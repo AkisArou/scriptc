@@ -104,9 +104,21 @@ jobs:
         run: |
           VERSION="${{ needs.check-release.outputs.version }}"
 
+          # npm accepts --provenance only from PUBLIC source repositories;
+          # while this repo is internal the flag is dropped, and the same
+          # step starts attaching provenance the moment the repo goes
+          # public — no workflow edit.
+          VISIBILITY=$(gh api "repos/${{ github.repository }}" --jq .visibility)
+          if [ "$VISIBILITY" = "public" ]; then
+            PROVENANCE="--provenance"
+          else
+            PROVENANCE=""
+            echo "repository visibility is '$VISIBILITY': publishing without provenance"
+          fi
+
           # Dependency order, so each package's deps are resolvable the
           # moment it lands. pnpm pack rewrites workspace:* to the real
-          # version; npm publish on the tarball handles OIDC + provenance.
+          # version; npm publish on the tarball handles OIDC.
           # Re-runs skip anything already on the registry at this version.
           publish_dir() {
             dir="$1"
@@ -116,9 +128,11 @@ jobs:
               return 0
             fi
             tarball=$(cd "$dir" && pnpm pack --silent | tail -1)
-            npm publish "$dir/$tarball" --provenance --access public
+            npm publish "$dir/$tarball" $PROVENANCE --access public
           }
 
           publish_dir packages/runtime
           publish_dir packages/compiler
           publish_dir packages/cli
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
