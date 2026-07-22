@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  check-release:
+    name: Check for new version
+    # The private mirror carries this file too; only the public repo
+    # publishes (the trusted publisher is pinned to it).
+    if: github.repository == 'vercel-labs/scriptc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Compare package.json version to npm
+        id: check
+        run: |
+          LOCAL_VERSION=$(node -p "require('./packages/cli/package.json').version")
+          echo "Local version: $LOCAL_VERSION"
+
+          NPM_VERSION=$(npm view scriptc version 2>/dev/null || echo "0.0.0")
+          echo "npm version: $NPM_VERSION"
+
+          if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
+            echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged on npm, skipping publish"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish to npm
+    needs: check-release
+    if: needs.check-release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Publishing uses npm trusted publishing (OIDC): the job's id-token
+      # permission lets npm mint short-lived credentials, so no npm token
+      # secret exists anywhere in this repo. All three packages —
+      # @scriptc/runtime, @scriptc/compiler, scriptc — must each be
+      # configured on npmjs.com with a GitHub Actions trusted publisher
+      # pointing at repository vercel-labs/scriptc, workflow release.yml,
+      # environment Release. A package missing that configuration fails
+      # loudly with an OIDC authentication error before anything uploads.
+      # Trusted publishing requires npm >= 11.5.1 (bundled with Node 24).
+
+      - name: Install and build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r build
+
+      - name: Check version sync
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          for pkg in packages/runtime packages/compiler packages/cli; do
+            V=$(node -p "require('./$pkg/package.json').version")
+            if [ "$V" != "$VERSION" ]; then
+              echo "Version mismatch: $pkg is $V, expected $VERSION"
+              exit 1
+            fi
+          done
+
+      - name: Publish to npm
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+
+          # Dependency order, so each package's deps are resolvable the
+          # moment it lands. pnpm pack rewrites workspace:* to the real
+          # version; npm publish on the tarball handles OIDC + provenance.
+          # Re-runs skip anything already on the registry at this version.
+          publish_dir() {
+            dir="$1"
+            name=$(node -p "require('./$dir/package.json').name")
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION already published, skipping"
+              return 0
+            fi
+            tarball=$(cd "$dir" && pnpm pack --silent | tail -1)
+            npm publish "$dir/$tarball" --provenance --access public
+          }
+
+          publish_dir packages/runtime
+          publish_dir packages/compiler
+          publish_dir packages/cli
