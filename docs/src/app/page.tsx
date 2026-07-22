@@ -82,8 +82,8 @@ export default function Home() {
             macOS · Linux · Windows
           </p>
           <h1 className="mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
-            The native compiler <br className="hidden sm:block" />
-            for TypeScript
+            TypeScript-to-Native <br className="hidden sm:block" />
+            Compiler
           </h1>
           <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
             Ordinary TypeScript becomes a small, fast native binary — no Node, no V8, no

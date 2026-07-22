@@ -1,25 +1,20 @@
 # Quickstart
 
-scriptc is installed from source today; an npm package (`npm install -g scriptc`) is coming. Building from a clone takes a couple of minutes.
+Install the CLI from npm and compile your first binary in a couple of minutes.
 
 ## Prerequisites
 
 - **macOS arm64** is the primary platform ([Linux and Windows](/platforms) are cross-compilation targets).
 - **clang** — preinstalled with the Xcode Command Line Tools.
-- **Node ≥ 24** and **pnpm** — for the compiler itself. The binaries it produces need neither.
+- **Node ≥ 20** — to run the compiler. The binaries it produces need no Node at all.
 
-## Install from source
-
-```console
-$ git clone https://github.com/vercel-labs/scriptc && cd scriptc
-$ pnpm install && pnpm build
-```
-
-The repo exposes the CLI as a package script, so `pnpm scriptc` works from the repo directory. For a shell-wide command, alias it:
+## Install
 
 ```console
-$ alias scriptc="pnpm --dir $PWD scriptc"
+$ npm install -g scriptc
 ```
+
+To work from a clone instead (`pnpm install && pnpm build` in the repo, then `pnpm scriptc` from the repo directory), see the [repository](https://github.com/vercel-labs/scriptc).
 
 ## Your first binary
 
