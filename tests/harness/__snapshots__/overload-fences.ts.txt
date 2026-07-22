@@ -1,0 +1,22 @@
+overload-fences.ts:12:13 - error SC1090: calls selecting an overload signature of a generic function (only the implementation signature monomorphizes) is not supported yet
+
+  11 | }
+  12 | console.log(twice("q").length);
+     |             ^~~~~~~~~~
+  13 | 
+
+overload-fences.ts:22:7 - error SC2001: values of type '{ (x: "a"): string; (x: "b"): number; }' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  21 | // directly compiles (corpus 1851).
+  22 | const asValue = pick;
+     |       ^~~~~~~
+  23 | console.log(typeof asValue);
+
+overload-fences.ts:23:20 - error SC2004: uses of 'asValue' inherit the blocker on its declaration
+
+  22 | const asValue = pick;
+  23 | console.log(typeof asValue);
+     |                    ^~~~~~~
+  24 | 
+
+  hint: the declaration of 'asValue' did not compile — fix the diagnostic reported there and these sites clear with it

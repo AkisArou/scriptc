@@ -1,0 +1,70 @@
+# Platform Support
+
+## macOS (arm64)
+
+The primary platform. clang — preinstalled with the Xcode Command Line Tools — is the only system dependency for producing binaries. The full surface is supported: the language, the stdlib, the Node API surface including the server stack, `--dynamic`, and the sanitizer lane.
+
+## Cross-compilation via zig
+
+scriptc cross-compiles from macOS using zig's bundled clang and sysroots. Install [zig](https://ziglang.org), then select it with two environment variables:
+
+<dl>
+  <dt><code>SCRIPTC_CC=zigcc</code></dt>
+  <dd>Use zig's clang as the C compiler.</dd>
+  <dt><code>SCRIPTC_TARGET=&lt;triple&gt;</code></dt>
+  <dd>The target triple, including a glibc version for Linux targets.</dd>
+</dl>
+
+### Linux (arm64, x86_64)
+
+```console
+$ SCRIPTC_CC=zigcc SCRIPTC_TARGET=aarch64-linux-gnu.2.36 scriptc build fib.ts -o fib-linux
+$ file fib-linux
+fib-linux: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 2.0.0, with debug_info, not stripped
+```
+
+The runtime has native Linux backends throughout: the event loop is epoll (kqueue on macOS), the server stack and TLS (with distro CA-bundle probing) and `fs.watch` all have Linux implementations, verified against Linux Node in a container-based differential lane. `x86_64-linux-gnu.2.36` works the same way.
+
+### Windows (x86_64)
+
+```console
+$ SCRIPTC_CC=zigcc SCRIPTC_TARGET=x86_64-windows-gnu scriptc build fib.ts -o fib.exe
+$ file fib.exe
+fib.exe: PE32+ executable (console) x86-64, for MS Windows
+```
+
+The language, stdlib, `fs`, and async surfaces pass a differential lane against Windows Node. **Not ported yet:** the socket/server stack (`net`/`http`/`https`/`tls`/`dgram`) and `child_process`.
+
+## What doesn't cross-compile yet
+
+- **`--dynamic` binaries are host-native only.** The embedded engine archive is built per target; cross-compiling a `--dynamic` build is not supported today. Static programs cross-compile fully.
+- `--sanitize` is a host-build lane.
+
+## Summary
+
+<table>
+  <thead>
+    <tr>
+      <th>Platform</th>
+      <th>How</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS arm64</td>
+      <td>native</td>
+      <td>Primary: full surface, <code>--dynamic</code>, sanitizer lane</td>
+    </tr>
+    <tr>
+      <td>Linux arm64 / x86_64</td>
+      <td><code>SCRIPTC_CC=zigcc SCRIPTC_TARGET=&lt;arch&gt;-linux-gnu.2.36</code></td>
+      <td>Static surface incl. servers, TLS, fs.watch; verified against Linux Node</td>
+    </tr>
+    <tr>
+      <td>Windows x86_64</td>
+      <td><code>SCRIPTC_CC=zigcc SCRIPTC_TARGET=x86_64-windows-gnu</code></td>
+      <td>Language, stdlib, fs, async; no servers or child_process yet</td>
+    </tr>
+  </tbody>
+</table>

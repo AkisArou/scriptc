@@ -1,0 +1,159 @@
+fenced.ts:5:13 - error SC2020: 'process.memoryUsage' is typed by @types/node but has no scriptc lowering yet
+
+  4 |  * never a silently broken binary. */
+  5 | console.log(process.memoryUsage()); // uptime/cpuUsage/resourceUsage lower now; the V8-heap report does not
+    |             ^~~~~~~~~~~~~~~~~~~
+  6 | const buf = Buffer.from("bytes").readBigUInt64BE(0); // from, fill, and the numeric families lower; the bigint reads fence
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:6:7 - error SC2001: values of type 'bigint' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  5 | console.log(process.memoryUsage()); // uptime/cpuUsage/resourceUsage lower now; the V8-heap report does not
+  6 | const buf = Buffer.from("bytes").readBigUInt64BE(0); // from, fill, and the numeric families lower; the bigint reads fence
+    |       ^~~
+  7 | console.log(Buffer.poolSize);
+
+fenced.ts:6:13 - error SC2020: 'Buffer<ArrayBuffer>.readBigUInt64BE' is typed by @types/node but has no scriptc lowering yet
+
+  5 | console.log(process.memoryUsage()); // uptime/cpuUsage/resourceUsage lower now; the V8-heap report does not
+  6 | const buf = Buffer.from("bytes").readBigUInt64BE(0); // from, fill, and the numeric families lower; the bigint reads fence
+    |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  7 | console.log(Buffer.poolSize);
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:7:13 - error SC2020: 'Buffer.poolSize' is typed by @types/node but has no scriptc lowering yet
+
+  6 | const buf = Buffer.from("bytes").readBigUInt64BE(0); // from, fill, and the numeric families lower; the bigint reads fence
+  7 | console.log(Buffer.poolSize);
+    |             ^~~~~~~~~~~~~~~
+  8 | /* setInterval lowers, and under @types/node its Timeout RETURN now maps
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:17:1 - error SC2020: 'Timeout.close' is typed by @types/node but has no scriptc lowering yet
+
+  16 | timer.refresh();
+  17 | timer.close();
+     | ^~~~~~~~~~~~~
+  18 | /* The web-platform globals ride in with @types/node (undici): they RESOLVE
+
+  hint: unref(), ref(), hasRef(), and refresh() are the supported Timeout methods
+
+fenced.ts:20:7 - error SC2020: 'AbortController' is typed by @types/node but has no scriptc lowering yet
+
+  19 |  * (no "Cannot find name") and their uses fence cleanly. */
+  20 | const controller = new AbortController();
+     |       ^~~~~~~~~~
+  21 | controller.abort();
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:20:20 - error SC2020: 'new AbortController' is typed by @types/node but has no scriptc lowering yet
+
+  19 |  * (no "Cannot find name") and their uses fence cleanly. */
+  20 | const controller = new AbortController();
+     |                    ^~~~~~~~~~~~~~~~~~~~~
+  21 | controller.abort();
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:21:1 - error SC2020: 'AbortController.abort' is typed by @types/node but has no scriptc lowering yet
+
+  20 | const controller = new AbortController();
+  21 | controller.abort();
+     | ^~~~~~~~~~~~~~~~
+  22 | fetch("https://example.invalid/");
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:22:1 - error SC2012: 'fetch' runs in the embedded dynamic engine, which this build does not include
+
+  21 | controller.abort();
+  22 | fetch("https://example.invalid/");
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  23 | /* Members of SUPPORTED builtin modules beyond the lowered tables: they
+
+  hint: build with --dynamic to run this call in the embedded engine (adds ~620KB to the binary); static builds never include it
+
+fenced.ts:29:1 - error SC2020: 'fs.watchFile' is typed by @types/node but has no scriptc lowering yet
+
+  28 | import { win32 } from "path";
+  29 | watchFile("x", () => {});
+     | ^~~~~~~~~~~~~~~~~~~~~~~~
+  30 | console.log(cpus().length);
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:30:13 - error SC2020: 'CpuInfo[].length' is part of the standard library types but has no scriptc lowering yet
+
+  29 | watchFile("x", () => {});
+  30 | console.log(cpus().length);
+     |             ^~~~~~~~~~~~~
+  31 | console.log(win32.sep);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:31:13 - error SC2020: 'PlatformPath.sep' is typed by @types/node but has no scriptc lowering yet
+
+  30 | console.log(cpus().length);
+  31 | console.log(win32.sep);
+     |             ^~~~~~~~~
+  32 | /* URL members beyond the supported getters (protocol/pathname/href/
+
+  hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+fenced.ts:37:13 - error SC2020: 'URL.hash' is typed by @types/node but has no scriptc lowering yet
+
+  36 | const u = new URL("https://example.com/x?a=1");
+  37 | console.log(u.hash);
+     |             ^~~~~~
+  38 | u.searchParams.get("a");
+
+  hint: protocol, pathname, href, host, hostname, search, searchParams, and toString() are the supported URL members
+
+fenced.ts:44:13 - error SC2020: 'deflateSync of 'string' data' is part of the standard library types but has no scriptc lowering yet
+
+  43 | import { deflateSync, gzipSync } from "zlib";
+  44 | deflateSync("data");
+     |             ^~~~~~
+  45 | gzipSync("data");
+
+  hint: zlib works on Buffers: deflateSync(Buffer.from(s, "utf8"))
+
+fenced.ts:45:1 - error SC2020: 'zlib.gzipSync' is typed by @types/node but has no scriptc lowering yet
+
+  44 | deflateSync("data");
+  45 | gzipSync("data");
+     | ^~~~~~~~~~~~~~~~
+  46 | /* The http2 compatibility slice's @types/node-world fences (divergence
+
+  hint: deflateSync and inflateSync are the lowered zlib surface
+
+fenced.ts:54:71 - error SC2020: 'a createSecureServer SNICallback of 'undefined' values' is part of the standard library types but has no scriptc lowering yet
+
+  53 | import * as http2 from "node:http2";
+  54 | http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", SNICallback: undefined });
+     |                                                                       ^~~~~~~~~~~~~~~~~~~~~~
+  55 | http2.createSecureServer({
+
+  hint: SNICallback lowers as a direct option or the conditional spread ...(x ? { SNICallback: x } : {}) — the callback is (servername, cb) => void with cb: (err: Error | null, ctx?: tls.SecureContext) => void
+
+fenced.ts:59:3 - error SC2020: 'createSecureServer options with a conditional spread' is part of the standard library types but has no scriptc lowering yet
+
+  58 |   key: "pem",
+  59 |   ...(1 ? { SNICallback: undefined } : {}),
+     |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  60 | });
+
+  hint: the lowered conditional spread is exactly ...(x ? { SNICallback: x } : {}) — the included value must BE the condition
+
+fenced.ts:61:71 - error SC2020: 'createSecureServer option 'streamResetBurst' with a non-literal value' is part of the standard library types but has no scriptc lowering yet
+
+  60 | });
+  61 | http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", streamResetBurst: 1 + 0 });
+     |                                                                       ^~~~~~~~~~~~~~~~~~~~~~~
+  62 | http2.connect("https://localhost");
+
+  hint: h2 session-tuning options are accepted with literal values (settings: a literal of literals) and ignored — the allowHTTP1 lowering serves HTTP/1.1 only, which has no h2 sessions to tune

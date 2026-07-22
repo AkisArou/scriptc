@@ -1,0 +1,66 @@
+import tseslint from "typescript-eslint";
+
+/* The 5.9.3 parser islands: the ONLY files that may import typescript5
+ * (the alias pinning the old compiler). Everything else lives in the
+ * 7.0.2 world — the two worlds' enums are renumbered and their nodes are
+ * not interchangeable, so a stray cross-import is a correctness bug, not
+ * a style problem. */
+const TS5_ISLANDS = [
+  "packages/compiler/src/frontend/npm.ts",
+  "packages/compiler/src/frontend/cjs-lexer.ts",
+  "packages/compiler/src/frontend/lowering/lower-comptime.ts",
+  "packages/compiler/src/frontend/ts7/world-check.ts",
+  // The provenance prescan parses files BEFORE any program world exists
+  // (the bare-import walk that decides what to fetch) — a parser island
+  // exactly like npm.ts's specifier scan.
+  "packages/compiler/src/frontend/provenance.ts",
+];
+
+const ts5Fence = {
+  group: ["typescript5", "typescript5/*"],
+  message: "typescript5 (the 5.9.3 island alias) is only for the parser islands (npm.ts, cjs-lexer.ts, lower-comptime.ts, ts7/world-check.ts) — everything else is the 7.0.2 world; the worlds never mix",
+};
+const frontendFence = {
+  group: ["**/frontend/*", "**/frontend/**"],
+  message: "backend must not import frontend — the IR is the only interface",
+};
+const backendFence = {
+  group: ["**/backend/*", "**/backend/**"],
+  message: "frontend must not import backend — the IR is the only interface",
+};
+
+/* NOTE: no-restricted-imports does not MERGE across matching config
+ * blocks — the last matching block replaces the whole rule config. Every
+ * block below therefore carries its complete pattern set. */
+export default tseslint.config(
+  ...tseslint.configs.recommended,
+  {
+    // The IR is the only interface between frontend and backend.
+    files: ["packages/compiler/src/backend/**"],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: [frontendFence, ts5Fence] }],
+    },
+  },
+  {
+    files: ["packages/compiler/src/frontend/**"],
+    ignores: TS5_ISLANDS,
+    rules: {
+      "no-restricted-imports": ["error", { patterns: [backendFence, ts5Fence] }],
+    },
+  },
+  {
+    files: TS5_ISLANDS,
+    rules: {
+      "no-restricted-imports": ["error", { patterns: [backendFence] }],
+    },
+  },
+  {
+    // Everything in the compiler outside frontend/backend (ir, diagnostics,
+    // index) is 7.0.2-world too.
+    files: ["packages/compiler/src/**"],
+    ignores: ["packages/compiler/src/frontend/**", "packages/compiler/src/backend/**"],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: [ts5Fence] }],
+    },
+  },
+);

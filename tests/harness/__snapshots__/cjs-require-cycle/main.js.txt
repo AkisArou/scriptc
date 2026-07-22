@@ -1,0 +1,5 @@
+cjs-require-cycle/a.js:1:1 - error SC1016: circular imports (cjs-require-cycle/a.js → cjs-require-cycle/b.js → cjs-require-cycle/a.js; the cycle closes through a require() edge) are not supported yet
+
+  1 | 'use strict';
+    | ^
+  2 | 

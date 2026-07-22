@@ -1,0 +1,62 @@
+// Top-level generic function declarations monomorphize (calls, and VALUES
+// whose reference pins one concrete signature); every other generic form
+// stays rejected with a specific message.
+function id<T>(x: T): T {
+  return x;
+}
+function useAsValue(): void {
+  const alias = id; // no pinning context — the slot keeps <T>(x: T) => T
+}
+function storeGenericSignature(): void {
+  const keep: <T>(x: T) => T = id; // the annotation KEEPS the type parameter
+  keep(1);
+}
+// (`const genericArrow = <T>(x: T): T => x` at module scope now COMPILES —
+// the generic value-binding rule; its fences live in
+// generic-value-bindings.ts.)
+function outer(): void {
+  function nested<T>(x: T): T {
+    return x;
+  }
+}
+// A body construct that only fails for SOME instantiations reports the
+// instantiation that triggered it.
+function joinAll<T>(a: T[]): string {
+  return a.join(",");
+}
+console.log(joinAll([1, 2]));
+console.log(joinAll([[1], [2]]));
+
+// Generic CLASSES monomorphize per instantiation; the family-level fences
+// are the ones with no per-instantiation story.
+class Box<T> {
+  v: T;
+  constructor(v: T) {
+    this.v = v;
+  }
+}
+// The uninstantiated family as a value: no thunk, no single ctor ABI.
+const BoxAlias = Box;
+// A base that mentions the class's own type parameters would differ per
+// instantiation — no single family interval can cover them.
+class Chained<T> extends Box<T> {
+  constructor(v: T) {
+    super(v);
+  }
+}
+// Generic class expressions: each evaluation would mint a distinct FAMILY.
+const ExprFamily = class <T> {
+  x: T | undefined;
+};
+
+// Reached: unreached bodies never lower, so their rejections only exist
+// when something on the entry path uses them.
+useAsValue();
+storeGenericSignature();
+outer();
+
+// Reached: collection defers its diagnostics until a reference makes
+// them relevant; these references are what makes them count.
+new Box(1);
+new Chained(2);
+new ExprFamily<number>();

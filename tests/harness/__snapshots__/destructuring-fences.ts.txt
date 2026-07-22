@@ -1,0 +1,43 @@
+destructuring-fences.ts:14:7 - error SC1031: object destructuring of class instances (read the fields directly — accessors make the desugar observable) are not supported yet
+
+  13 | }
+  14 | const { f } = new C();
+     |       ^~~~~
+  15 | 
+
+destructuring-fences.ts:27:9 - error SC1031: object destructuring of non-record values (the source is union-typed) are not supported yet
+
+  26 | function fromUnion(u: E1 | E2): string {
+  27 |   const { b } = u; // union source: narrow first
+     |         ^~~~~
+  28 |   return b;
+
+destructuring-fences.ts:28:10 - error SC2004: uses of 'b' inherit the blocker on its declaration
+
+  27 |   const { b } = u; // union source: narrow first
+  28 |   return b;
+     |          ^
+  29 | }
+
+  hint: the declaration of 'b' did not compile — fix the diagnostic reported there and these sites clear with it
+
+destructuring-fences.ts:33:7 - error SC1031: object destructuring of non-record values (the source is array-typed) are not supported yet
+
+  32 | const xs = [1, 2, 3];
+  33 | const { length: len } = xs; // object patterns over arrays keep the fence
+     |       ^~~~~~~~~~~~~~~
+  34 | console.log(len);
+
+destructuring-fences.ts:37:9 - error SC1031: rest bindings over index-signature shapes (the undeclared entries would need overflow packing) are not supported yet
+
+  36 | const indexed: Record<string, number> = { a: 1 };
+  37 | const { ...allOfIt } = indexed; // index-signature rest needs overflow packing
+     |         ^~~~~~~~~~
+  38 | console.log(allOfIt["a"]);
+
+destructuring-fences.ts:42:11 - error SC1031: destructuring assignment to nested patterns or non-variable targets (assign a variable, then write the parts out) are not supported yet
+
+  41 | let sink = 0;
+  42 | ({ inner: { v: sink } } = holder); // nested assignment targets keep the fence
+     |           ^~~~~~~~~~~
+  43 | console.log(sink);

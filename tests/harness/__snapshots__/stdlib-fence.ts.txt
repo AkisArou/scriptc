@@ -1,0 +1,285 @@
+stdlib-fence.ts:10:14 - error SC2020: 'Symbol.iterator' is part of the standard library types but has no scriptc lowering yet
+
+   9 | // surface below.)
+  10 | const iter = Symbol.iterator;
+     |              ^~~~~~~~~~~~~~~
+  11 | const g = globalThis;
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:15:15 - error SC1090: statically-decided Array.isArray on computed arguments (bind the value to a variable first) are not supported yet
+
+  14 | const n5 = Number.NaN; // lowers now, with the other Number constants
+  15 | const isArr = Array.isArray([1]);
+     |               ^~~~~~~~~~~~~~~~~~
+  16 | const merged = Object.assign({}, { a: 1 }); // the empty-target literal-source shape lowers now (it IS the source literal)
+
+stdlib-fence.ts:17:23 - error SC2020: 'Object.assign' is part of the standard library types but has no scriptc lowering yet
+
+  16 | const merged = Object.assign({}, { a: 1 }); // the empty-target literal-source shape lowers now (it IS the source literal)
+  17 | const aliasedAssign = Object.assign(merged, { b: 2 }); // aliased targets stay fenced (real mutation of a live object)
+     |                       ^~~~~~~~~~~~~
+  18 | const refl = Reflect.has({ a: 1 }, "a");
+
+  hint: spread instead: { ...a, ...b } builds the merged record; what lowers: the empty-target literal-source shape (Object.assign({}, { ... }) IS the source literal) and merges INTO an index-signature record whose value slot every source value enters — other aliased targets are real mutation, and a function target (Object.assign(fn, { prop })) is a function-with-properties value the model cannot represent: bind the property separately
+
+stdlib-fence.ts:18:14 - error SC2020: 'Reflect.has' is part of the standard library types but has no scriptc lowering yet
+
+  17 | const aliasedAssign = Object.assign(merged, { b: 2 }); // aliased targets stay fenced (real mutation of a live object)
+  18 | const refl = Reflect.has({ a: 1 }, "a");
+     |              ^~~~~~~~~~~
+  19 | const parsedMs = Date.parse("2024-01-01");
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:19:18 - error SC2020: 'Date.parse' is part of the standard library types but has no scriptc lowering yet
+
+  18 | const refl = Reflect.has({ a: 1 }, "a");
+  19 | const parsedMs = Date.parse("2024-01-01");
+     |                  ^~~~~~~~~~
+  20 | const fmt = new Intl.NumberFormat();
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:20:7 - error SC2001: values of type 'NumberFormat' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  19 | const parsedMs = Date.parse("2024-01-01");
+  20 | const fmt = new Intl.NumberFormat();
+     |       ^~~
+  21 | 
+
+stdlib-fence.ts:20:13 - error SC1090: constructing values other than classes declared in the program is not supported yet
+
+  19 | const parsedMs = Date.parse("2024-01-01");
+  20 | const fmt = new Intl.NumberFormat();
+     |             ^~~~~~~~~~~~~~~~~~~~~~~
+  21 | 
+
+stdlib-fence.ts:23:7 - error SC2001: values of type 'Date' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  22 | // Constructors.
+  23 | const d = new Date();
+     |       ^
+  24 | const wm = new WeakMap();
+
+stdlib-fence.ts:23:11 - error SC2020: 'new Date' is part of the standard library types but has no scriptc lowering yet
+
+  22 | // Constructors.
+  23 | const d = new Date();
+     |           ^~~~~~~~~~
+  24 | const wm = new WeakMap();
+
+  hint: Date values have no representation — Date.now() and the composed new Date(ms?).toISOString() form compile
+
+stdlib-fence.ts:24:7 - error SC2001: values of type 'WeakMap<WeakKey, any>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  23 | const d = new Date();
+  24 | const wm = new WeakMap();
+     |       ^~
+  25 | const px = new Proxy({ a: 1 }, {});
+
+stdlib-fence.ts:24:12 - error SC2020: 'new WeakMap' is part of the standard library types but has no scriptc lowering yet
+
+  23 | const d = new Date();
+  24 | const wm = new WeakMap();
+     |            ^~~~~~~~~~~~~
+  25 | const px = new Proxy({ a: 1 }, {});
+
+  hint: weak collections observe garbage collection, which reference counting never exposes — a strong Map behaves identically in-language: use Map
+
+stdlib-fence.ts:25:12 - error SC2020: 'new Proxy' is part of the standard library types but has no scriptc lowering yet
+
+  24 | const wm = new WeakMap();
+  25 | const px = new Proxy({ a: 1 }, {});
+     |            ^~~~~~~~~~~~~~~~~~~~~~~
+  26 | const buf = new ArrayBuffer(8);
+
+  hint: property-access metaprogramming has no static lowering (every property read must resolve at compile time)
+
+stdlib-fence.ts:26:7 - error SC2001: values of type 'ArrayBuffer' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  25 | const px = new Proxy({ a: 1 }, {});
+  26 | const buf = new ArrayBuffer(8);
+     |       ^~~
+  27 | const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds stay fenced
+
+stdlib-fence.ts:26:13 - error SC2020: 'new ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
+
+  25 | const px = new Proxy({ a: 1 }, {});
+  26 | const buf = new ArrayBuffer(8);
+     |             ^~~~~~~~~~~~~~~~~~
+  27 | const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds stay fenced
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:27:12 - error SC2020: 'new Set(values)' is part of the standard library types but has no scriptc lowering yet
+
+  26 | const buf = new ArrayBuffer(8);
+  27 | const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds stay fenced
+     |            ^~~~~~~~~~~~~~~~~~~~~~~~
+  28 | // (new Error / TypeError / RangeError / SyntaxError now LOWER — the error
+
+  hint: construct the Set empty and add() each value — only an array of already-legal elements (string or number) seeds a Set
+
+stdlib-fence.ts:31:7 - error SC2001: values of type 'AggregateError' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  30 | // and the unlowered members of lowered error objects.)
+  31 | const agg = new AggregateError([]);
+     |       ^~~
+  32 | const stack = new Error("boom").stack;
+
+stdlib-fence.ts:31:13 - error SC2020: 'new AggregateError' is part of the standard library types but has no scriptc lowering yet
+
+  30 | // and the unlowered members of lowered error objects.)
+  31 | const agg = new AggregateError([]);
+     |             ^~~~~~~~~~~~~~~~~~~~~~
+  32 | const stack = new Error("boom").stack;
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:32:15 - error SC2020: 'Error.stack' is part of the standard library types but has no scriptc lowering yet
+
+  31 | const agg = new AggregateError([]);
+  32 | const stack = new Error("boom").stack;
+     |               ^~~~~~~~~~~~~~~~~~~~~~~
+  33 | 
+
+  hint: stack traces are not captured (frames would need runtime bookkeeping); name, message, and toString() are available
+
+stdlib-fence.ts:35:15 - error SC2020: 'Math.SQRT2' is part of the standard library types but has no scriptc lowering yet
+
+  34 | // Unlowered members on lowered containers.
+  35 | const sqrt2 = Math.SQRT2;
+     |               ^~~~~~~~~~
+  36 | const clamped = Math.min(1, 2, 3);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:36:17 - error SC2020: 'Math.min' is part of the standard library types but has no scriptc lowering yet
+
+  35 | const sqrt2 = Math.SQRT2;
+  36 | const clamped = Math.min(1, 2, 3);
+     |                 ^~~~~~~~
+  37 | const entries = [1, 2].entries();
+
+  hint: Math.min lowers with exactly two arguments or one number[] spread — nest calls (Math.min(a, Math.min(b, c))) or spread an array (Math.min(...xs))
+
+stdlib-fence.ts:37:7 - error SC2001: values of type 'ArrayIterator<[number, number]>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  36 | const clamped = Math.min(1, 2, 3);
+  37 | const entries = [1, 2].entries();
+     |       ^~~~~~~
+  38 | const arrAt = [1, 2].at(0);
+
+stdlib-fence.ts:37:17 - error SC2020: 'number[].entries' is part of the standard library types but has no scriptc lowering yet
+
+  36 | const clamped = Math.min(1, 2, 3);
+  37 | const entries = [1, 2].entries();
+     |                 ^~~~~~~~~~~~~~
+  38 | const arrAt = [1, 2].at(0);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:39:14 - error SC2020: 'string.normalize' is part of the standard library types but has no scriptc lowering yet
+
+  38 | const arrAt = [1, 2].at(0);
+  39 | const norm = "abc".normalize();
+     |              ^~~~~~~~~~~~~~~
+  40 | const limited = "a,b,c".split(",", 2); // the string-separator split lowers; the limit form stays fenced
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:40:17 - error SC2020: '.split with 2 arguments on strings' is part of the standard library types but has no scriptc lowering yet
+
+  39 | const norm = "abc".normalize();
+  40 | const limited = "a,b,c".split(",", 2); // the string-separator split lowers; the limit form stays fenced
+     |                 ^~~~~~~~~~~~~~~~~~~~~
+  41 | const fixed = (1.5).toFixed(); // digit-free toFixed lowers now (the static ties-up integer)
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+stdlib-fence.ts:42:19 - error SC2020: 'number.toLocaleString' is part of the standard library types but has no scriptc lowering yet
+
+  41 | const fixed = (1.5).toFixed(); // digit-free toFixed lowers now (the static ties-up integer)
+  42 | const localized = (1234.5).toLocaleString();
+     |                   ^~~~~~~~~~~~~~~~~~~~~~~
+  43 | 
+
+  hint: locale- and ICU-backed behavior lives outside the static runtime (the localeCompare stance: code-unit order, no collation/locale data) — format with template literals, toFixed, and toString instead
+
+stdlib-fence.ts:47:15 - error SC2020: '.indexOf with 2 arguments' is part of the standard library types but has no scriptc lowering yet
+
+  46 | const nums = [1, 2, 3];
+  47 | const found = nums.indexOf(2, 1);
+     |               ^~~~~~~~~~~~~~~~~~
+  48 | const joined = nums.join();
+
+  hint: the fromIndex parameter has no lowering — slice first, or loop
+
+stdlib-fence.ts:48:16 - error SC2020: '.join with 0 arguments' is part of the standard library types but has no scriptc lowering yet
+
+  47 | const found = nums.indexOf(2, 1);
+  48 | const joined = nums.join();
+     |                ^~~~~~~~~~~
+  49 | nums.forEach((x) => console.log(x), { unused: true }); // thisArg stays fenced
+
+  hint: pass the separator explicitly: join(",")
+
+stdlib-fence.ts:49:1 - error SC2020: '.forEach with 2 arguments' is part of the standard library types but has no scriptc lowering yet
+
+  48 | const joined = nums.join();
+  49 | nums.forEach((x) => console.log(x), { unused: true }); // thisArg stays fenced
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  50 | const pos = "abc".includes("b", 1); // the position form lowers now (indexOf's clamp)
+
+  hint: the thisArg parameter has no lowering — use an arrow function
+
+stdlib-fence.ts:51:13 - error SC2020: 'JSON.parse with a reviver' is part of the standard library types but has no scriptc lowering yet
+
+  50 | const pos = "abc".includes("b", 1); // the position form lowers now (indexOf's clamp)
+  51 | const rev = JSON.parse("1", (_k, v) => v);
+     |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  52 | // (stringify with a null replacer + LITERAL space now lowers — the pretty
+
+  hint: parse to `unknown` and validate with a checked cast ('as T') instead
+
+stdlib-fence.ts:56:18 - error SC2020: 'JSON.stringify with replacer/space parameters' is part of the standard library types but has no scriptc lowering yet
+
+  55 | const toStringify = { a: 1 };
+  56 | const replaced = JSON.stringify(toStringify, (_k, v) => v);
+     |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  57 | const width = 2;
+
+  hint: the serializer is type-directed — shape the value before stringifying
+
+stdlib-fence.ts:58:16 - error SC2020: 'JSON.stringify with replacer/space parameters' is part of the standard library types but has no scriptc lowering yet
+
+  57 | const width = 2;
+  58 | const spaced = JSON.stringify(toStringify, null, width);
+     |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  59 | 
+
+  hint: the serializer is type-directed — shape the value before stringifying
+
+stdlib-fence.ts:64:16 - error SC2020: 'then with 2 arguments' is part of the standard library types but has no scriptc lowering yet
+
+  63 | }
+  64 | const thened = work().then((v) => v + 1, () => 0);
+     |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  65 | const caught = work().catch(() => 0);
+
+  hint: the supported form takes exactly one fulfillment handler — chain .catch(...) for the rejection half
+
+stdlib-fence.ts:68:7 - error SC2001: values of type '10n' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  67 | 
+  68 | const big = 10n;
+     |       ^~~
+  69 | 
+
+stdlib-fence.ts:68:13 - error SC1090: syntax 'BigIntLiteral' is not supported yet
+
+  67 | 
+  68 | const big = 10n;
+     |             ^~~
+  69 | 

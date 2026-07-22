@@ -1,0 +1,72 @@
+regex.ts:5:11 - error SC1121: '.test()' on a regex with the 'g' or 'y' flag is not supported yet
+
+  4 | // regexes stay out of arrays and union arms.
+  5 | const g = /ab/g.test("abab");
+    |           ^~~~~~~~~~~~~~~~~~
+  6 | const y = /ab/y.test("abab");
+
+  hint: g/y regexes carry mutable lastIndex state between calls, which is not modeled; drop the flag for a plain match test, or use replace/replaceAll/split (their iteration is internal)
+
+regex.ts:6:11 - error SC1121: '.test()' on a regex with the 'g' or 'y' flag is not supported yet
+
+  5 | const g = /ab/g.test("abab");
+  6 | const y = /ab/y.test("abab");
+    |           ^~~~~~~~~~~~~~~~~~
+  7 | const named = /(?<year>\d{4})-(?<month>\d{2})/;
+
+  hint: g/y regexes carry mutable lastIndex state between calls, which is not modeled; drop the flag for a plain match test, or use replace/replaceAll/split (their iteration is internal)
+
+regex.ts:7:15 - error SC1120: named capture groups in regex patterns are not supported yet
+
+  6 | const y = /ab/y.test("abab");
+  7 | const named = /(?<year>\d{4})-(?<month>\d{2})/;
+    |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  8 | const indices = /cat/d;
+
+  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .source/.flags, and string replace/replaceAll/split with string replacement templates
+
+regex.ts:8:17 - error SC1120: the regex 'd' flag (match indices) is not supported yet
+
+  7 | const named = /(?<year>\d{4})-(?<month>\d{2})/;
+  8 | const indices = /cat/d;
+    |                 ^~~~~~
+  9 | const sets = /[\p{L}]/v;
+
+  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .source/.flags, and string replace/replaceAll/split with string replacement templates
+
+regex.ts:9:14 - error SC1120: the regex 'v' flag (unicode sets) is not supported yet
+
+   8 | const indices = /cat/d;
+   9 | const sets = /[\p{L}]/v;
+     |              ^~~~~~~~~~
+  10 | const asValue = /x/.test;
+
+  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .source/.flags, and string replace/replaceAll/split with string replacement templates
+
+regex.ts:10:17 - error SC1090: regex methods as values (call 'test' directly) are not supported yet
+
+   9 | const sets = /[\p{L}]/v;
+  10 | const asValue = /x/.test;
+     |                 ^~~~~~~~
+  11 | const list: RegExp[] = [/a/, /b/];
+
+regex.ts:11:7 - error SC2001: values of type 'RegExp[]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  10 | const asValue = /x/.test;
+  11 | const list: RegExp[] = [/a/, /b/];
+     |       ^~~~
+  12 | const maybe: RegExp | undefined = /a/;
+
+regex.ts:11:24 - error SC2001: values of type 'RegExp[]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  10 | const asValue = /x/.test;
+  11 | const list: RegExp[] = [/a/, /b/];
+     |                        ^~~~~~~~~~
+  12 | const maybe: RegExp | undefined = /a/;
+
+regex.ts:12:7 - error SC2001: values of type 'RegExp | undefined' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  11 | const list: RegExp[] = [/a/, /b/];
+  12 | const maybe: RegExp | undefined = /a/;
+     |       ^~~~~
+  13 | 

@@ -1,0 +1,120 @@
+# CLI Reference
+
+The CLI has three commands. `scriptc --help` prints this same surface.
+
+```console
+$ scriptc --help
+scriptc — TypeScript/JavaScript to native executables (experimental)
+
+Usage:
+  scriptc build <file.ts|.js> [options]     compile to a native executable
+  scriptc run <file.ts|.js> [options]       compile and run
+  scriptc coverage <file.ts|.js>            how much compiles statically, and why not
+  scriptc coverage <file.ts|.js> --dynamic  what a --dynamic build compiles, and what still blocks it
+```
+
+## scriptc build
+
+Compiles a TypeScript (or JavaScript) entry file to a native executable. The program is type-checked first — by the real TypeScript compiler, honoring the nearest `tsconfig.json` — and any construct without a lowering is a compile error with an `SC`-prefixed code, a code frame, and usually a rewrite hint.
+
+```console
+$ scriptc build fib.ts -o fib
+$ ./fib
+832040
+```
+
+Without `-o`, the executable lands in `.scriptc/<name>` next to the input, and the generated C translation unit is kept beside it (see `--keep-c`):
+
+```console
+$ scriptc build fib.ts --emit-ir
+$ ls .scriptc/
+fib
+fib.c
+fib.ir.json
+```
+
+## scriptc run
+
+`build` followed by executing the binary, with stdio inherited.
+
+```console
+$ scriptc run fib.ts
+832040
+```
+
+Note: `run` does not forward extra command-line arguments to the program. To pass arguments, `build` the executable and invoke it directly.
+
+## scriptc coverage
+
+Analyzes the program without producing a binary and reports, statement by statement, what compiles statically, what needs the embedded dynamic engine, and what blocks the rest. With `--dynamic` it answers a different question: what would a `--dynamic` build compile, and what still blocks it. Both forms are covered in depth in [Coverage Reports](/coverage).
+
+## Options
+
+<dl>
+  <dt><code>-o, --out &lt;path&gt;</code></dt>
+  <dd>Output executable path. Default: <code>.scriptc/&lt;name&gt;</code> next to the input file.</dd>
+
+  <dt><code>--dynamic</code></dt>
+  <dd>Embed the dynamic engine (~620KB) so npm dependencies and <code>any</code>-typed code can run. Static stays the default — without this flag, dynamic-tier sites are per-site compile errors. See <a href="/dependencies">npm Dependencies</a>.</dd>
+
+  <dt><code>--backend &lt;c|llvm&gt;</code></dt>
+  <dd>Code generator: <code>llvm</code> (default — emits LLVM IR text, compiled by the same clang) or <code>c</code> (the readable reference backend). Unset, the build tries LLVM and falls back to the C backend when the program is outside the LLVM tier — a one-line stderr note says so, and program behavior is identical either way. An explicit <code>--backend llvm</code> fails with a diagnostic instead of falling back (the debugging/CI pin); <code>--backend c</code> pins the reference backend.</dd>
+
+  <dt><code>--npm-static &lt;pkg[,pkg…]|auto&gt;</code></dt>
+  <dd>EXPERIMENTAL. Compile the named npm packages' shipped JS statically as program modules instead of embedding them for the engine (repeatable; <code>auto</code> opts in every eligible direct import). A package the preflight refuses falls back to the island with a coverage-report note. See <a href="/dependencies">npm Dependencies</a> for maturity notes.</dd>
+
+  <dt><code>--provenance-sources</code></dt>
+  <dd>EXPERIMENTAL. Compile npm dependencies from their provenance-attested source, fetched at the attested commit, as static program modules; packages without a usable attestation keep the engine path (a note, never a failure).</dd>
+
+  <dt><code>--sanitize</code></dt>
+  <dd>Build with AddressSanitizer plus the runtime reference-count audit — the same lane the compiler's own test corpus runs under. Useful when a program misbehaves and you want leaks or memory errors to be loud.</dd>
+
+  <dt><code>--emit-ir</code></dt>
+  <dd>Also write the typed IR as JSON (<code>&lt;name&gt;.ir.json</code>) next to the executable.</dd>
+
+  <dt><code>--keep-c</code> / <code>--no-keep-c</code></dt>
+  <dd>Keep (default) or delete the generated program translation unit next to the executable — the <code>.ll</code> file under the default LLVM backend, or the <code>.c</code> under <code>--backend c</code> (and when the default build fell back). The generated C is readable and annotated with source lines.</dd>
+
+  <dt><code>--from-c</code></dt>
+  <dd>Treat the input as a C (or <code>.ll</code>) file. Toolchain plumbing and debugging.</dd>
+
+  <dt><code>-h, --help</code></dt>
+  <dd>Show usage.</dd>
+</dl>
+
+## Environment variables
+
+<dl>
+  <dt><code>SCRIPTC_CC</code></dt>
+  <dd>The C compiler to invoke. <code>zigcc</code> selects zig's bundled clang, which enables cross-compilation with its bundled sysroots.</dd>
+
+  <dt><code>SCRIPTC_TARGET</code></dt>
+  <dd>Target triple for cross-compilation, e.g. <code>aarch64-linux-gnu.2.36</code> or <code>x86_64-windows-gnu</code>. See <a href="/platforms">Platform Support</a>.</dd>
+</dl>
+
+```console
+$ SCRIPTC_CC=zigcc SCRIPTC_TARGET=aarch64-linux-gnu.2.36 scriptc build fib.ts -o fib-linux
+$ file fib-linux
+fib-linux: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 2.0.0, with debug_info, not stripped
+```
+
+## Backends
+
+The default backend emits textual LLVM IR, compiled by the same clang that links the runtime. It covers most of the supported surface; a program outside that tier is never miscompiled — the build falls back to the C backend transparently and says so in one stderr line:
+
+```console
+$ scriptc build cli-tool.ts --dynamic -o cli-tool
+scriptc: backend c (llvm refused: npmEmbedding)
+```
+
+The C backend is the reference, forever: deliberately readable, source-line-annotated output, and byte-identical program behavior wherever the two backends overlap — every release verifies that. Pin it when you want to read what your program became:
+
+```console
+$ scriptc build fib.ts --backend c -o fib
+$ ./fib
+832040
+$ head -1 fib.c
+/* Generated by scriptc from fib.ts. Do not edit. */
+```
+
+An explicit <code>--backend llvm</code> pins the LLVM backend and fails with diagnostic SC3001, naming the unsupported construct, instead of falling back — useful for CI lanes that must notice tier changes.

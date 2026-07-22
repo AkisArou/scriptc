@@ -1,0 +1,82 @@
+import { expect, test } from "vitest";
+import { validateModule } from "../src/ir/validate.js";
+import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
+import { fibModule } from "./fixtures/fib-ir.js";
+import { BOOL, F64, type IrModule } from "../src/ir/nodes.js";
+
+test("hand-built fib module validates", () => {
+  expect(validateModule(fibModule)).toEqual([]);
+});
+
+test("fib module JSON round-trips", () => {
+  const json = serializeModule(fibModule);
+  expect(deserializeModule(json)).toEqual(fibModule);
+});
+
+test("validator rejects type mismatches and bad references", () => {
+  const loc = { file: "t.ts", start: 0, end: 0 };
+  const bad: IrModule = {
+    irVersion: 1,
+    sourceFile: "t.ts",
+    entry: "__main",
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [{ id: "x.0", name: "x", type: F64, mutable: false }],
+        body: [
+          // init type mismatch: bool into f64 local
+          { kind: "varDecl", localId: "x.0", init: { kind: "boolLit", value: true, type: BOOL, loc }, loc },
+          // undeclared local
+          { kind: "assign", localId: "y.0", value: { kind: "numLit", value: 1, type: F64, loc }, loc },
+          // assign to immutable
+          { kind: "assign", localId: "x.0", value: { kind: "numLit", value: 1, type: F64, loc }, loc },
+          // call to unknown function
+          { kind: "exprStmt", expr: { kind: "call", callee: "nope", args: [], type: F64, loc }, loc },
+        ],
+        loc,
+      },
+    ],
+  };
+  const errors = validateModule(bad).map((e) => e.message);
+  expect(errors).toEqual([
+    expect.stringContaining('init: expected f64, got bool'),
+    expect.stringContaining('undeclared local/global "y.0"'),
+    expect.stringContaining('immutable local "x"'),
+    expect.stringContaining('undeclared function "nope"'),
+  ]);
+});
+
+test("serializer round-trips ±Infinity and refuses NaN", () => {
+  const mod = structuredClone(fibModule);
+  const fn = mod.functions[0]!;
+  const stmt = fn.body[0]!;
+  if (stmt.kind === "if" && stmt.cond.kind === "bin" && stmt.cond.right.kind === "numLit") {
+    stmt.cond.right.value = Infinity;
+  }
+  const back = deserializeModule(serializeModule(mod));
+  const stmt2 = back.functions[0]!.body[0]!;
+  if (stmt2.kind === "if" && stmt2.cond.kind === "bin" && stmt2.cond.right.kind === "numLit") {
+    expect(stmt2.cond.right.value).toBe(Infinity);
+  } else {
+    throw new Error("round-trip lost the statement shape");
+  }
+  if (stmt.kind === "if" && stmt.cond.kind === "bin" && stmt.cond.right.kind === "numLit") {
+    stmt.cond.right.value = -Infinity;
+  }
+  const back2 = deserializeModule(serializeModule(mod));
+  const stmt3 = back2.functions[0]!.body[0]!;
+  if (stmt3.kind === "if" && stmt3.cond.kind === "bin" && stmt3.cond.right.kind === "numLit") {
+    expect(stmt3.cond.right.value).toBe(-Infinity);
+  }
+  if (stmt.kind === "if" && stmt.cond.kind === "bin" && stmt.cond.right.kind === "numLit") {
+    stmt.cond.right.value = NaN;
+  }
+  expect(() => serializeModule(mod)).toThrow(/NaN/);
+});
+
+test("deserializer enforces IR version", () => {
+  const json = serializeModule(fibModule).replace('"irVersion": 1', '"irVersion": 99');
+  expect(() => deserializeModule(json)).toThrow(/version mismatch/);
+});

@@ -1,0 +1,13 @@
+spi-off/main.ts:19:3 - error SC1090: initializer-less fields not assigned at the constructor's top level when strictPropertyInitialization is off (nothing guarantees 'v' is assigned before a read — enable the option, assign it unconditionally at the top of the constructor, or include undefined in its type) is not supported yet
+
+  18 | class Bad {
+  19 |   v: number; // fenced: no initializer, no top-level ctor assignment
+     |   ^
+  20 |   m(): void {
+
+spi-off/main.ts:26:1 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  25 | console.log(new Ok(5).n);
+  26 | new Bad();
+     | ^~~~~~~~~
+  27 | 

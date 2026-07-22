@@ -1,0 +1,5 @@
+cycle-tdz-read/a.ts:1:1 - error SC1016: circular imports (cycle-tdz-read/a.ts → cycle-tdz-read/b.ts → cycle-tdz-read/a.ts; the cycle-crossing binding 'a' is read at cycle-tdz-read/b.ts:2, outside any function body — a read during the init window observes the partially-initialized module (Node's TDZ ReferenceError / stale var), which is not modeled) are not supported yet
+
+  1 | import { b } from "./b.ts";
+    | ^
+  2 | export const a: string = "A";

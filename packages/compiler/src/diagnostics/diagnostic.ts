@@ -1,0 +1,542 @@
+/* Diagnostic codes live in ONE registry. Message strings are never inlined
+ * at rejection sites — every "not supported yet" the compiler can produce is
+ * enumerable here, which is the seed of the future coverage report
+ * ("N constructs prevented static compilation, grouped by code").
+ *
+ * Code bands:
+ *   SC0xxx  preflight gates: TypeScript errors passed through (SC0001),
+ *            project-config incompatibilities (SC0002), malformed imported
+ *            JSON modules (SC0003), and upstream tsgo checker panics
+ *            surfaced as source-anchored diagnostics (SC0004)
+ *   SC1xxx  supported-TypeScript-not-yet: valid TS outside the current subset
+ *   SC2xxx  scriptc type rules (types we cannot compile yet)
+ *   SC3xxx  backend coverage: the program is compilable (the C backend
+ *            builds it) but the selected alternate backend's tier does not
+ *            include some IR construct yet (SC3001 — the LLVM backend's
+ *            refusal, minted in index.ts from LlvmUnsupportedError)
+ *   SC9xxx  internal compiler errors (still source-anchored)
+ */
+import type { SrcLoc } from "../ir/nodes.js";
+
+/* Internal prioritization buckets. NEVER rendered to users — user-facing
+ * output says only what is and isn't supported (plus hints); scheduling is
+ * maintainer business. Used to order blockers in the coverage report. */
+export type Milestone = "M1" | "M2" | "M3" | "M4" | "M5" | "later";
+
+export interface ScrDiagnostic {
+  code: `SC${number}`;
+  message: string;
+  loc: SrcLoc;
+  milestone?: Milestone;
+  hint?: string;
+}
+
+interface UnsupportedEntry {
+  feature: string;
+  milestone: Milestone;
+  hint?: string;
+}
+
+export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
+  SC1010: {
+    feature: "package imports",
+    milestone: "M4",
+    hint:
+      "relative imports (./file, ../dir/file), package.json-mediated project " +
+      "imports (#alias via the imports field, self-name references via " +
+      "exports), installed npm packages (their code runs under --dynamic), " +
+      "and the built-in fs, fs/promises, path, os, url, crypto, zlib, " +
+      "child_process, net, http, tls, https, http2, dgram, dns, util, " +
+      "util/types, string_decoder, readline, events, stream, buffer, " +
+      "assert, assert/strict, worker_threads, cluster, tty, async_hooks, " +
+      "timers, timers/promises, diagnostics_channel, and node:test modules " +
+      "(bare or node:-prefixed) are supported",
+  },
+  // SC1011 (exports) shipped via export modifiers — retired, do not reuse.
+  // Default exports/imports SHIPPED (expression, function/class declaration
+  // — named and anonymous — `export { x as default }`, default re-exports,
+  // and the CJS default interop). SC1012's remaining uses are the residual
+  // edges, each named at its site: default imports of builtin modules
+  // without a default surface, default-exporting a MUTABLE binding (Node
+  // snapshots; not modeled), named imports from JSON modules, and the
+  // require()-of-JSON forms.
+  SC1012: {
+    feature: "default exports/imports",
+    milestone: "later",
+    hint: "use named exports: export function f() {} / import { f } from \"./m\"",
+  },
+  // Namespace imports of USER modules shipped (`import * as ns from
+  // "./m"` and `export * as ns from "./m"`: ns.member resolves statically
+  // to the exporter's own registrations). SC1013's remaining uses name
+  // their edges: the ns OBJECT as a first-class value, namespace imports
+  // of JSON/CommonJS modules, runtime import = require(...) forms, and
+  // require() in an ES module.
+  SC1013: { feature: "namespace imports (* as ns)", milestone: "later" },
+  SC1014: {
+    feature: "re-exports and export lists",
+    milestone: "later",
+    hint: "export declarations directly: export function f() {}",
+  },
+  SC1015: { feature: "dynamic import()", milestone: "M4" },
+  SC1016: { feature: "circular imports", milestone: "later" },
+  // Class DECLARATIONS shipped; SC1020's remaining use is class expressions.
+  SC1020: { feature: "class expressions", milestone: "later" },
+  // SC1021 (arrow functions/closures) and SC1022 (nested function
+  // declarations) shipped — codes retired, do not reuse.
+  // SC1023 (object literals) shipped as records — code retired, do not
+  // reuse. (Spread, computed keys, getters/setters and `this` in
+  // object-literal methods remain rejected via SC1090.)
+  // SC1024 (arrays) shipped — code retired, do not reuse.
+  // `var` declarations shipped (function-scope hoisting, redeclaration
+  // merge, the shared-binding loop capture semantics). SC1030's remaining
+  // uses are the var edges with no honest lowering — each names its shape
+  // and remedy inline (a reference above the declaration whose early reads
+  // would be an unrepresentable `undefined`; `var` loop bindings in
+  // `for await`).
+  SC1030: {
+    feature: "var declarations",
+    milestone: "later",
+  },
+  SC1031: { feature: "destructuring", milestone: "M2" },
+  // SC1032 (multiple declarations in one statement) shipped — code retired,
+  // do not reuse. (Multi-declaration for-loop initializers remain rejected
+  // via SC1090.)
+  // SC1033 (let without an initializer) shipped — code retired, do not
+  // reuse.
+  SC1040: {
+    feature: "loose equality (== and !=)",
+    milestone: "M4",
+    hint: "use === / !== ('x == null' / 'x != null' — the null-or-undefined test — is supported; other loose comparisons need dynamic coercion semantics)",
+  },
+  // SC1041 (bitwise operators, ToInt32 semantics) shipped — code retired,
+  // do not reuse.
+  SC1042: {
+    feature: "logical operators on mixed operand types",
+    milestone: "later",
+    hint: "give both operands the same type (number, string, or boolean)",
+  },
+  SC1043: { feature: "comparing non-number, non-string values", milestone: "M1" },
+  SC1045: {
+    feature: "increment/decrement in expression position",
+    milestone: "later",
+    hint: "use ++/-- as a standalone statement, or write x = x + 1",
+  },
+  SC1050: { feature: "labeled break/continue", milestone: "later" },
+  // SC1051 (do-while loops) shipped — code retired, do not reuse.
+  SC1052: { feature: "for-in loops", milestone: "M4" }, // for-of over arrays shipped in M1
+  // SC1060 (switch statements) shipped — code retired, do not reuse.
+  // SC1061 (exceptions: throw/try/catch/finally) shipped — code retired, do
+  // not reuse. (Identifier catch bindings shipped too; what remains rejected
+  // is destructuring patterns — SC1062 — un-narrowed binding uses —
+  // SC1063 — and jumps crossing a finally — SC1090.)
+  SC1062: {
+    feature: "destructuring catch clause bindings",
+    milestone: "later",
+    hint: "bind an identifier (catch (e)) and narrow it — 'e instanceof Error' exposes .name/.message, typeof tests expose primitives",
+  },
+  SC1063: {
+    feature: "this use of a catch binding",
+    milestone: "later",
+    hint: "a catch binding is typed by what was thrown — narrow before reading: 'if (e instanceof Error)' (then .name/.message), 'typeof e === \"string\"/\"number\"/\"boolean\"', or rethrow with 'throw e'; String(e) and `${e}` also compile ('Error: msg' for Error payloads — Node's String(), which has no stack), so 'e instanceof Error ? e.message : String(e)' works as-is",
+  },
+  SC1070: { feature: "async/await", milestone: "M3" },
+  SC1071: { feature: "generators", milestone: "later" },
+  // `this` in class methods (+ lexical capture by arrows) shipped; what
+  // remains is `this` outside any method (top level, plain functions).
+  SC1080: { feature: "'this' outside a class method", milestone: "later" },
+  SC1090: { feature: "this syntax", milestone: "later" }, // generic fallback; message names the construct
+  SC1100: {
+    feature: "operations on 'unknown' values",
+    milestone: "later",
+    hint: "validate with 'as <type>' first — the cast checks the dynamic value at runtime and throws on mismatch",
+  },
+  SC1101: {
+    feature: "converting typed values to 'unknown'",
+    milestone: "later",
+    hint: "numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet",
+  },
+  // Regex fences. SC1120 is the shared code for regex features outside the
+  // supported slice (the rejection site names the construct); SC1121 is
+  // the statefulness fence, with its own hint.
+  SC1120: {
+    feature: "this regex feature",
+    milestone: "later",
+    hint: "supported: literal regexes with the g/i/m/s/u/y flags — .test(), .source/.flags, and string replace/replaceAll/split with string replacement templates",
+  },
+  SC1121: {
+    feature: "'.test()' on a regex with the 'g' or 'y' flag",
+    milestone: "later",
+    hint: "g/y regexes carry mutable lastIndex state between calls, which is not modeled; drop the flag for a plain match test, or use replace/replaceAll/split (their iteration is internal)",
+  },
+};
+
+export function unsupportedDiag(
+  code: keyof typeof UNSUPPORTED & `SC${number}`,
+  loc: SrcLoc,
+  featureOverride?: string,
+  hintOverride?: string,
+): ScrDiagnostic {
+  const entry = UNSUPPORTED[code]!;
+  const feature = featureOverride ?? entry.feature;
+  const diag: ScrDiagnostic = {
+    code,
+    message: `${feature} ${plural(feature) ? "are" : "is"} not supported yet`,
+    loc,
+    milestone: entry.milestone,
+  };
+  const hint = hintOverride ?? entry.hint;
+  if (hint !== undefined) diag.hint = hint;
+  return diag;
+}
+
+function plural(feature: string): boolean {
+  const head = feature.split(" (")[0]!.trim();
+  return /s$/.test(head) && !/(?:ness|this|ss)$/.test(head);
+}
+
+export function tscPassthroughDiag(message: string, loc: SrcLoc): ScrDiagnostic {
+  return { code: "SC0001", message, loc };
+}
+
+/** The project's tsconfig disables strictNullChecks, which scriptc cannot
+ * adopt: null and undefined are DISTINCT STATIC TYPES in the value model
+ * (union arms with their own runtime representation) — with the knob off,
+ * every type silently includes them and nothing about the model holds. The
+ * config gate fails loudly instead of silently re-enabling the knob. */
+/** True for the sync channel's surfaced Go panics: typescript-go wraps a
+ * server-side panic into a thrown Error whose message starts "panic:" and
+ * keeps the server intact (the prefetch fence's original finding). The
+ * 2026-07-19 sweep's three upstream panics — the TupleType interface
+ * conversion, the import.defer Debug failure, the 1e999 JSON marshal — all
+ * arrive in this shape. */
+export function isCheckerPanic(e: unknown): e is Error {
+  return e instanceof Error && e.message.startsWith("panic:");
+}
+
+/** A Go panic inside the typescript-go checker reached through a query
+ * about this source position. Upstream bugs from scriptc's point of view —
+ * but scriptc still owes a source-anchored diagnostic, never a crashed
+ * CLI. */
+export function checkerPanicDiag(detail: string, loc: SrcLoc): ScrDiagnostic {
+  // Go's encoding/json/v2 Hyrum-proofs its error strings: each process
+  // coin-flips between "cannot" and "unable to" as the modal verb
+  // (errorModalVerb over randomized map iteration), so the same panic
+  // renders two ways across tsgo spawns. scriptc's output is deterministic;
+  // pin one spelling before relaying.
+  const stable = detail.replace(/\bunable to (marshal|unmarshal|handle)\b/g, "cannot $1");
+  return {
+    code: "SC0004",
+    message: `the TypeScript checker crashed answering a query here (an upstream typescript-go bug): ${stable}`,
+    loc,
+  };
+}
+
+/** An imported .json module whose text strict JSON.parse rejects (a leading
+ * `//` comment line — the importAttributes11 shape). tsgo tolerates it, so
+ * the SC0001 passthrough never fires; Node itself refuses to import such a
+ * module at runtime, and the honest answer is a source-anchored gate at the
+ * import, never an uncaught parse throw. */
+export function invalidJsonModuleDiag(fileName: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC0003",
+    message: `imported JSON module '${fileName}' is not valid JSON (${detail})`,
+    loc,
+  };
+}
+
+export function strictNullChecksFloorDiag(configFile: string): ScrDiagnostic {
+  return {
+    code: "SC0002",
+    message:
+      "this project's tsconfig disables strictNullChecks, which scriptc requires " +
+      "(null and undefined are modeled as distinct static types; without the knob " +
+      "every type silently includes them)",
+    loc: { file: configFile, start: 0, end: 0 },
+    hint: 'set "strictNullChecks": true (or "strict": true) in the project tsconfig',
+  };
+}
+
+export function unsupportedTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
+  // `any` gets its own wording AND its own code: it is not an unsupported
+  // value type but a construct with a DYNAMIC lowering — under --dynamic,
+  // any-typed code runs in the embedded engine. This build didn't opt in,
+  // so each site reports the choice: pay ~620KB, or stay static with
+  // 'unknown' + a checked cast. The distinct code lets the coverage report
+  // separate "runs with --dynamic" from "cannot compile". One voice with
+  // SC2010/SC2012: same message shape, same cost figure, same
+  // stay-static alternative shape.
+  if (typeText === "any") {
+    return {
+      code: "SC2011",
+      message: `values of type 'any' run in the embedded dynamic engine, which this build does not include`,
+      loc,
+      milestone: "M4",
+      hint: "build with --dynamic to run 'any'-typed code in the embedded engine (adds ~620KB to the binary), or stay static with 'unknown' and a checked cast ('x as T')",
+    };
+  }
+  return {
+    code: "SC2001",
+    message:
+      `values of type '${typeText}' cannot be compiled yet ` +
+      `(supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')`,
+    loc,
+    milestone: "M2",
+  };
+}
+
+/** A type with a DYNAMIC representation but no static one — `any[]`,
+ * records/functions with `any`-typed members, or a shipped-.d.ts type whose
+ * values are island handles. The caller PROVED the claim by re-running
+ * mapType with `dynamic: true` before choosing this wording, so the message
+ * is a measured fact, not a guess. SC2011 like the bare-`any` arm of
+ * unsupportedTypeDiag (one dynamic-family code per story: this is the
+ * "values of this TYPE run in the engine" story), and "runs in" voice like
+ * SC2012 — the value exists under --dynamic; the build just didn't opt in. */
+export function requiresDynamicTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2011",
+    message: `values of type '${typeText}' have no static representation but run in the embedded dynamic engine, which this build does not include`,
+    loc,
+    milestone: "M4",
+    hint: "build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)",
+  };
+}
+
+/** A value whose type keeps a GENERIC call signature (`let g: <T>(x: T) =>
+ * T`, a stored generic function, a call result the checker left
+ * higher-order generic): every compiled function is one concrete
+ * signature, so a slot that keeps type parameters has no instance to hold
+ * — the generic-value monomorphization rule, named instead of the generic
+ * supported-types recitation. */
+export function genericSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2001",
+    message: `values of type '${typeText}' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)`,
+    loc,
+    milestone: "M2",
+    hint: "annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly",
+  };
+}
+
+/** An index-signature object type that STILL does not map: STRING and
+ * NUMBER index signatures compile (declared fields + an overflow map for
+ * undeclared keys, number keys canonicalized to their JS string spelling),
+ * so reaching this means a symbol-keyed signature, dual signatures with
+ * UNEQUAL value types, a value type outside the supported set (functions,
+ * Maps, promises, ...), or a declared `unknown` field under the signature.
+ * The message points at the working alternatives. */
+export function indexSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2001",
+    message: `values of type '${typeText}' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')`,
+    loc,
+    milestone: "M2",
+    hint: "string- and number-keyed index signatures over the supported value types compile directly; richer value types want Map<string, V>, and symbol keys have no lowering",
+  };
+}
+
+/** A REACHED use of standard-library surface with no lowering — the scope
+ * fence of the real-lib type world. The checker sees the full es2025
+ * standard library, so `Symbol`, `new Date()`, `p.then(...)`, `Math.min`
+ * with three arguments all TYPECHECK; each use site of surface (or a call
+ * form of it) that nothing lowers reports here instead of the old minimal-
+ * ambient "Cannot find name" — and never ICEs. `surface` names what was
+ * used ('Symbol', 'Math.sumPrecise', 'new Date', 'string.normalize'). */
+export function noLoweringDiag(
+  surface: string,
+  loc: SrcLoc,
+  hint?: string,
+  viaNodeTypes = false,
+): ScrDiagnostic {
+  // Same code, two provenances: with the project's @types/node adopted,
+  // the checker also sees everything IT declares (Buffer, process.stdout,
+  // fetch, the undici web globals, ...) — a reached use of node-typed
+  // surface nothing lowers is the same fence, blamed at @types/node so the
+  // report reads honestly ("typed by @types/node" — not "standard
+  // library").
+  return {
+    code: "SC2020",
+    message: viaNodeTypes
+      ? `'${surface}' is typed by @types/node but has no scriptc lowering yet`
+      : `'${surface}' is part of the standard library types but has no scriptc lowering yet`,
+    loc,
+    milestone: "later",
+    hint:
+      hint ??
+      (viaNodeTypes
+        ? "the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)"
+        : "the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)"),
+  };
+}
+
+/** Records are monomorphic structs, so a value's shape must match the
+ * expected shape EXACTLY — TypeScript's structural width subtyping
+ * (`{a: 1, b: 2}` where `{a: number}` is expected) would need a runtime
+ * shape coercion that doesn't exist yet. */
+export function recordShapeMismatchDiag(
+  expectedText: string,
+  actualText: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC2002",
+    message:
+      `record shapes must match exactly: expected '${expectedText}', got '${actualText}' ` +
+      `(structural width subtyping needs a shape coercion that is not supported yet)`,
+    loc,
+    milestone: "later",
+    hint: "build a new literal with exactly the expected fields instead of passing a wider value",
+  };
+}
+
+/** Union values carry a runtime tag assigned per-union: a value of one
+ * union type flowing into a DIFFERENT union's slot re-tags at runtime when
+ * every source arm has a home in the destination (`A | B` into `A | B | C`
+ * — see unionRetagHelper). What this rejects is the remainder: a source arm
+ * with no identical destination arm, where the value could not be
+ * represented in the target union at all. */
+export function unionMismatchDiag(
+  expectedText: string,
+  actualText: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC2003",
+    message:
+      `union types must match exactly: expected '${expectedText}', got '${actualText}' ` +
+      `(a union re-tags into another union only when every arm of the source has an identical arm in the destination, or is a record/array that width-coerces into exactly one destination arm)`,
+    loc,
+    milestone: "later",
+    hint: "narrow the value to a SINGLE arm first (a discriminant check, or '!== undefined'/'!== null' for unit arms); a plain arm value widens into any union that contains it, and a whole union widens into any union whose arms include the source's",
+  };
+}
+
+/** A use of a binding whose DECLARATION did not compile: the declaration
+ * site already carries the real diagnostic (a fenced type, a blocked
+ * signature, an unsupported binding form), and every later reference falls
+ * through the resolution steps because no local/global/function was ever
+ * registered under the symbol. This cascade marker names the binding and
+ * points back at the root cause instead of misreporting the reference as
+ * an unsupported construct of its own. */
+export function blockedBindingUseDiag(name: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2004",
+    message: `uses of '${name}' inherit the blocker on its declaration`,
+    loc,
+    milestone: "later",
+    hint: `the declaration of '${name}' did not compile — fix the diagnostic reported there and these sites clear with it`,
+  };
+}
+
+/** An OPERATION on an `any`-typed value with no static lowering, in a
+ * static build. The honest static subset of `any` compiles (bindings ride
+ * the checked-dynamic DOM — declarations, assignments, reads, equality,
+ * typeof, truthiness, templates, calls through boxed functions), but the
+ * operations that need JS's full coercion/mutation semantics (operators,
+ * expando writes, computed member names, iteration) execute only in the
+ * engine. Same code as the `any` type fence (SC2011) so the coverage
+ * report and the two-tier retry treat both as one dynamic-capable family:
+ * the island lifts exactly these sites. */
+export function anyOpRequiresDynamicDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2011",
+    message: `${feature} on 'any'-typed values runs in the embedded dynamic engine, which this build does not include`,
+    loc,
+    milestone: "M4",
+    hint: "build with --dynamic to run 'any'-typed code in the embedded engine (adds ~620KB to the binary), or stay static with 'unknown' and a checked cast ('x as T')",
+  };
+}
+
+/** A construct that needs the embedded dynamic-island engine was used in a
+ * static build. Static is the default and never silently embeds the engine
+ * (~620KB); the fix is spelled out in the hint, not applied implicitly.
+ * "Requires" (vs SC2011/SC2012's "runs in"): the construct is engine-only
+ * — it has no static form to stay with, so the hint offers no alternative. */
+export function requiresDynamicDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2010",
+    message: `${feature} requires the embedded dynamic engine, which this build does not include`,
+    loc,
+    milestone: "M4",
+    hint: "build with --dynamic to embed the engine (adds ~620KB to the binary); static builds never include it",
+  };
+}
+
+/** An ambient API with an island-backed lowering (Math.*, number/string
+ * methods beyond the static set, parseFloat, ...) was used in a static
+ * build. Same contract as SC2010, its own code so the coverage report can
+ * name the construct: the call RUNS under --dynamic (the engine executes
+ * it with JS-exact semantics); without the flag each use site reports the
+ * choice instead of ICEing or failing at link time. */
+export function requiresDynamicApiDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2012",
+    message: `${feature} runs in the embedded dynamic engine, which this build does not include`,
+    loc,
+    milestone: "M4",
+    hint: "build with --dynamic to run this call in the embedded engine (adds ~620KB to the binary); static builds never include it",
+  };
+}
+
+/** An npm package import in a static build. The package's shipped JS has
+ * exactly one execution home — the embedded engine — so the import itself
+ * "requires" (SC2010's voice); its own code so the coverage report can
+ * attribute sites per package. */
+export function requiresDynamicImportDiag(pkg: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2013",
+    message: `importing '${pkg}' requires the embedded dynamic engine, which this build does not include — the package's implementation runs there`,
+    loc,
+    milestone: "M4",
+    hint: "build with --dynamic to run npm package code in the embedded engine (adds ~620KB to the binary); static builds never include it",
+  };
+}
+
+/** A USE SITE of a value whose type the package's .d.ts declares, in a
+ * static build. Message names ONLY the package (never the type) so the
+ * coverage report groups all of a package's sites into one line. */
+export function requiresDynamicPackageDiag(pkg: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2013",
+    message: `values from the '${pkg}' package run in the embedded dynamic engine, which this build does not include`,
+    loc,
+    milestone: "M4",
+    hint: "build with --dynamic to run npm package code in the embedded engine (adds ~620KB to the binary); static builds never include it",
+  };
+}
+
+/** Building the embedded npm runtime graph failed — the package's entry
+ * or one of its internal modules can't resolve, or it needs a Node builtin
+ * the island doesn't shim. Named per problem, at the import site. */
+export function npmEmbedFailedDiag(detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2030",
+    message: `cannot embed npm package code: ${detail}`,
+    loc,
+    milestone: "later",
+    hint: "the package's runtime JS is embedded at build time and executed in the island; packages that reach outside the shimmed builtins (events, path, fs, os, process, util, buffer, stream, crypto, zlib, url, assert, and the rest of `scriptc coverage`'s shimmed table — http/https clients and net/tls load too; http2 and worker_threads are the notable absences) do not run yet",
+  };
+}
+
+/** comptime went wrong at evaluation time. The callback runs in an isolated
+ * `node:vm` context inside the compiler's own Node process and its RESULT is
+ * baked into the binary as a literal — everything that can fail at that
+ * stage lands here with a specific detail: the callback threw, evaluation
+ * exceeded the compile-time budget, or the returned value cannot be written
+ * as a literal of the expected type (NaN/Infinity, undefined/null/functions,
+ * shape mismatches — the detail names the offending path, dynCheck-style). */
+export function comptimeFailedDiag(detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC1110",
+    message: `comptime evaluation failed: ${detail}`,
+    loc,
+  };
+}
+
+export function iceDiag(message: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC9001",
+    message: `internal compiler error: ${message} — please report this`,
+    loc,
+  };
+}
