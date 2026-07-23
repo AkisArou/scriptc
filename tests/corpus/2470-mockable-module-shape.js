@@ -1,3 +1,4 @@
+// @deferred-fences: 1
 // The mockable-clock module shape: a JSDoc-generic factory whose declared
 // return carries `T[K]`-typed members (the indexed access resolves against
 // the instantiation's record binding), a hasOwn-guarded runtime-keyed
