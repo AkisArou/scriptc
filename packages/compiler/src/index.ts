@@ -207,6 +207,25 @@ function ts7IsImportWithStringSpec(stmt: unknown): stmt is { moduleSpecifier: { 
   return typeof s.moduleSpecifier?.text === "string";
 }
 
+/** The opted-in packages a consumer-anchored tsc message NAMES: module
+ * specifiers in `Module '"spec"'` phrasings, and resolved file paths in
+ * `import("…")` type spellings — the two ways the checker points at an
+ * import surface from the importer's side. */
+function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set<string> {
+  const hits = new Set<string>();
+  for (const m of message.matchAll(/Module '"([^"]+)"'/g)) {
+    const spec = m[1]!;
+    const parts = spec.split("/");
+    const prefix = spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+    if (optedIn.has(prefix)) hits.add(prefix);
+  }
+  for (const m of message.matchAll(/import\("([^"]+)"\)/g)) {
+    const pkg = npmStaticPackageOfPath(m[1]!);
+    if (pkg !== null && optedIn.has(pkg)) hits.add(pkg);
+  }
+  return hits;
+}
+
 function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"): Frontend {
   const statuses: NpmStaticStatus[] = [];
   let requested: string[] = [];
@@ -229,6 +248,18 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
   // its import takes the ordinary island path. Static compilation of a
   // package must never turn a working --dynamic build into a build
   // failure.
+  //
+  // CONSUMER-anchored attribution (the second source): an opted-in
+  // package whose inferred export surface breaks the typecheck reports at
+  // its IMPORT SITES — errors in program files no path-shaped attribution
+  // reaches, but whose MESSAGES name the package ("Module '"pkg"' has no
+  // exported member", "typeof import("…/pkg/dist/index")"). Bundle-shaped
+  // dists carry surfaces inference can only partly reach (type-only
+  // re-exports have no JS value to chase), and the ratified behavior is
+  // graceful PER-PACKAGE degradation: the named package drops to the
+  // island with a note, never a failed gate. Explicit opt-ins degrade
+  // exactly like auto's — "the user asked for these packages" buys the
+  // attempt, not a broken build.
   let load = loadProgram(entryPath, { npmStatic: requested });
   let preflight = checkPreflight(load);
   const effective = new Set(requested);
@@ -237,6 +268,21 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
     for (const d of preflight) {
       const pkg = npmStaticPackageOfPath(d.loc.file);
       if (pkg !== null && !reasons.has(pkg)) reasons.set(pkg, `${d.code}: ${d.message}`);
+    }
+    if (![...reasons.keys()].some((p) => effective.has(p))) {
+      const named = new Map<string, number>();
+      for (const d of preflight) {
+        if (d.code !== "SC0001") continue;
+        for (const pkg of packagesNamedByDiag(d.message, effective)) {
+          named.set(pkg, (named.get(pkg) ?? 0) + 1);
+        }
+      }
+      for (const [pkg, count] of named) {
+        reasons.set(
+          pkg,
+          `its inferred export surface breaks ${count} import site${count === 1 ? "" : "s"} in program files — the package serves from the island instead (bundler-emitted surfaces type only as far as inference reaches)`,
+        );
+      }
     }
     const dropping = [...reasons.keys()].filter((p) => effective.has(p));
     if (dropping.length === 0) break;
@@ -248,24 +294,29 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
     load = loadProgram(entryPath, { npmStatic: effective });
     preflight = checkPreflight(load);
   }
-  // AUTO mode's last resort: an opt-in can change the PROGRAM's OWN
-  // typecheck (the inferred surface replaces the shipped .d.ts — the
-  // commander name()/description() chaining shape, or a package consumed
-  // for type-only imports), and those SC0001s anchor in USER files no
-  // offender attribution reaches. Auto promised eligibility detection,
-  // not a broken program: each remaining package is probed ALONE-dropped
-  // (n is the direct-import count — a handful of extra analysis loads);
-  // culprits whose removal clears the errors fall back with a note, and
-  // if no subset typechecks, everything drops. Explicit opt-ins keep the
-  // errors (the user asked for exactly these packages and the errors are
-  // the actionable answer).
-  if (npmStatic === "auto" && effective.size > 0 && preflight.some((d) => d.code === "SC0001")) {
+  // The last resort, ALL modes: an opt-in can change the PROGRAM's OWN
+  // typecheck through errors that name no package at all (the inferred
+  // surface replaces the shipped .d.ts — the commander name()/description()
+  // chaining shape, or a .d.ts type-GUARD an inferred JS function cannot
+  // reproduce, so every catch-clause narrowing site reports "'err' is of
+  // type 'unknown'"). Those SC0001s anchor in USER files no offender or
+  // message attribution reaches, so each remaining package is probed
+  // ALONE-dropped (n is the opt-in count — a handful of extra analysis
+  // loads); culprits whose removal clears the errors fall back with a
+  // note, and if no subset typechecks, everything drops. Explicit opt-ins
+  // degrade the same way — the ratified stance for bundle-shaped dists is
+  // graceful per-package degradation, never a failed gate the user cannot
+  // act on (the note carries the why).
+  if (effective.size > 0 && preflight.some((d) => d.code === "SC0001")) {
     const dropWithNote = (p: string): void => {
       effective.delete(p);
       statuses.push({
         package: p,
         status: "fallback",
-        detail: "auto: the program does not typecheck against its inferred surface",
+        detail:
+          npmStatic === "auto"
+            ? "auto: the program does not typecheck against its inferred surface"
+            : "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase) — the package serves from the island instead",
       });
     };
     // Attribute per package by probing each SOLO (culprits are almost

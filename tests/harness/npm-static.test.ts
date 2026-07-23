@@ -55,6 +55,8 @@ async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise
   const inputs = [
     entry,
     ...globSync(join(pilotRoot, "**/node_modules/**/*.{js,mjs,cjs,json,d.ts}")).sort(),
+    // the bundler-emitted-CJS mini packages (cases 2465-2469)
+    ...globSync(join(fixturesRoot, "npm/node_modules/gt*/**/*.{js,json}")).sort(),
   ];
   for (const f of inputs) hash.update(f).update(readFileSync(f));
   const key = hash
@@ -233,21 +235,28 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.preflightFailed).toBe(false);
   }, 120_000);
 
-  // Checker errors in node_modules JS the opt-in never NAMED never gate
-  // the build: maxNodeModuleJsDepth (active on every --npm-static load)
-  // admits ANY node_modules JS the checker's resolution touches — the
-  // punycode-through-@types/node shape — and those files' errors are the
-  // same foreign-tsconfig story as an opted-in package's own. typegapped
-  // ships no .d.ts, its JS does not typecheck here, and it stays on the
-  // island while escape-string-regexp compiles statically beside it.
-  test("a non-opted node_modules JS file's checker errors never gate the build", () => {
+  // Non-opted UNTYPED node_modules packages keep the checked-dynamic
+  // surface: maxNodeModuleJsDepth (active on every --npm-static load)
+  // would otherwise admit their JS and replace the flagless `any` with an
+  // inferred surface — changing the PROGRAM's own types under a flag that
+  // promised to touch only the opted-in packages (the jaro-winkler
+  // shape). The fs shadow serves those files as the any-surface stub:
+  // typegapped's import types `any` (its use sites meet the ordinary
+  // any fences, never its own checker errors), while
+  // escape-string-regexp compiles statically beside it.
+  test("a non-opted untyped package keeps the checked-dynamic any surface", () => {
     const { coverage } = analyze(join(pilotRoot, "typegap-mix.ts"), {
       dynamic: true,
       npmStatic: ["escape-string-regexp"],
     });
     expect(coverage.preflightFailed).toBe(false);
-    expect(coverage.diagnostics).toHaveLength(0);
     expect(coverage.npmStatic).toEqual([{ package: "escape-string-regexp", status: "static" }]);
+    // typegapped's own checker errors never gate; the one report is the
+    // consumer's any-value fence — the same story a flagless island
+    // import of an untyped package tells.
+    expect(coverage.diagnostics).toHaveLength(1);
+    expect(coverage.diagnostics[0]?.code).toBe("SC1090");
+    expect(coverage.diagnostics[0]?.message).toMatch(/console\.log of 'any'/);
   }, 120_000);
 
   // WORKSPACE-LINKED packages: node_modules/wslinked is a symlink whose
@@ -284,6 +293,70 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     const all = JSON.stringify(coverage.diagnostics);
     expect(all).toContain("wslinked");
     expect(all).not.toContain("nothing installed resolves");
+  }, 120_000);
+
+  /* ── bundler-emitted CJS: the getter-table export shapes (cases
+   * 2465-2469) ─ the canonical-table rewrite types each shape's named
+   * exports by their resolved values, the compiled binaries byte-match
+   * Node, and the consumer-anchored offender attribution degrades what
+   * inference cannot carry. */
+
+  // 2465: the esbuild __export getter table (renamed local, member-access
+  // getter body, mutable-var snapshot) + a lexer-visible-but-valueless
+  // chunk-wrapped name binding undefined, exactly Node.
+  // 2466: the esbuild __reExport star (+ annotation spread) over a plain
+  // CJS sibling.
+  // 2467: the tsc __exportStar barrel (defineProperty __esModule stamp,
+  // void-init preamble, own member export beside the stars).
+  // 2468: the Object.defineProperty(exports, 'n', { get }) re-export
+  // family plus a scalar member export.
+  test.for([
+    ["2465-getter-table", "gtable"],
+    ["2466-getter-star", "gtstar"],
+    ["2467-star-barrel", "gtbarrel"],
+    ["2468-defineprop-exports", "gtdefine"],
+  ] as const)("bundler-emitted CJS %s compiles statically and byte-matches Node", async ([caseDir, pkg]) => {
+    const entry = join(fixturesRoot, "npm/cases", caseDir, "main.ts");
+    const { coverage } = analyze(entry, { npmStatic: [pkg] });
+    expect(coverage.npmStatic).toEqual([{ package: pkg, status: "static" }]);
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics).toHaveLength(0); // builds — fences are runtime
+    const binary = await buildStatic(entry, [pkg]);
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry]),
+      runBinary(binary, []),
+    ]);
+    expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+  }, 180_000);
+
+  // 2469: a TYPE-ONLY surface name (an interface) has no JS value the
+  // inferred surface can carry — the import-site SC0001 NAMES the package,
+  // and the consumer-anchored attribution degrades exactly it to the
+  // island with the note, never a failed gate. Explicit opt-ins degrade
+  // like auto's: the ratified bundle-shape behavior.
+  test("a consumer-anchored surface break degrades the named package with a note", () => {
+    const entry = join(fixturesRoot, "npm/cases/2469-bundle-offender/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: ["gtghost"] });
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "gtghost",
+        status: "fallback",
+        detail: expect.stringContaining("inferred export surface breaks 1 import site") as string,
+      },
+    ]);
+  }, 120_000);
+
+  // The build-transform-marker relaxation: a getter-table bundle with its
+  // own .d.ts is now ELIGIBLE for auto (the esbuild/tsc CJS stamps no
+  // longer disqualify — only a bundler RUNTIME like webpack's registry
+  // does), and the attempt succeeds outright here.
+  test("--npm-static=auto opts a getter-table bundle in", () => {
+    const entry = join(fixturesRoot, "npm/cases/2465-getter-table/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([{ package: "gtable", status: "static" }]);
+    expect(coverage.preflightFailed).toBe(false);
   }, 120_000);
 
   // The COPIED workspace shape classifies exactly like the symlinked one:

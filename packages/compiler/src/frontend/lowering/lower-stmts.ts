@@ -2850,6 +2850,41 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     );
   }
 
+/** The exact `Object.defineProperty(exports|module.exports, "__esModule",
+ * { value: true })` interop stamp (see the no-op lowering above). */
+function isEsModuleStamp(expr: ts.Expression): boolean {
+  if (!ts.isCallExpression(expr) || expr.questionDotToken !== undefined) return false;
+  const callee = expr.expression;
+  if (
+    !ts.isPropertyAccessExpression(callee) ||
+    !ts.isIdentifier(callee.expression) ||
+    callee.expression.text !== "Object" ||
+    !ts.isIdentifier(callee.name) ||
+    callee.name.text !== "defineProperty"
+  ) {
+    return false;
+  }
+  if (expr.arguments.length !== 3) return false;
+  const [recv, nameArg, desc] = expr.arguments as unknown as [ts.Expression, ts.Expression, ts.Expression];
+  const isExports =
+    (ts.isIdentifier(recv) && recv.text === "exports") ||
+    (ts.isPropertyAccessExpression(recv) &&
+      ts.isIdentifier(recv.expression) &&
+      recv.expression.text === "module" &&
+      ts.isIdentifier(recv.name) &&
+      recv.name.text === "exports");
+  if (!isExports) return false;
+  if (!ts.isStringLiteral(nameArg) || nameArg.text !== "__esModule") return false;
+  if (!ts.isObjectLiteralExpression(desc) || desc.properties.length !== 1) return false;
+  const p = desc.properties[0]!;
+  return (
+    ts.isPropertyAssignment(p) &&
+    ts.isIdentifier(p.name) &&
+    p.name.text === "value" &&
+    p.initializer.kind === ts.SyntaxKind.TrueKeyword
+  );
+}
+
 /** A top-level CommonJS export statement (see cjsExportAssignmentOf):
    * `exports.f = <expr>` and each expression-valued property of
    * `module.exports = { ... }` assign their pre-registered export globals
@@ -2893,6 +2928,55 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       // cjsMemberExportClassSymbol): the statement lowers to nothing.
       if (L.cjsMemberExportClassSymbol(cjs.expr) !== null) {
         return { kind: "block", body: [], loc };
+      }
+      // The tsc VOID-INIT PREAMBLE (`exports.leaf = void 0;` with the real
+      // `exports.leaf = leaf;` further down — every tsc-emitted dist file
+      // opens its exports this way): the export global takes its value at
+      // the REAL assignment, and pushing undefined through a typed slot
+      // here would trap at module load. Node's only observable difference
+      // is a transient undefined between the two statements — reads in
+      // that window are the declaring module's own top-level code, which
+      // the real assignment's position already orders. Preambles with no
+      // later real assignment keep the ordinary path (the export IS
+      // undefined then).
+      if (ts.isIdentifier(cjs.name)) {
+        const isExportsMember = (e: ts.Expression): e is ts.PropertyAccessExpression =>
+          ts.isPropertyAccessExpression(e) &&
+          ts.isIdentifier(e.name) &&
+          ((ts.isIdentifier(e.expression) && e.expression.text === "exports") ||
+            (ts.isPropertyAccessExpression(e.expression) &&
+              ts.isIdentifier(e.expression.expression) &&
+              e.expression.expression.text === "module" &&
+              ts.isIdentifier(e.expression.name) &&
+              e.expression.name.text === "exports"));
+        const isVoid = (e: ts.Expression): boolean => {
+          while (ts.isParenthesizedExpression(e)) e = e.expression;
+          return e.kind === ts.SyntaxKind.VoidExpression || (ts.isIdentifier(e) && e.text === "undefined");
+        };
+        // chains: `exports.a = exports.b = void 0;` collects every name
+        const names: string[] = [cjs.name.text];
+        let tail: ts.Expression = cjs.value;
+        while (
+          ts.isBinaryExpression(tail) &&
+          tail.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          isExportsMember(tail.left)
+        ) {
+          names.push((tail.left.name as ts.Identifier).text);
+          tail = tail.right;
+        }
+        if (isVoid(tail)) {
+          const sfHere = cjs.expr.getSourceFile();
+          const myPos = cjs.expr.getStart(sfHere);
+          const laterRealOf = (name: string): boolean =>
+            sfHere.statements.some((s) => {
+              const other = cjsExportAssignmentOf(s);
+              if (other?.kind !== "member" || !ts.isIdentifier(other.name)) return false;
+              if (other.name.text !== name) return false;
+              if (other.expr.getStart(sfHere) <= myPos) return false;
+              return !isVoid(other.value);
+            });
+          if (names.every(laterRealOf)) return { kind: "block", body: [], loc };
+        }
       }
       return assignExport(cjs.name, cjs.value);
     }
@@ -2964,6 +3048,18 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       // (cjsExportAccessorRead); writes through the setter keep their
       // fence at the write site.
       if (ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) continue;
+      // `...require('spec')` SPREAD entries are star-re-export plumbing
+      // (the bundler-emitted CJS canonical table — npm-static-rewrite.ts):
+      // importers of the spread names resolve statically through the
+      // TARGET module's own export machinery (the checker chases the
+      // spread; explicit member entries carry the values), and the module
+      // LOAD itself rides the ordinary import edge preflight collected —
+      // so no runtime copy exists to emit and the entry lowers to nothing.
+      if (ts.isSpreadAssignment(prop)) {
+        let inner: ts.Expression = prop.expression;
+        while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+        if (requireSpecOf(inner) !== null) continue;
+      }
       L.unsupported(
         "SC1090",
         prop,
@@ -3119,6 +3215,14 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     if (topLevelJs && ts.isExpressionStatement(stmtNode)) {
       const cjs = cjsExportAssignmentOf(stmtNode);
       if (cjs) return lowerCjsExportStatement(L, cjs);
+      // The tsc CJS interop stamp — `Object.defineProperty(exports,
+      // "__esModule", { value: true });` at a module's top — lowers to
+      // NOTHING: the compiled module system has no reflective exports
+      // object to mark, and the marker's one job (import interop) is
+      // already modeled statically by the checker and the CJS lexer link
+      // check. Every tsc-emitted dist file opens with it, and the generic
+      // defineProperty fence would throw at module load.
+      if (isEsModuleStamp(expr)) return { kind: "block", body: [], loc: locOf(expr) };
     }
     // Statement-position `delete` — the two honest receivers: process.env
     // keys (unsetenv(3) — later reads and spawned children observe the

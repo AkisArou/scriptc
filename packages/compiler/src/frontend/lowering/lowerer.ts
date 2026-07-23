@@ -62,6 +62,7 @@ import {
   isNodeTypesPath,
   locOf,
   overridesDtsPath,
+  npmStaticDepSf7,
   requireSpecOf,
   resolveImport,
   workspacePackageOfPath,
@@ -1300,8 +1301,13 @@ export class Lowerer {
       return null;
     }
     const spec = importDecl.moduleSpecifier.text;
-    if (!isRelativeSpecifier(spec)) return null;
-    const dep = resolveImport(this.program, importDecl.getSourceFile(), spec);
+    // Bare specifiers resolve only for opted-in --npm-static packages —
+    // their CJS entries take the same default-binding interop as a
+    // relative require; every other bare import answers null and keeps
+    // its own machinery.
+    const dep = isRelativeSpecifier(spec)
+      ? resolveImport(this.program, importDecl.getSourceFile(), spec)
+      : npmStaticDepSf7(this.program, importDecl.getSourceFile(), spec);
     if (!dep || !isJsSourceFile(dep) || isNodeEsmFile(dep)) return null;
     return dep;
   }
@@ -5768,6 +5774,26 @@ export class Lowerer {
     return this.resolveKey(THIS_BINDING);
   }
 
+  /** READ-ONLY twin of resolveLocal for PROBES (isIslandExpr): answers
+   * the nearest binding entry without boxing, threading, or predeclaring.
+   * resolveKey mutates capture state as a side effect, and a speculative
+   * island-ness query through a context that takes no captures (a plain
+   * declared function between the origin and the reference) was an ICE —
+   * the REAL lowering path still resolves (and diagnoses) the reference
+   * itself. */
+  peekLocal(ident: ts.Identifier): IrLocal | null {
+    let symbol = this.checker.getSymbolAtLocation(ident);
+    if (ident.parent && ts.isShorthandPropertyAssignment(ident.parent) && ident.parent.name === ident) {
+      symbol = this.checker.getShorthandAssignmentValueSymbol(ident.parent) ?? symbol;
+    }
+    if (!symbol) return null;
+    for (let depth = this.fnStack.length - 1; depth >= 0; depth--) {
+      const hit = this.bindingIn(this.fnStack[depth]!, symbol);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
   resolveKey(symbol: ts.Symbol, blame?: ts.Node): IrLocal | null {
     const direct = this.bindingIn(this.ctx, symbol);
     if (direct) return direct;
@@ -5804,6 +5830,21 @@ export class Lowerer {
         const ctx = this.fnStack[j]!;
         let entry = ctx.captureBySymbol.get(symbol);
         if (!entry) {
+          // A context that takes NO captures (a plain declared function —
+          // monomorphized/implicit instances lower this way) cannot carry
+          // the binding through: the shape is a module binding whose only
+          // storage is the init function's LOCAL (a typed-but-unmappable
+          // const — the file-scope `new Map()` ledger idiom) read from
+          // inside a nested instance. Fence it — in JS the statement
+          // defers to its runtime trap like every collection failure;
+          // asserting here was an ICE on ordinary npm-static JS.
+          if (ctx.captures === null) {
+            this.unsupported(
+              "SC1090",
+              blame ?? this.checker.declarationsOf(symbol)[0] ?? this.entry,
+              `the binding '${origin.name}' captured through a plain nested function (the declaration has no static storage a capture can thread — bind the value through a typed const, or read it in the declaring scope)`,
+            );
+          }
           const count = ctx.localCounters.get(origin.name) ?? 0;
           ctx.localCounters.set(origin.name, count + 1);
           entry = {
@@ -5818,9 +5859,6 @@ export class Lowerer {
           };
           ctx.locals.push(entry);
           ctx.captureBySymbol.set(symbol, entry);
-          if (ctx.captures === null) {
-            throw new Error("lowerer bug: capture threading through a non-lifted function");
-          }
           ctx.captures.push({ localId: entry.id, name: entry.name, type: entry.type });
           ctx.captureSources.push(parentEntry.id);
         }

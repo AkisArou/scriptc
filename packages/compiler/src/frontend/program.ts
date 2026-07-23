@@ -1063,7 +1063,18 @@ function npmStaticProgramDep(
     );
     return null;
   }
-  const dep = program.getSourceFile(resolvedFile) ?? null;
+  let dep = program.getSourceFile(resolvedFile) ?? null;
+  if (dep === null) {
+    // A workspace-linked package shipping its .ts SOURCE beside the
+    // compiled .js: the checker's resolution preferred the source (it
+    // outranks the sibling .js under bundler resolution), so the program
+    // holds the .ts twin at the same stem — the same module, in its
+    // richer spelling.
+    for (const ext of [".ts", ".tsx", ".mts", ".cts"]) {
+      dep = program.getSourceFile(resolvedFile.replace(/\.(js|mjs|cjs)$/, ext)) ?? null;
+      if (dep !== null) break;
+    }
+  }
   if (dep === null) {
     reportNpmStaticOffender(
       packageName,
@@ -1771,24 +1782,37 @@ function preflight7(load: LoadResult): {
             }
           }
           const isRelative = isRelativeSpecifier(req.spec);
+          let dep: ts.SourceFile | null = null;
           if (!isRelative) {
-            if (
-              canonicalBuiltinModule(req.spec) === null &&
-              !processModuleAliasRequire7(req.spec, req.decl)
-            ) {
-              // A binding-less require of a package NOTHING resolves:
-              // Node throws MODULE_NOT_FOUND at the require site — the
-              // lowering compiles exactly that catchable throw (the
-              // optional-dependency try/require pattern), so no fence.
-              // Binding forms keep the fence: their downstream reads
-              // would need the module that never loads.
-              if (req.decl !== null || probeNodeRequireRefusal(sf.fileName, req.spec) === null) {
-                diags.push(unsupportedDiag("SC1010", loc, `the '${req.spec}' module`));
+            // --npm-static: a require() of an OPTED-IN package is a
+            // program-module edge exactly like the import-declaration
+            // form above (bundle dists require their workspace siblings —
+            // the same resolution, the same offender discipline on a
+            // miss).
+            const npmReq = !req.spec.startsWith("#") ? resolveNpmImport7(sf.fileName, req.spec) : null;
+            if (npmReq !== null && isNpmStaticPackage(npmReq.packageName)) {
+              dep = npmStaticProgramDep(program, npmReq.packageName, npmReq.typesFile);
+              if (dep === null) continue; // offender recorded — the fallback loop reloads
+            } else {
+              if (
+                canonicalBuiltinModule(req.spec) === null &&
+                !processModuleAliasRequire7(req.spec, req.decl)
+              ) {
+                // A binding-less require of a package NOTHING resolves:
+                // Node throws MODULE_NOT_FOUND at the require site — the
+                // lowering compiles exactly that catchable throw (the
+                // optional-dependency try/require pattern), so no fence.
+                // Binding forms keep the fence: their downstream reads
+                // would need the module that never loads.
+                if (req.decl !== null || probeNodeRequireRefusal(sf.fileName, req.spec) === null) {
+                  diags.push(unsupportedDiag("SC1010", loc, `the '${req.spec}' module`));
+                }
               }
+              continue;
             }
-            continue;
+          } else {
+            dep = resolveImport7(program, sf, req.spec);
           }
-          const dep = resolveImport7(program, sf, req.spec);
           if (dep && dep.fileName.endsWith(".json")) {
             diags.push(unsupportedDiag("SC1012", loc, "require() of JSON modules"));
             continue;
@@ -1815,6 +1839,14 @@ function preflight7(load: LoadResult): {
           const spec = requireSpecOf7(call)!;
           const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
           if (!isRelativeSpecifier(spec)) {
+            // --npm-static: opted-in packages ride the program-module edge
+            // (the statement-level require branch above).
+            const npmReq = !spec.startsWith("#") ? resolveNpmImport7(sf.fileName, spec) : null;
+            if (npmReq !== null && isNpmStaticPackage(npmReq.packageName)) {
+              const nDep = npmStaticProgramDep(program, npmReq.packageName, npmReq.typesFile);
+              if (nDep !== null) deps.push({ dep: nDep, backAdmissible: () => false });
+              continue;
+            }
             if (canonicalBuiltinModule(spec) === null && !processModuleAliasRequire7(spec, null)) {
               // Binding-less by construction — same require-site throw
               // channel as the statement-level form above.
@@ -2332,7 +2364,7 @@ export function orderedImportsOf(
  * as a module edge), else null. No offender reporting here — preflight
  * already classified the import; this is the lookup the module-order and
  * lowering paths share. */
-function npmStaticDepSf7(program: ts.Program, sf: ts.SourceFile, spec: string): ts.SourceFile | null {
+export function npmStaticDepSf7(program: ts.Program, sf: ts.SourceFile, spec: string): ts.SourceFile | null {
   if (!npmStaticActive() || isRelativeSpecifier(spec)) return null;
   if (spec.startsWith("node:") || spec.startsWith("#")) return null;
   const npm = resolveNpmImport7(sf.fileName, spec);

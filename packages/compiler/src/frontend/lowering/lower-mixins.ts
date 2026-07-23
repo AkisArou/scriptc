@@ -202,8 +202,10 @@ function mixinFnShapeInner(
 export function mixinFnOfCallee(L: Lowerer, callee: ts.Expression): MixinFnShape | null {
   if (!ts.isIdentifier(callee)) return null;
   // A shadowing local owns the name (heritage-time demands have no
-  // function context — nothing can shadow at collection).
-  if (L.fnStack.length > 0 && L.resolveLocal(callee)) return null;
+  // function context — nothing can shadow at collection). peekLocal: this
+  // is a probe, and probes must not thread capture state (resolveLocal's
+  // side effect — an ICE through a non-lifted enclosing function).
+  if (L.fnStack.length > 0 && L.peekLocal(callee)) return null;
   // Recognition is a side-effect-free PROBE (it runs on every candidate
   // call/binding/reference): resolve without resolveValueSymbol's
   // deferred-diagnostic flush — a non-mixin callee's own paths flush when
