@@ -901,8 +901,13 @@ export function collectSignatureInner(L: Lowerer, decl: ts.FunctionDeclaration):
     }
     // Only NAME syntax is checkable here; optional/default/rest shapes are
     // computed per call site from the resolved signature (lowerGenericCall).
+    // Binding-PATTERN parameters (`retry<T>(fn, { retries = 3 } = {})`)
+    // pass: declareParams desugars patterns per instance exactly as it
+    // does for non-generic functions.
     for (const param of decl.parameters) {
-      if (!ts.isIdentifier(param.name)) L.unsupported("SC1031", param);
+      if (!ts.isIdentifier(param.name) && !ts.isObjectBindingPattern(param.name) && !ts.isArrayBindingPattern(param.name)) {
+        L.unsupported("SC1031", param);
+      }
     }
     const nameText = decl.name?.text ?? "%default"; // nameless = the default export (checked by collectSignatureInner)
     const symbol = declSymbolOf(L, decl);
@@ -6499,9 +6504,11 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     }
     // Only NAME syntax is checkable here; optional/default/rest shapes are
     // computed per instantiation from the resolved signature — exactly
-    // collectGenericSignature's rule.
+    // collectGenericSignature's rule, binding patterns included.
     for (const param of fnNode.parameters) {
-      if (!ts.isIdentifier(param.name)) L.unsupported("SC1031", param);
+      if (!ts.isIdentifier(param.name) && !ts.isObjectBindingPattern(param.name) && !ts.isArrayBindingPattern(param.name)) {
+        L.unsupported("SC1031", param);
+      }
     }
     const stmt = decl.parent.parent; // declarator → list → statement (nsPathPrefix wants the statement)
     const info: GenericFnInfo = {

@@ -33,14 +33,7 @@ unions.ts:48:13 - error SC1090: '.includes()' on union-element arrays (union val
   47 | console.log(items.indexOf(1));
   48 | console.log(items.includes("two"));
      |             ^~~~~~~~~~~~~~~~~~~~~
-  49 | // Unions may not contain function arms (closure identity vs tag, later).
-
-unions.ts:50:7 - error SC2001: values of type 'string | (() => number)' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
-
-  49 | // Unions may not contain function arms (closure identity vs tag, later).
-  50 | const callable: (() => number) | string = "later";
-     |       ^~~~~~~~
-  51 | 
+  49 | // Unions may contain function arms beside data arms now (typeof narrows,
 
 unions.ts:61:22 - error SC1090: string conversions of unions with object arms (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
 

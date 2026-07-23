@@ -7,7 +7,7 @@
 import * as ts from "../ts7/adapter.js";
 import { dirname } from "node:path";
 import type { Lowerer } from "./lowerer.js";
-import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey } from "../../ir/nodes.js";
+import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
@@ -21,7 +21,7 @@ import { lowerSocketInstanceOf } from "./lower-server.js";
 import { findGenericMethodOn, lowerStaticFieldRead } from "./lower-classes.js";
 import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
 import { mixinFnOfCallee } from "./lower-mixins.js";
-import { isGenericCallableMemberType, unitOnlyUnion } from "../types.js";
+import { isConstAssertionTypeNode, isGenericCallableMemberType, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
 
@@ -236,7 +236,14 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       (() => {
         const ctxTs = L.checker.getContextualType(expr);
         const mapped = (ctxTs ? L.mapTypeOf(ctxTs) : null) ?? L.mapTypeOf(L.typeOf(expr));
-        return mapped?.kind === "jsval";
+        if (mapped?.kind !== "jsval") return false;
+        // The tsgo readonly-[] panic repair (see lowerArrayLiteral): an
+        // EMPTY array literal under a const assertion is the empty tuple —
+        // its `any` answer is a panicked query, not an island slot.
+        if (ts.isArrayLiteralExpression(expr) && expr.elements.length === 0 && underConstAssertion(expr)) {
+          return false;
+        }
+        return true;
       })()
     ) {
       if (ts.isObjectLiteralExpression(expr)) {
@@ -617,6 +624,22 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         if (L.isStdlibSymbol(sym)) {
           return { kind: "numLit", value: expr.text === "NaN" ? NaN : Infinity, type: F64, loc };
         }
+      }
+      // The primitive constructors as VALUES (`const f = String`, an
+      // option table's `type: Boolean` field, `opt.type === Number`): the
+      // interned coercion closure — one synthesized module function per
+      // constructor per program, so every reference is the SAME zero-
+      // capture closure and `===` is JS identity (the type mapping in
+      // types.ts pins the one concrete signature `(value: string) =>
+      // primitive`; direct calls `String(x)` never reach here — the call
+      // lowering intercepts them with the wider static coercions).
+      // JavaScript sources keep the identity-token path below.
+      if (
+        (expr.text === "String" || expr.text === "Number" || expr.text === "Boolean") &&
+        !isJsSourceFile(expr.getSourceFile()) &&
+        L.isStdlibSymbol(L.checker.getSymbolAtLocation(expr))
+      ) {
+        return primitiveCtorClosure(L, expr.text, loc);
       }
       // The lib fence's IDENTIFIER chokepoint: the real standard library
       // resolves names the old minimal ambient world never declared
@@ -3040,6 +3063,19 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         const arrayArms = def?.arms.filter((a) => a.kind === "array") ?? [];
         if (arrayArms.length === 1) mapped = arrayArms[0]!;
       }
+    }
+    // An EMPTY literal under a CONST ASSERTION whose type queries panicked
+    // (tsgo's readonly-[] TupleType conversion — the facade answers `any`,
+    // which maps to nothing statically and to an island value under
+    // --dynamic): the value is provably the empty tuple; ride the
+    // unit-element array, mapType's own `[] as const` rule.
+    if (
+      (mapped === null || mapped.kind === "jsval") &&
+      expr.elements.length === 0 &&
+      (tsType.flags & ts.TypeFlags.Any) !== 0 &&
+      underConstAssertion(expr)
+    ) {
+      mapped = arrayOf(unitOnlyUnion(L.unions));
     }
     // A TUPLE-typed slot (`const t: [string, number] = ["a", 1]`): the
     // literal constructs the tuple's record shape — one positional field
@@ -5711,6 +5747,19 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
   /** `e as T` and the old-style assertion `<T>e` — one node shape (both
    * carry `.type` and `.expression`), one lowering. */
   export function lowerAsExpression(L: Lowerer, expr: ts.AsExpression | ts.TypeAssertion): IrExpr {
+    // `[] as const` — tsgo panics computing the expression's `readonly []`
+    // type (the facade's fence answers `any`), but the syntax pins the
+    // value exactly: the empty tuple, ridden as the unit-element array
+    // (mapType's empty-tuple rule). Lower it directly; enclosing slots
+    // coerce like any other empty-array source.
+    if (
+      ts.isAsExpression(expr) &&
+      isConstAssertionTypeNode(expr.type) &&
+      ts.isArrayLiteralExpression(expr.expression) &&
+      expr.expression.elements.length === 0
+    ) {
+      return { kind: "arrayLit", elems: [], type: arrayOf(unitOnlyUnion(L.unions)), loc: locOf(expr) };
+    }
     // `e as C` on a CATCH BINDING (`(err as Error).message`): the checked
     // extraction — an instanceof match extracts the payload, anything else
     // throws the catchable TypeError (dynCheck's trust-but-verify stance,
@@ -6117,6 +6166,24 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     if (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken) {
       const nullTest = lowerLooseNullCompare(L, expr, loc);
       if (nullTest) return nullTest;
+      // SAME-KIND loose equality IS strict equality (the spec's ==
+      // dispatches to === when both operands share a type): `typeof v ==
+      // 'object'`, `n != 0`, `flag == true` all lower exactly. Mixed
+      // kinds (where == coerces) keep the fence.
+      {
+        const negated = op === ts.SyntaxKind.ExclamationEqualsToken;
+        const left = L.lowerExpr(expr.left);
+        const right = L.lowerExpr(expr.right);
+        if (left.type.kind === "string" && right.type.kind === "string") {
+          return { kind: "strEq", negated, left, right, type: BOOL, loc };
+        }
+        if (
+          (left.type.kind === "f64" && right.type.kind === "f64") ||
+          (left.type.kind === "bool" && right.type.kind === "bool")
+        ) {
+          return { kind: "bin", op: negated ? "!==" : "===", left, right, type: BOOL, loc };
+        }
+      }
       L.unsupported("SC1040", expr);
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
@@ -8039,6 +8106,18 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       if (!pushAnswer(shape.indexValue)) return null;
     }
     if (joinArms.length === 0) return null;
+    // The join must be a BUILDABLE union: arm kinds the union invariants
+    // admit (no map/dyn/jsval/generator arms; func arms only beside
+    // func/unit siblings — unionFuncSetArmsOk, the validator's rule). A
+    // join mixing, say, a func answer with data answers has no union to
+    // surface as; the caller owns the fence message.
+    if (
+      joinArms.length > 1 &&
+      (!unionFuncSetArmsOk(joinArms) ||
+        joinArms.some((a) => a.kind === "map" || a.kind === "dyn" || a.kind === "jsval" || a.kind === "generator" || a.kind === "caught"))
+    ) {
+      return null;
+    }
     joinArms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
     const type: IrType =
       joinArms.length === 1 ? joinArms[0]! : { kind: "union", unionId: L.unions.intern(joinArms) };
@@ -8328,9 +8407,24 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         loc,
       };
     }
-    return target.container === "class"
-      ? { kind: "fieldGet", obj: target.obj, className: target.className, field: target.field, type: target.fieldType, loc }
-      : { kind: "recordGet", obj: target.obj, shapeId: target.shapeId, field: target.field, type: target.fieldType, loc };
+    if (target.container === "class") {
+      const read: IrExpr = { kind: "fieldGet", obj: target.obj, className: target.className, field: target.field, type: target.fieldType, loc };
+      // DEFERRED-INIT fields (`stream!: T` assigned past the constructor's
+      // top level — ClassInfo.deferredInitFields): the SLOT is the
+      // undefined-armed union; the read CHECKED-extracts the declared type
+      // — a genuinely unassigned read throws the catchable TypeError
+      // where Node reads an undefined the declared type cannot hold.
+      if (
+        L.classes.get(target.className)?.deferredInitFields?.has(target.field) === true &&
+        target.fieldType.kind === "union"
+      ) {
+        const inner = L.stripUndefinedArm(target.fieldType);
+        const helper = L.deferredReadHelper(target.fieldType.unionId, inner, loc);
+        if (helper) return { kind: "call", callee: helper, args: [read], type: inner, loc };
+      }
+      return read;
+    }
+    return { kind: "recordGet", obj: target.obj, shapeId: target.shapeId, field: target.field, type: target.fieldType, loc };
   }
 
 /** The write statement for a field target (fieldSet / recordSet / setter
@@ -8631,4 +8725,44 @@ function lowerStreamObjectProperty(L: Lowerer, expr: ts.PropertyAccessExpression
   const info = L.classes.get(recvT.className);
   if (!info || streamSidesOf(L, info) === null) return null;
   return lowerStreamProperty(L, expr, info);
+}
+
+/** The primitive-constructor closure (`String`/`Number`/`Boolean` as a
+ * VALUE): interns one synthesized module function per constructor —
+ * `%builtin.String` et al. — and returns the zero-capture closure over it.
+ * The body IS the string-coercion the type mapping promised
+ * (`(value: string) => primitive`): String is identity, Number the ECMA
+ * StringToNumber (num.fromString — the same runtime call the direct
+ * `Number(s)` lowering emits), Boolean the emptiness test. Interning makes
+ * every reference the SAME immortal closure, so `opt.type === String`
+ * compares like JS function identity. */
+export function primitiveCtorClosure(
+  L: Lowerer,
+  name: "String" | "Number" | "Boolean",
+  loc: SrcLoc,
+): IrExpr {
+  const ret = name === "String" ? STRING : name === "Number" ? F64 : BOOL;
+  const fnT = funcOf([STRING], ret);
+  let fnName = L.primitiveCtorFns.get(name);
+  if (!fnName) {
+    fnName = `%builtin.${name}`;
+    L.primitiveCtorFns.set(name, fnName);
+    const s: IrExpr = { kind: "varRef", localId: "v.0", type: STRING, loc };
+    const value: IrExpr =
+      name === "String"
+        ? s
+        : name === "Number"
+          ? { kind: "libCall", fn: "num.fromString", args: [s], type: F64, loc }
+          : { kind: "strEq", negated: true, left: s, right: { kind: "strLit", value: "", type: STRING, loc }, type: BOOL, loc };
+    const fn: IrFunction = {
+      name: fnName,
+      params: [{ localId: "v.0", name: "value", type: STRING }],
+      returnType: ret,
+      locals: [{ id: "v.0", name: "value", type: STRING, mutable: false }],
+      body: [{ kind: "return", value, loc }],
+      loc,
+    };
+    L.liftedFns.push(fn);
+  }
+  return { kind: "closure", fnName, captures: [], type: fnT, loc };
 }
