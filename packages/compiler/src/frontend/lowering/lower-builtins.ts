@@ -4221,7 +4221,11 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     // (process.features.* — no inspector, not a debug build).
     if (!expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
       const container = L.stdlibGlobalMember(expr.expression, "process");
-      if (container === "versions" && expr.name.text === "sqlite") {
+      if (container === "versions" && (expr.name.text === "sqlite" || expr.name.text === "bun" || expr.name.text === "deno")) {
+        // versions.bun / versions.deno are the OTHER-runtime probes (a
+        // formatter's config loader picks its package.json reader by
+        // them): a compiled binary is neither, so both read undefined —
+        // exactly Node's own answer.
         return { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc: locOf(expr) };
       }
       if (container === "features") {
@@ -5419,6 +5423,17 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
       }
       const argNode = call.arguments[0]!;
       const arg = L.lowerExpr(argNode);
+      // An ISLAND ('any'-typed) argument evaluates the predicate in the
+      // engine — the statics never coerce, so the engine's answer over the
+      // real value is JS-exact where a static fence would refuse the
+      // editorconfig `(value) => Number.isSafeInteger(value)` shape; the
+      // boolean exits validated like every island boolean.
+      if (arg.type.kind === "jsval") {
+        L.requireDynamicApi(`'Number.${member}'`, call);
+        const numberGlobal: IrExpr = { kind: "jsOp", op: "globalGet", name: "Number", args: [], type: JSVAL, loc };
+        const raw: IrExpr = { kind: "jsOp", op: "callMethod", name: member, args: [numberGlobal, arg], type: JSVAL, loc };
+        return { kind: "jsExit", value: raw, type: BOOL, loc };
+      }
       if (arg.type.kind !== "f64") {
         L.noLowering(
           `Number.${member} of '${L.fmt(arg.type)}' values`,

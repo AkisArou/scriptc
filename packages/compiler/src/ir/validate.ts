@@ -733,6 +733,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "error.domClone": { argTypes: [null, DYN], result: VOID },
   "dyn.errInstanceof": { argTypes: [DYN, F64], result: BOOL },
   "dyn.objKeys": { argTypes: [DYN], result: DYN },
+  "dyn.hasOwn": { argTypes: [DYN, STRING], result: BOOL },
+  "dyn.assign": { argTypes: [DYN, DYN], result: DYN },
   "dyn.objValues": { argTypes: [DYN], result: DYN },
   "dyn.objEntries": { argTypes: [DYN], result: DYN },
   "dyn.structuredClone": { argTypes: [DYN, DYN], result: DYN },
@@ -1726,6 +1728,12 @@ function validateFunction(
         checkExpr(e.left);
         checkExpr(e.right);
         expectType(e.right, e.type, "nullish right operand");
+        // The ISLAND form: `a ?? b` over an engine value — left, right,
+        // and result are all handles (the emitters' jsval nullish arm).
+        if (e.left.type.kind === "jsval") {
+          if (e.type.kind !== "jsval") err("jsval nullish must answer jsval", e.loc);
+          break;
+        }
         if (e.left.type.kind !== "union") {
           err(`nullish left must be a union, got ${e.left.type.kind}`, e.loc);
           break;
@@ -2297,9 +2305,13 @@ function validateFunction(
         // declared params plus that one must match.
         if (e.type.kind === "func") {
           const wantRet = callSiteReturnType(target);
-          const declared = e.type.rest ? target.params.slice(0, -1) : target.params;
+          // ISLAND-REST types (restAbi jsval) SPELL their trailing engine
+          // array param — the lifted signature matches directly, no
+          // hidden slot.
+          const hiddenRest = e.type.rest === true && e.type.restAbi !== "jsval";
+          const declared = hiddenRest ? target.params.slice(0, -1) : target.params;
           const restOk =
-            !e.type.rest ||
+            !hiddenRest ||
             (target.params.length === e.type.params.length + 1 &&
               target.params[target.params.length - 1]!.type.kind === "dyn");
           if (
@@ -4334,19 +4346,22 @@ function validateFunction(
           lt: 2, le: 2, gt: 2, ge: 2, eq: 2, neq: 2, instanceOf: 2,
           neg: 1, plus: 1, truthy: 1, not: 1, typeof: 1, toStr: 1,
           getProp: 1, setProp: 2, getIdx: 2, setIdx: 3, globalGet: 0,
-          undefLit: 0, nullLit: 0, iterNew: 1,
+          undefLit: 0, nullLit: 0, iterNew: 1, defineGetter: 3, objSpread: 2,
           callMethod: null, optCallMethod: null, callFn: null, construct: null, // receiver/callee + any number of args
-          objLit: null, arrLit: null, // variable length (objLit: key/value pairs)
+          objLit: null, arrLit: null, tplStrings: null, // variable length (objLit: key/value pairs; tplStrings: n cooked + n raw)
         };
         const want = arity[e.op];
         if (want !== null && want !== undefined && e.args.length !== want) {
           err(`jsOp ${e.op} takes ${want} arg(s), got ${e.args.length}`, e.loc);
         }
-        if (want === null && e.op !== "objLit" && e.op !== "arrLit" && e.args.length < 1) {
+        if (want === null && e.op !== "objLit" && e.op !== "arrLit" && e.op !== "tplStrings" && e.args.length < 1) {
           err(`jsOp ${e.op} needs a receiver/callee arg`, e.loc);
         }
         if (e.op === "objLit" && e.args.length % 2 !== 0) {
           err("jsOp objLit takes key/value pairs", e.loc);
+        }
+        if (e.op === "tplStrings" && e.args.length % 2 !== 0) {
+          err("jsOp tplStrings takes n cooked + n raw strings", e.loc);
         }
         for (const a of e.args) {
           if (a.type.kind !== "jsval") err(`jsOp ${e.op} arg must be jsval, got ${a.type.kind}`, e.loc);
@@ -4590,7 +4605,20 @@ function validateFunction(
           break;
         }
         if (!shape.indexValue) {
-          err(`recordKeySet on non-index-signature shape ${s.shapeId}`, s.loc);
+          // Signature-free dispatch: every declared field shares ONE type
+          // (the frontend's gate), the value IS that type, and a key miss
+          // traps at runtime — so overflowOnly writes cannot exist here.
+          const common = shape.fields[0]?.type;
+          if (!common || !shape.fields.every((f) => typeEquals(f.type, common))) {
+            err(`recordKeySet on non-index-signature shape ${s.shapeId} without one shared field type`, s.loc);
+            break;
+          }
+          if (s.overflowOnly) {
+            err(`recordKeySet overflowOnly on signature-free shape ${s.shapeId}`, s.loc);
+          }
+          expectType(s.obj, { kind: "record", shapeId: s.shapeId }, "recordKeySet receiver");
+          expectType(s.key, STRING, "recordKeySet key");
+          expectType(s.value, common, "recordKeySet value");
           break;
         }
         expectType(s.obj, { kind: "record", shapeId: s.shapeId }, "recordKeySet receiver");

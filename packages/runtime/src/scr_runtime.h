@@ -212,6 +212,10 @@ void *scr_classobj_retain_v(void *c);
 void scr_classobj_release_v(void *c);
 /* `X.name` (+1 — a no-op retain on the interned immortal). */
 ScrStr *scr_classobj_name(ScrClassObj *c);
+/* The keyed-write miss on a fixed-shape record: throws the catchable
+ * TypeError naming the key (JS would add the property — the documented
+ * monomorphic-struct divergence). scr_object.c. */
+void scr_record_key_miss(ScrStr *k);
 
 /* ── error objects (scr_error.c) ──────────────────────────────────────
  * `Error` and its lib subclasses (TypeError/RangeError/SyntaxError) are a
@@ -2565,6 +2569,13 @@ ScrDyn *scr_dyn_obj_get(const ScrDyn *d, const char *key, size_t key_len);
  * member nodes. null/undefined receivers throw Node's catchable
  * TypeError. */
 ScrDyn *scr_dyn_obj_keys(const ScrDyn *v);
+/* Object.hasOwn over a DOM receiver: OBJ member presence, ARR index
+ * bounds ("length" included); nullish receivers throw Node's ToObject
+ * TypeError; every other kind answers false. */
+bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key);
+/* Object.assign over DOM values (+1 target back; ToObject TypeError on a
+ * nullish target). */
+ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src);
 ScrDyn *scr_dyn_obj_values(const ScrDyn *v);
 ScrDyn *scr_dyn_obj_entries(const ScrDyn *v);
 
@@ -3656,6 +3667,16 @@ ScrPromise *scr_jsval_bridge_promise(ScrJsval *v, int payload);
  * marshaled strings) or an array from elements. Borrow argv; +1 out.
  * Cannot fail (allocation failure aborts, like every runtime OOM). */
 ScrJsval *scr_jsval_obj_lit(int npairs, ScrJsval **kv);
+/* Getter completion for an island literal: defines `key` on `obj` as an
+ * engine getter invoking `fn`; answers the object retained (+1). */
+ScrJsval *scr_jsval_define_getter(ScrJsval *obj, ScrJsval *key, ScrJsval *fn);
+/* The engine TemplateStringsArray for an island tag call: n cooked then n
+ * raw strings; the result array carries `.raw` (+1). */
+ScrJsval *scr_jsval_tpl_strings(int n, ScrJsval **kv);
+/* Spread completion for an island literal: engine CopyDataProperties of
+ * `src` onto `obj`; answers the target (+1), NULL + pending on a getter
+ * throw. */
+ScrJsval *scr_jsval_obj_spread(ScrJsval *obj, ScrJsval *src);
 ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems);
 
 /* Marshal out (island → static): validated, STRICT extraction — a

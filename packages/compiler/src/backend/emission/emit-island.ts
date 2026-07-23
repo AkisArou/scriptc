@@ -231,7 +231,7 @@ export function emitNpmEmbedding(E: CEmitter, out: string[]): void {
       const tagC = {
         void: "SCR_ISLP_VOID", f64: "SCR_ISLP_F64", bool: "SCR_ISLP_BOOL",
         string: "SCR_ISLP_STR", jsval: "SCR_ISLP_JSVAL",
-        json: "", // unreachable: islandCallbackRet never tags async json
+        json: "", dyn: "", // unreachable: islandCallbackRet never tags async json/dyn
       }[ret.tag];
       body.push(
         `  ScrPromise *sc_r = ${call};`,
@@ -261,6 +261,19 @@ export function emitNpmEmbedding(E: CEmitter, out: string[]): void {
             `  if (!sc_s) return NULL;`,
             `  ScrJsval *sc_r = scr_jsval_from_str(sc_s);`,
             `  scr_str_release(sc_s);`,
+            `  return sc_r;`,
+          );
+          break;
+        case "dyn":
+          body.push(
+            // A checked-dynamic (+1 DOM) result: deep copy into the
+            // engine (the jsMarshal dyn rule — data kinds only; boxed
+            // functions/handles leave the exception pending and the NULL
+            // dummy bridges).
+            `  ScrDyn *sc_d = ${call};`,
+            `  if (!sc_d) return NULL;`,
+            `  ScrJsval *sc_r = scr_jsval_from_dyn(sc_d);`,
+            `  scr_dyn_release(sc_d);`,
             `  return sc_r;`,
           );
           break;

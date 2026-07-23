@@ -468,6 +468,26 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         // result IS the left box. Narrowed shape: the single non-unit arm's
         // payload is extracted unionNarrow-style (+1 for ref kinds, the
         // checker proved the tag) and the left box is released.
+        if (e.left.type.kind === "jsval") {
+          // `a ?? b` on an island value: the engine's nullish test; the
+          // right runs lazily in its branch (already jsval-typed).
+          const l = E.emitExpr(e.left);
+          E.moveTemp(l);
+          const name = `sc_t${E.tempCounter++}`;
+          E.line(`${cDecl(e.type, name)};`);
+          E.line(`if (scr_jsval_is_nullish(${l.name})) {`);
+          E.indent++;
+          E.releaseValue(l.name, e.left.type);
+          E.emitBranchInto(name, e.right);
+          E.indent--;
+          E.line(`} else {`);
+          E.indent++;
+          E.line(`${name} = ${l.name};`);
+          E.indent--;
+          E.line(`}`);
+          if (isRefCounted(e.type)) E.currentFrame().push({ name, type: e.type });
+          return { name, type: e.type };
+        }
         if (e.left.type.kind !== "union") throw new Error("emitter bug: nullish left is not a union");
         const def = E.unionsById.get(e.left.type.unionId);
         if (!def) throw new Error(`emitter bug: nullish of unknown union ${e.left.type.unionId}`);
@@ -4665,6 +4685,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_domex_clone(${arg(0)}, ${arg(1)})`);
           case "dyn.objKeys":
             return finish(`scr_dyn_obj_keys(${arg(0)})`);
+          case "dyn.assign":
+            // Object.assign over DOM values: own members copy, the target
+            // returns (+1); non-object receivers throw like Node.
+            return finish(`scr_dyn_assign(${arg(0)}, ${arg(1)})`);
+          case "dyn.hasOwn":
+            // Object.hasOwn over a DOM receiver (throws on nullish, like
+            // Node's ToObject).
+            return finish(`scr_dyn_has_own(${arg(0)}, ${arg(1)})`);
           case "dyn.objValues":
             return finish(`scr_dyn_obj_values(${arg(0)})`);
           case "dyn.objEntries":
@@ -5868,9 +5896,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                   fn.ret.kind as "void" | "jsval" | "f64" | "bool" | "string",
                 )
               : E.islandTypedAdapter(fn);
+            // ISLAND-REST closures encode a NEGATIVE arity: the wrapper
+            // pads the leading declared params and hands the trailing
+            // slot the ENGINE array of the surplus arguments.
+            const arity = fn.rest === true && fn.restAbi === "jsval" ? -fn.params.length : fn.params.length;
             return E.newTemp(
               e.type,
-              `scr_jsval_from_closure(${v.name}, ${fn.params.length}, ${adapter})`,
+              `scr_jsval_from_closure(${v.name}, ${arity}, ${adapter})`,
             );
           }
           default: {
@@ -5962,6 +5994,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const pack = argPack(args.map((x) => x.name));
             return E.newTemp(e.type, `scr_jsval_obj_lit(${args.length / 2}, ${pack})`);
           }
+          case "tplStrings": {
+            const pack = argPack(args.map((x) => x.name));
+            return E.newTemp(e.type, `scr_jsval_tpl_strings(${args.length / 2}, ${pack})`);
+          }
+          case "objSpread":
+            // Spread completion: engine CopyDataProperties (getters can
+            // throw — fallible); answers the target (+1).
+            return finishFallible(`scr_jsval_obj_spread(${a(0)}, ${a(1)})`);
+          case "defineGetter":
+            // Getter completion for an island literal: defines key (a(1))
+            // on obj (a(0)) as an engine getter invoking a(2); answers the
+            // object (+1) for chaining.
+            return E.newTemp(e.type, `scr_jsval_define_getter(${a(0)}, ${a(1)}, ${a(2)})`);
           case "arrLit": {
             const pack = argPack(args.map((x) => x.name));
             return E.newTemp(e.type, `scr_jsval_arr_lit(${args.length}, ${pack})`);

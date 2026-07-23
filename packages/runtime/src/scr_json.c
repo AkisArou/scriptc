@@ -938,6 +938,26 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
     scr_dyn_obj_set(recv, key->data, key->len, scr_dyn_retain(value));
     return;
   }
+  if (recv->kind == SCR_DYN_ARR) {
+    /* An INDEX write on a DOM array (`args[i] = v` — the variadic-rest
+     * rebuild): a canonical numeric key sets/extends the element, holes
+     * padding with undefined exactly like JS length growth. Non-index
+     * keys keep the throw below (DOM arrays carry no expando table). */
+    size_t idx = 0;
+    int is_index = key->len > 0 && !(key->len > 1 && key->data[0] == '0');
+    for (size_t i = 0; is_index && i < key->len; i++) {
+      if (key->data[i] < '0' || key->data[i] > '9') is_index = 0;
+      else idx = idx * 10 + (size_t)(key->data[i] - '0');
+    }
+    if (is_index) {
+      while (recv->v.arr.len <= idx) {
+        scr_dyn_arr_push(recv, scr_dyn_retain(scr_dyn_undefined()));
+      }
+      scr_dyn_release(recv->v.arr.items[idx]);
+      recv->v.arr.items[idx] = scr_dyn_retain(value);
+      return;
+    }
+  }
   if (recv->kind == SCR_DYN_HANDLE) {
     scr_dyn_handle_key_set(recv, key, value);
     return;
@@ -1952,6 +1972,48 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
 }
 
 ScrDyn *scr_dyn_obj_keys(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWALK_KEYS); }
+
+/* Object.assign over DOM values: copies `src`'s own members onto `target`
+ * (last write wins) and answers the target retained (+1). Nullish
+ * receivers throw Node's ToObject TypeError; nullish sources copy
+ * nothing; non-object sources copy nothing DOM-representable. */
+ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
+  if (target->kind == SCR_DYN_UNDEF || target->kind == SCR_DYN_NULL) {
+    const char *m = "Cannot convert undefined or null to object";
+    scr_throw_error_msg(SCR_ERR_TYPE, m, strlen(m));
+    return NULL;
+  }
+  if (target->kind == SCR_DYN_OBJ && src->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < src->v.obj.len; i++) {
+      scr_dyn_obj_set(target, src->v.obj.entries[i].key,
+                      src->v.obj.entries[i].key_len,
+                      scr_dyn_retain(src->v.obj.entries[i].value));
+    }
+  }
+  return scr_dyn_retain(target);
+}
+
+bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key) {
+  if (v->kind == SCR_DYN_UNDEF || v->kind == SCR_DYN_NULL) {
+    const char *m = "Cannot convert undefined or null to object";
+    scr_throw_error_msg(SCR_ERR_TYPE, m, strlen(m));
+    return false;
+  }
+  if (v->kind == SCR_DYN_OBJ) {
+    return scr_dyn_obj_get(v, key->data, key->len) != NULL;
+  }
+  if (v->kind == SCR_DYN_ARR) {
+    if (key->len == 6 && memcmp(key->data, "length", 6) == 0) return true;
+    size_t idx = 0;
+    int is_index = key->len > 0 && !(key->len > 1 && key->data[0] == '0');
+    for (size_t i = 0; is_index && i < key->len; i++) {
+      if (key->data[i] < '0' || key->data[i] > '9') is_index = 0;
+      else idx = idx * 10 + (size_t)(key->data[i] - '0');
+    }
+    return is_index != 0 && idx < v->v.arr.len;
+  }
+  return false;
+}
 ScrDyn *scr_dyn_obj_values(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWALK_VALUES); }
 ScrDyn *scr_dyn_obj_entries(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWALK_ENTRIES); }
 

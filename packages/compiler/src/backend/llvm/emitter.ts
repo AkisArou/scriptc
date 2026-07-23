@@ -656,6 +656,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   // (option/DataClone/cycle errors), and new RegExp's eager compile
   // (catchable SyntaxError) — all may-throw generics over the DOM.
   "dyn.objKeys": "scr_dyn_obj_keys",
+  "dyn.hasOwn": "scr_dyn_has_own",
+  "dyn.assign": "scr_dyn_assign",
   "dyn.objValues": "scr_dyn_obj_values",
   "dyn.objEntries": "scr_dyn_obj_entries",
   "dyn.structuredClone": "scr_structured_clone",
@@ -2694,8 +2696,12 @@ class LlEmitter {
         const v = this.emitExpr(s.value);
         if (isRefCounted(v.type)) this.moveTemp(v);
         const shape = this.recordShape(s.shapeId);
-        const iv = shape.indexValue;
-        if (!iv) throw new Error(`llvm emitter bug: keyed write on non-overflow shape ${s.shapeId}`);
+        // Signature-free shapes dispatch over their (one-typed) declared
+        // fields and TRAP on a miss (scr_record_key_miss — JS would add
+        // the property, which a monomorphic struct cannot); overflow
+        // shapes keep the map insert tail.
+        const iv = shape.indexValue ?? shape.fields[0]?.type;
+        if (!iv) throw new Error(`llvm emitter bug: keyed write on field-free non-overflow shape ${s.shapeId}`);
         const vAcc = iv.kind === "f64" ? "f64" : iv.kind === "bool" ? "bool" : "ref";
         if (s.overflowOnly === true) {
           // A LITERAL key naming no declared field: a plain overflow
@@ -2706,7 +2712,7 @@ class LlEmitter {
         }
         const join = B.newLabel("rks.j");
         this.declare(`declare zeroext i1 @scr_str_eq(ptr, ptr)`);
-        if (iv.kind === "dyn") {
+        if (iv.kind === "dyn" && shape.indexValue) {
           // A dyn-valued shape (the C recordKeySetHelper's dyn arm,
           // inline): declared keys VALIDATE the dyn value against the
           // field's type first (dynCheck — a mismatched write throws the
@@ -2787,6 +2793,18 @@ class LlEmitter {
           }
           B.br(join);
           B.startBlock(ln);
+        }
+        if (!shape.indexValue) {
+          // The MISS on a fixed shape: release the moved-in value, throw
+          // the catchable TypeError naming the key (scr_record_key_miss —
+          // JS would add the property, the documented divergence).
+          if (isRefCounted(iv)) this.releaseValue(v.name, iv);
+          this.declare(`declare void @scr_record_key_miss(ptr)`);
+          B.line(`call void @scr_record_key_miss(ptr ${key.name})`);
+          B.br(join);
+          B.startBlock(join);
+          this.emitPendingCheck();
+          break;
         }
         const ovf = this.recordOvfPtr(obj.name, s.shapeId);
         this.mapSet(ovf, "str", vAcc, key.name, v.name);
@@ -4150,6 +4168,31 @@ class LlEmitter {
         // TAG against its unit arms as the test. Pass-through shape: the
         // result IS the left box. Narrowed shape: the single non-unit
         // arm's payload extracts (+1 for ref kinds) and the box releases.
+        if (e.left.type.kind === "jsval") {
+          // The island form: engine nullish test, lazy right (jsval).
+          const l = this.emitExpr(e.left);
+          this.moveTemp(l);
+          this.declare(`declare zeroext i1 @scr_jsval_is_nullish(ptr)`);
+          const slot = B.slot();
+          B.entryAllocas.push(`${slot} = alloca ptr`);
+          const isN = B.tmp();
+          B.line(`${isN} = call zeroext i1 @scr_jsval_is_nullish(ptr ${l.name})`);
+          const lu = B.newLabel("nulj.u");
+          const lv = B.newLabel("nulj.v");
+          const lj = B.newLabel("nulj.j");
+          B.condBr(isN, lu, lv);
+          B.startBlock(lu);
+          this.releaseValue(l.name, e.left.type);
+          this.emitBranchInto(slot, e.right);
+          B.br(lj);
+          B.startBlock(lv);
+          B.line(`store ptr ${l.name}, ptr ${slot}`);
+          B.br(lj);
+          B.startBlock(lj);
+          const t = B.tmp();
+          B.line(`${t} = load ptr, ptr ${slot}`);
+          return this.own({ name: t, type: e.type });
+        }
         if (e.left.type.kind !== "union") throw new Error("llvm emitter bug: nullish left is not a union");
         const def = this.unionsById.get(e.left.type.unionId);
         if (!def) throw new Error(`llvm emitter bug: nullish of unknown union ${e.left.type.unionId}`);
@@ -5806,8 +5849,12 @@ class LlEmitter {
           ? this.islandAdapter(fn.params.length, fn.ret.kind as "void" | "jsval" | "f64" | "bool" | "string")
           : this.islandTypedAdapter(fn);
         this.declare(`declare ptr @scr_jsval_from_closure(ptr, i32, ptr)`);
+        // ISLAND-REST closures encode a NEGATIVE arity (the C emitter's
+        // rule): the wrapper hands the trailing slot the engine array of
+        // the surplus arguments.
+        const arity = fn.rest === true && fn.restAbi === "jsval" ? -fn.params.length : fn.params.length;
         const t = B.tmp();
-        B.line(`${t} = call ptr @scr_jsval_from_closure(ptr ${v.name}, i32 ${fn.params.length}, ptr @${adapter})`);
+        B.line(`${t} = call ptr @scr_jsval_from_closure(ptr ${v.name}, i32 ${arity}, ptr @${adapter})`);
         return this.own({ name: t, type: e.type });
       }
       default: {
@@ -5994,6 +6041,30 @@ class LlEmitter {
         this.declare(`declare ptr @scr_jsval_obj_lit(i32, ptr)`);
         const t = B.tmp();
         B.line(`${t} = call ptr @scr_jsval_obj_lit(i32 ${args.length / 2}, ptr ${pack})`);
+        return this.own({ name: t, type: e.type });
+      }
+      case "tplStrings": {
+        const pack = argPack(args.map((x) => x.name));
+        this.declare(`declare ptr @scr_jsval_tpl_strings(i32, ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_jsval_tpl_strings(i32 ${args.length / 2}, ptr ${pack})`);
+        return this.own({ name: t, type: e.type });
+      }
+      case "objSpread": {
+        this.declare(`declare ptr @scr_jsval_obj_spread(ptr, ptr)`);
+        return fallible(() => {
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_jsval_obj_spread(ptr ${a(0)}, ptr ${a(1)})`);
+          return t;
+        });
+      }
+      case "defineGetter": {
+        // Getter completion for an island literal (the C emitter's
+        // scr_jsval_define_getter shape): defines key a(1) on obj a(0)
+        // as an engine getter invoking a(2); answers the object (+1).
+        this.declare(`declare ptr @scr_jsval_define_getter(ptr, ptr, ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_jsval_define_getter(ptr ${a(0)}, ptr ${a(1)}, ptr ${a(2)})`);
         return this.own({ name: t, type: e.type });
       }
       case "arrLit": {
@@ -6372,7 +6443,7 @@ class LlEmitter {
     );
     if (ret.async) {
       // The closure returns a +1 ScrPromise; from_promise takes ownership.
-      const tagN = { void: 0, f64: 1, bool: 2, string: 3, jsval: 4, json: 0 }[ret.tag];
+      const tagN = { void: 0, f64: 1, bool: 2, string: 3, jsval: 4, json: 0, dyn: 0 }[ret.tag];
       this.declare(`declare ptr @scr_jsval_from_promise(ptr, i32)`);
       d.push(
         `  %pr = call ptr %fn(${passed.join(", ")})`,
@@ -6420,6 +6491,23 @@ class LlEmitter {
             `sok:`,
             `  %j = call ptr @scr_jsval_from_str(ptr %r)`,
             `  call void @scr_str_release(ptr %r)`,
+            `  ret ptr %j`,
+          );
+          break;
+        case "dyn":
+          // A checked-dynamic (+1 DOM) result: deep copy into the engine
+          // (the jsMarshal dyn rule); NULL is the throw-path dummy.
+          this.declare(`declare ptr @scr_jsval_from_dyn(ptr)`);
+          this.declare(`declare void @scr_dyn_release(ptr)`);
+          d.push(
+            `  %r = call ptr %fn(${passed.join(", ")})`,
+            `  %rn = icmp eq ptr %r, null`,
+            `  br i1 %rn, label %dnull, label %dok`,
+            `dnull:`,
+            `  ret ptr null`,
+            `dok:`,
+            `  %j = call ptr @scr_jsval_from_dyn(ptr %r)`,
+            `  call void @scr_dyn_release(ptr %r)`,
             `  ret ptr %j`,
           );
           break;

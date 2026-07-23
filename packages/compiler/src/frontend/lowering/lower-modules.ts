@@ -1191,6 +1191,27 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
               }
               continue;
             }
+            // A JS file-scope object literal carrying GET accessors whose
+            // strict type has no mapping (the doc-printer root-indent
+            // shape — a self-referential getter): the literal builds
+            // ISLAND-NATIVE (the getter defines through the engine), so
+            // the binding holds the HANDLE — a jsval global, so exports
+            // and separately-declared functions reach the same engine
+            // object.
+            if (
+              L.dynamic && isJsSourceFile(sf) && !L.mapTypeOf(L.typeOf(nameNode)) &&
+              ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              decl.initializer !== undefined && ts.isObjectLiteralExpression(decl.initializer) &&
+              decl.initializer.properties.some((p) => ts.isGetAccessorDeclaration(p))
+            ) {
+              const symbol = L.checker.getSymbolAtLocation(nameNode);
+              if (symbol && !L.globalsBySymbol.has(symbol)) {
+                const g: IrGlobal = { id: `%g.${tag}${nsPrefix}${nameNode.text}`, name: nameNode.text, type: JSVAL, mutable: isLet };
+                L.globalsBySymbol.set(symbol, g);
+                L.globalsList.push(g);
+              }
+              continue;
+            }
             // JS declarations whose STRICT type has no mapping register no
             // global at all: the declaration lowers as an %init-body LOCAL
             // whose type adopts the initializer's (lowerVarDecl's JS

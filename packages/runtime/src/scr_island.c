@@ -1412,8 +1412,27 @@ static JSValue isl_hostfn_invoke(JSContext *ctx, JSValueConst this_val, int argc
   IslHostFn *b = JS_GetOpaque(func_data[0], isl_hostfn_class_id);
   if (!b) return JS_ThrowTypeError(ctx, "detached scriptc host function");
   ScrJsval *cells[ISL_HOSTFN_MAX_ARITY];
-  for (int i = 0; i < b->arity; i++) {
-    cells[i] = isl_cell_new(i < argc ? JS_DupValue(ctx, argv[i]) : JS_UNDEFINED);
+  int ncells;
+  if (b->arity < 0) {
+    /* The ISLAND-REST shape (negative arity = -(leading declared + 1)):
+     * leading params pad/drop like any host call; the trailing cell is a
+     * fresh ENGINE ARRAY of the surplus arguments — the closure's rest
+     * binding IS the engine's own arguments array. */
+    int leading = -b->arity - 1;
+    for (int i = 0; i < leading; i++) {
+      cells[i] = isl_cell_new(i < argc ? JS_DupValue(ctx, argv[i]) : JS_UNDEFINED);
+    }
+    JSValue rest = JS_NewArray(ctx);
+    for (int i = leading; i < argc; i++) {
+      JS_SetPropertyUint32(ctx, rest, (uint32_t)(i - leading), JS_DupValue(ctx, argv[i]));
+    }
+    cells[leading] = isl_cell_new(rest);
+    ncells = leading + 1;
+  } else {
+    for (int i = 0; i < b->arity; i++) {
+      cells[i] = isl_cell_new(i < argc ? JS_DupValue(ctx, argv[i]) : JS_UNDEFINED);
+    }
+    ncells = b->arity;
   }
   bool strayed_before = isl_anchor_strayed;
   isl_host_depth++;
@@ -1429,7 +1448,7 @@ static JSValue isl_hostfn_invoke(JSContext *ctx, JSValueConst this_val, int argc
     isl_anchor_here();
     isl_anchor_strayed = strayed_before;
   }
-  for (int i = 0; i < b->arity; i++) scr_jsval_release(cells[i]);
+  for (int i = 0; i < ncells; i++) scr_jsval_release(cells[i]);
   if (scr_exc_pending()) {
     if (r) scr_jsval_release(r);
     return isl_throw_pending(ctx);
@@ -1443,7 +1462,9 @@ static JSValue isl_hostfn_invoke(JSContext *ctx, JSValueConst this_val, int argc
 ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
                                   ScrJsval *(*adapt)(ScrClosure *, ScrJsval **)) {
   isl_entry();
-  if (arity > ISL_HOSTFN_MAX_ARITY) {
+  /* Negative arity = the island-rest shape; the CELL count is the leading
+   * declared params + the one rest-array slot. */
+  if ((arity < 0 ? -arity : arity) > ISL_HOSTFN_MAX_ARITY) {
     fprintf(stderr, "scriptc: island callback arity %d exceeds %d\n", arity,
             ISL_HOSTFN_MAX_ARITY);
     abort(); /* the frontend fences this; reaching here is a compiler bug */
@@ -1459,7 +1480,7 @@ ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
   JSValue box = JS_NewObjectClass(isl_ctx, isl_hostfn_class_id);
   JS_SetOpaque(box, b);
   JSValueConst data[1] = {box};
-  JSValue fn = JS_NewCFunctionData(isl_ctx, isl_hostfn_invoke, arity, 0, 1, data);
+  JSValue fn = JS_NewCFunctionData(isl_ctx, isl_hostfn_invoke, arity < 0 ? -arity - 1 : arity, 0, 1, data);
   JS_FreeValue(isl_ctx, box); /* fn's func_data holds its own reference */
   return isl_cell_new(fn);
 }
@@ -1715,6 +1736,60 @@ ScrJsval *scr_jsval_obj_lit(int npairs, ScrJsval **kv) {
     JS_FreeAtom(isl_ctx, k);
   }
   return isl_cell_new(o);
+}
+
+/* The engine-native TemplateStringsArray for an island tag call: `kv`
+ * carries n cooked strings then n raw strings — a fresh array whose
+ * `.raw` property holds the raw spellings, exactly the object a tagged
+ * template hands its tag (a JSON marshal would drop `.raw`, and tags
+ * dispatch on it). */
+ScrJsval *scr_jsval_tpl_strings(int n, ScrJsval **kv) {
+  isl_entry();
+  JSValue cooked = JS_NewArray(isl_ctx);
+  JSValue raw = JS_NewArray(isl_ctx);
+  for (int i = 0; i < n; i++) {
+    JS_SetPropertyUint32(isl_ctx, cooked, (uint32_t)i, JS_DupValue(isl_ctx, kv[i]->v));
+    JS_SetPropertyUint32(isl_ctx, raw, (uint32_t)i, JS_DupValue(isl_ctx, kv[n + i]->v));
+  }
+  JS_SetPropertyStr(isl_ctx, cooked, "raw", raw); /* consumes raw */
+  return isl_cell_new(cooked);
+}
+
+/* Spread completion for an island-native literal: copies `src`'s own
+ * enumerable properties onto `obj` — the engine's own Object.assign (the
+ * spec's CopyDataProperties; null/undefined sources spread nothing) — and
+ * answers the target retained (+1). NULL with the exception pending when
+ * a source getter throws. */
+ScrJsval *scr_jsval_obj_spread(ScrJsval *obj, ScrJsval *src) {
+  isl_entry();
+  if (JS_IsNull(src->v) || JS_IsUndefined(src->v)) return scr_jsval_retain(obj);
+  JSValue global = JS_GetGlobalObject(isl_ctx);
+  JSValue object_ctor = JS_GetPropertyStr(isl_ctx, global, "Object");
+  JS_FreeValue(isl_ctx, global);
+  JSValue assign = JS_GetPropertyStr(isl_ctx, object_ctor, "assign");
+  JS_FreeValue(isl_ctx, object_ctor);
+  JSValueConst args[2] = { obj->v, src->v };
+  JSValue r = JS_Call(isl_ctx, assign, JS_UNDEFINED, 2, args);
+  JS_FreeValue(isl_ctx, assign);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  JS_FreeValue(isl_ctx, r); /* assign answers the target itself */
+  return scr_jsval_retain(obj);
+}
+
+/* Getter completion for an island-native literal: defines `key` on `obj`
+ * as an engine GETTER invoking `fn` (a marshaled host function), and
+ * answers the object retained (+1) so builds chain. Enumerable +
+ * configurable, no setter — exactly a JS object-literal `get k() {}`. */
+ScrJsval *scr_jsval_define_getter(ScrJsval *obj, ScrJsval *key, ScrJsval *fn) {
+  isl_entry();
+  JSAtom k = JS_ValueToAtom(isl_ctx, key->v);
+  JS_DefinePropertyGetSet(isl_ctx, obj->v, k, JS_DupValue(isl_ctx, fn->v), JS_UNDEFINED,
+                          JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE);
+  JS_FreeAtom(isl_ctx, k);
+  return scr_jsval_retain(obj);
 }
 
 ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems) {

@@ -33,7 +33,7 @@ import { npmStaticPackageOfPath } from "../npm-static.js";
  * trailing-suffix call, and the frontend appends the interned undefined arm;
  * `rest` (always last) receives the surplus arguments packed into one array
  * literal at each call site. */
-export type ParamMode = "required" | "omittable" | "rest" | "dynRest";
+export type ParamMode = "required" | "omittable" | "rest" | "dynRest" | "islandRest";
 
 /** One parameter of a signature, as call sites and callee prologues see it.
  * `type` is the ABI type — what the emitted C parameter carries: the
@@ -220,11 +220,20 @@ export interface GenericInstance {
       // ARRAY param the dyn call thunk fills with the call's surplus
       // arguments; the binding is that array (dynRest — funcType marks
       // `rest`, and the value only ever calls through the boxed thunk).
-      if (
-        isJsSourceFile(param.getSourceFile()) &&
-        L.mapTypeOf(L.typeOf(param.name))?.kind !== "array"
-      ) {
-        return { type: DYN, mode: "dynRest" };
+      if (isJsSourceFile(param.getSourceFile())) {
+        const restMapped = L.mapTypeOf(L.typeOf(param.name));
+        // `any[]` under --dynamic maps to an island-element array — that
+        // is inference residue, not element information; the binding is
+        // the ENGINE's own arguments array (an island handle) and the
+        // value crosses as a REST host function (the withPlugins
+        // `async (...args) =>` shape). Static builds keep the variadic
+        // dyn form for every unmappable JS rest.
+        if (restMapped?.kind === "array" && restMapped.elem.kind === "jsval" && L.dynamic) {
+          return { type: JSVAL, mode: "islandRest" };
+        }
+        if (restMapped?.kind !== "array") {
+          return { type: DYN, mode: "dynRest" };
+        }
       }
       const type = L.irTypeOf(param.name);
       // Tuple-typed rest params don't map to an array; generic rest is the
@@ -343,7 +352,7 @@ export interface GenericInstance {
       s !== undefined && !("kind" in s);
     const sources: readonly ArgSource[] =
       leading && leading.length > 0 ? [...leading.map((ir) => ({ ir })), ...argNodes] : argNodes;
-    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest");
+    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "islandRest");
     const positional = restAt >= 0 ? shapes.slice(0, restAt) : [...shapes];
     const out: IrExpr[] = positional.map((shape, i) => {
       const src = sources[i];
@@ -375,7 +384,19 @@ export interface GenericInstance {
       }
       return L.undefinedArgFor(shape.type, loc, blame);
     });
-    if (restAt >= 0 && shapes[restAt]!.mode === "dynRest") {
+    if (restAt >= 0 && shapes[restAt]!.mode === "islandRest") {
+      // The ISLAND variadic pack: surplus arguments marshal into one
+      // fresh ENGINE array — exactly what the REST host-call adapter
+      // hands the closure for indirect calls.
+      const elems = sources.slice(restAt).map((a): IrExpr => {
+        if (isIr(a)) return L.coerceInto(blame, a.ir, JSVAL);
+        if (ts.isSpreadElement(a)) {
+          L.unsupported("SC1090", a, "spread arguments into an island rest parameter");
+        }
+        return L.lowerExprExpecting(a, JSVAL);
+      });
+      out.push({ kind: "jsOp", op: "arrLit", args: elems, type: JSVAL, loc });
+    } else if (restAt >= 0 && shapes[restAt]!.mode === "dynRest") {
       // The VARIADIC dyn pack (a JS `...args` with no static element
       // type, or the synthetic `arguments` slot): surplus arguments
       // convert through the dyn boundary into one fresh DOM array —
@@ -549,6 +570,7 @@ export interface GenericInstance {
         (s) =>
           s.mode === "required" ||
           s.mode === "dynRest" ||
+          s.mode === "islandRest" ||
           (s.mode === "omittable" && (s.type.kind === "dyn" || s.type.kind === "jsval")),
       )
     ) {
@@ -2828,6 +2850,40 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
             : "value";
         return { kind: "dynCall", callee, calleeName, args, type: DYN, loc };
       }
+      // `fn(...args)` — a TRAILING spread into an island call: the
+      // engine's own apply (`fn.apply(undefined, argsArray)`); leading
+      // plain arguments prepend through `[l1, l2].concat(argsArray)`
+      // (concat flattens the array argument one level — exactly the
+      // spread). Other spread shapes keep the syntax fence.
+      if (
+        expr.arguments.length > 0 &&
+        ts.isSpreadElement(expr.arguments[expr.arguments.length - 1]!) &&
+        expr.arguments.slice(0, -1).every((a) => !ts.isSpreadElement(a))
+      ) {
+        const spread = expr.arguments[expr.arguments.length - 1] as ts.SpreadElement;
+        const spreadV = L.jsvalIn(L.lowerExpr(spread.expression), spread.expression);
+        const leading = expr.arguments.slice(0, -1).map((a) => L.jsvalIn(L.lowerExpr(a), a));
+        const argsArr: IrExpr =
+          leading.length === 0
+            ? spreadV
+            : {
+                kind: "jsOp",
+                op: "callMethod",
+                name: "concat",
+                args: [{ kind: "jsOp", op: "arrLit", args: leading, type: JSVAL, loc }, spreadV],
+                type: JSVAL,
+                loc,
+              };
+        const result: IrExpr = {
+          kind: "jsOp",
+          op: "callMethod",
+          name: "apply",
+          args: [callee, { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }, argsArr],
+          type: JSVAL,
+          loc,
+        };
+        return islandPrimitiveExit(L, expr, result);
+      }
       const args = expr.arguments.map((a) => L.jsvalIn(L.lowerExpr(a), a));
       const result: IrExpr = { kind: "jsOp", op: "callFn", args: [callee, ...args], type: JSVAL, loc };
       return islandPrimitiveExit(L, expr, result);
@@ -4298,11 +4354,26 @@ const inliningPredicates = new Set<ts.Symbol>();
 
     // Island tags (--dynamic): the engine call forms, mirroring lowerCall's
     // island paths — a property-access tag is a method call (this = the
-    // receiver, JS-exact), any other island tag a function call.
+    // receiver, JS-exact), any other island tag a function call. The
+    // strings argument builds ENGINE-NATIVE with its `.raw` property (the
+    // tplStrings op): a JSON marshal would drop `.raw`, and tags dispatch
+    // on it (the outdent idiom treats a raw-less argument as its OPTIONS
+    // form and answers a function). A fresh array per evaluation — tags
+    // caching by strings identity re-compute per call (SEMANTICS.md).
+    const islandStrings = (): IrExpr => ({
+      kind: "jsOp",
+      op: "tplStrings",
+      args: [
+        ...pieces.map((p): IrExpr => ({ kind: "jsMarshal", value: { kind: "strLit", value: p.text, type: STRING, loc }, type: JSVAL, loc })),
+        ...pieces.map((p): IrExpr => ({ kind: "jsMarshal", value: { kind: "strLit", value: templateRawTextOf(p), type: STRING, loc }, type: JSVAL, loc })),
+      ],
+      type: JSVAL,
+      loc,
+    });
     if (ts.isPropertyAccessExpression(expr.tag) && L.isIslandExpr(expr.tag.expression)) {
       const receiver = L.lowerExpr(expr.tag.expression);
       const args = [
-        L.jsvalIn(strings, expr.template),
+        islandStrings(),
         ...values.map((a) => L.jsvalIn(L.lowerExpr(a), a)),
       ];
       return {
@@ -4313,7 +4384,7 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (L.isIslandExpr(expr.tag)) {
       const callee = L.lowerExpr(expr.tag);
       const args = [
-        L.jsvalIn(strings, expr.template),
+        islandStrings(),
         ...values.map((a) => L.jsvalIn(L.lowerExpr(a), a)),
       ];
       return { kind: "jsOp", op: "callFn", args: [callee, ...args], type: JSVAL, loc };
@@ -4527,6 +4598,7 @@ const inliningPredicates = new Set<ts.Symbol>();
     // use a rest parameter. Arrows never claim it (JS: an arrow's
     // `arguments` is the enclosing function's).
     const hasDynRest = shapes.some((s) => s.mode === "dynRest");
+    const hasIslandRest = shapes.some((s) => s.mode === "islandRest");
     const usesArguments =
       !hasDynRest &&
       !ts.isArrowFunction(node) &&
@@ -4543,9 +4615,14 @@ const inliningPredicates = new Set<ts.Symbol>();
       shapes,
       funcType: {
         kind: "func",
+        // dynRest is EXCLUDED (the boxed thunk fills the trailing DOM
+        // array — no spelled slot); islandRest is INCLUDED (the trailing
+        // jsval param IS the engine arguments array, the REST host-call
+        // adapter's one uniform shape).
         params: shapes.filter((s) => s.mode !== "dynRest").map((s) => s.type),
         ret,
-        ...(hasDynRest || usesArguments ? { rest: true as const } : {}),
+        ...(hasDynRest || usesArguments || hasIslandRest ? { rest: true as const } : {}),
+        ...(hasIslandRest ? { restAbi: "jsval" as const } : {}),
       },
     };
   }
@@ -4627,13 +4704,14 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (isGenerator && funcType.ret.kind === "generator") {
       fnCtx.generator = { yieldT: funcType.ret.yieldT, nextT: funcType.ret.nextT };
     }
+    const diagsBefore = L.diags.length;
     L.fnStack.push(fnCtx);
     try {
       const { params, prologue } = L.declareParams(node.parameters, shapes);
       // The VARIADIC `arguments` form (rest-marked with no declared rest
       // param): a synthetic trailing DOM-array param carries the call's
       // arguments; `arguments` reads resolve to it (identifier lowering).
-      if (funcType.rest && !shapes.some((s) => s.mode === "dynRest")) {
+      if (funcType.rest && !shapes.some((s) => s.mode === "dynRest" || s.mode === "islandRest")) {
         const argsLocal = L.declareHiddenLocal("%arguments", DYN);
         params.push({ localId: argsLocal.id, name: "%arguments", type: DYN });
         fnCtx.argumentsLocal = argsLocal;
@@ -4707,6 +4785,54 @@ const inliningPredicates = new Set<ts.Symbol>();
       if (fnCtx.generator) lifted.generator = fnCtx.generator;
       L.liftedFns.push(lifted);
       return { kind: "closure", fnName, captures: ctx.captureSources, type: funcType, loc };
+    } catch (e) {
+      // JS sources defer LAMBDA poisons like function declarations
+      // (lowerFunction's catch, lambda form — entry the function-level
+      // deferral): a fenced concise body (`(list) => new Intl.ListFormat
+      // (...).format(list)` — the error-message list-join idiom) would
+      // otherwise poison the ENCLOSING statement, stopping module init
+      // where Node only stops when the lambda is CALLED. The value
+      // compiles as a capture-free closure over a runtimeFence body —
+      // calling throws the first captured diagnostic at its source
+      // position. ICEs (SC9001) stay compile errors, exactly like
+      // lowerStmts; probe mode (diagSink) keeps the poison.
+      if (!(e instanceof PoisonError)) throw e;
+      if (
+        !isJsSourceFile(node.getSourceFile()) ||
+        L.diagSink !== null ||
+        L.diags.length <= diagsBefore ||
+        L.diags.slice(diagsBefore).some((d) => d.code === "SC9001")
+      ) {
+        throw e;
+      }
+      const captured = L.diags.splice(diagsBefore);
+      L.runtimeFences.push(...captured);
+      const first = captured[0]!;
+      const pos = ts.getLineAndCharacterOfPosition(
+        L.program.getSourceFile(first.loc.file) ?? node.getSourceFile(),
+        first.loc.start,
+      );
+      const params: IrParam[] = funcType.params.map((t, i) => ({ localId: `%pf${i}`, name: `%pf${i}`, type: t }));
+      const lifted: IrFunction = {
+        name: fnName,
+        params,
+        returnType: bodyReturn,
+        locals: params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+        captures: [],
+        body: [
+          {
+            kind: "runtimeFence",
+            code: first.code,
+            message: `${first.message} [${first.code} at ${first.loc.file}:${pos.line + 1}]`,
+            loc,
+          },
+        ],
+        loc,
+      };
+      if (isAsync) lifted.async = true;
+      if (fnCtx.generator) lifted.generator = fnCtx.generator;
+      L.liftedFns.push(lifted);
+      return { kind: "closure", fnName, captures: [], type: funcType, loc };
     } finally {
       L.fnStack.pop();
     }
@@ -5780,6 +5906,113 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     return { kind: "call", callee: helper, args: [receiver], type: resultT, loc };
   }
 
+  /** Interned `%obj.hasOwn.<n>(r, k)` — Object.hasOwn's membership walk
+   * over a signature-free record shape: the key compares against each
+   * declared field name, undefined-armed fields answering by their tag
+   * (a key is own exactly when Object.keys would list it — the two share
+   * the guard), everything else true, no match false. */
+  function recordHasOwnHelper(L: Lowerer, shapeId: string, loc: SrcLoc): string {
+    const key = `obj.hasOwn:${shapeId}`;
+    const existing = L.arrHofHelpers.get(key);
+    if (existing) return existing;
+    const helper = `%obj.hasOwn.${L.arrHofHelpers.size}`;
+    L.arrHofHelpers.set(key, helper);
+    const shape = L.shapes.get(shapeId)!;
+    const recT: IrType = { kind: "record", shapeId };
+    const rRef: IrExpr = { kind: "varRef", localId: "r.0", type: recT, loc };
+    const kRef: IrExpr = { kind: "varRef", localId: "k.0", type: STRING, loc };
+    const body: IrStmt[] = [];
+    for (const f of shape.fields) {
+      const utag = f.type.kind === "union" ? L.armTag(f.type.unionId, UNDEFINED_T) : -1;
+      const answer: IrExpr =
+        utag >= 0 && f.type.kind === "union"
+          ? {
+              kind: "unionIsTag",
+              unionId: f.type.unionId,
+              tag: utag,
+              negated: true,
+              value: { kind: "recordGet", obj: rRef, shapeId, field: f.name, type: f.type, loc },
+              type: BOOL,
+              loc,
+            }
+          : { kind: "boolLit", value: true, type: BOOL, loc };
+      body.push({
+        kind: "if",
+        cond: { kind: "strEq", negated: false, left: kRef, right: { kind: "strLit", value: f.name, type: STRING, loc }, type: BOOL, loc },
+        then: [{ kind: "return", value: answer, loc }],
+        else_: null,
+        loc,
+      });
+    }
+    body.push({ kind: "return", value: { kind: "boolLit", value: false, type: BOOL, loc }, loc });
+    L.liftedFns.push({
+      name: helper,
+      params: [
+        { localId: "r.0", name: "r", type: recT },
+        { localId: "k.0", name: "k", type: STRING },
+      ],
+      returnType: BOOL,
+      locals: [
+        { id: "r.0", name: "r", type: recT, mutable: true },
+        { id: "k.0", name: "k", type: STRING, mutable: false },
+      ],
+      body,
+      loc,
+    });
+    return helper;
+  }
+
+  /** Interned `%obj.assign.<n>(t, s)` — Object.assign's per-field copy
+   * over signature-free records (every source field lands on a same-named,
+   * same-typed target field — the caller's gate): undefined-armed source
+   * fields copy behind the not-undefined guard, everything else straight,
+   * and the TARGET returns (JS's aliasing). */
+  function recordAssignHelper(L: Lowerer, targetShapeId: string, srcShapeId: string, loc: SrcLoc): string {
+    const key = `obj.assign:${targetShapeId}:${srcShapeId}`;
+    const existing = L.arrHofHelpers.get(key);
+    if (existing) return existing;
+    const helper = `%obj.assign.${L.arrHofHelpers.size}`;
+    L.arrHofHelpers.set(key, helper);
+    const sShape = L.shapes.get(srcShapeId)!;
+    const tT: IrType = { kind: "record", shapeId: targetShapeId };
+    const sT: IrType = { kind: "record", shapeId: srcShapeId };
+    const tRef: IrExpr = { kind: "varRef", localId: "t.0", type: tT, loc };
+    const sRef: IrExpr = { kind: "varRef", localId: "s.0", type: sT, loc };
+    const body: IrStmt[] = [];
+    for (const f of sShape.fields) {
+      const get: IrExpr = { kind: "recordGet", obj: sRef, shapeId: srcShapeId, field: f.name, type: f.type, loc };
+      const set: IrStmt = { kind: "recordSet", obj: tRef, shapeId: targetShapeId, field: f.name, value: get, loc };
+      const utag = f.type.kind === "union" ? L.armTag(f.type.unionId, UNDEFINED_T) : -1;
+      body.push(
+        utag >= 0 && f.type.kind === "union"
+          ? {
+              kind: "if",
+              cond: { kind: "unionIsTag", unionId: f.type.unionId, tag: utag, negated: true, value: get, type: BOOL, loc },
+              then: [set],
+              else_: null,
+              loc,
+            }
+          : set,
+      );
+    }
+    body.push({ kind: "return", value: tRef, loc });
+    L.liftedFns.push({
+      name: helper,
+      params: [
+        { localId: "t.0", name: "t", type: tT },
+        { localId: "s.0", name: "s", type: sT },
+      ],
+      returnType: tT,
+      locals: [
+        { id: "t.0", name: "t", type: tT, mutable: true },
+        { id: "s.0", name: "s", type: sT, mutable: true },
+      ],
+      body,
+      loc,
+    });
+    return helper;
+  }
+
   /** The `Iterator` global's statics (ES2025 — Iterator.from, and the
    * abstract constructor as a value): no first-class iterator objects
    * exist here, so every member fences with the working spelling named
@@ -5847,6 +6080,54 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       // source, returning the target — lower-containers owns the matrix.
       const merged = lowerObjectAssignIndexShape(L, call);
       if (merged) return merged;
+      // `Object.assign(target, source)` over signature-free RECORDS whose
+      // source fields all land on same-named, same-typed target fields
+      // (the mockable-clock restore: `Object.assign(mocked,
+      // implementations)` over one shape): the per-field copy helper,
+      // returning the TARGET — JS's aliasing, the target mutates in
+      // place. Undefined-armed source fields copy behind the
+      // not-undefined guard (an omitted optional field holds the
+      // undefined arm and must not erase the target's value — Node
+      // copies own keys only; an EXPLICIT `k: undefined` source diverges,
+      // the explicit-undefined-is-absent stance). Everything else keeps
+      // the spread hint.
+      if (call.arguments.length === 2 && !call.arguments.some((a) => ts.isSpreadElement(a))) {
+        const tProbe = probeLower(L, call.arguments[0]!);
+        const sProbe = probeLower(L, call.arguments[1]!);
+        // CHECKED-DYNAMIC target and source (the JS file-scope
+        // object-literal identity story): the runtime DOM copy — own
+        // members of the source land on the target, which returns.
+        if (tProbe?.type.kind === "dyn") {
+          const loc = locOf(call);
+          const target = L.lowerExpr(call.arguments[0]!);
+          const source = L.coerceToExpected(L.lowerExpr(call.arguments[1]!), DYN);
+          if (target.type.kind === "dyn" && source.type.kind === "dyn") {
+            return { kind: "libCall", fn: "dyn.assign", args: [target, source], type: DYN, loc };
+          }
+        }
+        if (tProbe?.type.kind === "record" && sProbe?.type.kind === "record") {
+          const tShape = L.shapes.get(tProbe.type.shapeId);
+          const sShape = L.shapes.get(sProbe.type.shapeId);
+          const ok =
+            tShape && sShape &&
+            !tShape.tuple && !sShape.tuple &&
+            !tShape.indexValue && !sShape.indexValue &&
+            !shapeHasAccessorSlots(tShape) && !shapeHasAccessorSlots(sShape) &&
+            sShape.fields.every((sf) => {
+              const tf = tShape.fields.find((x) => x.name === sf.name);
+              return tf !== undefined && typeEquals(tf.type, sf.type);
+            });
+          if (ok) {
+            const loc = locOf(call);
+            const target = L.lowerExpr(call.arguments[0]!);
+            const source = L.lowerExpr(call.arguments[1]!);
+            if (target.type.kind === "record" && source.type.kind === "record") {
+              const helper = recordAssignHelper(L, target.type.shapeId, source.type.shapeId, loc);
+              return { kind: "call", callee: helper, args: [target, source], type: target.type, loc };
+            }
+          }
+        }
+      }
       return null;
     }
     // Object.defineProperties over a CHECKED-DYNAMIC target (test/common's
@@ -5906,6 +6187,49 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
         call,
         "freeze of a FRESH object/array literal (and of primitives) compiles — frozen-ness is unobservable there; an aliased target's later writes would need the runtime frozen bit",
       );
+    }
+    // `Object.hasOwn(r, k)` over a RECORD receiver: a record's own-key set
+    // is its declared field list, so membership is a compare chain against
+    // the field names (interned per shape). Undefined-armed (optional)
+    // fields answer by their runtime tag — the explicit-undefined-is-absent
+    // stance: an omitted optional field holds the undefined arm and reads
+    // as NOT own, exactly Node's absent key (an EXPLICIT `k: undefined`
+    // diverges — documented next to the child-env/JSON rule). Tuple,
+    // index-signature (overflow membership lives in the runtime map), and
+    // accessor-carrying shapes keep the SC2020 fence; non-record receivers
+    // do too.
+    if (member === "hasOwn" && call.arguments.length === 2 && !call.arguments.some((a) => ts.isSpreadElement(a))) {
+      const recvNode = call.arguments[0]!;
+      const keyNode = call.arguments[1]!;
+      const probed = probeLower(L, recvNode);
+      // A CHECKED-DYNAMIC receiver (the JS file-scope object-literal
+      // identity story): the runtime DOM probe — OBJ member presence, ARR
+      // index bounds, Node's ToObject TypeError on nullish.
+      if (probed?.type.kind === "dyn") {
+        const loc = locOf(call);
+        const receiver = L.lowerExpr(recvNode);
+        let key = L.lowerExpr(keyNode);
+        if (key.type.kind === "f64" || key.type.kind === "bool" || key.type.kind === "dyn") {
+          key = { kind: "toString", operand: key, type: STRING, loc: locOf(keyNode) };
+        }
+        if (key.type.kind !== "string") return null;
+        return { kind: "libCall", fn: "dyn.hasOwn", args: [receiver, key], type: BOOL, loc };
+      }
+      if (probed?.type.kind !== "record") return null;
+      const shape = L.shapes.get(probed.type.shapeId);
+      if (!shape || shape.tuple || shape.indexValue || shapeHasAccessorSlots(shape)) return null;
+      const loc = locOf(call);
+      const receiver = L.lowerExpr(recvNode);
+      if (receiver.type.kind !== "record") return null; // probe/lower drift: keep the fence
+      let key = L.lowerExpr(keyNode);
+      // Number/boolean/dyn keys stringify — ToPropertyKey, the keyed-write
+      // path's rule; symbol and composite keys keep the fence.
+      if (key.type.kind === "f64" || key.type.kind === "bool" || key.type.kind === "dyn") {
+        key = { kind: "toString", operand: key, type: STRING, loc: locOf(keyNode) };
+      }
+      if (key.type.kind !== "string") return null;
+      const helper = recordHasOwnHelper(L, receiver.type.shapeId, loc);
+      return { kind: "call", callee: helper, args: [receiver, key], type: BOOL, loc };
     }
     if (member !== "keys" && member !== "values" && member !== "entries") return null;
     if (call.arguments.length !== 1 || ts.isSpreadElement(call.arguments[0]!)) return null;

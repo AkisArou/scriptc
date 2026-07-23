@@ -1779,8 +1779,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     const existing = E.recordKeySetFns.get(shapeId);
     if (existing) return existing;
     const shape = E.recordsById.get(shapeId);
-    if (!shape?.indexValue) throw new Error(`emitter bug: keyed write on non-overflow shape ${shapeId}`);
-    const iv = shape.indexValue;
+    // Signature-free shapes dispatch over their (one-typed) declared
+    // fields and TRAP on a miss (scr_record_key_miss — JS would add the
+    // property, which a monomorphic struct cannot); overflow shapes keep
+    // the map insert tail.
+    const iv = shape?.indexValue ?? shape?.fields[0]?.type;
+    if (!shape || !iv) throw new Error(`emitter bug: keyed write on field-free non-overflow shape ${shapeId}`);
     const name = `sc_rks_${E.recordKeySetFns.size}`;
     E.recordKeySetFns.set(shapeId, name);
     const struct = mangleRecordStruct(shapeId);
@@ -1791,7 +1795,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       const lit = E.internLiteral(f.name);
       const member = `r->${mangleField(f.name)}`;
       d.push(`  if (scr_str_eq(k, (ScrStr *)&${lit})) { /* ${f.name} */`);
-      if (iv.kind === "dyn") {
+      if (iv.kind === "dyn" && shape.indexValue) {
         const keyLit = cStringLiteral(Buffer.from(f.name, "utf8"));
         d.push(`    ScrDynPath p = { NULL, ${keyLit}, 0 };`);
         d.push(`    ${cDecl(f.type, "nv")} = ${E.dynCheckHelper(f.type)}(v, &p);`);
@@ -1809,11 +1813,19 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       d.push(`    return;`);
       d.push(`  }`);
     }
-    const m = `r->${OVERFLOW_MEMBER}`;
-    if (iv.kind === "f64" || iv.kind === "bool") {
-      d.push(`  scr_map_set_str_${iv.kind === "f64" ? "f64" : "bool"}(${m}, k, v);`);
+    if (!shape.indexValue) {
+      // The MISS on a fixed shape: release the moved-in value, throw the
+      // catchable TypeError naming the key (JS would add the property —
+      // the documented monomorphic-struct divergence).
+      if (isRefCounted(iv)) d.push(`  if (v) ${releaseCallC(iv, "v")};`);
+      d.push(`  scr_record_key_miss(k);`);
     } else {
-      d.push(`  scr_map_set_str_ref(${m}, k, v); /* v moves in */`);
+      const m = `r->${OVERFLOW_MEMBER}`;
+      if (iv.kind === "f64" || iv.kind === "bool") {
+        d.push(`  scr_map_set_str_${iv.kind === "f64" ? "f64" : "bool"}(${m}, k, v);`);
+      } else {
+        d.push(`  scr_map_set_str_ref(${m}, k, v); /* v moves in */`);
+      }
     }
     d.push(`}`, ``);
     E.walkerDefs.push(...d);

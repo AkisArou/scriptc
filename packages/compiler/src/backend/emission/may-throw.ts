@@ -121,12 +121,13 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
         case "recordKeySet": {
           // A dynamic-keyed write can collide with a DECLARED field, where
           // a dyn value validates against the field's type (dynCheck) —
-          // that path throws the catchable TypeError. Declared-field-free
-          // shapes and typed value slots never do.
+          // that path throws the catchable TypeError. A SIGNATURE-FREE
+          // shape's write throws on a key MISS (scr_record_key_miss).
+          // Overflow shapes with typed value slots never do.
           const shape = (mod.records ?? []).find((r) => r.id === rec["shapeId"]);
           if (
             rec["overflowOnly"] !== true &&
-            shape && shape.indexValue?.kind === "dyn" && shape.fields.length > 0
+            shape && (!shape.indexValue || (shape.indexValue.kind === "dyn" && shape.fields.length > 0))
           ) {
             f.throws = true;
           }
