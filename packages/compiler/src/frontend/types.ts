@@ -2110,15 +2110,13 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
             a.kind === "map" || a.kind === "set" || a.kind === "regex" || a.kind === "dyn" ||
             // Generator arms follow the map/set rule: no narrowing test.
             a.kind === "generator" ||
-            // A func arm has no narrowing test against sibling DATA arms —
-            // but against pure unit companions the unit TAG tests are the
-            // narrowing (cb !== null, cb ?? f, cb?.()), so the nullable-
-            // callback shape `(() => void) | null | undefined` maps. FUNC
-            // siblings are fine too (`StringConstructor | NumberConstructor`
-            // — the option-table field): closures compare by pointer
-            // identity per tag, so `x === String` is the narrowing, and
-            // typeof answers "function" for every arm.
-            (a.kind === "func" && !arms.every((b) => b === a || b.kind === "func" || isUnitType(b))) ||
+            // Func arms map beside ANY sibling: `typeof x === "function"`
+            // is the narrowing against data arms (typeofAnswer knows every
+            // arm kind), unit TAG tests cover the nullable-callback shape
+            // (cb !== null, cb ?? f, cb?.()), and against FUNC siblings
+            // (`StringConstructor | NumberConstructor` — the option-table
+            // field) closures compare by pointer identity per tag
+            // (unionEq), so `x === String` narrows. No restriction left.
             // Promise arms follow the func rule (typeof gives no test
             // against sibling data arms): only the promise-or-absent shape
             // maps — `Promise<T> | undefined`, and `Promise<T> | void`
@@ -2211,6 +2209,49 @@ function mapNarrowedTypeParam(type: ts.Type, ctx: TypeMapperCtx): IrType | null 
  * recursion), everything else is already its awaited self — including
  * jsval (the engine's await handles thenables natively). Null off the
  * shape (not the lib's Awaited over a bound parameter). */
+/** True for a TypeNode spelling the `const` assertion (`e as const`). */
+export function isConstAssertionTypeNode(t: ts.TypeNode): boolean {
+  return (
+    t.kind === ts.SyntaxKind.TypeReference &&
+    ts.isIdentifier((t as ts.TypeReferenceNode).typeName) &&
+    ((t as ts.TypeReferenceNode).typeName as ts.Identifier).text === "const"
+  );
+}
+
+/** True when `n` sits inside a const assertion with only literal
+ * structure between (object/array literals, property assignments,
+ * parens) — the positions `as const` makes deeply readonly. */
+export function underConstAssertion(n: ts.Node): boolean {
+  for (let cur: ts.Node = n; cur !== undefined && !ts.isSourceFile(cur); cur = cur.parent) {
+    if (ts.isAsExpression(cur)) return isConstAssertionTypeNode(cur.type);
+    if (
+      !ts.isPropertyAssignment(cur) &&
+      !ts.isObjectLiteralExpression(cur) &&
+      !ts.isArrayLiteralExpression(cur) &&
+      !ts.isParenthesizedExpression(cur)
+    ) {
+      return false;
+    }
+  }
+  return false;
+}
+
+/** The `aliases: []`-under-`as const` shape (see the member walk's tsgo
+ * panic repair): a property symbol declared by a property assignment whose
+ * initializer is an EMPTY array literal inside a const assertion — its
+ * type is provably `readonly []`, whatever the panicked query answered. */
+function constAssertedEmptyArrayProp(p: ts.Symbol, ctx: TypeMapperCtx): boolean {
+  const d = ctx.checker.valueDeclarationOf(p);
+  if (d === undefined || !ts.isPropertyAssignment(d)) return false;
+  const init = d.initializer;
+  // `a: [] as const` pins the field type by itself, wherever the literal sits.
+  if (ts.isAsExpression(init) && isConstAssertionTypeNode(init.type)) {
+    return ts.isArrayLiteralExpression(init.expression) && init.expression.elements.length === 0;
+  }
+  if (!ts.isArrayLiteralExpression(init) || init.elements.length > 0) return false;
+  return underConstAssertion(d);
+}
+
 function mapGenericAwaitedAlias(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const { resolveTypeParam } = ctx;
   if (!resolveTypeParam) return null;
@@ -2725,6 +2766,16 @@ function mapRecordType(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
       // site against the defining object literal's declaration.
       if (isGenericCallableMemberType(fieldTs, checker)) continue;
       let pt = mapType(fieldTs, ctx);
+      // tsgo PANICS computing `readonly []` through the symbol-type query
+      // (the TupleType conversion — the facade's panic fence answers
+      // `any`), which would absorb the whole shape into the dynamic tier.
+      // The declaration pins the truth syntactically: a property whose
+      // initializer is an EMPTY array literal inside a const assertion IS
+      // the empty tuple — map it exactly as the tuple branch does (the
+      // unit-element array; see the `[] as const` rule there).
+      if ((pt === null || pt.kind === "jsval") && (fieldTs.flags & ts.TypeFlags.Any) !== 0 && constAssertedEmptyArrayProp(p, ctx)) {
+        pt = arrayOf(unitOnlyUnion(ctx.unions));
+      }
       // Unit-only FIELDS (`{ msg?: undefined }` — the discriminated-union
       // absent-field idiom — and `{ p: undefined }` spellings): the
       // unit-only union. The runtime value is the interned unit, JSON

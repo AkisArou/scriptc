@@ -1099,7 +1099,9 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           typeParams.push(sym);
         }
         for (const param of fnNode.parameters) {
-          if (!ts.isIdentifier(param.name)) L.unsupported("SC1031", param);
+          if (!ts.isIdentifier(param.name) && !ts.isObjectBindingPattern(param.name) && !ts.isArrayBindingPattern(param.name)) {
+            L.unsupported("SC1031", param);
+          }
         }
         (isStatic ? genericStatics : genericMethods).set(mName, {
           decl: fnNode,

@@ -21,7 +21,7 @@ import { lowerSocketInstanceOf } from "./lower-server.js";
 import { findGenericMethodOn, lowerStaticFieldRead } from "./lower-classes.js";
 import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
 import { mixinFnOfCallee } from "./lower-mixins.js";
-import { isGenericCallableMemberType, unitOnlyUnion } from "../types.js";
+import { isConstAssertionTypeNode, isGenericCallableMemberType, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
 
@@ -236,7 +236,14 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       (() => {
         const ctxTs = L.checker.getContextualType(expr);
         const mapped = (ctxTs ? L.mapTypeOf(ctxTs) : null) ?? L.mapTypeOf(L.typeOf(expr));
-        return mapped?.kind === "jsval";
+        if (mapped?.kind !== "jsval") return false;
+        // The tsgo readonly-[] panic repair (see lowerArrayLiteral): an
+        // EMPTY array literal under a const assertion is the empty tuple —
+        // its `any` answer is a panicked query, not an island slot.
+        if (ts.isArrayLiteralExpression(expr) && expr.elements.length === 0 && underConstAssertion(expr)) {
+          return false;
+        }
+        return true;
       })()
     ) {
       if (ts.isObjectLiteralExpression(expr)) {
@@ -3057,6 +3064,19 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         if (arrayArms.length === 1) mapped = arrayArms[0]!;
       }
     }
+    // An EMPTY literal under a CONST ASSERTION whose type queries panicked
+    // (tsgo's readonly-[] TupleType conversion — the facade answers `any`,
+    // which maps to nothing statically and to an island value under
+    // --dynamic): the value is provably the empty tuple; ride the
+    // unit-element array, mapType's own `[] as const` rule.
+    if (
+      (mapped === null || mapped.kind === "jsval") &&
+      expr.elements.length === 0 &&
+      (tsType.flags & ts.TypeFlags.Any) !== 0 &&
+      underConstAssertion(expr)
+    ) {
+      mapped = arrayOf(unitOnlyUnion(L.unions));
+    }
     // A TUPLE-typed slot (`const t: [string, number] = ["a", 1]`): the
     // literal constructs the tuple's record shape — one positional field
     // per element, source order (which IS index order, so evaluation order
@@ -5723,6 +5743,19 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
   /** `e as T` and the old-style assertion `<T>e` — one node shape (both
    * carry `.type` and `.expression`), one lowering. */
   export function lowerAsExpression(L: Lowerer, expr: ts.AsExpression | ts.TypeAssertion): IrExpr {
+    // `[] as const` — tsgo panics computing the expression's `readonly []`
+    // type (the facade's fence answers `any`), but the syntax pins the
+    // value exactly: the empty tuple, ridden as the unit-element array
+    // (mapType's empty-tuple rule). Lower it directly; enclosing slots
+    // coerce like any other empty-array source.
+    if (
+      ts.isAsExpression(expr) &&
+      isConstAssertionTypeNode(expr.type) &&
+      ts.isArrayLiteralExpression(expr.expression) &&
+      expr.expression.elements.length === 0
+    ) {
+      return { kind: "arrayLit", elems: [], type: arrayOf(unitOnlyUnion(L.unions)), loc: locOf(expr) };
+    }
     // `e as C` on a CATCH BINDING (`(err as Error).message`): the checked
     // extraction — an instanceof match extracts the payload, anything else
     // throws the catchable TypeError (dynCheck's trust-but-verify stance,

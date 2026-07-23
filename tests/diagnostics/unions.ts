@@ -46,8 +46,8 @@ switch (mk()) {
 const items: (number | string)[] = [1, "two"];
 console.log(items.indexOf(1));
 console.log(items.includes("two"));
-// Unions may not contain function arms (closure identity vs tag, later).
-const callable: (() => number) | string = "later";
+// Unions may contain function arms beside data arms now (typeof narrows,
+// closure pointer identity per tag compares) — no pin here anymore.
 
 // Bare undefined/null bindings compile: unit-only types ride the interned
 // null|undefined union (the value is one of the two immortal unit

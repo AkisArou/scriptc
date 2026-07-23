@@ -114,6 +114,8 @@ export type WidthLift =
   | { how: "liftWrap"; tag: number; arm: IrType }
   | { how: "width" }
   | { how: "arr" }
+  | { how: "tupleArr" }
+  | { how: "emptyArr" }
   | { how: "objWidth" }
   | { how: "clsWidth" };
 
@@ -2759,8 +2761,13 @@ export class Lowerer {
     }
     if (expected.kind === "array" && expr.type.kind === "array" && expected.elem.kind !== "jsval") {
       const helper = this.arrayWidthHelper(expr.type, expected, expr.loc);
-      if (!helper) return null;
-      return { kind: "call", callee: helper, args: [expr], type: expected, loc: expr.loc };
+      if (helper) return { kind: "call", callee: helper, args: [expr], type: expected, loc: expr.loc };
+      // The EMPTY-array lift (widthLiftPlan's emptyArr rule), top-level:
+      // `cmd.aliases` typed `(null | undefined)[]` (an `aliases: []`
+      // table) flowing into a `string[]` slot.
+      const lift = this.widthLiftPlan(expr.type, expected);
+      if (lift?.how !== "emptyArr") return null;
+      return this.applyWidthLift(lift, expr, expected, expr.loc);
     }
     // A TUPLE flowing into an array slot (`const NAMES = [...] as const`
     // assigned to a `readonly T[]` — the const-table pattern): TS erases
@@ -2841,9 +2848,37 @@ export class Lowerer {
       return this.recordToClassPlan(src.shapeId, dst.className) !== null ? { how: "clsWidth" } : null;
     }
     if (dst.kind === "array" && src.kind === "array") {
-      return this.widthLiftPlan(src.elem, dst.elem) !== null ? { how: "arr" } : null;
+      if (this.widthLiftPlan(src.elem, dst.elem) !== null) return { how: "arr" };
+      // The EMPTY-array lift: a unit-only element type (`readonly []`
+      // mapped as the unit-element array, `(null | undefined)[]`) has no
+      // per-element conversion into a data element — but the only value
+      // such a slot honestly holds in the width family is EMPTY, so the
+      // lift is a fresh empty array of the target type, guarded by a
+      // runtime non-empty trap (the checked-extraction stance).
+      if (this.unitOnlyElem(src.elem) && dst.elem.kind !== "jsval" && !this.unitOnlyElem(dst.elem)) {
+        return { how: "emptyArr" };
+      }
+      return null;
+    }
+    // A TUPLE flowing into an array FIELD/ELEMENT (`aliases: ["ls"]` into
+    // an `aliases: string[]` slot): per-position lifts, the top-level
+    // tuple-into-array coercion applied recursively.
+    if (dst.kind === "array" && src.kind === "record" && dst.elem.kind !== "jsval") {
+      const from = this.shapes.get(src.shapeId);
+      if (from?.tuple && from.fields.every((f) => this.widthLiftPlan(f.type, dst.elem) !== null)) {
+        return { how: "tupleArr" };
+      }
+      return null;
     }
     return null;
+  }
+
+  /** True for the unit-only element types (`(null | undefined)[]`, the
+   * `readonly []` mapping): a union whose every arm is a unit. */
+  unitOnlyElem(t: IrType): boolean {
+    if (t.kind !== "union") return false;
+    const def = this.unions.get(t.unionId);
+    return def !== undefined && def.arms.every((a) => isUnitType(a));
   }
 
   /** The build side of widthLiftPlan: the IrExpr converting `value` into
@@ -2881,6 +2916,17 @@ export class Lowerer {
         if (dst.kind !== "array" || value.type.kind !== "array") throw new Error("lowerer bug: arr lift shape");
         const helper = this.arrayWidthHelper(value.type, dst, loc);
         if (!helper) throw new Error("lowerer bug: planned arr lift failed to intern");
+        return { kind: "call", callee: helper, args: [value], type: dst, loc };
+      }
+      case "tupleArr": {
+        if (dst.kind !== "array" || value.type.kind !== "record") throw new Error("lowerer bug: tupleArr lift shape");
+        const helper = this.tupleArrayWidthHelper(value.type.shapeId, dst, loc);
+        if (!helper) throw new Error("lowerer bug: planned tupleArr lift failed to intern");
+        return { kind: "call", callee: helper, args: [value], type: dst, loc };
+      }
+      case "emptyArr": {
+        if (dst.kind !== "array" || value.type.kind !== "array") throw new Error("lowerer bug: emptyArr lift shape");
+        const helper = this.emptyArrayLiftHelper(value.type, dst, loc);
         return { kind: "call", callee: helper, args: [value], type: dst, loc };
       }
       case "objWidth": {
@@ -3069,6 +3115,57 @@ export class Lowerer {
           },
           loc,
         },
+      ],
+      loc,
+    });
+    return name;
+  }
+
+  /** Interned `%arr.empty.<n>(a)` — the EMPTY-array lift's build side: a
+   * unit-only-element array reshapes into any data-element array by
+   * answering a FRESH empty array, after a runtime non-empty trap (a
+   * genuinely inhabited `(null | undefined)[]` cannot reshape — the
+   * catchable-TypeError stance every checked extraction takes). */
+  emptyArrayLiftHelper(fromT: IrType & { kind: "array" }, toT: IrType & { kind: "array" }, loc: SrcLoc): string {
+    const key = `emptyarr:${typeKey(fromT.elem)}:${typeKey(toT.elem)}`;
+    const existing = this.widthHelpers.get(key);
+    if (existing) return existing;
+    const name = `%arr.empty.${this.widthHelpers.size}`;
+    this.widthHelpers.set(key, name);
+    const a: IrExpr = { kind: "varRef", localId: "a.0", type: fromT, loc };
+    this.liftedFns.push({
+      name,
+      params: [{ localId: "a.0", name: "a", type: fromT }],
+      returnType: toT,
+      locals: [{ id: "a.0", name: "a", type: fromT, mutable: true }],
+      body: [
+        {
+          kind: "if",
+          cond: {
+            kind: "bin",
+            op: "!==",
+            left: { kind: "arrIntrinsic", method: "length", receiver: a, args: [], type: F64, loc },
+            right: { kind: "numLit", value: 0, type: F64, loc },
+            type: BOOL,
+            loc,
+          },
+          then: [
+            {
+              kind: "throw",
+              value: {
+                kind: "libCall",
+                fn: "error.new",
+                args: [{ kind: "strLit", value: `expected ${this.fmt(toT)} (a non-empty ${this.fmt(fromT)} has no elements the target can hold)`, type: STRING, loc }],
+                type: { kind: "object", className: "%TypeError" },
+                loc,
+              },
+              loc,
+            },
+          ],
+          else_: [],
+          loc,
+        },
+        { kind: "return", value: { kind: "arrayLit", elems: [], type: toT, loc }, loc },
       ],
       loc,
     });
