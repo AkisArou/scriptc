@@ -1,9 +1,8 @@
-// The residual default-export fence: default-exporting a MUTABLE binding.
-// Node's `export default x` snapshots the value when the export statement
-// runs (later writes to x are invisible to importers), and the alias-based
-// lowering would read the live binding — so the mutable form fences by
-// name instead of diverging silently. Const/function/class defaults (and
-// expression defaults) compile — the 188x corpus programs pin them.
-let counter = 0;
-export default counter;
-counter = 1;
+// The default-export family's residual fence: `export =` assignments (the
+// CommonJS-interop spelling — no ESM analogue exists to lower it to).
+// Default-exporting a MUTABLE binding — this fixture's previous subject —
+// GRADUATED: `export default someLet` now registers Node's snapshot (the
+// value when the export statement runs; corpus 2426 pins the split against
+// the live `export { x as default }` spelling).
+const counter = 0;
+export = counter;
