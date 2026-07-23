@@ -363,7 +363,7 @@ export function requiresDynamicTypeDiag(typeText: string, loc: SrcLoc): ScrDiagn
 export function genericSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC2005",
-    message: `values of type '${typeText}' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)`,
+    message: `values of type '${typeText}' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)`,
     loc,
     milestone: "M2",
     hint: "annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly",

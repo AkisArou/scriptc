@@ -7,11 +7,17 @@ let flip = <T>(x: T): T => x;
 flip = <T>(x: T): T => x;
 console.log(flip(1));
 
-// A binding whose USES keep the generic signature: nothing pins a concrete
-// signature, so the value fences at the reference.
+// An ALIAS binding registers its target (calls through it monomorphize),
+// but a USE with no pinning context still keeps the generic signature —
+// the value fences at the reference, not the binding.
 const id = <T>(x: T): T => x;
 const stored = id;
-console.log(stored(2));
+console.log(typeof stored);
+
+// An alias of a REASSIGNED binding never registers: the target's own
+// fence reports, and the alias falls back to the ordinary binding story.
+const flipAlias = flip;
+console.log(flipAlias(5));
 
 // Declared inside a function: instances are module functions and cannot
 // capture the enclosing frame.

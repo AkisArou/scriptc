@@ -4646,6 +4646,42 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2550-generics-keyof-pick.ts": {
+   "order": [
+    "<repo>/tests/corpus/2550-generics-keyof-pick.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2551-generics-value-aliases.ts": {
+   "order": [
+    "<repo>/tests/corpus/2551-generics-value-aliases.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2552-generics-iface-methods.ts": {
+   "order": [
+    "<repo>/tests/corpus/2552-generics-iface-methods.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2553-generics-signature-bindings.ts": {
+   "order": [
+    "<repo>/tests/corpus/2553-generics-signature-bindings.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2554-generics-frontier-mix.ts": {
+   "order": [
+    "<repo>/tests/corpus/2554-generics-frontier-mix.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2555-generics-keyof-writes.ts": {
+   "order": [
+    "<repo>/tests/corpus/2555-generics-keyof-writes.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

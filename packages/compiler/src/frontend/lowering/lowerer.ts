@@ -696,6 +696,12 @@ export class Lowerer {
   /** Non-null while an instance body lowers: type-parameter symbol →
    * concrete IR type, consulted inside mapType's recursion. */
   typeParamBindings: Map<ts.Symbol, IrType> | null = null;
+  /** The ts-level twin of typeParamBindings, non-null while a CALL-keyed
+   * instance body lowers: type-parameter symbol → the bound CHECKER type,
+   * consulted where the mapped IrType has already widened away information
+   * the body needs — indexed accesses (`T[K]` needs K's literal key) and
+   * keyed record reads (`o[k]` where k's type is a literal-bound K). */
+  typeParamTsBindings: Map<ts.Symbol, ts.Type> | null = null;
   /** Non-null while an IMPLICIT-ANY instance body lowers (npm-static JS —
    * lower-calls' implicit-monomorphization section): bound param symbol →
    * the call site's checker type, consulted by typeOf for identifier
@@ -1050,6 +1056,7 @@ export class Lowerer {
       unions: this.unions,
       classNamer: this.classNamer,
       resolveTypeParam: this.typeParamResolver,
+      resolveTypeParamTs: this.typeParamTsResolver,
       genericClassInstance: (decl, ref) => this.genericClassInstanceType(decl, ref),
       mixinClassInstance: (decl) =>
         this.mixinTypeContext && this.mixinTypeContext.classNode === decl
@@ -2376,6 +2383,17 @@ export class Lowerer {
     if (!this.typeParamBindings || !(t.flags & ts.TypeFlags.TypeParameter)) return null;
     const sym: ts.Symbol | undefined = t.getSymbol();
     return (sym && this.typeParamBindings.get(sym)) ?? null;
+  };
+
+  /** The ts-level twin of typeParamResolver: the bound CHECKER type of a
+   * type parameter in the current instantiation (typeParamTsBindings), for
+   * the resolutions where mapType's widening already dropped what the body
+   * needs (indexed accesses over literal-bound keys). Inert outside
+   * call-keyed generic instantiation. */
+  readonly typeParamTsResolver = (t: ts.Type): ts.Type | null => {
+    if (!this.typeParamTsBindings || !(t.flags & ts.TypeFlags.TypeParameter)) return null;
+    const sym: ts.Symbol | undefined = t.getSymbol();
+    return (sym && this.typeParamTsBindings.get(sym)) ?? null;
   };
 
   irTypeOf(node: ts.Node): IrType {
@@ -5420,8 +5438,9 @@ export class Lowerer {
 
   inferTypeParamBindings(expr: ts.CallExpression,
     info: GenericFnInfo,
-    rsig: ts.Signature,): Map<ts.Symbol, IrType> {
-    return inferTypeParamBindings(this, expr, info, rsig);
+    rsig: ts.Signature,
+    tsBindings?: Map<ts.Symbol, ts.Type>,): Map<ts.Symbol, IrType> {
+    return inferTypeParamBindings(this, expr, info, rsig, tsBindings);
   }
 
   lowerGenericInstance(info: GenericFnInfo, inst: GenericInstance): IrFunction {

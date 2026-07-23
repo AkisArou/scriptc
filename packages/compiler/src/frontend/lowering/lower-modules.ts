@@ -13,7 +13,7 @@ import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } 
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, arrayOf, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, isPromisifyCall } from "./lower-builtins.js";
-import { bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
+import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
 import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
@@ -21,7 +21,7 @@ import { collectNamespaceStmt, nsPathPrefix } from "./lower-namespaces.js";
 import { collectExpandoMembers } from "./lower-expando.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import type { ClassInfo } from "./lower-classes.js";
-import { decoratorNodesOf, guaranteedDecorationThrow } from "./lower-classes.js";
+import { decoratorNodesOf, genericIfaceBindingKeepsClass, guaranteedDecorationThrow } from "./lower-classes.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 
 /** One file's declarations, split for collection and init-body lowering. */
@@ -1010,7 +1010,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // by name; the statement lowering skips (or re-fences — pushDiag
         // dedupes) by the same test.
         {
-          const gfnNode = bindingGenericFnNodeOf(decl);
+          const gfnNode = bindingGenericFnNodeOf(decl) ?? bindingContextualGenericFnNodeOf(L, decl);
           if (gfnNode) {
             try {
               bindingGenericFnInfoOf(L, decl, gfnNode);
@@ -1019,6 +1019,22 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             }
             continue;
           }
+        }
+        // `const h = id` at file scope — an ALIAS of a generic function:
+        // registers the target's info under the alias's symbol (no global
+        // exists; the binding is never read). Aliases resolve in
+        // declaration order, so a chain (`const h2 = h`) registers link by
+        // link; an unresolved target falls through to the ordinary global
+        // registration and its fences.
+        {
+          let aliased = false;
+          try {
+            aliased = bindingGenericFnAliasInfoOf(L, decl) !== null;
+          } catch (e) {
+            if (!(e instanceof PoisonError)) throw e;
+            aliased = true; // fenced by name — no global either way
+          }
+          if (aliased) continue;
         }
         // `const f = (x) => ...` at file scope of an npm-static JS file
         // whose params are implicit-any: the implicit-monomorphization
@@ -1250,6 +1266,18 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
               handleArrayPreservingCall(L, decl.initializer)
             ) {
               type = arrayOf(JSVAL);
+            }
+            // `const r: Repo = new MemRepo()` over an all-generic-method
+            // interface: the binding keeps the initializer's CLASS
+            // representation (the record shape maps empty and the width
+            // copy would drop the class the generic-method calls
+            // monomorphize against) — see genericIfaceBindingKeepsClass.
+            if (
+              type.kind === "record" && ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              genericIfaceBindingKeepsClass(L, decl, type)
+            ) {
+              const initT = L.mapTypeOf(L.typeOf(decl.initializer!));
+              if (initT?.kind === "object") type = initT;
             }
             // A file-scope PATTERN over an ISLAND-bound source (`export
             // let { toString } = 1;` — the engine reads the wrapper's

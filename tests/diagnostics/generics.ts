@@ -4,11 +4,16 @@
 function id<T>(x: T): T {
   return x;
 }
+// These two now COMPILE (no diagnostics): alias bindings register the
+// target, and a generic-signature annotation monomorphizes like the
+// unannotated alias — the unpinned-VALUE fences live in
+// generic-value-bindings.ts.
 function useAsValue(): void {
-  const alias = id; // no pinning context — the slot keeps <T>(x: T) => T
+  const alias = id;
+  alias(1);
 }
 function storeGenericSignature(): void {
-  const keep: <T>(x: T) => T = id; // the annotation KEEPS the type parameter
+  const keep: <T>(x: T) => T = id;
   keep(1);
 }
 // (`const genericArrow = <T>(x: T): T => x` at module scope now COMPILES —

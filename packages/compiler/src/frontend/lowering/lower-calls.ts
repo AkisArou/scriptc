@@ -17,7 +17,7 @@ import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilter
 import { lowerChildStreamMethodCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
 import { lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
-import { EMITTER_API_MEMBERS, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
+import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
 import { lowerConsoleInspectArg, lowerFormatCall } from "./lower-inspect.js";
 import { STREAM_API_MEMBERS, lowerStreamMethodCall, lowerStreamModuleCall, lowerStreamStaticCall, streamSidesOf } from "./lower-stream.js";
@@ -82,6 +82,12 @@ export interface GenericFnInfo {
   qualifiedName: string;
   /** Declaration-order type parameter symbols. */
   typeParams: ts.Symbol[];
+  /** Lazily computed (keyofConstrainedTypeParams): the type parameters
+   * declared `K extends keyof …`. Their bound LITERAL keys are semantic —
+   * the body's `o[k]` reads the named field — so instances key on the
+   * literal (no cross-literal sharing) and keep the checker types
+   * (tsBindings) the body resolves through. */
+  keyofTps?: Set<ts.Symbol>;
   /** Instantiation key (comma-joined typeKeys of the mapped param types +
    * `=>` + return typeKey) → instance. Key identity IS signature identity:
    * two call sites whose inferred types map to the same IR types share one
@@ -122,6 +128,11 @@ export interface GenericInstance {
   /** Type-parameter symbol → concrete IR type, consulted by mapType (via
    * typeParamResolver) while the instance body lowers. */
   bindings: Map<ts.Symbol, IrType>;
+  /** Call-keyed instances: type-parameter symbol → the bound CHECKER type
+   * (pre-widening), consulted while the body lowers where the IrType
+   * binding has already lost what the body needs — `T[K]` and `o[k]` reads
+   * whose K is bound to one literal key (typeParamTsBindings). */
+  tsBindings?: Map<ts.Symbol, ts.Type>;
   /** Rendered type arguments ("<number, string>") for diagnostics. */
   typeArgsText: string;
   /** Implicit instances only: param symbol → the call site's (widened)
@@ -1022,8 +1033,34 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       L.badType(expr, retTs);
     }
 
-    return internGenericInstance(L, expr, info, params, returnType, () =>
-      L.inferTypeParamBindings(expr, info, rsig),
+    // keyof-constrained type parameters (`K extends keyof T`): the bound
+    // LITERAL is semantic — the instance body reads the named field — so
+    // the bindings compute EAGERLY (the key needs them) and each literal
+    // keys its own instance (`pick(o, "a")` and `pick(o, "b")` map to the
+    // same IR signature when the fields agree, but their bodies read
+    // different fields). Non-literal bindings (a key union, plain string)
+    // share one runtime-keyed instance per IR signature, exactly the
+    // widened discipline.
+    const keyofTps = keyofConstrainedTypeParams(info);
+    if (keyofTps.size > 0) {
+      const tsBindings = new Map<ts.Symbol, ts.Type>();
+      const bindings = L.inferTypeParamBindings(expr, info, rsig, tsBindings);
+      const litKey = info.typeParams
+        .filter((tp) => keyofTps.has(tp))
+        .map((tp) => {
+          const bound = tsBindings.get(tp);
+          return bound?.isStringLiteralType() ? JSON.stringify(bound.value)
+            : bound?.isNumberLiteralType() ? String(bound.value)
+            : "*";
+        })
+        .join(",");
+      return internGenericInstance(L, expr, info, params, returnType, () => bindings, {
+        extraKey: `@${litKey}`,
+        tsBindings,
+      });
+    }
+    return internGenericInstance(L, expr, info, params, returnType, (tsBindings) =>
+      L.inferTypeParamBindings(expr, info, rsig, tsBindings),
     );
   }
 
@@ -1036,8 +1073,13 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     info: GenericFnInfo,
     params: ParamShape[],
     returnType: IrType,
-    makeBindings: () => Map<ts.Symbol, IrType>,): GenericInstance {
-    const key = `${params.map((s) => typeKey(s.type)).join(",")}=>${typeKey(returnType)}`;
+    makeBindings: (tsBindings: Map<ts.Symbol, ts.Type>) => Map<ts.Symbol, IrType>,
+    opts?: { extraKey?: string; tsBindings?: Map<ts.Symbol, ts.Type> },): GenericInstance {
+    // keyof-constrained instantiations append their literal keys
+    // (extraKey): the IR signature alone under-discriminates there — two
+    // literals can map to one IR signature while their bodies read
+    // different fields.
+    const key = `${params.map((s) => typeKey(s.type)).join(",")}=>${typeKey(returnType)}${opts?.extraKey ?? ""}`;
     let inst = info.instances.get(key);
     if (!inst) {
       if (info.instances.size >= MAX_GENERIC_INSTANCES) {
@@ -1048,9 +1090,16 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
             `${MAX_GENERIC_INSTANCES} instances — polymorphic recursion?)`,
         );
       }
-      const bindings = makeBindings();
+      const tsBindings = opts?.tsBindings ?? new Map<ts.Symbol, ts.Type>();
+      const bindings = makeBindings(tsBindings);
       const rendered = info.typeParams
         .map((tp) => {
+          // A literal-bound keyof parameter renders its literal — the
+          // instance is per-literal, and '<…, string>' would misname it.
+          const tsBound = tsBindings.get(tp);
+          if (info.keyofTps?.has(tp) && tsBound?.isStringLiteralType()) {
+            return JSON.stringify(tsBound.value);
+          }
           const bound = bindings.get(tp);
           return bound ? L.fmt(bound) : tp.name;
         })
@@ -1063,12 +1112,31 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
         params,
         returnType,
         bindings,
+        tsBindings,
         typeArgsText,
       };
       info.instances.set(key, inst);
       L.instantiationQueue.push({ info, inst });
     }
     return inst;
+  }
+
+/** The type parameters of `info` declared with a `keyof` CONSTRAINT
+   * (`K extends keyof T`) — the parameters whose bound literal is semantic
+   * (the body's `o[k]` reads the named field), computed once per info from
+   * the declaration's syntax. */
+  export function keyofConstrainedTypeParams(info: GenericFnInfo): Set<ts.Symbol> {
+    if (info.keyofTps) return info.keyofTps;
+    const out = new Set<ts.Symbol>();
+    info.decl.typeParameters?.forEach((tpDecl, i) => {
+      const sym = info.typeParams[i];
+      if (!sym || tpDecl.constraint === undefined) return;
+      if (ts.isTypeOperatorNode(tpDecl.constraint) && tpDecl.constraint.operator === ts.SyntaxKind.KeyOfKeyword) {
+        out.add(sym);
+      }
+    });
+    info.keyofTps = out;
+    return out;
   }
 
 /** Type-parameter symbol → concrete IR type for one instantiation.
@@ -1081,16 +1149,21 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
    * (carrying the instantiation context). */
   export function inferTypeParamBindings(L: Lowerer, expr: ts.CallExpression,
     info: GenericFnInfo,
-    rsig: ts.Signature,): Map<ts.Symbol, IrType> {
+    rsig: ts.Signature,
+    tsBindings?: Map<ts.Symbol, ts.Type>,): Map<ts.Symbol, IrType> {
     const bindings = new Map<ts.Symbol, IrType>();
     expr.typeArguments?.forEach((ta, i) => {
       const tp = info.typeParams[i];
       if (!tp) return;
-      const mapped = L.mapTypeOf(L.checker.getTypeFromTypeNode(ta));
-      if (mapped && mapped.kind !== "void") bindings.set(tp, mapped);
+      const taT = L.checker.getTypeFromTypeNode(ta);
+      const mapped = L.mapTypeOf(taT);
+      if (mapped && mapped.kind !== "void") {
+        bindings.set(tp, mapped);
+        tsBindings?.set(tp, taT);
+      }
     });
-    unifySignatureBindings(L, info, rsig, bindings);
-    bindDefaultTypeParams(L, info.typeParams, info.decl.typeParameters, bindings);
+    unifySignatureBindings(L, info, rsig, bindings, tsBindings);
+    bindDefaultTypeParams(L, info.typeParams, info.decl.typeParameters, bindings, tsBindings);
     return bindings;
   }
 
@@ -1100,12 +1173,17 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
    * an instance body's mapType consults. */
   export function bindDefaultTypeParams(L: Lowerer, typeParams: readonly ts.Symbol[],
     typeParamDecls: readonly ts.TypeParameterDeclaration[] | undefined,
-    bindings: Map<ts.Symbol, IrType>,): void {
+    bindings: Map<ts.Symbol, IrType>,
+    tsBindings?: Map<ts.Symbol, ts.Type>,): void {
     typeParamDecls?.forEach((tpDecl, i) => {
       const tp = typeParams[i];
       if (!tp || bindings.has(tp) || !tpDecl.defaultType) return;
-      const mapped = L.mapTypeOf(L.checker.getTypeFromTypeNode(tpDecl.defaultType));
-      if (mapped && mapped.kind !== "void") bindings.set(tp, mapped);
+      const defT = L.checker.getTypeFromTypeNode(tpDecl.defaultType);
+      const mapped = L.mapTypeOf(defT);
+      if (mapped && mapped.kind !== "void") {
+        bindings.set(tp, mapped);
+        tsBindings?.set(tp, defT);
+      }
     });
   }
 
@@ -1117,7 +1195,8 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
    * parameters (explicit type arguments) win. */
   export function unifySignatureBindings(L: Lowerer, info: GenericFnInfo,
     rsig: ts.Signature,
-    bindings: Map<ts.Symbol, IrType>,): void {
+    bindings: Map<ts.Symbol, IrType>,
+    tsBindings?: Map<ts.Symbol, ts.Type>,): void {
     const tpSet = new Set(info.typeParams);
 
     const seen = new Set<ts.Type>(); // recursive declared types must not loop
@@ -1134,9 +1213,21 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       if (depth > MAX_UNIFY_DEPTH) return;
       if (declared.flags & ts.TypeFlags.TypeParameter) {
         const sym: ts.Symbol | undefined = declared.getSymbol();
-        if (sym && tpSet.has(sym) && !bindings.has(sym)) {
-          const mapped = L.mapTypeOf(inst);
-          if (mapped && mapped.kind !== "void") bindings.set(sym, mapped);
+        if (sym && tpSet.has(sym)) {
+          // The checker type records even when an explicit type argument
+          // already bound the IrType: the raw type is the SAME binding
+          // pre-widening, and first-hit-wins keeps the two maps parallel.
+          // A generic body FORWARDING its own parameter (`pluck`'s
+          // `pick(it, key)` binds pick's K to pluck's K) resolves through
+          // the enclosing instantiation's ts bindings first — the literal
+          // carries through the chain.
+          if (tsBindings && !tsBindings.has(sym)) {
+            tsBindings.set(sym, L.typeParamTsResolver(inst) ?? inst);
+          }
+          if (!bindings.has(sym)) {
+            const mapped = L.mapTypeOf(inst);
+            if (mapped && mapped.kind !== "void") bindings.set(sym, mapped);
+          }
         }
         return;
       }
@@ -1256,6 +1347,13 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     L.typeParamBindings = clsBindings
       ? new Map([...clsBindings, ...inst.bindings])
       : inst.bindings;
+    // The ts-level bindings ride along: `T[K]` and literal-keyed `o[k]`
+    // reads inside the body resolve through the bound CHECKER types
+    // (typeParamTsResolver). Generic-class instantiations carry no
+    // ts-level bindings (their type arguments widened at the reference),
+    // so only the method instantiation's own map installs.
+    const prevTsBindings = L.typeParamTsBindings;
+    L.typeParamTsBindings = inst.tsBindings ?? null;
     // Implicit-any instances thread their param bindings through typeOf
     // (the checker reports `any` inside the body — there is no T for
     // mapType to substitute); see the implicit-monomorphization section.
@@ -1389,6 +1487,7 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       L.fnStack.pop();
       L.currentClass = prevClass;
       L.typeParamBindings = prevBindings;
+      L.typeParamTsBindings = prevTsBindings;
       L.implicitParamTypes = prevImplicit;
       L.instantiationContext = prevContext;
       L.suppressStats = prevSuppress;
@@ -6797,6 +6896,29 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     return null;
   }
 
+/** The CONTEXTUAL twin of bindingGenericFnNodeOf: `const g: Mapper = (x)
+   * => x` where `type Mapper = <T>(x: T) => T` — the initializer declares
+   * no type parameters of its own, but the ANNOTATION's one call signature
+   * does, and the checker types the arrow's parameters by those (`x: T`).
+   * Such a binding monomorphizes exactly like `const g = <T>(x: T) => x`;
+   * bindingGenericFnInfoOf reads the type parameters off the annotation's
+   * signature. Null when the shape doesn't match (a concrete annotation, a
+   * generic arrow — the syntactic probe's case, an overloaded alias). */
+  export function bindingContextualGenericFnNodeOf(L: Lowerer, decl: ts.VariableDeclaration): ts.FunctionExpression | ts.ArrowFunction | null {
+    if (!ts.isIdentifier(decl.name) || decl.initializer === undefined || decl.type === undefined) return null;
+    let init: ts.Expression = decl.initializer;
+    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    if (
+      !(ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ||
+      init.typeParameters !== undefined || init.body === undefined
+    ) {
+      return null;
+    }
+    const sigs = L.checker.getCallSignatures(L.typeOf(decl.name));
+    if (sigs.length !== 1 || sigs[0]!.getTypeParameters().length === 0) return null;
+    return init;
+  }
+
 /** The interned GenericFnInfo for one generic arrow/function-expression
    * binding initializer, with the supportability fences applied ONCE per
    * declaration: the binding must sit at module scope (the compiled
@@ -6844,10 +6966,25 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       );
     }
     const typeParams: ts.Symbol[] = [];
-    for (const tp of fnNode.typeParameters!) {
-      const tpSym = L.checker.getSymbolAtLocation(tp.name);
-      if (!tpSym) L.unsupported("SC1090", fnNode, "this function form");
-      typeParams.push(tpSym);
+    if (fnNode.typeParameters !== undefined) {
+      for (const tp of fnNode.typeParameters) {
+        const tpSym = L.checker.getSymbolAtLocation(tp.name);
+        if (!tpSym) L.unsupported("SC1090", fnNode, "this function form");
+        typeParams.push(tpSym);
+      }
+    } else {
+      // The CONTEXTUAL shape (bindingContextualGenericFnNodeOf): the type
+      // parameters live on the annotation's one call signature, and the
+      // checker types the initializer's parameters by them — the same
+      // symbols the instance bodies resolve through.
+      const sigs = L.checker.getCallSignatures(L.typeOf(decl.name));
+      const tps = sigs.length === 1 ? sigs[0]!.getTypeParameters() : [];
+      if (tps.length === 0) L.unsupported("SC1090", fnNode, "this function form");
+      for (const tp of tps) {
+        const tpSym: ts.Symbol | undefined = tp.getSymbol();
+        if (!tpSym) L.unsupported("SC1090", fnNode, "this function form");
+        typeParams.push(tpSym);
+      }
     }
     // Only NAME syntax is checkable here; optional/default/rest shapes are
     // computed per instantiation from the resolved signature — exactly
@@ -6872,6 +7009,51 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       if (inner) L.genericFnsBySymbol.set(inner, info);
     }
     return info;
+  }
+
+/** `const h = id` — a binding ALIASING a generic function (a top-level
+   * declaration, a registered generic binding, or another alias — resolved
+   * left to right in declaration order). The alias registers the SAME info
+   * under its own symbol, so calls (`h(3)`) and pinned values (`take(h)`)
+   * resolve exactly like the target's own name, and the binding itself has
+   * no runtime value (a generic function value cannot materialize). Claims
+   * only bindings whose OWN type still keeps type parameters — a
+   * concrete-annotated alias (`const h: (x: number) => number = id`) is a
+   * pinned VALUE, the existing lowerGenericFnValue story. Null when the
+   * shape doesn't match or the target isn't a registered generic; fences
+   * (reassignment, var redeclaration) report by name inside. */
+  export function bindingGenericFnAliasInfoOf(L: Lowerer, decl: ts.VariableDeclaration): GenericFnInfo | null {
+    if (!ts.isIdentifier(decl.name) || decl.initializer === undefined) return null;
+    let init: ts.Expression = decl.initializer;
+    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    if (!ts.isIdentifier(init)) return null;
+    const target = genericFnOf(L, init);
+    if (!target) return null;
+    // A concrete annotation pins one signature — that value story
+    // (lowerGenericFnValue at the reference) stays untouched.
+    const ownSigs = L.checker.getCallSignatures(L.typeOf(decl.name));
+    if (ownSigs.length === 0 || !ownSigs.every((s) => s.getTypeParameters().length > 0)) return null;
+    const sym = L.checker.getSymbolAtLocation(decl.name);
+    if (!sym) return null;
+    const existing = L.genericFnsBySymbol.get(sym);
+    if (existing) return existing;
+    const name = decl.name.text;
+    const isConst = (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0;
+    // The same holds-it-forever discipline as generic arrow bindings:
+    // calls through the alias resolve statically against the target, so
+    // nothing may ever rebind it (merged `var` redeclarations included).
+    const redeclared = L.checker
+      .declarationsOf(sym)
+      .some((d) => d !== decl && ts.isVariableDeclaration(d) && d.initializer !== undefined);
+    if (!isConst && (redeclared || !bindingNeverReassigned(L, sym, decl))) {
+      L.unsupported(
+        "SC1090",
+        decl.name,
+        `generic function values in reassigned bindings (calls of '${name}' resolve statically against this initializer, so the binding must provably hold it — a const, or a let/var nothing in its declaring file writes)`,
+      );
+    }
+    L.genericFnsBySymbol.set(sym, target);
+    return target;
   }
 
 /** Static resolution stands in for the receiver's runtime value, so an
@@ -6943,8 +7125,40 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     ) {
       return null;
     }
+    // An INTERFACE-typed receiver over a class instance (`const r: Repo =
+    // new MemRepo(); r.get(...)` — the declaration is signature-only, but
+    // the receiver's exact class is statically proven and the binding
+    // kept the class representation, genericIfaceBindingKeepsClass): the
+    // call is a class generic-method call on that exact class. The
+    // receiver must LOWER as the class — a record-held value (a `let`, a
+    // produced value, a parameter) has already dropped it, and keeps the
+    // named fence below.
+    {
+      const exact = exactInstanceClassOf(L, access.expression);
+      const gfound = exact ? findGenericMethodOn(L, exact, name) : null;
+      if (gfound && ts.isIdentifier(access.expression)) {
+        const recv = L.lowerExpr(access.expression); // identifier reads are pure — no double evaluation
+        if (recv.type.kind === "object") {
+          return lowerClassGenericMethodCall(L, call, access, exact!, gfound, recv);
+        }
+      }
+    }
     const found = objLitGenericFnNodeOf(L, propSym);
     if (!found) {
+      // Interface-declared generic methods dispatch statically, so the
+      // receiver's runtime class must be provable — name that discipline
+      // instead of the object-literal wording when the method lives on an
+      // interface.
+      const onInterface = L.checker
+        .declarationsOf(propSym)
+        .some((d) => d.parent !== undefined && ts.isInterfaceDeclaration(d.parent));
+      if (onInterface) {
+        L.unsupported(
+          "SC1090",
+          call,
+          `calls of the generic method '${name}' through this receiver (the interface declaration is signature-only and generic methods dispatch statically, so the receiver's runtime class must be provable — bind the receiver to a const initialized with its 'new' expression, e.g. 'const r: ${L.checker.typeToString(recvT)} = new C(...)')`,
+        );
+      }
       L.unsupported(
         "SC1090",
         call,

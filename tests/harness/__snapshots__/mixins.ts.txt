@@ -57,55 +57,37 @@ mixins.ts:35:13 - error SC2004: uses of 'a' inherit the blocker on its declarati
 
   hint: the declaration of 'a' did not compile — fix the diagnostic reported there and these sites clear with it
 
-mixins.ts:39:7 - error SC2005: values of type '<T extends Ctor<object>>(B: T) => { new (...args: any[]): (Anonymous class); prototype: M.(Anonymous class); } & T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+mixins.ts:41:20 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = M' — instantiate explicitly ('M<number>'), or call 'M' directly) is not supported yet
 
-  38 | // site, so nothing exists to store.
-  39 | const held = M;
-     |       ^~~~
-  40 | console.log(typeof held);
-
-  hint: annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly
-
-mixins.ts:39:14 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = M' — instantiate explicitly ('M<number>'), or call 'M' directly) is not supported yet
-
-  38 | // site, so nothing exists to store.
-  39 | const held = M;
-     |              ^
-  40 | console.log(typeof held);
-
-mixins.ts:40:20 - error SC2004: uses of 'held' inherit the blocker on its declaration
-
-  39 | const held = M;
-  40 | console.log(typeof held);
+  40 | const held = M;
+  41 | console.log(typeof held);
      |                    ^~~~
-  41 | 
+  42 | 
 
-  hint: the declaration of 'held' did not compile — fix the diagnostic reported there and these sites clear with it
+mixins.ts:48:17 - error SC1090: mixin constructors whose rest parameter does anything but forward (`super(...args)` as the first statement is the compiled shape) is not supported yet (instantiating mixin 'Sneaky' over 'Base')
 
-mixins.ts:47:17 - error SC1090: mixin constructors whose rest parameter does anything but forward (`super(...args)` as the first statement is the compiled shape) is not supported yet (instantiating mixin 'Sneaky' over 'Base')
-
-  46 |     argc: number;
-  47 |     constructor(...args: any[]) {
+  47 |     argc: number;
+  48 |     constructor(...args: any[]) {
      |                 ^~~~~~~~~~~~~~
-  48 |       super(...args);
+  49 |       super(...args);
 
-mixins.ts:55:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+mixins.ts:56:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
 
-  54 | class S extends Sneaky(Base) {}
-  55 | console.log(new S().argc);
+  55 | class S extends Sneaky(Base) {}
+  56 | console.log(new S().argc);
      |             ^~~~~~~
-  56 | 
+  57 | 
 
-mixins.ts:66:9 - error SC1090: extending computed expressions are not supported yet
+mixins.ts:67:9 - error SC1090: extending computed expressions are not supported yet
 
-  65 | }
-  66 | class L extends Leaky(Base) {}
+  66 | }
+  67 | class L extends Leaky(Base) {}
      |         ^~~~~~~~~~~~~~~~~~~
-  67 | console.log(new L().l);
+  68 | console.log(new L().l);
 
-mixins.ts:67:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+mixins.ts:68:13 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
 
-  66 | class L extends Leaky(Base) {}
-  67 | console.log(new L().l);
+  67 | class L extends Leaky(Base) {}
+  68 | console.log(new L().l);
      |             ^~~~~~~
-  68 | 
+  69 | 

@@ -40,14 +40,14 @@ generic-methods.ts:60:13 - error SC1090: reaching the object-literal generic met
      |             ^~~~~~~~~~~~~~~
   61 | rebindable = { m<T>(x: T): T { return x; } };
 
-generic-methods.ts:68:13 - error SC1090: calls of the generic method 'm' with no defining object literal (the declaration is signature-only — only methods declared with a body in an object literal monomorphize) is not supported yet
+generic-methods.ts:68:13 - error SC1090: calls of the generic method 'm' through this receiver (the interface declaration is signature-only and generic methods dispatch statically, so the receiver's runtime class must be provable — bind the receiver to a const initialized with its 'new' expression, e.g. 'const r: HasGeneric = new C(...)') is not supported yet
 
   67 | const viaInterface: HasGeneric = { m<T>(x: T): T { return x; } };
   68 | console.log(viaInterface.m(5));
      |             ^~~~~~~~~~~~~~~~~
   69 | 
 
-generic-methods.ts:78:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+generic-methods.ts:78:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
 
   77 | }
   78 | const bound = new Inst().g;
@@ -63,7 +63,7 @@ generic-methods.ts:78:15 - error SC1090: bound method references (call 'g' direc
      |               ^~~~~~~~~~~~
   79 | const util = { id<T>(x: T): T { return x; } };
 
-generic-methods.ts:80:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+generic-methods.ts:80:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
 
   79 | const util = { id<T>(x: T): T { return x; } };
   80 | const unpinned = util.id;
