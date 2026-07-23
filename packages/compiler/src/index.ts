@@ -1,10 +1,12 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { compileC, resolveCc, targetPlatform } from "./backend/cc.js";
+import { basename, dirname, join, resolve } from "node:path";
+import { compileC, compileCoreArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, iceDiag, isCheckerPanic, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
-import { moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib } from "./ir/nodes.js";
+import { checkerPanicDiag, coreAsyncExportDiag, coreAsyncSurfaceDiag, coreExportUnresolvedDiag, coreGenericExportDiag, coreUnmappableSignatureDiag, iceDiag, isCheckerPanic, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { loadCoreProfile, profileTeaching, type CoreProfile } from "./core/profile.js";
+import { entryFunctionExports, type EntryExportInfo } from "./frontend/core-exports.js";
+import { moduleCoreAsyncSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib, type IrCoreSection, type IrModule, type IrType } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { checkPreflight, isNodeTypesPath, loadProgram, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -148,6 +150,9 @@ interface Frontend {
   preflight: ScrDiagnostic[];
   /** The entry source file's text (emitModule's header comment input). */
   entryText: () => string;
+  /** Core mode's resolution input: the entry file's exported function
+   * declarations (call before dispose — it reads the ts7 AST). */
+  entryExports: () => Map<string, EntryExportInfo>;
   sourceTexts: () => Map<string, string>;
   lower: (opts: LowerOptions) => LowerResult;
   /** --npm-static: each requested (or auto-detected) package's outcome —
@@ -291,6 +296,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
   return {
     preflight,
     entryText: () => finalLoad.entry.text,
+    entryExports: () => entryFunctionExports(finalLoad.entry),
     sourceTexts: () =>
       new Map<string, string>([finalLoad.entry, ...finalLoad.moduleOrder].map((sf) => [sf.fileName, sf.text])),
     lower: (opts) => lowerToIr(finalLoad.program, finalLoad.entry, finalLoad.moduleOrder, { ...opts, startupCrash: finalLoad.startupCrash ?? null }),
@@ -530,5 +536,238 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     backend,
     ...(irPath !== undefined ? { irPath } : {}),
     ...(llvmRefusal !== undefined ? { llvmRefusal } : {}),
+  };
+}
+
+/* ── core (library) emission mode ────────────────────────────────────────
+ * `scriptc core --profile <file>`: compile the profile's ONE entry module
+ * to a linkable static archive (<name>.core.a) exporting exactly the
+ * profile-declared C-ABI symbols — no main, no event loop, no signal
+ * handlers, traps to the host's registered sink. The profile pins the
+ * emission; there is no fallback concept on this path (an out-of-tier
+ * program under emission "llvm" is SC3001, fail-loudly). */
+
+export interface CompileCoreOptions {
+  profilePath: string;
+  /** Where the archive and the kept program TU land. */
+  outDir: string;
+  /** Archive path. Default: <outDir>/<stem>.core.a. */
+  outPath?: string;
+  emitIr?: boolean;
+  sanitize?: boolean;
+}
+
+export type CompileCoreResult =
+  | { ok: true; archivePath: string; cPath: string; backend: "c" | "llvm"; irPath?: string }
+  | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
+
+/** The marshalling-class fit over IR types (design §4.2 + the ratified
+ * integer plumbing classes): number is every f64-backed class, bool/string
+ * map directly, bytes is the u8 element kind. */
+function coreClassFits(cls: string, t: IrType): boolean {
+  switch (cls) {
+    case "bool":
+      return t.kind === "bool";
+    case "string":
+      return t.kind === "string";
+    case "bytes":
+      return t.kind === "bytes" && t.elem === "u8";
+    default: // f64 and the u8/u32/i32 plumbing classes
+      return t.kind === "f64";
+  }
+}
+
+/** Resolve the profile's export map against the entry module — SC4002/
+ * SC4004/SC4007 from the declaration facts, SC4003 from the lowered IR
+ * signatures — and land the core section on the module. */
+function resolveCoreSection(
+  profile: CoreProfile,
+  entryInfo: Map<string, EntryExportInfo>,
+  mod: IrModule,
+  entryPath: string,
+): { core: IrCoreSection } | { diagnostics: ScrDiagnostic[] } {
+  const diagnostics: ScrDiagnostic[] = [];
+  const entryLoc = { file: entryPath, start: 0, end: 0 };
+  const fnByName = new Map(mod.functions.map((f) => [f.name, f]));
+  const exports: IrCoreSection["exports"] = [];
+  for (const e of profile.exports) {
+    const info = entryInfo.get(e.export);
+    if (info === undefined) {
+      diagnostics.push(
+        coreExportUnresolvedDiag(e.export, "the entry module has no exported function declaration by that name", entryLoc),
+      );
+      continue;
+    }
+    if (info.generic) {
+      diagnostics.push(coreGenericExportDiag(e.export, info.loc));
+      continue;
+    }
+    if (info.async || info.generator) {
+      diagnostics.push(
+        coreAsyncExportDiag(e.export, info.async ? "async" : "generator", info.loc, profileTeaching(profile, "SC4004")),
+      );
+      continue;
+    }
+    const fn = fnByName.get(e.export);
+    if (fn === undefined) {
+      diagnostics.push(
+        coreExportUnresolvedDiag(e.export, "the export did not lower to a compiled function", info.loc),
+      );
+      continue;
+    }
+    if (fn.params.length !== e.params.length) {
+      diagnostics.push(
+        coreUnmappableSignatureDiag(
+          e.export,
+          "signature",
+          `has ${fn.params.length} parameter(s) but the profile declares ${e.params.length} marshalling class(es)`,
+          info.loc,
+        ),
+      );
+      continue;
+    }
+    let bad = false;
+    e.params.forEach((cls, i) => {
+      if (!coreClassFits(cls, fn.params[i]!.type)) {
+        bad = true;
+        diagnostics.push(
+          coreUnmappableSignatureDiag(
+            e.export,
+            `parameter ${i + 1} ('${fn.params[i]!.name}')`,
+            `has IR type '${fn.params[i]!.type.kind}', which does not fit the declared marshalling class '${cls}'`,
+            info.loc,
+          ),
+        );
+      }
+    });
+    if (e.returns === "void" ? fn.returnType.kind !== "void" : !coreClassFits(e.returns, fn.returnType)) {
+      bad = true;
+      diagnostics.push(
+        coreUnmappableSignatureDiag(
+          e.export,
+          "the return",
+          `has IR type '${fn.returnType.kind}', which does not fit the declared marshalling class '${e.returns}'`,
+          info.loc,
+        ),
+      );
+    }
+    if (!bad) exports.push({ symbol: e.symbol, fnName: e.export, params: e.params, returns: e.returns });
+  }
+  if (diagnostics.length > 0) return { diagnostics };
+  return {
+    core: {
+      profileName: profile.name,
+      prefix: profile.prefix,
+      initSymbol: profile.initSymbol,
+      sinkRegisterSymbol: profile.sinkRegisterSymbol,
+      collectSymbol: profile.collectSymbol,
+      resultResetSymbol: profile.resultResetSymbol,
+      exports,
+    },
+  };
+}
+
+export async function compileCore(opts: CompileCoreOptions): Promise<CompileCoreResult> {
+  const loadedProfile = loadCoreProfile(resolve(opts.profilePath));
+  if (!loadedProfile.ok) {
+    return { ok: false, diagnostics: loadedProfile.diagnostics, sourceTexts: new Map() };
+  }
+  const profile = loadedProfile.profile;
+  const entryPath = profile.entry;
+
+  const fe = runFrontend(entryPath);
+  let lowered: LowerResult;
+  let entryText: string;
+  let sourceTexts: Map<string, string>;
+  let entryInfo: Map<string, EntryExportInfo>;
+  try {
+    const fail = (diagnostics: ScrDiagnostic[]): CompileCoreResult => ({
+      ok: false,
+      diagnostics,
+      sourceTexts: fe.sourceTexts(),
+    });
+    if (fe.preflight.length > 0) return fail(fe.preflight);
+    try {
+      lowered = fe.lower({
+        dynamic: false,
+        targetPlatform: buildTargetPlatform(),
+        // The profile-mapped exports are called from OUTSIDE the graph:
+        // they seed reachability beside the entry's top level (an
+        // executable build would dead-strip an uncalled export).
+        coreRoots: profile.exports.map((e) => e.export),
+      });
+    } catch (e) {
+      if (!isCheckerPanic(e)) throw e;
+      return fail([checkerPanicDiag(e.message.split("\n", 1)[0]!, { file: entryPath, start: 0, end: 0 })]);
+    }
+    if (lowered.module === null) return fail(lowered.diagnostics);
+    entryInfo = fe.entryExports();
+    entryText = fe.entryText();
+    sourceTexts = fe.sourceTexts();
+  } finally {
+    fe.dispose();
+  }
+  const mod = lowered.module!;
+
+  const fail = (diagnostics: ScrDiagnostic[]): CompileCoreResult => ({ ok: false, diagnostics, sourceTexts });
+
+  // The async_free requirement (ratified, SC4005): refused before anything
+  // is emitted, so the narrowed core link set below is structural fact.
+  const asyncSurface = moduleCoreAsyncSurface(mod);
+  if (asyncSurface !== null) {
+    return fail([coreAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc, profileTeaching(profile, "SC4005"))]);
+  }
+
+  const resolved = resolveCoreSection(profile, entryInfo, mod, entryPath);
+  if ("diagnostics" in resolved) return fail(resolved.diagnostics);
+  mod.core = resolved.core;
+
+  const validation = validateModule(mod);
+  if (validation.length > 0) return fail(validation.map((v) => iceDiag(v.message, v.loc)));
+
+  await mkdir(opts.outDir, { recursive: true });
+  const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
+  let cPath: string;
+  if (profile.emission === "llvm") {
+    try {
+      const ll = emitLlvmModule(mod);
+      cPath = join(opts.outDir, `${stem}.core.ll`);
+      await writeFile(cPath, ll);
+    } catch (err) {
+      if (!(err instanceof LlvmUnsupportedError)) throw err;
+      // The profile PINS the emission — fail-loudly, never a lane change.
+      return fail([llvmRefusalDiag(err, entryPath)]);
+    }
+  } else {
+    cPath = join(opts.outDir, `${stem}.core.c`);
+    await writeFile(cPath, emitModule(mod, entryText));
+  }
+  await rm(join(opts.outDir, `${stem}.core.${profile.emission === "llvm" ? "c" : "ll"}`), { force: true });
+
+  let irPath: string | undefined;
+  if (opts.emitIr) {
+    irPath = join(opts.outDir, `${stem}.core.ir.json`);
+    await writeFile(irPath, serializeModule(mod));
+  }
+
+  const archivePath = opts.outPath ?? join(opts.outDir, `${stem}.core.a`);
+  await compileCoreArchive({
+    cPath,
+    outPath: archivePath,
+    sanitize: opts.sanitize ?? false,
+    regex: moduleUsesRegex(mod),
+    assert: moduleUsesAssert(mod),
+    inspect: moduleUsesInspect(mod),
+    symbol: moduleUsesSymbol(mod),
+    searchParams: moduleUsesSearchParams(mod),
+    emitter: moduleUsesEmitter(mod),
+    zlib: moduleUsesZlib(mod),
+  });
+  return {
+    ok: true,
+    archivePath,
+    cPath,
+    backend: profile.emission,
+    ...(irPath !== undefined ? { irPath } : {}),
   };
 }

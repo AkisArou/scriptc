@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { analyze, compile, compileC, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
+import { analyze, compile, compileC, compileCore, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
 
 const USAGE = `scriptc — TypeScript/JavaScript to native executables (experimental)
 
@@ -12,6 +12,9 @@ Usage:
   scriptc run <file.ts|.js> [options]       compile and run
   scriptc coverage <file.ts|.js>            how much compiles statically, and why not
   scriptc coverage <file.ts|.js> --dynamic  what a --dynamic build compiles, and what still blocks it
+  scriptc core --profile <profile.json>     compile the profile's entry module to a
+                                            linkable static archive (<name>.core.a)
+                                            exporting the profile-declared C symbols
 
 Options:
   -o, --out <path>   output executable path (default: .scriptc/<name>)
@@ -76,6 +79,7 @@ async function main(): Promise<number> {
       dynamic: { type: "boolean", default: false },
       "npm-static": { type: "string", multiple: true },
       "provenance-sources": { type: "boolean", default: false },
+      profile: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: true,
@@ -88,8 +92,37 @@ async function main(): Promise<number> {
   }
 
   const [command, inputArg] = positionals;
-  if (command !== "build" && command !== "run" && command !== "coverage") {
+  if (command !== "build" && command !== "run" && command !== "coverage" && command !== "core") {
     fail(`unknown command "${command}"\n\n${USAGE}`);
+  }
+  if (command === "core") {
+    // The profile names the entry module and pins the emission; the
+    // executable lane's mode flags have no meaning here (core artifacts
+    // are static-tier only, and there is no fallback concept).
+    const profileArg = values.profile;
+    if (!profileArg) fail(`scriptc core needs --profile <profile.json>\n\n${USAGE}`);
+    if (values.dynamic || values.backend !== undefined || (values["npm-static"] ?? []).length > 0) {
+      fail("scriptc core takes no --dynamic/--backend/--npm-static: the profile pins the emission, and core artifacts are static-tier only");
+    }
+    const profilePath = resolve(profileArg);
+    const coreOutDir = values.out ? dirname(resolve(values.out)) : join(dirname(profilePath), ".scriptc");
+    const result = await compileCore({
+      profilePath,
+      outDir: coreOutDir,
+      ...(values.out ? { outPath: resolve(values.out) } : {}),
+      emitIr: values["emit-ir"],
+      sanitize: values.sanitize,
+    });
+    if (!result.ok) {
+      const color = process.stderr.isTTY ?? false;
+      process.stderr.write(renderAll(result.diagnostics, result.sourceTexts, { color }) + "\n");
+      const n = result.diagnostics.length;
+      process.stderr.write(`\n${n} error${n === 1 ? "" : "s"}.\n`);
+      return 1;
+    }
+    if (!values["keep-c"]) rmSync(result.cPath, { force: true });
+    process.stdout.write(`${result.archivePath}\n`);
+    return 0;
   }
   if (!inputArg) fail(`missing input file\n\n${USAGE}`);
   const input = resolve(inputArg);

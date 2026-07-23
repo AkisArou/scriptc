@@ -63,6 +63,7 @@
 import type {
   IrExpr,
   IrFunction,
+  IrGlobal,
   IrLocal,
   IrModule,
   IrRecordShape,
@@ -1125,6 +1126,28 @@ class LlEmitter {
       this.declare(`declare void @scr_loop_run()`);
       this.declare(`declare zeroext i1 @scr_report_unhandled_rejections()`);
     }
+    // CORE (library) mode: the runtime entry points the generated core
+    // symbols delegate to — declared before the extern block flushes.
+    if (this.mod.core !== undefined) {
+      this.declare(`declare void @scr_core_entry(i1 zeroext)`);
+      this.declare(`declare void @scr_core_reset()`);
+      this.declare(`declare void @scr_core_check_exc()`);
+      this.declare(`declare void @scr_core_set_sink(ptr, ptr)`);
+      this.declare(`declare void @scr_core_arena_reset()`);
+      this.declare(`declare void @scr_core_collect()`);
+      if (this.mod.core.exports.some((e) => e.params.includes("string"))) {
+        this.declare(`declare ptr @scr_core_str_in(ptr, i64)`);
+      }
+      if (this.mod.core.exports.some((e) => e.params.includes("bytes"))) {
+        this.declare(`declare ptr @scr_core_bytes_in(ptr, i64)`);
+      }
+      if (this.mod.core.exports.some((e) => e.returns === "string")) {
+        this.declare(`declare void @scr_core_str_out(ptr, ptr, ptr)`);
+      }
+      if (this.mod.core.exports.some((e) => e.returns === "bytes")) {
+        this.declare(`declare void @scr_core_bytes_out(ptr, ptr, ptr)`);
+      }
+    }
     // Helpers assemble BEFORE the declaration table flushes (they add
     // write/abort declarations).
     const helpers = this.helperDefs();
@@ -1293,12 +1316,19 @@ class LlEmitter {
       out.push(`declare void @scr_error_set_traced()`, ``);
       stamps.push(`  call void @scr_error_set_traced()`);
     }
-    if (entryMayThrow || runsLoop) {
+    if ((entryMayThrow || runsLoop) && this.mod.core === undefined) {
       // Declared inline: the extern block already flushed (LLVM is
       // order-free — the scr_error_set_traced precedent). Only the
       // printer emits here (nothing else declares it); scr_exc_pending
       // and the loop entry points rode the Set before the flush.
       out.push(`declare void @scr_exc_print_uncaught()`, ``);
+    }
+    if (this.mod.core !== undefined) {
+      // CORE (library) mode: no @main — the profile-declared external
+      // symbols instead, from the same IR facts the C emission consumes.
+      out.push(...this.emitCoreDefs(globals, globalReleaseLines, stamps));
+      out.push(`attributes #0 = { sanitize_address }`, ``);
+      return out.join("\n");
     }
     out.push(
       `define i32 @main(i32 %argc, ptr %argv) ${FN_ATTRS} {`,
@@ -1368,21 +1398,185 @@ class LlEmitter {
     return out.join("\n");
   }
 
+  /** CORE (library) mode: the profile-declared external definitions — the
+   * export-map wrappers plus init / sink-registration / reset / collect.
+   * Plain `define` (not `define internal`) — the exact linkage distinction
+   * that separates the executable lane's @main from everything else. The
+   * bodies delegate every runtime half to scr_core.c, mirroring the C
+   * emission line for line, so the two lanes are identical by
+   * construction. */
+  private emitCoreDefs(
+    globals: IrGlobal[],
+    globalReleaseLines: (prefix: string) => string[],
+    stamps: string[],
+  ): string[] {
+    const core = this.mod.core!;
+    const autoReset = core.resultResetSymbol === null;
+    const out: string[] = [``, `; ── core-mode entries (profile: ${core.profileName}) ──`, ``];
+    // The init entry: full deterministic reset-and-reevaluate. Program
+    // globals release and zero first (run-once guards included), then the
+    // runtime session reset, the error-vt interval stamps verbatim from
+    // the executable main, %main itself, and the escaped-exception check.
+    const zeroStores = globals.map((g) => {
+      const ty = this.llType(g.type);
+      const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
+      return `  store ${ty} ${zero}, ptr @${mangleGlobal(g.id)} ; ${g.name}`;
+    });
+    out.push(
+      `define void @${core.initSymbol}() ${FN_ATTRS} {`,
+      `entry:`,
+      `  call void @scr_core_entry(i1 zeroext true) ; init always resets the result arena`,
+      ...globalReleaseLines("ci"),
+      ...zeroStores,
+      `  call void @scr_core_reset()`,
+      ...stamps,
+      `  call void @${mangleFunction(this.mod.entry)}()`,
+      `  call void @scr_core_check_exc()`,
+      `  ret void`,
+      `}`,
+      ``,
+      `define void @${core.sinkRegisterSymbol}(ptr %fn, ptr %ctx) ${FN_ATTRS} {`,
+      `entry:`,
+      `  call void @scr_core_set_sink(ptr %fn, ptr %ctx)`,
+      `  ret void`,
+      `}`,
+      ``,
+    );
+    if (core.resultResetSymbol !== null) {
+      out.push(
+        `define void @${core.resultResetSymbol}() ${FN_ATTRS} {`,
+        `entry:`,
+        `  call void @scr_core_entry(i1 zeroext false)`,
+        `  call void @scr_core_arena_reset()`,
+        `  ret void`,
+        `}`,
+        ``,
+      );
+    }
+    if (core.collectSymbol !== null) {
+      out.push(
+        `define void @${core.collectSymbol}() ${FN_ATTRS} {`,
+        `entry:`,
+        `  call void @scr_core_entry(i1 zeroext false)`,
+        `  call void @scr_core_collect() ; arena reset + a full cycle collection`,
+        `  ret void`,
+        `}`,
+        ``,
+      );
+    }
+    for (const e of core.exports) {
+      const params: string[] = [];
+      const body: string[] = [`  call void @scr_core_entry(i1 zeroext ${autoReset ? "true" : "false"})`];
+      const args: string[] = [];
+      e.params.forEach((cls, i) => {
+        switch (cls) {
+          case "f64":
+            params.push(`double %a${i}`);
+            args.push(`double %a${i}`);
+            break;
+          case "bool":
+            params.push(`i8 %a${i}`);
+            body.push(`  %c${i} = icmp ne i8 %a${i}, 0`);
+            args.push(`i1 %c${i}`);
+            break;
+          case "u8":
+            params.push(`i8 %a${i}`);
+            body.push(`  %c${i} = uitofp i8 %a${i} to double`);
+            args.push(`double %c${i}`);
+            break;
+          case "u32":
+            params.push(`i32 %a${i}`);
+            body.push(`  %c${i} = uitofp i32 %a${i} to double`);
+            args.push(`double %c${i}`);
+            break;
+          case "i32":
+            params.push(`i32 %a${i}`);
+            body.push(`  %c${i} = sitofp i32 %a${i} to double`);
+            args.push(`double %c${i}`);
+            break;
+          case "string":
+            params.push(`ptr %a${i}_ptr`, `i64 %a${i}_len`);
+            body.push(`  %c${i} = call ptr @scr_core_str_in(ptr %a${i}_ptr, i64 %a${i}_len)`);
+            args.push(`ptr %c${i}`);
+            break;
+          case "bytes":
+            params.push(`ptr %a${i}_ptr`, `i64 %a${i}_len`);
+            body.push(`  %c${i} = call ptr @scr_core_bytes_in(ptr %a${i}_ptr, i64 %a${i}_len)`);
+            args.push(`ptr %c${i}`);
+            break;
+        }
+      });
+      if (e.returns === "string" || e.returns === "bytes") {
+        params.push(`ptr %out`, `ptr %out_len`);
+      }
+      const target = `@${mangleFunction(e.fnName)}`;
+      const callArgs = args.join(", ");
+      let retType = "void";
+      switch (e.returns) {
+        case "void":
+          body.push(`  call void ${target}(${callArgs})`, `  call void @scr_core_check_exc()`, `  ret void`);
+          break;
+        case "f64":
+          retType = "double";
+          body.push(
+            `  %r = call double ${target}(${callArgs})`,
+            `  call void @scr_core_check_exc()`,
+            `  ret double %r`,
+          );
+          break;
+        case "bool":
+          retType = "i8";
+          body.push(
+            `  %r = call i1 ${target}(${callArgs})`,
+            `  call void @scr_core_check_exc()`,
+            `  %z = zext i1 %r to i8`,
+            `  ret i8 %z`,
+          );
+          break;
+        case "string":
+          body.push(
+            `  %r = call ptr ${target}(${callArgs})`,
+            `  call void @scr_core_check_exc()`,
+            `  call void @scr_core_str_out(ptr %r, ptr %out, ptr %out_len)`,
+            `  ret void`,
+          );
+          break;
+        case "bytes":
+          body.push(
+            `  %r = call ptr ${target}(${callArgs})`,
+            `  call void @scr_core_check_exc()`,
+            `  call void @scr_core_bytes_out(ptr %r, ptr %out, ptr %out_len)`,
+            `  ret void`,
+          );
+          break;
+      }
+      out.push(
+        `define ${retType} @${e.symbol}(${params.join(", ")}) ${FN_ATTRS} { ; core export ${e.fnName}`,
+        `entry:`,
+        ...body,
+        `}`,
+        ``,
+      );
+    }
+    return out;
+  }
+
   /** The shared abort helpers (emitted only when referenced): the OOM
    * abort of untraced shape allocation and the invalid-union-tag abort —
    * both print the C emitter's exact message on fd 2 and abort. */
   private helperDefs(): string[] {
     const defs: string[] = [];
     const msgHelper = (fnName: string, msgSym: string, msg: string): void => {
+      // The message routes through the runtime's trap funnel: executable
+      // builds expand to the historical bytes-on-stderr + abort; core
+      // builds route to the registered panic sink (scr_runtime.h).
       const bytes = Buffer.byteLength(msg, "utf8");
-      this.declare(`declare i64 @write(i32, ptr, i64)`);
-      this.declare(`declare void @abort()`);
+      this.declare(`declare void @scr_trap(ptr)`);
       defs.push(
-        `@${msgSym} = internal constant [${bytes} x i8] c"${llStrBytes(msg).slice(0, -3)}"`,
+        `@${msgSym} = internal constant [${bytes + 1} x i8] c"${llStrBytes(msg)}"`,
         `define internal void @${fnName}() ${FN_ATTRS} {`,
         `entry:`,
-        `  %w = call i64 @write(i32 2, ptr @${msgSym}, i64 ${bytes})`,
-        `  call void @abort()`,
+        `  call void @scr_trap(ptr @${msgSym})`,
         `  unreachable`,
         `}`,
         ``,

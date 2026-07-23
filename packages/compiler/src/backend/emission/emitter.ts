@@ -644,6 +644,13 @@ export class CEmitter {
       out.push("", ...this.walkerProtos, "", ...this.walkerDefs);
     }
     out.push("", ...body);
+    if (this.mod.core !== undefined) {
+      // CORE (library) mode: no main(), no scr_init/scr_lib_init, no event
+      // loop — the profile-declared external symbols instead. Everything
+      // above is unchanged (still all internal linkage).
+      this.emitCoreEntries(out, globals);
+      return out.join("\n");
+    }
     const refGlobals = globals.filter((g) => isRefCounted(g.type));
     // Interned function-value closures are IMMORTAL (rc == SIZE_MAX), so
     // an own-property table Object.defineProperties hung on one would
@@ -811,6 +818,133 @@ export class CEmitter {
       ``,
     );
     return out.join("\n");
+  }
+
+  /* ── core (library) mode ──────────────────────────────────────────────
+   * The program TU's ONLY external-linkage definitions: the export-map
+   * wrappers plus the mode-provided init / sink-registration / reset /
+   * collect entries, all delegating their runtime halves to scr_core.c so
+   * both backends' emitted bodies are trivially identical. The init entry
+   * IS module-graph evaluation: full deterministic reset (program globals
+   * released and zeroed — run-once guards included — then the runtime's
+   * session reset), the error-vt interval stamps verbatim from today's
+   * main, then %main, then the escaped-exception check. */
+  emitCoreEntries(out: string[], globals: IrGlobal[]): void {
+    const core = this.mod.core!;
+    const autoReset = core.resultResetSymbol === null;
+    out.push(``, `/* ── core-mode entries (profile: ${core.profileName}) ── */`, ``);
+    // Session reset of PROGRAM state: release every refcounted global and
+    // zero everything (the run-once module guards included), putting the
+    // program back at the not-yet-evaluated state.
+    out.push(`static void sc_core_release_globals(void) {`);
+    for (const g of globals) {
+      const name = mangleGlobal(g.id);
+      if (isRefCounted(g.type)) {
+        out.push(`  ${releaseCallC(g.type, name)}; ${name} = NULL; /* ${g.name} */`);
+      } else if (g.type.kind === "bool") {
+        out.push(`  ${name} = false; /* ${g.name} */`);
+      } else {
+        out.push(`  ${name} = 0; /* ${g.name} */`);
+      }
+    }
+    if (globals.length === 0) out.push(`  /* no globals */`);
+    out.push(`}`, ``);
+
+    out.push(
+      `void ${core.initSymbol}(void) {`,
+      `  scr_core_entry(true); /* init always resets the result arena */`,
+      `  sc_core_release_globals();`,
+      `  scr_core_reset();`,
+      ...this.errorVtStampLines(),
+      ...emitterVtStampLines(this),
+      `  ${mangleFunction(this.mod.entry)}();`,
+      `  scr_core_check_exc();`,
+      `}`,
+      ``,
+      `void ${core.sinkRegisterSymbol}(void (*fn)(void *ctx, const uint8_t *msg, size_t msg_len, uint64_t address), void *ctx) {`,
+      `  scr_core_set_sink(fn, ctx);`,
+      `}`,
+      ``,
+    );
+    if (core.resultResetSymbol !== null) {
+      out.push(
+        `void ${core.resultResetSymbol}(void) {`,
+        `  scr_core_entry(false);`,
+        `  scr_core_arena_reset();`,
+        `}`,
+        ``,
+      );
+    }
+    if (core.collectSymbol !== null) {
+      out.push(
+        `void ${core.collectSymbol}(void) {`,
+        `  scr_core_entry(false);`,
+        `  scr_core_collect(); /* arena reset + a full cycle collection */`,
+        `}`,
+        ``,
+      );
+    }
+    for (const e of core.exports) {
+      const params: string[] = [];
+      const args: string[] = [];
+      e.params.forEach((cls, i) => {
+        switch (cls) {
+          case "f64":
+            params.push(`double a${i}`);
+            args.push(`a${i}`);
+            break;
+          case "bool":
+            params.push(`uint8_t a${i}`);
+            args.push(`(a${i} != 0)`);
+            break;
+          case "u8":
+            params.push(`uint8_t a${i}`);
+            args.push(`(double)a${i}`);
+            break;
+          case "u32":
+            params.push(`uint32_t a${i}`);
+            args.push(`(double)a${i}`);
+            break;
+          case "i32":
+            params.push(`int32_t a${i}`);
+            args.push(`(double)a${i}`);
+            break;
+          case "string":
+            params.push(`const uint8_t *a${i}_ptr`, `size_t a${i}_len`);
+            args.push(`scr_core_str_in(a${i}_ptr, a${i}_len)`);
+            break;
+          case "bytes":
+            params.push(`const uint8_t *a${i}_ptr`, `size_t a${i}_len`);
+            args.push(`scr_core_bytes_in(a${i}_ptr, a${i}_len)`);
+            break;
+        }
+      });
+      if (e.returns === "string" || e.returns === "bytes") {
+        params.push(`const uint8_t **out`, `size_t *out_len`);
+      }
+      const retType = e.returns === "f64" ? "double" : e.returns === "bool" ? "uint8_t" : "void";
+      const call = `${mangleFunction(e.fnName)}(${args.join(", ")})`;
+      out.push(`${retType} ${e.symbol}(${params.length > 0 ? params.join(", ") : "void"}) {`);
+      out.push(`  scr_core_entry(${autoReset ? "true" : "false"});`);
+      switch (e.returns) {
+        case "void":
+          out.push(`  ${call};`, `  scr_core_check_exc();`);
+          break;
+        case "f64":
+          out.push(`  double sc_r = ${call};`, `  scr_core_check_exc();`, `  return sc_r;`);
+          break;
+        case "bool":
+          out.push(`  bool sc_r = ${call};`, `  scr_core_check_exc();`, `  return (uint8_t)(sc_r ? 1 : 0);`);
+          break;
+        case "string":
+          out.push(`  ScrStr *sc_r = ${call};`, `  scr_core_check_exc();`, `  scr_core_str_out(sc_r, out, out_len);`);
+          break;
+        case "bytes":
+          out.push(`  ScrBytes *sc_r = ${call};`, `  scr_core_check_exc();`, `  scr_core_bytes_out(sc_r, out, out_len);`);
+          break;
+      }
+      out.push(`}`, ``);
+    }
   }
 
   emitAsyncScaffolding(out: string[]): void {

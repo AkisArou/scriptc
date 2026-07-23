@@ -691,6 +691,40 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
+  /** CORE (library) mode: the profile's resolved export map plus the
+   * mode-provided symbol names, landed ON the IR so both backends emit the
+   * external-linkage wrappers and entries from the same facts — the two
+   * emissions stay conformance-identical by construction. Absent on every
+   * executable build (the backends emit main() exactly as always). */
+  core?: IrCoreSection;
+}
+
+/** One export-map entry, resolved: the external ccc symbol, the IR
+ * function it wraps, and the marshalling class of each parameter and the
+ * return (already validated against the function's IR types — SC4003 ran
+ * before this landed on the module). */
+export interface IrCoreExport {
+  symbol: string;
+  /** IR function name (entry-file top-level, so unqualified). */
+  fnName: string;
+  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32")[];
+  returns: "f64" | "bool" | "string" | "bytes" | "void";
+}
+
+export interface IrCoreSection {
+  /** The profile's identity string (artifact header comments only). */
+  profileName: string;
+  /** Symbol-space hygiene: every external definition below carries it. */
+  prefix: string;
+  initSymbol: string;
+  sinkRegisterSymbol: string;
+  /** The mode-provided collect entry (cycle collector + arena reset), or
+   * null when the profile declares none. */
+  collectSymbol: string | null;
+  /** The declared result-arena reset entry; null selects the auto-reset
+   * posture (every entry prologue resets the arena). */
+  resultResetSymbol: string | null;
+  exports: IrCoreExport[];
 }
 
 export interface IrClassDef {

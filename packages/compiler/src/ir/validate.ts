@@ -998,6 +998,58 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     functionsByName.set(fn.name, fn);
   }
+  // The core section (library mode): every mapped function exists, is
+  // synchronous, and its IR signature fits the declared marshalling
+  // classes — the SC4xxx refusals ran before this landed on the module, so
+  // a violation here is a compiler bug like any other validation error.
+  if (mod.core !== undefined) {
+    const entryLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
+    for (const e of mod.core.exports) {
+      const fn = functionsByName.get(e.fnName);
+      if (!fn) {
+        errors.push({ message: `core export "${e.symbol}": missing function "${e.fnName}"`, loc: entryLoc });
+        continue;
+      }
+      if (fn.async === true || fn.generator !== undefined) {
+        errors.push({ message: `core export "${e.symbol}": "${e.fnName}" is async/generator`, loc: fn.loc });
+      }
+      if (fn.captures !== undefined) {
+        errors.push({ message: `core export "${e.symbol}": "${e.fnName}" captures an environment`, loc: fn.loc });
+      }
+      if (fn.params.length !== e.params.length) {
+        errors.push({
+          message: `core export "${e.symbol}": ${e.params.length} marshalling classes over ${fn.params.length} params`,
+          loc: fn.loc,
+        });
+        continue;
+      }
+      const fits = (cls: string, t: IrType): boolean =>
+        cls === "bool"
+          ? t.kind === "bool"
+          : cls === "string"
+            ? t.kind === "string"
+            : cls === "bytes"
+              ? t.kind === "bytes" && t.elem === "u8"
+              : t.kind === "f64"; // f64 + the integer plumbing classes
+      e.params.forEach((cls, i) => {
+        if (!fits(cls, fn.params[i]!.type)) {
+          errors.push({
+            message: `core export "${e.symbol}": param ${i} class "${cls}" over IR type "${fn.params[i]!.type.kind}"`,
+            loc: fn.loc,
+          });
+        }
+      });
+      if (e.returns === "void" ? fn.returnType.kind !== "void" : !fits(e.returns, fn.returnType)) {
+        errors.push({
+          message: `core export "${e.symbol}": return class "${e.returns}" over IR type "${fn.returnType.kind}"`,
+          loc: fn.loc,
+        });
+      }
+    }
+    if (!functionsByName.has(mod.entry)) {
+      errors.push({ message: `core module missing its entry function "${mod.entry}"`, loc: entryLoc });
+    }
+  }
   const classesByName = new Map<string, IrClassDef>();
   for (const cls of mod.classes ?? []) {
     if (classesByName.has(cls.name)) {

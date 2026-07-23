@@ -104,7 +104,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       }
     });
     d.push(
-      `  default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`,
+      `  default: scr_trap("scriptc: internal error: invalid union tag\\n");`,
       `  }`,
       `}`,
       ``,
@@ -155,7 +155,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       }
     });
     d.push(
-      `  default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`,
+      `  default: scr_trap("scriptc: internal error: invalid union tag\\n");`,
       `  }`,
       `}`,
       ``,
@@ -209,7 +209,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       }
     });
     d.push(
-      `  default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`,
+      `  default: scr_trap("scriptc: internal error: invalid union tag\\n");`,
       `  }`,
       `}`,
       ``,
@@ -664,7 +664,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             // record writer drops the field while it holds this tag before
             // calling — so the tag can never arrive here.
             d.push(`  case ${i}: /* undefined arm: the field dropped at the record level */`);
-            d.push(`    fputs("scriptc: internal error: stringify reached an undefined arm\\n", stderr); abort();`);
+            d.push(`    scr_trap("scriptc: internal error: stringify reached an undefined arm\\n");`);
             return;
           }
           const w = E.jsonWriteHelper(arm);
@@ -677,7 +677,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             d.push(`  case ${i}: ${w}(b, (${cType(arm).trim()})scr_union_peek(v)); break;`);
           }
         });
-        d.push(`  default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`);
+        d.push(`  default: scr_trap("scriptc: internal error: invalid union tag\\n");`);
         d.push(`  }`);
         break;
       }
@@ -1420,7 +1420,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             d.push(`  case ${i}: return ${E.toDynHelper(arm)}((${cType(arm).trim()})scr_union_peek(v));`);
           }
         });
-        d.push(`  default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`);
+        d.push(`  default: scr_trap("scriptc: internal error: invalid union tag\\n");`);
         d.push(`  }`);
         break;
       }
@@ -1759,8 +1759,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       // JS would answer undefined; T has no way to say it (the checker
       // claimed T without noUncheckedIndexedAccess) — trap like an array
       // OOB read instead of corrupting a typed slot (SEMANTICS.md).
-      d.push(`  fprintf(stderr, "scriptc: TypeError: record has no key '%.*s' (typed '${E.dynDesc(t)}' — no undefined is representable)\\n", (int)k->len, k->data);`);
-      d.push(`  abort();`);
+      d.push(`  scr_trap_fmt("scriptc: TypeError: record has no key '%.*s' (typed '${E.dynDesc(t)}' — no undefined is representable)\\n", (int)k->len, k->data);`);
     }
     d.push(`}`, ``);
     E.walkerDefs.push(...d);
