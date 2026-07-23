@@ -1,0 +1,8 @@
+create-require.ts:9:13 - error SC2020: 'module.createRequire' is part of the standard library types but has no scriptc lowering yet
+
+   8 | 
+   9 | const req = createRequire("/tmp/parent.js");
+     |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  10 | console.log(String(req("./config.cjs")));
+
+  hint: createRequire loads CommonJS from disk at RUNTIME (prettier's config/plugin loading) — a compiled program's modules are fixed at build time, so no lowering can exist; in JS sources the call defers to a runtime error naming this pattern

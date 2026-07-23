@@ -37,9 +37,16 @@ abstract class GenericAbstract {
 let AnimalAlias = Animal;
 class Aliased extends AnimalAlias {}
 
-// redeclaring an inherited field
-class Repeat extends Animal {
-  name: string = "b";
+// redeclaring an inherited field: the slot-type-exact WITH-initializer form
+// lowers (corpus 2428); the BARE form (type stripping leaves `name;`, which
+// Node [[Define]]s back to undefined) and the type-changing form keep fences
+class BareRepeat extends Animal {
+  // @ts-expect-error — tsc flags the overwrite (TS2612); the fence names Node's undefined reset
+  name!: string;
+}
+class RetypedRepeat extends Animal {
+  // @ts-expect-error — tsc rejects the incompatible redeclare too; the fence names the reason
+  name: number = 2;
 }
 
 // overrides must keep the exact signature (method bivariance is unsound
@@ -81,5 +88,6 @@ new Conditional(true);
 new Impl().usesLimit();
 const gaRef = GenericAbstract;
 new Aliased();
-new Repeat();
+new BareRepeat();
+new RetypedRepeat();
 new Bivariant();

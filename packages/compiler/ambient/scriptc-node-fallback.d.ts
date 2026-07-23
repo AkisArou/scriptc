@@ -733,6 +733,18 @@ declare module "perf_hooks" {
   export * from "node:perf_hooks";
 }
 
+/* node:module — the ADMIT-THEN-FENCE surface: the import compiles (the
+ * module carries no evaluation), and every member keeps a per-site fence.
+ * createRequire loads CommonJS from disk at runtime — a compiled
+ * program's modules are fixed at build time, so the call's fence defers
+ * to a runtime error in JS sources (prettier's require-from-file.js is
+ * reached only when a CJS config/plugin must load). Bare "module" stays a
+ * package specifier (an npm package by that name exists); only the node:
+ * spelling names the builtin. */
+declare module "node:module" {
+  export function createRequire(filename: string | URL): (id: string) => unknown;
+}
+
 /* The synchronous node:fs surface — utf8-only, no options objects, no
  * Buffers. Importing "node:fs" resolves here (preflight allowlists exactly
  * the ambient-declared node: modules); every function lowers to a `libCall`

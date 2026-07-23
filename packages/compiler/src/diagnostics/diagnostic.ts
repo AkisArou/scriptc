@@ -50,7 +50,7 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
       "util/types, string_decoder, readline, events, stream, buffer, " +
       "assert, assert/strict, worker_threads, cluster, tty, async_hooks, " +
       "timers, timers/promises, diagnostics_channel, perf_hooks, and " +
-      "node:test modules (bare or node:-prefixed) are supported",
+      "node:test and node:module modules (bare or node:-prefixed) are supported",
   },
   // SC1011 (exports) shipped via export modifiers — retired, do not reuse.
   // Default exports/imports SHIPPED (expression, function/class declaration

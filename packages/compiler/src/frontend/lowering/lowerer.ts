@@ -2963,7 +2963,7 @@ export class Lowerer {
    * lift, or null when the pair isn't width-coercible. Callers that must
    * validate a WHOLE plan before interning anything (the retag helper's
    * per-arm width lifts) probe with this. */
-  recordWidthPlan(fromId: string, toId: string): Map<string, { src: IrType; lift: WidthLift } | { absent: true; utag: number }> | null {
+  recordWidthPlan(fromId: string, toId: string): Map<string, { src: IrType; lift: WidthLift } | { absent: true; utag: number } | { absentDyn: true }> | null {
     const from = this.shapes.get(fromId);
     const to = this.shapes.get(toId);
     if (!from || !to || from.indexValue || to.indexValue) return null;
@@ -2976,17 +2976,25 @@ export class Lowerer {
     if (this.widthPlanning.has(key)) return new Map();
     this.widthPlanning.add(key);
     try {
-      type FieldLift = { src: IrType; lift: WidthLift } | { absent: true; utag: number };
+      type FieldLift = { src: IrType; lift: WidthLift } | { absent: true; utag: number } | { absentDyn: true };
       const plan = new Map<string, FieldLift>();
       for (const tf of to.fields) {
         const ff = from.fields.find((f) => f.name === tf.name);
         if (!ff) {
           // A target field MISSING on the source: legal exactly when it is
           // optional-flavored (an undefined-armed union) — the unset field
-          // IS the undefined arm, the same rule literal completion applies.
-          // Never for tuples: a completed position would change .length
-          // and JSON where Node keeps the source arity.
-          if (from.tuple || tf.type.kind !== "union") return null;
+          // IS the undefined arm, the same rule literal completion applies
+          // — or 'unknown' (a dyn slot holds the DOM undefined, exactly
+          // the absent-property read: prettier's `getFileInfo(file, {})`
+          // against `{ plugins: unknown, ... }`). Never for tuples: a
+          // completed position would change .length and JSON where Node
+          // keeps the source arity.
+          if (from.tuple) return null;
+          if (tf.type.kind === "dyn") {
+            plan.set(tf.name, { absentDyn: true });
+            continue;
+          }
+          if (tf.type.kind !== "union") return null;
           const def = this.unions.get(tf.type.unionId);
           const utag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
           if (utag < 0) return null;
@@ -3034,6 +3042,11 @@ export class Lowerer {
             kind: "recordLit",
             fields: to.fields.map((f) => {
               const lift = plan.get(f.name)!;
+              if ("absentDyn" in lift) {
+                // The unset 'unknown' field: the DOM undefined — exactly
+                // the absent-property read's answer.
+                return { name: f.name, value: dynUndefinedExpr(loc) };
+              }
               if ("absent" in lift) {
                 if (f.type.kind !== "union") throw new Error("lowerer bug: absent lift against a non-union field");
                 // The unset optional field: build the undefined arm.

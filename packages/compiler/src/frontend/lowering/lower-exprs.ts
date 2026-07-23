@@ -11,7 +11,7 @@ import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrJsOp, IrLocal, IrRe
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
-import { PoisonError, jsFuncNameOf, neverTaintedJsType, own } from "./lowerer.js";
+import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, own } from "./lowerer.js";
 import { IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead, strCharsCall } from "./lower-containers.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
 import { fenceEnumObjectValue, lowerEnumAccess } from "./lower-enums.js";
@@ -4503,8 +4503,12 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const provided = new Set(fields.filter((f) => !f.overflow).map((f) => f.name));
       for (const f of shape.fields) {
         if (provided.has(f.name)) continue;
-        const absent = L.wrappedUndefined(f.type, loc);
-        if (!absent) throw shapeMismatch(expr); // only optional (undefined-armed) fields may be omitted
+        // 'unknown' fields complete with the DOM undefined — the absent
+        // property reads as undefined in Node, and a dyn slot holds
+        // exactly that (prettier's `getFileInfo(file, {})` against
+        // `{ plugins: unknown, ... }` — a JS caller the checker admits).
+        const absent = L.wrappedUndefined(f.type, loc) ?? (f.type.kind === "dyn" ? dynUndefinedExpr(loc) : null);
+        if (!absent) throw shapeMismatch(expr); // only optional (undefined-armed) and 'unknown' fields may be omitted
         fields.push({ name: f.name, value: absent });
       }
     }

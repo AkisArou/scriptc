@@ -1284,6 +1284,73 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       }
       return;
     }
+    // A CLASS-INSTANCE source (`const { previous, next } = path` —
+    // prettier's AstPath idiom): the desugar IS JS's — one member read
+    // per element, left to right, at the element's pattern position:
+    // declared fields read their slots and accessor properties call
+    // their getters through the same fieldGetExpr dispatch as dotted
+    // reads (base-chain accessors and setter-only rejections resolve
+    // identically). Rest elements, methods, and names no class on the
+    // chain declares keep named fences (a detached method would lose its
+    // receiver silently; JS binds the prototype function).
+    if (srcType.kind === "object") {
+      const info = L.classes.get(srcType.className);
+      if (!info) L.flushDeferredClass(srcType.className);
+      if (info) {
+        for (const el of pattern.elements) {
+          if (el.name === undefined) continue;
+          const loc = locOf(el);
+          if (el.dotDotDotToken) {
+            L.unsupported(
+              "SC1031",
+              el,
+              "rest elements over class-instance sources (the remaining-properties object has no lowering yet)",
+            );
+          }
+          const prop = el.propertyName ?? el.name;
+          const propName = ts.isIdentifier(prop) || ts.isComputedPropertyName(prop) || ts.isStringLiteralLike(prop) || ts.isNumericLiteral(prop)
+            ? patternKeyNameOf(L, prop as ts.PropertyName)
+            : null;
+          if (propName === null) {
+            L.unsupported("SC1031", el, "destructuring with computed keys that do not fold to one property name");
+          }
+          const fieldType = info.fields.get(propName);
+          const getF = fieldType === undefined ? L.findMethodOn(info, `get:${propName}`) : null;
+          const setF = fieldType === undefined ? L.findMethodOn(info, `set:${propName}`) : null;
+          let value: IrExpr;
+          if (fieldType !== undefined) {
+            value = L.fieldGetExpr(
+              { container: "class", obj: srcRef(), className: srcType.className, field: propName, fieldType },
+              loc,
+              el,
+            );
+          } else if (getF || setF) {
+            value = L.fieldGetExpr(
+              {
+                container: "accessor",
+                obj: srcRef(),
+                className: srcType.className,
+                field: propName,
+                fieldType: getF ? getF.sig.ret : setF!.sig.params[0]!.type,
+              },
+              loc,
+              el,
+            );
+          } else {
+            L.unsupported(
+              "SC1031",
+              el,
+              L.findMethodOn(info, propName)
+                ? `destructuring the method '${propName}' (a detached method loses its receiver — call it through the instance)`
+                : `destructuring the property '${propName}' the class '${info.def.jsName ?? info.def.name}' does not declare`,
+            );
+          }
+          if (el.initializer) value = applyBindingDefault(L, el, value);
+          L.bindPatternTarget(el.name, value, isLet, out);
+        }
+        return;
+      }
+    }
     if (srcType.kind !== "record") {
       L.unsupported(
         "SC1031",

@@ -28,7 +28,7 @@ export interface ClassInfo {
   /** OWN fields only (declaration order) with their initializers: the
    * class's constructor runs exactly these — inherited fields initialize in
    * the base constructor, before/via super(). */
-  fieldOrder: { name: string; type: IrType; initializer: ts.Expression | undefined }[];
+  fieldOrder: { name: string; type: IrType; initializer: ts.Expression | undefined; /** Redeclared INHERITED field: the initializer assigns the base slot at this position; no new slot (def.fields excludes it). */ redeclared?: true }[];
   /** OWN declared methods only — inherited lookups walk the base chain
    * (findMethodOn). An `abstract` entry is a signature with no body (and
    * no module function): it declares the vtable slot; concrete subclasses
@@ -1297,7 +1297,30 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             L.unsupported("SC1090", member.name, "'unknown'-typed class fields");
           }
           if (fields.has(member.name.text)) {
-            L.unsupported("SC1090", member.name, "redeclaring inherited fields");
+            // REDECLARING an inherited field: Node [[Define]]s the OWN
+            // property again when THIS class's field initializers run
+            // (after super()), so the base slot simply takes the new
+            // value at that position — a slot-type-exact redeclare WITH
+            // an initializer lowers as an assignment into the inherited
+            // slot, no new slot, no layout change (prettier's `class
+            // ConfigError extends Error { name = "ConfigError" }`; the
+            // builtin Error prefix included — reads, toString, and throw
+            // reports all answer the overwritten name like Node). A BARE
+            // redeclare writes undefined in Node (`class B extends A
+            // { x; }` reads undefined!) and a type-changing redeclare has
+            // no single slot type — both keep the fence.
+            const baseType = fields.get(member.name.text)!;
+            if (member.initializer && typeEquals(type, baseType)) {
+              fieldOrder.push({ name: member.name.text, type, initializer: member.initializer, redeclared: true });
+              continue;
+            }
+            L.unsupported(
+              "SC1090",
+              member.name,
+              member.initializer
+                ? "redeclaring inherited fields at a different type"
+                : "redeclaring inherited fields without an initializer (Node resets the field to undefined)",
+            );
           }
           if (L.findMethodOn(base, member.name.text)) {
             L.unsupported("SC1090", member.name, "fields shadowing inherited methods");
@@ -1988,9 +2011,11 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           ...(base ? { base: base.def.name } : {}),
           // Layout order: the base chain's fields as an IDENTICAL prefix,
           // then this class's own — what makes an upcast a reinterpret.
+          // Redeclared INHERITED fields contribute no slot (their
+          // initializers assign the prefix slot).
           fields: [
             ...(base?.def.fields ?? []),
-            ...fieldOrder.map((f) => ({ name: f.name, type: f.type })),
+            ...fieldOrder.filter((f) => f.redeclared !== true).map((f) => ({ name: f.name, type: f.type })),
           ],
           ...(methods.size > 0 ? { methods: [...methods.keys()] } : {}),
           ...(abstractClass ? { abstract: true as const } : {}),
