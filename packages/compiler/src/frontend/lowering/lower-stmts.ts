@@ -2456,6 +2456,22 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // and .catch/.finally chains on the local bridge per use site (each
     // bridge is an independent observer of the same settlement).
     if (init.type.kind === "jsval" && type.kind === "promise") type = JSVAL;
+    // A STATIC array of island HANDLES under an unannotated declared type
+    // spelling evolved elements (`const kept = fns.filter(...)` over an
+    // evolving-`any` receiver — the handle-element lowering keeps the
+    // elements jsval, while tsc's evolving-array analysis types the
+    // result by the pushed elements): the value's element type is the
+    // truth, so the binding keeps the handle-element array (the
+    // island-HANDLE local story, one level down) and later method calls
+    // ride the handle-element lowering. Explicit annotations keep the
+    // validated-boundary fence.
+    if (
+      !decl.type &&
+      init.type.kind === "array" && init.type.elem.kind === "jsval" &&
+      type.kind === "array" && type.elem.kind !== "jsval"
+    ) {
+      type = init.type;
+    }
     // `const runner = options.runner || defaultRunner`: the checker types
     // the || as the union/merge of two structurally-compatible function
     // types — a signature whose RETURN is the arms' union, or the

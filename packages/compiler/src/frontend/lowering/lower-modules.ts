@@ -10,7 +10,7 @@ import { isNpmStaticPackage } from "../npm-static.js";
 import { isJsSourceFileName, isRelativeSpecifier } from "../shared.js";
 import { cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
 import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } from "../../diagnostics/diagnostic.js";
-import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
+import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, arrayOf, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, isPromisifyCall } from "./lower-builtins.js";
 import { bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
@@ -1233,6 +1233,24 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                   (uncheckedOverloadHandleCall(L, decl.initializer) ? JSVAL : null))
                 : null;
             let type = handleT ?? L.irTypeOf(nameNode);
+            // An evolving-`any` array's DERIVED file-scope binding under
+            // --dynamic (`const kept = fns.filter(...)` where `fns`
+            // registered array<jsval> at its `any[]` declaration): the
+            // receiver-type-preserving methods answer the receiver's
+            // handle-element array, while tsc's evolving-array analysis
+            // spells the pushed element type here — the value's element
+            // type is the truth, so the global slot takes the handle-
+            // element array (lowerVarDecl's adoption, the file-scope
+            // face). Annotated declarations keep the validated-boundary
+            // fence.
+            if (
+              L.dynamic && ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              decl.type === undefined && decl.initializer !== undefined &&
+              type.kind === "array" && type.elem.kind !== "jsval" &&
+              handleArrayPreservingCall(L, decl.initializer)
+            ) {
+              type = arrayOf(JSVAL);
+            }
             // A file-scope PATTERN over an ISLAND-bound source (`export
             // let { toString } = 1;` — the engine reads the wrapper's
             // prototype member): the bound value follows the island
@@ -1314,6 +1332,33 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         }
       }
     }
+  }
+
+/** True iff this initializer's VALUE is a jsval-element array from a
+   * module global already registered as one (the evolving-`any` binding
+   * under --dynamic): the global itself, or a receiver-TYPE-PRESERVING
+   * array-method call chain over it (filter/slice/splice/concat — each
+   * answers the receiver's own array type). Registration runs in source
+   * order, so the root's global — declared above, TDZ-guaranteed — is
+   * already in the table. */
+  function handleArrayPreservingCall(L: Lowerer, e: ts.Expression): boolean {
+    const PRESERVING = new Set(["filter", "slice", "splice", "concat"]);
+    let cur = e;
+    for (;;) {
+      while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+      if (
+        ts.isCallExpression(cur) && ts.isPropertyAccessExpression(cur.expression) &&
+        PRESERVING.has(cur.expression.name.text)
+      ) {
+        cur = cur.expression.expression;
+        continue;
+      }
+      break;
+    }
+    if (!ts.isIdentifier(cur)) return false;
+    const sym = L.checker.getSymbolAtLocation(cur);
+    const g = sym ? L.globalsBySymbol.get(sym) : undefined;
+    return g?.type.kind === "array" && g.type.elem.kind === "jsval";
   }
 
 /** Registers the entry-init note for a `var` module global: JS hoists

@@ -50,7 +50,7 @@ import { own, WidthLift } from "./lowerer.js";
     }
     if (receiverIr?.kind !== "array") return null;
     if (!probedUntyped && !L.isStdlibMember(access)) return null;
-    const elem = receiverIr.elem;
+    let elem = receiverIr.elem;
     const loc = locOf(call);
     // An island handle behind an array-typed .d.ts surface
     // (`parts().join("-")` — arrays never exit eagerly, so the value
@@ -95,6 +95,19 @@ import { own, WidthLift } from "./lowerer.js";
           call,
           "assign it to an array-typed binding first (the validated extraction), then call the method",
         );
+      }
+      // An evolving-`any` array binding under --dynamic whose flow type
+      // EVOLVED past `any[]` (`const fns = []; fns.push(() => 1);
+      // fns.map(...)` — the binding lowered array<jsval> at its `any[]`
+      // declaration, while tsc's evolving-array analysis answers the
+      // pushed element type at this site): the VALUE's element type is
+      // the truth — ride the explicit-`any[]` handle-element lowering
+      // (pushes marshal in, HOF callbacks bind the handle, results exit
+      // per the checker type), never a typed intrinsic over a jsval-
+      // element array (the validator ICE).
+      if (receiver.type.kind === "array" && receiver.type.elem.kind === "jsval" && !typeEquals(receiverIr, receiver.type)) {
+        receiverIr = receiver.type;
+        elem = receiver.type.elem;
       }
     }
     if (name === "sort") return lowerArraySortCall(L, call, access, elem, receiverIr);
@@ -241,6 +254,20 @@ import { own, WidthLift } from "./lowerer.js";
           args.push(arg);
           continue;
         }
+        // A handle-element receiver given an argument whose CHECKER type
+        // spells evolved elements while its VALUE is a jsval-element
+        // array (`fns.concat(tail)` — both sides of the evolving-`any`
+        // adoption): the value's array-ness decides, exactly JS's
+        // IsArray — spread it. Non-array values fall through to the
+        // element push (the jsvalIn coercion).
+        if (elem.kind === "jsval") {
+          const arg = L.lowerExpr(argNode);
+          if (arg.type.kind === "array" && arg.type.elem.kind === "jsval") {
+            shape.push("a");
+            args.push(arg);
+            continue;
+          }
+        }
         // An element value — union elements wrap exactly like a push.
         shape.push("e");
         args.push(L.lowerExprExpecting(argNode, elem));
@@ -360,6 +387,19 @@ import { own, WidthLift } from "./lowerer.js";
           overridden.push(p.name);
         }
       }
+    }
+    // A JSVAL-element receiver behind an EVOLVED contextual type (the
+    // evolving-`any` array under --dynamic — lowerArrayMethodCall adopted
+    // the value's handle element while tsc's evolving analysis types the
+    // callback's params by the pushed elements): the lead params BIND the
+    // handles the loop passes, whatever the contextual type spelled —
+    // paramShape's island-handle early-out, the then-handler rule.
+    if (ts.isArrowFunction(argNode) || ts.isFunctionExpression(argNode)) {
+      argNode.parameters.forEach((p, i) => {
+        if (i >= lead.length || lead[i]!.kind !== "jsval") return;
+        if (!ts.isIdentifier(p.name) || p.type || p.initializer || p.dotDotDotToken) return;
+        L.jsvalParamOverrides.add(p);
+      });
     }
     let fnArg: IrExpr;
     try {
