@@ -3992,6 +3992,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2386-string-to-chars.ts": {
+   "order": [
+    "<repo>/tests/corpus/2386-string-to-chars.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2387-tonumber-argv.ts": {
    "order": [
     "<repo>/tests/corpus/2387-tonumber-argv.ts"
@@ -4232,6 +4238,36 @@
   "<repo>/tests/corpus/2425-elseif-head-exit-narrow.ts": {
    "order": [
     "<repo>/tests/corpus/2425-elseif-head-exit-narrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2440-console-inspect-args.ts": {
+   "order": [
+    "<repo>/tests/corpus/2440-console-inspect-args.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2441-console-process-argv.ts": {
+   "order": [
+    "<repo>/tests/corpus/2441-console-process-argv.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2442-union-literal-arm-widening.ts": {
+   "order": [
+    "<repo>/tests/corpus/2442-union-literal-arm-widening.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2443-union-literal-shadow-narrowing.ts": {
+   "order": [
+    "<repo>/tests/corpus/2443-union-literal-shadow-narrowing.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2444-union-literal-reducer-spread.ts": {
+   "order": [
+    "<repo>/tests/corpus/2444-union-literal-reducer-spread.ts"
    ],
    "diags": []
   },
@@ -6030,63 +6066,11 @@
    "order": [
     "<repo>/tests/diagnostics/utility-types.ts"
    ],
-   "diags": [
-    {
-     "code": "SC0001",
-     "message": "Argument of type '{ [s: symbol]: string; }' is not assignable to parameter of type 'string | number | boolean'.",
-     "loc": {
-      "file": "<repo>/tests/diagnostics/utility-types.ts",
-      "start": 950,
-      "end": 958
-     }
-    }
-   ]
+   "diags": []
   },
   "<repo>/tests/diagnostics/var-fences.ts": {
    "order": [
     "<repo>/tests/diagnostics/var-fences.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/argv-env.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/argv-env.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/fenced.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/fenced.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/import-fences.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/import-fences.ts"
-   ],
-   "diags": [
-    {
-     "code": "SC1010",
-     "message": "the 'v8' module is not supported yet",
-     "loc": {
-      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
-      "start": 422,
-      "end": 461
-     },
-     "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, and node:test modules (bare or node:-prefixed) are supported"
-    }
-   ]
-  },
-  "<repo>/tests/fixtures/node-types/path-os.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/path-os.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/stream-capture.ts"
    ],
    "diags": []
   },
@@ -6433,6 +6417,48 @@
      "hint": "set \"strictNullChecks\": true (or \"strict\": true) in the project tsconfig"
     }
    ]
+  },
+  "<repo>/tests/fixtures/node-types/argv-env.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/argv-env.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/fenced.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/fenced.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/import-fences.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/import-fences.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC1010",
+     "message": "the 'v8' module is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
+      "start": 422,
+      "end": 461
+     },
+     "milestone": "M4",
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, and node:test modules (bare or node:-prefixed) are supported"
+    }
+   ]
+  },
+  "<repo>/tests/fixtures/node-types/path-os.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/path-os.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/stream-capture.ts"
+   ],
+   "diags": []
   }
  }
 }
