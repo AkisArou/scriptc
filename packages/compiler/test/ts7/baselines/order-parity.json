@@ -6284,45 +6284,43 @@
    ],
    "diags": []
   },
-  "<repo>/tests/fixtures/node-types/argv-env.ts": {
+  "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts": {
    "order": [
-    "<repo>/tests/fixtures/node-types/argv-env.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/fenced.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/fenced.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/import-fences.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/import-fences.ts"
+    "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts"
    ],
    "diags": [
     {
-     "code": "SC1010",
-     "message": "the 'v8' module is not supported yet",
+     "code": "SC0001",
+     "message": "Module '\"gtable\"' has no exported member 'chunkGhost'.",
      "loc": {
-      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
-      "start": 422,
-      "end": 461
-     },
-     "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+      "file": "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts",
+      "start": 506,
+      "end": 516
+     }
     }
    ]
   },
-  "<repo>/tests/fixtures/node-types/path-os.ts": {
+  "<repo>/tests/fixtures/npm/cases/2466-getter-star/main.ts": {
    "order": [
-    "<repo>/tests/fixtures/node-types/path-os.ts"
+    "<repo>/tests/fixtures/npm/cases/2466-getter-star/main.ts"
    ],
    "diags": []
   },
-  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
+  "<repo>/tests/fixtures/npm/cases/2467-star-barrel/main.ts": {
    "order": [
-    "<repo>/tests/fixtures/node-types/stream-capture.ts"
+    "<repo>/tests/fixtures/npm/cases/2467-star-barrel/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/2468-defineprop-exports/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/2468-defineprop-exports/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/2469-bundle-offender/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/2469-bundle-offender/main.ts"
    ],
    "diags": []
   },
@@ -6683,6 +6681,48 @@
      "hint": "set \"strictNullChecks\": true (or \"strict\": true) in the project tsconfig"
     }
    ]
+  },
+  "<repo>/tests/fixtures/node-types/argv-env.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/argv-env.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/fenced.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/fenced.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/import-fences.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/import-fences.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC1010",
+     "message": "the 'v8' module is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
+      "start": 422,
+      "end": 461
+     },
+     "milestone": "M4",
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+    }
+   ]
+  },
+  "<repo>/tests/fixtures/node-types/path-os.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/path-os.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/stream-capture.ts"
+   ],
+   "diags": []
   }
  }
 }
