@@ -23,11 +23,46 @@
  *     },
  *     "exports": [ { "export": "update", "symbol": "<prefix>_update",
  *                    "params": ["f64", "string"], "returns": "bytes" } ],
+ *     "sidecar": { ... },                      // ask-2 contract sidecar
+ *                                              // (see below); absent =
+ *                                              // no sidecar is emitted
  *     "determinism": { ... }                   // ask-5 surface, reserved;
  *                                              // only `teachings` is read
  *                                              // today (the SC4004/SC4005
  *                                              // teaching rider)
  *   }
+ *
+ * The `sidecar` section (ask 2): when present, the same invocation that
+ * emits the archive also emits the machine-readable contract sidecar
+ * (schema format 1) and the two profile-declared identity getters. The
+ * profile supplies the schema's echoed constants and designations:
+ *
+ *   "sidecar": {
+ *     "path": "app.contract.json",             // optional; resolved beside
+ *                                              // the archive; the neutral
+ *                                              // default when unstated is
+ *                                              // <out>.contract.json
+ *     "wire_version": 3,                       // echoed
+ *     "abi_version": 1,                        // echoed + getter-exported
+ *     "snapshot_format": 1,                    // echoed
+ *     "build_id_symbol": "<prefix>build_id",   // u64 identity getter
+ *     "abi_version_symbol": "<prefix>abi_version", // u32 identity getter
+ *     "model": "Model",                        // entry's exported root
+ *                                              // state type (interface)
+ *     "msg": "Msg",                            // entry's exported message
+ *                                              // union type (tagged alias)
+ *     "init_export": "init",                   // optional, default "init"
+ *     "update_export": "update",               // optional, default "update"
+ *     "subscriptions_export": "subscriptions", // optional, default
+ *     "source_hash": "module-graph"            // optional; the one v1
+ *                                              // hashing contract
+ *   }
+ *
+ * The COMPILATION ROOT for sidecar purposes is the profile file's
+ * directory: the sidecar's `entry` field and the build_id/source_hash
+ * canonical module paths are root-relative POSIX paths. The identity
+ * getters are pure data returns exempt from the poisoned guard and every
+ * runtime touch (ratified): callable before init and after a trap.
  *
  * Marshalling classes (design §4.2 + session ruling 3): f64, bool, string,
  * bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing classes
@@ -58,6 +93,36 @@ export interface LibraryExportEntry {
   returns: LibReturnClass;
 }
 
+/** The ask-2 contract-sidecar configuration: the profile-declared echo
+ * constants, identity-getter symbols, and contract designations. Presence
+ * of the section turns sidecar emission on for the invocation. */
+export interface LibrarySidecarConfig {
+  /** Sidecar file, resolved beside the archive; null selects the neutral
+   * default `<out>.contract.json`. */
+  path: string | null;
+  wireVersion: number;
+  abiVersion: number;
+  snapshotFormat: number;
+  /** The u64 build_id identity getter's C symbol. */
+  buildIdSymbol: string;
+  /** The u32 abi_version identity getter's C symbol. */
+  abiVersionSymbol: string;
+  /** The entry module's exported root state type (an interface). */
+  model: string;
+  /** The entry module's exported message union type (a tagged alias). */
+  msg: string;
+  /** The exported init/update/subscriptions function names the shape
+   * flags key on (and model_helpers excludes). */
+  initExport: string;
+  updateExport: string;
+  subscriptionsExport: string;
+  /** The profile-selected source-tree hashing contract. v1 implements
+   * exactly one: "module-graph" (wyhash-64, seed 0xc0de5eed, over the
+   * length-prefixed sorted module graph — canonical root-relative POSIX
+   * paths and exact source bytes). */
+  sourceHash: "module-graph";
+}
+
 export interface LibraryProfile {
   profileFormat: 1;
   name: string;
@@ -76,6 +141,13 @@ export interface LibraryProfile {
    * every entry prologue resets the result arena. */
   resultResetSymbol: string | null;
   exports: LibraryExportEntry[];
+  /** The ask-2 contract-sidecar section; null = the profile declares no
+   * sidecar and the invocation emits none. */
+  sidecar: LibrarySidecarConfig | null;
+  /** The profile file's exact bytes — build_id input 2 (the profile
+   * identity: two compiles under different profiles are different
+   * builds). */
+  profileBytes: Uint8Array;
   /** Profile-supplied teaching text appended to refusals (the ratified
    * SC4004/SC4005 rider): keyed by diagnostic code ("SC4005"), with
    * "async" accepted as the shared key for both async-surface codes. */
@@ -124,15 +196,15 @@ export function loadLibraryProfile(
     ok: false,
     diagnostics: [libProfileDiag(detail, profilePath)],
   });
-  let text: string;
+  let bytes: Uint8Array;
   try {
-    text = readFileSync(profilePath, "utf8");
+    bytes = readFileSync(profilePath);
   } catch (e) {
     return fail(`cannot read profile: ${(e as Error).message}`);
   }
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(new TextDecoder().decode(bytes));
   } catch (e) {
     return fail(`profile is not valid JSON (${(e as Error).message})`);
   }
@@ -200,6 +272,66 @@ export function loadLibraryProfile(
       entries.push({ export: exportName, symbol, params, returns: returns as LibReturnClass });
     });
 
+    // The ask-2 sidecar section: presence turns contract emission on.
+    // Unknown fields inside it are refused like abi's (a typo here would
+    // silently change the emitted contract).
+    let sidecar: LibrarySidecarConfig | null = null;
+    const sc = p["sidecar"];
+    if (sc !== undefined && sc !== null) {
+      if (typeof sc !== "object" || Array.isArray(sc)) throw new ProfileError("'sidecar' must be an object");
+      rejectUnknownKeys(sc, "sidecar", [
+        "path", "wire_version", "abi_version", "snapshot_format",
+        "build_id_symbol", "abi_version_symbol", "model", "msg",
+        "init_export", "update_export", "subscriptions_export", "source_hash",
+      ]);
+      const s = sc as Record<string, unknown>;
+      const intField = (key: string): number => {
+        const v = req<number>(s[key], `sidecar.${key}`, "number");
+        if (!Number.isInteger(v) || v < 0) {
+          throw new ProfileError(`'sidecar.${key}' must be a non-negative integer, got ${v}`);
+        }
+        return v;
+      };
+      const nameField = (key: string, fallback: string | null): string => {
+        if (s[key] === undefined && fallback !== null) return fallback;
+        const v = req<string>(s[key], `sidecar.${key}`, "string");
+        if (v === "") throw new ProfileError(`'sidecar.${key}' must be a non-empty name`);
+        return v;
+      };
+      let path: string | null = null;
+      if (s["path"] !== undefined && s["path"] !== null) {
+        const v = req<string>(s["path"], "sidecar.path", "string");
+        if (v === "") throw new ProfileError("'sidecar.path' must be a non-empty relative path");
+        if (isAbsolute(v)) {
+          throw new ProfileError("'sidecar.path' must be relative (the sidecar is written beside the archive)");
+        }
+        path = v;
+      }
+      const sourceHash = s["source_hash"] === undefined ? "module-graph" : req<string>(s["source_hash"], "sidecar.source_hash", "string");
+      if (sourceHash !== "module-graph") {
+        throw new ProfileError(
+          `'sidecar.source_hash' names an unknown hashing contract '${sourceHash}' (this scriptc implements "module-graph")`,
+        );
+      }
+      sidecar = {
+        path,
+        wireVersion: intField("wire_version"),
+        abiVersion: intField("abi_version"),
+        snapshotFormat: intField("snapshot_format"),
+        buildIdSymbol: symbolField(s["build_id_symbol"], "sidecar.build_id_symbol", prefix, false)!,
+        abiVersionSymbol: symbolField(s["abi_version_symbol"], "sidecar.abi_version_symbol", prefix, false)!,
+        model: nameField("model", null),
+        msg: nameField("msg", null),
+        initExport: nameField("init_export", "init"),
+        updateExport: nameField("update_export", "update"),
+        subscriptionsExport: nameField("subscriptions_export", "subscriptions"),
+        sourceHash: "module-graph",
+      };
+      if (sidecar.model === sidecar.msg) {
+        throw new ProfileError(`'sidecar.msg' must differ from 'sidecar.model' ('${sidecar.model}')`);
+      }
+    }
+
     // Pairwise-distinct symbols across the whole declared set (exports +
     // the mode-provided entries).
     const all = new Map<string, string>();
@@ -215,6 +347,10 @@ export function loadLibraryProfile(
     claim(sinkRegisterSymbol, "abi.sink_register_symbol");
     claim(collectSymbol, "abi.collect_symbol");
     claim(resultResetSymbol, "abi.result_reset_symbol");
+    if (sidecar !== null) {
+      claim(sidecar.buildIdSymbol, "sidecar.build_id_symbol");
+      claim(sidecar.abiVersionSymbol, "sidecar.abi_version_symbol");
+    }
     entries.forEach((e, i) => claim(e.symbol, `exports[${i}].symbol`));
     const exportNames = new Set<string>();
     entries.forEach((e, i) => {
@@ -251,6 +387,8 @@ export function loadLibraryProfile(
         collectSymbol,
         resultResetSymbol,
         exports: entries,
+        sidecar,
+        profileBytes: bytes,
         teachings,
       },
     };
