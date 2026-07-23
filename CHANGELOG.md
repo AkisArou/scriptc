@@ -8,8 +8,6 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
-The largest static-surface release yet, driven by compiling real programs end to end.
-
 ### Features
 
 - **`console.log` prints every inspectable shape**: arrays, records, Maps/Sets, class instances, `undefined`/`null`, Buffers, and unions — each non-scalar argument renders through the same machinery as `util.inspect`, matching Node's console semantics exactly (string union arms print raw, format-string first arguments keep `util.format` behavior).
@@ -31,15 +29,11 @@ The largest static-surface release yet, driven by compiling real programs end to
 
 ## 0.0.3
 
-The supported-surface manifest: the static tier, machine-readable.
-
 ### Features
 
 - **Surface manifest**: each release now ships a machine-readable `surface-manifest.json` — the language and stdlib surface the static tier compiles at that version, with stable per-entry ids so tooling can diff two releases mechanically. Every non-static entry carries the diagnostic code the compiler raises for it. Attached to the GitHub release and shipped inside `@scriptc/compiler` as `@scriptc/compiler/surface-manifest.json`; regenerate with `pnpm manifest`.
 
 ## 0.0.2
-
-Compiler fixes and static-surface growth driven by the first days of real-world use.
 
 ### Features
 
@@ -55,8 +49,6 @@ Compiler fixes and static-surface growth driven by the first days of real-world 
 - Import-cycle admission accepts declaration-only initialization windows whose calls resolve entirely to declaration files, widening the set of legal ESM cycles that compile statically.
 
 ## 0.0.1
-
-The first release: `scriptc` on npm, with `@scriptc/compiler` and `@scriptc/runtime` underneath it.
 
 ### Features
 
