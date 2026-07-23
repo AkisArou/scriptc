@@ -127,6 +127,13 @@ export interface CcOptions {
    * cross-compiles everywhere. sp-free binaries keep their exact link
    * line (scr_url.c never references the unit). */
   searchParams?: boolean;
+  /** The program uses the node:querystring surface (moduleUsesQs on the
+   * IR): compiles scr_qs.c into the binary — the searchParams gating
+   * precedent: pure data transforms (no loop hooks, no install),
+   * cross-compiles everywhere. qs-free binaries keep their exact link
+   * line (escape-only programs ride the always-linked component encoder
+   * and never flip this). */
+  qs?: boolean;
   /** The program uses the node:stream class surface (moduleUsesStream on
    * the IR): compiles scr_stream.c into the binary — always alongside
    * scr_events_emitter.c, which moduleUsesEmitter answers true for
@@ -957,6 +964,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(opts.emitter || net ? [rt(join(rtDir, "scr_dyn_handle.c"))] : []),
     ...(opts.symbol ? [rt(join(rtDir, "scr_symbol.c"))] : []),
     ...(opts.searchParams ? [rt(join(rtDir, "scr_url_params.c"))] : []),
+    ...(opts.qs ? [rt(join(rtDir, "scr_qs.c"))] : []),
     ...(opts.stream ? [rt(join(rtDir, "scr_stream.c"))] : []),
     // The readiness-poller backends (scr_platform.h): kqueue on macOS/BSD,
     // epoll on Linux, WSAPoll on Windows — each TU is empty off its

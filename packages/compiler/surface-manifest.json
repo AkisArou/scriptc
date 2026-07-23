@@ -1114,6 +1114,49 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.querystring",
+      "kind": "node-builtin",
+      "name": "querystring",
+      "status": "static",
+      "note": "recognized module (bare and node:-prefixed specifiers)"
+    },
+    {
+      "id": "node-builtin.querystring.decode",
+      "kind": "node-builtin",
+      "name": "querystring.decode",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.querystring.encode",
+      "kind": "node-builtin",
+      "name": "querystring.encode",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.querystring.escape",
+      "kind": "node-builtin",
+      "name": "querystring.escape",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.querystring.parse",
+      "kind": "node-builtin",
+      "name": "querystring.parse",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.querystring.stringify",
+      "kind": "node-builtin",
+      "name": "querystring.stringify",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.querystring.unescape",
+      "kind": "node-builtin",
+      "name": "querystring.unescape",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.readline",
       "kind": "node-builtin",
       "name": "readline",

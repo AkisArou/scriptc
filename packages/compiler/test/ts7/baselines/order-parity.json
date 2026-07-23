@@ -4363,6 +4363,36 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2460-qs-parse-grammar.ts": {
+   "order": [
+    "<repo>/tests/corpus/2460-qs-parse-grammar.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2461-qs-parse-options.ts": {
+   "order": [
+    "<repo>/tests/corpus/2461-qs-parse-options.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2462-qs-stringify.ts": {
+   "order": [
+    "<repo>/tests/corpus/2462-qs-stringify.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2463-qs-escape-unescape.ts": {
+   "order": [
+    "<repo>/tests/corpus/2463-qs-escape-unescape.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2464-qs-require-forms.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2464-qs-require-forms.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
