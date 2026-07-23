@@ -1,0 +1,670 @@
+/* The contract sidecar (ask 2) — conformance over the schema's RULES,
+ * never over any example's field lists. Both emissions run the same
+ * assertions (the reference/differential posture of the K suite):
+ *
+ *   - the anti-alphabetical fixture pins DECLARATION order end to end:
+ *     type names, record fields, enum members, union arms, msg arms, and
+ *     helper order all read from the AST (a sorter anywhere reorders
+ *     something here and the exact-order assertions catch it)
+ *   - identity: the probe reads the exported build_id/abi_version getters
+ *     BEFORE init and AFTER a poisoning trap (the ratified poisoned-guard
+ *     exemption) and the harness compares them against the sidecar (V12)
+ *   - determinism: two independent identical invocations produce
+ *     hash-equal sidecar bytes (V13)
+ *   - the V1–V14 validator passes the emitted documents and a
+ *     structurally-faithful format-1 conformance document, and catches a
+ *     targeted mutation per rule
+ *   - absent forms: the pre-ask-4/ask-5 sequencing emits integer_slots []
+ *     with every numeric slot f64, and the attestations are COMPUTED —
+ *     the clock-touching fixture attests deterministic: false
+ *   - SC4009: unprojectable designations refuse with the declaration
+ *     named, never guessed around
+ */
+import { createHash } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, test } from "vitest";
+import { compileLibrary, validateSidecar, wyhash64, type SidecarDoc } from "@scriptc/compiler";
+
+const repoRoot = join(import.meta.dirname, "../..");
+const fixtureRoot = join(repoRoot, "tests/library-mode");
+const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-contract");
+
+type Emission = "llvm" | "c";
+const EMISSIONS: Emission[] = ["llvm", "c"];
+
+const TOP_LEVEL_ORDER = [
+  "format", "wire_version", "abi_version", "compiler_version", "entry",
+  "source_hash", "build_id", "types", "model", "model_helpers",
+  "model_unbound", "msg", "init_returns_cmd", "update_returns_cmd",
+  "has_subscriptions", "channels", "abi", "integer_slots", "deterministic",
+  "async_free",
+];
+
+/** Build one contract fixture for one emission. The fixture is COPIED
+ * into the build dir so the compilation root (the profile's directory)
+ * contains the whole module graph — the sidecar's entry and hash inputs
+ * stay root-relative, absolute-path-free, and byte-reproducible across
+ * build directories. */
+async function buildContract(
+  fixture: string,
+  emission: Emission,
+  tag = "",
+): Promise<{ outDir: string; archive: string; sidecarPath: string; doc: SidecarDoc; bytes: Buffer }> {
+  const dir = join(fixtureRoot, fixture);
+  const outDir = join(cacheDir, `${fixture}-${emission}${tag}`);
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "lib.ts"), readFileSync(join(dir, "lib.ts")));
+  const profile = JSON.parse(readFileSync(join(dir, "profile.json"), "utf8")) as { emission: string };
+  profile.emission = emission;
+  writeFileSync(join(outDir, "profile.json"), JSON.stringify(profile, null, 2));
+  const result = await compileLibrary({ profilePath: join(outDir, "profile.json"), outDir });
+  if (!result.ok) {
+    throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+  }
+  expect(result.backend).toBe(emission);
+  expect(result.sidecarPath).toBeDefined();
+  const bytes = readFileSync(result.sidecarPath!);
+  return {
+    outDir,
+    archive: result.archivePath,
+    sidecarPath: result.sidecarPath!,
+    doc: JSON.parse(bytes.toString("utf8")) as SidecarDoc,
+    bytes: bytes as Buffer,
+  };
+}
+
+function nmDefined(archive: string, prefix: string): string[] {
+  const out = execFileSync("nm", ["-gU", archive], { encoding: "utf8" });
+  const set = new Set<string>();
+  for (const line of out.split("\n")) {
+    const sym = line.trim().split(/\s+/).pop();
+    if (sym === undefined || sym === "" || sym.endsWith(":")) continue;
+    const norm = sym.replace(/^_/, "");
+    if (norm.startsWith(prefix)) set.add(norm);
+  }
+  return [...set].sort();
+}
+
+describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
+  test("anti-alphabetical declaration order, schema shape, V11/V12 identity", async () => {
+    const { outDir, archive, doc, bytes } = await buildContract("contract", emission);
+
+    // The emitter's own self-check ran before writing; the test-side
+    // validator agrees the document conforms.
+    expect(validateSidecar(doc)).toEqual([]);
+
+    // §0 serialization: top-level keys in the §1 order, trailing newline,
+    // no BOM.
+    expect(Object.keys(doc)).toEqual(TOP_LEVEL_ORDER);
+    expect(bytes[0]).not.toBe(0xef);
+    expect(bytes[bytes.length - 1]).toBe(0x0a);
+
+    // The version/identity spine.
+    expect(doc.format).toBe(1);
+    expect(doc.wire_version).toBe(3);
+    expect(doc.abi_version).toBe(7);
+    expect(doc.compiler_version).toBe(
+      (JSON.parse(readFileSync(join(repoRoot, "packages/compiler/package.json"), "utf8")) as { version: string }).version,
+    );
+    expect(doc.entry).toBe("lib.ts");
+    expect(doc.source_hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(doc.build_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(doc.build_id).not.toBe(doc.source_hash);
+
+    // The type table: declaration order everywhere, exactly the reachable
+    // set, synthesized entries anchored at their containing declaration.
+    expect(doc.types.structs.map((s) => s.name)).toEqual(["Waypoint", "Shift", "Model", "Msg_blob_tag", "Msg_nudge"]);
+    expect(doc.types.enums.map((e) => e.name)).toEqual(["Zone"]);
+    expect(doc.types.unions.map((u) => u.name)).toEqual(["Route"]);
+    expect(doc.types.enums[0]!.members).toEqual(["west", "north", "east"]);
+    expect(doc.types.structs[0]!.fields).toEqual([
+      { name: "zone", type: { kind: "enum", name: "Zone" } },
+      { name: "note", type: { kind: "optional", inner: { kind: "bytes" } } },
+      { name: "label", type: { kind: "bytes" } },
+      { name: "id", type: { kind: "f64" } },
+    ]);
+    expect(doc.types.structs[2]!.fields.map((f) => f.name)).toEqual(["waypoints", "title", "speed", "route", "home", "active"]);
+    expect(doc.types.structs[2]!.fields[4]!.type).toEqual({ kind: "optional", inner: { kind: "node", name: "Waypoint" } });
+    expect(doc.types.structs[3]).toEqual({
+      name: "Msg_blob_tag",
+      synthesized: true,
+      fields: [
+        { name: "body", type: { kind: "bytes" } },
+        { name: "status", type: { kind: "f64" } },
+      ],
+    });
+    expect(doc.types.unions[0]!.arms).toEqual([
+      { name: "warp", payload: { kind: "node", name: "Waypoint" } },
+      { name: "step", payload: { kind: "value", name: "Shift" } },
+      { name: "idle", payload: { kind: "void" } },
+      { name: "annotate", payload: { kind: "bytes" } },
+    ]);
+
+    // The msg section: declaration-order arms (position IS the wire tag)
+    // over all five descriptor families; the bytes-first two-field record
+    // takes the record family (synthesized), never number_bytes.
+    expect(doc.msg.name).toBe("Msg");
+    expect(doc.msg.arms).toEqual([
+      { name: "zoom", payload: { kind: "number", class: "f64" } },
+      { name: "teleport", payload: { kind: "record", name: "Waypoint" } },
+      { name: "rename", payload: { kind: "bytes" } },
+      { name: "poll_done", payload: { kind: "number_bytes", number_field: "status", number_class: "f64", bytes_field: "body" } },
+      { name: "flip", payload: { kind: "scalar", type: { kind: "bool" } } },
+      { name: "route_set", payload: { kind: "union", name: "Route" } },
+      { name: "zone_set", payload: { kind: "enum", name: "Zone" } },
+      { name: "blob_tag", payload: { kind: "record", name: "Msg_blob_tag" } },
+      { name: "nudge", payload: { kind: "record", name: "Msg_nudge" } },
+      { name: "reset", payload: { kind: "void" } },
+      { name: "endpoint_set", payload: { kind: "bytes" } },
+      { name: "appearance", payload: { kind: "record", name: "Shift" } },
+    ]);
+    expect(doc.msg.unbound).toEqual(["poll_done", "endpoint_set"]);
+
+    // Helpers in declaration order (array index = ABI call index), with
+    // the arena bit derived from the return class.
+    expect(doc.model).toBe("Model");
+    expect(doc.model_helpers).toEqual([
+      { name: "waypointsOf", params: [], returns: { kind: "slice", elem: { kind: "node", name: "Waypoint" } }, arena: true },
+      { name: "headline", params: [], returns: { kind: "bytes" }, arena: true },
+      { name: "waypointCount", params: [], returns: { kind: "f64" }, arena: false },
+    ]);
+    // Helpers are bindable surface: the unbound list may name one.
+    expect(doc.model_unbound).toEqual(["title", "waypointCount"]);
+
+    // Shape flags and channels: command_msg answers export presence by
+    // suffix; the two host-constructed channels ride the exported consts.
+    expect(doc.init_returns_cmd).toBe(false);
+    expect(doc.update_returns_cmd).toBe(false);
+    expect(doc.has_subscriptions).toBe(false);
+    expect(doc.channels).toEqual({
+      command_msg: true,
+      frame_msg: false,
+      key_msg: false,
+      pinch_msg: false,
+      appearance_msg: "appearance",
+      chrome_msg: null,
+      env_msgs: [{ env: "APP_ENDPOINT", msg: "endpoint_set" }],
+    });
+
+    // The absent forms and the computed attestations.
+    expect(doc.integer_slots).toEqual([]);
+    expect(doc.deterministic).toBe(true);
+    expect(doc.async_free).toBe(true);
+
+    // V11 both directions: the archive's prefix-carrying definitions are
+    // exactly prefix + suffix over abi.exports — no extras, no misses.
+    expect(doc.abi).toEqual({
+      prefix: "kc_",
+      exports: ["abi_version", "build_id", "set_panic_sink", "init", "boot", "send", "command_msg", "title", "helper_probe", "boom"],
+      snapshot_format: 2,
+    });
+    expect(nmDefined(archive, "kc_")).toEqual(doc.abi.exports.map((s) => `kc_${s}`).sort());
+
+    // V12 + the poisoned-guard exemption, end to end: the probe reads the
+    // getters before init and after a trap; both reads equal the
+    // sidecar's build_id.
+    const probe = join(outDir, "probe");
+    execFileSync("clang", ["-std=c11", join(fixtureRoot, "contract/probe.c"), archive, "-lm", "-o", probe]);
+    const run = spawnSync(probe, [], { encoding: "utf8", timeout: 60_000 });
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(
+      `pre build_id: ${doc.build_id} abi 7
+contract ready
+title: atlas
+title2: atlas2
+headline: atlas2!
+counts: 2/2
+sink[1]: scriptc: RangeError: array index 9 out of bounds (length 3)
+survived, sink_calls=1
+post build_id: ${doc.build_id} abi 7
+identity stable: 1
+`,
+    );
+  });
+
+  test("V13: two independent identical invocations are hash-equal", async () => {
+    const a = await buildContract("contract", emission, "-det1");
+    const b = await buildContract("contract", emission, "-det2");
+    const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
+    expect(sha(a.bytes)).toBe(sha(b.bytes));
+  });
+
+  test("attestations and absent forms: tuple flags, subscriptions, a clock demotes deterministic", async () => {
+    const { doc, sidecarPath } = await buildContract("contract-attest", emission);
+    expect(validateSidecar(doc)).toEqual([]);
+    // The neutral default path when the profile states none.
+    expect(sidecarPath.endsWith(".lib.a.contract.json")).toBe(true);
+    expect(doc.init_returns_cmd).toBe(true);
+    expect(doc.update_returns_cmd).toBe(true);
+    expect(doc.has_subscriptions).toBe(true);
+    // Date.now() in the graph: computed, never defaulted (V14).
+    expect(doc.deterministic).toBe(false);
+    expect(doc.async_free).toBe(true);
+    // Absent conventions state themselves as empty/null, not omissions.
+    expect(doc.model_unbound).toEqual([]);
+    expect(doc.msg.unbound).toEqual([]);
+    expect(doc.model_helpers).toEqual([]);
+    expect(doc.channels.appearance_msg).toBeNull();
+    expect(doc.channels.chrome_msg).toBeNull();
+    expect(doc.channels.env_msgs).toEqual([]);
+    expect(doc.integer_slots).toEqual([]);
+  });
+});
+
+/* ── wyhash-64: the schema's one worked hashing definition ─────────────── */
+
+test("wyhash64 matches the published final_version_3 vectors", () => {
+  const enc = new TextEncoder();
+  const vectors: [string, bigint, string][] = [
+    ["", 0n, "42bc986dc5eec4d3"],
+    ["a", 1n, "84508dc903c31551"],
+    ["abc", 2n, "0bc54887cfc9ecb1"],
+    ["message digest", 3n, "6e2ff3298208a67c"],
+    ["abcdefghijklmnopqrstuvwxyz", 4n, "9a64e42e897195b9"],
+    ["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 5n, "9199383239c32554"],
+    ["12345678901234567890123456789012345678901234567890123456789012345678901234567890", 6n, "7c1ccf6bba30f5a5"],
+  ];
+  for (const [text, seed, want] of vectors) {
+    expect(wyhash64(enc.encode(text), seed).toString(16).padStart(16, "0")).toBe(want);
+  }
+});
+
+/* ── the validator over a full-vocabulary conformance document ──────────
+ * Structurally faithful to the schema's format-1 shape (all five
+ * descriptor families, i64 slots with the V10 bijection, node/value
+ * storage, an eleven-arm event union) with neutral identifiers. The
+ * assertions key on the RULES: each mutation violates exactly one rule
+ * and must be caught with that rule's tag. */
+
+function conformanceDoc(): Record<string, unknown> {
+  return {
+    format: 1,
+    wire_version: 3,
+    abi_version: 1,
+    compiler_version: "0.0.1",
+    entry: "src/lib.ts",
+    source_hash: "9f83c0de5eedc0de",
+    build_id: "b01dface00c0ffee",
+    types: {
+      structs: [
+        {
+          name: "ComposerDraft",
+          fields: [
+            { name: "bytes", type: { kind: "bytes" } },
+            { name: "anchor", type: { kind: "i64" } },
+            { name: "focus", type: { kind: "i64" } },
+          ],
+        },
+        {
+          name: "Turn",
+          fields: [
+            { name: "id", type: { kind: "i64" } },
+            { name: "role", type: { kind: "enum", name: "Role" } },
+            { name: "text", type: { kind: "bytes" } },
+          ],
+        },
+        {
+          name: "TurnRow",
+          fields: [
+            { name: "id", type: { kind: "i64" } },
+            { name: "user", type: { kind: "bool" } },
+            { name: "text", type: { kind: "bytes" } },
+          ],
+        },
+        {
+          name: "PanelState",
+          fields: [
+            { name: "offset", type: { kind: "f64" } },
+            { name: "velocity", type: { kind: "f64" } },
+          ],
+        },
+        {
+          name: "CaretMove",
+          fields: [
+            { name: "direction", type: { kind: "enum", name: "CaretDirection" } },
+            { name: "extend", type: { kind: "bool" } },
+          ],
+        },
+        {
+          name: "Selection",
+          fields: [
+            { name: "anchor", type: { kind: "i64" } },
+            { name: "focus", type: { kind: "i64" } },
+          ],
+        },
+        {
+          name: "Composition",
+          fields: [
+            { name: "text", type: { kind: "bytes" } },
+            { name: "cursor", type: { kind: "optional", inner: { kind: "i64" } } },
+          ],
+        },
+        {
+          name: "Model",
+          fields: [
+            { name: "turns", type: { kind: "slice", elem: { kind: "node", name: "Turn" } } },
+            { name: "nextId", type: { kind: "i64" } },
+            { name: "phase", type: { kind: "enum", name: "Phase" } },
+            { name: "draft", type: { kind: "node", name: "ComposerDraft" } },
+            { name: "endpoint", type: { kind: "bytes" } },
+            { name: "panelTop", type: { kind: "f64" } },
+          ],
+        },
+      ],
+      enums: [
+        { name: "Phase", members: ["idle", "sending", "failed"] },
+        { name: "Role", members: ["user", "assistant"] },
+        { name: "CaretDirection", members: ["previous", "next", "start", "end"] },
+      ],
+      unions: [
+        {
+          name: "EditEvent",
+          arms: [
+            { name: "insert_text", payload: { kind: "bytes" } },
+            { name: "delete_backward", payload: { kind: "void" } },
+            { name: "move_caret", payload: { kind: "value", name: "CaretMove" } },
+            { name: "set_selection", payload: { kind: "value", name: "Selection" } },
+            { name: "set_composition", payload: { kind: "value", name: "Composition" } },
+            { name: "commit_composition", payload: { kind: "void" } },
+          ],
+        },
+      ],
+    },
+    model: "Model",
+    model_helpers: [
+      { name: "sending", params: [], returns: { kind: "bool" }, arena: false },
+      { name: "draftText", params: [], returns: { kind: "bytes" }, arena: true },
+      { name: "turnRows", params: [], returns: { kind: "slice", elem: { kind: "node", name: "TurnRow" } }, arena: true },
+    ],
+    model_unbound: ["turns", "nextId", "phase", "draft", "endpoint"],
+    msg: {
+      name: "Msg",
+      arms: [
+        { name: "draft_edit", payload: { kind: "union", name: "EditEvent" } },
+        { name: "send", payload: { kind: "void" } },
+        { name: "chat_response", payload: { kind: "number_bytes", number_field: "status", number_class: "i64", bytes_field: "body" } },
+        { name: "chat_failed", payload: { kind: "bytes" } },
+        { name: "panel_moved", payload: { kind: "record", name: "PanelState" } },
+        { name: "phase_set", payload: { kind: "enum", name: "Phase" } },
+        { name: "endpoint_set", payload: { kind: "bytes" } },
+        { name: "muted", payload: { kind: "scalar", type: { kind: "bool" } } },
+      ],
+      unbound: ["chat_response", "chat_failed", "endpoint_set"],
+    },
+    init_returns_cmd: false,
+    update_returns_cmd: true,
+    has_subscriptions: false,
+    channels: {
+      command_msg: false,
+      frame_msg: false,
+      key_msg: false,
+      pinch_msg: false,
+      appearance_msg: null,
+      chrome_msg: "phase_set",
+      env_msgs: [{ env: "APP_CHAT_ENDPOINT", msg: "endpoint_set" }],
+    },
+    abi: {
+      prefix: "app_core_",
+      exports: ["abi_version", "build_id", "set_panic_sink", "init", "dispatch_void", "dispatch_bytes", "model_snapshot", "helper_call", "collect"],
+      snapshot_format: 1,
+    },
+    integer_slots: [
+      { slot: "ComposerDraft.anchor", class: "i64" },
+      { slot: "ComposerDraft.focus", class: "i64" },
+      { slot: "Turn.id", class: "i64" },
+      { slot: "TurnRow.id", class: "i64" },
+      { slot: "Selection.anchor", class: "i64" },
+      { slot: "Selection.focus", class: "i64" },
+      { slot: "Composition.cursor", class: "i64" },
+      { slot: "Model.nextId", class: "i64" },
+      { slot: "Msg.chat_response.status", class: "i64" },
+    ],
+    deterministic: true,
+    async_free: true,
+  };
+}
+
+describe("the V1-V14 validator", () => {
+  test("a conforming full-vocabulary document passes", () => {
+    expect(validateSidecar(conformanceDoc())).toEqual([]);
+  });
+
+  const expectViolation = (rule: string, mutate: (doc: Record<string, any>) => void): void => {
+    const doc = conformanceDoc() as Record<string, any>;
+    mutate(doc);
+    const violations = validateSidecar(doc);
+    expect(violations.length).toBeGreaterThan(0);
+    expect(violations.some((v) => v.startsWith(`${rule}:`)), violations.join("; ")).toBe(true);
+  };
+
+  test("V1: a missing required field refuses", () => {
+    expectViolation("V1", (d) => {
+      delete d["channels"];
+    });
+  });
+
+  test("V1: top-level key order is the schema's order", () => {
+    expectViolation("V1", (d) => {
+      const v = d["format"];
+      delete d["format"];
+      d["format"] = v; // same fields, format now last
+    });
+  });
+
+  test("V1: an unknown top-level field refuses (emitter-side posture)", () => {
+    expectViolation("V1", (d) => {
+      d["debug_info"] = {};
+    });
+  });
+
+  test("V2: hashes are exactly 16 lowercase hex digits", () => {
+    expectViolation("V2", (d) => {
+      d["build_id"] = "B01DFACE00C0FFEE";
+    });
+  });
+
+  test("V3: one namespace across the three arrays", () => {
+    expectViolation("V3", (d) => {
+      d["types"].enums.push({ name: "Model", members: ["x"] });
+    });
+  });
+
+  test("V3: duplicate field names within a struct", () => {
+    expectViolation("V3", (d) => {
+      d["types"].structs[0].fields.push({ name: "bytes", type: { kind: "bool" } });
+    });
+  });
+
+  test("V4: a dangling TypeRef refuses", () => {
+    expectViolation("V4", (d) => {
+      d["types"].structs[7].fields[0].type = { kind: "slice", elem: { kind: "node", name: "Ghost" } };
+    });
+  });
+
+  test("V4: an unreachable table entry refuses", () => {
+    expectViolation("V4", (d) => {
+      d["types"].structs.push({ name: "Orphan", fields: [{ name: "x", type: { kind: "f64" } }] });
+    });
+  });
+
+  test("V4: model must name a struct", () => {
+    expectViolation("V4", (d) => {
+      d["model"] = "Phase";
+    });
+  });
+
+  test("V5: a reference cycle refuses", () => {
+    expectViolation("V5", (d) => {
+      d["types"].structs[1].fields.push({ name: "parent", type: { kind: "node", name: "Model" } });
+    });
+  });
+
+  test("V6: more than 256 msg arms refuse", () => {
+    expectViolation("V6", (d) => {
+      for (let i = 0; i < 256; i++) d["msg"].arms.push({ name: `arm_${i}`, payload: { kind: "void" } });
+    });
+  });
+
+  test("V7: number_bytes needs distinct non-empty field names", () => {
+    expectViolation("V7", (d) => {
+      d["msg"].arms[2].payload.bytes_field = "status";
+    });
+  });
+
+  test("V7: scalar descriptors never carry a record TypeRef", () => {
+    expectViolation("V7", (d) => {
+      d["msg"].arms[7].payload = { kind: "scalar", type: { kind: "node", name: "PanelState" } };
+    });
+  });
+
+  test("V8: model_unbound entries are model fields or helper entries", () => {
+    expectViolation("V8", (d) => {
+      d["model_unbound"].push("nope");
+    });
+  });
+
+  test("V8: a helper name IS valid in model_unbound (bindable surface)", () => {
+    const doc = conformanceDoc() as Record<string, any>;
+    doc["model_unbound"].push("turnRows");
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+
+  test("V9: an env target must be a bytes arm", () => {
+    expectViolation("V9", (d) => {
+      d["channels"].env_msgs[0].msg = "send";
+    });
+  });
+
+  test("V9: a chrome/appearance arm must be of the named-type family", () => {
+    expectViolation("V9", (d) => {
+      d["channels"].chrome_msg = "chat_failed";
+    });
+  });
+
+  test("V9: a function channel true without the export suffix refuses", () => {
+    expectViolation("V9", (d) => {
+      d["channels"].frame_msg = true;
+    });
+  });
+
+  test("V10: an i64 spelling without its integer_slots entry refuses", () => {
+    expectViolation("V10", (d) => {
+      d["integer_slots"] = d["integer_slots"].filter((s: { slot: string }) => s.slot !== "Model.nextId");
+    });
+  });
+
+  test("V10: an integer_slots entry without its i64 spelling refuses", () => {
+    expectViolation("V10", (d) => {
+      d["integer_slots"].push({ slot: "Model.panelTop", class: "i64" });
+    });
+  });
+
+  test("V10: slice elements are exempt from the bijection", () => {
+    const doc = conformanceDoc() as Record<string, any>;
+    // An i64 slice element has no expressible slot path in format 1; the
+    // spelling alone must NOT demand an entry.
+    doc["model_helpers"].push({
+      name: "turnIds",
+      params: [],
+      returns: { kind: "slice", elem: { kind: "i64" } },
+      arena: true,
+    });
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+});
+
+/* ── SC4009: unprojectable designations refuse, never guess ────────────── */
+
+let refusalCounter = 0;
+async function sidecarRefusal(
+  source: string,
+  sidecarPatch: Record<string, unknown> = {},
+): Promise<{ code: string; message: string }[]> {
+  const outDir = join(cacheDir, `refusal-${refusalCounter++}`);
+  mkdirSync(outDir, { recursive: true });
+  const entry = join(outDir, "lib.ts");
+  writeFileSync(entry, source);
+  const profile = {
+    profile_format: 1,
+    name: "sidecar-refusal-fixture",
+    entry: "lib.ts",
+    emission: "c",
+    abi: {
+      prefix: "ks_",
+      init_symbol: "ks_init",
+      sink_register_symbol: "ks_set_panic_sink",
+      collect_symbol: null,
+      result_reset_symbol: null,
+    },
+    exports: [{ export: "boot", symbol: "ks_boot", params: [], returns: "f64" }],
+    sidecar: {
+      wire_version: 1,
+      abi_version: 1,
+      snapshot_format: 1,
+      build_id_symbol: "ks_build_id",
+      abi_version_symbol: "ks_abi_version",
+      model: "Model",
+      msg: "Msg",
+      ...sidecarPatch,
+    },
+  };
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile));
+  const result = await compileLibrary({ profilePath, outDir });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("unreachable");
+  return result.diagnostics.map((d) => ({ code: d.code, message: d.message }));
+}
+
+const REFUSAL_BASE = `export interface Model { count: number; }
+export type Msg = { kind: "tick" } | { kind: "set"; value: string };
+export function init(): Model { return { count: 0 }; }
+export function update(m: Model, msg: Msg): Model { return { count: m.count + 1 }; }
+let state = init();
+export function boot(): number { state = update(state, { kind: "tick" }); return state.count; }
+`;
+
+describe("SC4009: contract sidecar refusals", () => {
+  test("a model designation naming nothing refuses", async () => {
+    const diags = await sidecarRefusal(REFUSAL_BASE, { model: "Nope" });
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("'Nope'");
+  });
+
+  test("a msg designation that is not a tagged union refuses", async () => {
+    const diags = await sidecarRefusal(REFUSAL_BASE, { msg: "Model", model: "Msg" });
+    expect(diags[0]!.code).toBe("SC4009");
+  });
+
+  test("an inline union field refuses toward a named declaration", async () => {
+    const diags = await sidecarRefusal(
+      REFUSAL_BASE.replace("{ count: number; }", '{ count: number; mode: "a" | "b"; }').replace(
+        "return { count: 0 };",
+        'return { count: 0, mode: "a" };',
+      ).replace("return { count: m.count + 1 };", 'return { count: m.count + 1, mode: m.mode };'),
+    );
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("inline union");
+  });
+
+  test("a malformed convention const refuses", async () => {
+    const diags = await sidecarRefusal(REFUSAL_BASE + `export const envMsgs = ["nope"];\n`);
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("envMsgs");
+  });
+
+  test("an env channel targeting a non-bytes arm refuses", async () => {
+    const diags = await sidecarRefusal(REFUSAL_BASE + `export const envMsgs = [{ env: "APP_X", msg: "tick" }];\n`);
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("bytes");
+  });
+
+  test("a helper without a return annotation refuses", async () => {
+    const diags = await sidecarRefusal(REFUSAL_BASE + `export function peek(m: Model) { return m.count; }\n`);
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("peek");
+  });
+});
