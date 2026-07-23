@@ -3525,6 +3525,88 @@ function fenceClosureProbe(
   }
 }
 
+/** The union arm an object LITERAL inhabits when its fields must widen
+ * PER FIELD into exactly one record arm — the reducer-action pattern
+ * (`{ kind: "a", parsed: 1 }` into `{ kind: "a"; parsed: number | null }
+ * | { kind: "b" }`). The IR shapes erased the literal types tsc
+ * discriminated on, so the probe runs against the contextual union's
+ * CHECKER members: every literal field must exist on the member
+ * (excess-property freshness — tsc already enforced it), every arm field
+ * missing from the literal must be optional-flavored (an undefined-armed
+ * union, or a dyn slot — the absent-completion rule), and each present
+ * field's LITERAL type must fit the member's field type — literal against
+ * literal decides by VALUE (the discriminant), everything else by the
+ * widened IR pair under the width-lift relation. Exactly ONE fitting arm
+ * answers it; zero or several answer null and the caller keeps its
+ * fences. Plain property-assignment/shorthand literals only — spreads,
+ * accessors, methods, and unfoldable computed keys keep their own paths. */
+function literalUnionArmOf(
+  L: Lowerer,
+  expr: ts.ObjectLiteralExpression,
+  tsType: ts.Type,
+  recordArms: (IrType & { kind: "record" })[],
+): (IrType & { kind: "record" }) | null {
+  if (!tsType.isUnionType()) return null;
+  const props: { name: string; node: ts.Expression }[] = [];
+  for (const p of expr.properties) {
+    if (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name)) {
+      props.push({ name: propNameText(L, p.name), node: p.initializer });
+    } else if (ts.isShorthandPropertyAssignment(p) && ts.isIdentifier(p.name)) {
+      props.push({ name: p.name.text, node: p.name });
+    } else {
+      return null;
+    }
+  }
+  /** litT fits ftT: unions per arm; literal-vs-literal by value; unit
+   * types only into their own unit; otherwise the widened IR pair must be
+   * equal or width-liftable. */
+  const fits = (litT: ts.Type, ftT: ts.Type): boolean => {
+    if (ftT.isUnionType()) return ftT.getTypes().some((a) => fits(litT, a));
+    if (ftT.isStringLiteralType()) return litT.isStringLiteralType() && litT.value === ftT.value;
+    if (ftT.isNumberLiteralType()) return litT.isNumberLiteralType() && litT.value === ftT.value;
+    if (ftT.flags & ts.TypeFlags.BooleanLiteral) {
+      return (litT.flags & ts.TypeFlags.BooleanLiteral) !== 0 && L.checker.typeToString(litT) === L.checker.typeToString(ftT);
+    }
+    if (ftT.flags & ts.TypeFlags.Null) return (litT.flags & ts.TypeFlags.Null) !== 0;
+    if (ftT.flags & ts.TypeFlags.Undefined) return (litT.flags & ts.TypeFlags.Undefined) !== 0;
+    if (litT.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) return false;
+    const li = L.mapTypeOf(L.checker.getBaseTypeOfLiteralType(litT));
+    const fi = L.mapTypeOf(ftT);
+    if (!li || !fi) return false;
+    return typeEquals(li, fi) || L.widthLiftPlan(li, fi) !== null;
+  };
+  const armShapeIds = new Set(recordArms.map((a) => a.shapeId));
+  const candidates = new Set<string>();
+  for (const member of tsType.getTypes()) {
+    const mMapped = L.mapTypeOf(member);
+    if (mMapped?.kind !== "record" || !armShapeIds.has(mMapped.shapeId) || candidates.has(mMapped.shapeId)) continue;
+    const shape = L.shapes.get(mMapped.shapeId);
+    if (!shape || shape.tuple || shape.indexValue) continue;
+    // Excess-property freshness: every literal field must exist on the
+    // member (tsc rejected the others for a fresh literal).
+    if (!props.every((p) => L.checker.getPropertyOfType(member, p.name) !== undefined)) continue;
+    // Arm fields the literal leaves unset must be optional-flavored (the
+    // absent-completion rule: an undefined-armed union or a dyn slot).
+    const names = new Set(props.map((p) => p.name));
+    const absentOk = shape.fields.every((f) => {
+      if (names.has(f.name)) return true;
+      if (f.type.kind === "dyn") return true;
+      if (f.type.kind !== "union") return false;
+      return L.unions.get(f.type.unionId)?.arms.some((a) => a.kind === "undefinedT") ?? false;
+    });
+    if (!absentOk) continue;
+    const fieldsFit = props.every((p) => {
+      const sym = L.checker.getPropertyOfType(member, p.name);
+      if (!sym) return false;
+      return fits(L.typeOf(p.node), L.checker.getTypeOfSymbol(sym));
+    });
+    if (fieldsFit) candidates.add(mMapped.shapeId);
+  }
+  if (candidates.size !== 1) return null;
+  const [only] = candidates;
+  return recordArms.find((a) => a.shapeId === only) ?? null;
+}
+
 export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
     const loc = locOf(expr);
     // The RUNTIME-KEYED literal (JS): a computed key that doesn't fold to a
@@ -3721,6 +3803,24 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             !armShape?.tuple
           ) {
             mapped = recordArms[0]!;
+          }
+        } else if (recordArms.length > 1) {
+          const ownShapeId = mapped?.kind === "record" ? mapped.shapeId : null;
+          // SEVERAL record arms (the reducer-action / discriminated-message
+          // pattern): the literal's own inferred shape re-tags into no arm
+          // — its field types widened per field (`parsed: 1` against
+          // `parsed: number | null`), so the IR-level candidate probe is
+          // ambiguous (a narrower arm also admits the literal by dropping
+          // fields). The LITERAL types tsc checked carry the discriminant
+          // the shapes erased: match the literal's fields against each
+          // union member's CHECKER types (literal-vs-literal field pairs
+          // decide by value — the `kind: "a"` discriminant), and when
+          // exactly ONE member fits, build AS that arm — its field types
+          // drive every property's coercion, exactly the single-record-arm
+          // rule above. Ambiguous literals keep the SC2003 fence.
+          if (ownShapeId === null || !recordArms.some((a) => a.shapeId === ownShapeId)) {
+            const arm = literalUnionArmOf(L, expr, tsType, recordArms);
+            if (arm) mapped = arm;
           }
         }
       }
