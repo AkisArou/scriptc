@@ -9,4 +9,5 @@ const bad = 1 && "mixed";
 while (true) {
   break;
 }
-console.log(1 == 1);
+const anyone: unknown = 1;
+console.log(anyone == 1);
