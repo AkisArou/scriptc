@@ -7,7 +7,7 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, DYN, F64, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { MAX_GENERIC_INSTANCES, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
-import { typeKey } from "../types.js";
+import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { cjsClassExprWholeExportOf, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeTypesPath, locOf } from "../program.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 import { bufEncoding, lowerMapSeedArrayNew } from "./lower-containers.js";
@@ -1072,26 +1072,37 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       // `member.cls` backlink fills after the ClassInfo assembles below.
       const genericMethods = new Map<string, GenericFnInfo>();
       const genericStatics = new Map<string, GenericFnInfo>();
-      const collectGenericMember = (member: ts.MethodDeclaration, isStatic: boolean): void => {
+      // Accepts generic METHODS and instance FIELDS initialized with a
+      // generic arrow/function expression (`time = async <T>(...) => {...}`
+      // — the field form of a generic method: no closure slot can hold a
+      // generic function, so the member collects aside like a method and
+      // calls dispatch statically per instantiation; the arrow's lexical
+      // `this` IS the instance, exactly the method's param 0). ASYNC
+      // members collect too: a generic async instance is an async
+      // IrFunction like any other (lowerGenericInstance), calls enter
+      // through the instance's own spawn wrapper, and no vtable slot is
+      // ever involved — generic members always dispatch statically.
+      const collectGenericMember = (member: ts.MethodDeclaration | ts.PropertyDeclaration, isStatic: boolean): void => {
+        const fnNode: ts.MethodDeclaration | ts.ArrowFunction | ts.FunctionExpression =
+          ts.isPropertyDeclaration(member)
+            ? (genericFieldFnNodeOf(member) as ts.ArrowFunction | ts.FunctionExpression)
+            : member;
         if (!ts.isIdentifier(member.name)) {
           L.unsupported("SC1090", member, "computed generic method names");
         }
-        if (member.asteriskToken) L.unsupported("SC1071", member);
-        if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
-          L.unsupported("SC1090", member, "async methods");
-        }
+        if (fnNode.asteriskToken) L.unsupported("SC1071", member);
         const mName = (member.name as ts.Identifier).text;
         const typeParams: ts.Symbol[] = [];
-        for (const tp of member.typeParameters!) {
+        for (const tp of fnNode.typeParameters!) {
           const sym = L.checker.getSymbolAtLocation(tp.name);
           if (!sym) L.unsupported("SC1090", member, "this method form");
           typeParams.push(sym);
         }
-        for (const param of member.parameters) {
+        for (const param of fnNode.parameters) {
           if (!ts.isIdentifier(param.name)) L.unsupported("SC1031", param);
         }
         (isStatic ? genericStatics : genericMethods).set(mName, {
-          decl: member,
+          decl: fnNode,
           baseName: mName,
           qualifiedName: `%${className}.${isStatic ? "static:" : ""}${mName}`,
           typeParams,
@@ -1177,14 +1188,15 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             staticMethods.set(member.name.text, { params: shapes, ret: ft.ret, member });
           }
           // GENERIC static methods monomorphize like top-level generic
-          // functions (`%C.static:m%n`); async ones keep the async-method
-          // use-site fence below.
+          // functions (`%C.static:m%n`), async ones included — a generic
+          // async instance is an async module function entered through its
+          // own spawn wrapper (the async-static precedent above, per
+          // instantiation).
           if (
             ts.isMethodDeclaration(member) &&
             ts.isIdentifier(member.name) &&
             member.body &&
-            member.typeParameters !== undefined &&
-            !member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+            member.typeParameters !== undefined
           ) {
             collectGenericMember(member, true);
           }
@@ -1283,6 +1295,49 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             L.unsupported("SC1090", member, "auto-accessor fields ('accessor x')");
           }
           if (!ts.isIdentifier(member.name)) L.unsupported("SC1090", member, "computed field names");
+          // A field initialized with a GENERIC arrow/function expression
+          // (`time = async <T>(label, fn) => {...}` — the Output.time
+          // idiom): a generic MEMBER, not a field. No closure slot can
+          // hold a generic function (the record-shape exclusion rule), so
+          // the member collects like a generic method — no field slot,
+          // static per-instantiation dispatch, `this` as param 0 (the
+          // arrow's lexical `this` IS the instance). Reads of the field as
+          // a VALUE and writes to it fence at their sites — there is no
+          // slot — which enforces never-reassigned by construction.
+          // Guarded on the member TYPE still carrying its type parameters:
+          // an annotation that pins a concrete signature makes an ordinary
+          // closure field, which the normal path below owns.
+          if (
+            genericFieldFnNodeOf(member) !== null &&
+            isGenericCallableMemberType(L.typeOf(member.name), L.checker)
+          ) {
+            if (fields.has(member.name.text)) {
+              L.unsupported("SC1090", member.name, "redeclaring inherited fields");
+            }
+            if (L.findMethodOn(base, member.name.text)) {
+              L.unsupported("SC1090", member.name, "fields shadowing inherited methods");
+            }
+            if (findGenericMethodOn(L, base, member.name.text)) {
+              L.unsupported(
+                "SC1090",
+                member.name,
+                `redeclaring the inherited generic member '${member.name.text}' (generic members dispatch statically, so the base's call sites could never reach this redeclaration)`,
+              );
+            }
+            collectGenericMember(member, false);
+            continue;
+          }
+          // Non-generic fields shadowing an inherited GENERIC member split
+          // the two dispatch worlds (static per-instantiation calls would
+          // never see the field's value) — the method-vs-generic mixing
+          // fence, field form.
+          if (findGenericMethodOn(L, base, member.name.text)) {
+            L.unsupported(
+              "SC1090",
+              member.name,
+              `fields shadowing the inherited generic member '${member.name.text}' (generic members dispatch statically and would never reach this field's value)`,
+            );
+          }
           // OPTIONAL fields (`a?: string`) are the record-field precedent
           // applied to class shapes: the checker already types the slot
           // `string | undefined`, the allocation writes the interned
@@ -5242,3 +5297,20 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       loc,
     };
   }
+
+/** The generic function-like INITIALIZER behind a class FIELD —
+ * `time = async <T>(...) => {...}` or `= function g<T>(...) {...}`
+ * (parens stripped): bindingGenericFnNodeOf's shape rule, member form.
+ * Null when the field isn't that shape. */
+export function genericFieldFnNodeOf(member: ts.PropertyDeclaration): ts.FunctionExpression | ts.ArrowFunction | null {
+  if (member.initializer === undefined) return null;
+  let init: ts.Expression = member.initializer;
+  while (ts.isParenthesizedExpression(init)) init = init.expression;
+  if (
+    (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) &&
+    init.typeParameters !== undefined && init.body !== undefined
+  ) {
+    return init;
+  }
+  return null;
+}

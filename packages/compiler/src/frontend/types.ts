@@ -510,6 +510,12 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   if (resolveTypeParam) {
     const viaNarrowedParam = mapNarrowedTypeParam(type, ctx);
     if (viaNarrowedParam !== undefined) return viaNarrowedParam;
+    // `Awaited<T>` over a bound type parameter (an async generic body's
+    // `await fn()` result): a CONDITIONAL type the checker keeps symbolic
+    // inside the body — the object-gated utility-alias hook below never
+    // sees it, so it resolves here, before the flag dispatch.
+    const viaAwaited = mapGenericAwaitedAlias(type, ctx);
+    if (viaAwaited !== null) return viaAwaited;
   }
   const widened = checker.getBaseTypeOfLiteralType(type);
   const flags = widened.flags;
@@ -2200,6 +2206,32 @@ function mapNarrowedTypeParam(type: ts.Type, ctx: TypeMapperCtx): IrType | null 
  * (`{a?: string}` and `{a: string | undefined}` are ONE shape) — those stay
  * unmapped inside generic bodies; their concrete uses resolve structurally
  * through mapRecordType. */
+/** `Awaited<T>` where T is a STILL-GENERIC type parameter, resolved against
+ * the lowerer's binding: promise kinds unwrap recursively (the alias's own
+ * recursion), everything else is already its awaited self — including
+ * jsval (the engine's await handles thenables natively). Null off the
+ * shape (not the lib's Awaited over a bound parameter). */
+function mapGenericAwaitedAlias(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
+  const { resolveTypeParam } = ctx;
+  if (!resolveTypeParam) return null;
+  const alias = type.getAliasSymbol();
+  if (!alias || alias.name !== "Awaited") return null;
+  const aliasArgs = type.getAliasTypeArguments();
+  const arg = aliasArgs[0];
+  if (aliasArgs.length !== 1 || !arg) return null;
+  if (!(arg.flags & ts.TypeFlags.TypeParameter)) return null;
+  // Provenance: the STANDARD LIBRARY's alias, not a user's shadowing one.
+  const isLibAlias = ctx.checker.declarationsOf(alias).some(
+    (d) => ts.isTypeAliasDeclaration(d) && ctx.isStdlibFile(d.getSourceFile()),
+  );
+  if (!isLibAlias) return null;
+  const bound = resolveTypeParam(arg);
+  if (!bound) return null;
+  let r = bound;
+  while (r.kind === "promise") r = r.inner;
+  return r;
+}
+
 function mapGenericUtilityAlias(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const { resolveTypeParam, shapes, unions } = ctx;
   if (!resolveTypeParam) return null;
