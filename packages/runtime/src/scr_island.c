@@ -2945,7 +2945,7 @@ static const char isl_modules_bootstrap[] =
     /* The reason carries the __scr_wasm_stub marker (non-enumerable):
      * the rejection tracker below SKIPS ledgering it, so a top-level
      * `WebAssembly.compile(...)` chain the program never awaits (es-
-     * module-lexer's `export const init`, alive in the vercel CLI's
+     * module-lexer's `export const init`, alive in real CLI
      * graph) stays silent at teardown — under real wasm the compile
      * SUCCEEDS unobserved, so silence is Node's observable — while an
      * actual await site still sees the rejection untouched. The marker
@@ -7489,7 +7489,7 @@ static const char isl_modules_bootstrap[] =
     "    return ah;\n"
     "  });\n"
     /* node:domain — the deprecated legacy module, shimmed because
-     * @sentry/node (inside the vercel CLI's graph) REQUIRES it at load
+     * @sentry/node (inside a real CLI's graph) REQUIRES it at load
      * on every path (async/domain.js's top level) while only DRIVING it
      * on Node < 14, which never happens here. The shim keeps the module
      * loadable with the real synchronous surface: create()/Domain,
@@ -7560,7 +7560,7 @@ static const char isl_modules_bootstrap[] =
     "    return d;\n"
     "  });\n"
     /* node:worker_threads — the MAIN-THREAD surface, loadable because
-     * undici (proxy-agent's dispatcher, in the vercel CLI's graph when
+     * undici (proxy-agent's dispatcher, in a real CLI's graph when
      * proxy env vars exist) requires it UNGUARDED at load: fetch/
      * constants.js destructures MessageChannel/receiveMessageOnPort for
      * its structuredClone fallback, websocket/events.js MessagePort.
@@ -7680,7 +7680,7 @@ static const char isl_modules_bootstrap[] =
     "    return v8;\n"
     "  });\n"
     /* node:dns — LOADABLE with Node's surface shape, answers fenced at
-     * the call. proxy-agent's pac-resolver (in the vercel CLI's graph
+     * the call. proxy-agent's pac-resolver (in a real CLI's graph
      * whenever proxy env vars exist) requires dns at LOAD and only calls
      * lookup when a PAC proxy actually resolves — so the module must
      * import cleanly, and the callback-taking members deliver their
@@ -8625,7 +8625,7 @@ static const char isl_modules_bootstrap[] =
     "      exitCode: undefined,\n"
     "      stdout: stream(1),\n"
     "      stderr: stream(2),\n"
-    /* stdin: a REAL Readable over a whole-input host read (prettier's
+    /* stdin: a REAL Readable over a whole-input host read (the formatter idiom's
      * get-stdin async-iterates it when no file arguments arrive). The
      * host read happens lazily on the first pull — a program that only
      * probes isTTY or registers listeners never blocks on a silent pipe,
@@ -9232,7 +9232,7 @@ static const char isl_url_src[] =
     "      }\n"
     "      const c = parse(s);\n"
     /* href and search are LIVE-COUPLED (the one WHATWG mutation loop the
-     * vercel CLI's API client drives: url.searchParams.set('teamId', …)
+     * a real CLI's API client drives: url.searchParams.set('teamId', …)
      * then fetch(url)): both live in writable slots, the search setter
      * recomposes href around the old query, and the searchParams getter
      * hands out ONE URLSearchParams whose mutators write back through

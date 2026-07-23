@@ -124,7 +124,7 @@ export function workspacePackageOfPath(path: string): string | null {
 
 /** Node's relative-specifier family: './x', '../x', and the bare '.' /
  * '..' directory forms (path resolution treats them identically —
- * vercel's CLI imports `from '..'` for a parent directory's index).
+ * real CLIs import `from '..'` for a parent directory's index).
  * Anything else is a package, builtin, or package.json-mediated
  * specifier. ('...' and friends are legal PACKAGE names — only the exact
  * dot forms are relative.) */
@@ -211,7 +211,7 @@ export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([
   2305, 2551, 2724, 2731,
   // excess object-literal properties against a JSDoc-inferred contextual
   // type (and the did-you-mean variant): ordinary, working JS — the extra
-  // key rides the object at runtime exactly as written (prettier's
+  // key rides the object at runtime exactly as written (the formatter idiom's
   // expand-patterns passes an ignoreUnknown member its own JSDoc type
   // never declared)
   2353, 2561,
@@ -221,7 +221,7 @@ export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([
   // (1064), and 2366's no-ending-return against a JSDoc-declared return
   // type. The claims are documentation — Node never reads them; the
   // values keep their runtime behavior and every use meets the per-site
-  // fences (prettier's source carries dozens of each).
+  // fences (the pattern's source carries dozens of each).
   2749, 2702, 2344, 2536, 2538, 1064, 2366,
   // strict-null demands on dynamic shapes, continued: iterating/invoking
   // possibly-undefined values (runtime re-checks at the site)

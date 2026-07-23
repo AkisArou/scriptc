@@ -46,7 +46,7 @@
  * dependency chain that reached it. A require() or dynamic import() edge is
  * LAZY — Node fails require at the CALL and import() at evaluation — and so
  * is EVERY edge of a module only reachable through lazy edges: Node links
- * that whole subgraph at the boundary call (the vercel CLI's vc.js shim
+ * that whole subgraph at the boundary call (a CLI's launcher shim
  * import()s its real CLI, so the CLI graph's own static imports fail at
  * that import(), never sooner). A blocked lazy edge embeds a runtime trap
  * instead of failing the build:
@@ -246,7 +246,7 @@ const SHIMMED_BUILTINS = new Set([
   "punycode", "querystring", "constants", "console", "timers",
   "timers/promises", "zlib",
   // The deprecated legacy module, kept loadable because @sentry/node (the
-  // vercel CLI's crash reporter) requires it at load on every path while
+  // a crash reporter) requires it at load on every path while
   // only driving it on Node < 14.
   "domain",
   // Loadable with Node's surface, answers fenced AT THE CALL (through the

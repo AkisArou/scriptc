@@ -281,7 +281,7 @@ export function loadProgram(
   setProjectRealm(entryPath);
   // Two fs shadows compose: --npm-static's per-package hiding, and the
   // always-on project declaration-TWIN hiding (a .d.ts beside runtime JS
-  // outside node_modules — prettier's src/index.d.ts — must not exist for
+  // outside node_modules — the classic typed-JS-library entry — must not exist for
   // the checker, so its resolution lands on the JS Node actually loads;
   // resolve.ts answers the same sibling for scriptc's own edges).
   const npmShadow = npmStaticFsShadow();
@@ -886,7 +886,7 @@ function nonInertTopLevel7(program: ts.Program, sf: ts.SourceFile): ts.Node | nu
       if (!dtsRooted(e.expression) || !ts.isIdentifier(chainRoot7(e.expression))) return false;
       const args = e.arguments ?? [];
       // A CALLABLE argument is admissible when it is itself dts-rooted:
-      // a builtin-owned function value (vercel's `promisify(fs.readFile)`
+      // a builtin-owned function value (the `promisify(fs.readFile)`
       // at every cycle member's top level) is runtime-implemented — even
       // if the builtin callee invokes it, no user code runs and no
       // cluster binding is observable. Function literals and user
@@ -1124,7 +1124,7 @@ function preflight7(load: LoadResult): {
   // too late for the gate, so one pass over the program's import edges
   // registers them up front: every bare specifier any program file loads —
   // import/export declarations, dynamic import("literal") (tsgo chases
-  // those into the program too; vercel's CLI reaches @vercel/go exactly
+  // those into the program too; a CLI reaches its workspace sibling exactly
   // that way), require("literal") — resolved with the own resolver,
   // workspace answers recorded.
   {
@@ -1234,7 +1234,7 @@ function preflight7(load: LoadResult): {
    * package's files realpath OUTSIDE node_modules (so depth-0 exclusion
    * never saw them and allowJs+checkJs pulls them straight into the
    * program), but they are npm surface all the same — the island executes
-   * them, the program's author cannot fix them (vercel's @vercel/go ships
+   * them, the program's author cannot fix them (a workspace package shipping
    * an ncc bundle with dozens of checker errors). Registered up front (the
    * pass above), suppressed here unless --npm-static opted them into being
    * program modules. */
@@ -1245,7 +1245,7 @@ function preflight7(load: LoadResult): {
   const nodeModulesJsSuppressed = (d: ts.Diagnostic): boolean =>
     d.fileName !== undefined && islandJsFile(d.fileName);
   /* JSDoc TYPE positions in JS files are documentation Node never reads:
-   * a name-resolution failure THERE (2304/2552 — prettier's utilities.js
+   * a name-resolution failure THERE (2304/2552 — the pattern's utilities.js
    * spells a mapped type over a @template name it never declared) types
    * as the error-any and the per-site fences apply, same stance as the
    * strictness families above. A 2300 duplicate-identifier PAIR formed by
@@ -1422,7 +1422,7 @@ function preflight7(load: LoadResult): {
         const fromSpec = ts.isStringLiteral(stmt.moduleSpecifier) ? stmt.moduleSpecifier.text : "";
         if (!isRelativeSpecifier(fromSpec)) {
           // NAMED re-exports from a SUPPORTED builtin pass (`export { ok }
-          // from "node:assert"` — prettier's universal/assert facade): the
+          // from "node:assert"` — a universal re-export facade facade): the
           // statement binds nothing locally and evaluates nothing (builtins
           // have no %init), and importers' references chase the alias to
           // the builtin's own declarations exactly as if they imported the
@@ -1437,7 +1437,7 @@ function preflight7(load: LoadResult): {
             continue;
           }
           // NAMED re-exports from an INSTALLED npm package (`export
-          // { isUrl } from "url-or-path"` — prettier's universal facade,
+          // { isUrl } from "url-or-path"` — the pattern's universal facade,
           // `export { visitorKeys as default } from "@glimmer/syntax"`):
           // import-plus-export plumbing. collectNpmImports registers the
           // island load at this statement's position in the exporter's
@@ -1643,7 +1643,7 @@ function preflight7(load: LoadResult): {
         // (builtinNamespaceModuleOf's default-import twin). JS sources
         // always (Node never asks for interop flags); TS sources when the
         // adopted interop knobs made the checker accept the spelling
-        // (vercel's `import os from 'os'` under esModuleInterop — the
+        // (the `import os from 'os'` spelling under esModuleInterop — the
         // program TYPECHECKED, so the form is the project's own legal
         // dialect). A TS project without interop flags keeps the fence:
         // the SC1012 wording beats the raw TS1259 at the same site. The

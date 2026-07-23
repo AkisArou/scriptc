@@ -700,7 +700,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
       // function/class declarations — reassignment of those is fenced
       // elsewhere): Node's default binding would NOT see a later write
       // (snapshot), the alias-resolved read would (live). MUTABLE targets
-      // (`export default someLet` — prettier's visitor-keys.evaluate.js
+      // (`export default someLet` — the visitor-keys pattern
       // reassigns the let, then default-exports it) get SNAPSHOT storage
       // instead: Node's default binding captures the value once, when the
       // export statement runs, so the default registers its own const

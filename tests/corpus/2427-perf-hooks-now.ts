@@ -1,6 +1,6 @@
 // node:perf_hooks performance.now(): fractional ms on the monotonic clock
 // anchored at process start (Node's timeOrigin), plus the
-// .bind(performance) function-value spelling (prettier's mockable
+// .bind(performance) function-value spelling (the mockable-clock idiom's
 // getTimestamp). Raw readings are nondeterministic — print invariants.
 import { performance } from "node:perf_hooks";
 

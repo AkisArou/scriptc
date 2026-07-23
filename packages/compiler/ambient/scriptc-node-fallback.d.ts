@@ -721,7 +721,7 @@ declare module "diagnostics_channel" {
 /* node:perf_hooks — performance.now() over the runtime's process-start-
  * anchored monotonic clock (Node's timeOrigin for a compiled program),
  * fractional milliseconds. The .bind(performance) spelling lowers to the
- * same clock as a plain () => number function value (prettier's mockable
+ * same clock as a plain () => number function value (the mockable-clock idiom's
  * getTimestamp); everything else fences per member. */
 declare module "node:perf_hooks" {
   export interface Performance {
@@ -737,7 +737,7 @@ declare module "perf_hooks" {
  * module carries no evaluation), and every member keeps a per-site fence.
  * createRequire loads CommonJS from disk at runtime — a compiled
  * program's modules are fixed at build time, so the call's fence defers
- * to a runtime error in JS sources (prettier's require-from-file.js is
+ * to a runtime error in JS sources (the config-loader idiom is
  * reached only when a CJS config/plugin must load). Bare "module" stays a
  * package specifier (an npm package by that name exists); only the node:
  * spelling names the builtin. */
@@ -2609,7 +2609,7 @@ declare module "node:worker_threads" {
  * Buffer re-exports the GLOBAL declaration, so an imported binding
  * resolves to the same symbol the lowerings already answer for (and
  * third-party .d.ts files that `import { Buffer } from "node:buffer"` —
- * file-entry-cache in prettier's source graph — typecheck). */
+ * file-entry-cache in a typed-JS source graph — typecheck). */
 declare module "buffer" {
   export function atob(data: string): string;
   export function btoa(data: string): string;

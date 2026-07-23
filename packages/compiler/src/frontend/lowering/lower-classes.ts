@@ -1302,7 +1302,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             // (after super()), so the base slot simply takes the new
             // value at that position — a slot-type-exact redeclare WITH
             // an initializer lowers as an assignment into the inherited
-            // slot, no new slot, no layout change (prettier's `class
+            // slot, no new slot, no layout change (the `class
             // ConfigError extends Error { name = "ConfigError" }`; the
             // builtin Error prefix included — reads, toString, and throw
             // reports all answer the overwritten name like Node). A BARE

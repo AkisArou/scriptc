@@ -1285,7 +1285,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       return;
     }
     // A CLASS-INSTANCE source (`const { previous, next } = path` —
-    // prettier's AstPath idiom): the desugar IS JS's — one member read
+    // the path-walker idiom): the desugar IS JS's — one member read
     // per element, left to right, at the element's pattern position:
     // declared fields read their slots and accessor properties call
     // their getters through the same fieldGetExpr dispatch as dotted

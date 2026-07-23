@@ -3155,7 +3155,7 @@ int mbedtls_ecp_gen_keypair(mbedtls_ecp_group *grp,
 }
 
 /*
- * Generate a keypair, prettier wrapper
+ * Generate a keypair, the formatter wrapper
  */
 int mbedtls_ecp_gen_key(mbedtls_ecp_group_id grp_id, mbedtls_ecp_keypair *key,
                         int (*f_rng)(void *, unsigned char *, size_t), void *p_rng)

@@ -1,6 +1,6 @@
 // Default imports of supported builtins in JS sources: Node's default
 // export of a CJS builtin IS the module object, so the binding exposes
-// exactly the namespace-import member surface (prettier's source tree
+// exactly the namespace-import member surface (the pattern's source tree
 // spells nearly every builtin import this way).
 import path from "node:path";
 import os from "node:os";

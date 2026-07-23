@@ -97,7 +97,7 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     }
     // The RE-EXPORT FACADE hop: a binding acquired through a user module
     // that re-exports a builtin (`import { ok } from "./assert-facade.js"`
-    // over `export { ok } from "node:assert"` — prettier's
+    // over `export { ok } from "node:assert"` — the formatter idiom's
     // universal/assert idiom; the namespace-member spelling resolves to
     // the facade's ExportSpecifier the same way). The specifier here is a
     // user module, so provenance comes from the ALIAS CHAIN instead: the
@@ -211,7 +211,7 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
 /** The node:perf_hooks spoke: `performance.now()` reads the runtime's
    * monotonic clock anchored at process start — Node's timeOrigin for a
    * compiled program, fractional milliseconds — and
-   * `performance.now.bind(performance)` (prettier's mockable
+   * `performance.now.bind(performance)` (the mockable-clock idiom's
    * getTimestamp) is the same clock as a plain () => number function
    * value. Other members on the performance object fence by name; null
    * for non-perf_hooks callees (the call chain keeps trying). */

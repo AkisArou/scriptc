@@ -798,7 +798,7 @@
       "name": "module.createRequire",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "createRequire loads CommonJS from disk at RUNTIME (prettier's config/plugin loading) — a compiled program's modules are fixed at build time, so no lowering can exist; in JS sources the call defers to a runtime error naming this pattern"
+      "note": "createRequire loads CommonJS from disk at RUNTIME (the config/plugin-loading pattern) — a compiled program's modules are fixed at build time, so no lowering can exist; in JS sources the call defers to a runtime error naming this pattern"
     },
     {
       "id": "node-builtin.net",

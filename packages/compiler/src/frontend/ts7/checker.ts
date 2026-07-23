@@ -308,7 +308,7 @@ export class CheckerFacade {
     // The direct (memo-miss) path wears the same panic fence as the
     // prefetch sweep: symbols the sweep never saw (members resolved from
     // other files' d.ts) can hit the identical server panics (observed:
-    // GetTypeOfSymbol's TypeReference/TupleType conversion on prettier's
+    // GetTypeOfSymbol's TypeReference/TupleType conversion on the formatter idiom's
     // engine graph), and the fence's answer is the sweep's — undefined,
     // presented as `any`.
     const [type] = withPanicFence([symbol], (c) => this.raw.getTypeOfSymbol(c));

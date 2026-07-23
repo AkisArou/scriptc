@@ -2985,7 +2985,7 @@ export class Lowerer {
           // optional-flavored (an undefined-armed union) — the unset field
           // IS the undefined arm, the same rule literal completion applies
           // — or 'unknown' (a dyn slot holds the DOM undefined, exactly
-          // the absent-property read: prettier's `getFileInfo(file, {})`
+          // the absent-property read: the options-record call shape
           // against `{ plugins: unknown, ... }`). Never for tuples: a
           // completed position would change .length and JSON where Node
           // keeps the source arity.
@@ -6493,7 +6493,7 @@ export class Lowerer {
     const module = this.builtinNamespaceModuleOf(access.expression);
     if (module !== null) return { module, member: access.name.text };
     // The RE-EXPORT FACADE's namespace spelling: `import * as assert from
-    // "./facade.js"` over `export { ok } from "node:assert"` (prettier's
+    // "./facade.js"` over `export { ok } from "node:assert"` (the formatter idiom's
     // universal/assert). The member's symbol is the facade's
     // ExportSpecifier, and builtinImportOf's alias chase answers the
     // builtin's own module/member — the same tables as a direct import;

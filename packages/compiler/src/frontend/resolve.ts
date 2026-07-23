@@ -152,7 +152,7 @@ function loadAsDirectory(base: string): string | null {
  * "src/index.d.ts" when both exist OUTSIDE node_modules — or null. Node
  * loads the JS (declaration files do not exist in its world), and a
  * project module's implementation is what scriptc compiles: a hand-kept
- * .d.ts beside runtime JS (prettier's src/index.d.ts, the classic
+ * .d.ts beside runtime JS (the classic typed-JS-library entry, the classic
  * typed-JS-library pattern) is the author's claim about the code, not
  * the code. EXACTLY the .d.ts/.js pair: the per-format spellings
  * (.d.mts/.d.cts twins — an openh264.d.mts beside its island-bound

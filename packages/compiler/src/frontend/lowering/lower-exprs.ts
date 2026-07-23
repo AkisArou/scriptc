@@ -4505,7 +4505,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         if (provided.has(f.name)) continue;
         // 'unknown' fields complete with the DOM undefined — the absent
         // property reads as undefined in Node, and a dyn slot holds
-        // exactly that (prettier's `getFileInfo(file, {})` against
+        // exactly that (the options-record call shape against
         // `{ plugins: unknown, ... }` — a JS caller the checker admits).
         const absent = L.wrappedUndefined(f.type, loc) ?? (f.type.kind === "dyn" ? dynUndefinedExpr(loc) : null);
         if (!absent) throw shapeMismatch(expr); // only optional (undefined-armed) and 'unknown' fields may be omitted

@@ -1,6 +1,6 @@
 // Redeclaring an inherited field WITH an initializer: Node [[Define]]s the
 // own property again after super(), so the base slot takes the new value at
-// the subclass's field-init position — prettier's errors.js idiom on the
+// the subclass's field-init position — the pattern's errors.js idiom on the
 // builtin Error prefix, and the plain program-class shape. Bare redeclares
 // (undefined reset) and type-changing redeclares keep their fence.
 class ConfigError extends Error {

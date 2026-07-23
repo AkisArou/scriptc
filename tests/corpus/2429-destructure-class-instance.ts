@@ -2,7 +2,7 @@
 // left to right at the element's position — fields read slots, accessor
 // properties call their getters (observably, like JS), renames and
 // parameter patterns ride the same desugar, and defaults follow the
-// undefined-arm rule. prettier's AstPath { previous, next } idiom.
+// undefined-arm rule. the pattern's AstPath { previous, next } idiom.
 class AstPath {
   stack: string[] = ["root", "mid", "leaf"];
   label = "path";

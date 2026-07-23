@@ -866,7 +866,7 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
   },
   module: {
     createRequire:
-      "createRequire loads CommonJS from disk at RUNTIME (prettier's config/plugin loading) — " +
+      "createRequire loads CommonJS from disk at RUNTIME (the config/plugin-loading pattern) — " +
       "a compiled program's modules are fixed at build time, so no lowering can exist; " +
       "in JS sources the call defers to a runtime error naming this pattern",
   },

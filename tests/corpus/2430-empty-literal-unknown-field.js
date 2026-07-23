@@ -1,6 +1,6 @@
 // An EMPTY literal (and a partial one) flowing into a record whose missing
 // fields are optional OR 'unknown': the unknown slot completes with the DOM
-// undefined — exactly the absent-property read Node answers. prettier's
+// undefined — exactly the absent-property read Node answers. the formatter idiom's
 // getFileInfo(file, {}) against { plugins: unknown, ... } (a JS caller the
 // checker admits; JSDoc types, no annotations).
 

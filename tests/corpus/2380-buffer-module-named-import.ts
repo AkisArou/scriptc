@@ -1,6 +1,6 @@
 // The module spelling of the Buffer global: `import { Buffer } from
 // "node:buffer"` resolves through the import alias to the SAME stdlib
-// symbol the bare-global lowerings answer for (prettier's source graph
+// symbol the bare-global lowerings answer for (the pattern's source graph
 // carries third-party .d.ts files that import the name this way).
 import { Buffer } from "node:buffer";
 

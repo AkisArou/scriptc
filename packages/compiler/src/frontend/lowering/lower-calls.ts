@@ -3205,7 +3205,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       if (nsMember) {
         // A builtin RE-EXPORT FACADE member (`import * as assert from
         // "./facade.js"` over `export { ok } from "node:assert"` —
-        // prettier's universal/assert): builtinMemberOf's alias chase
+        // a universal re-export facade): builtinMemberOf's alias chase
         // resolves the builtin module/member, and the spokes own the call
         // exactly as a direct builtin import. Ordinary user-module
         // members answer null there and resolve below.
@@ -6139,7 +6139,7 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       // the whole analysis.
       if (!(e instanceof PoisonError)) throw e;
       // JS sources defer function-level poisons like statement fences
-      // (prettier's whitespace.js `({ parent: sentenceNode })` over the
+      // (the sentence-walker idiom `({ parent: sentenceNode })` over the
       // #private-fenced AstPath): the function compiles as its OWN
       // runtimeFence — CALLING it throws the first captured diagnostic
       // at the declaration's position — so a reachable-but-broken
@@ -6153,7 +6153,7 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       ) {
         const captured = L.diags.splice(diagsBefore);
         L.runtimeFences.push(...captured);
-        // An ABI type naming a class that never REGISTERED (prettier's
+        // An ABI type naming a class that never REGISTERED (the formatter idiom's
         // AstPath — the #private fence): the emitter would name a struct
         // that does not exist, so no fence function can be built. No call
         // site can lower either (producing the unregistered class's value
