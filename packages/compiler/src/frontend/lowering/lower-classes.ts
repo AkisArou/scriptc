@@ -5102,7 +5102,22 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
           if (!ts.isSpreadElement(argNode)) {
             const argIr = L.mapTypeOf(L.typeOf(argNode));
             if (argIr?.kind === "array" && typeEquals(argIr.elem, mapped.elem)) {
-              return { kind: "setNew", seed: L.lowerExpr(argNode), type: mapped, loc };
+              let seed = L.lowerExpr(argNode);
+              // A T[]-DECLARED seed whose value is an island handle (a
+              // package's exported array — the binding never held a
+              // static array): the VALIDATED exit copies the engine
+              // array out (strict elements, the catchable TypeError on a
+              // lying handle), and the bulk add proceeds on the copy —
+              // construction reads the seed once, so the aliasing
+              // divergence has nothing to observe.
+              if (seed.type.kind === "jsval" && L.boundaryExitSafe(arrayOf(mapped.elem))) {
+                seed = { kind: "jsExit", value: seed, type: arrayOf(mapped.elem), loc: seed.loc };
+              }
+              if (typeEquals(seed.type, arrayOf(mapped.elem))) {
+                return { kind: "setNew", seed, type: mapped, loc };
+              }
+              // Any other lowered kind falls through to the named fence
+              // below — never a mistyped seed into the validator.
             }
           }
         }

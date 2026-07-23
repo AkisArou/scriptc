@@ -4763,18 +4763,36 @@ class LlEmitter {
         // Type-directed serialization: the STATIC type picks an emitted
         // serializer (interned per typeKey) — no DOM, no runtime dispatch.
         // The value temp is BORROWED (released with this statement's
-        // frame); the result string is owned (+1). Never throws.
+        // frame); the result string is owned (+1). Never throws — except
+        // the dyn root below.
         const v = this.emitExpr(e.value);
-        const helper = this.walkers.jsonWriteHelper(e.value.type);
-        this.declare(`declare void @scr_jb_init(ptr)`);
-        this.declare(`declare ptr @scr_jb_finish(ptr)`);
-        const buf = B.slot();
-        B.entryAllocas.push(`${buf} = alloca %ScrJsonBuf`);
-        B.line(`call void @scr_jb_init(ptr ${buf})`);
-        B.line(`call void @${helper}(ptr ${buf}, ${this.llType(e.value.type)} ${v.name})`);
-        const t = B.tmp();
-        B.line(`${t} = call ptr @scr_jb_finish(ptr ${buf})`);
-        const compact = this.own({ name: t, type: e.type });
+        let compact: { name: string; type: IrType };
+        if (e.value.type.kind === "dyn") {
+          // A dyn root: the runtime's DOM walker (scr_dyn_format_j — the
+          // C backend's dispatch exactly): number/string/bool/null/array/
+          // object exact, dropped members omitted, and a dropped ROOT
+          // becomes the TEXT "undefined" (JSON.stringify(undefined) is
+          // the undefined value; printing it spells the word — Node's
+          // answer, where the nested-position writer would spell null).
+          // Fallible (a runtime handle inside the tree throws) — the
+          // pending check runs.
+          this.declare(`declare ptr @scr_dyn_format_j(ptr)`);
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_dyn_format_j(ptr ${v.name})`);
+          compact = this.own({ name: t, type: e.type });
+          this.emitPendingCheck();
+        } else {
+          const helper = this.walkers.jsonWriteHelper(e.value.type);
+          this.declare(`declare void @scr_jb_init(ptr)`);
+          this.declare(`declare ptr @scr_jb_finish(ptr)`);
+          const buf = B.slot();
+          B.entryAllocas.push(`${buf} = alloca %ScrJsonBuf`);
+          B.line(`call void @scr_jb_init(ptr ${buf})`);
+          B.line(`call void @${helper}(ptr ${buf}, ${this.llType(e.value.type)} ${v.name})`);
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_jb_finish(ptr ${buf})`);
+          compact = this.own({ name: t, type: e.type });
+        }
         // A pretty-print form (`stringify(v, null, 2)`): the frontend
         // resolved the space to a compile-time indent string (Node's
         // clamp/truncate rules); the interned re-indenter rewrites the

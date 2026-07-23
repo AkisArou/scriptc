@@ -38,7 +38,7 @@
  * cleanly before. The validator stays the backstop for anything else. */
 import type { Lowerer } from "./lowerer.js";
 import { PoisonError } from "./lowerer.js";
-import { canAdaptDynFuncTo, IrExpr, IrType, SrcLoc, STRING, isUnitType, typeEquals } from "../../ir/nodes.js";
+import { canAdaptDynFuncTo, canMarshalTypedFuncIntoIsland, DYN, IrExpr, IrType, JSVAL, SrcLoc, STRING, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { LIB_FN_SIGS, REGEX_INTRINSIC_SIGS, STR_INTRINSIC_SIGS } from "../../ir/validate.js";
 import { unionMismatchDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 
@@ -66,6 +66,18 @@ function dynCheckable(L: Lowerer, want: IrType): boolean {
  * statement takes the runtime-fence path in JS sources. */
 function coerceSlot(L: Lowerer, arg: IrExpr, want: IrType, what: string): IrExpr {
   if (typeEquals(arg.type, want)) return arg;
+  // An ISLAND value in a typed intrinsic slot (`/x/.test(anyText)`,
+  // `" ".repeat(anyN)` — checker-`any` arguments the surface signatures
+  // accept): the VALIDATED island exit, exactly the dynCheck stance one
+  // branch down — strict for primitives, JSON round-trip for composites,
+  // a lying handle throws the catchable TypeError. Targets outside the
+  // exit set keep the named fence.
+  if (arg.type.kind === "jsval" && want.kind !== "jsval") {
+    if (L.boundaryExitSafe(want)) {
+      return { kind: "jsExit", value: arg, type: want, loc: arg.loc };
+    }
+    fence(L, "SC1100", arg.loc, `passing 'any'-typed values where '${L.fmt(want)}' is expected (${what})`);
+  }
   if (arg.type.kind === "dyn" && want.kind !== "dyn") {
     if (dynCheckable(L, want)) {
       return { kind: "dynCheck", value: arg, type: want, loc: arg.loc };
@@ -143,18 +155,22 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
   }
   if (kind === "arrIntrinsic") {
     const e = rec as unknown as Extract<IrExpr, { kind: "arrIntrinsic" }>;
-    if (e.receiver.type.kind === "dyn" || isUnitType(e.receiver.type)) {
+    if (e.receiver.type.kind === "dyn" || e.receiver.type.kind === "jsval" || isUnitType(e.receiver.type)) {
       // No element type exists to validate a dyn receiver against — the
-      // honest answer is the operations-on-unknown fence. Other non-array
-      // receivers stay the validator's ICE (frontend breakage, not a
-      // checked-dynamic escape).
+      // honest answer is the operations-on-unknown fence. An island
+      // (jsval) receiver fences too: the exit would COPY the engine
+      // array, so a static intrinsic over it silently mutates the copy —
+      // the producing sites route jsval receivers through the engine's
+      // own methods instead. Other non-array receivers stay the
+      // validator's ICE (frontend breakage, not a checked-dynamic
+      // escape).
       fence(L, "SC1100", e.receiver.loc, `'.${e.method}()' on '${L.fmt(e.receiver.type)}' array receivers`);
     }
     return;
   }
   if (kind === "callValue") {
     const e = rec as unknown as Extract<IrExpr, { kind: "callValue" }>;
-    if (e.callee.type.kind === "dyn" || isUnitType(e.callee.type)) {
+    if (e.callee.type.kind === "dyn" || e.callee.type.kind === "jsval" || isUnitType(e.callee.type)) {
       fence(L, "SC1100", e.loc, `calling '${L.fmt(e.callee.type)}' values`);
     }
     if (e.callee.type.kind !== "func") return; // validator's ICE otherwise
@@ -170,6 +186,60 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
     e.args.forEach((a, i) => {
       const want = params[i];
       if (want) e.args[i] = coerceSlot(L, a, want, `argument ${i + 1} of the call`);
+    });
+    return;
+  }
+  if (kind === "jsOp") {
+    // Engine-op arguments must be jsval. The producing sites marshal with
+    // jsvalIn, but a checker-`any` expression can LOWER to another world
+    // (dyn.this, the DOM WeakSet placeholder, JS rest-args) — re-apply
+    // jsvalIn's rules here: units become the engine's own units, typed
+    // values with an island representation marshal in, and dyn values (no
+    // DOM→engine bridge that preserves handles/functions) fence with
+    // jsvalIn's own message.
+    const e = rec as unknown as Extract<IrExpr, { kind: "jsOp" }>;
+    e.args.forEach((a, i) => {
+      if (a.type.kind === "jsval") return;
+      if (isUnitType(a.type)) {
+        e.args[i] = { kind: "jsOp", op: a.type.kind === "undefinedT" ? "undefLit" : "nullLit", args: [], type: JSVAL, loc: a.loc };
+        return;
+      }
+      if (a.type.kind === "dyn") {
+        fence(L, "SC1100", a.loc, "passing 'unknown' values into dynamically-executed ('any'-typed) code (validate with 'as <type>' first)");
+      }
+      if (
+        L.boundarySafe(a.type) ||
+        (a.type.kind === "func" && canMarshalTypedFuncIntoIsland(a.type, (id) => L.shapes.get(id), (id) => L.unions.get(id)))
+      ) {
+        e.args[i] = { kind: "jsMarshal", value: a, type: JSVAL, loc: a.loc };
+        return;
+      }
+      fence(L, "SC1090", a.loc, `'${L.fmt(a.type)}' values crossing into dynamically-executed ('any'-typed) code`);
+    });
+    return;
+  }
+  if (kind === "dynCall" || kind === "dynInvoke") {
+    // Checked-dynamic call arguments must be dyn. Convertible typed values
+    // take the ordinary dynFrom crossing; island values have NO bridge
+    // into the DOM (a jsval handle cannot ride the deep-copy), so they
+    // fence — named, catchable at runtime in JS sources, never an ICE.
+    const e = rec as unknown as Extract<IrExpr, { kind: "dynCall" | "dynInvoke" }>;
+    if (kind === "dynInvoke") {
+      const inv = e as Extract<IrExpr, { kind: "dynInvoke" }>;
+      if (inv.recv.type.kind !== "dyn") {
+        fence(L, "SC1100", inv.recv.loc, `'.${inv.method}()' calls through '${L.fmt(inv.recv.type)}' receivers in checked-dynamic positions`);
+      }
+    }
+    e.args.forEach((a, i) => {
+      if (a.type.kind === "dyn") return;
+      if (a.type.kind === "jsval") {
+        fence(L, "SC1100", a.loc, "passing 'any'-typed values into calls through 'unknown' values (validate with 'as <type>' first)");
+      }
+      if (a.kind === "unitLit" || L.dynConvertible(a.type)) {
+        e.args[i] = { kind: "dynFrom", value: a, type: DYN, loc: a.loc };
+        return;
+      }
+      fence(L, "SC1100", a.loc, `passing '${L.fmt(a.type)}' values into calls through 'unknown' values`);
     });
     return;
   }

@@ -730,6 +730,7 @@ export interface ClassMeta {
       // machinery as record/object/union elements.
       elem.kind === "promise" ||
       elem.kind === "jsval" || // island handles: scr_jsval_* adapters, no trace
+      elem.kind === "regex" || // RegExp values: scr_regex_* adapters, no trace (no refs inside)
       elem.kind === "child" || // spawned child handles: scr_child_* adapters, no trace
       elem.kind === "netServer" || // server handles: scr_net_server_* adapters, no trace
       elem.kind === "symbol" || // symbol identities: scr_sym_* adapters, no trace

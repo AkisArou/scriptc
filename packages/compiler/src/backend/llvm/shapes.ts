@@ -510,6 +510,7 @@ export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): stri
     elem.kind === "child" || // spawned child handles: scr_child_* adapters, no trace
     elem.kind === "netServer" || // server handles ([...set] drains): REF, no trace
     elem.kind === "jsval" || // island handles (`any[]` under --dynamic): REF, no trace
+    elem.kind === "regex" || // RegExp values: scr_regex_* adapters, no trace (no refs inside)
     (elem.kind === "array" && traceAdapter(host, elem) !== null);
   if (!useRef) {
     host.declare(`declare ptr @scr_arr_new(i32, i64)`);

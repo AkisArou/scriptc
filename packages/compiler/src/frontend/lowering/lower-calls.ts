@@ -2797,6 +2797,20 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       L.isIslandExpr(expr.expression.expression)
     ) {
       const receiver = L.lowerExpr(expr.expression.expression);
+      // A checker-`any` receiver whose VALUE lives in the DOM (a
+      // checked-dynamic local behind the any-typed spelling — the JS
+      // WeakSet placeholder, rest-args arrays): the checked-dynamic
+      // method machinery owns it — receiver-kind dispatch, stored-member
+      // calls, honest fences — never an engine op over a dyn value.
+      if (receiver.type.kind === "dyn") {
+        const served = lowerDynReceiverMethodCall(L, expr, expr.expression);
+        if (served) return served;
+        L.unsupported(
+          "SC1100",
+          expr,
+          `'.${expr.expression.name.text}()' calls through 'unknown'-valued receivers in dynamically-executed positions`,
+        );
+      }
       const args = expr.arguments.map((a) => L.jsvalIn(L.lowerExpr(a), a));
       const result: IrExpr = {
         kind: "jsOp", op: "callMethod", name: expr.expression.name.text,
@@ -2806,6 +2820,20 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     }
     if (L.isIslandExpr(expr.expression)) {
       const callee = L.lowerExpr(expr.expression);
+      // A checker-`any` callee that LOWERED checked-dynamic (a dyn member
+      // chain's stored function): the DOM's own call — dynCall reads and
+      // calls the stored member with Node's is-not-a-function TypeError
+      // on refusal. Island-typed arguments meet the boundary pass's
+      // dynCall rule (no jsval→DOM bridge exists — the named fence).
+      if (callee.type.kind === "dyn") {
+        const args = expr.arguments.map((a) => L.lowerExprExpecting(a, DYN));
+        const calleeName = ts.isPropertyAccessExpression(expr.expression)
+          ? expr.expression.getText()
+          : ts.isIdentifier(expr.expression)
+            ? expr.expression.text
+            : "value";
+        return { kind: "dynCall", callee, calleeName, args, type: DYN, loc };
+      }
       const args = expr.arguments.map((a) => L.jsvalIn(L.lowerExpr(a), a));
       const result: IrExpr = { kind: "jsOp", op: "callFn", args: [callee, ...args], type: JSVAL, loc };
       return islandPrimitiveExit(L, expr, result);
@@ -6004,8 +6032,15 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
               vt = f.type;
             } else if (others.length === 1) {
               vt = others[0]!;
-              const narrowTag = L.armTag(f.type.unionId, vt);
-              value = { kind: "unionNarrow", unionId: f.type.unionId, tag: narrowTag, value: raw, type: vt, loc };
+              // A UNIT other arm (`null | undefined` fields — the mixed-
+              // defaults spread idiom; undefined was filtered above, so
+              // the unit is null): units carry no payload, so the guarded
+              // push writes the unit LITERAL — unionNarrow to a unit arm
+              // (and unionWrap of a narrowed unit) is malformed IR; the
+              // literal is the one legal unit spelling.
+              value = isUnitType(vt)
+                ? { kind: "unitLit", unit: "null", type: vt, loc }
+                : { kind: "unionNarrow", unionId: f.type.unionId, tag: L.armTag(f.type.unionId, vt), value: raw, type: vt, loc };
             } else {
               L.unsupported(
                 "SC1090",
@@ -6158,19 +6193,13 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       ) {
         const captured = L.diags.splice(diagsBefore);
         L.runtimeFences.push(...captured);
-        // An ABI type naming a class that never REGISTERED (the formatter idiom's
-        // AstPath — the #private fence): the emitter would name a struct
-        // that does not exist, so no fence function can be built. No call
-        // site can lower either (producing the unregistered class's value
-        // fences first — the brokenGlobals/brokenLocals family), so the
-        // symbol is never referenced; the validator's registration check
-        // is the backstop for anything that slips through.
-        if (
-          sig.params.some((p) => L.typeNamesUnregisteredClass(p.type)) ||
-          L.typeNamesUnregisteredClass(bodyReturn)
-        ) {
-          return null;
-        }
+        // An ABI type naming a class that never REGISTERED (the sentence-
+        // walker idiom's path type — the #private fence) is fine to emit:
+        // callers CAN lower calls to this symbol (a same-typed param
+        // passes straight through — no construction needed), so the fence
+        // function must exist, and run()'s unregistered-class sweep
+        // rewrites every such slot to the inert f64 placeholder before
+        // emission — caller and fence stay ABI-consistent.
         const first = captured[0]!;
         const loc = locOf(decl);
         const pos = ts.getLineAndCharacterOfPosition(

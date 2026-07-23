@@ -4315,6 +4315,25 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2447-island-boundary-slots/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2447-island-boundary-slots/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2448-entries-null-arms-regex-arrays.ts": {
+   "order": [
+    "<repo>/tests/corpus/2448-entries-null-arms-regex-arrays.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2449-js-dyn-worlds/main.js": {
+   "order": [
+    "<repo>/tests/corpus/2449-js-dyn-worlds/walker.js",
+    "<repo>/tests/corpus/2449-js-dyn-worlds/main.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2450-private-instance-methods.ts": {
    "order": [
     "<repo>/tests/corpus/2450-private-instance-methods.ts"
@@ -5894,6 +5913,12 @@
   "<repo>/tests/diagnostics/inheritance.ts": {
    "order": [
     "<repo>/tests/diagnostics/inheritance.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/island-boundary-slots.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/island-boundary-slots.ts"
    ],
    "diags": []
   },
