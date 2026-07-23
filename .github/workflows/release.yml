@@ -81,7 +81,7 @@ jobs:
       # configured on npmjs.com with a GitHub Actions trusted publisher
       # pointing at repository vercel-labs/scriptc, workflow release.yml,
       # environment Release. A package missing that configuration fails
-      # loudly with an OIDC authentication error before anything uploads.
+      # with an OIDC authentication error before anything uploads.
       # Trusted publishing requires npm >= 11.5.1 (bundled with Node 24).
 
       - name: Install and build
@@ -96,6 +96,7 @@ jobs:
             V=$(node -p "require('./$pkg/package.json').version")
             if [ "$V" != "$VERSION" ]; then
               echo "Version mismatch: $pkg is $V, expected $VERSION"
+              echo "Run 'node scripts/sync-versions.mjs' to stamp runtime and compiler from the CLI version, then commit"
               exit 1
             fi
           done
@@ -134,5 +135,51 @@ jobs:
           publish_dir packages/runtime
           publish_dir packages/compiler
           publish_dir packages/cli
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The GitHub release is a tag and notes only — scriptc has no platform
+  # binary assets to stage (programs compile on the user's machine) — so
+  # it runs AFTER a successful npm publish and never gates it. The body is
+  # the CHANGELOG.md block between the release:start/release:end markers,
+  # which RELEASING.md keeps on the latest entry only.
+  github-release:
+    name: Create GitHub Release
+    needs: [check-release, publish]
+    if: needs.check-release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract changelog entry
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          awk '/<!-- release:start -->/{found=1; next} /<!-- release:end -->/{exit} found{print}' CHANGELOG.md > /tmp/release-notes.md
+
+          LINES=$(wc -l < /tmp/release-notes.md | tr -d ' ')
+          if [ "$LINES" -lt 2 ]; then
+            echo "Error: No release notes found between <!-- release:start --> and <!-- release:end --> markers in CHANGELOG.md"
+            exit 1
+          fi
+          echo "Extracted release notes for $VERSION ($LINES lines)"
+
+      - name: Create GitHub Release
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          TAG="v$VERSION"
+
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists, skipping"
+          else
+            echo "Creating release $TAG..."
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes-file /tmp/release-notes.md
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
