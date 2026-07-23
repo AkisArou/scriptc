@@ -14,8 +14,7 @@
 #include <stdlib.h>
 
 static void scr_error_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 static bool scr_error_traced = false;
@@ -247,8 +246,7 @@ void scr_undef_global_read(ScrStr *name) {
   size_t len = name->len + sizeof suffix - 1;
   char *msg = malloc(len + 1);
   if (!msg) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   memcpy(msg, name->data, name->len);
   memcpy(msg + name->len, suffix, sizeof suffix);

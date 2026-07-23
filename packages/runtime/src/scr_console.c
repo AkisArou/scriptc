@@ -14,6 +14,26 @@
 static long scr_abandoned_fibers = 0;
 void scr_note_abandoned_fibers(long n) { scr_abandoned_fibers = n; }
 
+#ifndef SCR_CORE
+/* The trap funnel's EXECUTABLE expansion: exactly the historical
+ * fputs/vfprintf-to-stderr + abort every trap site used to open-code — the
+ * default lane's bytes and behavior are unchanged by construction. Core
+ * builds (-DSCR_CORE) get the sink-routing definitions from scr_core.c
+ * instead; this pair compiles out there. */
+_Noreturn void scr_trap(const char *msg) {
+  fputs(msg, stderr);
+  abort();
+}
+
+_Noreturn void scr_trap_fmt(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  abort();
+}
+#endif /* !SCR_CORE */
+
 #ifdef SCR_RC_AUDIT
 extern long scr_str_live_count(void);     /* scr_string.c */
 extern long scr_arr_live_count(void);     /* scr_array.c */

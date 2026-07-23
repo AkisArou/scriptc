@@ -37,8 +37,7 @@
 #include "libregexp.h"
 
 static void scr_regex_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* ── libregexp host hooks ─────────────────────────────────────────────
@@ -102,7 +101,7 @@ static void scr_note_compiled(ScrRegex *re) {
     scr_compiled = realloc(scr_compiled, scr_compiled_cap * sizeof *scr_compiled);
     if (!scr_compiled) scr_regex_oom();
   }
-  if (scr_compiled_len == 0) atexit(scr_regex_free_bytecodes);
+  if (scr_compiled_len == 0) scr_atexit(scr_regex_free_bytecodes);
   scr_compiled[scr_compiled_len++] = re;
 }
 
@@ -119,9 +118,8 @@ static int scr_lre_flags(const ScrStr *flags) {
       case 'u': mask |= LRE_FLAG_UNICODE; break;
       case 'y': mask |= LRE_FLAG_STICKY; break;
       default:
-        fprintf(stderr, "scriptc: internal error: unexpected regex flag '%c'\n",
-                flags->data[i]);
-        abort();
+        scr_trap_fmt("scriptc: internal error: unexpected regex flag '%c'\n",
+                     flags->data[i]);
     }
   }
   return mask;
@@ -197,9 +195,8 @@ static uint8_t *scr_regex_bc(ScrRegex *re) {
      * tsc's parser has already caught plain syntax errors, so this is
      * rare). */
     fflush(stdout);
-    fprintf(stderr, "scriptc: SyntaxError: Invalid regular expression: /%s/%s: %s\n",
-            re->source->data, re->flags->data, error_msg);
-    abort();
+    scr_trap_fmt("scriptc: SyntaxError: Invalid regular expression: /%s/%s: %s\n",
+                 re->source->data, re->flags->data, error_msg);
   }
   re->bc = bc;
   scr_note_compiled(re);
@@ -315,8 +312,7 @@ static int scr_exec(uint8_t **capture, const uint8_t *bc, const uint16_t *u,
   int rc = lre_exec(capture, bc, (const uint8_t *)u, index, len, 1, lre_opaque());
   if (rc < 0) {
     fflush(stdout);
-    fputs("scriptc: regular expression execution failed\n", stderr);
-    abort();
+    scr_trap("scriptc: regular expression execution failed\n");
   }
   return rc;
 }
@@ -351,11 +347,9 @@ bool scr_regex_test(ScrRegex *re, ScrStr *s) {
      * iteration this slice does not model (the frontend rejects the sites
      * it can see; values that flow through variables land here). */
     fflush(stdout);
-    fprintf(stderr,
-            "scriptc: test() on a regex with the 'g' or 'y' flag is not "
-            "supported (stateful lastIndex); drop the flag, or use "
-            "replace/replaceAll/split\n");
-    abort();
+    scr_trap("scriptc: test() on a regex with the 'g' or 'y' flag is not "
+             "supported (stateful lastIndex); drop the flag, or use "
+             "replace/replaceAll/split\n");
   }
   int len;
   uint16_t *u = scr_to_utf16(s, &len);
@@ -379,11 +373,9 @@ ScrArr *scr_regex_match(ScrStr *s, ScrRegex *re) {
   uint8_t *bc = scr_regex_bc(re);
   if (lre_get_flags(bc) & (LRE_FLAG_GLOBAL | LRE_FLAG_STICKY)) {
     fflush(stdout);
-    fprintf(stderr,
-            "scriptc: match() on a regex with the 'g' or 'y' flag is not "
-            "supported (an every-match array is a different shape); drop the "
-            "flag, or use replace/replaceAll/split\n");
-    abort();
+    scr_trap("scriptc: match() on a regex with the 'g' or 'y' flag is not "
+             "supported (an every-match array is a different shape); drop the "
+             "flag, or use replace/replaceAll/split\n");
   }
   int len;
   uint16_t *u = scr_to_utf16(s, &len);
@@ -803,7 +795,7 @@ static bool scr_assert_regex_hits(ScrRegex *re, ScrStr *s) {
 static ScrStr *scr_assert_regex_render(ScrRegex *re) {
   size_t cap = re->source->len + re->flags->len + 2;
   char *buf = malloc(cap);
-  if (!buf) abort();
+  if (!buf) scr_trap("scriptc: out of memory\n");
   size_t n = 0;
   buf[n++] = '/';
   memcpy(buf + n, re->source->data, re->source->len);
@@ -831,7 +823,7 @@ static void scr_assert_regex_input_fail(bool negated, ScrRegex *re, ScrStr *inpu
   const char *mid = ". Input:\n\n";
   size_t cap = strlen(head) + rre->len + strlen(mid) + insp->len + 1;
   char *buf = malloc(cap);
-  if (!buf) abort();
+  if (!buf) scr_trap("scriptc: out of memory\n");
   size_t n = 0;
   memcpy(buf + n, head, strlen(head));
   n += strlen(head);
@@ -924,8 +916,7 @@ ScrRegex *scr_regex_new(ScrStr *pattern, ScrStr *flags) {
   }
   ScrRegex *re = calloc(1, sizeof *re);
   if (!re) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   re->rc = 1;
   re->source = pattern->len > 0 ? scr_str_retain(pattern) : scr_str_new("(?:)", 4);

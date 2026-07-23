@@ -39,8 +39,7 @@
 #define SCR_RC(obj) (*(size_t *)(obj))
 
 static void scr_cyc_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 void *scr_cyc_alloc(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn) {

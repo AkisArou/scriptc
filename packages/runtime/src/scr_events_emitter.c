@@ -54,8 +54,7 @@
 #endif
 
 static void scr_ee_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* One registered listener. Shared between the live list and emit

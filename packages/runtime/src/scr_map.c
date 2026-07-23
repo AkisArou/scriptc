@@ -31,8 +31,7 @@ long scr_map_live_count(void) { return scr_live_maps; }
 #define SCR_MAP_EMPTY SIZE_MAX
 
 static void scr_map_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* ── key normalization + hashing (SameValueZero) ───────────────────────
@@ -462,8 +461,7 @@ bool scr_map_iter_live(const ScrMap *m, double i) {
 
 static const ScrMapEntry *scr_map_iter_at(const ScrMap *m, double i) {
   if (!(i >= 0) || i >= (double)m->nentries || !m->entries[(size_t)i].live) {
-    fputs("scriptc: internal error: map iteration index out of range\n", stderr);
-    abort();
+    scr_trap("scriptc: internal error: map iteration index out of range\n");
   }
   return &m->entries[(size_t)i];
 }

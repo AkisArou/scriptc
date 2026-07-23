@@ -32,8 +32,7 @@
 #include <string.h>
 
 static void scr_assert_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* ── a tiny append-only byte buffer for message assembly ─────────────── */

@@ -18,8 +18,7 @@
 #include <zlib.h>
 
 static void scr_zlib_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 ScrBytes *scr_zlib_deflate(const ScrBytes *data) {

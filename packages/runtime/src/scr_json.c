@@ -36,8 +36,7 @@ long scr_dyn_live_count(void) { return scr_live_dyns; }
 #endif
 
 static void scr_json_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* ── output buffer ─────────────────────────────────────────────────────
@@ -421,8 +420,7 @@ void scr_dyn_handle_install(ScrDynHandleTag tag, const ScrDynHandleOps *ops) {
 static const ScrDynHandleOps *scr_dyn_handle_ops(ScrDynHandleTag tag) {
   const ScrDynHandleOps *ops = scr_dynh_ops[tag];
   if (!ops) {
-    fputs("scriptc: internal error: dyn handle ops not installed\n", stderr);
-    abort();
+    scr_trap("scriptc: internal error: dyn handle ops not installed\n");
   }
   return ops;
 }
@@ -501,8 +499,7 @@ static ScrDynThisEnt *scr_dyn_this_grow(void) {
     size_t cap = scr_dyn_this_cap ? scr_dyn_this_cap * 2 : 8;
     ScrDynThisEnt *s = realloc(scr_dyn_this_stack, cap * sizeof *s);
     if (!s) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     scr_dyn_this_stack = s;
     scr_dyn_this_cap = cap;
@@ -526,8 +523,7 @@ void scr_dyn_this_push_dyn(const ScrDyn *v) {
 
 void scr_dyn_this_pop(void) {
   if (scr_dyn_this_n == 0) {
-    fputs("scriptc: internal error: receiver stack underflow\n", stderr);
-    abort();
+    scr_trap("scriptc: internal error: receiver stack underflow\n");
   }
   ScrDynThisEnt *e = &scr_dyn_this_stack[--scr_dyn_this_n];
   if (e->dv) scr_dyn_release(e->dv);
@@ -763,13 +759,12 @@ ScrDyn *scr_dyn_from_error(const ScrError *e) {
     scr_errdyn_cap = scr_errdyn_cap ? scr_errdyn_cap * 2 : 8;
     scr_errdyn_cache = realloc(scr_errdyn_cache, scr_errdyn_cap * sizeof *scr_errdyn_cache);
     if (!scr_errdyn_cache) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
   }
   if (!scr_errdyn_teardown_registered) {
     scr_errdyn_teardown_registered = true;
-    atexit(scr_errdyn_teardown);
+    scr_atexit(scr_errdyn_teardown);
   }
   scr_errdyn_cache[scr_errdyn_n].err = scr_error_retain((ScrError *)e);
   scr_errdyn_cache[scr_errdyn_n].dyn = scr_dyn_retain(d);
@@ -824,13 +819,12 @@ void scr_errdyn_put(ScrError *e, ScrDyn *d) {
     scr_errdyn_cap = scr_errdyn_cap ? scr_errdyn_cap * 2 : 8;
     scr_errdyn_cache = realloc(scr_errdyn_cache, scr_errdyn_cap * sizeof *scr_errdyn_cache);
     if (!scr_errdyn_cache) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
   }
   if (!scr_errdyn_teardown_registered) {
     scr_errdyn_teardown_registered = true;
-    atexit(scr_errdyn_teardown);
+    scr_atexit(scr_errdyn_teardown);
   }
   scr_errdyn_cache[scr_errdyn_n].err = scr_error_retain(e);
   scr_errdyn_cache[scr_errdyn_n].dyn = scr_dyn_retain(d);
@@ -1035,8 +1029,7 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
     return;
   }
   }
-  fputs("scriptc: internal error: invalid dyn kind\n", stderr);
-  abort();
+  scr_trap("scriptc: internal error: invalid dyn kind\n");
 }
 
 /* ── dynCheck failure path ─────────────────────────────────────────────── */
@@ -1750,8 +1743,7 @@ static ScrDyn *scr_sc_clone(const ScrDyn *v, const ScrScParent *up) {
     size_t len = what->len + sizeof suffix - 1;
     char *msg = malloc(len + 1);
     if (!msg) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     memcpy(msg, what->data, what->len);
     memcpy(msg + what->len, suffix, sizeof suffix);
@@ -1860,8 +1852,7 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
     bool *is_index = malloc(n ? n * sizeof *is_index : 1);
     double *idx = malloc(n ? n * sizeof *idx : 1);
     if (!is_index || !idx) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     size_t index_count = 0;
     for (size_t i = 0; i < n; i++) {

@@ -15,8 +15,7 @@ long scr_str_live_count(void) { return scr_live_strings; }
 #endif
 
 static void scr_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* ── UTF-16 index cache ───────────────────────────────────────────────
@@ -519,8 +518,7 @@ ScrStr *scr_str_slice(ScrStr *s, double start, double end) {
 ScrStr *scr_str_repeat(ScrStr *s, double count) {
   double n = scr_to_integer_or_infinity(count);
   if (n < 0 || (isinf(n) && n > 0)) {
-    fputs("scriptc: RangeError: Invalid count value\n", stderr);
-    abort();
+    scr_trap("scriptc: RangeError: Invalid count value\n");
   }
   if (n == 0 || s->len == 0) return scr_str_empty();
   /* n is a finite non-negative integer here. Reject sizes malloc could not

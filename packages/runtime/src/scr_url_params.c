@@ -26,8 +26,7 @@ static void ub_init(UrlBuf *b) {
   b->len = 0;
   b->data = malloc(b->cap);
   if (!b->data) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
 }
 
@@ -36,8 +35,7 @@ static void ub_append(UrlBuf *b, const char *bytes, size_t n) {
     while (b->len + n > b->cap) b->cap *= 2;
     char *grown = realloc(b->data, b->cap);
     if (!grown) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     b->data = grown;
   }
@@ -94,8 +92,7 @@ struct ScrSearchParams {
 static ScrSearchParams *sp_alloc(void) {
   ScrSearchParams *sp = malloc(sizeof(ScrSearchParams));
   if (!sp) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   sp->rc = 1;
   sp->len = 0;
@@ -103,8 +100,7 @@ static ScrSearchParams *sp_alloc(void) {
   sp->names = malloc(sp->cap * sizeof(ScrStr *));
   sp->vals = malloc(sp->cap * sizeof(ScrStr *));
   if (!sp->names || !sp->vals) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   sp->owner = NULL;
   return sp;
@@ -142,8 +138,7 @@ static void sp_push(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
     ScrStr **gn = realloc(sp->names, sp->cap * sizeof(ScrStr *));
     ScrStr **gv = realloc(sp->vals, sp->cap * sizeof(ScrStr *));
     if (!gn || !gv) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     sp->names = gn;
     sp->vals = gv;
@@ -161,8 +156,7 @@ static ScrStr *sp_scrub_utf8(const char *in_c, size_t n) {
   const unsigned char *in = (const unsigned char *)in_c;
   char *out = malloc(n * 3 + 1);
   if (!out) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   size_t o = 0;
   uint32_t cp = 0;
