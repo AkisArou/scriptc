@@ -411,7 +411,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "process.killNum": "scr_process_kill",
   // fs.promises (scr_bytes_io.c / scr_lib.c): the promise forms settle
   // instead of throwing — plain generic calls answering a +1 promise.
-  "fsp.readFile": "scr_fsp_read_file",
+  // fsp.readFile is NOT here: it carries the ignored encoding argument,
+  // so it is special-cased in emitLibCall (the fs.readFileSync pattern).
   "fsp.readFileBytes": "scr_fsp_read_file_bytes",
   "fsp.writeFile": "scr_fsp_write_file",
   "fsp.mkdir": "scr_fsp_mkdir",
@@ -8915,6 +8916,19 @@ class LlEmitter {
       this.emitPendingCheck();
       return out;
     }
+    if (e.fn === "fsp.readFile") {
+      // fs.promises.readFile(path, "utf8"): args[1] is the encoding —
+      // evaluated for JS-exact side-effect order, ignored by the runtime
+      // exactly like fs.readFileSync's. The C prototype takes ONLY the
+      // path, so the generic path (which passes every evaluated arg)
+      // would declare a second parameter the runtime never had. Settles
+      // the +1 promise instead of throwing — no pending check.
+      const args = e.args.map((a) => this.emitExpr(a));
+      this.declare(`declare ptr @scr_fsp_read_file(ptr)`);
+      const t = B.tmp();
+      B.line(`${t} = call ptr @scr_fsp_read_file(ptr ${args[0]!.name})`);
+      return this.own({ name: t, type: e.type });
+    }
     if (e.fn === "timers.setTimeout" || e.fn === "timers.setInterval" || e.fn === "timers.setTimeoutHandle" || e.fn === "timers.setImmediate" || e.fn === "process.nextTick" || e.fn === "timers.queueMicrotask") {
       // The loop owns the callback until it fires (setTimeout/setImmediate/
       // queueMicrotask) or until clear (setInterval) — the +1 MOVES in;
@@ -10133,7 +10147,7 @@ class LlEmitter {
       if (!shape) throw new Error("llvm emitter bug: net.serverAddress record unknown");
       const args = e.args.map((a) => this.emitExpr(a));
       this.declare(`declare ptr @scr_net_server_addr_ip(ptr)`);
-      this.declare(`declare double @scr_net_server_addr_family(ptr)`);
+      this.declare(`declare ptr @scr_net_server_addr_family(ptr)`);
       this.declare(`declare double @scr_net_server_port(ptr)`);
       const ip = B.tmp();
       B.line(`${ip} = call ptr @scr_net_server_addr_ip(ptr ${args[0]!.name}) ; +1`);
@@ -10151,8 +10165,8 @@ class LlEmitter {
       };
       store("address", "ptr", ip);
       const fam = B.tmp();
-      B.line(`${fam} = call double @scr_net_server_addr_family(ptr ${args[0]!.name})`);
-      store("family", "double", fam);
+      B.line(`${fam} = call ptr @scr_net_server_addr_family(ptr ${args[0]!.name}) ; +1 — "IPv4"/"IPv6"`);
+      store("family", "ptr", fam);
       const port = B.tmp();
       B.line(`${port} = call double @scr_net_server_port(ptr ${args[0]!.name})`);
       store("port", "double", port);
