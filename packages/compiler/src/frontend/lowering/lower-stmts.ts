@@ -16,7 +16,7 @@ import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.j
 import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape } from "./lower-containers.js";
 import { bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
-import type { ClassIteratorInfo } from "./lower-classes.js";
+import type { ClassInfo, ClassIteratorInfo } from "./lower-classes.js";
 import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from "./lower-stream.js";
 import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf } from "./lower-builtins.js";
@@ -1301,11 +1301,28 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
           if (el.name === undefined) continue;
           const loc = locOf(el);
           if (el.dotDotDotToken) {
-            L.unsupported(
-              "SC1031",
-              el,
-              "rest elements over class-instance sources (the remaining-properties object has no lowering yet)",
+            // `{ a, ...rest }` over a class instance: the remaining
+            // instance FIELDS pack fresh (classInstanceRestValue — JS's
+            // CopyDataProperties copies own enumerable properties, which
+            // for a class instance are exactly the fields).
+            const consumed = new Set<string>();
+            for (const sib of pattern.elements) {
+              if (sib === el || sib.name === undefined || sib.dotDotDotToken) continue;
+              const keyNode = sib.propertyName ?? (ts.isIdentifier(sib.name) ? sib.name : null);
+              if (keyNode === null) continue; // defensive: a pattern target always carries a propertyName
+              const folded = patternKeyNameOf(L, keyNode);
+              if (folded === null) {
+                L.unsupported("SC1031", el, "rest bindings beside computed keys (the consumed set is a runtime fact)");
+              }
+              consumed.add(folded);
+            }
+            L.bindPatternTarget(
+              el.name,
+              classInstanceRestValue(L, el, srcRef, srcType, info, consumed, patternBindingType(L, el.name)),
+              isLet,
+              out,
             );
+            continue;
           }
           const prop = el.propertyName ?? el.name;
           const propName = ts.isIdentifier(prop) || ts.isComputedPropertyName(prop) || ts.isStringLiteralLike(prop) || ts.isNumericLiteral(prop)
@@ -1336,6 +1353,14 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
               loc,
               el,
             );
+            // A defaulted GETTER result lands in a hidden temp first: the
+            // default's ternary mentions its operand twice (test + present
+            // arm), and JS calls the getter once per element.
+            if (el.initializer) {
+              const got = L.declareHiddenLocal("%dget", value.type);
+              out.push({ kind: "varDecl", localId: got.id, init: value, loc });
+              value = { kind: "varRef", localId: got.id, type: value.type, loc };
+            }
           } else {
             L.unsupported(
               "SC1031",
@@ -1397,12 +1422,20 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
             `destructuring the setter-only property '${propName}' (Node would bind undefined)`,
           );
         }
-        if (el.initializer) {
-          L.unsupported("SC1031", el, "defaults on destructured get/set accessor properties");
-        }
         const loc = locOf(el);
         const closure: IrExpr = { kind: "recordGet", obj: srcRef(), shapeId: srcType.shapeId, field: `%get:${propName}`, type: getSlotT, loc };
-        L.bindPatternTarget(el.name, { kind: "callValue", callee: closure, args: [], type: getSlotT.ret, loc }, isLet, out);
+        // The getter call IS the element's read; a default applies to its
+        // RESULT exactly like a data field's (undefined-arm test, lazy).
+        // The result lands in a hidden temp first: the default's ternary
+        // mentions its operand twice (test + present arm), and the getter
+        // must run ONCE (JS calls it once per element).
+        let accessorValue: IrExpr = { kind: "callValue", callee: closure, args: [], type: getSlotT.ret, loc };
+        if (el.initializer) {
+          const got = L.declareHiddenLocal("%dget", accessorValue.type);
+          out.push({ kind: "varDecl", localId: got.id, init: accessorValue, loc });
+          accessorValue = applyBindingDefault(L, el, { kind: "varRef", localId: got.id, type: accessorValue.type, loc });
+        }
+        L.bindPatternTarget(el.name, accessorValue, isLet, out);
         continue;
       }
       const fieldType = shape.fields.find((f) => f.name === propName)?.type;
@@ -1468,7 +1501,11 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
   export function patternKeyNameOf(L: Lowerer, prop: ts.PropertyName): string | null {
     if (ts.isIdentifier(prop) || ts.isPrivateIdentifier(prop)) return prop.text;
     if (ts.isComputedPropertyName(prop)) return L.foldedStringKeyOf(prop.expression);
-    if (ts.isStringLiteral(prop) || ts.isNoSubstitutionTemplateLiteral(prop) || ts.isNumericLiteral(prop)) {
+    // A numeric-literal key spells JS's canonical ToPropertyKey form
+    // directly (`{ 2: x }` names the field "2") — a pattern position is
+    // not an expression, so the checker-type fold below does not apply.
+    if (ts.isNumericLiteral(prop)) return String(Number(prop.text));
+    if (ts.isStringLiteral(prop) || ts.isNoSubstitutionTemplateLiteral(prop)) {
       return L.foldedStringKeyOf(prop);
     }
     return null;
@@ -1736,6 +1773,94 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       }
       const read: IrExpr = { kind: "recordGet", obj: srcRef(), shapeId: srcType.shapeId, field: srcField.name, type: srcField.type, loc };
       return { name: f.name, value: L.coerceInto(el, read, f.type) };
+    });
+    return { kind: "recordLit", fields, type: restT, loc };
+  }
+
+/** The fresh record for `{ a, ...rest }` over a CLASS-INSTANCE source:
+   * JS's CopyDataProperties copies the OWN ENUMERABLE properties — the
+   * instance FIELDS, base chain included, in property-creation order
+   * (base constructors assign theirs first) — and never the prototype
+   * members (methods and accessors stay behind; the checker's rest type
+   * excludes them too, so the two sides agree). The packed record must
+   * agree with the checker's rest type field-for-field — a non-public
+   * field IS copied by JS but the rest type cannot name it (silent
+   * divergence; fence) — and key-for-key in ORDER: the packed shape's
+   * JSON/Object.keys order is first-seen global metadata, and a checker
+   * rest type that reorders (own-before-inherited) would make the
+   * enumeration surfaces diverge from Node, so it fences instead of
+   * silently reordering. Runtime-provided chains (Error/EventEmitter/
+   * stream roots) carry runtime-internal state no record copy can
+   * reproduce — fenced. ES-#private fields are own but non-enumerable:
+   * JS skips them and so does the packing. */
+  function classInstanceRestValue(L: Lowerer, blame: ts.Node,
+    srcRef: () => IrExpr,
+    srcType: IrType & { kind: "object" },
+    info: ClassInfo,
+    consumed: Set<string>,
+    restT: IrType | null,): IrExpr {
+    const loc = locOf(blame);
+    for (let c: ClassInfo | null = info; c; c = c.base) {
+      if (c.builtinError || c.builtinEmitter || c.builtinStream) {
+        L.unsupported(
+          "SC1031",
+          blame,
+          "rest bindings over runtime-provided class instances (Error/EventEmitter/stream internals have no record form)",
+        );
+      }
+    }
+    if (restT?.kind !== "record") {
+      L.unsupported(
+        "SC1031",
+        blame,
+        restT
+          ? `rest bindings packing the remaining properties as '${L.fmt(restT)}' (only plain record types pack)`
+          : "rest bindings whose packed type has no static mapping (only plain record types pack)",
+      );
+    }
+    const restShape = L.shapes.get(restT.shapeId);
+    if (!restShape) throw new Error(`lowerer bug: rest binding over unknown shape ${restT.shapeId}`);
+    if (restShape.indexValue || restShape.tuple) {
+      L.unsupported("SC1031", blame, "rest bindings over index-signature shapes (the undeclared entries would need overflow packing)");
+    }
+    const remaining = info.def.fields.filter(
+      (f) => !f.name.startsWith("#") && !f.name.startsWith("%") && !consumed.has(f.name),
+    );
+    for (const f of remaining) {
+      if (!restShape.fields.some((rf) => rf.name === f.name)) {
+        L.unsupported(
+          "SC1031",
+          blame,
+          `rest bindings over instances of '${info.def.jsName ?? info.def.name}' (JS copies the non-public field '${f.name}' into the rest object, which the rest type cannot name)`,
+        );
+      }
+    }
+    for (const rf of restShape.fields) {
+      if (!remaining.some((f) => f.name === rf.name)) {
+        L.unsupported(
+          "SC1031",
+          blame,
+          `the rest field '${rf.name}' is not an instance field of '${info.def.jsName ?? info.def.name}'`,
+        );
+      }
+    }
+    const emitOrder = restShape.declaredOrder ?? restShape.fields.map((f) => f.name);
+    if (emitOrder.length !== remaining.length || emitOrder.some((n, i) => n !== remaining[i]!.name)) {
+      L.unsupported(
+        "SC1031",
+        blame,
+        "rest bindings over class instances whose packed key order cannot match Node's (Object.keys/JSON.stringify would enumerate the copied fields in a different order)",
+      );
+    }
+    const fields = remaining.map((f) => {
+      const fieldType = info.fields.get(f.name) ?? f.type;
+      const read = L.fieldGetExpr(
+        { container: "class", obj: srcRef(), className: srcType.className, field: f.name, fieldType },
+        loc,
+        blame,
+      );
+      const restFT = restShape.fields.find((rf) => rf.name === f.name)!.type;
+      return { name: f.name, value: L.coerceInto(blame, read, restFT) };
     });
     return { kind: "recordLit", fields, type: restT, loc };
   }
@@ -4046,6 +4171,127 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       }
       return { stmts: out, value };
     }
+    // A CLASS-INSTANCE source (`({ a, b } = inst)`): the declaration
+    // path's desugar in assignment position — one member read per
+    // element, left to right (declared fields read their slots, accessor
+    // properties call their getters through the same fieldGetExpr
+    // dispatch), defaults against the TARGET's own type, rest packing
+    // the remaining instance fields (classInstanceRestValue). Methods
+    // and names no class on the chain declares keep the declaration
+    // path's named fences.
+    if (init.type.kind === "object") {
+      const objT = init.type;
+      if (!L.classes.get(objT.className)) L.flushDeferredClass(objT.className);
+      const info = L.classes.get(objT.className);
+      if (info) {
+        for (const prop of target.properties) {
+          const propLoc = locOf(prop);
+          if (ts.isSpreadAssignment(prop)) {
+            let restTo: ts.Expression = prop.expression;
+            while (ts.isParenthesizedExpression(restTo)) restTo = restTo.expression;
+            const consumed = new Set<string>();
+            for (const p of target.properties) {
+              if (ts.isShorthandPropertyAssignment(p)) consumed.add((p.name as ts.Identifier).text);
+              else if (ts.isPropertyAssignment(p)) {
+                const n = patternKeyNameOf(L, p.name);
+                if (n !== null) consumed.add(n);
+              }
+            }
+            if (!ts.isIdentifier(restTo)) {
+              lowerAssignTargetInto(L, out, restTo, prop, null, (targetT) =>
+                classInstanceRestValue(L, prop, tmpRef, objT, info, consumed, targetT));
+              continue;
+            }
+            const targetBinding = L.resolveWritable(restTo);
+            if (!targetBinding) {
+              L.rejectUnresolved(restTo, `assignment to '${restTo.text}' (not a writable local or module global)`);
+            }
+            const packed = classInstanceRestValue(L, prop, tmpRef, objT, info, consumed, targetBinding.type);
+            out.push({ kind: "assign", localId: targetBinding.id, value: L.coerceInto(prop, packed, targetBinding.type), loc: propLoc });
+            continue;
+          }
+          let fieldName: string;
+          let bindTo: ts.Expression;
+          let dfltInit: ts.Expression | null = null;
+          if (ts.isShorthandPropertyAssignment(prop)) {
+            fieldName = (prop.name as ts.Identifier).text;
+            bindTo = prop.name as ts.Identifier;
+            dfltInit = prop.objectAssignmentInitializer ?? null;
+          } else if (ts.isPropertyAssignment(prop)) {
+            const folded = patternKeyNameOf(L, prop.name);
+            if (folded === null) {
+              L.unsupported("SC1031", prop, "destructuring assignment with computed keys that do not fold to one property name");
+            }
+            fieldName = folded;
+            bindTo = prop.initializer;
+            if (ts.isBinaryExpression(bindTo) && bindTo.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+              dfltInit = bindTo.right;
+              bindTo = bindTo.left;
+            }
+          } else {
+            L.unsupported("SC1031", prop, "destructuring assignment with getter/setter or method properties");
+          }
+          const dflt = dfltInit;
+          const readOf = (targetT: IrType | null): IrExpr => {
+            const fieldType = info.fields.get(fieldName);
+            const getF = fieldType === undefined ? L.findMethodOn(info, `get:${fieldName}`) : null;
+            const setF = fieldType === undefined ? L.findMethodOn(info, `set:${fieldName}`) : null;
+            let v: IrExpr;
+            if (fieldType !== undefined) {
+              v = L.fieldGetExpr({ container: "class", obj: tmpRef(), className: objT.className, field: fieldName, fieldType }, propLoc, prop);
+            } else if (getF || setF) {
+              v = L.fieldGetExpr(
+                { container: "accessor", obj: tmpRef(), className: objT.className, field: fieldName, fieldType: getF ? getF.sig.ret : setF!.sig.params[0]!.type },
+                propLoc,
+                prop,
+              );
+              // A defaulted getter result temps first — the default's
+              // ternary mentions its operand twice, and JS calls the
+              // getter once per element.
+              if (dflt && targetT) {
+                const got = L.declareHiddenLocal("%dget", v.type);
+                out.push({ kind: "varDecl", localId: got.id, init: v, loc: propLoc });
+                v = { kind: "varRef", localId: got.id, type: v.type, loc: propLoc };
+              }
+            } else {
+              L.unsupported(
+                "SC1031",
+                prop,
+                L.findMethodOn(info, fieldName)
+                  ? `destructuring the method '${fieldName}' (a detached method loses its receiver — call it through the instance)`
+                  : `destructuring the property '${fieldName}' the class '${info.def.jsName ?? info.def.name}' does not declare`,
+              );
+            }
+            if (dflt && targetT) v = undefArmDefault(L, prop, dflt, v, targetT);
+            return v;
+          };
+          while (ts.isParenthesizedExpression(bindTo)) bindTo = bindTo.expression;
+          if (!ts.isIdentifier(bindTo)) {
+            lowerAssignTargetInto(L, out, bindTo, prop, dfltInit, readOf);
+            continue;
+          }
+          let targetBinding: { id: string; type: IrType } | null;
+          if (ts.isShorthandPropertyAssignment(prop)) {
+            const valueSymbol = L.checker.getShorthandAssignmentValueSymbol(prop) ?? null;
+            const local = valueSymbol ? L.resolveKey(valueSymbol, bindTo) : null;
+            const g = valueSymbol ? L.globalsBySymbol.get(valueSymbol) : undefined;
+            targetBinding = local ? { id: local.id, type: local.type } : g ? { id: g.id, type: g.type } : null;
+          } else {
+            targetBinding = L.resolveWritable(bindTo);
+          }
+          if (!targetBinding) {
+            L.rejectUnresolved(bindTo, `assignment to '${bindTo.text}' (not a writable local or module global)`);
+          }
+          out.push({
+            kind: "assign",
+            localId: targetBinding.id,
+            value: L.coerceInto(prop, readOf(targetBinding.type), targetBinding.type),
+            loc: propLoc,
+          });
+        }
+        return { stmts: out, value };
+      }
+    }
     if (init.type.kind !== "record") {
       L.unsupported(
         "SC1031",
@@ -4071,13 +4317,6 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         // copied values too), then assign like any record value.
         let restTo: ts.Expression = prop.expression;
         while (ts.isParenthesizedExpression(restTo)) restTo = restTo.expression;
-        if (!ts.isIdentifier(restTo)) {
-          L.unsupported("SC1031", prop, "destructuring assignment of rest into non-variable targets");
-        }
-        const targetBinding = L.resolveWritable(restTo);
-        if (!targetBinding) {
-          L.rejectUnresolved(restTo, `assignment to '${restTo.text}' (not a writable local or module global)`);
-        }
         if (shape.indexValue) {
           L.unsupported("SC1031", prop, "rest bindings over index-signature shapes (the undeclared entries would need overflow packing)");
         }
@@ -4105,6 +4344,16 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           type: { kind: "record", shapeId: restShapeId },
           loc: locOf(prop),
         };
+        if (!ts.isIdentifier(restTo)) {
+          // `({ a, ...box.rest } = src)` — the rest packs identically and
+          // lands through the property/element write machinery.
+          lowerAssignTargetInto(L, out, restTo, prop, null, () => packed);
+          continue;
+        }
+        const targetBinding = L.resolveWritable(restTo);
+        if (!targetBinding) {
+          L.rejectUnresolved(restTo, `assignment to '${restTo.text}' (not a writable local or module global)`);
+        }
         out.push({
           kind: "assign",
           localId: targetBinding.id,
@@ -4138,11 +4387,31 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       }
       while (ts.isParenthesizedExpression(bindTo)) bindTo = bindTo.expression;
       if (!ts.isIdentifier(bindTo)) {
-        L.unsupported(
-          "SC1031",
-          bindTo,
-          "destructuring assignment to nested patterns or non-variable targets (assign a variable, then write the parts out)",
-        );
+        // Nested patterns and property/element targets: the element's
+        // value (default applied at the target's own type) lands through
+        // the shared non-variable machinery.
+        const fieldT = shape.fields.find((f) => f.name === fieldName)?.type;
+        const dflt = dfltInit;
+        lowerAssignTargetInto(L, out, bindTo, prop, dflt, (targetT) => {
+          if (!fieldT) {
+            // The defaulted read of a field the shape does not carry is
+            // always undefined — the default IS the value (the identifier
+            // path's rule below).
+            if (dflt && targetT) return L.lowerExprExpecting(dflt, targetT);
+            L.unsupported("SC1031", prop, `destructuring the field '${fieldName}' the source shape does not carry`);
+          }
+          let v: IrExpr = {
+            kind: "recordGet",
+            obj: { kind: "varRef", localId: tmp.id, type: srcType, loc: locOf(prop) },
+            shapeId: srcType.shapeId,
+            field: fieldName,
+            type: fieldT,
+            loc: locOf(prop),
+          };
+          if (dflt && targetT) v = undefArmDefault(L, prop, dflt, v, targetT);
+          return v;
+        });
+        continue;
       }
       // Shorthand names resolve to the PROPERTY symbol at their location;
       // the VALUE symbol (the binding being assigned) comes from the
@@ -4195,6 +4464,112 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       });
     }
     return { stmts: out, value };
+  }
+
+/** A destructuring-ASSIGNMENT target that is not a plain variable:
+   * PROPERTY targets (`({ a: this.x } = o)`, `[c.x, c.y] = t` — the
+   * receiver evaluates into a hidden temp at the element's pattern
+   * position, BEFORE the element's value read, JS's get-the-reference-
+   * then-GetV order), ELEMENT targets over arrays (runtime f64 index)
+   * and tuples/records (literal keys) with the same receiver/key temp
+   * discipline, and NESTED patterns (`({ p: { q } } = o)`, `[[a], b] = t`
+   * — the element's value destructures through the same assignment
+   * machinery, its own hidden temp included). `valueOf` builds the
+   * (defaulted) source value at the target's own type; it receives null
+   * exactly for nested patterns, which have no single binding type —
+   * defaults there keep a fence (JS would need the pattern's implied
+   * type to test against). Optional-chain targets are not assignment
+   * targets in JS at all; index-signature runtime keys and island/dyn
+   * receivers keep the fence below. */
+  function lowerAssignTargetInto(L: Lowerer, out: IrStmt[], targetNode: ts.Expression,
+    blame: ts.Node,
+    dflt: ts.Expression | null,
+    valueOf: (targetT: IrType | null) => IrExpr,): void {
+    let t = targetNode;
+    while (ts.isParenthesizedExpression(t)) t = t.expression;
+    const loc = locOf(t);
+    if (ts.isObjectLiteralExpression(t) || ts.isArrayLiteralExpression(t)) {
+      if (dflt) {
+        L.unsupported(
+          "SC1031",
+          blame,
+          "defaults on nested patterns in destructuring assignment (bind a variable with the default, then destructure it)",
+        );
+      }
+      const sub = destructuringAssignInto(L, t, valueOf(null), null, blame, loc);
+      out.push(...sub.stmts);
+      return;
+    }
+    if (ts.isPropertyAccessExpression(t) && !t.questionDotToken) {
+      const ft = L.fieldTarget(t);
+      if (ft) {
+        // The receiver temps FIRST: JS evaluates the target reference
+        // before reading the element's value, so a side-effecting
+        // receiver (`f().x`) must run before the source read the
+        // defaulted value machinery may emit.
+        const recv = L.declareHiddenLocal("%dtRecv", ft.obj.type);
+        out.push({ kind: "varDecl", localId: recv.id, init: ft.obj, loc });
+        const value = L.coerceInto(blame, valueOf(ft.fieldType), ft.fieldType);
+        out.push(L.fieldSetStmt({ ...ft, obj: { kind: "varRef", localId: recv.id, type: ft.obj.type, loc } }, value, loc, t));
+        return;
+      }
+    }
+    if (ts.isElementAccessExpression(t) && !t.questionDotToken) {
+      const recvT = L.mapTypeOf(L.typeOf(t.expression));
+      if (recvT?.kind === "array") {
+        const arr = L.lowerExpr(t.expression);
+        if (arr.type.kind === "array") {
+          const recv = L.declareHiddenLocal("%dtRecv", arr.type);
+          out.push({ kind: "varDecl", localId: recv.id, init: arr, loc });
+          const index = L.lowerExpr(t.argumentExpression);
+          if (index.type.kind !== "f64") {
+            L.unsupported("SC1090", t.argumentExpression, "indexing with non-number keys");
+          }
+          const idx = L.declareHiddenLocal("%dtIdx", F64);
+          out.push({ kind: "varDecl", localId: idx.id, init: index, loc });
+          const value = L.coerceInto(blame, valueOf(recvT.elem), recvT.elem);
+          out.push({
+            kind: "arraySet",
+            arr: { kind: "varRef", localId: recv.id, type: arr.type, loc },
+            index: { kind: "varRef", localId: idx.id, type: F64, loc },
+            value,
+            loc,
+          });
+          return;
+        }
+      } else if (recvT?.kind === "record") {
+        // Tuple positions and LITERAL declared record keys are field
+        // writes (the element-write lowering's own rule); runtime keys
+        // keep the fence below.
+        const shape = L.shapes.get(recvT.shapeId);
+        const litKey = ts.isStringLiteralLike(t.argumentExpression) || ts.isNumericLiteral(t.argumentExpression)
+          ? L.foldedStringKeyOf(t.argumentExpression)
+          : null;
+        const field = litKey !== null ? shape?.fields.find((f) => f.name === litKey) : undefined;
+        if (field) {
+          const obj = L.lowerExpr(t.expression);
+          if (obj.type.kind === "record") {
+            const recv = L.declareHiddenLocal("%dtRecv", obj.type);
+            out.push({ kind: "varDecl", localId: recv.id, init: obj, loc });
+            const value = L.coerceInto(blame, valueOf(field.type), field.type);
+            out.push({
+              kind: "recordSet",
+              obj: { kind: "varRef", localId: recv.id, type: obj.type, loc },
+              shapeId: recvT.shapeId,
+              field: field.name,
+              value,
+              loc,
+            });
+            return;
+          }
+        }
+      }
+    }
+    L.unsupported(
+      "SC1031",
+      targetNode,
+      "destructuring assignment to targets with no static write form (assign a variable, then write the parts out)",
+    );
   }
 
 /** One object-pattern property's pieces for the checked-dynamic path:
@@ -4348,34 +4723,28 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         defaultNode = el.right;
       }
       while (ts.isParenthesizedExpression(targetNode)) targetNode = targetNode.expression;
-      if (!ts.isIdentifier(targetNode)) {
-        L.unsupported(
-          "SC1031",
-          targetNode,
-          "destructuring assignment to nested patterns or non-variable targets (assign a variable, then write the parts out)",
-        );
-      }
-      const targetBinding = L.resolveWritable(targetNode);
-      if (!targetBinding) {
-        L.rejectUnresolved(targetNode, `assignment to '${targetNode.text}' (not a writable local or module global)`);
-      }
-      let read: IrExpr;
-      if (isRest) {
-        read = isTuple
-          ? tupleTailValue(L, el, tmpRef, srcType as IrType & { kind: "record" }, shape!, i, targetBinding.type)
-          : { kind: "arrIntrinsic", method: "slice", receiver: tmpRef(), args: [{ kind: "numLit", value: i, type: F64, loc: locOf(el) }], type: srcType, loc: locOf(el) };
-      } else if (isTuple && defaultNode !== null && !shape!.fields.some((f) => f.name === String(i))) {
-        // Past the tuple's end the read is always undefined — the default
-        // IS the assignment (JS evaluates it unconditionally there).
-        read = L.lowerExprExpecting(defaultNode, targetBinding.type);
-      } else {
+      // The element's (defaulted) value at the target's own type — shared
+      // by variable, property/element, and nested-pattern targets (the
+      // latter receive null: no single binding type exists there, and
+      // defaults on nested targets fence in the shared machinery).
+      const readOf = (targetT: IrType | null): IrExpr => {
+        if (isRest) {
+          return isTuple
+            ? tupleTailValue(L, el, tmpRef, srcType as IrType & { kind: "record" }, shape!, i, targetT)
+            : { kind: "arrIntrinsic", method: "slice", receiver: tmpRef(), args: [{ kind: "numLit", value: i, type: F64, loc: locOf(el) }], type: srcType, loc: locOf(el) };
+        }
+        if (isTuple && defaultNode !== null && targetT !== null && !shape!.fields.some((f) => f.name === String(i))) {
+          // Past the tuple's end the read is always undefined — the default
+          // IS the assignment (JS evaluates it unconditionally there).
+          return L.lowerExprExpecting(defaultNode, targetT);
+        }
         // Defaults: JS applies the default ONLY when the element reads
         // undefined. A checked-dynamic element tests at runtime; a tuple
         // position tests its undefined arm (a never-undefined field makes
         // the default dead — JS would not evaluate it either); an array
         // position carries the bounds test (past the end JS reads
         // undefined where the plain read would trap).
-        read = elemRead(i, el);
+        let read = elemRead(i, el);
         if (defaultNode !== null) {
           if (read.type.kind === "dyn" || read.type.kind === "jsval") {
             const boundary = read.type;
@@ -4395,17 +4764,26 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
               type: boundary,
               loc: locOf(el),
             };
-          } else if (isTuple) {
-            read = undefArmDefault(L, el, defaultNode, read, targetBinding.type);
-          } else {
-            read = arrayPositionDefaultValue(L, el, defaultNode, read, tmpRef, i, (srcType as IrType & { kind: "array" }).elem, targetBinding.type, out);
+          } else if (targetT !== null) {
+            read = isTuple
+              ? undefArmDefault(L, el, defaultNode, read, targetT)
+              : arrayPositionDefaultValue(L, el, defaultNode, read, tmpRef, i, (srcType as IrType & { kind: "array" }).elem, targetT, out);
           }
         }
+        return read;
+      };
+      if (!ts.isIdentifier(targetNode)) {
+        lowerAssignTargetInto(L, out, targetNode, el, defaultNode, readOf);
+        return;
+      }
+      const targetBinding = L.resolveWritable(targetNode);
+      if (!targetBinding) {
+        L.rejectUnresolved(targetNode, `assignment to '${targetNode.text}' (not a writable local or module global)`);
       }
       out.push({
         kind: "assign",
         localId: targetBinding.id,
-        value: L.coerceInto(el, read, targetBinding.type),
+        value: L.coerceInto(el, readOf(targetBinding.type), targetBinding.type),
         loc: locOf(el),
       });
     });
