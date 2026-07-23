@@ -15,7 +15,9 @@ Usage:
   scriptc build --lib --profile <p.json>    library mode: compile the profile's entry
                                             module to a linkable static archive
                                             (<name>.lib.a) exporting the
-                                            profile-declared C symbols
+                                            profile-declared C symbols; a profile
+                                            with a sidecar section also gets the
+                                            contract sidecar JSON beside the archive
 
 Options:
   -o, --out <path>   output executable path (default: .scriptc/<name>)
@@ -129,6 +131,9 @@ async function main(): Promise<number> {
     }
     if (!values["keep-c"]) rmSync(result.cPath, { force: true });
     process.stdout.write(`${result.archivePath}\n`);
+    // The contract sidecar rides the same invocation when the profile
+    // declares one — name it so the embedder's tooling knows where to look.
+    if (result.sidecarPath !== undefined) process.stdout.write(`${result.sidecarPath}\n`);
     return 0;
   }
   if (!inputArg) fail(`missing input file\n\n${USAGE}`);

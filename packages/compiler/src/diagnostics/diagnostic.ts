@@ -18,8 +18,9 @@
  *            malformed (SC4001), export unresolved (SC4002), unmappable
  *            signature (SC4003), async/generator export (SC4004), the
  *            async_free graph requirement (SC4005), island/dynamic on the
- *            library path (SC4006), generic export signatures (SC4007);
- *            SC4008 reserved for ask-5 determinism denials
+ *            library path (SC4006), generic export signatures (SC4007),
+ *            contract-sidecar projection (SC4009); SC4008 reserved for
+ *            ask-5 determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -670,6 +671,24 @@ export function libGenericExportDiag(exportName: string, loc: SrcLoc): ScrDiagno
     hint:
       "pin a concrete instantiation in the entry (or facade) module and map that: " +
       "export const update_f64 = update<number>",
+  };
+}
+
+/** SC4009 — the contract sidecar cannot be projected: a profile
+ * designation names nothing the entry declares, a designated type falls
+ * outside the schema's closed vocabulary, or a contract convention const
+ * is malformed. The sidecar records verdicts, never guesses — anything
+ * unprojectable refuses with the offending declaration named. */
+export function libSidecarDiag(detail: string, loc: SrcLoc, hint?: string): ScrDiagnostic {
+  return {
+    code: "SC4009",
+    message: `contract sidecar: ${detail}`,
+    loc,
+    hint:
+      hint ??
+      "the sidecar's type table speaks a closed vocabulary (bool, number, string/Uint8Array, optional, arrays, " +
+      "named records, string-literal-union enums, and kind-tagged unions of object literals) read from the entry " +
+      "module's exported declarations in source order",
   };
 }
 

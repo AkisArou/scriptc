@@ -134,3 +134,61 @@ describe("library profile validation", () => {
       "params[0]",
     ));
 });
+
+/* ── the ask-2 sidecar section ─────────────────────────────────────────── */
+
+const goodSidecar = {
+  wire_version: 3,
+  abi_version: 1,
+  snapshot_format: 1,
+  build_id_symbol: "kx_build_id",
+  abi_version_symbol: "kx_abi_version",
+  model: "Model",
+  msg: "Msg",
+};
+
+describe("library profile sidecar section", () => {
+  test("well-formed sidecar section resolves with its defaults", () => {
+    const r = loadLibraryProfile(writeProfile({ ...good, sidecar: goodSidecar }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.sidecar).toEqual({
+      path: null,
+      wireVersion: 3,
+      abiVersion: 1,
+      snapshotFormat: 1,
+      buildIdSymbol: "kx_build_id",
+      abiVersionSymbol: "kx_abi_version",
+      model: "Model",
+      msg: "Msg",
+      initExport: "init",
+      updateExport: "update",
+      subscriptionsExport: "subscriptions",
+      sourceHash: "module-graph",
+    });
+    // The profile's exact bytes ride along (build_id input 2).
+    expect(r.profile.profileBytes.length).toBeGreaterThan(0);
+  });
+
+  test("no sidecar section means no sidecar config", () => {
+    const r = loadLibraryProfile(writeProfile(good));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.sidecar).toBeNull();
+  });
+
+  test("unknown field inside sidecar refuses", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, extra: 1 } }, "sidecar.extra"));
+  test("getter symbol without the prefix refuses", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, build_id_symbol: "zz_build_id" } }, "sidecar.build_id_symbol"));
+  test("a getter symbol colliding with a mode symbol refuses", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, build_id_symbol: "kx_init" } }, "declared twice"));
+  test("model and msg must differ", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, msg: "Model" } }, "differ"));
+  test("an unknown source_hash contract refuses", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, source_hash: "sha256" } }, "module-graph"));
+  test("a non-integer version constant refuses", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, wire_version: 1.5 } }, "sidecar.wire_version"));
+  test("an absolute sidecar path refuses", () =>
+    expectSc4001({ ...good, sidecar: { ...goodSidecar, path: "/tmp/contract.json" } }, "sidecar.path"));
+});
