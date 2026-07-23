@@ -19,8 +19,10 @@
  *            signature (SC4003), async/generator export (SC4004), the
  *            async_free graph requirement (SC4005), island/dynamic on the
  *            library path (SC4006), generic export signatures (SC4007),
- *            contract-sidecar projection (SC4009); SC4008 reserved for
- *            ask-5 determinism denials
+ *            contract-sidecar projection (SC4009), multi-site type
+ *            declarations feeding a tabled type (SC4010), conditional/
+ *            mapped types producing a tabled type (SC4011); SC4008
+ *            reserved for ask-5 determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -689,6 +691,37 @@ export function libSidecarDiag(detail: string, loc: SrcLoc, hint?: string): ScrD
       "the sidecar's type table speaks a closed vocabulary (bool, number, string/Uint8Array, optional, arrays, " +
       "named records, string-literal-union enums, and kind-tagged unions of object literals) read from the entry " +
       "module's exported declarations in source order",
+  };
+}
+
+/** SC4010 — a tabled or designated type's members gather from MORE THAN
+ * ONE declaration site (interface merging, module augmentation, a
+ * same-name exported declaration in another module): the merged member
+ * order is a checker implementation detail no sidecar consumer can
+ * reproduce from source, and declaration order IS the wire contract. The
+ * teaching names every contributing site. */
+export function libSidecarMergedDiag(name: string, sites: readonly string[], loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC4010",
+    message: `contract sidecar: '${name}' gathers members from ${sites.length} declaration sites (${sites.join(", ")}) — a tabled type's order must derive from ONE declaration site`,
+    loc,
+    hint:
+      `merged declaration order is a checker implementation detail that no sidecar consumer can reproduce from source — ` +
+      `collapse '${name}' into a single declaration and delete or rename the other site(s): ${sites.join(", ")}`,
+  };
+}
+
+/** SC4011 — a conditional or mapped type produces a tabled or designated
+ * type: type-level computation has no author-visible declaration order,
+ * so its member order cannot be the wire contract. */
+export function libSidecarComputedDiag(name: string, which: "conditional" | "mapped", loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC4011",
+    message: `contract sidecar: '${name}' is produced by a ${which} type — a tabled or designated type needs literal, declaration-ordered members`,
+    loc,
+    hint:
+      "table and arm order is wire contract read from the declaration site, and a computed type's member order is " +
+      "checker evaluation, not source — spell the union's arms (or the record's fields) literally in one declaration",
   };
 }
 
