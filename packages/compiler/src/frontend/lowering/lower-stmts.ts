@@ -14,7 +14,7 @@ import { isProvenanceSourceFile } from "../provenance-registry.js";
 import { lowerImportEquals, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.js";
 import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape } from "./lower-containers.js";
-import { bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
+import { bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 import type { ClassIteratorInfo } from "./lower-classes.js";
 import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from "./lower-stream.js";
@@ -2204,6 +2204,13 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         return null;
       }
     }
+
+    // `const h = id` — an ALIAS of a generic function: the alias's symbol
+    // registers the target's info (calls and pinned values resolve like
+    // the target's own name), the binding has no runtime value, and the
+    // statement emits nothing (collectGlobals skipped module-scope
+    // globals by the same test; block-scoped aliases register here).
+    if (bindingGenericFnAliasInfoOf(L, decl)) return null;
 
     // `const knownBy = (cmd) => ...` — an IMPLICIT-ANY function-value
     // binding in npm-static JS (function-scope bindings register here, in

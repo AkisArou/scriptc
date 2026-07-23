@@ -5370,7 +5370,11 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // NUMERIC literals are their canonical string spelling — JS object keys
     // ARE strings (`r[1]` reads `r["1"]`), so `b[1]` hits a declared field
     // named "1" (a mapped type over a numeric enum) exactly like `b["1"]`.
-    const litKey = recordKeyLiteralText(keyNode);
+    // A key IDENTIFIER whose type proves one literal (a literal-typed
+    // const, a keyof-constrained type parameter bound to a literal inside
+    // a generic instance) is the same static read — identifier evaluation
+    // is pure, so skipping it matches JS exactly.
+    const litKey = recordKeyLiteralText(keyNode) ?? recordKeyTypeLiteralText(L, keyNode);
     // The receiver lowers FIRST (both branches below read it, and JS
     // evaluates the receiver before the key).
     const obj = L.lowerExpr(expr.expression);
@@ -5465,6 +5469,30 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
   export function recordKeyLiteralText(node: ts.Expression): string | null {
     if (ts.isStringLiteral(node)) return node.text;
     if (ts.isNumericLiteral(node)) return String(Number(node.text));
+    return null;
+  }
+
+  /** The compile-time key an IDENTIFIER's TYPE proves: a key variable whose
+   * (narrowed) type is one string/number literal — `const k: "a" = …; o[k]`,
+   * and the generic-body form where k's type is a keyof-constrained
+   * parameter bound to a literal (`pick(o, "a")`'s instance reads `o[k]`
+   * with K = "a", resolved through typeParamTsBindings). Identifier reads
+   * are pure, so the static field read may skip evaluating the key exactly
+   * like a syntactic literal. Null anywhere the type keeps more than one
+   * key. */
+  export function recordKeyTypeLiteralText(L: Lowerer, node: ts.Expression): string | null {
+    if (!ts.isIdentifier(node)) return null;
+    let t: ts.Type = L.typeOf(node);
+    if (t.flags & ts.TypeFlags.TypeParameter) {
+      const bound = L.typeParamTsResolver(t);
+      if (!bound) return null;
+      t = bound;
+    }
+    if (t.isStringLiteralType()) return t.value;
+    if (t.isNumberLiteralType()) {
+      const n = t.value;
+      return Number.isFinite(n) && n >= 0 ? String(n) : null;
+    }
     return null;
   }
 

@@ -1,78 +1,13 @@
-generics.ts:8:17 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = id' — instantiate explicitly ('id<number>'), or call 'id' directly) is not supported yet
+generics.ts:50:1 - error SC0001: Cannot find name 'useAsValue'.
 
-  7 | function useAsValue(): void {
-  8 |   const alias = id; // no pinning context — the slot keeps <T>(x: T) => T
-    |                 ^~
-  9 | }
+  49 | // when something on the entry path uses them.
+  50 | useAsValue();
+     | ^~~~~~~~~~
+  51 | storeGenericSignature();
 
-generics.ts:11:32 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = id' — instantiate explicitly ('id<number>'), or call 'id' directly) is not supported yet
+generics.ts:51:1 - error SC0001: Cannot find name 'storeGenericSignature'.
 
-  10 | function storeGenericSignature(): void {
-  11 |   const keep: <T>(x: T) => T = id; // the annotation KEEPS the type parameter
-     |                                ^~
-  12 |   keep(1);
-
-generics.ts:12:3 - error SC2004: uses of 'keep' inherit the blocker on its declaration
-
-  11 |   const keep: <T>(x: T) => T = id; // the annotation KEEPS the type parameter
-  12 |   keep(1);
-     |   ^~~~
-  13 | }
-
-  hint: the declaration of 'keep' did not compile — fix the diagnostic reported there and these sites clear with it
-
-generics.ts:18:3 - error SC1090: generic nested functions (only top-level generic function declarations are supported) are not supported yet
-
-  17 | function outer(): void {
-  18 |   function nested<T>(x: T): T {
-     |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  19 |     return x;
-
-generics.ts:25:10 - error SC1090: '.join()' on arrays of this element type (number, string, and boolean arrays join — unions of those with undefined/null arms too, the units printing empty like JS) is not supported yet (instantiating 'joinAll' with <number[]>)
-
-  24 | function joinAll<T>(a: T[]): string {
-  25 |   return a.join(",");
-     |          ^~~~~~~~~~~
-  26 | }
-
-generics.ts:39:7 - error SC2001: values of type 'typeof Box' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
-
-  38 | // The uninstantiated family as a value: no thunk, no single ctor ABI.
-  39 | const BoxAlias = Box;
-     |       ^~~~~~~~
-  40 | // A base that mentions the class's own type parameters would differ per
-
-generics.ts:39:18 - error SC1090: generic classes as values ('typeof Box' keeps the type parameter — instantiation expressions ('Box<number>') and concrete constructor-typed slots compile) are not supported yet
-
-  38 | // The uninstantiated family as a value: no thunk, no single ctor ABI.
-  39 | const BoxAlias = Box;
-     |                  ^~~
-  40 | // A base that mentions the class's own type parameters would differ per
-
-generics.ts:42:26 - error SC1090: generic classes whose 'extends' clause mentions their own type parameters (each instantiation would need a different base) are not supported yet
-
-  41 | // instantiation — no single family interval can cover them.
-  42 | class Chained<T> extends Box<T> {
-     |                          ^~~~~~
-  43 |   constructor(v: T) {
-
-generics.ts:48:20 - error SC1090: generic class expressions are not supported yet
-
-  47 | // Generic class expressions: each evaluation would mint a distinct FAMILY.
-  48 | const ExprFamily = class <T> {
-     |                    ^~~~~~~~~~~
-  49 |   x: T | undefined;
-
-generics.ts:61:1 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
-
-  60 | new Box(1);
-  61 | new Chained(2);
-     | ^~~~~~~~~~~~~~
-  62 | new ExprFamily<number>();
-
-generics.ts:62:1 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
-
-  61 | new Chained(2);
-  62 | new ExprFamily<number>();
-     | ^~~~~~~~~~~~~~~~~~~~~~~~
-  63 | 
+  50 | useAsValue();
+  51 | storeGenericSignature();
+     | ^~~~~~~~~~~~~~~~~~~~~
+  52 | outer();

@@ -13,7 +13,7 @@ import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } 
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, isPromisifyCall } from "./lower-builtins.js";
-import { bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
+import { bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
 import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
@@ -1019,6 +1019,22 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             }
             continue;
           }
+        }
+        // `const h = id` at file scope — an ALIAS of a generic function:
+        // registers the target's info under the alias's symbol (no global
+        // exists; the binding is never read). Aliases resolve in
+        // declaration order, so a chain (`const h2 = h`) registers link by
+        // link; an unresolved target falls through to the ordinary global
+        // registration and its fences.
+        {
+          let aliased = false;
+          try {
+            aliased = bindingGenericFnAliasInfoOf(L, decl) !== null;
+          } catch (e) {
+            if (!(e instanceof PoisonError)) throw e;
+            aliased = true; // fenced by name — no global either way
+          }
+          if (aliased) continue;
         }
         // `const f = (x) => ...` at file scope of an npm-static JS file
         // whose params are implicit-any: the implicit-monomorphization

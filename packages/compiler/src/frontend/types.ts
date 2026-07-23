@@ -477,6 +477,14 @@ export type ClassNamer = (decl: ts.ClassLikeDeclaration) => string;
  * TypeMapperCtx exactly like ClassNamer. */
 export type TypeParamResolver = (t: ts.Type) => IrType | null;
 
+/** Resolves a type-parameter ts.Type to the CHECKER type it is bound to in
+ * the current instantiation, or null. The ts-level twin of
+ * TypeParamResolver, needed where the IR type has already lost information
+ * mapType's widening discipline drops: `T[K]` inside a generic body resolves
+ * through the BOUND checker types (K's literal names the property), which no
+ * IrType binding can carry. */
+export type TypeParamTsResolver = (t: ts.Type) => ts.Type | null;
+
 /** Everything mapType needs besides the type itself: the checker, the two
  * interners (owned by the Lowerer), and the Lowerer-injected hooks. Built
  * once per Lowerer and threaded through the recursion — adding a hook means
@@ -487,6 +495,10 @@ export interface TypeMapperCtx {
   unions: UnionRegistry;
   classNamer: ClassNamer;
   resolveTypeParam?: TypeParamResolver;
+  /** The ts-level twin of resolveTypeParam (bound CHECKER types), consulted
+   * only where literal identity matters — indexed accesses (`T[K]`) inside
+   * generic bodies whose K is bound to a literal key. */
+  resolveTypeParamTs?: TypeParamTsResolver;
   /** GENERIC program classes (monomorphization by flow): the mapping of a
    * concrete instantiation reference (`Box<number>`) — the Lowerer
    * registers/reuses the instantiation (`Box%0`) and answers its object
@@ -673,6 +685,15 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (viaAwaited !== null) {
       contextResolutions++;
       return viaAwaited;
+    }
+    // `T[K]` inside a generic body (the checker keeps indexed accesses over
+    // type parameters symbolic): resolved through the BOUND checker types
+    // when K names one concrete key — the property's type maps like any
+    // concrete member read (mapBoundIndexedAccess).
+    const viaIndexed = mapBoundIndexedAccess(type, ctx);
+    if (viaIndexed !== null) {
+      contextResolutions++;
+      return viaIndexed;
     }
   }
   const widened = checker.getBaseTypeOfLiteralType(type);
@@ -2385,6 +2406,34 @@ function mapNarrowedTypeParam(type: ts.Type, ctx: TypeMapperCtx): IrType | null 
   if (arms.length === 1) return isUnitType(arms[0]!) ? null : arms[0]!;
   // Filtering preserves the canonical (typeKey-sorted) arm order.
   return { kind: "union", unionId: unions.intern(arms) };
+}
+
+/** `T[K]` inside a generic body, resolved through the instantiation's BOUND
+ * checker types (the checker keeps indexed accesses over type parameters
+ * symbolic). Object and index sides each resolve through resolveTypeParamTs
+ * when they are type parameters; when the index lands on ONE literal key
+ * (`K extends keyof T` bound to `"a"` — inference preserves the literal
+ * there), the named property's type maps like a concrete member read. A
+ * non-literal index (K bound to `string` or a key union) answers null: the
+ * access has no one property type, and the per-site keyed-read machinery
+ * (or its fences) owns the story. */
+function mapBoundIndexedAccess(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
+  const { checker, resolveTypeParamTs } = ctx;
+  if (!resolveTypeParamTs || !type.isIndexedAccessType()) return null;
+  const resolveSide = (t: ts.Type): ts.Type | null =>
+    t.flags & ts.TypeFlags.TypeParameter ? resolveTypeParamTs(t) : t;
+  const objT = resolveSide(type.getObjectType());
+  const idxT = resolveSide(type.getIndexType());
+  if (!objT || !idxT) return null;
+  const key = idxT.isStringLiteralType()
+    ? idxT.value
+    : idxT.isNumberLiteralType()
+      ? String(idxT.value)
+      : null;
+  if (key === null) return null;
+  const prop = checker.getPropertyOfType(objT, key);
+  if (!prop) return null;
+  return mapType(checker.getTypeOfSymbol(prop), ctx);
 }
 
 /** `Partial<T>` / `Readonly<T>` where T is a STILL-GENERIC type parameter —
