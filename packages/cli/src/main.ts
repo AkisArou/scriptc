@@ -126,9 +126,9 @@ async function main(): Promise<number> {
   }
 
   if (command === "coverage") {
-    const { coverage } = analyze(input, { dynamic: values.dynamic, ...(npmStatic !== undefined ? { npmStatic } : {}) });
+    const { coverage, sourceTexts } = analyze(input, { dynamic: values.dynamic, ...(npmStatic !== undefined ? { npmStatic } : {}) });
     const color = process.stdout.isTTY ?? false;
-    process.stdout.write(renderCoverage(coverage, { color }) + "\n");
+    process.stdout.write(renderCoverage(coverage, { color, sourceTexts }) + "\n");
     return coverage.preflightFailed ? 1 : 0;
   }
 

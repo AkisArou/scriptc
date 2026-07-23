@@ -117,6 +117,16 @@ test("type errors block analysis", () => {
   expect(out).toContain("1 TypeScript error");
 });
 
+test("type errors render the same code frame a build prints", () => {
+  const { coverage, sourceTexts } = analyze(fixture("type-errors.ts"));
+  const out = renderCoverage(coverage, { sourceTexts });
+  expect(out).toContain("not analyzable");
+  expect(out).toContain("error SC0001");
+  // The frame gutter with the offending line, exactly the build renderer.
+  expect(out).toMatch(/\d+ \| /);
+  expect(out).toContain("^");
+});
+
 test("every corpus program is 100% static (corpus and coverage agree)", async () => {
   // The differential corpus compiles by definition; coverage must agree.
   // `// @dynamic` programs compile under --dynamic, so analyze them that way.

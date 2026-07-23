@@ -7,6 +7,7 @@
  * collects — the diagnostics registry is the coverage taxonomy.
  */
 import type { Milestone, ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import { renderAll } from "../diagnostics/render.js";
 import type { LowerStats } from "../frontend/lowering/lowerer.js";
 import type { NpmBuiltinUse, NpmLazyTrap } from "../frontend/npm.js";
 import type { ProvenanceSources } from "../frontend/provenance-registry.js";
@@ -85,7 +86,7 @@ interface Blocker {
   count: number;
 }
 
-export function renderCoverage(input: CoverageInput, opts: { color?: boolean } = {}): string {
+export function renderCoverage(input: CoverageInput, opts: { color?: boolean; sourceTexts?: Map<string, string> } = {}): string {
   const c = (code: string, s: string) => (opts.color ? code + s + RESET : s);
   const out: string[] = [];
   out.push(`${c(BOLD, "scriptc coverage")} ${DIMPath(input.file, opts.color ?? false)}`);
@@ -109,6 +110,13 @@ export function renderCoverage(input: CoverageInput, opts: { color?: boolean } =
         `  ${c(RED, "not analyzable")}: ${tsc.length} TypeScript error${tsc.length === 1 ? "" : "s"} — ` +
           `fix type errors first (scriptc only analyzes programs that typecheck)`,
       );
+      // The same rendered diagnostics a build prints: coverage is the
+      // command people reach for first, so the verdict line alone would
+      // swallow the code frames that say what to fix.
+      if (opts.sourceTexts) {
+        out.push("");
+        out.push(renderAll(tsc, opts.sourceTexts, { color: opts.color ?? false }));
+      }
       return out.join("\n");
     }
     const n = input.diagnostics.length;
@@ -122,6 +130,10 @@ export function renderCoverage(input: CoverageInput, opts: { color?: boolean } =
       out.push(
         `    ${c(RED, `×${b.count}`.padStart(4))}  ${b.what.padEnd(widest)}  ${c(DIM, b.code)}`,
       );
+    }
+    if (opts.sourceTexts) {
+      out.push("");
+      out.push(renderAll(input.diagnostics, opts.sourceTexts, { color: opts.color ?? false }));
     }
     return out.join("\n");
   }
