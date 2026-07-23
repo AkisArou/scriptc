@@ -4,9 +4,23 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.4
+## 0.0.5
 
 <!-- release:start -->
+
+### Features
+
+- **Library mode**: `scriptc build --lib --profile <profile.json>` compiles a TypeScript module set into a linkable static archive exporting profile-declared C symbols — marshalled scalar/string/bytes signatures, a re-runnable init entry, panic-to-sink routing instead of aborts, and a cycle-collection entry. The emitted archive links against nothing but libSystem, creates no threads, and installs no signal handlers; conformance fixtures drive both code generators from a real C host.
+- **Bundler-emitted CommonJS packages work with `--npm-static`**: getter-table and star re-export plumbing now types its named exports from the same name set Node's lexer sees, and a package whose shipped code still breaks the typecheck falls back to the embedded engine with a note naming why — never a failed build.
+
+### Fixes
+
+- Two compile-time crashes on unusual shipped-JavaScript shapes (probe reads that mutated locals, captures through non-lifted functions) now compile or fence with a named diagnostic.
+
+<!-- release:end -->
+
+## 0.0.4
+
 
 ### Features
 
@@ -24,8 +38,6 @@ All notable changes to scriptc will be documented in this file.
 - `JSON.stringify` of a dynamic value holding `undefined` now prints identically on both backends.
 - Loose equality between same-kind operands lowers as strict equality.
 - The limitations page documents the type surface: where scriptc's ambient world is narrower than stock TypeScript's, and what diagnostics point at instead.
-
-<!-- release:end -->
 
 ## 0.0.3
 
