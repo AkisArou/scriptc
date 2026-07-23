@@ -5860,9 +5860,14 @@ export function lowerPrefixUnary(L: Lowerer, expr: ts.PrefixUnaryExpression): Ir
       }
       case ts.SyntaxKind.PlusToken: {
         const operand = L.lowerExpr(expr.operand);
-        // Unary + is ToNumber; on an already-number operand it's identity.
+        // Unary + is ToNumber; on an already-number operand it's identity,
+        // and a STRING operand runs the runtime's ECMA-exact StringToNumber
+        // (num.fromString — Number(aString)'s lowering, scr_string.c).
         if (operand.type.kind === "jsval") {
           return { kind: "jsOp", op: "plus", args: [operand], type: JSVAL, loc };
+        }
+        if (operand.type.kind === "string") {
+          return { kind: "libCall", fn: "num.fromString", args: [operand], type: F64, loc };
         }
         if (operand.type.kind !== "f64") L.unsupported("SC1043", expr);
         return operand;

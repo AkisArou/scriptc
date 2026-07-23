@@ -168,6 +168,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "math.random": "scr_math_random",
   "num.parseInt": "scr_parse_int",
   "num.parseFloat": "scr_parse_float",
+  "num.fromString": "scr_string_to_number",
   "math.round": "scr_math_round",
   // decodeUriComponent is NOT here: it throws (MAY_THROW_LIB_FNS), so it
   // refuses by name like the rest of the throwing tier.

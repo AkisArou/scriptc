@@ -2426,6 +2426,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_parse_int(${arg(0)}, ${arg(1)})`);
           case "num.parseFloat":
             return finish(`scr_parse_float(${arg(0)})`);
+          case "num.fromString":
+            return finish(`scr_string_to_number(${arg(0)})`);
           case "num.isNaN":
             return finish(`(bool)isnan(${arg(0)})`);
           // The URI codecs (scr_string.c). Borrow; results +1. decode
