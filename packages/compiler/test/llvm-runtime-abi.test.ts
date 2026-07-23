@@ -5,7 +5,7 @@
  * type-checks its calls against the header), but a .ll `declare` is taken
  * on faith by the linker, so a disagreement is silent UB that can run
  * clean under one toolchain and misbehave under another. This test kills
- * the class mechanically, from two directions:
+ * the class mechanically, from three directions:
  *
  *  1. Source scan: every fully-literal `declare ... @scr_*` template
  *     string in the backend/llvm sources is checked against the header.
@@ -13,6 +13,14 @@
  *     through the LLVM backend and every `declare @scr_*` in the emitted
  *     .ll — including the generic LIB_FN_SYMS path, whose signatures are
  *     derived from IR arg types per call site — is checked the same way.
+ *  3. Name-existence scan: every scr_* symbol name the backend sources
+ *     can EVER put in a .ll — the static string tables (LIB_FN_SYMS and
+ *     friends, whose signatures only exist per call site so neither scan
+ *     above sees an unexercised entry) plus every literal @scr_* template
+ *     reference — must exist in the header as a prototype or an extern
+ *     data symbol. This is what catches a two-string name skew (table
+ *     says scr_foo_bar, runtime defines scr_foobar) at test time instead
+ *     of at the user's link step.
  *
  * The header parser fails LOUDLY on any C type it cannot map so it can
  * never silently fall behind the header. */
@@ -112,10 +120,12 @@ function splitParams(argsText: string): string[] {
   return out;
 }
 
-/** Parse scr_runtime.h into name → prototype. Only `;`-terminated
- * prototypes count: a `static inline` definition has no linkage symbol the
- * emitter could declare, so a declare against one must report as missing. */
-async function parseHeader(): Promise<{ protos: Map<string, CProto> }> {
+/** Parse scr_runtime.h into name → prototype, plus the extern data
+ * symbols (vtable globals and the like) the emitter references by name.
+ * Only `;`-terminated prototypes count: a `static inline` definition has
+ * no linkage symbol the emitter could declare, so a declare against one
+ * must report as missing. */
+async function parseHeader(): Promise<{ protos: Map<string, CProto>; dataSyms: Set<string> }> {
   const raw = await readFile(headerPath, "utf8");
   const src = raw
     .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -160,7 +170,11 @@ async function parseHeader(): Promise<{ protos: Map<string, CProto> }> {
     const params = (variadic ? parts.slice(0, -1) : parts).map((p) => cParamToLl(p, types));
     protos.set(name, { ret: cTypeToLl(retText, types), params, variadic });
   }
-  return { protos };
+  const dataSyms = new Set<string>();
+  for (const m of src.matchAll(/\bextern\s+[^;(){}]*?\b(scr_[a-z0-9_]+)\s*(?:\[[^\]]*\])?\s*;/g)) {
+    dataSyms.add(m[1]!);
+  }
+  return { protos, dataSyms };
 }
 
 interface LlDeclare {
@@ -222,6 +236,37 @@ describe("LLVM backend declares match scr_runtime.h prototypes", () => {
     // literal declares — finding almost none means the regex rotted, not
     // that the emitter went quiet.
     expect(checked).toBeGreaterThan(100);
+    expect(failures).toEqual([]);
+  });
+
+  test("every scr_* name the backend sources can emit exists in the header", async () => {
+    const { protos, dataSyms } = await parseHeader();
+    const names = new Map<string, string>(); // name → first file seen in
+    for (const file of await readdir(llvmSrcDir)) {
+      if (!file.endsWith(".ts")) continue;
+      const src = await readFile(join(llvmSrcDir, file), "utf8");
+      // The static string tables: every double-quoted scr_* literal is a
+      // symbol name some path can hand to the .ll (LIB_FN_SYMS et al.).
+      for (const m of src.matchAll(/"(scr_[a-z0-9_]+)"/g)) {
+        if (!names.has(m[1]!)) names.set(m[1]!, file);
+      }
+      // Literal @scr_* references inside template strings (declares AND
+      // call sites). A reference whose name continues with `${...}` is an
+      // interpolated per-type family (scr_arr_get_${suffix}) — the full
+      // name only exists per suffix, so those ride the emitted scan.
+      for (const m of src.matchAll(/@(scr_[a-z0-9_]+)/g)) {
+        if (src.startsWith("${", m.index + m[0].length)) continue;
+        if (!names.has(m[1]!)) names.set(m[1]!, file);
+      }
+    }
+    const failures: string[] = [];
+    for (const [name, file] of names) {
+      if (protos.has(name) || dataSyms.has(name)) continue;
+      failures.push(`${file}: ${name} — the backend can emit this symbol but scr_runtime.h declares no such prototype or extern data symbol`);
+    }
+    // Extractor guard: the tables alone carry hundreds of names — finding
+    // few means the scan rotted, not that the backend went quiet.
+    expect(names.size).toBeGreaterThan(400);
     expect(failures).toEqual([]);
   });
 
