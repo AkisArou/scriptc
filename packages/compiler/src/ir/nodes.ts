@@ -5489,6 +5489,146 @@ export function moduleUsesTls(mod: IrModule): boolean {
   return found;
 }
 
+/* ── core mode's async_free gate ─────────────────────────────────────────
+ * v1 core mode REQUIRES an async_free module graph (ratified): no async
+ * functions, no generators, no timers, no event-loop or ambient-process
+ * surface anywhere the entry reaches — a static fact of the graph, never a
+ * runtime observation. The detector below answers "what does this graph
+ * reach that a core cannot link?", first offender with its source anchor;
+ * the structural consequence (scr_async.c / scr_child.c and every
+ * loop-hooked unit never join a core link) is safe exactly because this
+ * refusal ran first. */
+
+/** libCall families a v1 core refuses, with the surface name the SC4005
+ * teaching uses. Prefix match over IrLibFn spellings. */
+const CORE_REFUSED_LIB_PREFIXES: readonly [string, string][] = [
+  ["timers.", "the timers surface (setTimeout family)"],
+  ["tp.", "the timers/promises surface"],
+  ["cp.", "the child_process surface"],
+  ["child.", "the child_process surface"],
+  ["spawnRes.", "the child_process surface"],
+  ["process.on", "process signal/exit listeners"],
+  ["process.off", "process signal/exit listeners"],
+  ["stdin.", "the stdin event surface"],
+  ["rl.", "the node:readline surface"],
+  ["net.", "the node:net surface"],
+  ["http.", "the node:http surface"],
+  ["https.", "the node:https surface"],
+  ["http2.", "the node:http2 surface"],
+  ["h2.", "the node:http2 surface"],
+  ["dgram.", "the node:dgram surface"],
+  ["dns.", "the node:dns surface"],
+  ["tls.", "the node:tls surface"],
+  ["fs.watch", "fs.watch"],
+  ["watcher.", "fs.watch"],
+  ["test.", "the node:test surface"],
+  ["readable.", "the node:stream surface"],
+  ["writable.", "the node:stream surface"],
+  ["duplex.", "the node:stream surface"],
+  ["transform.", "the node:stream surface"],
+  ["passthrough.", "the node:stream surface"],
+  ["stream.", "the node:stream surface"],
+  ["als.", "AsyncLocalStorage"],
+  ["urj.", "unhandled-rejection tracking"],
+  ["dc.", "the diagnostics_channel surface"],
+  // NOT the whole "dyn." family: the checked-dynamic DOM (ScrDyn) is
+  // static-tier surface hosted by always-linked units; only defineProps
+  // drags the prototype-dispatch unit (scr_dyn_invoke.c → scr_async_dyn.c).
+  ["dyn.defineProps", "checked-dynamic prototype dispatch"],
+];
+
+/** Value/type kinds whose mere presence means an excluded unit's code (or
+ * a fiber) would have to link. */
+const CORE_REFUSED_KINDS: ReadonlyMap<string, string> = new Map([
+  ["promise", "promise values"],
+  ["generator", "generator values"],
+  ["awaitExpr", "await"],
+  ["awaitUnionExpr", "await"],
+  ["yieldExpr", "yield"],
+  ["child", "the child_process surface"],
+  ["spawnRes", "the child_process surface"],
+  ["childStream", "the child_process surface"],
+  ["netServer", "the node:net surface"],
+  ["netSocket", "the node:net surface"],
+  ["http2Session", "the node:http2 surface"],
+  ["http2Stream", "the node:http2 surface"],
+  ["dgramSocket", "the node:dgram surface"],
+  ["fsWatcher", "fs.watch"],
+  ["testCtx", "the node:test surface"],
+  ["httpReq", "the node:http surface"],
+  ["httpRes", "the node:http surface"],
+  ["httpClientReq", "the node:http surface"],
+  ["secureCtx", "the node:tls surface"],
+  ["dynInvoke", "checked-dynamic prototype dispatch"],
+]);
+
+/** First async/event-loop/ambient-process surface the module graph
+ * reaches, or null when the graph is async_free (the v1 core requirement).
+ * The generic-walk shape of moduleUsesRegex, tracking the nearest
+ * enclosing `loc` so the refusal anchors at the reaching construct; the
+ * coarse moduleUses* predicates are the safety net behind the fine-grained
+ * table (a surface reached only through a spelling the table misses still
+ * refuses, anchored at the entry). */
+export function moduleCoreAsyncSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
+  for (const fn of mod.functions) {
+    if (fn.async === true) return { surface: `an async function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
+    if (fn.generator !== undefined) {
+      return { surface: `a generator function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
+    }
+  }
+  const entryLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
+  let found: { surface: string; loc: SrcLoc } | null = null;
+  const visit = (v: unknown, loc: SrcLoc): void => {
+    if (found !== null || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item, loc);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown; loc?: SrcLoc };
+    const here = node.loc ?? loc;
+    if (typeof node.kind === "string") {
+      const bad = CORE_REFUSED_KINDS.get(node.kind);
+      if (bad !== undefined) {
+        found = { surface: bad, loc: here };
+        return;
+      }
+      if (node.kind === "libCall" && typeof node.fn === "string") {
+        for (const [prefix, surface] of CORE_REFUSED_LIB_PREFIXES) {
+          if (node.fn.startsWith(prefix)) {
+            found = { surface, loc: here };
+            return;
+          }
+        }
+      }
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key], here);
+  };
+  visit(mod, entryLoc);
+  if (found !== null) return found;
+  // Safety net: the coarse unit predicates, entry-anchored. Every one of
+  // these units is excluded from core links, so a true answer that the
+  // fine-grained table missed must still refuse.
+  const coarse: [boolean, string][] = [
+    [moduleUsesProcessEvents(mod), "process signal/exit listeners or the stdin event surface"],
+    [moduleUsesNet(mod), "the node:net surface"],
+    [moduleUsesHttpServer(mod), "the node:http surface"],
+    [moduleUsesHttp2(mod), "the node:http2 surface"],
+    [moduleUsesDgram(mod), "the node:dgram surface"],
+    [moduleUsesFsWatch(mod), "fs.watch"],
+    [moduleUsesStream(mod), "the node:stream surface"],
+    [moduleUsesTls(mod), "the node:tls surface"],
+    [moduleUsesFetch(mod), "fetch"],
+    [moduleUsesNodeTest(mod), "the node:test surface"],
+    [moduleUsesDynAsync(mod), "the checked-dynamic async surface"],
+    [moduleUsesDc(mod), "the diagnostics_channel surface"],
+    [moduleUsesDynInvoke(mod), "checked-dynamic prototype dispatch"],
+  ];
+  for (const [on, surface] of coarse) {
+    if (on) return { surface, loc: entryLoc };
+  }
+  return null;
+}
+
 /** The may-throw seed: libCall members that can raise. Every fs.* member
  * EXCEPT existsSync (which, like Node's, swallows errors and returns false)
  * throws a catchable error on failure; json.parse throws a catchable
