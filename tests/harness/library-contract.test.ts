@@ -115,7 +115,7 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
 
     // The type table: declaration order everywhere, exactly the reachable
     // set, synthesized entries anchored at their containing declaration.
-    expect(doc.types.structs.map((s) => s.name)).toEqual(["Waypoint", "Shift", "Model", "Msg_blob_tag", "Msg_nudge"]);
+    expect(doc.types.structs.map((s) => s.name)).toEqual(["Waypoint", "Shift", "Model", "Msg_blob_tag", "Msg_nudge", "helpers_extent"]);
     expect(doc.types.enums.map((e) => e.name)).toEqual(["Zone"]);
     expect(doc.types.unions.map((u) => u.name)).toEqual(["Route"]);
     expect(doc.types.enums[0]!.members).toEqual(["west", "north", "east"]);
@@ -133,6 +133,16 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
       fields: [
         { name: "body", type: { kind: "bytes" } },
         { name: "status", type: { kind: "f64" } },
+      ],
+    });
+    // Helper-return synthesized names are the same two-part pattern:
+    // container 'helpers', member the helper name — no '_return' suffix.
+    expect(doc.types.structs[5]).toEqual({
+      name: "helpers_extent",
+      synthesized: true,
+      fields: [
+        { name: "span", type: { kind: "f64" } },
+        { name: "first", type: { kind: "bytes" } },
       ],
     });
     expect(doc.types.unions[0]!.arms).toEqual([
@@ -169,6 +179,7 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
       { name: "waypointsOf", params: [], returns: { kind: "slice", elem: { kind: "node", name: "Waypoint" } }, arena: true },
       { name: "headline", params: [], returns: { kind: "bytes" }, arena: true },
       { name: "waypointCount", params: [], returns: { kind: "f64" }, arena: false },
+      { name: "extent", params: [], returns: { kind: "value", name: "helpers_extent" }, arena: true },
     ]);
     // Helpers are bindable surface: the unbound list may name one.
     expect(doc.model_unbound).toEqual(["title", "waypointCount"]);

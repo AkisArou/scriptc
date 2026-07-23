@@ -95,6 +95,13 @@ export function waypointCount(m: Model): number {
   return m.waypoints.length;
 }
 
+// An inline-record return: the synthesized name is two-part like every
+// other (`<Container>_<member>`) — container `helpers`, member the helper
+// name — so this tables `helpers_extent`, never a `_return` suffix.
+export function extent(m: Model): { span: number; first: string } {
+  return { span: m.speed, first: m.title };
+}
+
 // The ratified exported-const conventions (under an embedder's profile a
 // generated facade emits these; nothing here is host code).
 export const modelUnbound = ["title", "waypointCount"];
