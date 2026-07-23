@@ -101,6 +101,7 @@ import {
   mapValKindNum,
   releaseSym,
   retainSym,
+  traceAdapter,
   traceArg,
   vAdapters,
 } from "./shapes.js";
@@ -283,6 +284,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "assert.eqDyn": "scr_assert_eq_dyn",
   "assert.deepResult": "scr_assert_deep_result",
   "assert.sameValue": "scr_assert_same_value_f64",
+  "assert.deqEnter": "scr_assert_deq_enter",
+  "assert.deqLeave": "scr_assert_deq_leave",
   "assert.match": "scr_assert_match",
   "assert.throwsNone": "scr_assert_throws_none",
   "assert.throwsMismatch": "scr_assert_throws_mismatch",
@@ -353,6 +356,13 @@ const LIB_FN_SYMS: Record<string, string> = {
   "insp.key": "scr_insp_key",
   "insp.moreItems": "scr_insp_more_items",
   "insp.end": "scr_insp_end",
+  // Circular references over cycle-capable composites (Node's
+  // seen/circular machinery — none of these throw; refWrap borrows its
+  // string and answers +1).
+  "insp.circCheck": "scr_insp_circ_check",
+  "insp.seenPush": "scr_insp_seen_push",
+  "insp.refWrap": "scr_insp_ref_wrap",
+  "insp.circular": "scr_insp_circular",
   // WHATWG URL + URLSearchParams (scr_url.c / scr_url_params.c):
   // constructions +1; url.new, the fileURLToPath pair, the win32
   // pathToFileURL flavor, and sp.fromPairs throw catchably (may-throw).
@@ -1202,7 +1212,7 @@ class LlEmitter {
       // slot } — TDZ reads peek the payload slot (offset 40) directly.
       `%ScrBox = type { i64, i32, ptr, ptr, ptr, i64 }`,
       // The stack buffer of the emitted JSON serializers { data, len, cap }.
-      `%ScrJsonBuf = type { ptr, i64, i64 }`,
+      `%ScrJsonBuf = type { ptr, i64, i64, ptr, i64, i64 }`,
       // The dynCheck error-path spine { parent, key, index } — the emitted
       // builders stack-allocate one per recursion level (dyn.ts).
       `%ScrDynPath = type { ptr, ptr, i64 }`,
@@ -4986,6 +4996,11 @@ class LlEmitter {
           const t = B.tmp();
           B.line(`${t} = call ptr @scr_jb_finish(ptr ${buf})`);
           compact = this.own({ name: t, type: e.type });
+          // A cycle-capable root can throw the circular-structure
+          // TypeError mid-walk: finish still runs (frees the buffer, the
+          // partial string joins the frame and releases on unwind), then
+          // the pending check unwinds — the C emitter's contract exactly.
+          if (traceAdapter(this, e.value.type) !== null) this.emitPendingCheck();
         }
         // A pretty-print form (`stringify(v, null, 2)`): the frontend
         // resolved the space to a compile-time indent string (Node's

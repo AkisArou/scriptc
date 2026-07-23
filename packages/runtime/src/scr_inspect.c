@@ -245,10 +245,13 @@ static double g_cur_depth;    /* ctx.currentDepth (last-entered composite) */
 
 static InspFrame *insp_top(void) { return &g_frames[g_nframes - 1]; }
 
+static void insp_circ_reset(void); /* circular-reference state, below */
+
 /* Begin a non-empty composite: formatRaw's `recurseTimes += 1;
  * ctx.currentDepth = recurseTimes` plus the uniform +2 the children
  * format under. `recurse` is the CHILDREN's recursion depth. */
 void scr_insp_begin(double recurse) {
+  if (recurse == 1) insp_circ_reset(); /* a fresh top-level value: Node's per-inspect ctx */
   if (g_nframes == g_frames_cap) {
     g_frames_cap = g_frames_cap ? g_frames_cap * 2 : 8;
     g_frames = realloc(g_frames, g_frames_cap * sizeof(InspFrame));
@@ -275,6 +278,85 @@ void scr_insp_entry(ScrStr *s, bool is_num) {
   }
   f->items[f->len++] = scr_str_retain(s);
   if (!is_num) f->all_num = false;
+}
+
+/* ── circular references (Node's <ref *N> / [Circular *N]) ────────────
+ * Recursive record/class types permit runtime reference cycles, and Node
+ * renders them with formatValue's seen/circular machinery: a value
+ * already ON the current traversal stack renders as `[Circular *N]` (N
+ * assigned at first detection, in discovery order), and every rendering
+ * of a so-numbered value gets the `<ref *N> ` prefix at its close. The
+ * compiler-emitted helpers over CYCLE-CAPABLE composites drive exactly
+ * that protocol: circ_check first (before the empty-literal and depth
+ * answers — Node's order: a circular value beyond the depth budget still
+ * says Circular), seen_push after begin, ref_wrap around end's result.
+ * The circular MAP persists for one whole top-level inspect — begin(1)
+ * is the per-value reset (a root composite's first frame). */
+typedef struct {
+  const void *ptr;
+  int id; /* circular id (0 while only on the stack) */
+} InspSeenEnt;
+
+static InspSeenEnt *g_seen;
+static size_t g_nseen;
+static size_t g_seen_cap;
+/* Detection-numbered circular targets (persist across the call). */
+static const void *g_circ[64];
+static int g_ncirc;
+
+static void insp_circ_reset(void) {
+  g_nseen = 0;
+  g_ncirc = 0;
+}
+
+static int insp_circ_id(const void *v) {
+  for (int i = 0; i < g_ncirc; i++) {
+    if (g_circ[i] == v) return i + 1;
+  }
+  return 0;
+}
+
+double scr_insp_circ_check(const void *v) {
+  for (size_t i = 0; i < g_nseen; i++) {
+    if (g_seen[i].ptr != v) continue;
+    int id = insp_circ_id(v);
+    if (id == 0 && g_ncirc < (int)(sizeof g_circ / sizeof *g_circ)) {
+      g_circ[g_ncirc++] = v;
+      id = g_ncirc;
+    }
+    return (double)id;
+  }
+  return 0;
+}
+
+void scr_insp_seen_push(const void *v) {
+  if (g_nseen == g_seen_cap) {
+    g_seen_cap = g_seen_cap ? g_seen_cap * 2 : 8;
+    g_seen = realloc(g_seen, g_seen_cap * sizeof(InspSeenEnt));
+    if (!g_seen) insp_oom();
+  }
+  g_seen[g_nseen].ptr = v;
+  g_seen[g_nseen].id = 0;
+  g_nseen++;
+}
+
+ScrStr *scr_insp_circular(double id) {
+  char buf[32];
+  int n = snprintf(buf, sizeof buf, "[Circular *%.0f]", id);
+  return scr_str_new(buf, (size_t)n);
+}
+
+ScrStr *scr_insp_ref_wrap(const void *v, ScrStr *s) {
+  if (g_nseen > 0) g_nseen--;
+  int id = insp_circ_id(v);
+  if (id == 0) return scr_str_retain(s);
+  char buf[32];
+  int n = snprintf(buf, sizeof buf, "<ref *%d> ", id);
+  ScrStr *out = scr_str_alloc_raw(s->len + (size_t)n, s->len + (size_t)n);
+  memcpy(out->data, buf, (size_t)n);
+  memcpy(out->data + n, s->data, s->len);
+  out->data[out->len] = '\0';
+  return out;
 }
 
 /* remainingText: the "... N more items" tail entry. */

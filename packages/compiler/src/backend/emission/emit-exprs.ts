@@ -5207,6 +5207,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_assert_eq_dyn(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`);
           case "assert.deepResult":
             return finish(`scr_assert_deep_result(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`);
+          case "assert.deqEnter":
+            return finish(`scr_assert_deq_enter(${arg(0)}, ${arg(1)})`);
+          case "assert.deqLeave":
+            return finish(`scr_assert_deq_leave()`);
           case "assert.sameValue":
             return finish(`scr_assert_same_value_f64(${arg(0)}, ${arg(1)})`);
           case "assert.match":
@@ -5288,6 +5292,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_insp_jsval(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "insp.begin":
             return finish(`scr_insp_begin(${arg(0)})`);
+          // Circular references over cycle-capable composites: check/push/
+          // wrap drive Node's seen/circular machinery (scr_inspect.c).
+          case "insp.circCheck":
+            return finish(`scr_insp_circ_check(${arg(0)})`);
+          case "insp.seenPush":
+            return finish(`scr_insp_seen_push(${arg(0)})`);
+          case "insp.refWrap":
+            return finish(`scr_insp_ref_wrap(${arg(0)}, ${arg(1)})`);
+          case "insp.circular":
+            return finish(`scr_insp_circular(${arg(0)})`);
           case "insp.entry":
             return finish(`scr_insp_entry(${arg(0)}, ${arg(1)})`);
           case "insp.key":
@@ -5460,7 +5474,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         // Type-directed serialization: the STATIC type picks an emitted
         // serializer (interned per type) — no DOM, no runtime dispatch. The
         // value temp is BORROWED (released with this statement's frame);
-        // the result string is owned (+1). Never throws.
+        // the result string is owned (+1). Throws only over CYCLE-CAPABLE
+        // types (recursive records — the circular-structure TypeError) and
+        // dyn roots; everything else keeps the throw-free path.
         const v = E.emitExpr(e.value);
         // A dyn root: the runtime's DOM walker (scr_dyn_format_j — the %j
         // serializer IS JSON.stringify over the DOM: number/string/bool/
@@ -5475,7 +5491,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 const buf = `sc_t${E.tempCounter++}`;
                 E.line(`ScrJsonBuf ${buf}; scr_jb_init(&${buf});${E.srcComment(e.loc)}`);
                 E.line(`${helper}(&${buf}, ${v.name});`);
-                return E.newTemp(e.type, `scr_jb_finish(&${buf})`);
+                const t = E.newTemp(e.type, `scr_jb_finish(&${buf})`);
+                // A cycle-capable root can throw the circular-structure
+                // TypeError mid-walk: finish still runs (frees the buffer,
+                // the partial string joins the frame and releases on
+                // unwind), then the pending check unwinds.
+                if (E.traceAdapterC(e.value.type) !== null) E.emitPendingCheck();
+                return t;
               })();
         // A pretty-print form (`stringify(v, null, 2)`): the frontend
         // resolved the space to a compile-time indent string (Node's

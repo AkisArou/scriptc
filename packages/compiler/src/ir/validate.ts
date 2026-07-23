@@ -847,6 +847,10 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "assert.eqBool": { argTypes: [BOOL, BOOL, BOOL, BOOL, STRING, BOOL], result: VOID },
   "assert.deepResult": { argTypes: [BOOL, BOOL, STRING, BOOL], result: VOID },
   "assert.sameValue": { argTypes: [F64, F64], result: BOOL },
+  // The deep-equality pair memo: both slots are program-dependent
+  // (any cycle-capable record/array/map type).
+  "assert.deqEnter": { argTypes: [null, null], result: BOOL },
+  "assert.deqLeave": { argTypes: [], result: VOID },
   "assert.match": { argTypes: [STRING, REGEX, BOOL, STRING, BOOL], result: VOID },
   "assert.throwsNone": { argTypes: [BOOL, STRING, BOOL, STRING, BOOL], result: VOID },
   "assert.throwsMismatch": { argTypes: [STRING, { kind: "object", className: "%Error" }, STRING, BOOL], result: VOID },
@@ -893,6 +897,12 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "insp.jsval": { argTypes: [JSVAL, F64, F64], result: STRING },
   "insp.begin": { argTypes: [F64], result: VOID },
   "insp.entry": { argTypes: [STRING, BOOL], result: VOID },
+  // Circular references: the receiver slot is program-dependent (any
+  // cycle-capable record/array/map/class type — the insp.error precedent).
+  "insp.circCheck": { argTypes: [null], result: F64 },
+  "insp.seenPush": { argTypes: [null], result: VOID },
+  "insp.refWrap": { argTypes: [null, STRING], result: STRING },
+  "insp.circular": { argTypes: [F64], result: STRING },
   "insp.key": { argTypes: [STRING], result: STRING },
   "insp.moreItems": { argTypes: [F64], result: STRING },
   "insp.end": { argTypes: [STRING, STRING, STRING, F64, BOOL, BOOL], result: STRING },

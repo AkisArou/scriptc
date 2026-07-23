@@ -6,14 +6,17 @@
  * Interning ORDER is part of the emitted .ll, so the registries live on one
  * LlWalkers instance the emitter owns.
  *
- * Everything here is throw-free (the jsonStringify node never throws; join
- * walks only f64/string/bool/unit arms — the frontend's fence), so nothing
- * touches the pending-exception protocol the tier excludes. */
+ * Mostly throw-free; the ONE exception is circular-structure detection:
+ * walkers over CYCLE-CAPABLE types (recursive records and their arrays)
+ * bracket their bodies with scr_jb_enter/leave, and a cyclic value makes
+ * enter set the pending TypeError and the walker chain return early — the
+ * jsonStringify emission site runs the pending check (join still walks
+ * only f64/string/bool/unit arms — the frontend's fence). */
 import type { IrRecordShape, IrType, IrUnionDef } from "../../ir/nodes.js";
 import { isRefCounted, typeKey } from "../../ir/nodes.js";
 import { mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
-import { llFieldType, releaseSym, type ShapeHost } from "./shapes.js";
+import { llFieldType, releaseSym, traceAdapter, type ShapeHost } from "./shapes.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 
 /** What the walkers need from the emitter beyond the shape tables: union
@@ -119,6 +122,39 @@ export class LlWalkers {
     return t;
   }
 
+  /* ── circular-structure detection (the C walkers' scr_jb_enter bracket,
+   * ported): CYCLE-CAPABLE containers push themselves on the buffer's
+   * seen stack; a repeat throws V8's exact circular TypeError inside
+   * scr_jb_enter and the walker returns with the exception pending. ── */
+
+  /** Emits the enter call + early return; caller pairs it with jbLeave. */
+  private jbEnter(B: BlockBuilder, isArray: boolean): void {
+    this.host.declare(`declare zeroext i1 @scr_jb_enter(ptr, ptr, i1)`);
+    const ok = B.tmp();
+    B.line(`${ok} = call zeroext i1 @scr_jb_enter(ptr %b, ptr %v, i1 ${isArray ? "true" : "false"})`);
+    const go = B.newLabel("jw.go");
+    const circ = B.newLabel("jw.circ");
+    B.condBr(ok, go, circ);
+    B.startBlock(circ);
+    B.terminate(`ret void ; circular: pending TypeError`);
+    B.startBlock(go);
+  }
+
+  private jbLeave(B: BlockBuilder): void {
+    this.host.declare(`declare void @scr_jb_leave(ptr)`);
+    B.line(`call void @scr_jb_leave(ptr %b)`);
+  }
+
+  private jbEdgeProp(B: BlockBuilder, name: string): void {
+    this.host.declare(`declare void @scr_jb_edge_prop(ptr, ptr)`);
+    B.line(`call void @scr_jb_edge_prop(ptr %b, ptr ${this.host.cstr(name)}) ; ${JSON.stringify(name)}`);
+  }
+
+  private jbEdgeIdx(B: BlockBuilder, idx: string): void {
+    this.host.declare(`declare void @scr_jb_edge_idx(ptr, i64)`);
+    B.line(`call void @scr_jb_edge_idx(ptr %b, i64 ${idx})`);
+  }
+
   /* ── type-directed JSON serializers (jsonWriteHelper, ported) ─────────── */
 
   jsonWriteHelper(t: IrType): string {
@@ -156,7 +192,7 @@ export class LlWalkers {
         this.emitRecordWriter(B, t.shapeId);
         break;
       case "array":
-        this.emitArrayWriter(B, t.elem);
+        this.emitArrayWriter(B, t.elem, traceAdapter(this.host, t) !== null);
         break;
       case "union":
         this.emitUnionWriter(B, t.unionId);
@@ -191,6 +227,12 @@ export class LlWalkers {
     const shape = this.host.recordsById.get(shapeId);
     if (!shape) throw new Error(`llvm emitter bug: jsonStringify of unknown shape ${shapeId}`);
     const fieldIndex = new Map(shape.fields.map((f, i) => [f.name, i + 1]));
+    // CYCLE-CAPABLE shapes bracket the walk with the circular-detection
+    // stack; edge labels stamp before members whose walk can re-enter —
+    // emit-walkers.ts's contract, ported.
+    const cyclic = traceAdapter(this.host, { kind: "record", shapeId }) !== null;
+    const edgeable = (ft: IrType): boolean => cyclic && traceAdapter(this.host, ft) !== null;
+    if (cyclic) this.jbEnter(B, shape.tuple === true);
     // A tuple serializes as a JSON ARRAY in index order — JS-exact. Every
     // position is required, so commas are static.
     if (shape.tuple) {
@@ -198,10 +240,12 @@ export class LlWalkers {
       this.putc(B, "%b", "91"); // '['
       byIndex.forEach((f, i) => {
         if (i > 0) this.putc(B, "%b", "44"); // ','
+        if (edgeable(f.type)) this.jbEdgeIdx(B, String(i));
         const v = this.loadField(B, "%v", shapeId, fieldIndex.get(f.name)!, f.type);
         B.line(`call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; [${f.name}]`);
       });
       this.putc(B, "%b", "93"); // ']'
+      if (cyclic) this.jbLeave(B);
       return;
     }
     // Fields serialize in DECLARED order (JS insertion order); internal
@@ -220,6 +264,7 @@ export class LlWalkers {
     if (!droppable) {
       emitFields.forEach((f, i) => {
         this.puts(B, "%b", `${i > 0 ? "," : ""}"${f.name}":`);
+        if (edgeable(f.type)) this.jbEdgeProp(B, f.name);
         const v = this.loadField(B, "%v", shapeId, fieldIndex.get(f.name)!, f.type);
         B.line(`call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; ${f.name}`);
       });
@@ -255,21 +300,23 @@ export class LlWalkers {
         }
         comma();
         this.puts(B, "%b", `"${f.name}":`);
+        if (edgeable(f.type)) this.jbEdgeProp(B, f.name);
         B.line(`call void @${this.jsonWriteHelper(f.type)}(ptr %b, ${this.valTy(f.type)} ${v}) ; ${f.name}`);
         if (skip !== null) {
           B.br(skip);
           B.startBlock(skip);
         }
       }
-      if (shape.indexValue) this.emitOverflowEntries(B, shape, first);
+      if (shape.indexValue) this.emitOverflowEntries(B, shape, first, edgeable(shape.indexValue));
     }
     this.putc(B, "%b", "125"); // '}'
+    if (cyclic) this.jbLeave(B);
   }
 
   /** Overflow entries follow the declared fields, in JS OWN-KEY order
    * (scr_map_keys_js_order); keys escape like any JSON string;
    * undefined-valued entries drop (the optional-field rule). */
-  private emitOverflowEntries(B: BlockBuilder, shape: IrRecordShape, first: string): void {
+  private emitOverflowEntries(B: BlockBuilder, shape: IrRecordShape, first: string, edgeKeys = false): void {
     const iv = shape.indexValue!;
     const host = this.host;
     const ovfp = B.tmp();
@@ -369,6 +416,10 @@ export class LlWalkers {
     host.declare(`declare void @scr_jb_put_json_str(ptr, ptr)`);
     B.line(`call void @scr_jb_put_json_str(ptr %b, ptr ${k})`);
     this.putc(B, "%b", "58"); // ':'
+    if (edgeKeys) {
+      this.host.declare(`declare void @scr_jb_edge_key(ptr, ptr)`);
+      B.line(`call void @scr_jb_edge_key(ptr %b, ptr ${k})`);
+    }
     B.line(`call void @${this.jsonWriteHelper(iv)}(ptr %b, ${this.valTy(iv)} ${val})`);
     B.line(`call void @scr_str_release(ptr ${k})`);
     if (isRefCounted(iv)) B.line(`call void ${releaseSym(host, iv)}(ptr ${val})`);
@@ -383,10 +434,13 @@ export class LlWalkers {
     B.line(`call void @scr_arr_release(ptr ${ks})`);
   }
 
-  private emitArrayWriter(B: BlockBuilder, elem: IrType): void {
+  private emitArrayWriter(B: BlockBuilder, elem: IrType, cyclic: boolean): void {
     const host = this.host;
     const w = this.jsonWriteHelper(elem);
     host.declare(`declare double @scr_arr_len(ptr)`);
+    // A cycle-capable array joins the circular-detection stack exactly
+    // like a cycle-capable record.
+    if (cyclic) this.jbEnter(B, true);
     this.putc(B, "%b", "91"); // '['
     const len = B.tmp();
     B.line(`${len} = call double @scr_arr_len(ptr %v)`);
@@ -413,6 +467,11 @@ export class LlWalkers {
     this.putc(B, "%b", "44"); // ','
     B.br(lj);
     B.startBlock(lj);
+    if (cyclic) {
+      const idx = B.tmp();
+      B.line(`${idx} = fptoui double ${i} to i64`);
+      this.jbEdgeIdx(B, idx);
+    }
     if (elem.kind === "f64" || elem.kind === "bool") {
       const acc = elem.kind;
       const accTy = elem.kind === "f64" ? "double" : "i1";
@@ -434,6 +493,7 @@ export class LlWalkers {
     B.br(lc);
     B.startBlock(le);
     this.putc(B, "%b", "93"); // ']'
+    if (cyclic) this.jbLeave(B);
   }
 
   private emitUnionWriter(B: BlockBuilder, unionId: string): void {

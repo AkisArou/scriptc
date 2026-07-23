@@ -162,6 +162,23 @@ console.log("unreachable", d.server.host);
     );
   });
 
+  test("RECURSIVE shapes validate depth-first: the path names the deep offender", async () => {
+    // The named-recursive-shape walker calls itself per level (JSON input
+    // is a tree, so the recursion terminates); a failure three knots down
+    // still renders the full path.
+    const r = await compileAndRun(
+      "recursive-path",
+      `interface TreeNode { label: string; children: TreeNode[] }
+const t = JSON.parse('{"label":"r","children":[{"label":"a","children":[{"label":7,"children":[]}]}]}') as TreeNode;
+console.log("unreachable", t.label);
+`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "Uncaught TypeError: expected string at $.children[0].children[0].label, got number",
+    );
+  });
+
   test("array where a record is expected names the mismatch at the root", async () => {
     const r = await compileAndRun(
       "root-kind",

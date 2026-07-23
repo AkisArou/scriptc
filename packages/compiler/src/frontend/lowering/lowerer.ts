@@ -4438,7 +4438,7 @@ export class Lowerer {
    * which have no JSON serialization (a handle isn't JSON) but an honest
    * per-field construction. Recursion terminates: recursive shapes are
    * rejected at mapping time. */
-  jsvalLiftable(t: IrType): boolean {
+  jsvalLiftable(t: IrType, visiting: Set<string> = new Set()): boolean {
     if (t.kind === "jsval") return true;
     if (this.boundarySafe(t)) return true;
     // Typed arrays and URLs marshal IN without joining the round-trip
@@ -4457,20 +4457,29 @@ export class Lowerer {
     if (t.kind === "record") {
       const shape = this.shapes.get(t.shapeId);
       if (!shape || shape.tuple) return false;
+      // Recursive shapes reaching here answer FALSE: this branch is the
+      // per-field island lift (jsval/bytes-bearing composites — the
+      // JSON-safe ones already answered true through boundarySafe, where
+      // a cyclic value throws the circular TypeError at the marshal), and
+      // the lift helpers walk values with no circular guard — fencing the
+      // TYPE is the honest answer.
+      if (visiting.has(t.shapeId)) return false;
+      visiting.add(t.shapeId);
       // An INDEX-SIGNATURE record lifts when its value slot does (dyn
       // included): declared fields write first, then the overflow keys.
-      if (shape.indexValue && !this.jsvalLiftable(shape.indexValue)) return false;
-      return shape.fields.every((f) => !f.name.startsWith("%") && this.jsvalLiftable(f.type));
+      if (shape.indexValue && !this.jsvalLiftable(shape.indexValue, visiting)) return false;
+      return shape.fields.every((f) => !f.name.startsWith("%") && this.jsvalLiftable(f.type, visiting));
     }
-    if (t.kind === "array") return this.jsvalLiftable(t.elem);
+    if (t.kind === "array") return this.jsvalLiftable(t.elem, visiting);
     // A union crossing IN lifts arm by arm (a runtime tag switch — see
     // unionToJsvalHelper) when every arm does: unit arms become the
     // engine's own undefined/null (which is why bare undefined-armed
     // unions lift here despite being JSON-unsafe), the rest lift as
-    // themselves. Arms never nest unions, so this terminates.
+    // themselves. Arms never nest unions, so this terminates (recursive
+    // knots pass through records, guarded above).
     if (t.kind === "union") {
       const def = this.unions.get(t.unionId);
-      return !!def && def.arms.every((a) => isUnitType(a) || this.jsvalLiftable(a));
+      return !!def && def.arms.every((a) => isUnitType(a) || this.jsvalLiftable(a, visiting));
     }
     return false;
   }

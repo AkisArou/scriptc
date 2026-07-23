@@ -7,22 +7,16 @@
 // - symbol-keyed index signatures (no lowering for symbol keys);
 // - index-signature value types outside the supported set (functions,
 //   Maps, promises — Map<string, V> is the container for those);
-// - self-referential mapped types cannot intern (recursive shape rule);
 // - utility types over LIB interfaces stay a type world, not data shapes.
 // (Dot access/writes to index-signature keys compile now — the overflow
-// path in dot spelling; differential corpus.)
+// path in dot spelling — and self-referential mapped types intern as
+// named recursive shapes; differential corpus covers both.)
 const bySymbol: { [s: symbol]: string } = {};
 console.log(bySymbol);
 
 const fnBag: { [k: string]: () => void } = {};
 const boot = fnBag["boot"];
 boot();
-
-type SelfP = Partial<{ next: SelfP; v: number }>;
-const sp: SelfP = { v: 1 };
-if (sp.v !== undefined) {
-  console.log(sp.v);
-}
 
 const stamped: Readonly<Date> = new Date(0);
 console.log(stamped.getTime());

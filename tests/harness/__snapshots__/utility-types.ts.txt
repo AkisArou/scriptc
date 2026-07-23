@@ -1,6 +1,6 @@
 utility-types.ts:14:7 - error SC2001: values of type '{ [s: symbol]: string; }' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
 
-  13 | // path in dot spelling; differential corpus.)
+  13 | // named recursive shapes; differential corpus covers both.)
   14 | const bySymbol: { [s: symbol]: string } = {};
      |       ^~~~~~~~
   15 | console.log(bySymbol);
@@ -34,43 +34,27 @@ utility-types.ts:18:14 - error SC2004: uses of 'fnBag' inherit the blocker on it
 
   hint: the declaration of 'fnBag' did not compile — fix the diagnostic reported there and these sites clear with it
 
-utility-types.ts:22:7 - error SC2001: values of type 'Partial<{ next: Partial<...>; v: number; }>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+utility-types.ts:21:7 - error SC2001: values of type 'Readonly<Date>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
 
-  21 | type SelfP = Partial<{ next: SelfP; v: number }>;
-  22 | const sp: SelfP = { v: 1 };
-     |       ^~
-  23 | if (sp.v !== undefined) {
-
-utility-types.ts:23:5 - error SC2004: uses of 'sp' inherit the blocker on its declaration
-
-  22 | const sp: SelfP = { v: 1 };
-  23 | if (sp.v !== undefined) {
-     |     ^~~~
-  24 |   console.log(sp.v);
-
-  hint: the declaration of 'sp' did not compile — fix the diagnostic reported there and these sites clear with it
-
-utility-types.ts:27:7 - error SC2001: values of type 'Readonly<Date>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
-
-  26 | 
-  27 | const stamped: Readonly<Date> = new Date(0);
+  20 | 
+  21 | const stamped: Readonly<Date> = new Date(0);
      |       ^~~~~~~
-  28 | console.log(stamped.getTime());
+  22 | console.log(stamped.getTime());
 
-utility-types.ts:27:33 - error SC2020: 'new Date' is part of the standard library types but has no scriptc lowering yet
+utility-types.ts:21:33 - error SC2020: 'new Date' is part of the standard library types but has no scriptc lowering yet
 
-  26 | 
-  27 | const stamped: Readonly<Date> = new Date(0);
+  20 | 
+  21 | const stamped: Readonly<Date> = new Date(0);
      |                                 ^~~~~~~~~~~
-  28 | console.log(stamped.getTime());
+  22 | console.log(stamped.getTime());
 
   hint: Date values have no representation — Date.now() and the composed new Date(ms?).toISOString() form compile
 
-utility-types.ts:28:13 - error SC2020: 'Readonly<Date>.getTime' is part of the standard library types but has no scriptc lowering yet
+utility-types.ts:22:13 - error SC2020: 'Readonly<Date>.getTime' is part of the standard library types but has no scriptc lowering yet
 
-  27 | const stamped: Readonly<Date> = new Date(0);
-  28 | console.log(stamped.getTime());
+  21 | const stamped: Readonly<Date> = new Date(0);
+  22 | console.log(stamped.getTime());
      |             ^~~~~~~~~~~~~~~
-  29 | 
+  23 | 
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)

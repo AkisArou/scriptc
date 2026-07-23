@@ -27,9 +27,87 @@ export class ShapeRegistry {
   private readonly byId = new Map<string, IrRecordShape>();
   /** All interned shapes in first-seen (`r0`, `r1`, ...) order. */
   readonly shapes: IrRecordShape[] = [];
-  /** ts.Types currently being mapped — breaks recursive shape types
-   * (`type T = { next: T }`), which mapType rejects by returning null. */
+  /** ts.Types currently being mapped — a BACK-REFERENCE to one of these is
+   * the recursive knot (`interface TreeNode { children: TreeNode[] }`):
+   * mapType answers a NAMED RECURSIVE SHAPE (recursiveRef) whose fields
+   * fill in when the outer frame completes. */
   readonly inProgress = new Set<ts.Type>();
+  /** RECURSIVE shape ids, keyed by CHECKER TYPE identity: one shapeId per
+   * declaration site (the checker canonicalizes interface/alias types per
+   * declaration, and caches generic instantiations, so the same spelling
+   * is the same ts.Type). Cross-declaration structural unification exists
+   * only through the byKey registration finalizeRecursive performs — a
+   * one-level unfolding that references the same knot (`{ next: T }` where
+   * `type T = { next: T }`) folds into the knot's id; two INDEPENDENT
+   * structurally identical recursive declarations intern as distinct
+   * shapes, so values of one fence at the other's slots with the ordinary
+   * shape-mismatch diagnostic (tsc admits the assignment; the exact-shape
+   * stance reports it — the documented v1 width/assignability consequence
+   * of per-declaration identity). */
+  private readonly recIds = new Map<ts.Type, string>();
+  /** Placeholder ids minted but not yet finalized: mid-construction, or
+   * permanently pending when the outer mapping failed (such shapes are
+   * referenced by nothing reachable and prune at module assembly). */
+  private readonly pendingRec = new Set<string>();
+
+  /** The interning key of a canonical field list — shared by intern and
+   * finalizeRecursive so the two registration paths can never disagree. */
+  private keyOf(fields: { name: string; type: IrType }[], tuple: boolean, indexValue?: IrType): string {
+    return (
+      (tuple ? "tuple!" : "") +
+      (indexValue ? `idx<${typeKey(indexValue)}>!` : "") +
+      JSON.stringify(fields.map((f) => [f.name, typeKey(f.type)]))
+    );
+  }
+
+  /** The shape id a back-reference to an in-progress type resolves to:
+   * reuses the type's persistent recursive id or mints a PLACEHOLDER
+   * entry (empty fields) the outer frame finalizes. */
+  recursiveRef(t: ts.Type): string {
+    let id = this.recIds.get(t);
+    if (id === undefined) {
+      id = `r${this.shapes.length}`;
+      const shape: IrRecordShape = { id, fields: [] };
+      this.byId.set(id, shape);
+      this.shapes.push(shape);
+      this.recIds.set(t, id);
+      this.pendingRec.add(id);
+    }
+    return id;
+  }
+
+  /** The FINALIZED recursive shape for a checker type — undefined while
+   * never mapped, mid-construction, or permanently failed. */
+  recursiveShapeFor(t: ts.Type): string | undefined {
+    const id = this.recIds.get(t);
+    return id !== undefined && !this.pendingRec.has(id) ? id : undefined;
+  }
+
+  /** True when a back-reference minted a placeholder for `t` that the
+   * outer frame has not (yet) finalized. */
+  recursivePending(t: ts.Type): boolean {
+    const id = this.recIds.get(t);
+    return id !== undefined && this.pendingRec.has(id);
+  }
+
+  /** Completes a recursive placeholder with its computed field list and
+   * registers the structural key (first writer wins — the key may already
+   * belong to a structurally identical shape; the recursive id stays
+   * authoritative for its own checker type either way). */
+  finalizeRecursive(t: ts.Type, fields: { name: string; type: IrType }[], indexValue?: IrType, declaredOrder?: string[]): string {
+    const id = this.recIds.get(t);
+    if (id === undefined) throw new Error("shape registry bug: finalizeRecursive without a placeholder");
+    if (this.pendingRec.has(id)) {
+      const shape = this.byId.get(id)!;
+      shape.fields = fields;
+      if (indexValue) shape.indexValue = indexValue;
+      if (declaredOrder) shape.declaredOrder = declaredOrder;
+      this.pendingRec.delete(id);
+      const key = this.keyOf(fields, false, indexValue);
+      if (!this.byKey.has(key)) this.byKey.set(key, id);
+    }
+    return id;
+  }
 
   /** Interns a canonical (name-sorted) field list, returning its shapeId.
    * `tuple` shapes (fields "0".."n-1" from a tuple type) intern SEPARATELY
@@ -40,10 +118,7 @@ export class ShapeRegistry {
    * declared fields with and without an overflow portion — or with
    * differently-typed ones — are different structs. */
   intern(fields: { name: string; type: IrType }[], tuple = false, indexValue?: IrType, declaredOrder?: string[],): string {
-    const key =
-      (tuple ? "tuple!" : "") +
-      (indexValue ? `idx<${typeKey(indexValue)}>!` : "") +
-      JSON.stringify(fields.map((f) => [f.name, typeKey(f.type)]));
+    const key = this.keyOf(fields, tuple, indexValue);
     let id = this.byKey.get(key);
     if (id === undefined) {
       id = `r${this.shapes.length}`;
@@ -79,9 +154,62 @@ export class UnionRegistry {
   private readonly byId = new Map<string, IrUnionDef>();
   /** All interned unions in first-seen (`u0`, `u1`, ...) order. */
   readonly unions: IrUnionDef[] = [];
-  /** ts.Types currently being mapped — breaks recursive union types
-   * (`type T = A | { next: T }`), which mapType rejects by returning null. */
+  /** ts.Types currently being mapped — a back-reference to one is the
+   * recursive knot passing through a union (`type Tree = Leaf | Branch`
+   * whose Branch arm carries `Tree[]`, the optional field `a?: A` of a
+   * mutually recursive pair): mapType answers a NAMED RECURSIVE UNION
+   * (recursiveRef) whose arms fill in when the outer frame completes. */
   readonly inProgress = new Set<ts.Type>();
+  /** Recursive union ids, keyed by checker type identity — the
+   * ShapeRegistry.recIds story exactly (per-declaration identity, byKey
+   * folding one-level unfoldings in). */
+  private readonly recIds = new Map<ts.Type, string>();
+  private readonly pendingRec = new Set<string>();
+
+  /** The union id a back-reference to an in-progress union resolves to:
+   * reuses the type's persistent recursive id or mints a PLACEHOLDER
+   * entry (empty arms) the outer frame finalizes. */
+  recursiveRef(t: ts.Type): string {
+    let id = this.recIds.get(t);
+    if (id === undefined) {
+      id = `u${this.unions.length}`;
+      const def: IrUnionDef = { id, arms: [] };
+      this.byId.set(id, def);
+      this.unions.push(def);
+      this.recIds.set(t, id);
+      this.pendingRec.add(id);
+    }
+    return id;
+  }
+
+  /** The FINALIZED recursive union for a checker type — undefined while
+   * never mapped, mid-construction, or permanently failed. */
+  recursiveUnionFor(t: ts.Type): string | undefined {
+    const id = this.recIds.get(t);
+    return id !== undefined && !this.pendingRec.has(id) ? id : undefined;
+  }
+
+  /** True when a back-reference minted a placeholder for `t` that the
+   * outer frame has not (yet) finalized. */
+  recursivePending(t: ts.Type): boolean {
+    const id = this.recIds.get(t);
+    return id !== undefined && this.pendingRec.has(id);
+  }
+
+  /** Completes a recursive placeholder with its canonical arm list and
+   * registers the structural key (first writer wins, like shapes). */
+  finalizeRecursive(t: ts.Type, arms: IrType[]): string {
+    const id = this.recIds.get(t);
+    if (id === undefined) throw new Error("union registry bug: finalizeRecursive without a placeholder");
+    if (this.pendingRec.has(id)) {
+      const def = this.byId.get(id)!;
+      def.arms.push(...arms);
+      this.pendingRec.delete(id);
+      const key = JSON.stringify(arms.map(typeKey));
+      if (!this.byKey.has(key)) this.byKey.set(key, id);
+    }
+    return id;
+  }
 
   /** Interns a canonical (typeKey-sorted, deduplicated) arm list, returning
    * its unionId. */
@@ -105,8 +233,9 @@ export class UnionRegistry {
 
 /** Human-readable rendering of an IrType for diagnostics (records expand to
  * their canonical field list, unions to their arms; `checker.typeToString`
- * can't — it never sees IR types). */
-export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegistry): string {
+ * can't — it never sees IR types). `seen` breaks recursive shapes/unions:
+ * a back-reference renders as "..." instead of expanding forever. */
+export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegistry, seen: Set<string> = new Set()): string {
   switch (t.kind) {
     case "f64":
       return "number";
@@ -128,7 +257,7 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
     case "array": {
       // Union/func elements need the parens TS syntax would ("(number |
       // string)[]" — without them the [] reads as binding to the last arm).
-      const elem = formatIrType(t.elem, shapes, unions);
+      const elem = formatIrType(t.elem, shapes, unions, seen);
       return t.elem.kind === "union" || t.elem.kind === "func" ? `(${elem})[]` : `${elem}[]`;
     }
     case "bytes":
@@ -136,11 +265,11 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
       // runtime representation; the message stays honest either way).
       return t.elem === "u8" ? "Uint8Array" : t.elem === "u32" ? "Uint32Array" : t.elem === "i32" ? "Int32Array" : "Float32Array";
     case "map":
-      return `Map<${formatIrType(t.key, shapes, unions)}, ${formatIrType(t.value, shapes, unions)}>`;
+      return `Map<${formatIrType(t.key, shapes, unions, seen)}, ${formatIrType(t.value, shapes, unions, seen)}>`;
     case "set":
-      return `Set<${formatIrType(t.elem, shapes, unions)}>`;
+      return `Set<${formatIrType(t.elem, shapes, unions, seen)}>`;
     case "func":
-      return `(${t.params.map((p) => formatIrType(p, shapes, unions)).join(", ")}) => ${formatIrType(t.ret, shapes, unions)}`;
+      return `(${t.params.map((p) => formatIrType(p, shapes, unions, seen)).join(", ")}) => ${formatIrType(t.ret, shapes, unions, seen)}`;
     case "object":
       // Runtime-provided error classes carry '%'-prefixed IR names
       // ("%Error") so user classes can never collide; diagnostics show the
@@ -152,31 +281,43 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
     case "record": {
       const shape = shapes.get(t.shapeId);
       if (!shape) return `{ /* unknown shape ${t.shapeId} */ }`;
-      if (shape.tuple) {
-        const byIndex = [...shape.fields].sort((a, b) => Number(a.name) - Number(b.name));
-        return `[${byIndex.map((f) => formatIrType(f.type, shapes, unions)).join(", ")}]`;
-      }
-      const members = shape.fields.map((f) => {
-        // Accessor slots print in TS's accessor spelling, not the
-        // reserved '%'-field encoding.
-        const slot = accessorSlotProp(f.name);
-        if (slot && f.type.kind === "func") {
-          return slot.kind === "get"
-            ? `get ${slot.prop}(): ${formatIrType(f.type.ret, shapes, unions)}`
-            : `set ${slot.prop}(${formatIrType(f.type.params[0] ?? VOID, shapes, unions)})`;
+      if (seen.has(t.shapeId)) return "..."; // the recursive knot
+      seen.add(t.shapeId);
+      try {
+        if (shape.tuple) {
+          const byIndex = [...shape.fields].sort((a, b) => Number(a.name) - Number(b.name));
+          return `[${byIndex.map((f) => formatIrType(f.type, shapes, unions, seen)).join(", ")}]`;
         }
-        return `${f.name}: ${formatIrType(f.type, shapes, unions)}`;
-      });
-      if (shape.indexValue) {
-        members.push(`[key: string]: ${formatIrType(shape.indexValue, shapes, unions)}`);
+        const members = shape.fields.map((f) => {
+          // Accessor slots print in TS's accessor spelling, not the
+          // reserved '%'-field encoding.
+          const slot = accessorSlotProp(f.name);
+          if (slot && f.type.kind === "func") {
+            return slot.kind === "get"
+              ? `get ${slot.prop}(): ${formatIrType(f.type.ret, shapes, unions, seen)}`
+              : `set ${slot.prop}(${formatIrType(f.type.params[0] ?? VOID, shapes, unions, seen)})`;
+          }
+          return `${f.name}: ${formatIrType(f.type, shapes, unions, seen)}`;
+        });
+        if (shape.indexValue) {
+          members.push(`[key: string]: ${formatIrType(shape.indexValue, shapes, unions, seen)}`);
+        }
+        if (members.length === 0) return "{}";
+        return `{ ${members.join("; ")} }`;
+      } finally {
+        seen.delete(t.shapeId); // sibling occurrences still expand
       }
-      if (members.length === 0) return "{}";
-      return `{ ${members.join("; ")} }`;
     }
     case "union": {
       const def = unions.get(t.unionId);
       if (!def) return `/* union ${t.unionId} */`;
-      return def.arms.map((a) => formatIrType(a, shapes, unions)).join(" | ");
+      if (seen.has(t.unionId)) return "..."; // the recursive knot
+      seen.add(t.unionId);
+      try {
+        return def.arms.map((a) => formatIrType(a, shapes, unions, seen)).join(" | ");
+      } finally {
+        seen.delete(t.unionId);
+      }
     }
     case "jsval":
       return "any";
@@ -221,9 +362,9 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
     case "procStream":
       return "WriteStream";
     case "promise":
-      return `Promise<${formatIrType(t.inner, shapes, unions)}>`;
+      return `Promise<${formatIrType(t.inner, shapes, unions, seen)}>`;
     case "generator":
-      return `Generator<${formatIrType(t.yieldT, shapes, unions)}, ${formatIrType(t.retT, shapes, unions)}, ${formatIrType(t.nextT, shapes, unions)}>`;
+      return `Generator<${formatIrType(t.yieldT, shapes, unions, seen)}, ${formatIrType(t.retT, shapes, unions, seen)}, ${formatIrType(t.nextT, shapes, unions, seen)}>`;
     default: {
       const _exhaustive: never = t;
       void _exhaustive;
@@ -469,6 +610,14 @@ function genChannels(
  * fallback for it. */
 const MAP_TYPE_MAX_DEPTH = 64;
 let mapTypeDepth = 0;
+/** Bumped whenever mapType resolves a type through CONTEXT-SENSITIVE hooks
+ * (a generic body's type parameter, a mixin instantiation) — mappings that
+ * make the same ts.Type answer differently across instantiation contexts.
+ * The recursive-shape machinery keys shape identity by checker type, which
+ * is sound only for context-FREE mappings: a recursive frame that observes
+ * a bump between entry and exit stays fenced (recursive generic-open types
+ * report SC2001 instead of interning a per-context-wrong shape). */
+let contextResolutions = 0;
 
 export function mapType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   if (mapTypeDepth >= MAP_TYPE_MAX_DEPTH) return null;
@@ -498,7 +647,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const { checker, unions, classNamer, resolveTypeParam } = ctx;
   if (resolveTypeParam && type.flags & ts.TypeFlags.TypeParameter) {
     const bound = resolveTypeParam(type);
-    if (bound) return bound;
+    if (bound) {
+      contextResolutions++;
+      return bound;
+    }
   }
   // Narrowed type parameters: `!== undefined` / `!== null` / truthiness on
   // a `T | undefined`-flavored value inside a generic body leaves the
@@ -509,13 +661,19 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // the mapping is the binding filtered to what the narrowing kept.
   if (resolveTypeParam) {
     const viaNarrowedParam = mapNarrowedTypeParam(type, ctx);
-    if (viaNarrowedParam !== undefined) return viaNarrowedParam;
+    if (viaNarrowedParam !== undefined) {
+      contextResolutions++;
+      return viaNarrowedParam;
+    }
     // `Awaited<T>` over a bound type parameter (an async generic body's
     // `await fn()` result): a CONDITIONAL type the checker keeps symbolic
     // inside the body — the object-gated utility-alias hook below never
     // sees it, so it resolves here, before the flag dispatch.
     const viaAwaited = mapGenericAwaitedAlias(type, ctx);
-    if (viaAwaited !== null) return viaAwaited;
+    if (viaAwaited !== null) {
+      contextResolutions++;
+      return viaAwaited;
+    }
   }
   const widened = checker.getBaseTypeOfLiteralType(type);
   const flags = widened.flags;
@@ -850,7 +1008,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // pinned instantiation; ambiguity stays unmapped (the hook's rules).
     {
       const viaMixin = ctx.mixinIntersectionInstance?.(widened);
-      if (viaMixin) return viaMixin;
+      if (viaMixin) {
+        contextResolutions++;
+        return viaMixin;
+      }
     }
   }
   // symbol, but with construct signatures — that is the STATIC side, and
@@ -877,7 +1038,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // stays unmapped (nothing names a call site).
     {
       const viaMixin = ctx.mixinClassInstance?.(classDecl);
-      if (viaMixin) return viaMixin;
+      if (viaMixin) {
+        contextResolutions++;
+        return viaMixin;
+      }
     }
     // A class expression inside a function/static block never registers
     // (a distinct class per evaluation): unmappable for the same reason.
@@ -904,7 +1068,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // the current instantiation's classval, like the instance type above.
     {
       const viaMixin = ctx.mixinClassInstance?.(classDecl);
-      if (viaMixin?.kind === "object") return { kind: "classval", className: viaMixin.className };
+      if (viaMixin?.kind === "object") {
+        contextResolutions++;
+        return { kind: "classval", className: viaMixin.className };
+      }
     }
     if (classExprNeverRegisters(classDecl)) return null;
     // A GENERIC class's static side: only an INSTANTIATED one maps — an
@@ -2058,11 +2225,20 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // union membership is the only position where the units are
   // representable. Deliberately unmapped: any other unmappable part
   // (poisons the union), void parts, func arms (closure identity vs tag
-  // interplay, later), and recursive unions (`type T = A | { next: T }` —
-  // an RC cycle anyway).
+  // interplay, later). RECURSIVE unions (`type Tree = Leaf | { children:
+  // Tree[] }`, the optional-field spelling `a?: A` of a mutually recursive
+  // pair) map as NAMED RECURSIVE UNIONS: a back-reference to an in-progress
+  // union answers a placeholder id whose arms fill in when this frame
+  // completes — the ShapeRegistry knot, mirrored (identity per checker
+  // type; context-sensitive frames stay fenced).
   if (widened.isUnionType()) {
-    if (unions.inProgress.has(widened)) return null;
+    const knownRecursive = unions.recursiveUnionFor(widened);
+    if (knownRecursive !== undefined) return { kind: "union", unionId: knownRecursive };
+    if (unions.inProgress.has(widened)) {
+      return { kind: "union", unionId: unions.recursiveRef(widened) };
+    }
     unions.inProgress.add(widened);
+    const sensitivityAtEntry = contextResolutions;
     try {
       const byKey = new Map<string, IrType>();
       for (const part of widened.getTypes()) {
@@ -2103,9 +2279,15 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       const arms = [...byKey.values()];
       // A single surviving UNIT arm cannot stand alone (degenerate — the
       // checker collapsed everything else away); anything else single is
-      // just that type.
+      // just that type. A single arm UNDER A MINTED PLACEHOLDER cannot
+      // stand either: back-references already handed out the union id, and
+      // a one-armed union has no representation — fence the degenerate
+      // recursive spelling honestly.
       if (arms.length === 1 && isUnitType(arms[0]!)) return null;
-      if (arms.length === 1) return arms[0]!;
+      if (arms.length === 1) {
+        if (unions.recursivePending(widened)) return null;
+        return arms[0]!;
+      }
       if (
         arms.some(
           (a) =>
@@ -2132,6 +2314,15 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         return null;
       }
       arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
+      if (unions.recursivePending(widened)) {
+        // The knot closed through this union. A frame that resolved
+        // through context-sensitive hooks (generic type parameters, mixin
+        // instantiations) cannot intern by checker-type identity — the
+        // same ts.Type answers differently per instantiation — so
+        // recursive generic-open unions stay fenced.
+        if (contextResolutions !== sensitivityAtEntry) return null;
+        return { kind: "union", unionId: unions.finalizeRecursive(widened, arms) };
+      }
       return { kind: "union", unionId: unions.intern(arms) };
     } finally {
       unions.inProgress.delete(widened);
@@ -2542,7 +2733,63 @@ export function isGenericCallableMemberType(t: ts.Type, checker: ts.TypeChecker)
   );
 }
 
+/** The computed pieces of a record shape mapRecordTypeInner hands back for
+ * the OUTER frame to intern — or, when a back-reference minted a recursive
+ * placeholder for the type mid-construction, to finalize INTO that
+ * placeholder (the named-recursive-shape knot). */
+interface RecordShapeParts {
+  fields: { name: string; type: IrType }[];
+  indexValue?: IrType;
+  declaredOrder?: string[];
+}
+
 function mapRecordType(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
+  const { shapes } = ctx;
+  // A type whose recursive shape already finalized answers its id straight
+  // off the registry (identity is per checker type; remapping would walk
+  // the same members to the same answer).
+  const knownRecursive = shapes.recursiveShapeFor(widened);
+  if (knownRecursive !== undefined) return { kind: "record", shapeId: knownRecursive };
+  // A BACK-REFERENCE to a shape currently being mapped (`interface
+  // TreeNode { label: string; children: TreeNode[] }` reaching TreeNode
+  // through its own field walk — directly or through arrays, unions,
+  // optionals, Maps): the recursive knot. Answer a NAMED RECURSIVE SHAPE —
+  // a placeholder shape-table entry whose fields fill in when the outer
+  // frame completes (finalizeRecursive below). Backends represent records
+  // as heap references, so the self-reference is an ordinary pointer.
+  if (shapes.inProgress.has(widened)) {
+    return { kind: "record", shapeId: shapes.recursiveRef(widened) };
+  }
+  shapes.inProgress.add(widened);
+  const sensitivityAtEntry = contextResolutions;
+  try {
+    const inner = mapRecordTypeInner(widened, ctx);
+    if (inner === null) return null; // a pending placeholder, if minted, stays unfinalized (prunes as unreachable)
+    if (!("fields" in inner)) {
+      // A whole-type answer (the jsval/dyn absorbs, the header-family
+      // canonical shape). If a back-reference minted a placeholder for
+      // this very type meanwhile, the two answers disagree — fence rather
+      // than leave references to a shape that is not this type's mapping.
+      if (shapes.recursivePending(widened) && inner.kind !== "jsval" && inner.kind !== "dyn") return null;
+      return inner;
+    }
+    if (shapes.recursivePending(widened)) {
+      // The knot closed through this shape. Context-sensitive frames
+      // (generic type parameters, mixin instantiations) cannot intern by
+      // checker-type identity — fence recursive generic-open shapes.
+      if (contextResolutions !== sensitivityAtEntry) return null;
+      return {
+        kind: "record",
+        shapeId: shapes.finalizeRecursive(widened, inner.fields, inner.indexValue, inner.declaredOrder),
+      };
+    }
+    return { kind: "record", shapeId: shapes.intern(inner.fields, false, inner.indexValue, inner.declaredOrder) };
+  } finally {
+    shapes.inProgress.delete(widened);
+  }
+}
+
+function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | RecordShapeParts | null {
   const { checker, shapes } = ctx;
   if (checker.getConstructSignatures(widened).length > 0) return null;
   if (checker.isTupleType(widened) || checker.isArrayLikeType(widened)) return null;
@@ -2664,11 +2911,7 @@ function mapRecordType(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // Checker-computed shapes (no user declaration) need two extra fences in
   // the member walk below; see the comments there.
   const computed = widened.isIntersectionType() || isMappedShape(widened);
-  // Recursive shapes (`type T = { next: T }`) cannot intern (and would be RC
-  // cycles anyway): break the recursion by failing the inner reference.
-  if (shapes.inProgress.has(widened)) return null;
-  shapes.inProgress.add(widened);
-  try {
+  {
     const props = checker.getPropertiesOfType(widened);
     // A computed shape with NO members is not a real empty record: inside a
     // generic body `Partial<T>` resolves to no members at all (keyof T is
@@ -2817,8 +3060,6 @@ function mapRecordType(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // (OrdinaryOwnPropertyKeys) — Object.keys/JSON/inspect all read it.
     const declaredOrder = esOwnKeyOrder(fields.filter((f) => accessorSlotProp(f.name) === null).map((f) => f.name));
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    return { kind: "record", shapeId: shapes.intern(fields, false, indexValue, declaredOrder) };
-  } finally {
-    shapes.inProgress.delete(widened);
+    return { fields, ...(indexValue ? { indexValue } : {}), declaredOrder };
   }
 }

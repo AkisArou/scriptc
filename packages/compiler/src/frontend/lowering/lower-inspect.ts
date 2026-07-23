@@ -14,19 +14,25 @@
  * and throw catchably on composites (the runtime tag is all there is).
  *
  * Options fence honestly, never approximate: depth takes any numeric
- * literal (null/Infinity only over non-recursive types — a cycle would
- * render forever), colors:false / compact:3 / breakLength:80 are the
- * accepted no-op spellings, and everything else names itself in the
- * diagnostic. Values whose rendering would need runtime type identity
- * the static type lacks fence the same way: class hierarchies (a
- * subclass's name and extra fields are dynamic), function values inside
- * composites (no runtime name exists), Uint8Array-vs-Buffer ambiguity.
+ * literal plus null/Infinity (cycle-capable types are safe unbounded —
+ * the circular machinery cuts every cycle), colors:false / compact:3 /
+ * breakLength:80 are the accepted no-op spellings, and everything else
+ * names itself in the diagnostic. Values whose rendering would need
+ * runtime type identity the static type lacks fence the same way: class
+ * hierarchies (a subclass's name and extra fields are dynamic), function
+ * values inside composites (no runtime name exists), Uint8Array-vs-
+ * Buffer ambiguity.
+ *
+ * CYCLIC runtime data renders Node's exact `<ref *N>`/`[Circular *N]`
+ * markers: helpers over cycle-capable composites (typeReachesItself)
+ * drive the runtime seen/circular protocol (insp.circCheck/seenPush/
+ * refWrap — scr_inspect.c), numbering in discovery order per top-level
+ * value, exactly formatValue's ctx.seen/ctx.circular.
  *
  * Known-divergence corners (SEMANTICS.md): errors render the STACKLESS
- * `[Name: message]` form (compiled binaries carry no JS stack), cyclic
- * runtime data renders depth placeholders instead of `<ref *1>`/
- * `[Circular *1]`, and record/class property order follows declaration
- * order (SEMANTICS.md 36's existing stance). */
+ * `[Name: message]` form (compiled binaries carry no JS stack), and
+ * record/class property order follows declaration order (SEMANTICS.md
+ * 36's existing stance). */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { isJsSourceFile } from "../program.js";
@@ -283,6 +289,58 @@ function inspectExpr(
   }
 }
 
+/** True when a VALUE of `t` can contain itself — t's type graph reaches t
+ * again through record fields (index values included), array elements,
+ * union arms, map keys/values, set elements, or class fields. Inspect
+ * helpers over such types run Node's circular machinery (seen stack +
+ * <ref *N>/[Circular *N]); everything acyclic keeps the zero-cost path
+ * (a value of an acyclic type can never repeat on its own path). */
+export function typeReachesItself(L: Lowerer, t: IrType): boolean {
+  const root = typeKey(t);
+  const seen = new Set<string>();
+  const walk = (u: IrType): boolean => {
+    const constituents: IrType[] = [];
+    switch (u.kind) {
+      case "record": {
+        const shape = L.shapes.get(u.shapeId);
+        if (!shape) return false;
+        constituents.push(...shape.fields.map((f) => f.type));
+        if (shape.indexValue) constituents.push(shape.indexValue);
+        break;
+      }
+      case "array":
+      case "set":
+        constituents.push(u.elem);
+        break;
+      case "map":
+        constituents.push(u.key, u.value);
+        break;
+      case "union": {
+        const def = L.unions.get(u.unionId);
+        if (def) constituents.push(...def.arms);
+        break;
+      }
+      case "object": {
+        const info = L.classes.get(u.className);
+        if (info) constituents.push(...info.def.fields.map((f) => f.type));
+        break;
+      }
+      default:
+        return false;
+    }
+    for (const c of constituents) {
+      const k = typeKey(c);
+      if (k === root) return true;
+      if (!seen.has(k)) {
+        seen.add(k);
+        if (walk(c)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(t);
+}
+
 /* ── the interned per-type helper ────────────────────────────────────── */
 
 /** `%util.insp.<n>(v, r, d): string` — formatValue over the static type:
@@ -305,16 +363,34 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
   const rPlus1 = (): IrExpr => ({ kind: "bin", op: "+", left: r(), right: num(1, loc), type: F64, loc });
   const ret = (value: IrExpr): IrStmt => ({ kind: "return", value, loc });
   const exprStmt = (expr: IrExpr): IrStmt => ({ kind: "exprStmt", expr, loc });
-  const begin = (): IrStmt => exprStmt({ kind: "libCall", fn: "insp.begin", args: [rPlus1()], type: { kind: "void" }, loc });
+  // CYCLE-CAPABLE composites (typeReachesItself) run Node's circular
+  // machinery: circCheck first (a value already on the traversal stack
+  // renders [Circular *N] — before the empty/depth answers, Node's
+  // order), seen-push after begin, and refWrap around end's result (the
+  // <ref *N> prefix on values the walk found circular). Acyclic types
+  // keep the zero-cost path.
+  const onCycle =
+    (t.kind === "record" || t.kind === "array" || t.kind === "map" || t.kind === "object") &&
+    typeReachesItself(L, t);
+  const begin = (): IrStmt[] => [
+    exprStmt({ kind: "libCall", fn: "insp.begin", args: [rPlus1()], type: { kind: "void" }, loc }),
+    ...(onCycle
+      ? [exprStmt({ kind: "libCall", fn: "insp.seenPush", args: [v()], type: { kind: "void" }, loc })]
+      : []),
+  ];
   const entry = (s: IrExpr, isNum: IrExpr): IrStmt =>
     exprStmt({ kind: "libCall", fn: "insp.entry", args: [s, isNum], type: { kind: "void" }, loc });
-  const end = (base: IrExpr, b0: IrExpr, b1: IrExpr, arrayExtras: boolean, trailingMore: IrExpr): IrExpr => ({
-    kind: "libCall",
-    fn: "insp.end",
-    args: [base, b0, b1, rPlus1(), boolLit(arrayExtras, loc), trailingMore],
-    type: STRING,
-    loc,
-  });
+  const end = (base: IrExpr, b0: IrExpr, b1: IrExpr, arrayExtras: boolean, trailingMore: IrExpr): IrExpr => {
+    const reduced: IrExpr = {
+      kind: "libCall",
+      fn: "insp.end",
+      args: [base, b0, b1, rPlus1(), boolLit(arrayExtras, loc), trailingMore],
+      type: STRING,
+      loc,
+    };
+    if (!onCycle) return reduced;
+    return { kind: "libCall", fn: "insp.refWrap", args: [v(), reduced], type: STRING, loc };
+  };
   /** if (r > d) return "<placeholder>"; */
   const depthGate = (placeholder: string): IrStmt => ({
     kind: "if",
@@ -356,7 +432,7 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
         },
         depthGate("[Array]"),
         { kind: "varDecl", localId: "s.0", init: { kind: "ternary", cond: hasMore(), then: num(100, loc), else_: n(), type: F64, loc }, loc },
-        begin(),
+        ...begin(),
         {
           kind: "for",
           init: { kind: "varDecl", localId: "i.0", init: num(0, loc), loc },
@@ -397,7 +473,7 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
           body = [ret(str("[]", loc))];
           break;
         }
-        body = [depthGate("[Array]"), begin()];
+        body = [depthGate("[Array]"), ...begin()];
         for (const f of shape.fields) {
           body.push(entry(child(f.type, get(f.name, f.type)), isNumberFlag(L, f.type, () => get(f.name, f.type), loc)));
         }
@@ -436,7 +512,7 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
             loc,
           },
           depthGate("[Object]"),
-          begin(),
+          ...begin(),
           {
             kind: "for",
             init: { kind: "varDecl", localId: "i.0", init: num(0, loc), loc },
@@ -469,7 +545,7 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
       // Object.keys' declared order (SEMANTICS.md 36's stance).
       const order = shape.declaredOrder ?? shape.fields.map((f) => f.name);
       const byName = new Map(shape.fields.map((f) => [f.name, f.type] as const));
-      body = [depthGate("[Object]"), begin()];
+      body = [depthGate("[Object]"), ...begin()];
       for (const fname of order) {
         const ft = byName.get(fname);
         if (!ft) continue;
@@ -517,7 +593,7 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
           loc,
         },
         depthGate(`[${label}]`),
-        begin(),
+        ...begin(),
         { kind: "varDecl", localId: "c.0", init: num(0, loc), loc },
         {
           kind: "for",
@@ -609,7 +685,7 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
         break;
       }
       const get = (field: string, type: IrType): IrExpr => ({ kind: "fieldGet", obj: v(), className: t.className, field, type, loc });
-      body = [depthGate(`[${display}]`), begin()];
+      body = [depthGate(`[${display}]`), ...begin()];
       // def.fields carries layout order: the base chain first, then own —
       // exactly the own-property insertion order of a constructor that
       // assigns in declaration order (SEMANTICS.md 36's stance). SYMBOL-
@@ -633,6 +709,30 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
     }
     default:
       throw new Error(`inspect helper over unexpected type ${typeKey(t)}`);
+  }
+
+  if (onCycle) {
+    // The circular check, FIRST (before the empty-literal and depth
+    // answers): a value already on the traversal stack renders
+    // [Circular *N] and descends no further — Node's formatValue order
+    // (a circular target beyond the depth budget still says Circular).
+    locals.push({ id: "cc.0", name: "cc", type: F64, mutable: false });
+    const cc = (): IrExpr => ref("cc.0", F64);
+    body.unshift(
+      {
+        kind: "varDecl",
+        localId: "cc.0",
+        init: { kind: "libCall", fn: "insp.circCheck", args: [v()], type: F64, loc },
+        loc,
+      },
+      {
+        kind: "if",
+        cond: { kind: "bin", op: ">", left: cc(), right: num(0, loc), type: BOOL, loc },
+        then: [ret({ kind: "libCall", fn: "insp.circular", args: [cc()], type: STRING, loc })],
+        else_: null,
+        loc,
+      },
+    );
   }
 
   L.liftedFns.push({
@@ -807,13 +907,10 @@ function parseInspectOptions(L: Lowerer, node: ts.Expression | undefined, recurs
     };
     if (key === "depth") {
       if (value.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(value) && value.text === "Infinity")) {
-        if (recursive) {
-          L.noLowering(
-            "util.inspect with unbounded depth over a recursive type",
-            value,
-            "cyclic runtime data would render forever — pass a numeric depth",
-          );
-        }
+        // Unbounded depth is safe over recursive types too: the circular
+        // machinery ([Circular *N]) cuts every cycle, so the walk is
+        // bounded by the (finite) object graph — exactly Node.
+        void recursive;
         depth = Infinity;
       } else if (!(ts.isIdentifier(value) && value.text === "undefined")) {
         const n = numeric();

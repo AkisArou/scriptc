@@ -132,6 +132,17 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           }
           break;
         }
+        case "jsonStringify": {
+          // Composite roots can throw: dyn (a runtime handle inside the
+          // DOM), and record/array/union roots whose types are recursive
+          // (the circular-structure TypeError). Kind-level conservatism —
+          // the emitters place the pending check only for cycle-capable
+          // types, and a never-taken caller-side check costs one flag
+          // read.
+          const vt = (rec["value"] as { type?: { kind?: string } }).type?.kind;
+          if (vt === "dyn" || vt === "record" || vt === "array" || vt === "union") f.throws = true;
+          break;
+        }
         case "jsOp":
         case "jsExit":
         case "jsMarshal":

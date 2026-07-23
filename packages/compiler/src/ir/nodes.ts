@@ -3053,6 +3053,11 @@ export type IrLibFn =
   | "assert.eqDyn"
   | "assert.deepResult"
   | "assert.sameValue"
+  /* deepStrictEqual's pair memo over cycle-capable types: enter answers
+   * true for a pair already being compared (Node's memo — equal cyclic
+   * structures compare true); leave pops. */
+  | "assert.deqEnter"
+  | "assert.deqLeave"
   | "assert.match"
   | "assert.throwsNone"
   | "assert.throwsMismatch"
@@ -3106,6 +3111,15 @@ export type IrLibFn =
   | "insp.entry"
   | "insp.key"
   | "insp.moreItems"
+  /* Circular references over cycle-capable composites (recursive record/
+   * class types): circCheck answers a value's circular id when it is
+   * already on the traversal stack (0 otherwise), seenPush/refWrap
+   * bracket the frame (refWrap adds Node's "<ref *N> " prefix to values
+   * the walk found circular), circular renders "[Circular *N]". */
+  | "insp.circCheck"
+  | "insp.seenPush"
+  | "insp.refWrap"
+  | "insp.circular"
   | "insp.end"
   /** node:string_decoder's utf8 StringDecoder (scr_string.c): the decoder
    * value is a one-field record whose f64 PACKS the pending partial
@@ -4447,14 +4461,17 @@ export function isUndefinedArmedUnion(
  * can be validated against): f64, string, bool, records, arrays, and unions
  * of those, recursively. Closures, class instances, dyn itself, and void are
  * not JSON. Registry lookups are parameters because the frontend holds
- * registries and the validator/backend hold maps; recursive shapes/unions
- * cannot exist (the frontend rejects them), so the recursion terminates. */
+ * registries and the validator/backend hold maps. RECURSIVE shapes/unions
+ * are handled COINDUCTIVELY (a revisited shape answers true — safety is
+ * decided by the rest of the graph): a recursive TYPE is JSON-safe when
+ * every reachable constituent is; a cyclic VALUE of such a type throws
+ * Node's circular-structure TypeError at runtime instead. */
 export function isJsonSafeType(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
-  return isJsonSafeAt(t, getRecord, getUnion, false);
+  return isJsonSafeAt(t, getRecord, getUnion, false, new Set());
 }
 
 /** The recursion behind isJsonSafeType. `inRecordField` is the ONE position
@@ -4470,6 +4487,7 @@ function isJsonSafeAt(
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
   inRecordField: boolean,
+  visiting: Set<string>,
 ): boolean {
   switch (t.kind) {
     case "f64":
@@ -4477,14 +4495,19 @@ function isJsonSafeAt(
     case "bool":
       return true;
     case "array":
-      return isJsonSafeAt(t.elem, getRecord, getUnion, false);
+      return isJsonSafeAt(t.elem, getRecord, getUnion, false, visiting);
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
+      // The recursive knot: answer true and let the rest of the graph
+      // decide (any unsafe constituent is found on its own path; a false
+      // short-circuits every `every` up the walk).
+      if (visiting.has(t.shapeId)) return true;
+      visiting.add(t.shapeId);
       // TUPLE positions are array slots, not droppable object keys: an
       // undefined-armed position would stringify as `null` in JS (not
       // drop), so tuples keep the array rule for their fields.
-      if (!shape.fields.every((f) => isJsonSafeAt(f.type, getRecord, getUnion, !shape.tuple))) {
+      if (!shape.fields.every((f) => isJsonSafeAt(f.type, getRecord, getUnion, !shape.tuple, visiting))) {
         return false;
       }
       // Overflow values sit in record-key position too: dyn is JSON-safe
@@ -4492,13 +4515,17 @@ function isJsonSafeAt(
       // like any undefined-valued key), everything else follows the
       // record-field rule.
       if (shape.indexValue && shape.indexValue.kind !== "dyn") {
-        return isJsonSafeAt(shape.indexValue, getRecord, getUnion, true);
+        return isJsonSafeAt(shape.indexValue, getRecord, getUnion, true, visiting);
       }
       return true;
     }
     case "union": {
       const def = getUnion(t.unionId);
-      return !!def && def.arms.every((a) => isJsonSafeAt(a, getRecord, getUnion, inRecordField));
+      if (!def) return false;
+      const key = `${t.unionId}:${inRecordField}`;
+      if (visiting.has(key)) return true; // the recursive knot, union-flavored
+      visiting.add(key);
+      return def.arms.every((a) => isJsonSafeAt(a, getRecord, getUnion, inRecordField, visiting));
     }
     case "func":
     case "object":
@@ -4776,6 +4803,7 @@ function canBoxBytesComposite(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
+  visiting: Set<string> = new Set(),
 ): boolean {
   switch (t.kind) {
     case "f64":
@@ -4788,16 +4816,22 @@ function canBoxBytesComposite(
     case "bytes":
       return t.elem === "u8";
     case "array":
-      return canBoxBytesComposite(t.elem, getRecord, getUnion);
+      return canBoxBytesComposite(t.elem, getRecord, getUnion, visiting);
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
-      if (!shape.fields.every((f) => canBoxBytesComposite(f.type, getRecord, getUnion))) return false;
-      return !shape.indexValue || canBoxBytesComposite(shape.indexValue, getRecord, getUnion);
+      // Recursive shapes answer coinductively, like isJsonSafeType.
+      if (visiting.has(t.shapeId)) return true;
+      visiting.add(t.shapeId);
+      if (!shape.fields.every((f) => canBoxBytesComposite(f.type, getRecord, getUnion, visiting))) return false;
+      return !shape.indexValue || canBoxBytesComposite(shape.indexValue, getRecord, getUnion, visiting);
     }
     case "union": {
       const def = getUnion(t.unionId);
-      return !!def && def.arms.every((a) => canBoxBytesComposite(a, getRecord, getUnion));
+      if (!def) return false;
+      if (visiting.has(t.unionId)) return true;
+      visiting.add(t.unionId);
+      return def.arms.every((a) => canBoxBytesComposite(a, getRecord, getUnion, visiting));
     }
     default:
       return false;
