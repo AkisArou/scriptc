@@ -4025,9 +4025,213 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2392-block-guard-alias-scope.ts": {
+   "order": [
+    "<repo>/tests/corpus/2392-block-guard-alias-scope.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2393-loop-exit-guard-narrow.ts": {
+   "order": [
+    "<repo>/tests/corpus/2393-loop-exit-guard-narrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2394-loop-narrow-containment.ts": {
+   "order": [
+    "<repo>/tests/corpus/2394-loop-narrow-containment.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2395-while-cond-guard.ts": {
+   "order": [
+    "<repo>/tests/corpus/2395-while-cond-guard.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2396-born-narrowed-decl.ts": {
+   "order": [
+    "<repo>/tests/corpus/2396-born-narrowed-decl.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2397-branch-kill-merge.ts": {
+   "order": [
+    "<repo>/tests/corpus/2397-branch-kill-merge.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2398-switch-arm-kill.ts": {
+   "order": [
+    "<repo>/tests/corpus/2398-switch-arm-kill.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2399-reassign-kill-polarity.ts": {
+   "order": [
+    "<repo>/tests/corpus/2399-reassign-kill-polarity.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/240-stdout-write.ts": {
    "order": [
     "<repo>/tests/corpus/240-stdout-write.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2400-kill-return-edge.ts": {
+   "order": [
+    "<repo>/tests/corpus/2400-kill-return-edge.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2401-kill-break-staging.ts": {
+   "order": [
+    "<repo>/tests/corpus/2401-kill-break-staging.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2402-labeled-break-kill.ts": {
+   "order": [
+    "<repo>/tests/corpus/2402-labeled-break-kill.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2403-kill-continue-backedge.ts": {
+   "order": [
+    "<repo>/tests/corpus/2403-kill-continue-backedge.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2404-kill-throw-catch.ts": {
+   "order": [
+    "<repo>/tests/corpus/2404-kill-throw-catch.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2405-sibling-arm-narrow.ts": {
+   "order": [
+    "<repo>/tests/corpus/2405-sibling-arm-narrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2406-switch-clause-sibling-narrow.ts": {
+   "order": [
+    "<repo>/tests/corpus/2406-switch-clause-sibling-narrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2407-infinite-loop-seal.ts": {
+   "order": [
+    "<repo>/tests/corpus/2407-infinite-loop-seal.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2408-loop-terminality-reopen.ts": {
+   "order": [
+    "<repo>/tests/corpus/2408-loop-terminality-reopen.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2409-loop-body-return-not-terminal.ts": {
+   "order": [
+    "<repo>/tests/corpus/2409-loop-body-return-not-terminal.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2410-stacked-cases-terminality.ts": {
+   "order": [
+    "<repo>/tests/corpus/2410-stacked-cases-terminality.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2411-exhaustive-switch-terminality.ts": {
+   "order": [
+    "<repo>/tests/corpus/2411-exhaustive-switch-terminality.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2412-dowhile-guard-trailing-test.ts": {
+   "order": [
+    "<repo>/tests/corpus/2412-dowhile-guard-trailing-test.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2413-dowhile-kill-renarrow.ts": {
+   "order": [
+    "<repo>/tests/corpus/2413-dowhile-kill-renarrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2414-dowhile-continue-kill.ts": {
+   "order": [
+    "<repo>/tests/corpus/2414-dowhile-continue-kill.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2415-dowhile-break-trailing-test.ts": {
+   "order": [
+    "<repo>/tests/corpus/2415-dowhile-break-trailing-test.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2416-spread-ternary-positions.ts": {
+   "order": [
+    "<repo>/tests/corpus/2416-spread-ternary-positions.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2417-ternary-local-inference.ts": {
+   "order": [
+    "<repo>/tests/corpus/2417-ternary-local-inference.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2418-wrapped-ternary-arms.ts": {
+   "order": [
+    "<repo>/tests/corpus/2418-wrapped-ternary-arms.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2419-selector-ternary-union.ts": {
+   "order": [
+    "<repo>/tests/corpus/2419-selector-ternary-union.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2420-nullish-null-identity.ts": {
+   "order": [
+    "<repo>/tests/corpus/2420-nullish-null-identity.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2421-float-lane-inference.ts": {
+   "order": [
+    "<repo>/tests/corpus/2421-float-lane-inference.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2422-ieee-div-rem-corners.ts": {
+   "order": [
+    "<repo>/tests/corpus/2422-ieee-div-rem-corners.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2423-param-null-reassign.ts": {
+   "order": [
+    "<repo>/tests/corpus/2423-param-null-reassign.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2424-ternary-miss-first-narrowing.ts": {
+   "order": [
+    "<repo>/tests/corpus/2424-ternary-miss-first-narrowing.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2425-elseif-head-exit-narrow.ts": {
+   "order": [
+    "<repo>/tests/corpus/2425-elseif-head-exit-narrow.ts"
    ],
    "diags": []
   },
