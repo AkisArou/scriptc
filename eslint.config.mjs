@@ -14,6 +14,10 @@ const TS5_ISLANDS = [
   // (the bare-import walk that decides what to fetch) — a parser island
   // exactly like npm.ts's specifier scan.
   "packages/compiler/src/frontend/provenance.ts",
+  // The bundler-emitted-CJS export rewrite runs inside the fs shadow,
+  // BEFORE the 7.0.2 program reads the file — a text→text parser island
+  // beside cjs-lexer.ts (only strings cross its boundary).
+  "packages/compiler/src/frontend/npm-static-rewrite.ts",
 ];
 
 const ts5Fence = {

@@ -54,8 +54,10 @@
  * the state, so a flagless compile after a flagged one sees a clean
  * slate. */
 
-import { readFileSync } from "node:fs";
-import { npmPackageNameOf, workspacePackageOfPath } from "./shared.js";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname } from "node:path";
+import { rewriteBundlerCjsExports } from "./npm-static-rewrite.js";
+import { npmPackageNameOf, registerWorkspacePackage, workspacePackageOfPath } from "./shared.js";
 
 let activePackages: ReadonlySet<string> = new Set();
 
@@ -64,9 +66,16 @@ let activePackages: ReadonlySet<string> = new Set();
  * frontend's fallback loop consumes these and rebuilds without them. */
 const offenders = new Map<string, string>();
 
+/** Per-load cache of the bundler-CJS export rewrite (npm-static-rewrite.ts):
+ * the host probes the same file many times, and the rewrite parses. */
+const rewriteCache = new Map<string, string | null>();
+
 export function setNpmStaticPackages(packages: Iterable<string>): void {
   activePackages = new Set(packages);
   offenders.clear();
+  rewriteCache.clear();
+  untypedPkgCache.clear();
+  realpathProbed.clear();
 }
 
 export function npmStaticActive(): boolean {
@@ -82,10 +91,19 @@ export function isNpmStaticPackage(name: string | null): boolean {
 }
 
 /** The opted-in package a path belongs to, or null. Attribution uses the
- * INNERMOST node_modules segment (a nested install is its own package). */
+ * INNERMOST node_modules segment (a nested install is its own package);
+ * paths with NO node_modules segment consult the workspace registry — an
+ * opted-in WORKSPACE package's files live at realpaths outside every
+ * node_modules (the symlinked-install shape), and they are that package's
+ * files for every consumer of this answer: the fallback loop's offender
+ * attribution, the checker-error suppression, and the program-source
+ * classification (islandJsFile/userFiles) all agree the opt-in claims
+ * them. */
 export function npmStaticPackageOfPath(path: string): string | null {
   const pkg = npmPackageNameOf(path);
-  return pkg !== null && activePackages.has(pkg) ? pkg : null;
+  if (pkg !== null) return activePackages.has(pkg) ? pkg : null;
+  const ws = workspacePackageOfPath(path.split("\\").join("/"));
+  return ws !== null && activePackages.has(ws) ? ws : null;
 }
 
 /** Records why a package cannot compile statically this attempt (first
@@ -102,6 +120,21 @@ export function npmStaticOffenders(): ReadonlyMap<string, string> {
  * @types twin that must hide alongside the package's own declarations. */
 function mangledTypesName(name: string): string {
   return name.startsWith("@") ? name.slice(1).replace("/", "__") : name;
+}
+
+/** See shadowTargetOf: realpaths an opted-in package's node_modules dir
+ * once per load and registers workspace-symlinked installs. */
+const realpathProbed = new Set<string>();
+
+function registerWorkspaceRealpath(pkg: string, nmDir: string): void {
+  if (realpathProbed.has(nmDir)) return;
+  realpathProbed.add(nmDir);
+  try {
+    const real = realpathSync(nmDir).split("\\").join("/");
+    if (real !== nmDir && !real.includes("/node_modules/")) registerWorkspacePackage(pkg, real);
+  } catch {
+    /* dangling symlink / missing dir — nothing to register */
+  }
 }
 
 /** node_modules path classification for the fs shadow: which opted-in
@@ -122,7 +155,17 @@ function shadowTargetOf(path: string): { pkg: string; viaTypes: boolean } | null
   const parts = rest.split("/");
   const first = parts[0] ?? "";
   const dirName = first.startsWith("@") ? `${first}/${parts[1] ?? ""}` : first;
-  if (activePackages.has(dirName)) return { pkg: dirName, viaTypes: false };
+  if (activePackages.has(dirName)) {
+    /* An opted-in package first seen through a node_modules path may be a
+     * WORKSPACE SYMLINK whose realpath escapes node_modules — and the
+     * host reads file CONTENT at realpaths, where nothing path-shaped
+     * marks the package. The entry-anchored probe in loadProgram misses
+     * nested realms (a monorepo driver outside every package realm), so
+     * the shadow registers the realpath the moment resolution touches the
+     * symlink — always before any content read along it. */
+    registerWorkspaceRealpath(dirName, `${norm.slice(0, idx)}/node_modules/${dirName}`);
+    return { pkg: dirName, viaTypes: false };
+  }
   if (first === "@types") {
     const mangled = parts[1] ?? "";
     for (const pkg of activePackages) {
@@ -219,6 +262,58 @@ function isDeclarationFileName(path: string): boolean {
   return /\.d\.(ts|mts|cts)$/.test(path) || path.endsWith(".d.json.ts");
 }
 
+function isNodeModulesPathNorm(path: string): boolean {
+  return path.split("\\").join("/").includes("/node_modules/");
+}
+
+/** Whether the package owning `path` is UNTYPED for the checker: no
+ * "types"/"typings" claim, no root .d.ts entry, and no installed @types
+ * twin along the walk-up — the packages whose flagless import surface is
+ * `any` (see the any-surface stub in the fs shadow). Cached per package
+ * directory for the load's lifetime. */
+const untypedPkgCache = new Map<string, boolean>();
+
+function packageIsUntyped(path: string): boolean {
+  const norm = path.split("\\").join("/");
+  const idx = norm.lastIndexOf("/node_modules/");
+  if (idx === -1) return false;
+  const rest = norm.slice(idx + "/node_modules/".length);
+  const parts = rest.split("/");
+  const first = parts[0] ?? "";
+  if (first.startsWith("@types")) return false; // a twin IS the types
+  const dirName = first.startsWith("@") ? `${first}/${parts[1] ?? ""}` : first;
+  const pkgDir = `${norm.slice(0, idx)}/node_modules/${dirName}`;
+  const hit = untypedPkgCache.get(pkgDir);
+  if (hit !== undefined) return hit;
+  let untyped = true;
+  try {
+    const pkg = JSON.parse(readFileSync(`${pkgDir}/package.json`, "utf8")) as Record<string, unknown>;
+    if (pkg["types"] !== undefined || pkg["typings"] !== undefined) untyped = false;
+    if (untyped && typeof pkg["exports"] === "object" && pkg["exports"] !== null) {
+      // a "types" condition anywhere inside exports is a claim too
+      untyped = !JSON.stringify(pkg["exports"]).includes('"types"');
+    }
+  } catch {
+    /* no package.json — keep probing */
+  }
+  if (untyped && existsSync(`${pkgDir}/index.d.ts`)) untyped = false;
+  if (untyped) {
+    // the @types twin, hoisted anywhere up the realm chain
+    const mangled = mangledTypesName(dirName);
+    for (let dir = dirname(pkgDir); ; ) {
+      const parent = dirname(dir);
+      if (existsSync(`${dir}/node_modules/@types/${mangled}/package.json`) || existsSync(`${dir}/@types/${mangled}/package.json`)) {
+        untyped = false;
+        break;
+      }
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  untypedPkgCache.set(pkgDir, untyped);
+  return untyped;
+}
+
 export interface NpmStaticFsShadow {
   /** Shadowed CONTENT for a real path (the types-stripped package.json),
    * or undefined (no shadow — fall through). */
@@ -235,13 +330,54 @@ export function npmStaticFsShadow(): NpmStaticFsShadow | null {
   return {
     readFile: (path) => {
       const target = shadowTargetOf(path);
-      if (!target || target.viaTypes) return undefined;
-      if (!path.endsWith("/package.json") && !path.endsWith("\\package.json")) return undefined;
-      try {
-        return npmStaticTransformPkgJsonText(readFileSync(path, "utf8"));
-      } catch {
+      /* NON-OPTED node_modules JS: maxNodeModuleJsDepth (set only on
+       * --npm-static loads) admits third-party JS the flagless build never
+       * types, and an UNTYPED package's inferred surface would then
+       * replace the `any` its imports contribute flagless — changing the
+       * PROGRAM's own types under a flag that promised to touch only the
+       * opted-in packages (the jaro-winkler shape: an @ts-ignore'd import
+       * whose result feeds program arithmetic). Serve those files as the
+       * any-surface stub instead: the import types exactly what the
+       * flagless build typed. Typed packages (own .d.ts or an installed
+       * @types twin) resolve types-first and never reach here. */
+      if (!target) {
+        if (
+          (path.endsWith(".js") || path.endsWith(".cjs")) &&
+          isNodeModulesPathNorm(path) &&
+          !existsSync(path.replace(/\.(js|cjs)$/, ".d.ts")) && // a sibling .d.ts types this very file
+          packageIsUntyped(path)
+        ) {
+          return "module.exports = (() => { let u; return u; })();\n";
+        }
         return undefined;
       }
+      if (target.viaTypes) return undefined;
+      if (path.endsWith("/package.json") || path.endsWith("\\package.json")) {
+        try {
+          return npmStaticTransformPkgJsonText(readFileSync(path, "utf8"));
+        } catch {
+          return undefined;
+        }
+      }
+      // Bundler-emitted CJS files get their export surface respelled in
+      // the plain CJS both worlds model (npm-static-rewrite.ts) — the ONE
+      // program serves checker and lowering, so the rewrite is the text
+      // everywhere downstream (statement walks, the CJS lexer link check,
+      // diagnostics rendering; original line offsets survive by
+      // construction).
+      if (path.endsWith(".js") || path.endsWith(".cjs")) {
+        const hit = rewriteCache.get(path);
+        if (hit !== undefined) return hit ?? undefined;
+        let rewritten: string | null = null;
+        try {
+          rewritten = rewriteBundlerCjsExports(readFileSync(path, "utf8"), path);
+        } catch {
+          rewritten = null; // unreadable/unparseable: fall through untouched
+        }
+        rewriteCache.set(path, rewritten);
+        return rewritten ?? undefined;
+      }
+      return undefined;
     },
     hideFile: (path) => {
       const target = shadowTargetOf(path);
@@ -261,13 +397,15 @@ export function npmStaticFsShadow(): NpmStaticFsShadow | null {
  * the author checked). Best-effort: a package that slips through and
  * fails preflight falls back to the island like any offender. */
 
-const TRANSFORM_MARKERS = [
-  "__webpack_require__",
-  '"__esModule"', // tsc/babel CJS transform stamp
-  "'__esModule'",
-  "var __require", // esbuild's external-require helper
-  "function __require",
-];
+/* Only a bundler RUNTIME disqualifies now: webpack's module registry has
+ * no static story (the graph lives in numbered closures). The tsc/babel
+ * __esModule stamp and esbuild's helper preambles used to disqualify too,
+ * but the bundler-emitted CJS export rewrite (npm-static-rewrite.ts)
+ * types the getter-table shapes and the offender attribution degrades a
+ * package whose surface still breaks its consumers — so those bundles are
+ * worth ATTEMPTING: eligible when the .d.ts and unminified criteria hold,
+ * gracefully per-package-degraded when the attempt fails. */
+const TRANSFORM_MARKERS = ["__webpack_require__"];
 
 /** Unminified-JS heuristic over an entry source: at least two lines and
  * an average line length under 200 characters (minified dists are one
