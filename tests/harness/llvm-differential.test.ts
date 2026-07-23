@@ -181,8 +181,20 @@ async function build(file: string, backend: "c" | "llvm" | "default") {
     .slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
+  // The binary BASENAME must be unique per lane (and per flavor): fs-corpus
+  // programs derive their scratch paths from tail(process.argv[1]) — the
+  // basename — so two concurrently running native binaries that share a
+  // name share a scratch directory and corrupt each other's fs state. This
+  // suite runs its LLVM and C binaries concurrently (the Promise.all
+  // below), and the main differential's C binary ("program") for the same
+  // fixture can run in a sibling worker at the same time; the node oracle
+  // is safe on its own (argv[1] is the .ts path). Observed on the public
+  // CI runner as the seven fs/path llvm-differential failures of run
+  // 29965245855 — empty or interleaved stdout on whichever lane lost the
+  // race, reproducible locally by racing the two same-named binaries.
+  const lane = backend === "llvm" ? "program-llvm" : backend === "c" ? "program-llvmc" : "program-llvmdef";
   return compile(file, {
-    outPath: join(outDir, "program"),
+    outPath: join(outDir, `${lane}${sanitize ? "-san" : ""}`),
     outDir,
     sanitize,
     dynamic: wantsDynamic(file),
