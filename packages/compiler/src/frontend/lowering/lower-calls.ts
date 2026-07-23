@@ -6102,6 +6102,7 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     const ctx = newFnCtx(false, null, null, bodyReturn);
     ctx.isAsync = sig.isAsync === true;
     if (sig.generator !== undefined) ctx.generator = sig.generator;
+    const diagsBefore = L.diags.length;
     L.fnStack.push(ctx);
     try {
       const { params, prologue } = L.declareParams(decl.parameters, sig.params);
@@ -6132,10 +6133,65 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       return fn;
     } catch (e) {
       // A poison OUTSIDE the per-statement catches (a parameter DEFAULT
-      // whose initializer is fenced): the diagnostic is already recorded —
-      // the function skips, like a signature-blocked one, instead of
-      // killing the whole analysis.
+      // whose initializer is fenced, a parameter PATTERN over a class
+      // that never lowered): the diagnostic is already recorded — the
+      // function skips, like a signature-blocked one, instead of killing
+      // the whole analysis.
       if (!(e instanceof PoisonError)) throw e;
+      // JS sources defer function-level poisons like statement fences
+      // (prettier's whitespace.js `({ parent: sentenceNode })` over the
+      // #private-fenced AstPath): the function compiles as its OWN
+      // runtimeFence — CALLING it throws the first captured diagnostic
+      // at the declaration's position — so a reachable-but-broken
+      // signature stops the RUN at its own site instead of the build.
+      // ICEs (SC9001) stay compile errors, exactly like lowerStmts.
+      if (
+        isJsSourceFile(decl.getSourceFile()) &&
+        L.diagSink === null &&
+        L.diags.length > diagsBefore &&
+        !L.diags.slice(diagsBefore).some((d) => d.code === "SC9001")
+      ) {
+        const captured = L.diags.splice(diagsBefore);
+        L.runtimeFences.push(...captured);
+        // An ABI type naming a class that never REGISTERED (prettier's
+        // AstPath — the #private fence): the emitter would name a struct
+        // that does not exist, so no fence function can be built. No call
+        // site can lower either (producing the unregistered class's value
+        // fences first — the brokenGlobals/brokenLocals family), so the
+        // symbol is never referenced; the validator's registration check
+        // is the backstop for anything that slips through.
+        if (
+          sig.params.some((p) => L.typeNamesUnregisteredClass(p.type)) ||
+          L.typeNamesUnregisteredClass(bodyReturn)
+        ) {
+          return null;
+        }
+        const first = captured[0]!;
+        const loc = locOf(decl);
+        const pos = ts.getLineAndCharacterOfPosition(
+          L.program.getSourceFile(first.loc.file) ?? decl.getSourceFile(),
+          first.loc.start,
+        );
+        const params: IrParam[] = sig.params.map((p, i) => ({ localId: `%pf${i}`, name: `%pf${i}`, type: p.type }));
+        const fn: IrFunction = {
+          name: sig.name,
+          params,
+          returnType: bodyReturn,
+          locals: params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+          body: [
+            {
+              kind: "runtimeFence",
+              code: first.code,
+              message: `${first.message} [${first.code} at ${first.loc.file}:${pos.line + 1}]`,
+              loc,
+            },
+          ],
+          loc,
+        };
+        if (sig.isAsync) fn.async = true;
+        if (sig.generator !== undefined) fn.generator = sig.generator;
+        return fn;
+      }
       return null;
     } finally {
       L.fnStack.pop();
