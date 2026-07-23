@@ -49,10 +49,3 @@ regex.ts:10:17 - error SC1090: regex methods as values (call 'test' directly) ar
   10 | const asValue = /x/.test;
      |                 ^~~~~~~~
   11 | const maybe: RegExp | undefined = /a/;
-
-regex.ts:11:7 - error SC2001: values of type 'RegExp | undefined' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
-
-  10 | const asValue = /x/.test;
-  11 | const maybe: RegExp | undefined = /a/;
-     |       ^~~~~
-  12 | 
