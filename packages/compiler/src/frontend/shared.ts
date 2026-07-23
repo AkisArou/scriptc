@@ -113,6 +113,18 @@ export function clearWorkspacePackages(): void {
   workspacePackageDirs.clear();
 }
 
+/** True when `name` is a registered workspace package — the NAME-keyed
+ * twin of workspacePackageOfPath, for call sites that hold a bare import
+ * specifier instead of a file path (a workspace member installed by COPY
+ * has no out-of-node_modules files to match, but its name registered all
+ * the same). */
+export function isWorkspacePackageName(name: string): boolean {
+  for (const n of workspacePackageDirs.values()) {
+    if (n === name) return true;
+  }
+  return false;
+}
+
 /** The registered workspace package a path lies inside, or null. */
 export function workspacePackageOfPath(path: string): string | null {
   const norm = path.split("\\").join("/");

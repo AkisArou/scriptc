@@ -194,9 +194,14 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
   }
 
 /** True for any spelling of node:perf_hooks' `performance` object — the
-   * named import binding, a namespace/default-import member, or the
-   * require twins (all through the shared builtin tables). */
+   * named import binding, a namespace/default-import member, the require
+   * twins (all through the shared builtin tables), or the GLOBAL Node
+   * exposes without any import (the module export and the global are one
+   * value; provenance-checked like console/process, so the bare
+   * identifier and the globalThis.performance member both land here and
+   * a user's own `performance` binding never does). */
   export function isPerfHooksPerformanceExpr(L: Lowerer, node: ts.Expression): boolean {
+    if (L.isStdlibGlobal(node, "performance")) return true;
     if (ts.isIdentifier(node)) {
       const bi = builtinImportOf(L, node);
       return bi !== null && bi.module === "perf_hooks" && bi.member === "performance";

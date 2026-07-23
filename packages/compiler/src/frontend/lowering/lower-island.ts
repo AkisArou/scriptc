@@ -561,11 +561,32 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     const staticMath = isMath ? own(STATIC_MATH_FNS, name) : undefined;
     if (
       staticMath &&
-      call.arguments.length === staticMath.arity &&
       call.arguments.every((a) => !ts.isSpreadElement(a))
     ) {
-      const args = call.arguments.map((a) => L.lowerExprExpecting(a, F64));
-      return { kind: "libCall", fn: staticMath.fn, args, type: F64, loc };
+      // Math.max/Math.min at ANY plain arity — Node's are variadic. The
+      // spec's reduction is a left fold of the same NaN-poisoning
+      // ±0-ordered scalar compare the two-arg form lowers to, so n
+      // arguments nest n-1 scalar calls (arguments still evaluate left to
+      // right, before any compare that involves them). One argument is
+      // the value itself (every argument here is number-typed, so the
+      // spec's ToNumber is the identity — NaN included), and zero
+      // arguments are the fold's seed: -Infinity for max, +Infinity for
+      // min, exactly Node.
+      if (name === "max" || name === "min") {
+        if (call.arguments.length === 0) {
+          return { kind: "numLit", value: name === "max" ? -Infinity : Infinity, type: F64, loc };
+        }
+        const args = call.arguments.map((a) => L.lowerExprExpecting(a, F64));
+        let acc = args[0]!;
+        for (let i = 1; i < args.length; i++) {
+          acc = { kind: "libCall", fn: staticMath.fn, args: [acc, args[i]!], type: F64, loc };
+        }
+        return acc;
+      }
+      if (call.arguments.length === staticMath.arity) {
+        const args = call.arguments.map((a) => L.lowerExprExpecting(a, F64));
+        return { kind: "libCall", fn: staticMath.fn, args, type: F64, loc };
+      }
     }
     // `Math.max(...xs)` / `Math.min(...xs)` over a number[]: a STATIC
     // runtime fold (JS-exact: NaN poisons, ±0 order by the JS rules, the
