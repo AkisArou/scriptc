@@ -593,7 +593,10 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
       if (fn.returns.k === "void") {
         throw new SidecarError(`helper '${fn.name}' returns void — a contract helper returns a value the host can read`, fn.loc);
       }
-      const returns = projector.shapeRef(fn.returns, `helpers_${fn.name}`, "return", fn.loc);
+      // Helper-return synthesized names are two-part like everything else:
+      // container 'helpers', member the helper's name — `helpers_<name>`,
+      // never a '_return' suffix (the ratified spelling).
+      const returns = projector.shapeRef(fn.returns, "helpers", fn.name, fn.loc);
       if (helpers.some((h) => h.name === fn.name)) {
         throw new SidecarError(`helper '${fn.name}' is declared twice`, fn.loc);
       }
