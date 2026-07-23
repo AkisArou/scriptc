@@ -1040,6 +1040,22 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // bound handle).
       if (L.isIslandExpr(expr.expression)) {
         const receiver = L.lowerExpr(expr.expression);
+        // The checker said 'any' but the VALUE lives in the DOM (`this`
+        // in a plain JS function — dyn.this — or a checked-dynamic local
+        // behind an any-typed spelling): the property read is the DOM's
+        // own keyed read, dyn results and dyn chains exactly like every
+        // checked-dynamic member access (a nullish receiver throws V8's
+        // catchable TypeError, exactly Node). Never a jsOp over a dyn —
+        // the two dynamic worlds don't share a value representation.
+        if (receiver.type.kind === "dyn") {
+          return {
+            kind: "dynKeyGet",
+            key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+            value: receiver,
+            type: DYN,
+            loc,
+          };
+        }
         const read: IrExpr = { kind: "jsOp", op: "getProp", name: expr.name.text, args: [receiver], type: JSVAL, loc };
         // A member the .d.ts DECLARES as a primitive exits eagerly to that
         // static type (`f.mediaType` on a package handle IS a string):

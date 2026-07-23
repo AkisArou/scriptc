@@ -1633,6 +1633,20 @@ export class Lowerer {
     // the emitted program references, flushing deferred class diagnostics
     // that a reached type makes relevant.
     const artifacts = this.moduleArtifacts(functions);
+    // Types still naming a class that never REGISTERED after retention's
+    // flush (JS graphs whose class fences deferred to runtime — the
+    // sentence-walker's path params, printer tables whose func-typed
+    // fields spell the fenced class): the emitter would name a struct
+    // that does not exist — the compile-C escape family. No instance of
+    // such a class can ever exist (every construction site fenced), so
+    // the slots are inert by construction: rewrite each to the f64 dummy
+    // placeholder (boxNewC's uncollected-class stance, applied to unboxed
+    // slots), uniformly across params/locals/globals/fields/body types so
+    // every producer and consumer agrees. Programs with no unregistered
+    // reference are untouched — byte-stability holds.
+    if (this.diags.length === 0) {
+      this.sanitizeUnregisteredClassTypes([functions, this.globalsList, artifacts.classes, artifacts.records, artifacts.unions]);
+    }
     const module: IrModule | null =
       this.diags.length > 0
         ? null
@@ -1657,6 +1671,40 @@ export class Lowerer {
       ...(this.npmBuiltins ? { npmBuiltins: this.npmBuiltins } : {}),
       ...(this.npmLazyTraps ? { npmLazyTraps: this.npmLazyTraps } : {}),
     };
+  }
+
+  /** The unregistered-class type sweep (run()'s last step before the
+   * module assembles): every `{kind:"object"}` TYPE naming a class with
+   * no registered ClassInfo is rewritten IN PLACE to the f64 dummy.
+   * classval types are exempt (they emit the class-independent
+   * `ScrClassObj *` — inert-but-valid storage, the validator's own
+   * stance), and only type objects rewrite — node-level classNames
+   * (`new`, upcasts) cannot reach here (their lowerings fence without a
+   * registered class), so the validator still backstops those. */
+  sanitizeUnregisteredClassTypes(roots: unknown[]): void {
+    const isUnregisteredObjectType = (v: unknown): boolean =>
+      typeof v === "object" && v !== null &&
+      (v as { kind?: unknown }).kind === "object" &&
+      typeof (v as { className?: unknown }).className === "string" &&
+      !this.classes.has((v as { className: string }).className);
+    const sweep = (node: unknown): void => {
+      if (node === null || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        node.forEach((item, i) => {
+          if (isUnregisteredObjectType(item)) node[i] = F64;
+          else sweep(item);
+        });
+        return;
+      }
+      const rec = node as Record<string, unknown>;
+      for (const key of Object.keys(rec)) {
+        if (key === "loc") continue;
+        const v = rec[key];
+        if (isUnregisteredObjectType(v)) rec[key] = F64;
+        else sweep(v);
+      }
+    };
+    for (const root of roots) sweep(root);
   }
 
   /** True when `t` (recursively) names a class instance type with no

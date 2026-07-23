@@ -61,10 +61,14 @@ async function compileAndRun(
   for (const [extraName, text] of Object.entries(extraFiles)) {
     writeFileSync(join(outDir, extraName), text);
   }
+  // `// @dynamic` on the entry's FIRST line embeds the island engine —
+  // for runtime-fence shapes only mixed dynamic graphs can spell (the
+  // diagnostics suite's directive, applied to the run-and-observe lane).
+  const dynamic = /^\/\/ @dynamic\s*$/.test(source.split("\n", 1)[0] ?? "");
   // Pinned: the uncaught-STDERR line shape (SEMANTICS.md divergence 11) is
   // pinned against the C reference; the LLVM lane's uncaught epilogue is
   // llvm-differential's parity job, not this suite's.
-  const result = await compile(file, { outPath: join(outDir, name), outDir, sanitize, backend: "c" });
+  const result = await compile(file, { outPath: join(outDir, name), outDir, sanitize, backend: "c", dynamic });
   if (!result.ok) {
     throw new Error(
       "errors program failed to compile:\n" +
@@ -353,5 +357,36 @@ console.log('never runs', a);
     expect(r.stderr).toBe(
       "Uncaught SyntaxError: The requested module './table.cjs' does not provide an export named 'a'\n",
     );
+  });
+});
+
+describe("checked-dynamic/island boundary fences (scriptc-only)", () => {
+  test("an island-typed argument into a call through 'unknown' fences catchably", async () => {
+    // `this` in a plain JS function is the checked-dynamic ambient
+    // receiver; a member CALL through it with an 'any'-typed argument has
+    // no lowering (no jsval→DOM bridge exists), so the statement compiles
+    // to its runtime fence — an SC-coded catchable throw, never an ICE.
+    // Node would throw its own TypeError reading the member; the fence's
+    // wording is the divergence this pin owns.
+    const r = await compileAndRun(
+      "island-arg-dyn-call",
+      `// @dynamic
+'use strict';
+function register(item) {
+  try {
+    this.registry(item);
+    return "unreachable";
+  } catch (e) {
+    return "caught: " + e.message;
+  }
+}
+console.log(\`\${register(7)}\`);
+`,
+      "mjs",
+      { "tsconfig.json": '{"compilerOptions":{"strict":true,"noImplicitAny":false}}\n' },
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^caught: .*\[SC1101 at .*island-arg-dyn-call\.mjs:5\]\n$/);
+    expect(r.stderr).toBe("");
   });
 });

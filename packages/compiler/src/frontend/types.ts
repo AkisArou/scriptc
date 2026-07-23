@@ -707,12 +707,17 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // the messages-building pattern (`const content: any[] = []`) — which
     // keeps its static array-of-handles representation.
     if (elem?.kind === "jsval" && !(elemTs.flags & ts.TypeFlags.Any)) return JSVAL;
+    // RegExp elements ride REF (scr_regex_retain_v/release_v, no trace —
+    // a regex holds only its bytecode and source): the derived-pattern
+    // idiom `[bases].map(ps => new RegExp(...))` builds real regex
+    // arrays, elements flow into the regex intrinsics unchanged, and
+    // indexOf/includes/=== are the REF kind's pointer identity — exactly
+    // JS object identity for RegExp values.
     if (
       !elem ||
       elem.kind === "void" ||
       elem.kind === "map" ||
       elem.kind === "set" ||
-      elem.kind === "regex" ||
       elem.kind === "url" ||
       elem.kind === "searchParams" ||
       elem.kind === "stats" ||

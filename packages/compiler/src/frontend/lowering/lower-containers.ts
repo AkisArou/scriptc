@@ -402,9 +402,30 @@ import { own, WidthLift } from "./lowerer.js";
     const { fnArg, arity } = hofCallbackArg(L, argNode, [elem], arrayOf(elem));
     const fnRet = fnArg.type.ret;
     if (method === "map" && (fnRet.kind === "void" || fnRet.kind === "func")) {
-      // The result array U[] is unrepresentable (no void elements; ScrArr
-      // has no closure element kind).
+      // The result array U[] is unrepresentable here (no void elements;
+      // the map helper's closure-returning form has no fixture-backed
+      // story yet).
       L.badType(call, L.typeOf(call));
+    }
+    if (
+      method === "map" &&
+      (fnRet.kind === "map" || fnRet.kind === "set" || fnRet.kind === "url" ||
+        fnRet.kind === "searchParams" || fnRet.kind === "generator" || fnRet.kind === "caught" ||
+        fnRet.kind === "stats" || fnRet.kind === "spawnRes" || fnRet.kind === "netSocket" ||
+        fnRet.kind === "dgramSocket" || fnRet.kind === "testCtx" || fnRet.kind === "httpReq" ||
+        fnRet.kind === "httpRes" || fnRet.kind === "httpClientReq" || fnRet.kind === "secureCtx" ||
+        fnRet.kind === "fsWatcher" || fnRet.kind === "childStream" || fnRet.kind === "procStream" ||
+        isUnitType(fnRet))
+    ) {
+      // The result would be an array of an element kind ScrArr has no
+      // home for (mapTypeOf's own array exclusions) — the callback return
+      // type bypasses that gate, so it is enforced here: a named fence,
+      // never a mistyped array into the backends.
+      L.unsupported(
+        "SC1090",
+        call,
+        `'.map()' with a callback returning '${L.fmt(fnRet)}' values (arrays of this element kind have no representation — store the values individually)`,
+      );
     }
     if (method === "map" && fnRet.kind === "dyn") {
       // A checked-dynamic callback return would make the result a
@@ -5159,7 +5180,14 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
                 const otherTag = L.armTag(valueT.unionId, others[0]!);
                 const narrowTag = L.armTag(f.type.unionId, others[0]!);
                 if (otherTag >= 0 && narrowTag >= 0) {
-                  const narrowed: IrExpr = { kind: "unionNarrow", unionId: f.type.unionId, tag: narrowTag, value: raw, type: others[0]!, loc };
+                  const other = others[0]!;
+                  // A UNIT other arm pushes the unit LITERAL (undefined
+                  // was filtered above, so the unit is null; units carry
+                  // no payload and narrowing to a unit arm is malformed
+                  // IR) — the fixed-shape helper's rule exactly.
+                  const narrowed: IrExpr = isUnitType(other)
+                    ? { kind: "unitLit", unit: "null", type: other, loc }
+                    : { kind: "unionNarrow", unionId: f.type.unionId, tag: narrowTag, value: raw, type: other, loc };
                   return { kind: "unionWrap", unionId: valueT.unionId, tag: otherTag, value: narrowed, type: valueT, loc };
                 }
               }

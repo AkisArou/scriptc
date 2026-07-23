@@ -563,7 +563,7 @@ export class CEmitter {
       );
     }
     if (this.unitInstances.size > 0) out.push("");
-    out.push(...structDefs);
+    for (const line of structDefs) out.push(line); // program-sized: never spread
     for (const [key, sym] of this.regexInstances) {
       // One immortal ScrRegex per (pattern, flags) literal, pointing at the
       // interned source/flags strings. `.bc` starts NULL: the runtime
@@ -641,9 +641,17 @@ export class CEmitter {
     // Type-directed JSON walkers (jsonStringify serializers, dynCheck
     // matchers/builders), interned per type during body emission above.
     if (this.walkerProtos.length > 0) {
-      out.push("", ...this.walkerProtos, "", ...this.walkerDefs);
+      out.push("");
+      for (const line of this.walkerProtos) out.push(line);
+      out.push("");
+      for (const line of this.walkerDefs) out.push(line);
     }
-    out.push("", ...body);
+    // Loop-appended, never spread: `body` scales with the PROGRAM (a large
+    // embedded graph emits hundreds of thousands of lines), and a spread
+    // push passes every line as a call argument — the engine's stack
+    // overflows long before memory matters.
+    out.push("");
+    for (const line of body) out.push(line);
     const refGlobals = globals.filter((g) => isRefCounted(g.type));
     // Interned function-value closures are IMMORTAL (rc == SIZE_MAX), so
     // an own-property table Object.defineProperties hung on one would
