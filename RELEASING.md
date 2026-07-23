@@ -1,0 +1,18 @@
+# Releasing
+
+Releases are manual, single-commit affairs. The maintainer controls the changelog voice and format. The three npm packages — `@scriptc/runtime`, `@scriptc/compiler`, `scriptc` — always publish together at the same version.
+
+To prepare a release:
+
+1. Bump the version in `packages/cli/package.json`
+2. Run `node scripts/sync-versions.mjs` to stamp the same version into `packages/runtime` and `packages/compiler`
+3. Fold the `## Unreleased` section of `CHANGELOG.md` into a new `## <version>` entry (newest first, below `## Unreleased`), and leave `## Unreleased` empty for the next cycle
+4. Wrap the new entry in `<!-- release:start -->` and `<!-- release:end -->` markers; this marked block is also the GitHub release body
+5. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry; only the latest release should have markers
+6. Commit to `main`
+
+CI (`.github/workflows/release.yml`) compares the version in `packages/cli/package.json` to what `scriptc` has on npm. If it differs, it builds the workspace, verifies all three package versions match (a mismatch fails with a hint to run `scripts/sync-versions.mjs`), and publishes to npm in dependency order — `@scriptc/runtime`, then `@scriptc/compiler`, then `scriptc` — so each package's dependencies are resolvable the moment it lands. After the publish succeeds, a separate job creates the git tag `v<version>` and the GitHub release with the marked changelog entry as its body.
+
+Two deliberate differences from repositories that ship prebuilt binaries: there are no platform binary assets to build or stage — scriptc compiles programs on the user's machine with the local clang — so the GitHub release is a tag and release notes only, and the npm publish never waits on the GitHub release (the release job runs after the publish, not before it).
+
+Publishing uses npm trusted publishing (OIDC) — there is no npm token secret. The one-time setup is already done: each of the three packages is configured on npmjs.com with a GitHub Actions trusted publisher pointing at repository `vercel-labs/scriptc`, workflow `release.yml`, environment `Release`. A package missing that configuration fails with an OIDC authentication error before anything is uploaded. Re-runs are safe: any package already on the registry at the target version is skipped, so a partially published release can be resumed by re-running the workflow.
