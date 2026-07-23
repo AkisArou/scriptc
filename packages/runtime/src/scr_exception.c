@@ -13,6 +13,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef SCR_CORE
+/* The trap funnel's EXECUTABLE expansion: exactly the historical
+ * fputs/vfprintf-to-stderr + abort every trap site used to open-code — the
+ * default lane's bytes and behavior are unchanged by construction. Core
+ * builds (-DSCR_CORE) get the sink-routing definitions from scr_core.c
+ * instead; this pair compiles out there. Lives HERE (the failure-channel
+ * unit, present in every link including the runtime's own unit-test
+ * subsets) rather than in the console unit. */
+_Noreturn void scr_trap(const char *msg) {
+  fputs(msg, stderr);
+  abort();
+}
+
+_Noreturn void scr_trap_fmt(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  abort();
+}
+#endif /* !SCR_CORE */
+
 static ScrExcCell scr_main_exc; /* fiber zero (the main stack) */
 static ScrExcCell *scr_cur = &scr_main_exc;
 

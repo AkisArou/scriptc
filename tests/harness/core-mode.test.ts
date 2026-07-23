@@ -167,6 +167,14 @@ describe.each(EMISSIONS)("core mode, %s emission", (emission) => {
     for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
       expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
     }
+    // The structural async_free consequence: no fiber/event-loop/timer/
+    // child-process symbol is DEFINED in the archive (scr_async.c and
+    // scr_child.c never joined the link) and none is REFERENCED by a
+    // linked unit (a missed inter-unit reference would surface here, the
+    // backstop the design asks for instead of a hand-maintained map).
+    const loopish = /^scr_(loop|fiber|on_fiber|timer|set_timeout|set_interval|set_immediate|next_tick|child|spawn)/;
+    expect([...defined].filter((s) => loopish.test(s))).toEqual([]);
+    expect([...undef].filter((s) => loopish.test(s))).toEqual([]);
   });
 
   /* ── K3: buffers, both arena postures over one core ──────────────────── */
