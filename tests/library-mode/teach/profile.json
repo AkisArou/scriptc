@@ -1,0 +1,28 @@
+{
+  "profile_format": 1,
+  "name": "conformance-teach",
+  "entry": "lib.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "kv_",
+    "init_symbol": "kv_init",
+    "sink_register_symbol": "kv_set_panic_sink",
+    "collect_symbol": null,
+    "result_reset_symbol": null
+  },
+  "exports": [
+    { "export": "wrap", "symbol": "kv_wrap", "params": ["bytes"], "returns": "f64" },
+    { "export": "teach", "symbol": "kv_teach", "params": [], "returns": "f64" },
+    { "export": "teachStr", "symbol": "kv_teach_str", "params": [], "returns": "f64" },
+    { "export": "boomBaseline", "symbol": "kv_boom_baseline", "params": ["f64"], "returns": "f64" },
+    { "export": "failBaseline", "symbol": "kv_fail_baseline", "params": [], "returns": "f64" }
+  ],
+  "determinism": {
+    "teachings": {
+      "SC4012": "inbound bytes length does not fit the marshalling class — the host and this library disagree about the call contract\n"
+    },
+    "remediations": {
+      "SC4012": "pass the buffer's true byte length; lengths must stay below 2^53"
+    }
+  }
+}

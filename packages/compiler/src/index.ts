@@ -3,8 +3,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
-import { loadLibraryProfile, profileTeaching, type LibraryProfile } from "./library/profile.js";
+import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
+import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
   buildSidecar,
   canonicalModuleGraph,
@@ -44,6 +45,7 @@ export { validateModule } from "./ir/validate.js";
 export {
   loadLibraryProfile,
   profileTeaching,
+  profileRemediation,
   LIB_PARAM_CLASSES,
   LIB_RETURN_CLASSES,
   type LibraryProfile,
@@ -52,6 +54,11 @@ export {
   type LibParamClass,
   type LibReturnClass,
 } from "./library/profile.js";
+export {
+  assembleTrapTeaching,
+  TRAP_TEACHING_MARKER,
+  TRAP_TEACHING_SEP,
+} from "./library/trap-teaching.js";
 export {
   abiExportSuffixes,
   buildSidecar,
@@ -755,7 +762,31 @@ function resolveLibrarySection(
         ),
       );
     }
-    if (!bad) exports.push({ symbol: e.symbol, fnName: e.export, params: e.params, returns: e.returns });
+    if (!bad) {
+      const resolvedExport: IrLibSection["exports"][number] = {
+        symbol: e.symbol,
+        fnName: e.export,
+        params: e.params,
+        returns: e.returns,
+      };
+      if (e.params.includes("bytes")) {
+        // The wrapper's one host-contract trap (an inbound bytes length
+        // past the marshalling class's range) is assembled HERE, once, as
+        // the structured trap-teaching message: the profile's teaching for
+        // SC4012 (or the mode's default text), the code, the trapping
+        // export's C symbol exactly as the host linked it, and the
+        // profile's remediation when supplied — so both backends emit the
+        // same bytes and the sink sees one canonical message.
+        resolvedExport.inboundBytesTrap = assembleTrapTeaching(
+          profileTeaching(profile, LIB_INBOUND_BYTES_TRAP_CODE) ??
+            "scriptc: library inbound bytes length out of range\n",
+          LIB_INBOUND_BYTES_TRAP_CODE,
+          e.symbol,
+          profileRemediation(profile, LIB_INBOUND_BYTES_TRAP_CODE),
+        );
+      }
+      exports.push(resolvedExport);
+    }
   }
   if (diagnostics.length > 0) return { diagnostics };
   return {

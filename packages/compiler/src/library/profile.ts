@@ -27,9 +27,12 @@
  *                                              // (see below); absent =
  *                                              // no sidecar is emitted
  *     "determinism": { ... }                   // ask-5 surface, reserved;
- *                                              // only `teachings` is read
+ *                                              // only `teachings` and
+ *                                              // `remediations` are read
  *                                              // today (the SC4004/SC4005
- *                                              // teaching rider)
+ *                                              // teaching rider + the
+ *                                              // structured trap-teaching
+ *                                              // encoding's text sources)
  *   }
  *
  * The `sidecar` section (ask 2): when present, the same invocation that
@@ -148,10 +151,20 @@ export interface LibraryProfile {
    * identity: two compiles under different profiles are different
    * builds). */
   profileBytes: Uint8Array;
-  /** Profile-supplied teaching text appended to refusals (the ratified
-   * SC4004/SC4005 rider): keyed by diagnostic code ("SC4005"), with
-   * "async" accepted as the shared key for both async-surface codes. */
+  /** Profile-supplied teaching text (the ratified SC4004/SC4005 rider,
+   * extended by the structured trap-teaching encoding): keyed by diagnostic
+   * code ("SC4005"), with "async" accepted as the shared key for both
+   * async-surface codes. Refusal teachings ride the diagnostic hint;
+   * runtime-trap teachings become the structured sink message's text
+   * field. Keys and values are validated free of the encoding's reserved
+   * bytes (0x01/0x1F) — keys as bare tokens, never for registry membership
+   * (embedder code spaces are the embedder's; SC is the compiler's). */
   teachings: Readonly<Record<string, string>>;
+  /** Profile-supplied remediation text, keyed like `teachings`: the
+   * structured trap-teaching message's optional fourth field — the whole
+   * field is absent from the assembled bytes when the profile supplies
+   * none. Same reserved-byte validation as `teachings`. */
+  remediations: Readonly<Record<string, string>>;
 }
 
 const C_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -360,17 +373,39 @@ export function loadLibraryProfile(
       exportNames.add(e.export);
     });
 
-    // Ask-5 surface: only the teachings rider is read today; everything
-    // else under `determinism` is reserved and ignored.
+    // Ask-5 surface: only the teachings and remediations riders are read
+    // today; everything else under `determinism` is reserved and ignored.
+    // Both maps feed the structured trap-teaching encoding, which reserves
+    // 0x01 (the version marker) and 0x1F (the field separator): a key or
+    // value carrying either would corrupt the assembled sink message, so
+    // both are refused at load. Keys are diagnostic codes validated ONLY
+    // as tokens free of the reserved bytes — embedder code spaces belong
+    // to the embedder (SC is the compiler registry's); membership is
+    // never checked here.
     const teachings: Record<string, string> = {};
+    const remediations: Record<string, string> = {};
     const det = p["determinism"];
     if (det !== undefined && det !== null && typeof det === "object" && !Array.isArray(det)) {
-      const t = (det as Record<string, unknown>)["teachings"];
-      if (t !== undefined && t !== null && typeof t === "object" && !Array.isArray(t)) {
+      const readRider = (rider: "teachings" | "remediations", into: Record<string, string>): void => {
+        const t = (det as Record<string, unknown>)[rider];
+        if (t === undefined || t === null || typeof t !== "object" || Array.isArray(t)) return;
         for (const [k, v] of Object.entries(t as Record<string, unknown>)) {
-          if (typeof v === "string") teachings[k] = v;
+          if (typeof v !== "string") continue;
+          if (/[\u0001\u001f]/.test(k)) {
+            throw new ProfileError(
+              `'determinism.${rider}' key ${JSON.stringify(k)} contains a reserved byte — 0x01 and 0x1F are the structured trap encoding's marker and separator; a code must be a plain token`,
+            );
+          }
+          if (/[\u0001\u001f]/.test(v)) {
+            throw new ProfileError(
+              `'determinism.${rider}.${k}' contains a reserved byte — 0x01 and 0x1F are the structured trap encoding's marker and separator; teaching and remediation text must be plain UTF-8`,
+            );
+          }
+          into[k] = v;
         }
-      }
+      };
+      readRider("teachings", teachings);
+      readRider("remediations", remediations);
     }
 
     const entry = isAbsolute(entryRel) ? entryRel : resolve(dirname(profilePath), entryRel);
@@ -390,6 +425,7 @@ export function loadLibraryProfile(
         sidecar,
         profileBytes: bytes,
         teachings,
+        remediations,
       },
     };
   } catch (e) {
@@ -403,4 +439,11 @@ export function loadLibraryProfile(
  * sanctioned alternative). Falls back to the shared "async" key. */
 export function profileTeaching(profile: LibraryProfile, code: string): string | undefined {
   return profile.teachings[code] ?? (code === "SC4004" || code === "SC4005" ? profile.teachings["async"] : undefined);
+}
+
+/** The profile's remediation text for one code — the structured
+ * trap-teaching message's optional fourth field. No shared-key fallback:
+ * a remediation names one code's fix. */
+export function profileRemediation(profile: LibraryProfile, code: string): string | undefined {
+  return profile.remediations[code];
 }

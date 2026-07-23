@@ -21,7 +21,9 @@
  *            library path (SC4006), generic export signatures (SC4007),
  *            contract-sidecar projection (SC4009), multi-site type
  *            declarations feeding a tabled type (SC4010), conditional/
- *            mapped types producing a tabled type (SC4011); SC4008
+ *            mapped types producing a tabled type (SC4011), the
+ *            inbound-bytes host-contract runtime trap (SC4012 — a
+ *            structured trap-teaching code, not a refusal); SC4008
  *            reserved for ask-5 determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
@@ -789,6 +791,15 @@ export function libSidecarComputedDiag(name: string, which: "conditional" | "map
       "checker evaluation, not source — spell the union's arms (or the record's fields) literally in one declaration",
   };
 }
+/** SC4012 — the library-mode host-contract violation trap a generated
+ * entry wrapper raises when an inbound bytes buffer's declared length falls
+ * outside the marshalling class's range (past 2^53−1 — no real buffer, so
+ * the host and the library disagree about the call contract). A RUNTIME
+ * code, never a compile-time refusal: it rides the structured trap-teaching
+ * message (library/trap-teaching.ts) the wrapper delivers through the panic
+ * sink, alongside the trapping export's C symbol and the profile's teaching
+ * and remediation text for this code when the profile supplies them. */
+export const LIB_INBOUND_BYTES_TRAP_CODE = "SC4012";
 
 export function iceDiag(message: string, loc: SrcLoc): ScrDiagnostic {
   return {

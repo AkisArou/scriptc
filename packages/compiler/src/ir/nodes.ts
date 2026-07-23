@@ -729,6 +729,14 @@ export interface IrLibExport {
   fnName: string;
   params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32")[];
   returns: "f64" | "bool" | "string" | "bytes" | "void";
+  /** The exact sink-message bytes this wrapper passes to the inbound-bytes
+   * marshalling helper's trap — present exactly when a parameter is
+   * bytes-classed. Already the assembled structured trap-teaching form
+   * (library/trap-teaching.ts): 0x01, teaching text, 0x1F, SC4012, 0x1F,
+   * this export's C symbol, and the profile's remediation behind one more
+   * 0x1F when supplied. Assembled ONCE at export resolution so both
+   * backends emit identical bytes by construction. */
+  inboundBytesTrap?: string;
 }
 
 export interface IrLibSection {
