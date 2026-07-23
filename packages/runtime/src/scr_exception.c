@@ -185,6 +185,26 @@ ScrStr *scr_caught_to_string(const ScrCaught *c) {
 void scr_library_check_exc(void) {
   if (!scr_exc_pending()) return;
   static char buf[1024]; /* the message is copied out before the payload dies */
+  /* The ratified verbatim rule: a thrown message that ALREADY begins with
+   * the structured trap-teaching marker (0x01) is delivered exactly as
+   * authored — no "Uncaught " prefix, no added newline — which is how a
+   * facade-authored structured teaching rides the throw channel through to
+   * the sink. Both throw idioms qualify: a thrown string, and an Error
+   * whose .message starts with the marker. Everything else keeps the
+   * baseline "Uncaught ..." shape below, whose first byte is printable —
+   * the guarantee the marker's unambiguity rests on. */
+  const ScrStr *marked = NULL;
+  if (scr_exc_kind == SCR_EXC_STR) {
+    marked = (const ScrStr *)scr_exc_payload;
+  } else if (scr_exc_kind == SCR_EXC_OBJ && scr_error_is(scr_exc_payload)) {
+    marked = ((const ScrError *)scr_exc_payload)->message;
+  }
+  if (marked != NULL && marked->len > 0 && (uint8_t)marked->data[0] == 0x01) {
+    size_t take = marked->len > sizeof buf ? sizeof buf : marked->len;
+    memcpy(buf, marked->data, take);
+    scr_exc_reset(); /* the payload is released before the funnel poisons */
+    scr_trap_len(buf, take);
+  }
   size_t n = 0;
   const char prefix[] = "Uncaught ";
   memcpy(buf, prefix, sizeof prefix - 1);

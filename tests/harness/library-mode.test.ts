@@ -27,6 +27,14 @@
  *                           suite in library-profile.test.ts)
  *   K10 sanitized-lane      K4/K5/K7 re-run under ASan + the RC audit
  *                           (arming the per-session zero-live-heap seam)
+ *   K11 trap-teaching       the structured sink-message encoding: a
+ *                           host-contract trap arrives as 0x01 text 0x1F
+ *                           code 0x1F symbol 0x1F remediation (exact byte
+ *                           layout through the spec's parse rule), an
+ *                           0x01-led throw rides the sink verbatim (no
+ *                           "Uncaught " prefix), and baseline messages
+ *                           keep a printable first byte — the marker's
+ *                           unambiguity pin
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -284,6 +292,104 @@ survived, sink_calls=1
     const run = runProbe(probe, ["preregister"]);
     expect(run.signal).toBe("SIGABRT");
     expect(run.stdout).not.toContain("UNREACHABLE");
+  });
+
+  /* ── K11: the structured trap-teaching encoding ──────────────────────── */
+
+  test("K11: a host-contract trap arrives structured, exact byte layout", async () => {
+    const { archive, outDir } = await buildLibrary("teach", emission);
+    const probe = buildProbe("teach", archive, outDir);
+    const run = runProbe(probe, ["structured"]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    // The probe implements the spec's parse rule: byte 0 is the 0x01
+    // marker, the bytes after it split on 0x1F into exactly four fields —
+    // the profile's teaching text (its authored newline intact), the
+    // compiler-threaded code and trapping symbol, and the profile's
+    // remediation. fields=4 pins that the emitter appends nothing past
+    // the remediation.
+    expect(run.stdout).toBe(
+      `teach ready
+sink[1]:
+text=[inbound bytes length does not fit the marshalling class — the host and this library disagree about the call contract
+]
+code=[SC4010]
+symbol=[kv_wrap]
+remediation=[pass the buffer's true byte length; lengths must stay below 2^53]
+fields=4
+survived, sink_calls=1
+`,
+    );
+  });
+
+  test("K11: an 0x01-led thrown Error message rides the sink verbatim", async () => {
+    const { archive, outDir } = await buildLibrary("teach", emission);
+    const probe = buildProbe("teach", archive, outDir);
+    const run = runProbe(probe, ["verbatim"]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    // The facade-authored structured teaching (embedder-prefixed NS code)
+    // arrives byte-for-byte: no "Uncaught " prefix ahead of the marker,
+    // no added trailing newline inside the remediation.
+    expect(run.stdout).toBe(
+      `teach ready
+sink[1]:
+text=[tag 99 does not name a bare message arm of this core]
+code=[NS1207]
+symbol=[kv_dispatch]
+remediation=[rebuild the app so the compiled core and the host shim come from one build]
+fields=4
+survived, sink_calls=1
+`,
+    );
+  });
+
+  test("K11: an 0x01-led thrown string rides the sink verbatim", async () => {
+    const { archive, outDir } = await buildLibrary("teach", emission);
+    const probe = buildProbe("teach", archive, outDir);
+    const run = runProbe(probe, ["verbatim-str"]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    // Three fields, no remediation: the whole fourth field is absent, so
+    // the parser counts exactly three.
+    expect(run.stdout).toBe(
+      `teach ready
+sink[1]:
+text=[string-thrown teaching]
+code=[NS0002]
+symbol=[kv_teach_str]
+fields=3
+survived, sink_calls=1
+`,
+    );
+  });
+
+  test("K11: baseline sink messages keep a printable first byte", async () => {
+    const { archive, outDir } = await buildLibrary("teach", emission);
+    const probe = buildProbe("teach", archive, outDir);
+    // A runtime trap and an ordinary escaped throw both stay baseline —
+    // whole-buffer human text, first byte printable (>= 0x20) — the
+    // guarantee msg[0] == 0x01 versioning rests on.
+    const trap = runProbe(probe, ["baseline-trap"]);
+    expect(trap.signal).toBeNull();
+    expect(trap.status).toBe(0);
+    expect(trap.stdout).toBe(
+      `teach ready
+sink[1]:
+baseline printable=1 text=scriptc: RangeError: array index 9 out of bounds (length 3)
+survived, sink_calls=1
+`,
+    );
+    const thrown = runProbe(probe, ["baseline-throw"]);
+    expect(thrown.signal).toBeNull();
+    expect(thrown.status).toBe(0);
+    expect(thrown.stdout).toBe(
+      `teach ready
+sink[1]:
+baseline printable=1 text=Uncaught Error: kaput
+survived, sink_calls=1
+`,
+    );
   });
 
   /* ── K10: the sanitized lane (ASan + the RC audit's re-init seam) ────── */

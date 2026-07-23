@@ -19,7 +19,9 @@
  *            signature (SC4003), async/generator export (SC4004), the
  *            async_free graph requirement (SC4005), island/dynamic on the
  *            library path (SC4006), generic export signatures (SC4007),
- *            contract-sidecar projection (SC4009); SC4008 reserved for
+ *            contract-sidecar projection (SC4009), the inbound-bytes
+ *            host-contract runtime trap (SC4010 — a structured
+ *            trap-teaching code, not a refusal); SC4008 reserved for
  *            ask-5 determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
@@ -691,6 +693,16 @@ export function libSidecarDiag(detail: string, loc: SrcLoc, hint?: string): ScrD
       "module's exported declarations in source order",
   };
 }
+
+/** SC4010 — the library-mode host-contract violation trap a generated
+ * entry wrapper raises when an inbound bytes buffer's declared length falls
+ * outside the marshalling class's range (past 2^53−1 — no real buffer, so
+ * the host and the library disagree about the call contract). A RUNTIME
+ * code, never a compile-time refusal: it rides the structured trap-teaching
+ * message (library/trap-teaching.ts) the wrapper delivers through the panic
+ * sink, alongside the trapping export's C symbol and the profile's teaching
+ * and remediation text for this code when the profile supplies them. */
+export const LIB_INBOUND_BYTES_TRAP_CODE = "SC4010";
 
 export function iceDiag(message: string, loc: SrcLoc): ScrDiagnostic {
   return {

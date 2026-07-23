@@ -60,6 +60,14 @@ __attribute__((noinline)) _Noreturn void scr_trap(const char *msg) {
   scr_library_trap_deliver(msg, strlen(msg), SCR_TRAP_ADDR());
 }
 
+__attribute__((noinline)) _Noreturn void scr_trap_len(const char *msg, size_t len) {
+  /* The length-delimited funnel entry: structured trap-teaching messages
+   * and verbatim 0x01-led thrown messages are byte-counted, never
+   * NUL-scanned (a thrown JS string may embed NUL). Same poison-deliver-
+   * abort discipline as scr_trap. */
+  scr_library_trap_deliver(msg, len, SCR_TRAP_ADDR());
+}
+
 __attribute__((noinline)) _Noreturn void scr_trap_fmt(const char *fmt, ...) {
   static char buf[512]; /* no malloc on the invariant-failure path */
   va_list ap;
@@ -125,13 +133,16 @@ ScrStr *scr_library_str_in(const uint8_t *p, size_t len) {
   return scr_str_new(len == 0 ? "" : (const char *)p, len);
 }
 
-ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len) {
+ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len, const char *trap_msg) {
   ScrBytes *b = scr_bytes_new(SCR_BYTES_U8, (double)len);
   if (b == NULL) {
     /* scr_bytes_new throws only for lengths past 2^53-1 — an impossible
-     * host buffer; funnel the contract violation instead of a NULL deref. */
+     * host buffer; funnel the contract violation instead of a NULL deref.
+     * The message is the wrapper's compiler-assembled structured
+     * trap-teaching form (code SC4010, the trapping export's symbol, the
+     * profile's teaching and remediation) — opaque bytes here. */
     scr_exc_clear();
-    scr_trap("scriptc: library inbound bytes length out of range\n");
+    scr_trap(trap_msg);
   }
   if (len > 0 && p != NULL) memcpy(b->data, p, len);
   return b;

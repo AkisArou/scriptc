@@ -67,7 +67,22 @@ typedef struct ScrBytes ScrBytes;
  * call; address is the trap site's return address (0 when the toolchain
  * cannot supply one); ctx is the registration's opaque pointer. The sink
  * must not call back into any library entry and must not unwind or longjmp
- * back into library frames. */
+ * back into library frames.
+ *
+ * Message shape (the ratified structured trap-teaching encoding): a
+ * BASELINE message is plain text whose first byte is printable (>= 0x20) —
+ * no emitter path ever produces an unstructured message starting below
+ * 0x20. A STRUCTURED message begins with the marker byte 0x01 followed by
+ * the human teaching text and 0x1F-separated fields:
+ *
+ *   0x01  text  0x1F code  0x1F symbol  [ 0x1F remediation ]
+ *
+ * so msg_len > 0 && msg[0] == 0x01 is the one version test. Parse: split
+ * the bytes after the marker on 0x1F — field 0 is the human text, 1 the
+ * diagnostic code, 2 the trapping symbol as the host linked it, 3 the
+ * remediation; a missing or empty field means none; ignore any field past
+ * the fourth. Fields are (pointer, length) — never assume NUL termination.
+ * A plain-text host may print the whole buffer: the teaching leads it. */
 typedef void (*ScrLibSinkFn)(void *ctx, const uint8_t *msg, size_t msg_len,
                               uint64_t address);
 void scr_library_set_sink(ScrLibSinkFn fn, void *ctx); /* latest wins */
@@ -96,8 +111,18 @@ void scr_library_register_reset(void (*fn)(void));
 /* An escaped exception at an entry boundary: renders the same "Uncaught
  * ..." text the executable epilogue prints, releases the payload, and
  * routes the text through the trap funnel. No-op when nothing is pending.
- * Defined in scr_exception.c (it owns the cell). */
+ * The ratified verbatim rule: a thrown message that ALREADY begins with the
+ * structured marker 0x01 (a thrown string, or an Error whose .message
+ * starts with it) is delivered byte-for-byte — no "Uncaught " prefix, no
+ * added newline — which is how facade-authored structured teachings ride
+ * the throw channel to the sink. Defined in scr_exception.c (it owns the
+ * cell). */
 void scr_library_check_exc(void);
+
+/* The length-taking funnel entry (library lane only): delivers exactly the
+ * given bytes to the sink — the verbatim path above needs it because a
+ * structured message is length-delimited, never NUL-scanned. */
+_Noreturn void scr_trap_len(const char *msg, size_t len);
 
 /* Marshalling helpers the generated wrappers call (both emissions share
  * these bodies, which is how the two lanes stay identical by
@@ -105,7 +130,10 @@ void scr_library_check_exc(void);
  * the result arena and stay valid until the next arena reset. String
  * results are NUL-terminated after *out_len bytes (ScrStr's layout). */
 ScrStr *scr_library_str_in(const uint8_t *p, size_t len);   /* +1 */
-ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len); /* +1, u8 */
+/* trap_msg is the wrapper's compiler-assembled host-contract trap message
+ * (structured trap-teaching bytes naming this entry's symbol), delivered
+ * through the funnel when len falls outside the marshalling class. */
+ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len, const char *trap_msg); /* +1, u8 */
 void scr_library_str_out(ScrStr *s, const uint8_t **out, size_t *out_len);
 void scr_library_bytes_out(ScrBytes *b, const uint8_t **out, size_t *out_len);
 

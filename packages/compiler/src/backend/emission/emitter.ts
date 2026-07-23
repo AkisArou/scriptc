@@ -939,7 +939,11 @@ export class CEmitter {
             break;
           case "bytes":
             params.push(`const uint8_t *a${i}_ptr`, `size_t a${i}_len`);
-            args.push(`scr_library_bytes_in(a${i}_ptr, a${i}_len)`);
+            // The helper's trap message is the compiler-assembled
+            // structured trap-teaching form (0x01 text 0x1F SC4010 0x1F
+            // symbol [0x1F remediation]) — assembled once at export
+            // resolution, identical across both backends.
+            args.push(`scr_library_bytes_in(a${i}_ptr, a${i}_len, ${cStringLiteral(Buffer.from(e.inboundBytesTrap!, "utf8"))})`);
             break;
         }
       });

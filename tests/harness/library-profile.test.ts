@@ -2,12 +2,13 @@
  * every malformation family the design names is SC4001 with the offending
  * JSON path in the message; a well-formed profile round-trips into the
  * resolved LibraryProfile shape (entry made absolute against the profile's
- * own directory, teachings rider captured). */
+ * own directory, teachings and remediations riders captured — reserved
+ * bytes of the structured trap-teaching encoding refused in both). */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
-import { loadLibraryProfile, profileTeaching } from "@scriptc/compiler";
+import { loadLibraryProfile, profileRemediation, profileTeaching } from "@scriptc/compiler";
 
 const dir = mkdtempSync(join(tmpdir(), "scriptc-lib-profile-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -76,6 +77,44 @@ describe("library profile validation", () => {
     expect(profileTeaching(r.profile, "SC4004")).toBe("wrap it in a sync facade");
     expect(profileTeaching(r.profile, "SC4005")).toBe("use kx_schedule instead");
     expect(profileTeaching(r.profile, "SC4001")).toBeUndefined();
+  });
+
+  test("remediations rider round-trips; embedder code keys pass as bare tokens", () => {
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        determinism: {
+          teachings: { NS1207: "the host and this core disagree about the contract" },
+          remediations: { NS1207: "rebuild the app from one build", SC4010: "pass the true byte length" },
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Embedder-prefixed codes are validated only as tokens free of the
+    // reserved bytes — never for registry membership.
+    expect(profileTeaching(r.profile, "NS1207")).toBe("the host and this core disagree about the contract");
+    expect(profileRemediation(r.profile, "NS1207")).toBe("rebuild the app from one build");
+    expect(profileRemediation(r.profile, "SC4010")).toBe("pass the true byte length");
+    expect(profileRemediation(r.profile, "SC4004")).toBeUndefined();
+  });
+
+  test("teaching and remediation text reject the encoding's reserved bytes", () => {
+    // 0x01 is the structured message's version marker, 0x1F its field
+    // separator: either byte inside profile-authored text would corrupt
+    // the assembled sink message, so the load refuses (SC4001).
+    expectSc4001(
+      { ...good, determinism: { teachings: { SC4010: "bad \u0001 marker" } } },
+      "determinism.teachings.SC4010",
+    );
+    expectSc4001(
+      { ...good, determinism: { remediations: { SC4010: "bad \u001f separator" } } },
+      "determinism.remediations.SC4010",
+    );
+    expectSc4001(
+      { ...good, determinism: { teachings: { "NS\u001f12": "text is fine" } } },
+      "reserved byte",
+    );
   });
 
   test("parse error", () => expectSc4001("{ not json", "not valid JSON"));

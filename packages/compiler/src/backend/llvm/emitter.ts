@@ -1158,7 +1158,7 @@ class LlEmitter {
         this.declare(`declare ptr @scr_library_str_in(ptr, i64)`);
       }
       if (this.mod.lib.exports.some((e) => e.params.includes("bytes"))) {
-        this.declare(`declare ptr @scr_library_bytes_in(ptr, i64)`);
+        this.declare(`declare ptr @scr_library_bytes_in(ptr, i64, ptr)`);
       }
       if (this.mod.lib.exports.some((e) => e.returns === "string")) {
         this.declare(`declare void @scr_library_str_out(ptr, ptr, ptr)`);
@@ -1507,6 +1507,14 @@ class LlEmitter {
       const params: string[] = [];
       const body: string[] = [`  call void @scr_library_entry(i1 zeroext ${autoReset ? "true" : "false"})`];
       const args: string[] = [];
+      if (e.inboundBytesTrap !== undefined) {
+        // The bytes-in helper's trap message: the compiler-assembled
+        // structured trap-teaching form (0x01 text 0x1F SC4010 0x1F symbol
+        // [0x1F remediation]) — the same bytes the C emission passes, so
+        // the sink message is emission-invariant by construction.
+        const trapBytes = Buffer.byteLength(e.inboundBytesTrap, "utf8");
+        out.push(`@sc_lib_bytes_trap_${e.symbol} = internal constant [${trapBytes + 1} x i8] c"${llStrBytes(e.inboundBytesTrap)}"`, ``);
+      }
       e.params.forEach((cls, i) => {
         switch (cls) {
           case "f64":
@@ -1540,7 +1548,7 @@ class LlEmitter {
             break;
           case "bytes":
             params.push(`ptr %a${i}_ptr`, `i64 %a${i}_len`);
-            body.push(`  %c${i} = call ptr @scr_library_bytes_in(ptr %a${i}_ptr, i64 %a${i}_len)`);
+            body.push(`  %c${i} = call ptr @scr_library_bytes_in(ptr %a${i}_ptr, i64 %a${i}_len, ptr @sc_lib_bytes_trap_${e.symbol})`);
             args.push(`ptr %c${i}`);
             break;
         }
