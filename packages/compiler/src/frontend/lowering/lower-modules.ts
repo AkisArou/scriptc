@@ -7,7 +7,7 @@ import type { Lowerer } from "./lowerer.js";
 import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
 import { NpmGraphBuilder, packageNameOfPath, probeNodeImportRefusal } from "../npm.js";
 import { isNpmStaticPackage } from "../npm-static.js";
-import { isJsSourceFileName } from "../shared.js";
+import { isJsSourceFileName, isRelativeSpecifier } from "../shared.js";
 import { cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
 import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
@@ -75,7 +75,7 @@ export interface FileParts {
     sf: ts.SourceFile,
     spec: string,
   ): ts.SourceFile | null {
-    if (!spec.startsWith("./") && !spec.startsWith("../") && !spec.startsWith("/")) return null;
+    if (!isRelativeSpecifier(spec) && !spec.startsWith("/")) return null;
     const dep = resolveImport(program, sf, spec);
     if (!dep || dep.isDeclarationFile) return null;
     if (dep.fileName.endsWith(".json") || dep.fileName.endsWith(".cts")) return null;
@@ -240,7 +240,7 @@ export interface FileParts {
         // and node_modules files never lower as program modules — the
         // import silently dropped).
         const relPkg =
-          npm === null && (spec.startsWith("./") || spec.startsWith("../"))
+          npm === null && isRelativeSpecifier(spec)
             ? packageNameOfPath(resolvePath(dirnamePath(fp.sf.fileName), spec))
             : null;
         const relIsJs =

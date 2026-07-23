@@ -63,11 +63,13 @@ import {
   fallbackDtsPath,
   isJsSourceFileName,
   isNodeTypesPath,
+  isRelativeSpecifier,
   JS_ANY_OPERATOR_CODES,
   JS_RELAXED_TSC_CODES,
   overridesDtsPath,
   registerWorkspacePackage,
   SUPPORTED_NODE_MODULES,
+  workspacePackageOfPath,
 } from "./shared.js";
 
 const BASE_OPTIONS: ts.Ts7CompilerOptions = {
@@ -883,11 +885,17 @@ function nonInertTopLevel7(program: ts.Program, sf: ts.SourceFile): ts.Node | nu
     if (ts.isCallExpression(e) || ts.isNewExpression(e)) {
       if (!dtsRooted(e.expression) || !ts.isIdentifier(chainRoot7(e.expression))) return false;
       const args = e.arguments ?? [];
+      // A CALLABLE argument is admissible when it is itself dts-rooted:
+      // a builtin-owned function value (vercel's `promisify(fs.readFile)`
+      // at every cycle member's top level) is runtime-implemented — even
+      // if the builtin callee invokes it, no user code runs and no
+      // cluster binding is observable. Function literals and user
+      // callables keep the refusal.
       return args.every(
         (a) =>
           inert(a) &&
           !containsFunctionLike(a) &&
-          checker.getCallSignatures(checker.getTypeAtLocation(a)).length === 0,
+          (checker.getCallSignatures(checker.getTypeAtLocation(a)).length === 0 || dtsRooted(a)),
       );
     }
     return false;
@@ -1006,7 +1014,7 @@ function resolveNpmImport7(
   fromFileName: string,
   specifier: string,
 ): { packageName: string; version?: string; typesFile: string } | null {
-  if (specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("node:")) {
+  if (isRelativeSpecifier(specifier) || specifier.startsWith("node:")) {
     return null;
   }
   // --provenance-sources: a registered specifier is NOT an npm import —
@@ -1106,6 +1114,61 @@ function preflight7(load: LoadResult): {
   const { program, entry } = load;
   const diags: ScrDiagnostic[] = [...load.configDiags];
 
+  // Workspace-linked packages register BEFORE the tsc gate. Their files
+  // live at realpaths OUTSIDE node_modules (the monorepo-tool symlink
+  // shape), so nothing path-shaped marks them as npm surface — yet their
+  // shipped JS is the identical foreign-tsconfig story as node_modules JS
+  // (the island executes it under --dynamic; the author's own build
+  // checked it, the program's author cannot fix it). The lazy
+  // registration inside the import-fence walk below runs AFTER errorsOf,
+  // too late for the gate, so one pass over the program's import edges
+  // registers them up front: every bare specifier any program file loads —
+  // import/export declarations, dynamic import("literal") (tsgo chases
+  // those into the program too; vercel's CLI reaches @vercel/go exactly
+  // that way), require("literal") — resolved with the own resolver,
+  // workspace answers recorded.
+  {
+    const supportedBuiltins = new Set<string>(SUPPORTED_NODE_MODULES);
+    const probed = new Set<string>();
+    const probe = (fromFile: string, spec: string): void => {
+      if (
+        isRelativeSpecifier(spec) ||
+        spec.startsWith("#") ||
+        spec.startsWith("node:") ||
+        supportedBuiltins.has(spec)
+      ) {
+        return;
+      }
+      const key = `${dirname(fromFile)} ${spec}`;
+      if (probed.has(key)) return;
+      probed.add(key);
+      const r = resolveBareModule(fromFile, spec);
+      if (r !== null && r.workspaceDir !== undefined) registerWorkspacePackage(r.packageName, r.workspaceDir);
+    };
+    for (const sf of program.getSourceFiles()) {
+      if (sf.isDeclarationFile || sf.fileName.endsWith(".json")) continue;
+      ts.walkPreorder(sf, (n) => {
+        if (
+          (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) &&
+          n.moduleSpecifier !== undefined &&
+          ts.isStringLiteral(n.moduleSpecifier)
+        ) {
+          probe(sf.fileName, n.moduleSpecifier.text);
+          return "skip";
+        }
+        if (ts.isCallExpression(n)) {
+          const arg = n.arguments[0];
+          const isImportCall = n.expression.kind === ts.SyntaxKind.ImportKeyword;
+          const isRequireCall = ts.isIdentifier(n.expression) && n.expression.text === "require";
+          if ((isImportCall || isRequireCall) && arg !== undefined && ts.isStringLiteralLike(arg)) {
+            probe(sf.fileName, arg.text);
+          }
+        }
+        return undefined;
+      });
+    }
+  }
+
   const toPassthrough = (d: ts.Diagnostic): ScrDiagnostic => {
     const message = ts.flattenDiagnosticMessageText(d, "\n");
     // File-less (global/options) diagnostics anchor at the entry with a
@@ -1167,8 +1230,20 @@ function preflight7(load: LoadResult): {
    * every flagless compile (depth 0 keeps node_modules JS out of the
    * program), and the packages themselves still island — so their checker
    * errors never gate a build. */
+  /* WORKSPACE-LINKED shipped JS is the same story at a different path: the
+   * package's files realpath OUTSIDE node_modules (so depth-0 exclusion
+   * never saw them and allowJs+checkJs pulls them straight into the
+   * program), but they are npm surface all the same — the island executes
+   * them, the program's author cannot fix them (vercel's @vercel/go ships
+   * an ncc bundle with dozens of checker errors). Registered up front (the
+   * pass above), suppressed here unless --npm-static opted them into being
+   * program modules. */
+  const islandJsFile = (file: string): boolean =>
+    isJsSourceFileName(file) &&
+    npmStaticPackageOfPath(file) === null &&
+    (isNodeModulesPath(file) || workspacePackageOfPath(file) !== null);
   const nodeModulesJsSuppressed = (d: ts.Diagnostic): boolean =>
-    d.fileName !== undefined && isNodeModulesPath(d.fileName) && isJsSourceFileName(d.fileName);
+    d.fileName !== undefined && islandJsFile(d.fileName);
   /* JSDoc TYPE positions in JS files are documentation Node never reads:
    * a name-resolution failure THERE (2304/2552 — prettier's utilities.js
    * spells a mapped type over a @template name it never declared) types
@@ -1246,7 +1321,13 @@ function preflight7(load: LoadResult): {
         sf.fileName !== ambient &&
         !sf.isDeclarationFile &&
         !sf.fileName.endsWith(".json") &&
-        (!isNodeModulesPath(sf.fileName) || npmStaticPackageOfPath(sf.fileName) !== null),
+        (!isNodeModulesPath(sf.fileName) || npmStaticPackageOfPath(sf.fileName) !== null) &&
+        // Workspace-linked shipped JS (see islandJsFile): its execution
+        // home is the island exactly like node_modules JS, so no import
+        // fences, no module edges, no statement counts from it. Its .ts
+        // files (a workspace package imported bare AND reached relatively)
+        // stay program source — only the island-bound JS steps out.
+        !islandJsFile(sf.fileName),
     );
 
   const ambientModules = new Set<string>(SUPPORTED_NODE_MODULES);
@@ -1339,7 +1420,7 @@ function preflight7(load: LoadResult): {
         if (stmt.isTypeOnly || erasedTypeOnlyReexport(stmt)) continue;
         if (!stmt.moduleSpecifier) continue;
         const fromSpec = ts.isStringLiteral(stmt.moduleSpecifier) ? stmt.moduleSpecifier.text : "";
-        if (!fromSpec.startsWith("./") && !fromSpec.startsWith("../")) {
+        if (!isRelativeSpecifier(fromSpec)) {
           // NAMED re-exports from a SUPPORTED builtin pass (`export { ok }
           // from "node:assert"` — prettier's universal/assert facade): the
           // statement binds nothing locally and evaluates nothing (builtins
@@ -1389,7 +1470,7 @@ function preflight7(load: LoadResult): {
       const specNode: ts.Expression | undefined = stmt.moduleSpecifier;
       if (specNode === undefined || !ts.isStringLiteral(specNode)) continue;
       const spec = specNode.text;
-      const isRelative = spec.startsWith("./") || spec.startsWith("../");
+      const isRelative = isRelativeSpecifier(spec);
       const isBare = !isRelative && !ambientModules.has(spec);
       // An import edge Node's own resolution refuses BEFORE any module
       // evaluates: recorded as a startup-crash candidate (the Node-order
@@ -1524,17 +1605,27 @@ function preflight7(load: LoadResult): {
         selfImportTdzFences7(program, sf, clause, diags);
       }
       if (clause) {
-        // Default imports of SUPPORTED builtins in JS sources pass: Node's
-        // default export of a CJS builtin IS the module object, so the
-        // binding exposes exactly the namespace-import surface and the
-        // lowering keys the same tables (builtinNamespaceModuleOf's
-        // default-import twin). TS sources keep the fence — the checker
-        // itself refuses the spelling without interop flags, and the
-        // SC1012 wording beats the raw TS1259. The callable module
-        // objects (assert, events, test) stay allowed everywhere.
+        // Default imports of SUPPORTED builtins pass where the spelling is
+        // legal: Node's default export of a CJS builtin IS the module
+        // object, so the binding exposes exactly the namespace-import
+        // surface and the lowering keys the same tables
+        // (builtinNamespaceModuleOf's default-import twin). JS sources
+        // always (Node never asks for interop flags); TS sources when the
+        // adopted interop knobs made the checker accept the spelling
+        // (vercel's `import os from 'os'` under esModuleInterop — the
+        // program TYPECHECKED, so the form is the project's own legal
+        // dialect). A TS project without interop flags keeps the fence:
+        // the SC1012 wording beats the raw TS1259 at the same site. The
+        // callable module objects (assert, events, test) stay allowed
+        // everywhere.
+        const opts = program.getCompilerOptions() as {
+          esModuleInterop?: boolean;
+          allowSyntheticDefaultImports?: boolean;
+        };
+        const interopOn = opts.esModuleInterop === true || opts.allowSyntheticDefaultImports === true;
         const defaultOk =
           builtinDefaultImportModule(spec) !== null ||
-          (isJsSourceFileName(sf.fileName) && canonicalBuiltinModule(spec) !== null);
+          ((isJsSourceFileName(sf.fileName) || interopOn) && canonicalBuiltinModule(spec) !== null);
         if (clause.name && !isJson && dep === null && !defaultOk) {
           diags.push(unsupportedDiag("SC1012", locOf7(clause.name)));
         }
@@ -1627,7 +1718,7 @@ function preflight7(load: LoadResult): {
               continue;
             }
           }
-          const isRelative = req.spec.startsWith("./") || req.spec.startsWith("../");
+          const isRelative = isRelativeSpecifier(req.spec);
           if (!isRelative) {
             if (
               canonicalBuiltinModule(req.spec) === null &&
@@ -1671,7 +1762,7 @@ function preflight7(load: LoadResult): {
         for (const call of nestedBareRequiresOf7(sf)) {
           const spec = requireSpecOf7(call)!;
           const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
-          if (!spec.startsWith("./") && !spec.startsWith("../")) {
+          if (!isRelativeSpecifier(spec)) {
             if (canonicalBuiltinModule(spec) === null && !processModuleAliasRequire7(spec, null)) {
               // Binding-less by construction — same require-site throw
               // channel as the statement-level form above.
@@ -1914,7 +2005,7 @@ function cjsNamedImportLinkCheck(
   diags: ScrDiagnostic[],
 ): StartupCrash | null {
   const lexMemo = new Map<ts.SourceFile, Set<string>>();
-  const isRelative = (spec: string): boolean => spec.startsWith("./") || spec.startsWith("../");
+  const isRelative = isRelativeSpecifier;
   // Relative specifiers resolve as ever; PROJECT imports (#alias/self-name
   // — the same package.json-mediated edges preflight admits) join them so
   // a named import THROUGH one of a CommonJS module keeps Node's lexer
@@ -2168,7 +2259,7 @@ export function orderedImportsOf(
     if (ts.isImportDeclaration(stmt) && erasedTypeOnlyImport(stmt)) continue;
     if (!stmt.moduleSpecifier || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
     const spec = stmt.moduleSpecifier.text;
-    const isRelative = spec.startsWith("./") || spec.startsWith("../");
+    const isRelative = isRelativeSpecifier(spec);
     // Relative edges as ever; PROJECT imports (#alias/self-name — the
     // package.json-mediated specifiers preflight admits as user-module
     // edges) resolve to the same dep so the importer's %init header calls
@@ -2190,7 +2281,7 @@ export function orderedImportsOf(
  * already classified the import; this is the lookup the module-order and
  * lowering paths share. */
 function npmStaticDepSf7(program: ts.Program, sf: ts.SourceFile, spec: string): ts.SourceFile | null {
-  if (!npmStaticActive() || spec.startsWith("./") || spec.startsWith("../")) return null;
+  if (!npmStaticActive() || isRelativeSpecifier(spec)) return null;
   if (spec.startsWith("node:") || spec.startsWith("#")) return null;
   const npm = resolveNpmImport7(sf.fileName, spec);
   if (npm === null || !isNpmStaticPackage(npm.packageName)) return null;

@@ -12,6 +12,7 @@
  * - Lexical scoping is resolved here: locals get function-unique ids
  *   ("x.0", "x.1" for shadowing); the IR is scope-flat.
  */
+import { isRelativeSpecifier } from "../shared.js";
 import * as ts from "../ts7/adapter.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import {
@@ -1236,7 +1237,7 @@ export class Lowerer {
       return null;
     }
     const spec = importDecl.moduleSpecifier.text;
-    if (!spec.startsWith("./") && !spec.startsWith("../")) return null;
+    if (!isRelativeSpecifier(spec)) return null;
     const dep = resolveImport(this.program, importDecl.getSourceFile(), spec);
     if (!dep || !isJsSourceFile(dep) || isNodeEsmFile(dep)) return null;
     return dep;
@@ -1263,7 +1264,7 @@ export class Lowerer {
         return false;
       }
       const spec = requireSpecOf(decl.initializer);
-      if (spec === null || !(spec.startsWith("./") || spec.startsWith("../"))) return false;
+      if (spec === null || !isRelativeSpecifier(spec)) return false;
     }
     // SINGLE-VALUE exporters (`module.exports = Countdown` / `= double` /
     // `= 42`): the requirer's binding IS the exported value, not a
@@ -1364,7 +1365,7 @@ export class Lowerer {
    * specifier is not a relative program module (builtins load nothing;
    * anything else kept its preflight fence). */
   requireInitStmt(spec: string, node: ts.Node): IrStmt | null {
-    if (!spec.startsWith("./") && !spec.startsWith("../")) return null;
+    if (!isRelativeSpecifier(spec)) return null;
     const dep = resolveImport(this.program, node.getSourceFile(), spec);
     if (!dep || dep.fileName.endsWith(".json")) return null;
     const initName = this.initNameOf.get(dep);
