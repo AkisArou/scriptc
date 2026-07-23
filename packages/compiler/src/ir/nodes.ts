@@ -205,7 +205,7 @@ export type IrType =
    * (fn.length semantics). Rest-marked values are only ever CALLED
    * through the dyn boundary (boxed thunks); direct static calls box
    * first (lower-calls). */
-  | { kind: "func"; params: IrType[]; ret: IrType; rest?: true }
+  | { kind: "func"; params: IrType[]; ret: IrType; rest?: true; restAbi?: "jsval" }
   | { kind: "object"; className: string } // heap, refcounted class instance
   /** The class STATIC side as a value — `typeof C`, the type of the class
    * name itself and of `new (…) => T` constructor-typed slots. Runtime
@@ -438,6 +438,11 @@ export function isSupportedMapValue(t: IrType): boolean {
     // references at all, so no trace, no cycles, ever.
     case "classval":
       return true;
+    // A regex (Map<string, RegExp> — the per-EOL pattern table): the
+    // array-element story (scr_regex retain/release adapters, no trace —
+    // a regex holds no references), map form.
+    case "regex":
+      return true;
     default:
       return false;
   }
@@ -520,7 +525,7 @@ export function typeKey(t: IrType): string {
     case "set":
       return `set<${typeKey(t.elem)}>`;
     case "func":
-      return `func(${[...t.params.map(typeKey), ...(t.rest ? ["...dyn[]"] : [])].join(",")})=>${typeKey(t.ret)}`;
+      return `func(${[...t.params.map(typeKey), ...(t.rest ? [t.restAbi === "jsval" ? "...jsval[]" : "...dyn[]"] : [])].join(",")})=>${typeKey(t.ret)}`;
     case "object":
       return `object:${t.className}`;
     case "classval":
@@ -2801,6 +2806,8 @@ export type IrLibFn =
    * empty array; null/undefined throw Node's catchable TypeError
    * ("Cannot convert undefined or null to object"). */
   | "dyn.objKeys"
+  | "dyn.hasOwn"
+  | "dyn.assign"
   | "dyn.objValues"
   | "dyn.objEntries"
   /** structuredClone over the DOM (scr_json.c): the JSON-safe subset plus
@@ -4410,6 +4417,23 @@ export type IrJsOp =
    * are alternating key/value jsvals (keys are marshaled strings), arrLit
    * args are the elements. Never throw. */
   | "objLit" | "arrLit"
+  /** The engine-native TemplateStringsArray for an ISLAND TAG call: args
+   * are 2n marshaled strings — n cooked then n raw — building a fresh
+   * engine array whose `.raw` carries the raw spellings (tags dispatch on
+   * it). Never throws. */
+  | "tplStrings"
+  /** Spread completion for an island-native object literal: copies
+   * args[1]'s own enumerable properties onto args[0] (the spec's
+   * CopyDataProperties — the engine's own Object.assign; null/undefined
+   * sources spread nothing) and answers args[0] for chaining. May throw
+   * (getters run). */
+  | "objSpread"
+  /** Accessor completion for an island-native object literal: defines a
+   * GETTER property on args[0] (the object) — args are (obj, key string
+   * marshal, getter function handle) — and answers the same object (the
+   * chainable spelling: `defineGetter(objLit(...), k, f)`). The
+   * self-referential doc-printer root-indent shape. Never throws. */
+  | "defineGetter"
   /** The engine's own undefined / null as island values (zero args, never
    * throw): the unit arms of a union marshaling IN (`string | undefined`
    * into an 'any' slot — the undefined arm IS the engine undefined), and
@@ -4435,7 +4459,7 @@ export function jsOpResultKind(op: IrJsOp): "jsval" | "bool" | "string" | "void"
     case "getProp": case "getIdx": case "callMethod": case "callFn":
     case "construct":
     case "globalGet":
-    case "objLit": case "arrLit":
+    case "objLit": case "arrLit": case "defineGetter": case "tplStrings": case "objSpread":
     case "undefLit": case "nullLit":
     case "iterNew": case "optCallMethod":
       return "jsval";
@@ -4639,6 +4663,7 @@ export const MAX_ISLAND_CALLBACK_ARITY = 16;
 export function canMarshalFuncIntoIsland(t: IrType): boolean {
   return (
     t.kind === "func" &&
+    t.rest !== true &&
     t.params.length <= MAX_ISLAND_CALLBACK_ARITY &&
     t.params.every((p) => p.kind === "jsval") &&
     (t.ret.kind === "jsval" || t.ret.kind === "void" ||
@@ -4685,7 +4710,7 @@ export function islandCallbackRet(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
-): { async: boolean; tag: "void" | "jsval" | "f64" | "bool" | "string" | "json" } | null {
+): { async: boolean; tag: "void" | "jsval" | "f64" | "bool" | "string" | "json" | "dyn" } | null {
   const tagOf = (r: IrType) =>
     r.kind === "void" || r.kind === "jsval" || r.kind === "f64" || r.kind === "bool" || r.kind === "string"
       ? r.kind
@@ -4696,6 +4721,12 @@ export function islandCallbackRet(
   }
   const tag = tagOf(t);
   if (tag) return { async: false, tag };
+  // A CHECKED-DYNAMIC result (a JS getter/callback whose inferred return
+  // degraded — the doc-printer root-indent getter): the DOM value deep-
+  // copies into the engine on return, exactly the jsMarshal dyn rule
+  // (data kinds only; boxed functions/handles throw the catchable
+  // TypeError). Sync only — no engine-promise tag exists for DOM values.
+  if (t.kind === "dyn") return { async: false, tag: "dyn" };
   return isJsonSafeType(t, getRecord, getUnion) ? { async: false, tag: "json" } : null;
 }
 
@@ -4710,8 +4741,23 @@ export function canMarshalTypedFuncIntoIsland(
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
+  if (t.kind !== "func") return false;
+  // The ISLAND-REST form (`async (...args) =>` in JS under --dynamic —
+  // the withPlugins wrapper): the trailing ABI param is the ENGINE array
+  // of the call's surplus arguments; leading params convert per argument
+  // like any typed callback. Plain rest signatures (dynRest, typed
+  // rests) stay out — no completed-ABI spelling exists for them here.
+  if (t.rest === true) {
+    return (
+      t.restAbi === "jsval" &&
+      t.params.length >= 1 &&
+      t.params.length <= MAX_ISLAND_CALLBACK_ARITY &&
+      t.params[t.params.length - 1]!.kind === "jsval" &&
+      t.params.slice(0, -1).every((p) => isIslandCallbackParamType(p, getRecord, getUnion)) &&
+      islandCallbackRet(t.ret, getRecord, getUnion) !== null
+    );
+  }
   return (
-    t.kind === "func" &&
     t.params.length <= MAX_ISLAND_CALLBACK_ARITY &&
     t.params.every((p) => isIslandCallbackParamType(p, getRecord, getUnion)) &&
     islandCallbackRet(t.ret, getRecord, getUnion) !== null
@@ -6047,6 +6093,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.cloneTransferFail",
   // the dyn Object walks throw on null/undefined receivers
   "dyn.objKeys",
+  "dyn.hasOwn",
+  "dyn.assign",
   "dyn.objValues",
   "dyn.objEntries",
   "error.domClone",

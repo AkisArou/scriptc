@@ -674,6 +674,14 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       contextResolutions++;
       return viaAwaited;
     }
+    // `T[K]` over a bound parameter: like Awaited, a form the checker
+    // keeps symbolic inside the body — resolved structurally against the
+    // record binding, before the flag dispatch below sees it.
+    const viaIndexed = mapGenericIndexedAccess(type, ctx);
+    if (viaIndexed !== null) {
+      contextResolutions++;
+      return viaIndexed;
+    }
   }
   const widened = checker.getBaseTypeOfLiteralType(type);
   const flags = widened.flags;
@@ -2292,9 +2300,12 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         arms.some(
           (a) =>
             a.kind === "void" || a.kind === "union" ||
-            // Map/Set and regex arms stay out (like func against data
-            // arms: no narrowing test — no discriminant fields on them).
-            a.kind === "map" || a.kind === "set" || a.kind === "regex" || a.kind === "dyn" ||
+            // Map/Set arms stay out (like func against data arms: no
+            // narrowing test — no discriminant fields on them). REGEX
+            // arms map: `x instanceof RegExp` is their narrowing test
+            // (the skip-utility `string | RegExp` shape), and the arm
+            // rides the ref machinery like array regex elements.
+            a.kind === "map" || a.kind === "set" || a.kind === "dyn" ||
             // Generator arms follow the map/set rule: no narrowing test.
             a.kind === "generator" ||
             // Func arms map beside ANY sibling: `typeof x === "function"`
@@ -2469,6 +2480,47 @@ function mapGenericAwaitedAlias(type: ts.Type, ctx: TypeMapperCtx): IrType | nul
   return r;
 }
 
+/** `T[K]` where T is a STILL-GENERIC type parameter, resolved against the
+ * lowerer's binding — the checker keeps the access symbolic inside a
+ * generic body (the mockable-clock module shape: a JSDoc-generic factory
+ * whose declared return carries `implementation: T[K]` members). The
+ * binding decides which field types the access can name: a string-LITERAL
+ * index picks its one declared field (the index signature's value type for
+ * an undeclared name); an all-keys index — `keyof T` over the same
+ * parameter, or an index parameter whose own binding widened to plain
+ * string — covers every declared field. The mapping answers only when
+ * every covered field agrees on ONE IR type (the call boundary resolved
+ * the same access against the concrete T, so the shapes intern equal);
+ * disagreeing fields would need a union whose arms this relation cannot
+ * vouch for — those stay unmapped, keeping their fences. */
+function mapGenericIndexedAccess(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
+  const { resolveTypeParam, shapes } = ctx;
+  if (!resolveTypeParam || !type.isIndexedAccessType()) return null;
+  const obj = type.getObjectType();
+  if (!(obj.flags & ts.TypeFlags.TypeParameter)) return null;
+  const bound = resolveTypeParam(obj);
+  if (!bound || bound.kind !== "record") return null;
+  const shape = shapes.get(bound.shapeId);
+  if (!shape || shape.tuple) return null;
+  const idx = type.getIndexType();
+  let covered: IrType[] | null = null;
+  if (idx.isStringLiteralType()) {
+    const f = shape.fields.find((x) => x.name === idx.value);
+    covered = f ? [f.type] : shape.indexValue ? [shape.indexValue] : null;
+  } else {
+    const allKeys =
+      (idx.flags & ts.TypeFlags.TypeParameter && resolveTypeParam(idx)?.kind === "string") ||
+      (idx.isIndexType() && idx.getTarget() === obj);
+    if (allKeys) {
+      covered = shape.fields.map((f) => f.type);
+      if (shape.indexValue) covered.push(shape.indexValue);
+    }
+  }
+  if (!covered || covered.length === 0) return null;
+  const first = covered[0]!;
+  return covered.every((t) => typeEquals(t, first)) ? first : null;
+}
+
 function mapGenericUtilityAlias(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const { resolveTypeParam, shapes, unions } = ctx;
   if (!resolveTypeParam) return null;
@@ -2610,8 +2662,7 @@ export function withUndefinedArm(t: IrType, unions: UnionRegistry): IrType | nul
     return { kind: "union", unionId: unions.intern(arms) };
   }
   if (
-    t.kind === "void" || t.kind === "map" ||
-    t.kind === "regex" || t.kind === "dyn" ||
+    t.kind === "void" || t.kind === "map" || t.kind === "dyn" ||
     // A bare unit field type cannot occur (units live only inside unions),
     // but guard against constructing a single-arm union from one.
     isUnitType(t)

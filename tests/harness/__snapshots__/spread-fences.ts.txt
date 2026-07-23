@@ -18,12 +18,3 @@ spread-fences.ts:25:27 - error SC1090: object spread after explicit properties (
   25 | const s2: Shape = { x: 5, ...yPart };
      |                           ^~~~~~~~
   26 | 
-
-spread-fences.ts:40:18 - error SC2002: record shapes must match exactly: expected '{ n: number; s: string }', got '{ n: number; s: string | undefined }' (structural width subtyping needs a shape coercion that is not supported yet)
-
-  39 | const optSrc: OptSrc = { n: 1 };
-  40 | const reqDst = { ...optSrc } as ReqDst;
-     |                  ^~~~~~~~~
-  41 | console.log(reqDst.n);
-
-  hint: build a new literal with exactly the expected fields instead of passing a wider value

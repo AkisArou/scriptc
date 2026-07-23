@@ -433,7 +433,9 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         const helper = E.recordKeySetHelper(s.shapeId);
         E.line(`${helper}(${obj.name}, ${key.name}, ${v.name});${E.srcComment(s.loc)}`);
         const shape = E.recordsById.get(s.shapeId);
-        if (shape && shape.indexValue?.kind === "dyn" && shape.fields.length > 0) {
+        // MAY THROW: a dyn value validating against a declared field, or a
+        // signature-free shape's key MISS (scr_record_key_miss).
+        if (shape && (!shape.indexValue || (shape.indexValue.kind === "dyn" && shape.fields.length > 0))) {
           E.emitPendingCheck();
         }
         break;

@@ -88,7 +88,7 @@ import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassign
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { builtinImportOf, lowerBuiltinModuleCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
-import { isIslandExpr, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
+import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
 import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty } from "./lower-server.js";
 import { lowerDgramDnsModuleCall, lowerDgramMethodCall } from "./lower-dgram.js";
 import { lowerNodeTestModuleCall, lowerTestDirectCall, lowerTestMethodCall, lowerTestCtxProperty } from "./lower-test.js";
@@ -96,7 +96,7 @@ import { lowerAssertModuleCall, lowerAssertDirectCall } from "./lower-assert.js"
 import { lowerUtilModuleCall } from "./lower-inspect.js";
 import { lowerComptime, comptimeBakeable, rejectComptimeCaptures, comptimeValueToIr } from "./lower-comptime.js";
 import { lowerStmts, noteBlockedBindings, isBlockedBinding, lowerScopedBlock, predeclareForwardCapture, predeclareForwardFnDecl, predeclareForwardVar, rejectJumpCrossingFinally, lowerStmt, lowerVarStatement, lowerDestructuringDecl, lowerDestructuringAssignParts, lowerBindingPattern, lowerJsvalBindingPattern, checkBindingElement, bindPatternTarget, lowerVarDeclList, lowerVarDecl, lowerSwitch, lowerTry, lowerExprStatement, lowerForOf, lowerForStatement } from "./lower-stmts.js";
-import { FieldTarget, lowerExpr, maybeNarrow, lowerUnitComparison, lowerNullishCoalesce, lowerOptionalChain, finishOptionalChain, lowerCondition, ensureBool, requireTruthyUnion, eqComparableUnion, lowerIntrinsicProperty, lowerArrayLiteral, lowerObjectLiteral, lowerShorthandValue, rejectThisInObjectMethod, lowerElementAccess, lowerElementWrite, lowerRecordKeyRead, ensureString, lowerTemplate, lowerAsExpression, lowerPrefixUnary, lowerBinary, lowerCaughtTypeofTest, caughtRead, caughtLocalOf, caughtToString, lowerInstanceOf, lowerRegexLiteral, lowerFieldRead, lowerUnionProperty, fieldTarget, fieldGetExpr, fieldSetStmt, lowerFieldCompound, uniqueSymbolKeyOf, foldedStringKeyOf } from "./lower-exprs.js";
+import { FieldTarget, lowerDynObjectLiteral, lowerExpr, maybeNarrow, lowerUnitComparison, lowerNullishCoalesce, lowerOptionalChain, finishOptionalChain, lowerCondition, ensureBool, requireTruthyUnion, eqComparableUnion, lowerIntrinsicProperty, lowerArrayLiteral, lowerObjectLiteral, lowerShorthandValue, rejectThisInObjectMethod, lowerElementAccess, lowerElementWrite, lowerRecordKeyRead, ensureString, lowerTemplate, lowerAsExpression, lowerPrefixUnary, lowerBinary, lowerCaughtTypeofTest, caughtRead, caughtLocalOf, caughtToString, lowerInstanceOf, lowerRegexLiteral, lowerFieldRead, lowerUnionProperty, fieldTarget, fieldGetExpr, fieldSetStmt, lowerFieldCompound, uniqueSymbolKeyOf, foldedStringKeyOf } from "./lower-exprs.js";
 import type { ExpandoMember } from "./lower-expando.js";
 import { lowerRecordFieldCall, lowerObjectMethodCall } from "./lower-calls.js";
 import { fenceCrossBlockNsRef, nsPathPrefix } from "./lower-namespaces.js";
@@ -118,7 +118,8 @@ export type WidthLift =
   | { how: "tupleArr" }
   | { how: "emptyArr" }
   | { how: "objWidth" }
-  | { how: "clsWidth" };
+  | { how: "clsWidth" }
+  | { how: "narrow" };
 
 export class PoisonError extends Error {}
 
@@ -2952,6 +2953,15 @@ export class Lowerer {
       if (candidates.length !== 1) return null;
       return { how: "liftWrap", tag: candidates[0]!.tag, arm: candidates[0]!.arm };
     }
+    // A UNION source into a slot that is ONE of its arms (a width copy
+    // whose target field narrowed — the option-table choices shape:
+    // `value: boolean | string` copying into a `value: string` slot the
+    // checker approved): the CHECKED extraction — narrowedArmHelper,
+    // exactly `x!`'s machinery — the proven arm's payload comes out, any
+    // other arm throws the catchable TypeError (divergence 38's stance).
+    if (src.kind === "union" && !isUnitType(dst) && dst.kind !== "void" && this.armTag(src.unionId, dst) >= 0) {
+      return { how: "narrow" };
+    }
     if (dst.kind === "record" && src.kind === "record") {
       return this.recordWidthPlan(src.shapeId, dst.shapeId) !== null ? { how: "width" } : null;
     }
@@ -3053,6 +3063,12 @@ export class Lowerer {
         if (dst.kind !== "object" || value.type.kind !== "record") throw new Error("lowerer bug: clsWidth lift shape");
         const helper = this.recordClassWidthHelper(value.type.shapeId, dst.className, loc);
         if (!helper) throw new Error("lowerer bug: planned clsWidth lift failed to intern");
+        return { kind: "call", callee: helper, args: [value], type: dst, loc };
+      }
+      case "narrow": {
+        if (value.type.kind !== "union") throw new Error("lowerer bug: narrow lift on a non-union");
+        const helper = this.narrowedArmHelper(value.type.unionId, dst, loc);
+        if (!helper) throw new Error("lowerer bug: planned narrow lift failed to intern");
         return { kind: "call", callee: helper, args: [value], type: dst, loc };
       }
       default: {
@@ -3737,7 +3753,16 @@ export class Lowerer {
     }
     if (src.kind === "jsval") return this.boundaryExitSafe(dst);
     if (dst.kind === "dyn") return src.kind !== "dyn" && this.dynConvertible(src);
-    if (src.kind === "dyn") return this.jsonSafe(dst);
+    if (src.kind === "dyn") {
+      // The checked-dynamic function boundary's OUT direction joins the
+      // mechanical set: a dyn result landing in an adaptable func slot
+      // takes dynCheck's per-target shim (coerceToExpected's funcOk rule
+      // — the production/development function-choice ternary shape).
+      return (
+        this.jsonSafe(dst) ||
+        (dst.kind === "func" && canAdaptDynFuncTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
+      );
+    }
     if (dst.kind === "union") {
       if (src.kind === "union") return this.unionRetagMappable(src.unionId, dst.unionId);
       if (src.kind === "void") return this.armTag(dst.unionId, UNDEFINED_T) >= 0;
@@ -3781,9 +3806,18 @@ export class Lowerer {
       if (!this.coercibleValue(toT.params[i]!, fromT.params[i]!)) strandParams = true;
     }
     let voidRet: "dyn" | "jsval" | "strand" | null = null;
+    let strandRet = false;
     if (toT.ret.kind !== "void" && !this.coercibleValue(fromT.ret, toT.ret)) {
-      if (fromT.ret.kind !== "void") return null;
-      voidRet = toT.ret.kind === "dyn" ? "dyn" : toT.ret.kind === "jsval" ? "jsval" : "strand";
+      if (fromT.ret.kind !== "void") {
+        // A RESULT that cannot convert — the strandParams stance, result
+        // side (the production/development function-choice ternary: the
+        // untaken arm's result shape never lands in the slot's): the
+        // assignment compiles, INVOKING the slot runs the function and
+        // throws the stranded TypeError where its result would convert.
+        strandRet = true;
+      } else {
+        voidRet = toT.ret.kind === "dyn" ? "dyn" : toT.ret.kind === "jsval" ? "jsval" : "strand";
+      }
     }
     if (toT.ret.kind === "void" && fromT.ret.kind === "jsval") return null;
     const key = `fnadapt:${typeKey(fromT)}:${typeKey(toT)}`;
@@ -3845,6 +3879,13 @@ export class Lowerer {
           { kind: "exprStmt", expr: call, loc },
           strandThrow(
             `a void result where the '${this.fmt(toT)}' slot promises '${this.fmt(toT.ret)}' (a thrower typed 'never' never reaches this; a genuinely void function has no result to hand over)`,
+          ),
+        ];
+      } else if (strandRet) {
+        body = [
+          { kind: "exprStmt", expr: call, loc },
+          strandThrow(
+            `a '${this.fmt(fromT)}' function invoked through a '${this.fmt(toT)}' slot (the result cannot convert to '${this.fmt(toT.ret)}' — the checker's loose function compatibility admitted the assignment, but the call has no exact lowering)`,
           ),
         ];
       } else {
@@ -4860,6 +4901,23 @@ export class Lowerer {
         e = { kind: "call", callee: helper, args: [e], type: expected, loc: e.loc };
       }
     }
+    // A JS FUNC value outside the island marshal set flowing into a
+    // jsval slot (`withPlugins(getSupportInfoWithoutPlugins, 0)` — a
+    // wrapper built at module init around a function the run may never
+    // call): the crossing defers to a call-time fence closure instead of
+    // stopping the statement — jsvalIn's deferral, the implicit-coercion
+    // spelling.
+    if (expected.kind === "jsval" && e.type.kind === "func" && !typeEquals(e.type, expected)) {
+      const diagsBefore = this.diags.length;
+      try {
+        this.requireExactShape(node, e.type, expected);
+      } catch (err) {
+        const fence = islandFuncValueFence(this, err, diagsBefore, node);
+        if (fence) return fence;
+        throw err;
+      }
+      return e;
+    }
     this.requireExactShape(node, e.type, expected);
     return e;
   }
@@ -4937,6 +4995,61 @@ export class Lowerer {
       while (ts.isParenthesizedExpression(x)) x = x.expression;
       if (ts.isArrayLiteralExpression(x) && x.elements.length === 0) {
         return this.coerceInto(node, this.lowerArrayLiteral(x, expected), expected);
+      }
+    }
+    // An OBJECT LITERAL against a checked-dynamic slot in a JS file (the
+    // getSupportInfo options argument — a dyn-ABI param): the value's
+    // world IS the DOM — build the DOM literal directly, before the
+    // island gate could claim the checker's `any` context (an island
+    // build could never land in the slot: no engine→DOM crossing).
+    if (expected?.kind === "dyn") {
+      let x: ts.Expression = node;
+      while (ts.isParenthesizedExpression(x)) x = x.expression;
+      if (ts.isObjectLiteralExpression(x) && isJsSourceFile(x.getSourceFile())) {
+        return lowerDynObjectLiteral(this, x);
+      }
+    }
+    // An ARRAY LITERAL against a UNION slot whose own type has no static
+    // home (the JS dyn fallback — the checker gave no usable context):
+    // when the union has exactly ONE array-family arm — an array, or an
+    // arity-matching tuple (the option-table `default: [{ value: [] }]`
+    // shape) — build AS that arm and wrap; the IR-directed twin of
+    // lowerArrayLiteral's contextual-union rule.
+    if (expected?.kind === "union") {
+      let x: ts.Expression = node;
+      while (ts.isParenthesizedExpression(x)) x = x.expression;
+      if (ts.isArrayLiteralExpression(x)) {
+        const own = this.mapTypeOf(this.checker.getContextualType(x) ?? this.typeOf(x));
+        // Elements beyond bare null/undefined literals can never live in
+        // a unit-only-element array — a checker type that degraded to one
+        // (`[]`-flavored inference over a populated literal) carries no
+        // element information.
+        const nonUnitElems = x.elements.some(
+          (el) =>
+            !ts.isOmittedExpression(el) &&
+            el.kind !== ts.SyntaxKind.NullKeyword &&
+            !(ts.isIdentifier(el) && el.text === "undefined"),
+        );
+        if (
+          own === null || own.kind === "dyn" || own.kind === "jsval" ||
+          (own.kind === "array" && nonUnitElems && this.unitOnlyElem(own.elem)) ||
+          this.widthLiftPlan(own, expected) === null
+        ) {
+          const def = this.unions.get(expected.unionId);
+          const arms = (def?.arms ?? []).filter(
+            (a) =>
+              (a.kind === "array" && !(nonUnitElems && this.unitOnlyElem(a.elem))) ||
+              (a.kind === "record" &&
+                !!this.shapes.get(a.shapeId)?.tuple &&
+                this.shapes.get(a.shapeId)!.fields.length === x.elements.length &&
+                !x.elements.some(ts.isSpreadElement)),
+          );
+          if (arms.length === 1) {
+            const arm = arms[0]!;
+            const built = this.lowerArrayLiteral(x, arm as IrType & { kind: "array" } | (IrType & { kind: "record" }));
+            return this.coerceInto(node, built, expected);
+          }
+        }
       }
     }
     const e = this.lowerExpr(node);
@@ -6321,7 +6434,7 @@ export class Lowerer {
     return stdlibGlobalMember(this, access, name);
   }
 
-  lowerArrayLiteral(expr: ts.ArrayLiteralExpression, expected?: IrType & { kind: "array" }): IrExpr {
+  lowerArrayLiteral(expr: ts.ArrayLiteralExpression, expected?: (IrType & { kind: "array" }) | (IrType & { kind: "record" })): IrExpr {
     return lowerArrayLiteral(this, expr, expected);
   }
 

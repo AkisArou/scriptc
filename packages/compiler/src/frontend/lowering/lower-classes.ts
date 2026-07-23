@@ -5045,6 +5045,22 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
           return { kind: "mapNew", seed, type: mapped, loc };
         }
         const targs = L.checker.getTypeArguments(tsType as ts.TypeReference);
+        // JAVASCRIPT `new Map()` whose arguments never resolved past
+        // Map<any, any> (no annotation, no contextual type, no seed): the
+        // WeakMap stance below — the VALUE lowers as an opaque DOM object
+        // (identity and truthiness are real), and every reached METHOD use
+        // meets its own per-site fence at runtime. The formatter's
+        // config-cache shape: module init constructs the caches
+        // unconditionally; the format path never touches them. TypeScript
+        // keeps the compile fence.
+        if (
+          isJsSourceFile(expr.getSourceFile()) &&
+          (expr.arguments?.length ?? 0) === 0 &&
+          targs.length > 0 &&
+          targs.every((t) => (t.flags & ts.TypeFlags.Any) !== 0)
+        ) {
+          return { kind: "dynObjLit", type: DYN, loc };
+        }
         const keyIr = targs[0] ? L.mapTypeOf(targs[0]) : null;
         if (targs[0] && (!keyIr || !isSupportedMapKey(keyIr))) {
           L.unsupported(

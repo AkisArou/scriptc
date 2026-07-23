@@ -7,7 +7,7 @@ import type { Lowerer } from "./lowerer.js";
 import { F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
-import { isCjsJsFile, locOf, npmPackageNameOf } from "../program.js";
+import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
 import { pureReemittable } from "./lower-exprs.js";
 import { PoisonError, newFnCtx, own } from "./lowerer.js";
 
@@ -40,6 +40,55 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
    * divergence). Values with no island representation — closures, class
    * instances, promises, un-validated 'unknown' — are rejected with the
    * boundary message. */
+  /** The call-time deferral of a FUNC-value island crossing in a JS
+   * source: captures the just-recorded diagnostic into the runtime-fence
+   * ledger and answers a marshaled host closure that THROWS it when
+   * invoked — building the value compiles; only a call through the
+   * island stops the run. Null (caller rethrows) outside the JS deferral
+   * gate: TypeScript sources, probe mode, ICEs. */
+  export function islandFuncValueFence(L: Lowerer, err: unknown, diagsBefore: number, node: ts.Node): IrExpr | null {
+    if (
+      !(err instanceof PoisonError) ||
+      !isJsSourceFile(node.getSourceFile()) ||
+      L.diagSink !== null ||
+      L.diags.length <= diagsBefore ||
+      L.diags.slice(diagsBefore).some((d) => d.code === "SC9001")
+    ) {
+      return null;
+    }
+    const captured = L.diags.splice(diagsBefore);
+    L.runtimeFences.push(...captured);
+    const first = captured[0]!;
+    const pos = ts.getLineAndCharacterOfPosition(
+      L.program.getSourceFile(first.loc.file) ?? node.getSourceFile(),
+      first.loc.start,
+    );
+    const loc = locOf(node);
+    const fnName = `%fn${L.lambdaCounter++}_islfence`;
+    L.liftedFns.push({
+      name: fnName,
+      params: [],
+      returnType: VOID,
+      locals: [],
+      captures: [],
+      body: [
+        {
+          kind: "runtimeFence",
+          code: first.code,
+          message: `${first.message} [${first.code} at ${first.loc.file}:${pos.line + 1}]`,
+          loc,
+        },
+      ],
+      loc,
+    });
+    return {
+      kind: "jsMarshal",
+      value: { kind: "closure", fnName, captures: [], type: { kind: "func", params: [], ret: VOID }, loc },
+      type: JSVAL,
+      loc,
+    };
+  }
+
   export function jsvalIn(L: Lowerer, e: IrExpr, node: ts.Node): IrExpr {
     if (e.type.kind === "jsval") return e;
     // Bare unit literals (`undefined` / `null` in an 'any' slot): the
@@ -49,11 +98,11 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
       return { kind: "jsOp", op: e.type.kind === "undefinedT" ? "undefLit" : "nullLit", args: [], type: JSVAL, loc: e.loc };
     }
     if (e.type.kind === "dyn") {
-      L.unsupported(
-        "SC1100",
-        node,
-        "passing 'unknown' values into dynamically-executed ('any'-typed) code (validate with 'as <type>' first)",
-      );
+      // A CHECKED-DYNAMIC value entering the island: the DOM tree
+      // deep-copies into engine values — exactly coerceToExpected's
+      // jsval-IN rule (data kinds only; a DOM carrying a boxed
+      // function/handle throws the catchable TypeError at runtime).
+      return { kind: "jsMarshal", value: e, type: JSVAL, loc: e.loc };
     }
     // Closures cross INTO the island as host functions — THE package
     // callback pattern (`.action((a, b) => ...)`). Unannotated params stay
@@ -68,20 +117,32 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
       e.type.kind === "func" &&
       !canMarshalTypedFuncIntoIsland(e.type, (id) => L.shapes.get(id), (id) => L.unions.get(id))
     ) {
-      L.unsupported(
-        "SC1090",
-        node,
-        `functions with this signature crossing into dynamically-executed code ` +
-          `(a callback passed to a package/'any' API may take 'any' parameters — ` +
-          `leave them unannotated so contextual typing keeps them 'any' — or parameters ` +
-          `convertible at the boundary (number, string, boolean, JSON-safe ` +
-          `records/arrays/unions, 'T | undefined'), and return 'any', void, number, ` +
-          `string, boolean, a JSON-safe composite, or a Promise of the primitive kinds${
-            e.type.kind === "func" && e.type.params.length > MAX_ISLAND_CALLBACK_ARITY
-              ? `; at most ${MAX_ISLAND_CALLBACK_ARITY} parameters`
-              : ""
-          })`,
-      );
+      const diagsBefore = L.diags.length;
+      try {
+        L.unsupported(
+          "SC1090",
+          node,
+          `functions with this signature crossing into dynamically-executed code ` +
+            `(a callback passed to a package/'any' API may take 'any' parameters — ` +
+            `leave them unannotated so contextual typing keeps them 'any' — or parameters ` +
+            `convertible at the boundary (number, string, boolean, JSON-safe ` +
+            `records/arrays/unions, 'T | undefined'), and return 'any', void, number, ` +
+            `string, boolean, a JSON-safe composite, or a Promise of the primitive kinds${
+              e.type.kind === "func" && e.type.params.length > MAX_ISLAND_CALLBACK_ARITY
+                ? `; at most ${MAX_ISLAND_CALLBACK_ARITY} parameters`
+                : ""
+            })`,
+        );
+      } catch (err) {
+        // JS sources defer the crossing like a statement fence, one level
+        // deeper: the slot receives a host closure that THROWS the
+        // diagnostic when INVOKED (the withPlugins aggregation shape —
+        // wrappers built at module init around functions the smoke path
+        // never calls). TypeScript and probe mode keep the poison.
+        const fence = islandFuncValueFence(L, err, diagsBefore, node);
+        if (fence) return fence;
+        throw err;
+      }
     }
     if (e.type.kind !== "func" && !L.boundarySafe(e.type)) {
       // A RegExp crossing INTO the island (`z.string().regex(/^a+$/)` —

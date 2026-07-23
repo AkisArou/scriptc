@@ -4442,6 +4442,48 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2470-mockable-module-shape.js": {
+   "order": [
+    "<repo>/tests/corpus/2470-mockable-module-shape.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2471-record-keyed-write-hasown.js": {
+   "order": [
+    "<repo>/tests/corpus/2471-record-keyed-write-hasown.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2472-string-regexp-union.ts": {
+   "order": [
+    "<repo>/tests/corpus/2472-string-regexp-union.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2473-option-table-widths.js": {
+   "order": [
+    "<repo>/tests/corpus/2473-option-table-widths.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2474-island-literal-forms.ts": {
+   "order": [
+    "<repo>/tests/corpus/2474-island-literal-forms.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2475-variadic-wrapper-island.js": {
+   "order": [
+    "<repo>/tests/corpus/2475-variadic-wrapper-island.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2476-map-regex-values.ts": {
+   "order": [
+    "<repo>/tests/corpus/2476-map-regex-values.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2480-recursive-record-tree.ts": {
    "order": [
     "<repo>/tests/corpus/2480-recursive-record-tree.ts"

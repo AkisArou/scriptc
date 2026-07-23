@@ -243,6 +243,46 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         if (ts.isArrayLiteralExpression(expr) && expr.elements.length === 0 && underConstAssertion(expr)) {
           return false;
         }
+        // A JS variable INITIALIZER whose BINDING registered as a
+        // checked-dynamic module global (the typedef-annotated
+        // doc-builder consts whose JSDoc types degraded — DYN slots):
+        // the island build could never land (no engine→DOM crossing
+        // exists), so the literal takes its own world's path instead —
+        // the DOM literal, or a static record the slot converts.
+        if (
+          isJsSourceFile(expr.getSourceFile()) &&
+          ts.isVariableDeclaration(expr.parent) &&
+          expr.parent.initializer === expr &&
+          ts.isIdentifier(expr.parent.name)
+        ) {
+          const bindSym = L.checker.getSymbolAtLocation(expr.parent.name);
+          const g = bindSym ? L.globalsBySymbol.get(bindSym) : undefined;
+          if (g?.type.kind === "dyn") return false;
+        }
+        // A PROJECT-DECLARED contextual type that only ABSORBED to the
+        // island (a doc-builder typedef whose field's JSDoc type
+        // reference degraded to checker-`any` — the tsgo multi-file
+        // value-as-type residue) is not an npm slot: when the literal's
+        // OWN type maps statically, it builds that way — the binding's
+        // checked-dynamic slot takes the DOM conversion. Genuinely
+        // island slots (npm .d.ts provenance, plain `any`) keep the
+        // native build.
+        if (ctxTs !== undefined && (ctxTs.flags & ts.TypeFlags.Any) === 0) {
+          // Intersection/tuple typedefs (`Line & {readonly soft: true}`)
+          // carry provenance on the ALIAS symbol.
+          const sym = ctxTs.getSymbol() ?? ctxTs.getAliasSymbol();
+          const decls = sym ? L.checker.declarationsOf(sym) : [];
+          const projectDeclared =
+            decls.length > 0 &&
+            decls.every((d) => {
+              const sf = d.getSourceFile();
+              return !sf.isDeclarationFile && !sf.fileName.includes("/node_modules/");
+            });
+          if (projectDeclared) {
+            const own = L.mapTypeOf(L.typeOf(expr));
+            if (own?.kind === "record" || own?.kind === "array") return false;
+          }
+        }
         return true;
       })()
     ) {
@@ -258,26 +298,86 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         // (`"k" in o` is false), which the static record path can't say.
         const argsWithout: IrExpr[] = [];
         const argsWith: IrExpr[] = [];
+        const getters: { name: string; fn: IrExpr; loc: SrcLoc }[] = [];
         let spread: { cond: IrExpr; whenTrue: boolean } | null = null;
+        // A MEMBER a JS file cannot lower or marshal (a generic function
+        // as a value, a signature with checked-dynamic parameters — the
+        // doc-builder public aggregate's degraded pieces): defer like a
+        // statement fence — the slot holds a host closure that THROWS the
+        // captured diagnostic when invoked, so building the aggregate
+        // compiles and only a CALL through the island stops the run.
+        const islandMemberFence = (diagsBefore: number, err: unknown, valueNode: ts.Node): IrExpr => {
+          if (
+            !(err instanceof PoisonError) ||
+            !isJsSourceFile(expr.getSourceFile()) ||
+            L.diagSink !== null ||
+            L.diags.length <= diagsBefore ||
+            L.diags.slice(diagsBefore).some((d) => d.code === "SC9001")
+          ) {
+            throw err;
+          }
+          const captured = L.diags.splice(diagsBefore);
+          L.runtimeFences.push(...captured);
+          const first = captured[0]!;
+          const pos = ts.getLineAndCharacterOfPosition(
+            L.program.getSourceFile(first.loc.file) ?? expr.getSourceFile(),
+            first.loc.start,
+          );
+          const fnName = `%fn${L.lambdaCounter++}_islfence`;
+          L.liftedFns.push({
+            name: fnName,
+            params: [],
+            returnType: VOID,
+            locals: [],
+            captures: [],
+            body: [
+              {
+                kind: "runtimeFence",
+                code: first.code,
+                message: `${first.message} [${first.code} at ${first.loc.file}:${pos.line + 1}]`,
+                loc: locOf(valueNode),
+              },
+            ],
+            loc: locOf(valueNode),
+          });
+          const fence: IrExpr = { kind: "closure", fnName, captures: [], type: funcOf([], VOID), loc: locOf(valueNode) };
+          return L.jsvalIn(fence, valueNode);
+        };
         const pushProp = (
           name: ts.Identifier | ts.StringLiteral,
           value: IrExpr,
           valueNode: ts.Node,
           into: IrExpr[][],
         ): void => {
+          const diagsBefore = L.diags.length;
+          let marshaled: IrExpr;
+          try {
+            marshaled = L.jsvalIn(value, valueNode);
+          } catch (err) {
+            marshaled = islandMemberFence(diagsBefore, err, valueNode);
+          }
           for (const args of into) {
             args.push({
               kind: "jsMarshal",
               value: { kind: "strLit", value: name.text, type: STRING, loc: locOf(name) },
               type: JSVAL, loc: locOf(name),
             });
-            args.push(L.jsvalIn(value, valueNode));
+            args.push(marshaled);
           }
         };
+        const spreadSrcs: IrExpr[] = [];
+        let sawPlainProp = false;
         for (const prop of expr.properties) {
           if (ts.isSpreadAssignment(prop)) {
             const cs = conditionalSpreadOf(prop.expression);
             if (cs && cs !== "unsupported" && !spread) {
+              if (spreadSrcs.length > 0) {
+                L.unsupported(
+                  "SC1090",
+                  prop,
+                  "a conditional spread mixed with plain spreads in an 'any'-typed object literal",
+                );
+              }
               const cond = L.lowerCondition(cs.cond);
               if (!pureCondExpr(cond)) {
                 L.unsupported(
@@ -293,12 +393,31 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
               }
               continue;
             }
+            // A PLAIN spread (`{ ...options, plugins }` — the withPlugins
+            // argument-rebuild shape): the source copies into the fresh
+            // engine object through the spec's CopyDataProperties (the
+            // objSpread op). Spreads must precede explicit properties
+            // (the composition applies explicit keys AFTER the copies —
+            // JS's later-wins — which a spread after them would invert);
+            // mixing with a conditional spread keeps the fence.
+            if (cs === undefined || cs === null) {
+              if (sawPlainProp || spread) {
+                L.unsupported(
+                  "SC1090",
+                  prop,
+                  "object spread after explicit properties (or mixed with a conditional spread) in an 'any'-typed object literal — spreads must come first",
+                );
+              }
+              spreadSrcs.push(L.jsvalIn(L.lowerExpr(prop.expression), prop.expression));
+              continue;
+            }
             L.unsupported(
               "SC1090",
               prop,
               "this spread form in an 'any'-typed object literal (one `...(c ? { k: v } : {})` conditional spread is supported — bind other shapes to a const and set keys explicitly)",
             );
           }
+          sawPlainProp = true;
           // `name: value`, the shorthand `{ name }` (the value is the
           // identifier itself, resolved through the shorthand VALUE symbol
           // like the static record path), and METHODS — `{ load() {...} }`
@@ -308,24 +427,85 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           // string-literal keys — engine property names have no
           // identifier restriction ("content-type").
           const name = prop.name;
-          const value = ts.isPropertyAssignment(prop)
-            ? L.lowerExpr(prop.initializer)
-            : ts.isShorthandPropertyAssignment(prop)
-              ? L.lowerShorthandValue(prop)
-              : ts.isMethodDeclaration(prop) && prop.body
-                ? (L.rejectThisInObjectMethod(prop.body), L.lowerLambda(prop))
-                : null;
+          // A GET accessor (`get root() { return ROOT_INDENT; }` — the
+          // doc-printer's self-referential root-indent shape): the body
+          // lowers as a zero-param closure marshaled into the engine, and
+          // the property defines through the engine's own getter
+          // machinery AFTER the literal builds (the defineGetter op) —
+          // reads through the handle invoke it natively. `this` in the
+          // body keeps the object-method rejection; setters stay fenced.
+          if (ts.isGetAccessorDeclaration(prop) && prop.body && name && (ts.isIdentifier(name) || ts.isStringLiteral(name))) {
+            L.rejectThisInObjectMethod(prop.body);
+            getters.push({ name: name.text, fn: L.jsvalIn(L.lowerLambda(prop), prop), loc: locOf(prop) });
+            continue;
+          }
+          // A member VALUE that cannot lower at all (a generic function
+          // referenced as a value — the aggregate's `align`): the same
+          // call-time fence deferral pushProp applies to marshal failures.
+          let value: IrExpr | null = null;
+          const valueDiagsBefore = L.diags.length;
+          try {
+            value = ts.isPropertyAssignment(prop)
+              ? L.lowerExpr(prop.initializer)
+              : ts.isShorthandPropertyAssignment(prop)
+                ? L.lowerShorthandValue(prop)
+                : ts.isMethodDeclaration(prop) && prop.body
+                  ? (L.rejectThisInObjectMethod(prop.body), L.lowerLambda(prop))
+                  : null;
+          } catch (err) {
+            value = islandMemberFence(valueDiagsBefore, err, prop);
+          }
           if (value && name && (ts.isIdentifier(name) || ts.isStringLiteral(name))) {
             pushProp(name, value, prop, [argsWithout, argsWith]);
           } else {
             L.unsupported(
               "SC1090",
               prop,
-              "this property form in an 'any'-typed object literal (only `name: value` and shorthand names are supported)",
+              "this property form in an 'any'-typed object literal (only `name: value`, shorthand names, methods, and get accessors are supported)",
             );
           }
         }
-        if (!spread) return { kind: "jsOp", op: "objLit", args: argsWithout, type: JSVAL, loc };
+        const withGetters = (obj: IrExpr): IrExpr =>
+          getters.reduce<IrExpr>(
+            (acc, g) => ({
+              kind: "jsOp",
+              op: "defineGetter",
+              args: [
+                acc,
+                { kind: "jsMarshal", value: { kind: "strLit", value: g.name, type: STRING, loc: g.loc }, type: JSVAL, loc: g.loc },
+                g.fn,
+              ],
+              type: JSVAL,
+              loc: g.loc,
+            }),
+            obj,
+          );
+        if (!spread) {
+          if (spreadSrcs.length === 0) {
+            return withGetters({ kind: "jsOp", op: "objLit", args: argsWithout, type: JSVAL, loc });
+          }
+          // Plain spreads compose left to right onto a fresh object, the
+          // explicit properties merging LAST (JS's later-wins): spread
+          // sources evaluate before later property values by nesting
+          // order, exactly the source order.
+          let acc: IrExpr = { kind: "jsOp", op: "objLit", args: [], type: JSVAL, loc };
+          for (const src of spreadSrcs) {
+            acc = { kind: "jsOp", op: "objSpread", args: [acc, src], type: JSVAL, loc };
+          }
+          if (argsWithout.length > 0) {
+            acc = {
+              kind: "jsOp",
+              op: "objSpread",
+              args: [acc, { kind: "jsOp", op: "objLit", args: argsWithout, type: JSVAL, loc }],
+              type: JSVAL,
+              loc,
+            };
+          }
+          return withGetters(acc);
+        }
+        if (getters.length > 0) {
+          L.unsupported("SC1090", expr, "get accessors combined with conditional spreads in an 'any'-typed object literal");
+        }
         const withLit: IrExpr = { kind: "jsOp", op: "objLit", args: argsWith, type: JSVAL, loc };
         const withoutLit: IrExpr = { kind: "jsOp", op: "objLit", args: argsWithout, type: JSVAL, loc };
         return {
@@ -2122,7 +2302,11 @@ export function pureReemittable(e: IrExpr): boolean {
       L.unsupported("SC1100", expr, "nullish coalescing on 'unknown' values");
     }
     if (left.type.kind === "jsval") {
-      L.unsupported("SC1090", expr, "nullish coalescing on 'any' values");
+      // `a ?? b` on an ISLAND value: the engine's own nullish test — the
+      // left evaluates once, the right runs lazily in its branch and
+      // marshals in (the emitter's jsval nullish arm).
+      const right = L.jsvalIn(L.lowerExpr(expr.right), expr.right);
+      return { kind: "nullish", left, right, type: JSVAL, loc };
     }
     if (left.type.kind !== "union") return left;
     const def = L.unions.get(left.type.unionId);
@@ -3047,7 +3231,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
    * tsc accepts the arm covariantly, but a tagged element representation
    * must be BUILT as the slot's element type). */
   export function lowerArrayLiteral(L: Lowerer, expr: ts.ArrayLiteralExpression,
-    expected?: IrType & { kind: "array" },): IrExpr {
+    expected?: (IrType & { kind: "array" }) | (IrType & { kind: "record" }),): IrExpr {
     const loc = locOf(expr);
     const ctxType = L.checker.getContextualType(expr);
     const tsType = ctxType ?? L.typeOf(expr);
@@ -3093,6 +3277,42 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         const def = L.unions.get(ctxUnion.unionId);
         const arrayArms = def?.arms.filter((a) => a.kind === "array") ?? [];
         if (arrayArms.length === 1) mapped = arrayArms[0]!;
+      }
+      // A NON-EMPTY literal whose own type has no static home (the JS dyn
+      // fallback — a null/dyn mapping, or an inference that degraded to a
+      // unit-only-element array over non-unit elements) under a union
+      // with exactly ONE array-family arm — an array, or an
+      // arity-matching tuple (the option-table `default: [{ value: [] }]`
+      // shape): build AS that arm, exactly the empty-literal rule above;
+      // the slot's coercion wraps it.
+      if (ctxUnion && expr.elements.length > 0) {
+        // A unit-only-element array (`(null | undefined)[]`) cannot hold
+        // non-unit elements — neither as the literal's own mapping nor as
+        // a competing union arm.
+        const nonUnitElems = expr.elements.some(
+          (el) =>
+            !ts.isOmittedExpression(el) &&
+            el.kind !== ts.SyntaxKind.NullKeyword &&
+            !(ts.isIdentifier(el) && el.text === "undefined"),
+        );
+        const ownUnhelpful =
+          mapped === null || mapped.kind === "dyn" ||
+          // The checker echoing the context union back as the literal's
+          // own type decides nothing either — nor does an island ('any')
+          // residue under a STATIC union slot.
+          mapped.kind === "union" || mapped.kind === "jsval" ||
+          (mapped.kind === "array" && nonUnitElems && L.unitOnlyElem(mapped.elem));
+        if (ownUnhelpful) {
+          const def = L.unions.get(ctxUnion.unionId);
+          const arms = (def?.arms ?? []).filter(
+            (a) =>
+              (a.kind === "array" && !(nonUnitElems && L.unitOnlyElem(a.elem))) ||
+              (a.kind === "record" &&
+                !!L.shapes.get(a.shapeId)?.tuple &&
+                L.shapes.get(a.shapeId)!.fields.length === expr.elements.length),
+          );
+          if (arms.length === 1) mapped = arms[0]!;
+        }
       }
     }
     // An EMPTY literal under a CONST ASSERTION whose type queries panicked
@@ -3455,7 +3675,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
    * (dynFrom's domain, functions box); a value with no dyn representation
    * fences per property. Spreads, accessors, and methods stay fenced —
    * none co-occur with the computed-key idiom in the wild. */
-  function lowerDynObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
+  export function lowerDynObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
     const loc = locOf(expr);
     const fields: { key: IrExpr; value: IrExpr }[] = [];
     for (const prop of expr.properties) {
@@ -3497,16 +3717,104 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       // Lambda values that fail to lower become trap closures (the
       // per-call fence granularity — fenceClosureProbe) so the object
       // still builds; everything else keeps the per-property fence below.
-      const raw =
-        fenceClosureProbe(L, valueExpr, undefined, () => L.lowerExpr(valueExpr)) ??
-        L.lowerExpr(valueExpr);
-      const v = L.coerceToExpected(raw, DYN);
-      if (v.type.kind !== "dyn") {
-        L.unsupported(
-          "SC1101",
-          valueExpr,
-          `holding '${L.fmt(v.type)}' values in a runtime-keyed (computed-key) object literal`,
+      let raw: IrExpr;
+      const propDiagsBefore = L.diags.length;
+      try {
+        raw =
+          fenceClosureProbe(L, valueExpr, undefined, () => L.lowerExpr(valueExpr)) ??
+          L.lowerExpr(valueExpr);
+      } catch (err) {
+        // A PURE member read a JS file cannot lower (a namespace object
+        // in an export aggregate): the slot takes a boxed fence closure —
+        // the diagnostics defer to the runtime-fence ledger, the object
+        // builds, and only USING the member stops the run.
+        const pureMember = ts.isIdentifier(valueExpr);
+        if (
+          !(err instanceof PoisonError) ||
+          !pureMember ||
+          L.diagSink !== null ||
+          L.diags.length <= propDiagsBefore ||
+          L.diags.slice(propDiagsBefore).some((d) => d.code === "SC9001")
+        ) {
+          throw err;
+        }
+        const captured = L.diags.splice(propDiagsBefore);
+        L.runtimeFences.push(...captured);
+        const first = captured[0]!;
+        const pos = ts.getLineAndCharacterOfPosition(
+          L.program.getSourceFile(first.loc.file) ?? expr.getSourceFile(),
+          first.loc.start,
         );
+        const fnName = `%fn${L.lambdaCounter++}_dynfence`;
+        L.liftedFns.push({
+          name: fnName,
+          params: [],
+          returnType: VOID,
+          locals: [],
+          captures: [],
+          body: [
+            {
+              kind: "runtimeFence",
+              code: first.code,
+              message: `${first.message} [${first.code} at ${first.loc.file}:${pos.line + 1}]`,
+              loc: locOf(prop),
+            },
+          ],
+          loc: locOf(prop),
+        });
+        raw = { kind: "closure", fnName, captures: [], type: funcOf([], VOID), loc: locOf(prop) };
+      }
+      let v = L.coerceToExpected(raw, DYN);
+      if (v.type.kind !== "dyn") {
+        const convDiagsBefore = L.diags.length;
+        try {
+          L.unsupported(
+            "SC1101",
+            valueExpr,
+            `holding '${L.fmt(v.type)}' values in a runtime-keyed (computed-key) object literal`,
+          );
+        } catch (err) {
+          // A member value the DOM cannot hold — a func whose signature
+          // cannot box, an island ('any') handle, a record carrying func
+          // fields (the export aggregate's typed utilities and npm-handle
+          // members): the same call-time fence deferral as an unlowerable
+          // member — the slot takes a boxed fence closure; only USING it
+          // stops the run. Probe mode and ICEs keep the poison.
+          if (
+            !(err instanceof PoisonError) ||
+            L.diagSink !== null ||
+            L.diags.length <= convDiagsBefore ||
+            L.diags.slice(convDiagsBefore).some((d) => d.code === "SC9001")
+          ) {
+            throw err;
+          }
+          const captured = L.diags.splice(convDiagsBefore);
+          L.runtimeFences.push(...captured);
+          const first = captured[0]!;
+          const pos = ts.getLineAndCharacterOfPosition(
+            L.program.getSourceFile(first.loc.file) ?? expr.getSourceFile(),
+            first.loc.start,
+          );
+          const fnName = `%fn${L.lambdaCounter++}_dynfence`;
+          L.liftedFns.push({
+            name: fnName,
+            params: [],
+            returnType: VOID,
+            locals: [],
+            captures: [],
+            body: [
+              {
+                kind: "runtimeFence",
+                code: first.code,
+                message: `${first.message} [${first.code} at ${first.loc.file}:${pos.line + 1}]`,
+                loc: locOf(prop),
+              },
+            ],
+            loc: locOf(prop),
+          });
+          const fence: IrExpr = { kind: "closure", fnName, captures: [], type: funcOf([], VOID), loc: locOf(prop) };
+          v = L.coerceToExpected(fence, DYN);
+        }
       }
       fields.push({ key, value: v });
     }
@@ -3844,7 +4152,11 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // the slot's width coercion constructs through the trivial
     // parameter-property constructor (recordToClassPlan), or fences with
     // the record-shape story.
-    if (mapped === null || mapped.kind === "union" || mapped.kind === "dyn" || mapped.kind === "object") {
+    // A jsval-mapped context reaches here only when lowerExpr's island
+    // gate DECLINED it (a project-declared typedef that absorbed to the
+    // island through checker-`any` field residue): the literal builds at
+    // its own type like every unmappable context.
+    if (mapped === null || mapped.kind === "union" || mapped.kind === "dyn" || mapped.kind === "object" || mapped.kind === "jsval") {
       const ctxUnion = mapped?.kind === "union" ? mapped : null;
       mapped = L.mapTypeOf(L.typeOf(expr)) ?? mapped;
       // A literal whose own shape re-tags into NO arm of the contextual
@@ -4147,6 +4459,9 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // contributor overriding one would silently drop that evaluation —
     // collisions fence in both directions.
     const conditionalNames = new Set<string>();
+    // Member names DROPPED from the shape (JS deferral — unlowerable pure
+    // member reads narrow away; see the catch in the property loop).
+    const droppedNames = new Set<string>();
     for (const prop of expr.properties) {
       if (ts.isSpreadAssignment(prop)) {
         const cs = conditionalSpreadOf(prop.expression);
@@ -4618,11 +4933,22 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
 
       let value: IrExpr;
       let valueNode: ts.Node = prop;
+      const propDiagsBefore = L.diags.length;
+      try {
       if (ts.isPropertyAssignment(prop)) {
         valueNode = prop.initializer;
+        // ARRAY-LITERAL initializers route through the expected-type
+        // lowering: a union field with one array-family arm builds the
+        // literal AS that arm (lowerExprExpecting's IR-directed rule —
+        // the option-table `default: [{ value: [] }]` shape), where the
+        // bare lowering would take the JS DOM fallback and fence.
+        let init: ts.Expression = prop.initializer;
+        while (ts.isParenthesizedExpression(init)) init = init.expression;
         value =
           fenceClosureProbe(L, prop.initializer, fieldType, () => L.lowerExpr(prop.initializer)) ??
-          L.lowerExpr(prop.initializer);
+          (fieldType !== undefined && ts.isArrayLiteralExpression(init)
+            ? L.lowerExprExpecting(prop.initializer, fieldType)
+            : L.lowerExpr(prop.initializer));
       } else if (ts.isShorthandPropertyAssignment(prop)) {
         value = L.lowerShorthandValue(prop);
       } else if (ts.isMethodDeclaration(prop)) {
@@ -4630,6 +4956,31 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           fenceClosureProbe(L, prop, fieldType, () => L.lowerLambda(prop)) ?? L.lowerLambda(prop);
       } else {
         L.unsupported("SC1090", prop, `syntax '${ts.SyntaxKind[(prop as ts.Node).kind]}'`);
+      }
+      } catch (err) {
+        // A member VALUE a JS file cannot lower (a namespace object in an
+        // export aggregate — the sharedWithCli `errors` member): the
+        // member NARROWS AWAY like a CJS export-table accessor entry —
+        // the diagnostics defer to the runtime-fence ledger, the shape
+        // drops the field, and each READ of it meets its own per-site
+        // fence. Pure member forms only (identifier/shorthand reads);
+        // TypeScript, probe mode, and ICEs keep the poison.
+        const pureMember =
+          ts.isShorthandPropertyAssignment(prop) ||
+          (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.initializer));
+        if (
+          !(err instanceof PoisonError) ||
+          !pureMember ||
+          !isJsSourceFile(expr.getSourceFile()) ||
+          L.diagSink !== null ||
+          L.diags.length <= propDiagsBefore ||
+          L.diags.slice(propDiagsBefore).some((d) => d.code === "SC9001")
+        ) {
+          throw err;
+        }
+        L.runtimeFences.push(...L.diags.splice(propDiagsBefore));
+        droppedNames.add(name);
+        continue;
       }
       if (!fieldType) {
         // Overflow entry: the value flows into the index signature's value
@@ -4666,6 +5017,16 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // omission of required fields before lowering, undefined-armed or not).
     // A REQUIRED missing field keeps the shape-mismatch rejection (possible
     // through `as`: the cast smuggles a narrower literal past freshness).
+    if (droppedNames.size > 0) {
+      const narrowed = shape.fields.filter((f) => !droppedNames.has(f.name));
+      const narrowedId = L.shapes.intern(
+        narrowed.map((f) => ({ name: f.name, type: f.type })),
+        false,
+        shape.indexValue,
+      );
+      type = { kind: "record", shapeId: narrowedId };
+      shape = L.shapes.get(narrowedId)!;
+    }
     if (fields.filter((f) => !f.overflow).length !== shape.fields.length) {
       const provided = new Set(fields.filter((f) => !f.overflow).map((f) => f.name));
       for (const f of shape.fields) {
@@ -5655,11 +6016,44 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           }
         }
         if (!shape.indexValue) {
-          L.unsupported(
-            "SC1090",
-            target,
-            "dynamic keyed writes to records without an index signature (spell the field name)",
-          );
+          // A SIGNATURE-FREE shape whose declared fields share ONE type
+          // writes through the same per-shape dispatch (the mockable-clock
+          // module shape: `mocked[functionality] = implementation` over a
+          // table of same-signature closures). A key naming no declared
+          // field throws the catchable TypeError — JS would ADD the
+          // property, which a monomorphic struct cannot (the SEMANTICS.md
+          // keyed-write-miss divergence). Mixed-type and accessor-carrying
+          // shapes keep the fence.
+          const common =
+            shape.fields.length > 0 &&
+            !shapeHasAccessorSlots(shape) &&
+            shape.fields.every((f) => typeEquals(f.type, shape.fields[0]!.type))
+              ? shape.fields[0]!.type
+              : null;
+          if (!common) {
+            L.unsupported(
+              "SC1090",
+              target,
+              "dynamic keyed writes to records without an index signature (declared fields of ONE shared type dispatch by key — spell the field name otherwise)",
+            );
+          }
+          const obj = L.lowerExpr(target.expression);
+          let key: IrExpr =
+            litKey !== null
+              ? { kind: "strLit", value: litKey, type: STRING, loc: locOf(target.argumentExpression) }
+              : L.lowerExpr(target.argumentExpression);
+          // Runtime number/boolean/dyn keys stringify — ToPropertyKey,
+          // exactly the index-signature path's rule.
+          if (key.type.kind === "f64") key = L.ensureString(key, target.argumentExpression);
+          if (key.type.kind === "bool" || key.type.kind === "dyn") {
+            key = { kind: "toString", operand: key, type: STRING, loc: locOf(target.argumentExpression) };
+          }
+          if (key.type.kind !== "string") {
+            L.unsupported("SC1090", target.argumentExpression, "indexing records with non-string or non-number keys");
+          }
+          const value = L.coerceInto(expr.right, L.lowerExpr(expr.right), common);
+          if (!typeEquals(value.type, common)) L.badType(expr.right, L.typeOf(expr.right));
+          return { kind: "recordKeySet", obj, shapeId: receiverIr.shapeId, key, value, loc: locOf(expr) };
         }
         // A LITERAL key naming no declared field is a pure overflow insert
         // — no collision to validate. Runtime keys must be able to collide
@@ -7493,6 +7887,29 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         const left = L.lowerExpr(expr.left);
         if (left.type.kind === "dyn") {
           return { kind: "dynTest", test: "bytes", value: left, type: BOOL, loc };
+        }
+      }
+      // `x instanceof RegExp` over a union with a regex arm (the
+      // skip-utility `string | RegExp` dispatch): a union tag test — the
+      // socket-narrowing shape; the checker types the branches and
+      // maybeNarrow bridges the reads. A plain regex-typed LHS folds
+      // true; the fold keeps the operand-purity rule of the class folds
+      // (identifier reads only).
+      if (
+        ts.isIdentifier(expr.right) &&
+        L.isStdlibGlobal(expr.right, "RegExp") &&
+        !L.caughtLocalOf(expr.left)
+      ) {
+        const left = L.lowerExpr(expr.left);
+        if (left.type.kind === "union") {
+          const def = L.unions.get(left.type.unionId);
+          const tag = def ? def.arms.findIndex((a) => a.kind === "regex") : -1;
+          if (tag >= 0) {
+            return { kind: "unionIsTag", unionId: left.type.unionId, tag, negated: false, value: left, type: BOOL, loc };
+          }
+        }
+        if (left.type.kind === "regex" && left.kind === "varRef" && ts.isIdentifier(expr.left)) {
+          return { kind: "boolLit", value: true, type: BOOL, loc };
         }
       }
       // `x instanceof X` where X is a class VALUE (a classval-typed
