@@ -126,11 +126,17 @@ static void scr_lib_cleanup(void) {
   scr_versions_openssl_str = NULL;
 }
 
+#ifndef SCR_CORE
+/* Executable lane only: a core has no argv and registers no atexit
+ * handlers (the emitted core init never calls this; compiling it out keeps
+ * the archive's objects free of any atexit reference — the K8 ambient
+ * audit's bar). */
 void scr_lib_init(int argc, char **argv) {
   scr_lib_argc = argc;
   scr_lib_argv = argv;
   atexit(scr_lib_cleanup);
 }
+#endif /* !SCR_CORE */
 
 #ifdef SCR_CORE
 /* Core builds never call scr_lib_init (a core has no argv and registers no

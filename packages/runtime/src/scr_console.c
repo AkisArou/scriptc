@@ -34,6 +34,7 @@ _Noreturn void scr_trap_fmt(const char *fmt, ...) {
 }
 #endif /* !SCR_CORE */
 
+#ifndef SCR_CORE
 #ifdef SCR_RC_AUDIT
 extern long scr_str_live_count(void);     /* scr_string.c */
 extern long scr_arr_live_count(void);     /* scr_array.c */
@@ -116,6 +117,10 @@ void scr_init(void) {
 #endif
   atexit(scr_collect_cycles_at_exit);
 }
+#endif /* !SCR_CORE — a core never touches host stdio modes/buffering and
+        * registers no atexit handlers: scr_init and its exit hooks (the
+        * audit's _Exit(99) included) are executable-lane machinery; the
+        * core session reset lives in scr_core.c. */
 
 /* ONE formatter for both console streams — console.error/warn print
  * byte-identically to console.log in Node (same inspect rendering), only

@@ -121,7 +121,8 @@ void scr_core_collect(void) {
 /* ── marshalling helpers (both emissions call exactly these) ──────────── */
 
 ScrStr *scr_core_str_in(const uint8_t *p, size_t len) {
-  return scr_str_new((const char *)p, len);
+  /* ptr may be NULL when len is 0 (the contract's empty-buffer form). */
+  return scr_str_new(len == 0 ? "" : (const char *)p, len);
 }
 
 ScrBytes *scr_core_bytes_in(const uint8_t *p, size_t len) {
@@ -132,7 +133,7 @@ ScrBytes *scr_core_bytes_in(const uint8_t *p, size_t len) {
     scr_exc_clear();
     scr_trap("scriptc: core inbound bytes length out of range\n");
   }
-  if (len > 0) memcpy(b->data, p, len);
+  if (len > 0 && p != NULL) memcpy(b->data, p, len);
   return b;
 }
 

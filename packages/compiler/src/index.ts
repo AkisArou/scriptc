@@ -711,15 +711,17 @@ export async function compileCore(opts: CompileCoreOptions): Promise<CompileCore
 
   const fail = (diagnostics: ScrDiagnostic[]): CompileCoreResult => ({ ok: false, diagnostics, sourceTexts });
 
-  // The async_free requirement (ratified, SC4005): refused before anything
-  // is emitted, so the narrowed core link set below is structural fact.
+  // Export resolution first (SC4002/SC4003/SC4004/SC4007 anchor at the
+  // mapped declaration — a mapped async export reports as SC4004, not the
+  // graph-wide gate), then the async_free requirement (ratified, SC4005):
+  // both refused before anything is emitted, so the narrowed core link set
+  // below is structural fact.
+  const resolved = resolveCoreSection(profile, entryInfo, mod, entryPath);
+  if ("diagnostics" in resolved) return fail(resolved.diagnostics);
   const asyncSurface = moduleCoreAsyncSurface(mod);
   if (asyncSurface !== null) {
     return fail([coreAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc, profileTeaching(profile, "SC4005"))]);
   }
-
-  const resolved = resolveCoreSection(profile, entryInfo, mod, entryPath);
-  if ("diagnostics" in resolved) return fail(resolved.diagnostics);
   mod.core = resolved.core;
 
   const validation = validateModule(mod);

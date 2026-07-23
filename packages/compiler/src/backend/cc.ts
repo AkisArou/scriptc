@@ -657,7 +657,7 @@ async function ensureTlsArchive(sanitize: boolean, driver: CcDriver): Promise<st
  * scr_async.c (fibers, timers, the loop) and scr_child.c drop — the
  * async_free refusal already guarantees nothing references them — and
  * scr_core.c (sink, arena, reset registry, core funnel) joins. The gated
- * units a core may reach are the pure-data ones (regex+libregexp, assert,
+ * units a core may reach are the pure-data ones (regex + the vendored matcher, assert,
  * inspect, symbol, searchParams, emitter+dyn_handle, zlib); every
  * loop-hooked or ambient unit was refused at SC4005 before emission.
  * External-symbol contract: undefined references only to libc/libm — which
