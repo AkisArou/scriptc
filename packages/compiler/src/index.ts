@@ -180,8 +180,9 @@ interface Frontend {
    * declarations (call before dispose — it reads the ts7 AST). */
   entryExports: () => Map<string, EntryExportInfo>;
   /** The contract sidecar's projection input: the entry file's exported
-   * type declarations, function signatures, and convention consts in
-   * declaration order (call before dispose — it reads the ts7 AST). */
+   * function signatures and convention consts, plus the whole graph's
+   * exported type declarations, in declaration order (call before
+   * dispose — it reads the ts7 AST). */
   entryContract: () => ContractFacts;
   sourceTexts: () => Map<string, string>;
   lower: (opts: LowerOptions) => LowerResult;
@@ -378,9 +379,24 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
     preflight,
     entryText: () => finalLoad.entry.text,
     entryExports: () => entryFunctionExports(finalLoad.entry),
-    entryContract: () => entryContractFacts(finalLoad.entry),
+    // The contract scans the PROGRAM's source files, not the runtime
+    // module order: a type-only module (nothing but exported types) has no
+    // runtime edge and never joins moduleOrder, yet its declarations are
+    // contract surface. Declaration files (default libs, @types) stay out;
+    // every remaining source file is authored program surface, because the
+    // library path refuses npm imports (SC4006) long before projection.
+    entryContract: () =>
+      entryContractFacts(finalLoad.entry, finalLoad.program.getSourceFiles().filter((sf) => !sf.isDeclarationFile)),
+    // Runtime evaluation order first, then any type-only program modules
+    // (no runtime edge, so absent from moduleOrder — but they are contract
+    // surface now, and the library identity hashes cover the WHOLE module
+    // graph; the Map dedups by fileName).
     sourceTexts: () =>
-      new Map<string, string>([finalLoad.entry, ...finalLoad.moduleOrder].map((sf) => [sf.fileName, sf.text])),
+      new Map<string, string>(
+        [finalLoad.entry, ...finalLoad.moduleOrder, ...finalLoad.program.getSourceFiles().filter((sf) => !sf.isDeclarationFile)].map(
+          (sf) => [sf.fileName, sf.text],
+        ),
+      ),
     lower: (opts) => lowerToIr(finalLoad.program, finalLoad.entry, finalLoad.moduleOrder, { ...opts, startupCrash: finalLoad.startupCrash ?? null }),
     npmStatic: statuses,
     dispose: finalLoad.dispose,

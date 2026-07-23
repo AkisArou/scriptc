@@ -1,10 +1,20 @@
-/* Library mode's contract-sidecar input: the ENTRY source file's exported
- * type declarations, exported function signatures, and the exported-const
- * contract conventions — all read from the SYNTAX TREE in statement order.
- * Declaration order is the ratified contract (the sidecar's field, member,
- * and arm orders are wire semantics), and the checker's property
- * enumeration hands back internal/sorted order, so the AST is the only
- * trustworthy order source; this module never touches the checker.
+/* Library mode's contract-sidecar input: the entry module's exported
+ * function signatures and exported-const contract conventions, plus the
+ * exported type declarations of the WHOLE module graph (entry first, the
+ * other modules in canonical path order — never import order, so moving
+ * an import statement can never perturb a sidecar table) — all read from
+ * the SYNTAX TREE in statement order. Declaration order is the ratified
+ * contract (the sidecar's field, member, and arm orders are wire
+ * semantics), and the checker's property enumeration hands back
+ * internal/sorted order, so the AST is the only trustworthy order source;
+ * this module never touches the checker.
+ *
+ * Order must be derivable from ONE declaration site (ask 3's
+ * define-or-refuse rule), so this module also records every type name
+ * whose members gather from multiple sites — a second same-name interface
+ * block (declaration merging), a module augmentation's contribution, or a
+ * same-name exported declaration in another module (the type table has
+ * one namespace) — for the emitter to refuse when such a name is tabled.
  *
  * The projection into the sidecar schema's closed vocabulary happens in
  * library/sidecar.ts; this module only captures syntactic shapes. The
@@ -35,7 +45,10 @@ export type ContractTypeShape =
   | { k: "object"; fields: ContractField[] }
   | { k: "stringLit"; text: string }
   | { k: "union"; parts: ContractTypeShape[] }
-  | { k: "unsupported"; text: string };
+  /** `computed` marks type-level computation (conditional/mapped types):
+   * the members such a type produces have no author-visible declaration
+   * order, so a tabled/designated one refuses with its own teaching. */
+  | { k: "unsupported"; text: string; computed?: "conditional" | "mapped" };
 
 export interface ContractField {
   name: string;
@@ -69,8 +82,16 @@ export interface ContractConst<T> {
 }
 
 export interface ContractFacts {
-  /** Exported interface/type-alias declarations, statement order. */
+  /** Exported interface/type-alias declarations: the entry module's in
+   * statement order, then the other modules' (canonical path order, each
+   * module's in statement order). One entry per name — a later same-name
+   * exported declaration lands in `multiSiteTypes` instead. */
   types: ContractTypeDecl[];
+  /** Type names whose members gather from more than one declaration site
+   * (see the module comment). `sites` are `file:line`, in scan order
+   * (entry first, then path-ordered modules) — the emitter's refusal
+   * names every site. */
+  multiSiteTypes: { name: string; sites: string[] }[];
   /** Exported function declarations, statement order. */
   functions: ContractFnDecl[];
   modelUnbound: ContractConst<string[]> | null;
@@ -164,6 +185,12 @@ export function typeShape(file: ts.SourceFile, node: ts.TypeNode): ContractTypeS
     if (bad !== null) return { k: "unsupported", text: bad };
     return { k: "object", fields };
   }
+  if (ts.isConditionalTypeNode(node)) {
+    return { k: "unsupported", text: `a conditional type (${node.getText(file)})`, computed: "conditional" };
+  }
+  if (ts.isMappedTypeNode(node)) {
+    return { k: "unsupported", text: `a mapped type (${node.getText(file)})`, computed: "mapped" };
+  }
   if (ts.isTypeReferenceNode(node)) {
     if (!ts.isIdentifier(node.typeName)) return { k: "unsupported", text: node.getText(file) };
     const name = node.typeName.text;
@@ -229,12 +256,20 @@ function envMsgArray(expr: ts.Expression): { env: string; msg: string }[] | null
   return out;
 }
 
-/** Everything the sidecar projection needs from the entry module's syntax
- * tree, in statement (declaration) order. Call before the frontend is
- * disposed. */
-export function entryContractFacts(entry: ts.SourceFile): ContractFacts {
+/** One mergeable declaration site, `file:line` (1-based line). */
+function siteOf(file: ts.SourceFile, node: ts.Node): string {
+  return `${file.fileName}:${ts.getLineAndCharacterOfPosition(file, node.getStart()).line + 1}`;
+}
+
+/** Everything the sidecar projection needs from the program's syntax
+ * trees: functions and convention consts from the entry module, type
+ * declarations from the whole graph (entry first, other modules in
+ * canonical path order), each in statement (declaration) order. Call
+ * before the frontend is disposed. */
+export function entryContractFacts(entry: ts.SourceFile, modules: readonly ts.SourceFile[] = []): ContractFacts {
   const facts: ContractFacts = {
     types: [],
+    multiSiteTypes: [],
     functions: [],
     modelUnbound: null,
     msgUnbound: null,
@@ -243,41 +278,98 @@ export function entryContractFacts(entry: ts.SourceFile): ContractFacts {
     envMsgs: null,
     malformedConsts: [],
   };
+
+  // name → every mergeable declaration site, in scan order.
+  const sites = new Map<string, string[]>();
+  const addSite = (name: string, site: string): void => {
+    const list = sites.get(name);
+    if (list === undefined) sites.set(name, [site]);
+    else list.push(site);
+  };
+  const declared = new Set<string>();
+
+  /** One module's exported type declarations (statement order) plus every
+   * extra declaration site the merge refusal needs: a non-exported
+   * declaration merging with an exported same-name one in the SAME module,
+   * a repeated exported declaration (in this module or a later-scanned
+   * one — the type table has one namespace), and the type declarations
+   * inside `declare module "…"` augmentation blocks. Augmentations are
+   * read syntactically — the specifier is not resolved, so a same-name
+   * augmentation of ANY module counts as an extra site; that over-refuses
+   * only programs already trafficking in colliding contract type names,
+   * and the refusal names every site. */
+  const collectTypes = (file: ts.SourceFile): void => {
+    const exportedHere = new Set<string>();
+    for (const stmt of file.statements) {
+      if ((ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) && isExported(stmt)) {
+        exportedHere.add(stmt.name.text);
+      }
+    }
+    for (const stmt of file.statements) {
+      if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) {
+        const name = stmt.name.text;
+        const exported = isExported(stmt);
+        // A non-exported declaration matters only when it merges with an
+        // exported same-name declaration of its own module; other modules'
+        // private types never touch the contract namespace.
+        if (!exported && !exportedHere.has(name)) continue;
+        addSite(name, siteOf(file, stmt));
+        if (!exported || declared.has(name)) continue;
+        declared.add(name);
+        if (ts.isInterfaceDeclaration(stmt)) {
+          let bad: string | null = null;
+          const fields = shapeOfMembers(file, stmt.members, (text) => {
+            bad = text;
+          });
+          const generic = (stmt.typeParameters?.length ?? 0) > 0;
+          const heritage = (stmt.heritageClauses?.length ?? 0) > 0;
+          facts.types.push({
+            name,
+            form: "interface",
+            shape:
+              bad !== null
+                ? { k: "unsupported", text: bad }
+                : generic
+                  ? { k: "unsupported", text: "a generic interface" }
+                  : heritage
+                    ? { k: "unsupported", text: "an interface with heritage clauses" }
+                    : { k: "object", fields },
+            loc: locOf(file, stmt),
+          });
+        } else {
+          const generic = (stmt.typeParameters?.length ?? 0) > 0;
+          facts.types.push({
+            name,
+            form: "alias",
+            shape: generic ? { k: "unsupported", text: "a generic type alias" } : typeShape(file, stmt.type),
+            loc: locOf(file, stmt),
+          });
+        }
+        continue;
+      }
+      if (ts.isModuleDeclaration(stmt) && ts.isStringLiteral(stmt.name) && stmt.body !== undefined && ts.isModuleBlock(stmt.body)) {
+        for (const inner of stmt.body.statements) {
+          if (ts.isInterfaceDeclaration(inner) || ts.isTypeAliasDeclaration(inner)) {
+            addSite(inner.name.text, siteOf(file, inner));
+          }
+        }
+      }
+    }
+  };
+
+  // The entry's declarations anchor first; the rest of the graph follows
+  // in bytewise path order — a DECLARATION-SITE order, so reordering
+  // import statements or import bindings can never perturb the table.
+  collectTypes(entry);
+  const others = modules
+    .filter((m) => m.fileName !== entry.fileName)
+    .sort((a, b) => (a.fileName < b.fileName ? -1 : a.fileName > b.fileName ? 1 : 0));
+  for (const m of others) collectTypes(m);
+  for (const [name, list] of sites) {
+    if (list.length > 1) facts.multiSiteTypes.push({ name, sites: list });
+  }
+
   for (const stmt of entry.statements) {
-    if (ts.isInterfaceDeclaration(stmt)) {
-      if (!isExported(stmt)) continue;
-      let bad: string | null = null;
-      const fields = shapeOfMembers(entry, stmt.members, (text) => {
-        bad = text;
-      });
-      const generic = (stmt.typeParameters?.length ?? 0) > 0;
-      const heritage = (stmt.heritageClauses?.length ?? 0) > 0;
-      facts.types.push({
-        name: stmt.name.text,
-        form: "interface",
-        shape:
-          bad !== null
-            ? { k: "unsupported", text: bad }
-            : generic
-              ? { k: "unsupported", text: "a generic interface" }
-              : heritage
-                ? { k: "unsupported", text: "an interface with heritage clauses" }
-                : { k: "object", fields },
-        loc: locOf(entry, stmt),
-      });
-      continue;
-    }
-    if (ts.isTypeAliasDeclaration(stmt)) {
-      if (!isExported(stmt)) continue;
-      const generic = (stmt.typeParameters?.length ?? 0) > 0;
-      facts.types.push({
-        name: stmt.name.text,
-        form: "alias",
-        shape: generic ? { k: "unsupported", text: "a generic type alias" } : typeShape(entry, stmt.type),
-        loc: locOf(entry, stmt),
-      });
-      continue;
-    }
     if (ts.isFunctionDeclaration(stmt) && stmt.name !== undefined) {
       if (!isExported(stmt)) continue;
       if (stmt.body === undefined && facts.functions.some((f) => f.name === stmt.name!.text)) continue; // overload signature

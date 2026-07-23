@@ -22,7 +22,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary, validateSidecar, wyhash64, type SidecarDoc } from "@scriptc/compiler";
@@ -55,7 +55,9 @@ async function buildContract(
   const dir = join(fixtureRoot, fixture);
   const outDir = join(cacheDir, `${fixture}-${emission}${tag}`);
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "lib.ts"), readFileSync(join(dir, "lib.ts")));
+  for (const name of readdirSync(dir)) {
+    if (name.endsWith(".ts")) writeFileSync(join(outDir, name), readFileSync(join(dir, name)));
+  }
   const profile = JSON.parse(readFileSync(join(dir, "profile.json"), "utf8")) as { emission: string };
   profile.emission = emission;
   writeFileSync(join(outDir, "profile.json"), JSON.stringify(profile, null, 2));
@@ -262,6 +264,63 @@ identity stable: 1
     expect(doc.channels.chrome_msg).toBeNull();
     expect(doc.channels.env_msgs).toEqual([]);
     expect(doc.integer_slots).toEqual([]);
+  });
+
+  test("ask-3 §2 adversarial order shapes + §3 spread-union composition", async () => {
+    const { doc } = await buildContract("contract-order", emission);
+    expect(validateSidecar(doc)).toEqual([]);
+
+    // Shape 1 — cross-file payloads: Cargo's arms keep THEIR declaration
+    // order (anti-alphabetical), and the payload records keep payloads.ts's
+    // declaration order (Zeta, Wisp, Yank) — not the import list's
+    // alphabetical order, not the arms' reference order (Yank, Zeta, Wisp),
+    // not the alphabet. Entry-module declarations anchor first.
+    expect(doc.types.structs.map((s) => s.name)).toEqual(["Model", "Zeta", "Wisp", "Yank"]);
+    expect(doc.types.unions).toEqual([
+      {
+        name: "Cargo",
+        arms: [
+          { name: "veil", payload: { kind: "node", name: "Yank" } },
+          { name: "sift", payload: { kind: "node", name: "Zeta" } },
+          { name: "onyx", payload: { kind: "node", name: "Wisp" } },
+        ],
+      },
+    ]);
+
+    // Shape 2 — the enum table keeps anti-alphabetical member order, with
+    // "Infinity" (a global-shadowing name) held verbatim in place.
+    expect(doc.types.enums).toEqual([{ name: "Slot", members: ["zone", "Infinity", "alpha"] }]);
+
+    // Shape 3 — the alias is transparent: the model field references
+    // CargoAlias, the table speaks Cargo (the aliased declaration), and no
+    // CargoAlias entry exists anywhere.
+    expect(doc.types.structs[0]!.fields).toEqual([
+      { name: "load", type: { kind: "union", name: "Cargo" } },
+      { name: "slot", type: { kind: "enum", name: "Slot" } },
+    ]);
+    const allNames = [
+      ...doc.types.structs.map((s) => s.name),
+      ...doc.types.enums.map((e) => e.name),
+      ...doc.types.unions.map((u) => u.name),
+    ];
+    expect(allNames).not.toContain("CargoAlias");
+
+    // §3 composition (the reducer pattern): Msg = GadgetMsg | CoreMsg with
+    // GadgetMsg = SpinMsg | { tap }. Depth-first source order — SpinMsg's
+    // arms in SpinMsg's own declaration order, then the inline tap, then
+    // CoreMsg's — and CoreMsg's duplicate "wind" drops (first occurrence,
+    // SpinMsg's, wins). Position IS the wire tag.
+    expect(doc.msg.name).toBe("Msg");
+    expect(doc.msg.arms).toEqual([
+      { name: "wind", payload: { kind: "number", class: "f64" } },
+      { name: "unwind", payload: { kind: "void" } },
+      { name: "tap", payload: { kind: "void" } },
+      { name: "reset", payload: { kind: "void" } },
+      { name: "boot", payload: { kind: "enum", name: "Slot" } },
+    ]);
+    // The constituents themselves never join the table: they are spelled
+    // into Msg, not referenced as payload types.
+    expect(allNames).toEqual(expect.not.arrayContaining(["SpinMsg", "GadgetMsg", "CoreMsg", "Msg"]));
   });
 });
 
@@ -593,11 +652,13 @@ let refusalCounter = 0;
 async function sidecarRefusal(
   source: string,
   sidecarPatch: Record<string, unknown> = {},
-): Promise<{ code: string; message: string }[]> {
+  extraFiles: Record<string, string> = {},
+): Promise<{ code: string; message: string; hint?: string }[]> {
   const outDir = join(cacheDir, `refusal-${refusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
   const entry = join(outDir, "lib.ts");
   writeFileSync(entry, source);
+  for (const [name, text] of Object.entries(extraFiles)) writeFileSync(join(outDir, name), text);
   const profile = {
     profile_format: 1,
     name: "sidecar-refusal-fixture",
@@ -627,7 +688,7 @@ async function sidecarRefusal(
   const result = await compileLibrary({ profilePath, outDir });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
-  return result.diagnostics.map((d) => ({ code: d.code, message: d.message }));
+  return result.diagnostics.map((d) => (d.hint === undefined ? { code: d.code, message: d.message } : { code: d.code, message: d.message, hint: d.hint }));
 }
 
 const REFUSAL_BASE = `export interface Model { count: number; }
@@ -677,5 +738,137 @@ describe("SC4009: contract sidecar refusals", () => {
     const diags = await sidecarRefusal(REFUSAL_BASE + `export function peek(m: Model) { return m.count; }\n`);
     expect(diags[0]!.code).toBe("SC4009");
     expect(diags[0]!.message).toContain("peek");
+  });
+
+  test("a repeated arm within ONE declaration still refuses (dedup is cross-constituent only)", async () => {
+    const diags = await sidecarRefusal(
+      `export interface Model { count: number; }
+export type Msg = { kind: "tick" } | { kind: "tick"; fast: boolean };
+export function init(): Model { return { count: 0 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function boot(): number { return init().count; }
+`,
+    );
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("repeats arm 'tick'");
+  });
+
+  test("a union composing a non-union constituent refuses", async () => {
+    const diags = await sidecarRefusal(
+      `export interface Model { count: number; }
+export type Mode = "a" | "b";
+export type Msg = { kind: "tick" } | Mode;
+export function init(): Model { return { count: 0 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function boot(): number { return init().count; }
+`,
+    );
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("'Mode'");
+    expect(diags[0]!.message).toContain("only kind-tagged unions compose by reference");
+  });
+});
+
+/* ── ask-3 §3 define-or-refuse: order not derivable from ONE site ────────
+ * SC4010 (multi-site declarations: interface merging, module
+ * augmentation, a same-name exported type in another module) and SC4011
+ * (conditional/mapped types producing a tabled or designated type). The
+ * teaching names every contributing site, file:line each. */
+
+describe("SC4010: multi-site declarations feeding a tabled type refuse", () => {
+  test("interface merging in one file names both sites", async () => {
+    // Merged declarations must agree on export (TS2395), so the second
+    // block is exported too — still two sites, still refused.
+    const diags = await sidecarRefusal(
+      `export interface Model { count: number; }
+export interface Model { extra: number; }
+export type Msg = { kind: "tick" } | { kind: "set"; value: string };
+export function init(): Model { return { count: 0, extra: 0 }; }
+export function update(m: Model, msg: Msg): Model { return { count: m.count + 1, extra: m.extra }; }
+let state = init();
+export function boot(): number { state = update(state, { kind: "tick" }); return state.count; }
+`,
+    );
+    expect(diags[0]!.code).toBe("SC4010");
+    expect(diags[0]!.message).toContain("'Model'");
+    expect(diags[0]!.message).toContain("lib.ts:1");
+    expect(diags[0]!.message).toContain("lib.ts:2");
+    expect(diags[0]!.hint).toContain("lib.ts:1");
+    expect(diags[0]!.hint).toContain("lib.ts:2");
+  });
+
+  test("module augmentation from another file names both sites", async () => {
+    const diags = await sidecarRefusal(
+      `import type { Box } from "./payload.ts";
+import "./augment.ts";
+export interface Model { box: Box; }
+export type Msg = { kind: "tick" };
+export function init(): Model { return { box: { n: 0, extra: 1 } }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function boot(): number { return update(init(), { kind: "tick" }).box.n; }
+`,
+      {},
+      {
+        "payload.ts": `export interface Box { n: number; }\n`,
+        "augment.ts": `import "./payload.ts";\ndeclare module "./payload.ts" {\n  interface Box { extra: number; }\n}\nexport {};\n`,
+      },
+    );
+    expect(diags[0]!.code).toBe("SC4010");
+    expect(diags[0]!.message).toContain("'Box'");
+    expect(diags[0]!.message).toContain("payload.ts:1");
+    expect(diags[0]!.message).toContain("augment.ts:3");
+  });
+
+  test("a same-name exported type in two modules refuses when referenced (one namespace)", async () => {
+    const diags = await sidecarRefusal(
+      `import type { Box } from "./a.ts";
+import type { Box as BoxDupe } from "./b.ts";
+export interface Model { box: Box; n: number; }
+export type Msg = { kind: "tick" };
+export function init(): Model { return { box: { n: 1 }, n: 2 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function boot(): number { return init().n; }
+`,
+      {},
+      {
+        "a.ts": `export interface Box { n: number; }\n`,
+        "b.ts": `export interface Box { m: number; }\n`,
+      },
+    );
+    expect(diags[0]!.code).toBe("SC4010");
+    expect(diags[0]!.message).toContain("'Box'");
+    expect(diags[0]!.message).toContain("a.ts:1");
+    expect(diags[0]!.message).toContain("b.ts:1");
+  });
+});
+
+describe("SC4011: computed types producing a tabled/designated type refuse", () => {
+  test("a conditional type as the designated msg", async () => {
+    const diags = await sidecarRefusal(
+      `export interface Model { count: number; }
+export type Msg = true extends true ? ({ kind: "tick" } | { kind: "set"; value: string }) : never;
+export function init(): Model { return { count: 0 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function boot(): number { return init().count; }
+`,
+    );
+    expect(diags[0]!.code).toBe("SC4011");
+    expect(diags[0]!.message).toContain("'Msg'");
+    expect(diags[0]!.message).toContain("conditional");
+  });
+
+  test("a mapped type reaching the table", async () => {
+    const diags = await sidecarRefusal(
+      `export type Flags = { [K in "on" | "off"]: boolean };
+export interface Model { count: number; flags: Flags; }
+export type Msg = { kind: "tick" };
+export function init(): Model { return { count: 0, flags: { on: true, off: false } }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function boot(): number { return init().count; }
+`,
+    );
+    expect(diags[0]!.code).toBe("SC4011");
+    expect(diags[0]!.message).toContain("'Flags'");
+    expect(diags[0]!.message).toContain("mapped");
   });
 });

@@ -16,6 +16,18 @@
  * sorted order (the ratified record-field-order ruling: the IR's sorted
  * canonicalization is storage; AST order is the contract).
  *
+ * Order must be DERIVABLE FROM ONE DECLARATION SITE or the build refuses
+ * (ask 3's define-or-refuse rule): declaration merging into a tabled type
+ * refuses with every site named (SC4010), conditional/mapped types
+ * producing a tabled type refuse (SC4011), and a union COMPOSED of other
+ * kind-tagged unions (`type Msg = A | B` — the reducer-composition
+ * pattern) is allowed with a pinned order: depth-first source order of
+ * the constituent declarations (A's arms in A's own declaration order,
+ * then B's), an arm name appearing in several constituents keeping its
+ * FIRST occurrence. A type alias of a named type is transparent: the
+ * table derives from the aliased declaration, the alias adds no entry
+ * and no reordering.
+ *
  * Not-yet facts emit the schema's stated absent forms, never invented
  * values: `integer_slots` is `[]` with every numeric slot spelled `f64`
  * (the pre-ask-4 sequencing the schema names valid — the empty list is
@@ -26,7 +38,7 @@ import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { libSidecarDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import { libSidecarComputedDiag, libSidecarDiag, libSidecarMergedDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import type { ContractFacts, ContractField, ContractTypeDecl, ContractTypeShape } from "../frontend/lib-contract.js";
 import type { SrcLoc } from "../ir/nodes.js";
 import type { LibraryProfile, LibrarySidecarConfig } from "./profile.js";
@@ -206,35 +218,54 @@ export function abiExportSuffixes(profile: LibraryProfile): string[] {
 
 /* ── classification of the entry's declared types ──────────────────────── */
 
+/** One syntactic constituent of a kind-tagged union declaration: an
+ * inline object-literal arm, or a REFERENCE to another named union (the
+ * composition form, flattened depth-first by the projector). */
+type TaggedPart =
+  | { p: "arm"; name: string; fields: ContractField[]; loc: SrcLoc }
+  | { p: "ref"; name: string; loc: SrcLoc };
+
 type Classified =
   | { c: "struct"; storage: "node" | "value"; fields: ContractField[]; decl: ContractTypeDecl; index: number }
   | { c: "enum"; members: string[]; decl: ContractTypeDecl; index: number }
-  | { c: "tagged"; arms: { name: string; fields: ContractField[]; loc: SrcLoc }[]; decl: ContractTypeDecl; index: number }
-  | { c: "unsupported"; why: string; decl: ContractTypeDecl; index: number };
+  | { c: "tagged"; parts: TaggedPart[]; decl: ContractTypeDecl; index: number }
+  /** `type A = B` — transparent: projection follows to the aliased
+   * declaration; the alias itself never joins the table. */
+  | { c: "alias"; target: string; decl: ContractTypeDecl; index: number }
+  | { c: "unsupported"; why: string; computed?: "conditional" | "mapped"; decl: ContractTypeDecl; index: number };
 
 function classify(decl: ContractTypeDecl, index: number): Classified {
   const s = decl.shape;
-  if (s.k === "unsupported") return { c: "unsupported", why: s.text, decl, index };
+  if (s.k === "unsupported") {
+    return s.computed === undefined
+      ? { c: "unsupported", why: s.text, decl, index }
+      : { c: "unsupported", why: s.text, computed: s.computed, decl, index };
+  }
   if (s.k === "object") {
     return { c: "struct", storage: decl.form === "interface" ? "node" : "value", fields: s.fields, decl, index };
   }
+  if (decl.form === "alias" && s.k === "ref") return { c: "alias", target: s.name, decl, index };
   if (decl.form === "alias" && s.k === "stringLit") return { c: "enum", members: [s.text], decl, index };
   if (decl.form === "alias" && s.k === "union") {
     if (s.parts.every((p) => p.k === "stringLit")) {
       return { c: "enum", members: s.parts.map((p) => (p as { text: string }).text), decl, index };
     }
-    const arms: { name: string; fields: ContractField[]; loc: SrcLoc }[] = [];
+    const parts: TaggedPart[] = [];
     for (const p of s.parts) {
+      if (p.k === "ref") {
+        parts.push({ p: "ref", name: p.name, loc: decl.loc });
+        continue;
+      }
       if (p.k !== "object") {
-        return { c: "unsupported", why: "a union mixing non-object constituents (a tagged union's arms are object literals with a string-literal 'kind')", decl, index };
+        return { c: "unsupported", why: "a union mixing non-object constituents (a tagged union's arms are object literals with a string-literal 'kind', or references to other kind-tagged unions)", decl, index };
       }
       const kindField = p.fields.find((f) => f.name === "kind");
       if (kindField === undefined || kindField.shape.k !== "stringLit" || kindField.optional) {
         return { c: "unsupported", why: "a union constituent without a non-optional string-literal 'kind' discriminant", decl, index };
       }
-      arms.push({ name: kindField.shape.text, fields: p.fields.filter((f) => f.name !== "kind"), loc: kindField.loc });
+      parts.push({ p: "arm", name: kindField.shape.text, fields: p.fields.filter((f) => f.name !== "kind"), loc: kindField.loc });
     }
-    return { c: "tagged", arms, decl, index };
+    return { c: "tagged", parts, decl, index };
   }
   return { c: "unsupported", why: `a shape outside the sidecar's vocabulary (${s.k})`, decl, index };
 }
@@ -257,10 +288,21 @@ class SidecarError extends Error {
   }
 }
 
+/** A refusal that carries its own minted diagnostic (SC4010/SC4011 —
+ * the SC4009 default rides SidecarError). */
+class SidecarRefusal extends Error {
+  constructor(readonly diag: ScrDiagnostic) {
+    super(diag.message);
+  }
+}
+
 class Projector {
   private readonly byName = new Map<string, Classified>();
+  private readonly multiSite = new Map<string, string[]>();
   private readonly table = new Map<string, TableEntry>();
   private readonly inProgress = new Set<string>();
+  private readonly flatArms = new Map<string, { name: string; fields: ContractField[]; loc: SrcLoc }[]>();
+  private readonly flattening = new Set<string>();
   private synthCounter = 0;
 
   constructor(
@@ -268,23 +310,100 @@ class Projector {
     readonly config: LibrarySidecarConfig,
     readonly entryLoc: SrcLoc,
   ) {
-    facts.types.forEach((decl, index) => {
-      if (this.byName.has(decl.name)) {
-        throw new SidecarError(`the entry module declares '${decl.name}' twice — the type table has one namespace`, decl.loc);
-      }
-      this.byName.set(decl.name, classify(decl, index));
-    });
+    // facts.types carries one entry per name (a repeated exported name is
+    // a multi-site fact, refused below when the name is actually used).
+    facts.types.forEach((decl, index) => this.byName.set(decl.name, classify(decl, index)));
+    for (const m of facts.multiSiteTypes) this.multiSite.set(m.name, m.sites);
   }
 
   lookup(name: string, loc: SrcLoc): Exclude<Classified, { c: "unsupported" }> {
     const c = this.byName.get(name);
     if (c === undefined) {
-      throw new SidecarError(`'${name}' is not an exported type declaration of the entry module`, loc);
+      throw new SidecarError(`'${name}' is not an exported type declaration of the program's modules`, loc);
+    }
+    // Define-or-refuse: a name whose members gather from several
+    // declaration sites has no single-source order — refuse the moment
+    // the contract touches it, naming every site (SC4010).
+    const sites = this.multiSite.get(name);
+    if (sites !== undefined) {
+      throw new SidecarRefusal(libSidecarMergedDiag(name, sites, c.decl.loc));
     }
     if (c.c === "unsupported") {
+      if (c.computed !== undefined) {
+        throw new SidecarRefusal(libSidecarComputedDiag(name, c.computed, c.decl.loc));
+      }
       throw new SidecarError(`'${name}' cannot join the type table: it is ${c.why}`, c.decl.loc);
     }
     return c;
+  }
+
+  /** Follow `type A = B` alias chains to the aliased declaration: the
+   * table derives from the target's declaration site, and the alias
+   * introduces no entry and no reordering. */
+  resolve(name: string, loc: SrcLoc): { name: string; c: Exclude<Classified, { c: "unsupported" | "alias" }> } {
+    const seen = new Set<string>();
+    let cur = name;
+    for (;;) {
+      if (seen.has(cur)) {
+        throw new SidecarError(`the type alias chain through '${name}' is cyclic`, loc);
+      }
+      seen.add(cur);
+      const c = this.lookup(cur, loc);
+      if (c.c !== "alias") return { name: cur, c };
+      cur = c.target;
+    }
+  }
+
+  /** A kind-tagged union's arms, its reference constituents flattened
+   * DEPTH-FIRST IN SOURCE ORDER (the ask-3 composition rule, pinned by
+   * conformance): an inline arm lands where it is spelled; a constituent
+   * union contributes its own (recursively flattened) arms, in its own
+   * declaration order, at the position of the reference. An arm name
+   * arriving from several constituents keeps its FIRST occurrence; a
+   * repeat among one declaration's own inline arms stays a refusal. */
+  unionArms(unionName: string, loc: SrcLoc): { name: string; fields: ContractField[]; loc: SrcLoc }[] {
+    const memo = this.flatArms.get(unionName);
+    if (memo !== undefined) return memo;
+    if (this.flattening.has(unionName)) {
+      throw new SidecarError(`union composition is cyclic through '${unionName}' — a union cannot spread itself`, loc);
+    }
+    const c = this.lookup(unionName, loc);
+    if (c.c !== "tagged") {
+      throw new SidecarError(`'${unionName}' is not a kind-tagged union of object literals`, c.decl.loc);
+    }
+    this.flattening.add(unionName);
+    try {
+      const out: { name: string; fields: ContractField[]; loc: SrcLoc }[] = [];
+      const originOf = new Map<string, string>();
+      for (const part of c.parts) {
+        if (part.p === "arm") {
+          const origin = originOf.get(part.name);
+          if (origin === unionName) {
+            throw new SidecarError(`union '${unionName}' repeats arm '${part.name}'`, part.loc);
+          }
+          if (origin !== undefined) continue; // an earlier constituent's arm — first occurrence wins
+          originOf.set(part.name, unionName);
+          out.push({ name: part.name, fields: part.fields, loc: part.loc });
+          continue;
+        }
+        const r = this.resolve(part.name, part.loc);
+        if (r.c.c !== "tagged") {
+          throw new SidecarError(
+            `constituent '${part.name}' of union '${unionName}' is not a kind-tagged union — only kind-tagged unions compose by reference`,
+            part.loc,
+          );
+        }
+        for (const arm of this.unionArms(r.name, part.loc)) {
+          if (originOf.has(arm.name)) continue; // first occurrence wins under depth-first order
+          originOf.set(arm.name, r.name);
+          out.push(arm);
+        }
+      }
+      this.flatArms.set(unionName, out);
+      return out;
+    } finally {
+      this.flattening.delete(unionName);
+    }
   }
 
   /** Project a syntactic field to a TypeRef, tabling every named type it
@@ -324,23 +443,25 @@ class Projector {
         );
       }
       case "ref": {
-        const c = this.lookup(shape.name, loc);
-        if (c.c === "struct") {
-          this.tableNamed(shape.name, loc);
-          return { kind: c.storage, name: shape.name };
+        // Aliases are transparent: the table entry (and its order) is the
+        // ALIASED declaration's, under the aliased declaration's name.
+        const r = this.resolve(shape.name, loc);
+        if (r.c.c === "struct") {
+          this.tableNamed(r.name, loc);
+          return { kind: r.c.storage, name: r.name };
         }
-        if (c.c === "enum") {
-          this.tableNamed(shape.name, loc);
-          return { kind: "enum", name: shape.name };
+        if (r.c.c === "enum") {
+          this.tableNamed(r.name, loc);
+          return { kind: "enum", name: r.name };
         }
-        if (shape.name === this.config.msg) {
+        if (r.name === this.config.msg) {
           throw new SidecarError(
-            `'${container}.${member}' references the designated msg union '${shape.name}' — the msg union is the dispatch surface, not a table type`,
+            `'${container}.${member}' references the designated msg union '${r.name}' — the msg union is the dispatch surface, not a table type`,
             loc,
           );
         }
-        this.tableNamed(shape.name, loc);
-        return { kind: "union", name: shape.name };
+        this.tableNamed(r.name, loc);
+        return { kind: "union", name: r.name };
       }
       case "object":
         return { kind: "value", name: this.tableSynthesized(container, member, shape.fields, loc) };
@@ -372,6 +493,12 @@ class Projector {
       throw new SidecarError(`the contract type graph is cyclic through '${name}' — recursive contract types cannot encode`, loc);
     }
     const c = this.lookup(name, loc);
+    if (c.c === "alias") {
+      // Callers table resolved names; a designation reaching here through
+      // an alias still tables the aliased declaration, nothing else.
+      this.tableNamed(this.resolve(name, loc).name, loc);
+      return;
+    }
     this.inProgress.add(name);
     try {
       if (c.c === "enum") {
@@ -396,12 +523,11 @@ class Projector {
         this.table.set(name, { kind: "struct", entry, anchor: c.index, sub: -1 });
         return;
       }
-      // A named tagged union (never the msg union — fenced above).
+      // A named tagged union (never the msg union — fenced above), its
+      // arms flattened depth-first (composition + the repeat refusal live
+      // in unionArms).
       const entry: SidecarUnion = { name, arms: [] };
-      const seen = new Set<string>();
-      for (const arm of c.arms) {
-        if (seen.has(arm.name)) throw new SidecarError(`union '${name}' repeats arm '${arm.name}'`, arm.loc);
-        seen.add(arm.name);
+      for (const arm of this.unionArms(name, loc)) {
         entry.arms.push({ name: arm.name, payload: this.armPayloadRef(name, arm) });
       }
       this.table.set(name, { kind: "union", entry, anchor: c.index, sub: -1 });
@@ -547,25 +673,25 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     projector.tableNamed(config.model, entryLoc);
     const modelFieldNames = new Set(modelClass.fields.map((f) => f.name));
 
-    // The msg union: declaration-order arms, positional wire tags, at
-    // most 256 arms (tags ride a u8).
+    // The msg union: declaration-order arms (composed constituents
+    // flattened depth-first in source order, first occurrence winning a
+    // duplicated arm name — the reducer-composition rule), positional
+    // wire tags, at most 256 arms (tags ride a u8).
     const msgClass = projector.lookup(config.msg, entryLoc);
     if (msgClass.c !== "tagged") {
       throw new SidecarError(`the profile designates msg '${config.msg}', which is not a kind-tagged union of object literals`, msgClass.decl.loc);
     }
-    if (msgClass.arms.length > 256) {
+    const flatArms = projector.unionArms(config.msg, entryLoc);
+    if (flatArms.length > 256) {
       throw new SidecarError(
-        `msg union '${config.msg}' declares ${msgClass.arms.length} arms — wire tags ride a u8, so at most 256 are permitted`,
+        `msg union '${config.msg}' declares ${flatArms.length} arms — wire tags ride a u8, so at most 256 are permitted`,
         msgClass.decl.loc,
       );
     }
-    const seenArms = new Set<string>();
-    const msgArms: { name: string; payload: PayloadDescriptor }[] = [];
-    for (const arm of msgClass.arms) {
-      if (seenArms.has(arm.name)) throw new SidecarError(`msg union '${config.msg}' repeats arm '${arm.name}'`, arm.loc);
-      seenArms.add(arm.name);
-      msgArms.push({ name: arm.name, payload: projector.msgDescriptor(config.msg, arm) });
-    }
+    const msgArms: { name: string; payload: PayloadDescriptor }[] = flatArms.map((arm) => ({
+      name: arm.name,
+      payload: projector.msgDescriptor(config.msg, arm),
+    }));
     const armByName = new Map(msgArms.map((a) => [a.name, a.payload]));
 
     // Helpers: exported functions taking the model first, in declaration
@@ -720,6 +846,9 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     };
     return { ok: true, doc, json: JSON.stringify(doc, null, 2) + "\n" };
   } catch (e) {
+    if (e instanceof SidecarRefusal) {
+      return { ok: false, diagnostics: [e.diag] };
+    }
     if (e instanceof SidecarError) {
       return { ok: false, diagnostics: [libSidecarDiag(e.detail, e.loc)] };
     }
