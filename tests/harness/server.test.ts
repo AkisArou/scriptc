@@ -26,6 +26,7 @@ import { existsSync, globSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compile } from "@scriptc/compiler";
+import { shardSelect, shardSuffix } from "./shard.js";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixturesRoot = join(repoRoot, "tests/fixtures/server");
@@ -115,16 +116,20 @@ async function build(entry: string): Promise<string> {
 
 // main.ts cases are the TS lane; main.js cases pin the JS-entry lane's
 // server surface (the ambient receiver, the dyn-binding handle) — both
-// lanes run the identical three-leg comparison.
-const cases = [...globSync(join(fixturesRoot, "cases/*/main.ts")), ...globSync(join(fixturesRoot, "cases/*/main.js"))]
-  .sort()
-  .map((entry) => ({
-    name: entry.split("/").at(-2)!,
-    entry,
-    driver: existsSync(join(entry, "../driver.mjs")) ? join(entry, "../driver.mjs") : null,
-  }));
+// lanes run the identical three-leg comparison. SCRIPTC_TEST_SHARD (CI's
+// matrix) keeps only this shard's slice, keyed by case name.
+const cases = shardSelect(
+  [...globSync(join(fixturesRoot, "cases/*/main.ts")), ...globSync(join(fixturesRoot, "cases/*/main.js"))]
+    .sort()
+    .map((entry) => ({
+      name: entry.split("/").at(-2)!,
+      entry,
+      driver: existsSync(join(entry, "../driver.mjs")) ? join(entry, "../driver.mjs") : null,
+    })),
+  (c) => c.name,
+);
 
-describe(`server differential (${cases.length} programs${sanitize ? ", sanitized" : ""})`, () => {
+describe(`server differential (${cases.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
   test.for(cases.map((c) => [c.name, c] as const))("%s", async ([, c]) => {
     const binary = await build(c.entry);
     // Sequential, not parallel: both lanes bind ephemeral ports and drive

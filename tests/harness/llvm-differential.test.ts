@@ -24,17 +24,23 @@ import { promisify } from "node:util";
 import { afterAll, describe, expect, test } from "vitest";
 import ts5 from "typescript";
 import { compile } from "@scriptc/compiler";
+import { shardSelect, shardSuffix } from "./shard.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const corpusDir = join(repoRoot, "tests/corpus");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 
+// Same corpus, same SCRIPTC_TEST_SHARD slice as differential.test.ts (the
+// two files split identically, so a shard's compile cache serves both lanes).
 const ENTRY_EXTS = ["ts", "js", "mjs", "cjs"];
-const files = ENTRY_EXTS.flatMap((ext) => [
-  ...globSync(join(corpusDir, `*.${ext}`)),
-  ...globSync(join(corpusDir, `*/main.${ext}`)),
-]).sort();
+const files = shardSelect(
+  ENTRY_EXTS.flatMap((ext) => [
+    ...globSync(join(corpusDir, `*.${ext}`)),
+    ...globSync(join(corpusDir, `*/main.${ext}`)),
+  ]).sort(),
+  (f) => f.slice(corpusDir.length + 1),
+);
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 
 // Same known-env contract as the main differential suite.
@@ -212,7 +218,7 @@ const claimed: string[] = [];
 const refusalKinds = new Map<string, number>();
 const refusalPrograms = new Map<string, string[]>();
 
-describe(`llvm differential corpus (${files.length} programs${sanitize ? ", sanitized" : ""})`, () => {
+describe(`llvm differential corpus (${files.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
   test.for(files.map((f) => [f.slice(corpusDir.length + 1), f] as const))(
     "%s",
     async ([rel, file]) => {
@@ -278,7 +284,9 @@ describe(`llvm differential corpus (${files.length} programs${sanitize ? ", sani
   );
 
   test("tier floor: the survey's six programs stay claimed", () => {
-    for (const name of TIER_FLOOR) {
+    // Under a shard, only the floor programs THIS slice ran can be asserted
+    // (same key as the corpus split above); the shard union covers all six.
+    for (const name of shardSelect(TIER_FLOOR, (n) => n)) {
       expect(claimed, `${name} regressed out of the LLVM tier`).toContain(name);
     }
   });

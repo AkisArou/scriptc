@@ -21,6 +21,7 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import { compile } from "@scriptc/compiler";
 import { npmCases } from "./npm-cases.js";
+import { shardSelect, shardSuffix } from "./shard.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
@@ -29,8 +30,10 @@ const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 
 // The case table lives in npm-cases.ts: the Linux lane runs the identical
-// cases (same entries, same argv lists) inside its container.
-const cases = npmCases(fixturesRoot);
+// cases (same entries, same argv lists) inside its container. The shard
+// split (SCRIPTC_TEST_SHARD, CI's matrix) is applied HERE, not in the
+// table, so that lane keeps its full list.
+const cases = shardSelect(npmCases(fixturesRoot), (c) => c.name);
 
 interface RunResult {
   stdout: Buffer;
@@ -159,7 +162,7 @@ describe(`typed-callback boundary (scriptc-only${sanitize ? ", sanitized" : ""})
   }, 120_000);
 });
 
-describe(`npm differential (${cases.length} programs${sanitize ? ", sanitized" : ""})`, () => {
+describe(`npm differential (${cases.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
   test.for(cases.map((c) => [c.name, c] as const))("%s", async ([, c]) => {
     const binary = await build(c.entry);
     for (const argv of c.argvs ?? [[]]) {
