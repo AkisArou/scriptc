@@ -58,16 +58,18 @@ class StaticBrand {
 }
 console.log(new StaticBrand().check(new StaticBrand()));
 
-// Private statics through class VALUES: a classval slot can hold a
-// descendant at runtime and JS brands the declaring class object alone.
+// Private statics through class VALUES that may hold a DESCENDANT: with a
+// subclass in the program, the slot can hold it at runtime and JS brands
+// the declaring class object alone (exact receivers — the name, a const
+// alias, a leaf class's values — compile).
 class ViaValue {
   static #origin = 7;
-  static read(): number {
-    const K: typeof ViaValue = ViaValue;
-    return K.#origin;
+  static read(k: typeof ViaValue): number {
+    return k.#origin;
   }
 }
-console.log(ViaValue.read());
+class ViaValueSub extends ViaValue {}
+console.log(ViaValue.read(ViaValueSub));
 
 // Generic classes share ONE brand across every instantiation in JS; these
 // layouts mint one class per instantiation, so private-in fences there.

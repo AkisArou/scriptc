@@ -3223,6 +3223,20 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     return staticCallOn(L, call, access, info, throughValue);
   }
 
+/** True when a class-VALUE receiver can only hold `info`'s own class
+   * object at runtime: the receiver provably IS the class
+   * (exactClassOfReceiver — the name, or a const bound to the class
+   * expression / class name), or `info` is a LEAF class, so no strict
+   * descendant exists to flow into the slot (the static-write path's
+   * rule — a rebindable decorated name rides this arm, since replacement
+   * decorators fence any class with subclasses before minting the
+   * rebindable global). Exactly then a #private static access through
+   * the value always carries the declaring class's brand — Node's
+   * TypeError cannot arise. */
+  function classValueIsExactlyOwn(L: Lowerer, recv: ts.Expression, info: ClassInfo): boolean {
+    return exactClassOfReceiver(L, recv) === info || info.subclasses.length === 0;
+  }
+
   function staticCallOn(
     L: Lowerer,
     call: ts.CallExpression,
@@ -3231,11 +3245,13 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     throughValue: boolean,
   ): IrExpr | null {
     const loc = locOf(call);
-    // #private statics: through-a-VALUE receivers fence (a classval slot
-    // can hold a descendant at runtime and only the declaring class
-    // object carries the brand in JS), and the direct spelling resolves
-    // only on the declaring class itself — `D.#s` is Node's TypeError.
-    if (access.name.text.startsWith("#") && throughValue) {
+    // #private statics: through-a-VALUE receiver the call devirtualizes
+    // exactly when the value can only BE the declaring class
+    // (classValueIsExactlyOwn — a slot that could hold a descendant at
+    // runtime fences, since only the declaring class object carries the
+    // brand in JS), and the direct spelling resolves only on the
+    // declaring class itself — `D.#s` is Node's TypeError.
+    if (access.name.text.startsWith("#") && throughValue && !classValueIsExactlyOwn(L, access.expression, info)) {
       L.unsupported(
         "SC1090",
         call,
@@ -3345,17 +3361,29 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         `the static member '${member}' of class '${info.def.name.replace(/^%|^%m\d+\./, "")}' (static accessors and initializer-less static fields have no lowering, and Function members like .call/.bind/.prototype have no value form)`,
       );
     }
-    // #private statics never read through class VALUES: the slot can hold
-    // a descendant at runtime and JS brands the declaring class object
-    // alone (Node's TypeError on any other receiver). The direct
-    // class-name spelling resolved in lowerStaticFieldRead, so a private
-    // reaching here is a classval-typed binding.
+    // #private statics read through a class VALUE exactly when the value
+    // can only BE the declaring class (classValueIsExactlyOwn — a const
+    // bound to the class expression / class name, or a leaf class): a
+    // slot that could hold a descendant at runtime fences, since JS
+    // brands the declaring class object alone (Node's TypeError on any
+    // other receiver). The direct class-name spelling resolved in
+    // lowerStaticFieldRead, so a private reaching here is a
+    // classval-typed binding.
     if (member.startsWith("#")) {
-      L.unsupported(
-        "SC1090",
-        expr,
-        `reading the private static '${member}' through a class value (JS brands the declaring class object alone — spell the declaring class's name)`,
-      );
+      if (!classValueIsExactlyOwn(L, expr.expression, info)) {
+        L.unsupported(
+          "SC1090",
+          expr,
+          `reading the private static '${member}' through a class value (JS brands the declaring class object alone — spell the declaring class's name)`,
+        );
+      }
+      if (found.declarer !== info) {
+        L.unsupported(
+          "SC1090",
+          expr,
+          `reading the private static '${member}' through the subclass '${info.def.name.replace(/^%|^%m\d+\./, "")}' (JS brands the declaring class object alone — Node throws a TypeError here; spell the declaring class's name)`,
+        );
+      }
     }
     if (staticShadowBelow(L, info, member)) {
       L.unsupported(
