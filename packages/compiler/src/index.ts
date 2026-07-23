@@ -30,6 +30,16 @@ export {
   type SurfaceManifestEntry,
 } from "./coverage/surface-manifest.js";
 export { validateModule } from "./ir/validate.js";
+export {
+  loadCoreProfile,
+  profileTeaching,
+  CORE_PARAM_CLASSES,
+  CORE_RETURN_CLASSES,
+  type CoreProfile,
+  type CoreExportEntry,
+  type CoreParamClass,
+  type CoreReturnClass,
+} from "./core/profile.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, overridesDtsPath } from "./frontend/program.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
