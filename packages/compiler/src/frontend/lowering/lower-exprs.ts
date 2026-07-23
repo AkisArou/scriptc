@@ -8385,9 +8385,24 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         loc,
       };
     }
-    return target.container === "class"
-      ? { kind: "fieldGet", obj: target.obj, className: target.className, field: target.field, type: target.fieldType, loc }
-      : { kind: "recordGet", obj: target.obj, shapeId: target.shapeId, field: target.field, type: target.fieldType, loc };
+    if (target.container === "class") {
+      const read: IrExpr = { kind: "fieldGet", obj: target.obj, className: target.className, field: target.field, type: target.fieldType, loc };
+      // DEFERRED-INIT fields (`stream!: T` assigned past the constructor's
+      // top level — ClassInfo.deferredInitFields): the SLOT is the
+      // undefined-armed union; the read CHECKED-extracts the declared type
+      // — a genuinely unassigned read throws the catchable TypeError
+      // where Node reads an undefined the declared type cannot hold.
+      if (
+        L.classes.get(target.className)?.deferredInitFields?.has(target.field) === true &&
+        target.fieldType.kind === "union"
+      ) {
+        const inner = L.stripUndefinedArm(target.fieldType);
+        const helper = L.deferredReadHelper(target.fieldType.unionId, inner, loc);
+        if (helper) return { kind: "call", callee: helper, args: [read], type: inner, loc };
+      }
+      return read;
+    }
+    return { kind: "recordGet", obj: target.obj, shapeId: target.shapeId, field: target.field, type: target.fieldType, loc };
   }
 
 /** The write statement for a field target (fieldSet / recordSet / setter

@@ -4249,6 +4249,59 @@ export class Lowerer {
     return name;
   }
 
+  /** The DEFERRED-INIT field read (`stream!: T` assigned past the
+   * constructor's top level — the slot is `T | undefined`): interned
+   * `%deferred.read.<n>(u)` extracting the declared type. SCALAR arms
+   * whose JS-undefined behavior a unit default reproduces read that
+   * default — bool false (conditions are exact: undefined and false are
+   * both falsy; only printing/strict-equality could tell) and f64 NaN
+   * (arithmetic and conditions exact) — while string and REF arms keep
+   * the checked-extraction TRAP: JS itself TypeErrors the first member
+   * use of such an undefined, so the catchable TypeError at the read is
+   * the same failure, named earlier (SEMANTICS.md). */
+  deferredReadHelper(fromId: string, target: IrType, loc: SrcLoc): string | null {
+    if (target.kind !== "bool" && target.kind !== "f64") {
+      return this.narrowedArmHelper(fromId, target, loc);
+    }
+    const from = this.unions.get(fromId);
+    const tag = this.armTag(fromId, target);
+    const utag = from ? from.arms.findIndex((a) => a.kind === "undefinedT") : -1;
+    if (!from || tag < 0 || utag < 0) return null;
+    const key = `deferred:${fromId}:${tag}`;
+    const existing = this.narrowHelpers.get(key);
+    if (existing) return existing;
+    const name = `%deferred.read.${this.narrowHelpers.size}`;
+    this.narrowHelpers.set(key, name);
+    const fromT: IrType = { kind: "union", unionId: fromId };
+    const u: IrExpr = { kind: "varRef", localId: "u.0", type: fromT, loc };
+    const dflt: IrExpr =
+      target.kind === "bool"
+        ? { kind: "boolLit", value: false, type: BOOL, loc }
+        : { kind: "numLit", value: NaN, type: F64, loc };
+    this.liftedFns.push({
+      name,
+      params: [{ localId: "u.0", name: "u", type: fromT }],
+      returnType: target,
+      locals: [{ id: "u.0", name: "u", type: fromT, mutable: true }],
+      body: [
+        {
+          kind: "if",
+          cond: { kind: "unionIsTag", unionId: fromId, tag: utag, negated: false, value: u, type: BOOL, loc },
+          then: [{ kind: "return", value: dflt, loc }],
+          else_: null,
+          loc,
+        },
+        {
+          kind: "return",
+          value: { kind: "unionNarrow", unionId: fromId, tag, value: u, type: target, loc },
+          loc,
+        },
+      ],
+      loc,
+    });
+    return name;
+  }
+
   /** True when a static value can become ONE island value: jsval itself,
    * anything boundary-safe (the deep JSON marshal), a record whose fields
    * all can (built as an island OBJECT literal, field by field), or an

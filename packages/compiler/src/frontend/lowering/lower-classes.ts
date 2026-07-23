@@ -47,6 +47,16 @@ export interface ClassInfo {
    * generic twin of staticMethods (same this/super fence, same
    * through-a-VALUE shadowing rules via staticShadowBelow). */
   genericStatics?: Map<string, GenericFnInfo>;
+  /** DEFERRED-INIT fields (inherited included, like `fields`): a
+   * `stream!: T` definite-assignment assertion (or an SPI-off
+   * initializer-less field) whose first assignment happens past the
+   * constructor's top level. The SLOT is the undefined-armed union —
+   * allocation writes the interned undefined, exactly Node's
+   * pre-assignment read — writes wrap into the arm, and every READ is a
+   * CHECKED extraction back to the declared type: a genuinely
+   * unassigned read throws the catchable TypeError instead of yielding
+   * an undefined the declared type cannot hold (SEMANTICS.md). */
+  deferredInitFields?: Set<string>;
   /** null for the builtin error classes (runtime-provided; no source).
    * Class EXPRESSIONS carry their ts.ClassExpression here — members,
    * accessors, and locs read identically off either form. */
@@ -1747,6 +1757,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       // (conditional branches, assignment in a method, no constructor at
       // all) leaves a window where Node reads undefined and these layouts
       // would read zeroed memory, so it fences instead.
+      const deferredInitFields = new Set<string>(base?.deferredInitFields ?? []);
       if (unguardedFields.length > 0) {
         const topAssigned = new Set<string>();
         for (const stmt of ctor?.body?.statements ?? []) {
@@ -1761,7 +1772,31 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           }
         }
         for (const f of unguardedFields) {
-          if (!topAssigned.has(f.name)) L.unsupported("SC1090", f.node, f.why);
+          if (topAssigned.has(f.name)) continue;
+          // DEFERRED INITIALIZATION (the Output.initialize idiom —
+          // `stream!: T` assigned inside a method the constructor calls):
+          // the slot becomes the undefined-armed union — allocation writes
+          // the interned undefined (Node's pre-assignment value), writes
+          // wrap, and reads CHECKED-extract the declared type, trapping a
+          // genuinely-unassigned read with the catchable TypeError.
+          // Only single-arm declared types take the deferral (the checked
+          // extraction targets one arm); union-typed `!` fields keep the
+          // fence.
+          const declared = fields.get(f.name);
+          const armable =
+            declared !== undefined && !isUnitType(declared) &&
+            declared.kind !== "union" && declared.kind !== "jsval" && declared.kind !== "dyn" &&
+            declared.kind !== "map" && declared.kind !== "generator" && declared.kind !== "void" &&
+            declared.kind !== "caught";
+          const armed = armable ? L.withUndefinedArm(declared) : null;
+          if (armed !== null && armed.kind === "union") {
+            fields.set(f.name, armed);
+            const fo = fieldOrder.find((x) => x.name === f.name);
+            if (fo) fo.type = armed;
+            deferredInitFields.add(f.name);
+            continue;
+          }
+          L.unsupported("SC1090", f.node, f.why);
         }
       }
 
@@ -2073,6 +2108,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         ...(staticBlocks.length > 0 ? { staticBlocks } : {}),
         ...(symbolFields.size > 0 ? { symbolFields } : {}),
         ...(classDecoratorNodes.length > 0 ? { classDecorators: { nodes: classDecoratorNodes } } : {}),
+        ...(deferredInitFields.size > 0 ? { deferredInitFields } : {}),
       };
       // GENERIC members get their declaring-class backlink now that the
       // info exists (instance lowering reads it for `this` typing and the
