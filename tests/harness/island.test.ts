@@ -393,8 +393,11 @@ console.log(greet("world"), 6 * 7);
     // engine is a ~620KB jump, not a page. The globals lane (DOMException,
     // structuredClone + the DOM object walks, atob/btoa, queueMicrotask —
     // always-linked TUs) re-based both arms by ~2 pages (Mach-O measured
-    // 333,544).
-    expect(staticSize).toBeLessThan(process.platform === "linux" ? 360_000 : 344_000);
+    // 333,544). StringToNumber (Number(aString) — ~1.3KB in the
+    // always-linked string TU) tipped the Mach-O arm one more page from
+    // 336,328 to a measured 353,000; the cushion stays under a page so
+    // the next tip still fails loudly.
+    expect(staticSize).toBeLessThan(process.platform === "linux" ? 360_000 : 361_000);
     expect(dynamicSize).toBeGreaterThan(500_000);
   });
 

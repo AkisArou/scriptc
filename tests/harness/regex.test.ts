@@ -165,7 +165,11 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // 312,024. The globals lane (DOMException, structuredClone + the DOM
     // object walks, atob/btoa, queueMicrotask — all in always-linked
     // TUs) re-based both arms by ~2 pages (Mach-O measured 333,544).
-    expect(statSync(plainBuild.binaryPath).size).toBeLessThan(process.platform === "linux" ? 360_000 : 344_000);
+    // StringToNumber (Number(aString) — ~1.3KB in the always-linked
+    // string TU) tipped the Mach-O arm one more page from 336,328 to a
+    // measured 353,000; the cushion stays under a page so the next tip
+    // still fails loudly.
+    expect(statSync(plainBuild.binaryPath).size).toBeLessThan(process.platform === "linux" ? 360_000 : 361_000);
 // The regex class re-bases per platform: the same program measured
     // 461,456 bytes on native Linux (scripts/sandbox-suite.mjs — AL2023
     // clang 15, ELF section alignment, glibc static bits, and the lane's
