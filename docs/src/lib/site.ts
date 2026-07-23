@@ -12,7 +12,7 @@ export const githubUrl = "https://github.com/vercel-labs/scriptc";
 export const siteUrl = "https://scriptc.dev";
 
 /** The one-line tagline used in titles and Open Graph text. */
-export const tagline = "Zero-runtime TypeScript";
+export const tagline = "TypeScript-to-Native Compiler";
 
 /** The one-sentence description used in metadata. */
 export const description =

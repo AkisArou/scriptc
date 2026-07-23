@@ -1,5 +1,5 @@
 export const PAGE_TITLES: Record<string, string> = {
-  "": "Zero-runtime\nTypeScript",
+  "": "TypeScript-to-Native\nCompiler",
   introduction: "Introduction",
   quickstart: "Quickstart",
   cli: "CLI Reference",
