@@ -1840,7 +1840,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // The ternary's IR type is normally the checker's own: it collapses
       // same-kind literal unions ("a" | "b" → string) and forms tagged
       // unions for mixed arms that map (`c ? okRec : errRec`); anything
-      // left unmappable gets SC2001 here. A record/union CONTEXTUAL type
+      // left unmappable gets the type fence (badType) here. A record/union CONTEXTUAL type
       // takes over exactly when the own type can't carry the value —
       // unmappable, or a DIFFERENT union (branch literals omitting
       // DIFFERENT optional subsets make the own type a union of the
@@ -3225,7 +3225,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
 /** `[a, b, c]`. The element type comes from the contextual type when tsc
    * has one (`const a: number[] = []`, arguments, nested literals) and from
    * the literal's own inferred type otherwise. A bare `[]` with no context
-   * is `never[]` — unmappable, rejected with SC2001. `expected` overrides
+   * is `never[]` — unmappable, rejected with the component fence (SC2009). `expected` overrides
    * the contextual lookup where the caller knows the slot's array type and
    * tsc's API doesn't surface it (ternary arms under an array context —
    * tsc accepts the arm covariantly, but a tagged element representation
@@ -4005,7 +4005,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // Syntax fence FIRST: unsupported member forms get their specific
     // message even when they also make the literal's type unmappable
     // (a getter or a `this`-returning method would otherwise surface as an
-    // opaque SC2001 on the whole literal).
+    // opaque type fence on the whole literal).
     for (const prop of expr.properties) {
       if (ts.isSpreadAssignment(prop)) {
         // Supported shapes: FULL spreads of known record shapes read as

@@ -1,4 +1,4 @@
-utility-types.ts:14:7 - error SC2001: values of type '{ [s: symbol]: string; }' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
+utility-types.ts:14:7 - error SC2006: values of type '{ [s: symbol]: string; }' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
 
   13 | // named recursive shapes; differential corpus covers both.)
   14 | const bySymbol: { [s: symbol]: string } = {};
@@ -16,7 +16,7 @@ utility-types.ts:15:13 - error SC2004: uses of 'bySymbol' inherit the blocker on
 
   hint: the declaration of 'bySymbol' did not compile — fix the diagnostic reported there and these sites clear with it
 
-utility-types.ts:17:7 - error SC2001: values of type '{ [k: string]: () => void; }' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
+utility-types.ts:17:7 - error SC2006: values of type '{ [k: string]: () => void; }' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
 
   16 | 
   17 | const fnBag: { [k: string]: () => void } = {};

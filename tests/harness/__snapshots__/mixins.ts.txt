@@ -1,9 +1,11 @@
-mixins.ts:17:10 - error SC2001: values of type 'M.(Anonymous class) & Base' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+mixins.ts:17:10 - error SC2008: values of type 'M.(Anonymous class) & Base' cannot be compiled: this intersection resolves to no runtime shape
 
   16 | // one immortal class object cannot be exact there.
   17 | function makeClass() {
      |          ^~~~~~~~~
   18 |   const X = M(Base);
+
+  hint: restate the intersection as a single interface or type literal with the combined members; mixin-produced intersections compile where the mixin chain pins one instantiation
 
 mixins.ts:21:13 - error SC2004: uses of 'makeClass' inherit the blocker on its declaration
 
@@ -28,19 +30,23 @@ mixins.ts:26:13 - error SC1090: constructing through a class value whose class h
      |             ^~~~~~~
   27 | 
 
-mixins.ts:33:7 - error SC2001: values of type 'M.(Anonymous class) & Base' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+mixins.ts:33:7 - error SC2008: values of type 'M.(Anonymous class) & Base' cannot be compiled: this intersection resolves to no runtime shape
 
   32 | const A2 = M(Base);
   33 | const a = new A1();
      |       ^
   34 | const b = new A2();
 
-mixins.ts:34:7 - error SC2001: values of type 'M.(Anonymous class) & Base' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+  hint: restate the intersection as a single interface or type literal with the combined members; mixin-produced intersections compile where the mixin chain pins one instantiation
+
+mixins.ts:34:7 - error SC2008: values of type 'M.(Anonymous class) & Base' cannot be compiled: this intersection resolves to no runtime shape
 
   33 | const a = new A1();
   34 | const b = new A2();
      |       ^
   35 | console.log(a.m + b.m);
+
+  hint: restate the intersection as a single interface or type literal with the combined members; mixin-produced intersections compile where the mixin chain pins one instantiation
 
 mixins.ts:35:13 - error SC2004: uses of 'a' inherit the blocker on its declaration
 
@@ -51,7 +57,7 @@ mixins.ts:35:13 - error SC2004: uses of 'a' inherit the blocker on its declarati
 
   hint: the declaration of 'a' did not compile — fix the diagnostic reported there and these sites clear with it
 
-mixins.ts:39:7 - error SC2001: values of type '<T extends Ctor<object>>(B: T) => { new (...args: any[]): (Anonymous class); prototype: M.(Anonymous class); } & T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+mixins.ts:39:7 - error SC2005: values of type '<T extends Ctor<object>>(B: T) => { new (...args: any[]): (Anonymous class); prototype: M.(Anonymous class); } & T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
 
   38 | // site, so nothing exists to store.
   39 | const held = M;

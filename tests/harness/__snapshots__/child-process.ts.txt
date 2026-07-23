@@ -23,12 +23,14 @@ child-process.ts:23:14 - error SC1090: listeners returning a value (make the cal
      |              ^~~~~~~~~~~~~~~
   24 | 
 
-child-process.ts:26:7 - error SC2001: values of type '{ (event: "exit", listener: (code: number | null, signal: string | null) => void): void; (event: "error", listener: (err: Error) => void): void; }' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+child-process.ts:26:7 - error SC2007: values of type '{ (event: "exit", listener: (code: number | null, signal: string | null) => void): void; (event: "error", listener: (err: Error) => void): void; }' cannot be compiled: the type declares multiple call signatures (overloads), and a compiled function value is always one concrete signature
 
   25 | // Methods have no bound-value form — call on directly.
   26 | const f = c.on;
      |       ^
   27 | 
+
+  hint: annotate the slot with the ONE signature the program actually calls (e.g. '(x: number) => string'), or wrap the overloaded function in a single-signature arrow
 
 child-process.ts:26:11 - error SC1090: child methods as values (call 'on' directly) are not supported yet
 

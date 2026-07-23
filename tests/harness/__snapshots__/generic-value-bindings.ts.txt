@@ -23,7 +23,7 @@ generic-value-bindings.ts:8:13 - error SC2004: uses of 'flip' inherit the blocke
 
   hint: the declaration of 'flip' did not compile — fix the diagnostic reported there and these sites clear with it
 
-generic-value-bindings.ts:13:7 - error SC2001: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+generic-value-bindings.ts:13:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
 
   12 | const id = <T>(x: T): T => x;
   13 | const stored = id;

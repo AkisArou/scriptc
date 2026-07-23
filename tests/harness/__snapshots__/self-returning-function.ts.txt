@@ -1,16 +1,20 @@
-self-returning-function.ts:4:10 - error SC2001: values of type '() => typeof somefn' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+self-returning-function.ts:4:10 - error SC2009: values of type '() => typeof somefn' cannot be compiled: the function shape is supported, but its return type '() => typeof somefn' does not compile
 
   3 | // (invariant signature 15), and the uses fence by name.
   4 | function somefn() {
     |          ^~~~~~
   5 |   return somefn;
 
-self-returning-function.ts:7:7 - error SC2001: values of type '() => typeof somefn' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+self-returning-function.ts:7:7 - error SC2009: values of type '() => typeof somefn' cannot be compiled: the function shape is supported, but its return type '() => typeof somefn' does not compile
 
   6 | }
   7 | const g = somefn();
     |       ^
   8 | console.log(typeof g);
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
 
 self-returning-function.ts:7:11 - error SC2004: uses of 'somefn' inherit the blocker on its declaration
 

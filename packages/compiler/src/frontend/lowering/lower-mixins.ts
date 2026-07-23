@@ -497,7 +497,7 @@ function instantiateMixinCall(L: Lowerer, call: ts.CallExpression, shape: MixinF
  * that instantiation's object type — layout-true by construction (same
  * source, same base chain). Anything ambiguous (two same-shaped
  * instantiations — where picking one could mis-devirtualize against the
- * other's subtree) stays honestly unmapped, and the per-site SC2001
+ * other's subtree) stays honestly unmapped, and the per-site SC2008
  * names the type. Only instantiations from PINNED positions (const
  * bindings, heritage clauses) participate: they are registered before
  * any body lowers in BOTH passes, so discovery and emit answer alike. */

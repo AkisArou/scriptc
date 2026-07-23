@@ -1,9 +1,11 @@
-dataview.ts:9:7 - error SC2001: values of type 'ArrayBuffer' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+dataview.ts:9:7 - error SC2020: 'ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 
    8 | // '.buffer' only compiles inside new DataView(x.buffer, ...).
    9 | const escaped = buf.buffer;
      |       ^~~~~~~
   10 | 
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 dataview.ts:9:17 - error SC1090: '.buffer' outside new DataView(x.buffer, ...) — scriptc typed arrays own their storage: no free-standing ArrayBuffer value exists, and slice()/subarray() copy is not supported yet
 
@@ -28,12 +30,14 @@ dataview.ts:12:13 - error SC2020: '.getBigUint64 outside Number(...)' is part of
 
   hint: bigint values have no representation — Number(view.getBigUint64(offset, littleEndian?)) is the lowered form
 
-dataview.ts:15:7 - error SC2001: values of type 'ArrayBuffer' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+dataview.ts:15:7 - error SC2020: 'ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 
   14 | // The constructor wants a typed array's own '.buffer'.
   15 | const ab = new ArrayBuffer(8);
      |       ^~
   16 | const direct = new DataView(ab);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 dataview.ts:15:12 - error SC2020: 'new ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 

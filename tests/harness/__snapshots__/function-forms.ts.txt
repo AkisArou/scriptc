@@ -1,9 +1,11 @@
-function-forms.ts:29:7 - error SC2001: values of type '(...args: number[]) => number' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+function-forms.ts:29:7 - error SC2009: values of type '(...args: number[]) => number' cannot be compiled: the function shape is supported, but its rest parameter 'args' has no compiled calling convention yet (a compiled signature is fixed-arity)
 
   28 | // REST signatures are never spellable as exact-arity func types.
   29 | const restRef = rest;
      |       ^~~~~~~
   30 | // Union-typed parameter defaults compile now (corpus 1535); kept here as
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
 
 function-forms.ts:29:17 - error SC1090: functions with rest parameters as values (call them directly) are not supported yet
 
