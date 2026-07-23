@@ -14,7 +14,7 @@ import { isProvenanceSourceFile } from "../provenance-registry.js";
 import { lowerImportEquals, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.js";
 import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape } from "./lower-containers.js";
-import { bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
+import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 import type { ClassIteratorInfo } from "./lower-classes.js";
 import { genericIfaceBindingKeepsClass } from "./lower-classes.js";
@@ -2199,7 +2199,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // shapes (reassigned bindings, declarations inside functions) fence
     // by name inside; a collection-time report dedupes.
     {
-      const gfnNode = bindingGenericFnNodeOf(decl);
+      const gfnNode = bindingGenericFnNodeOf(decl) ?? bindingContextualGenericFnNodeOf(L, decl);
       if (gfnNode) {
         bindingGenericFnInfoOf(L, decl, gfnNode);
         return null;

@@ -13,7 +13,7 @@ import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } 
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, isPromisifyCall } from "./lower-builtins.js";
-import { bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
+import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
 import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
@@ -1010,7 +1010,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // by name; the statement lowering skips (or re-fences — pushDiag
         // dedupes) by the same test.
         {
-          const gfnNode = bindingGenericFnNodeOf(decl);
+          const gfnNode = bindingGenericFnNodeOf(decl) ?? bindingContextualGenericFnNodeOf(L, decl);
           if (gfnNode) {
             try {
               bindingGenericFnInfoOf(L, decl, gfnNode);

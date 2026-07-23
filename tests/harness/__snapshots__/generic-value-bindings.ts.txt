@@ -30,7 +30,7 @@ generic-value-bindings.ts:15:20 - error SC1090: generic functions as values with
      |                    ^~~~~~
   16 | 
 
-generic-value-bindings.ts:19:7 - error SC2001: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+generic-value-bindings.ts:19:7 - error SC2001: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned bindings holding a generic arrow/function expression, an alias of a registered generic function, or a function initializer under a generic-signature annotation)
 
   18 | // fence reports, and the alias falls back to the ordinary binding story.
   19 | const flipAlias = flip;

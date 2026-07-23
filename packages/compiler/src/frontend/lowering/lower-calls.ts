@@ -6572,6 +6572,29 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     return null;
   }
 
+/** The CONTEXTUAL twin of bindingGenericFnNodeOf: `const g: Mapper = (x)
+   * => x` where `type Mapper = <T>(x: T) => T` — the initializer declares
+   * no type parameters of its own, but the ANNOTATION's one call signature
+   * does, and the checker types the arrow's parameters by those (`x: T`).
+   * Such a binding monomorphizes exactly like `const g = <T>(x: T) => x`;
+   * bindingGenericFnInfoOf reads the type parameters off the annotation's
+   * signature. Null when the shape doesn't match (a concrete annotation, a
+   * generic arrow — the syntactic probe's case, an overloaded alias). */
+  export function bindingContextualGenericFnNodeOf(L: Lowerer, decl: ts.VariableDeclaration): ts.FunctionExpression | ts.ArrowFunction | null {
+    if (!ts.isIdentifier(decl.name) || decl.initializer === undefined || decl.type === undefined) return null;
+    let init: ts.Expression = decl.initializer;
+    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    if (
+      !(ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ||
+      init.typeParameters !== undefined || init.body === undefined
+    ) {
+      return null;
+    }
+    const sigs = L.checker.getCallSignatures(L.typeOf(decl.name));
+    if (sigs.length !== 1 || sigs[0]!.getTypeParameters().length === 0) return null;
+    return init;
+  }
+
 /** The interned GenericFnInfo for one generic arrow/function-expression
    * binding initializer, with the supportability fences applied ONCE per
    * declaration: the binding must sit at module scope (the compiled
@@ -6619,10 +6642,25 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       );
     }
     const typeParams: ts.Symbol[] = [];
-    for (const tp of fnNode.typeParameters!) {
-      const tpSym = L.checker.getSymbolAtLocation(tp.name);
-      if (!tpSym) L.unsupported("SC1090", fnNode, "this function form");
-      typeParams.push(tpSym);
+    if (fnNode.typeParameters !== undefined) {
+      for (const tp of fnNode.typeParameters) {
+        const tpSym = L.checker.getSymbolAtLocation(tp.name);
+        if (!tpSym) L.unsupported("SC1090", fnNode, "this function form");
+        typeParams.push(tpSym);
+      }
+    } else {
+      // The CONTEXTUAL shape (bindingContextualGenericFnNodeOf): the type
+      // parameters live on the annotation's one call signature, and the
+      // checker types the initializer's parameters by them — the same
+      // symbols the instance bodies resolve through.
+      const sigs = L.checker.getCallSignatures(L.typeOf(decl.name));
+      const tps = sigs.length === 1 ? sigs[0]!.getTypeParameters() : [];
+      if (tps.length === 0) L.unsupported("SC1090", fnNode, "this function form");
+      for (const tp of tps) {
+        const tpSym: ts.Symbol | undefined = tp.getSymbol();
+        if (!tpSym) L.unsupported("SC1090", fnNode, "this function form");
+        typeParams.push(tpSym);
+      }
     }
     // Only NAME syntax is checkable here; optional/default/rest shapes are
     // computed per instantiation from the resolved signature — exactly
