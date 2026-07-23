@@ -3992,6 +3992,21 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2386-dot-requires/main.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2386-dot-requires/shared.cjs",
+    "<repo>/tests/corpus/2386-dot-requires/sub/index.cjs",
+    "<repo>/tests/corpus/2386-dot-requires/sub/child.cjs",
+    "<repo>/tests/corpus/2386-dot-requires/main.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2387-default-builtin-imports/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2387-default-builtin-imports/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/240-stdout-write.ts": {
    "order": [
     "<repo>/tests/corpus/240-stdout-write.ts"
@@ -6079,6 +6094,12 @@
   "<repo>/tests/fixtures/npm/cases/workspace-linked/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/workspace-linked/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/workspace-unclean/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/workspace-unclean/main.ts"
    ],
    "diags": []
   },
