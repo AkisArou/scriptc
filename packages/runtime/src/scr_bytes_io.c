@@ -12,8 +12,7 @@
 #include <string.h>
 
 static void scr_bytes_io_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* ── fs (the Buffer forms of scr_lib.c's utf8 pair) ────────────────────── */

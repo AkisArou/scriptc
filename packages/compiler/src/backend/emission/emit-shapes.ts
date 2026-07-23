@@ -246,7 +246,7 @@ export interface ClassMeta {
           `}`,
           `static ${s.struct} *${s.newFn}(void) {`,
           `  ${s.struct} *o = calloc(1, sizeof *o);`,
-          `  if (!o) { fputs("scriptc: out of memory\\n", stderr); abort(); }`,
+          `  if (!o) { scr_trap("scriptc: out of memory\\n"); }`,
           `  o->rc = 1;`,
           ...undefFieldInitC(s),
           ...(s.indexValue ? [`  o->${OVERFLOW_MEMBER} = ${overflowNewC(s)};`] : []),
@@ -494,7 +494,7 @@ export interface ClassMeta {
         ? [`  ${s.struct} *o = scr_cyc_alloc(sizeof *o, &${s.trace}, &${s.gcFree});`]
         : [
             `  ${s.struct} *o = calloc(1, sizeof *o);`,
-            `  if (!o) { fputs("scriptc: out of memory\\n", stderr); abort(); }`,
+            `  if (!o) { scr_trap("scriptc: out of memory\\n"); }`,
           ]),
       `  o->rc = 1;`,
       `  o->vt = &${mangleVtInstance(meta.def.name)}.head;`,

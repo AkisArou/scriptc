@@ -126,11 +126,25 @@ static void scr_lib_cleanup(void) {
   scr_versions_openssl_str = NULL;
 }
 
+#ifndef SCR_LIB
+/* Executable lane only: a library artifact has no argv and registers no
+ * atexit handlers (the emitted library init never calls this; keeping it out
+ * the archive's objects free of any atexit reference — the K8 ambient
+ * audit's bar). */
 void scr_lib_init(int argc, char **argv) {
   scr_lib_argc = argc;
   scr_lib_argv = argv;
   atexit(scr_lib_cleanup);
 }
+#endif /* !SCR_LIB */
+
+#ifdef SCR_LIB
+/* Library builds never call scr_lib_init (a library artifact has no argv and registers no
+ * atexit handlers); the interned process values above still intern lazily
+ * on first read, so the library reset seam releases them here instead —
+ * scr_library_reset (scr_library.c) calls this every session reset. */
+void scr_lib_session_cleanup(void) { scr_lib_cleanup(); }
+#endif
 
 /* Raw argv accessors for the island's process shim (scr_island.c): the
  * island's process.argv must match the static world's ["scriptc",
@@ -261,8 +275,7 @@ ScrStr *scr_env_get(const ScrStr *name) {
   if (need == 0) return NULL; /* absent (an empty value still needs its NUL) */
   char *buf = malloc(need);
   if (!buf) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   DWORD got = GetEnvironmentVariableA(name->data, buf, need);
   ScrStr *s = scr_str_new(buf, got);
@@ -553,8 +566,7 @@ bool scr_process_kill_named(double pid, const ScrStr *signal) {
     size_t cap = 16 + signal->len + 1;
     char *msg = malloc(cap);
     if (!msg) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     int len = snprintf(msg, cap, "Unknown signal: %s", signal->data);
     scr_throw_error_msg(SCR_ERR_TYPE, msg, (size_t)len);
@@ -567,8 +579,7 @@ bool scr_process_kill_named(double pid, const ScrStr *signal) {
 ScrStr *scr_process_cwd(void) {
   char buf[4096];
   if (!getcwd(buf, sizeof buf)) {
-    fputs("scriptc: process.cwd() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: process.cwd() failed\n");
   }
   return scr_str_new(buf, strlen(buf));
 }
@@ -612,16 +623,14 @@ bool scr_proc_stream_write(double fd, const ScrStr *data) {
 ScrStr *scr_os_homedir(void) {
   const char *home = getenv("USERPROFILE");
   if (home && home[0] != '\0') return scr_str_new(home, strlen(home));
-  fputs("scriptc: os.homedir() failed\n", stderr);
-  abort();
+  scr_trap("scriptc: os.homedir() failed\n");
 }
 
 ScrStr *scr_os_user_name(void) {
   char buf[UNLEN + 1];
   DWORD n = sizeof buf;
   if (!GetUserNameA(buf, &n) || n == 0) {
-    fputs("scriptc: os.userInfo() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.userInfo() failed\n");
   }
   return scr_str_new(buf, n - 1); /* n counts the NUL */
 }
@@ -648,8 +657,7 @@ ScrStr *scr_os_release(void) {
   RtlGetVersionFn fn =
       ntdll ? (RtlGetVersionFn)(void *)GetProcAddress(ntdll, "RtlGetVersion") : NULL;
   if (fn == NULL || fn(&info) != 0) {
-    fputs("scriptc: os.release() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.release() failed\n");
   }
   char buf[64];
   int len = snprintf(buf, sizeof buf, "%lu.%lu.%lu", (unsigned long)info.dwMajorVersion,
@@ -676,8 +684,7 @@ ScrStr *scr_os_tmpdir(void) {
   char buf[MAX_PATH + 2];
   DWORD n = GetTempPathA(sizeof buf, buf);
   if (n == 0 || n >= sizeof buf) {
-    fputs("scriptc: os.tmpdir() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.tmpdir() failed\n");
   }
   size_t len = n;
   if (len > 1 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) len--;
@@ -693,8 +700,7 @@ ScrStr *scr_os_homedir(void) {
   struct passwd *result = NULL;
   char buf[8192];
   if (getpwuid_r(getuid(), &pw, buf, sizeof buf, &result) != 0 || !result || !result->pw_dir) {
-    fputs("scriptc: os.homedir() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.homedir() failed\n");
   }
   return scr_str_new(result->pw_dir, strlen(result->pw_dir));
 }
@@ -706,8 +712,7 @@ ScrStr *scr_os_homedir(void) {
 static const struct passwd *scr_os_passwd(char *buf, size_t cap, struct passwd *pw) {
   struct passwd *result = NULL;
   if (getpwuid_r(getuid(), pw, buf, cap, &result) != 0 || !result) {
-    fputs("scriptc: os.userInfo() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.userInfo() failed\n");
   }
   return result;
 }
@@ -740,8 +745,7 @@ ScrStr *scr_os_release(void) {
   /* uname(2)'s release field — Node's uv_os_uname()-backed answer. */
   struct utsname u;
   if (uname(&u) != 0) {
-    fputs("scriptc: os.release() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.release() failed\n");
   }
   return scr_str_new(u.release, strlen(u.release));
 }
@@ -750,8 +754,7 @@ ScrStr *scr_os_type(void) {
   /* uname(2)'s sysname field ("Darwin", "Linux") — Node's os.type(). */
   struct utsname u;
   if (uname(&u) != 0) {
-    fputs("scriptc: os.type() failed\n", stderr);
-    abort();
+    scr_trap("scriptc: os.type() failed\n");
   }
   return scr_str_new(u.sysname, strlen(u.sysname));
 }
@@ -824,20 +827,20 @@ struct ScrIfaddrs {
  * stance. */
 ScrIfaddrs *scr_os_ifaddrs(void) {
   ScrIfaddrs *s = calloc(1, sizeof *s);
-  if (!s) abort();
+  if (!s) scr_trap("scriptc: out of memory\n");
   ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
                 GAA_FLAG_SKIP_DNS_SERVER;
   ULONG size = 16 * 1024;
   IP_ADAPTER_ADDRESSES *adapters = NULL;
   for (int tries = 0; tries < 4; tries++) {
     adapters = realloc(adapters, size);
-    if (!adapters) abort();
+    if (!adapters) scr_trap("scriptc: out of memory\n");
     ULONG rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, adapters, &size);
     if (rc == ERROR_SUCCESS) break;
     if (rc != ERROR_BUFFER_OVERFLOW) {
       free(adapters);
       s->rows = calloc(1, sizeof *s->rows);
-      if (!s->rows) abort();
+      if (!s->rows) scr_trap("scriptc: out of memory\n");
       return s; /* empty snapshot */
     }
   }
@@ -850,7 +853,7 @@ ScrIfaddrs *scr_os_ifaddrs(void) {
     }
   }
   s->rows = calloc(count ? count : 1, sizeof *s->rows);
-  if (!s->rows) abort();
+  if (!s->rows) scr_trap("scriptc: out of memory\n");
   for (IP_ADAPTER_ADDRESSES *a = adapters; a != NULL; a = a->Next) {
     if (a->OperStatus != IfOperStatusUp || a->FirstUnicastAddress == NULL) continue;
     char name[64] = "";
@@ -934,7 +937,7 @@ static int scr_netmask_prefix(const unsigned char *bytes, size_t len) {
 
 ScrIfaddrs *scr_os_ifaddrs(void) {
   ScrIfaddrs *s = calloc(1, sizeof *s);
-  if (!s) abort();
+  if (!s) scr_trap("scriptc: out of memory\n");
   struct ifaddrs *addrs = NULL;
   if (getifaddrs(&addrs) != 0) return s;
   size_t count = 0;
@@ -942,7 +945,7 @@ ScrIfaddrs *scr_os_ifaddrs(void) {
     if (scr_ifaddr_row_ok(ent)) count++;
   }
   s->rows = calloc(count ? count : 1, sizeof *s->rows);
-  if (!s->rows) abort();
+  if (!s->rows) scr_trap("scriptc: out of memory\n");
   for (struct ifaddrs *ent = addrs; ent != NULL; ent = ent->ifa_next) {
     if (!scr_ifaddr_row_ok(ent)) continue;
     ScrIfaddrRow *row = &s->rows[s->n++];
@@ -1419,8 +1422,7 @@ void scr_fs_throw(int e, const char *op, const ScrStr *path) {
   size_t cap = strlen(name) + strlen(text) + strlen(op) + strlen(shown) + 8;
   char *msg = malloc(cap);
   if (!msg) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   int len = snprintf(msg, cap, "%s: %s, %s '%s'", name, text, op, shown);
   /* A real Error instance (name "Error", message = Node's text) — what a
@@ -1443,16 +1445,14 @@ ScrStr *scr_fs_read_file(ScrStr *path) {
   size_t cap = 4096, len = 0;
   char *buf = malloc(cap);
   if (!buf) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   for (;;) {
     if (cap - len < 2048) {
       cap *= 2;
       char *grown = realloc(buf, cap);
       if (!grown) {
-        fputs("scriptc: out of memory\n", stderr);
-        abort();
+        scr_trap("scriptc: out of memory\n");
       }
       buf = grown;
     }
@@ -1698,8 +1698,7 @@ static void scr_fs_throw2(int e, const char *op, const ScrStr *src, const ScrStr
   size_t cap = strlen(name) + strlen(text) + strlen(op) + strlen(shown_src) + strlen(shown_dest) + 16;
   char *msg = malloc(cap);
   if (!msg) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   int len = snprintf(msg, cap, "%s: %s, %s '%s' -> '%s'", name, text, op, shown_src, shown_dest);
   scr_throw_error_msg_code(SCR_ERR_ERROR, msg, (size_t)len, name);
@@ -1856,8 +1855,7 @@ static void scr_mkdir_rec(char *path, size_t len, mode_t mode) {
 void scr_fs_mkdir_recursive(ScrStr *path) {
   char *buf = malloc(path->len + 1);
   if (!buf) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   memcpy(buf, path->data, path->len + 1); /* ScrStr data is NUL-terminated */
   scr_mkdir_rec(buf, path->len, 0777);
@@ -1869,8 +1867,7 @@ void scr_fs_mkdir_recursive(ScrStr *path) {
 void scr_fs_mkdir_recursive_mode(ScrStr *path, double mode) {
   char *buf = malloc(path->len + 1);
   if (!buf) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   memcpy(buf, path->data, path->len + 1);
   scr_mkdir_rec(buf, path->len, (mode_t)mode);
@@ -1917,8 +1914,7 @@ static void scr_rm_tree_e(const char *path, size_t len, ScrRmFail *f) {
     size_t namelen = strlen(ent->d_name);
     char *child = malloc(len + 1 + namelen + 1);
     if (!child) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     memcpy(child, path, len);
     child[len] = '/';
@@ -2021,8 +2017,7 @@ static char *scr_win_mkdtemp(char *tmpl) {
 ScrStr *scr_fs_mkdtemp(ScrStr *prefix) {
   char *tmpl = malloc(prefix->len + 7);
   if (!tmpl) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   memcpy(tmpl, prefix->data, prefix->len);
   memcpy(tmpl + prefix->len, "XXXXXX", 7);
@@ -2069,16 +2064,14 @@ static char *scr_read_fd_all(double fd, size_t *out_len) {
   size_t cap = 4096, len = 0;
   char *buf = malloc(cap);
   if (!buf) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   for (;;) {
     if (cap - len < 2048) {
       cap *= 2;
       char *grown = realloc(buf, cap);
       if (!grown) {
-        fputs("scriptc: out of memory\n", stderr);
-        abort();
+        scr_trap("scriptc: out of memory\n");
       }
       buf = grown;
     }
@@ -2286,8 +2279,7 @@ double scr_stats_mtime_ms(ScrStats *s) { return s->mtime_ms; }
 static ScrStats *scr_stats_of(const struct stat *st) {
   ScrStats *s = malloc(sizeof(ScrStats));
   if (!s) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   s->rc = 1;
   s->is_file = S_ISREG(st->st_mode);
@@ -2384,16 +2376,14 @@ ScrScandir *scr_fs_scandir(ScrStr *path) {
   }
   ScrScandir *s = malloc(sizeof *s);
   if (!s) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   s->len = 0;
   s->cap = 8;
   s->names = malloc(s->cap * sizeof *s->names);
   s->kinds = malloc(s->cap);
   if (!s->names || !s->kinds) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   const struct dirent *ent;
   while ((ent = readdir(d)) != NULL) {
@@ -2434,8 +2424,7 @@ ScrScandir *scr_fs_scandir(ScrStr *path) {
       s->names = realloc(s->names, s->cap * sizeof *s->names);
       s->kinds = realloc(s->kinds, s->cap);
       if (!s->names || !s->kinds) {
-        fputs("scriptc: out of memory\n", stderr);
-        abort();
+        scr_trap("scriptc: out of memory\n");
       }
     }
     s->names[s->len] = scr_str_new(ent->d_name, strlen(ent->d_name));
@@ -2545,8 +2534,7 @@ ScrStr *scr_crypto_random_string(double n, ScrStr *enc) {
   size_t size = (size_t)n;
   unsigned char *bytes = malloc(size ? size : 1);
   if (!bytes) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   arc4random_buf(bytes, size);
   ScrStr *out;
@@ -2554,8 +2542,7 @@ ScrStr *scr_crypto_random_string(double n, ScrStr *enc) {
     static const char hex[] = "0123456789abcdef";
     char *buf = malloc(size * 2 + 1);
     if (!buf) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     for (size_t i = 0; i < size; i++) {
       buf[i * 2] = hex[bytes[i] >> 4];
@@ -2569,8 +2556,7 @@ ScrStr *scr_crypto_random_string(double n, ScrStr *enc) {
     size_t outlen = (size + 2) / 3 * 4;
     char *buf = malloc(outlen + 1);
     if (!buf) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     size_t o = 0;
     for (size_t i = 0; i < size; i += 3) {
@@ -2909,8 +2895,7 @@ static bool scr_x509_der(const uint8_t *in, size_t n, const uint8_t **der, size_
     }
     uint8_t *out = malloc(((size_t)(stop - b) / 4 + 1) * 3 + 3);
     if (!out) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     size_t o = 0;
     unsigned acc = 0;
@@ -3126,8 +3111,7 @@ static uint32_t scr_to_uint32(double d);
 static ScrStr *scr_str_from_units(size_t n, uint32_t (*unit)(void *, size_t), void *src) {
   char *out = malloc(n * 3 + 1); /* worst case: 3 bytes per UTF-16 unit */
   if (!out) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   size_t o = 0;
   for (size_t i = 0; i < n; i++) {

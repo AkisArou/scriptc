@@ -146,8 +146,7 @@ void *scr_box_get_ref(ScrBox *b) {
   case SCR_BOX_OBJ:
     return b->obj_retain(p);
   default:
-    fputs("scriptc: internal error: box_get_ref on a scalar box\n", stderr);
-    abort();
+    scr_trap("scriptc: internal error: box_get_ref on a scalar box\n");
   }
 }
 

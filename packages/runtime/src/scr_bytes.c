@@ -17,8 +17,7 @@ long scr_bytes_live_count(void) { return scr_live_bytes; }
 #endif
 
 static void scr_bytes_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 size_t scr_bytes_elem_size(ScrBytesElem elem) {
@@ -98,10 +97,8 @@ static size_t scr_bytes_check_index(const ScrBytes *b, double i) {
   if (!(i >= 0) || i != trunc(i) || i >= (double)b->len) {
     char buf[32];
     scr_f64_to_str(i, buf);
-    fprintf(stderr,
-            "scriptc: RangeError: typed array index %s out of bounds (length %zu)\n",
-            buf, b->len);
-    abort();
+    scr_trap_fmt("scriptc: RangeError: typed array index %s out of bounds (length %zu)\n",
+                 buf, b->len);
   }
   return (size_t)i;
 }

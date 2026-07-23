@@ -327,6 +327,12 @@ export interface LowerOptions {
    * resolution walk and CJS named-import link check): the program
    * compiles to that startup crash. */
   startupCrash?: StartupCrash | null;
+  /** LIBRARY mode's reachability roots: the profile-mapped exports of the
+   * entry module. Executable builds root at the entry's top level alone
+   * (an unreferenced export dead-strips); a library's exports are called from
+   * OUTSIDE the graph, so discovery seeds them alongside the init
+   * bodies. Names are the entry file's unqualified declaration names. */
+  libRoots?: readonly string[];
 }
 
 /** The Lowerer's pass configuration (see lowerToIr). */
@@ -378,7 +384,7 @@ export function lowerToIr(
   const dynamic = options.dynamic ?? false;
   const targetPlatform = options.targetPlatform ?? process.platform;
   const startupCrash = options.startupCrash ?? null;
-  const reachable = new Lowerer(program, entry, moduleOrder, dynamic, { targetPlatform }).discover();
+  const reachable = new Lowerer(program, entry, moduleOrder, dynamic, { targetPlatform }).discover(options.libRoots);
   const emit = new Lowerer(program, entry, moduleOrder, dynamic, { reachable, targetPlatform, startupCrash });
   const result = emit.run();
   if (options.coverage !== true) return result;
@@ -1771,7 +1777,7 @@ export class Lowerer {
    * demand-driven) and lifted lambdas lower inline with their enclosing
    * body; both fire edges through the same hooks and are not units
    * themselves. */
-  discover(): Set<string> {
+  discover(extraRoots?: readonly string[]): Set<string> {
     const parts = this.splitFiles();
     this.collectProgram(parts);
     // Decorated classes analyze post-collection here too: the %init seeds
@@ -1874,6 +1880,11 @@ export class Lowerer {
       this.lowerFileInit(fp.sf, fp.topStmts, this.initNameOf.get(fp.sf)!);
       drainInstances();
     });
+    // LIBRARY mode's extra reachability roots (LowerOptions.libRoots): the
+    // profile-mapped exports are called from outside the graph, so they
+    // seed the worklist beside the init bodies. Unknown names are inert
+    // (the export-map resolution reports them as SC4002 later).
+    for (const root of extraRoots ?? []) this.onEdge?.(root);
     while (queue.length > 0) {
       // A body-level poison outside the per-statement catches (a fenced
       // constructor/method parameter default lowered by declareParams):

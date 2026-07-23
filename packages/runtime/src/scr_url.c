@@ -69,8 +69,7 @@ static void ub_init(UrlBuf *b) {
   b->len = 0;
   b->data = malloc(b->cap);
   if (!b->data) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
 }
 
@@ -79,8 +78,7 @@ static void ub_append(UrlBuf *b, const char *bytes, size_t n) {
     while (b->len + n > b->cap) b->cap *= 2;
     char *grown = realloc(b->data, b->cap);
     if (!grown) {
-      fputs("scriptc: out of memory\n", stderr);
-      abort();
+      scr_trap("scriptc: out of memory\n");
     }
     b->data = grown;
   }
@@ -182,8 +180,7 @@ static ScrStr *parse_rooted_path(const char *raw, size_t len, bool special) {
   size_t seg_starts_cap = 8, seg_count = 0;
   size_t *seg_starts = malloc(seg_starts_cap * sizeof(size_t));
   if (!seg_starts) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   size_t i = 0;
   /* One leading separator opens the first segment (rooted). */
@@ -206,7 +203,7 @@ static ScrStr *parse_rooted_path(const char *raw, size_t len, bool special) {
         if (seg_count == seg_starts_cap) {
           seg_starts_cap *= 2;
           seg_starts = realloc(seg_starts, seg_starts_cap * sizeof(size_t));
-          if (!seg_starts) abort();
+          if (!seg_starts) scr_trap("scriptc: out of memory\n");
         }
         seg_starts[seg_count++] = out.len;
       }
@@ -215,7 +212,7 @@ static ScrStr *parse_rooted_path(const char *raw, size_t len, bool special) {
         if (seg_count == seg_starts_cap) {
           seg_starts_cap *= 2;
           seg_starts = realloc(seg_starts, seg_starts_cap * sizeof(size_t));
-          if (!seg_starts) abort();
+          if (!seg_starts) scr_trap("scriptc: out of memory\n");
         }
         seg_starts[seg_count++] = out.len;
       }
@@ -224,8 +221,7 @@ static ScrStr *parse_rooted_path(const char *raw, size_t len, bool special) {
         seg_starts_cap *= 2;
         seg_starts = realloc(seg_starts, seg_starts_cap * sizeof(size_t));
         if (!seg_starts) {
-          fputs("scriptc: out of memory\n", stderr);
-          abort();
+          scr_trap("scriptc: out of memory\n");
         }
       }
       seg_starts[seg_count++] = out.len;
@@ -355,8 +351,7 @@ ScrUrl *scr_url_new(ScrStr *input) {
   while (e > b && (unsigned char)raw[e - 1] <= 0x20) e--;
   char *buf = malloc(e - b + 1);
   if (!buf) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   size_t len = 0;
   for (size_t i = b; i < e; i++) {
@@ -526,8 +521,7 @@ ScrUrl *scr_url_new(ScrStr *input) {
 
   ScrUrl *u = malloc(sizeof(ScrUrl));
   if (!u) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   u->rc = 1;
   u->scheme = scheme_str;
@@ -738,8 +732,7 @@ ScrStr *scr_url_str_to_path(ScrStr *input) {
 static ScrUrl *scr_url_new_file(ScrStr *host, ScrStr *encoded_path) {
   ScrUrl *u = malloc(sizeof(ScrUrl));
   if (!u) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   u->rc = 1;
   u->scheme = scr_str_new("file", 4);

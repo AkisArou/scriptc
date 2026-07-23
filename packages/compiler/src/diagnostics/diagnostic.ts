@@ -14,6 +14,12 @@
  *            builds it) but the selected alternate backend's tier does not
  *            include some IR construct yet (SC3001 — the LLVM backend's
  *            refusal, minted in index.ts from LlvmUnsupportedError)
+ *   SC4xxx  library-mode/profile refusals (the library-emission mode): profile
+ *            malformed (SC4001), export unresolved (SC4002), unmappable
+ *            signature (SC4003), async/generator export (SC4004), the
+ *            async_free graph requirement (SC4005), island/dynamic on the
+ *            library path (SC4006), generic export signatures (SC4007);
+ *            SC4008 reserved for ask-5 determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -555,6 +561,115 @@ export function comptimeFailedDiag(detail: string, loc: SrcLoc): ScrDiagnostic {
     code: "SC1110",
     message: `comptime evaluation failed: ${detail}`,
     loc,
+  };
+}
+
+/* ── SC4xxx: library-mode/profile refusals ─────────────────────────────────
+ * The library-emission mode's own code block (design §5.4 + the ratified
+ * SC4xxx range): neither preflight nor type rules nor backend coverage —
+ * each refusal names the profile entry involved and the fix, and SC4004/
+ * SC4005 additionally carry the profile's own teaching text when the
+ * profile supplies one (the ratification session's rider). */
+
+/** SC4001 — the profile file itself is malformed: parse errors, unknown
+ * fields at meaning-changing positions, prefix violations, duplicate
+ * symbols, bad C identifiers. Anchored at the profile file. */
+export function libProfileDiag(detail: string, profilePath: string): ScrDiagnostic {
+  return {
+    code: "SC4001",
+    message: `library profile invalid: ${detail}`,
+    loc: { file: profilePath, start: 0, end: 0 },
+  };
+}
+
+/** SC4002 — an export-map entry names something the entry module does not
+ * export as a function value. */
+export function libExportUnresolvedDiag(exportName: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC4002",
+    message: `library export '${exportName}' cannot be resolved: ${detail}`,
+    loc,
+    hint:
+      "the export map may only name function declarations exported by the profile's ONE entry module; " +
+      "a program with exports scattered across files writes a one-line facade module that re-exports them " +
+      "and points the profile's entry at the facade",
+  };
+}
+
+/** SC4003 — a mapped export's parameter or return is outside the v1
+ * marshalling classes, or does not fit the class the profile declared. */
+export function libUnmappableSignatureDiag(
+  exportName: string,
+  position: string,
+  detail: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC4003",
+    message: `library export '${exportName}': ${position} ${detail}`,
+    loc,
+    hint:
+      "v1 marshalling classes: f64/u8/u32/i32 (TS number), bool, string, bytes (Uint8Array/Buffer), and a void return; " +
+      "records and unions slot in when the contract-sidecar conversation (asks 2/3) lands — deferral, not permanent unsupport",
+  };
+}
+
+/** SC4004 — a mapped export is async or a generator: a synchronous ABI
+ * entry cannot be either. Carries the profile's teaching when supplied. */
+export function libAsyncExportDiag(
+  exportName: string,
+  kind: "async" | "generator",
+  loc: SrcLoc,
+  teaching?: string,
+): ScrDiagnostic {
+  return {
+    code: "SC4004",
+    message: `library export '${exportName}' is ${kind === "async" ? "an async function" : "a generator"} — a profile entry is a synchronous ABI symbol`,
+    loc,
+    hint:
+      "expose a synchronous facade function and map that instead" +
+      (teaching !== undefined ? ` — ${teaching}` : ""),
+  };
+}
+
+/** SC4005 — the library module graph reaches event-loop or ambient-process
+ * surface (async functions, generators, timers, sockets, signals, child
+ * processes, ...): async_free is a v1 REQUIREMENT, derived from the module
+ * graph, never observed at runtime. Carries the profile's teaching. */
+export function libAsyncSurfaceDiag(surface: string, loc: SrcLoc, teaching?: string): ScrDiagnostic {
+  return {
+    code: "SC4005",
+    message: `library mode requires an async_free module graph, and this graph reaches ${surface}`,
+    loc,
+    hint:
+      "v1 library artifacts link no event loop, install no signal handlers, and create no threads — remove the surface from " +
+      "everything the entry module reaches" +
+      (teaching !== undefined ? ` — ${teaching}` : ""),
+  };
+}
+
+/** SC4006 — island/dynamic machinery on the library path: --dynamic,
+ * --npm-static, npm imports, `any`-typed island surface. */
+export function libDynamicDiag(what: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC4006",
+    message: `${what} is not available in library mode — the island engine and embedded npm graphs are executable-lane machinery`,
+    loc,
+    hint: "library artifacts are provable only for the static tier: no engine, no hidden init, no threads",
+  };
+}
+
+/** SC4007 — a mapped export whose signature keeps type parameters: every
+ * compiled function is one concrete signature (the SC2001 monomorphization
+ * rule, re-anchored at the profile entry). */
+export function libGenericExportDiag(exportName: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC4007",
+    message: `library export '${exportName}' is generic — a profile entry needs one concrete compiled signature`,
+    loc,
+    hint:
+      "pin a concrete instantiation in the entry (or facade) module and map that: " +
+      "export const update_f64 = update<number>",
   };
 }
 

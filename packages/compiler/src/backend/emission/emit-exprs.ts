@@ -1728,7 +1728,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const value = isRefCounted(e.type) ? retainCallC(e.type, read) : read;
           E.line(`case ${i}: ${name} = ${value}; break;`);
         });
-        E.line(`default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`);
+        E.line(`default: scr_trap("scriptc: internal error: invalid union tag\\n");`);
         E.indent--;
         E.line(`}`);
         if (isRefCounted(e.type)) E.currentFrame().push({ name, type: e.type });
@@ -1821,7 +1821,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const helper = E.recordKeyGetHelper(arm.shapeId, e.type, literal !== null && !!shape.indexValue);
           E.line(`case ${i}: ${name} = ${helper}((${cType(arm).trim()})scr_union_peek(${u.name}), ${k.name}); break;`);
         });
-        E.line(`default: fputs("scriptc: internal error: invalid union tag\\n", stderr); abort();`);
+        E.line(`default: scr_trap("scriptc: internal error: invalid union tag\\n");`);
         E.indent--;
         E.line(`}`);
         if (isRefCounted(e.type)) E.currentFrame().push({ name, type: e.type });

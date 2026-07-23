@@ -652,6 +652,13 @@ export class CEmitter {
     // overflows long before memory matters.
     out.push("");
     for (const line of body) out.push(line);
+    if (this.mod.lib !== undefined) {
+      // LIBRARY mode: no main(), no scr_init/scr_lib_init, no event
+      // loop — the profile-declared external symbols instead. Everything
+      // above is unchanged (still all internal linkage).
+      this.emitLibEntries(out, globals);
+      return out.join("\n");
+    }
     const refGlobals = globals.filter((g) => isRefCounted(g.type));
     // Interned function-value closures are IMMORTAL (rc == SIZE_MAX), so
     // an own-property table Object.defineProperties hung on one would
@@ -819,6 +826,133 @@ export class CEmitter {
       ``,
     );
     return out.join("\n");
+  }
+
+  /* ── library mode ─────────────────────────────────────────────────────
+   * The program TU's ONLY external-linkage definitions: the export-map
+   * wrappers plus the mode-provided init / sink-registration / reset /
+   * collect entries, all delegating their runtime halves to scr_library.c so
+   * both backends' emitted bodies are trivially identical. The init entry
+   * IS module-graph evaluation: full deterministic reset (program globals
+   * released and zeroed — run-once guards included — then the runtime's
+   * session reset), the error-vt interval stamps verbatim from today's
+   * main, then %main, then the escaped-exception check. */
+  emitLibEntries(out: string[], globals: IrGlobal[]): void {
+    const lib = this.mod.lib!;
+    const autoReset = lib.resultResetSymbol === null;
+    out.push(``, `/* ── library-mode entries (profile: ${lib.profileName}) ── */`, ``);
+    // Session reset of PROGRAM state: release every refcounted global and
+    // zero everything (the run-once module guards included), putting the
+    // program back at the not-yet-evaluated state.
+    out.push(`static void sc_lib_release_globals(void) {`);
+    for (const g of globals) {
+      const name = mangleGlobal(g.id);
+      if (isRefCounted(g.type)) {
+        out.push(`  ${releaseCallC(g.type, name)}; ${name} = NULL; /* ${g.name} */`);
+      } else if (g.type.kind === "bool") {
+        out.push(`  ${name} = false; /* ${g.name} */`);
+      } else {
+        out.push(`  ${name} = 0; /* ${g.name} */`);
+      }
+    }
+    if (globals.length === 0) out.push(`  /* no globals */`);
+    out.push(`}`, ``);
+
+    out.push(
+      `void ${lib.initSymbol}(void) {`,
+      `  scr_library_entry(true); /* init always resets the result arena */`,
+      `  sc_lib_release_globals();`,
+      `  scr_library_reset();`,
+      ...this.errorVtStampLines(),
+      ...emitterVtStampLines(this),
+      `  ${mangleFunction(this.mod.entry)}();`,
+      `  scr_library_check_exc();`,
+      `}`,
+      ``,
+      `void ${lib.sinkRegisterSymbol}(void (*fn)(void *ctx, const uint8_t *msg, size_t msg_len, uint64_t address), void *ctx) {`,
+      `  scr_library_set_sink(fn, ctx);`,
+      `}`,
+      ``,
+    );
+    if (lib.resultResetSymbol !== null) {
+      out.push(
+        `void ${lib.resultResetSymbol}(void) {`,
+        `  scr_library_entry(false);`,
+        `  scr_library_arena_reset();`,
+        `}`,
+        ``,
+      );
+    }
+    if (lib.collectSymbol !== null) {
+      out.push(
+        `void ${lib.collectSymbol}(void) {`,
+        `  scr_library_entry(false);`,
+        `  scr_library_collect(); /* arena reset + a full cycle collection */`,
+        `}`,
+        ``,
+      );
+    }
+    for (const e of lib.exports) {
+      const params: string[] = [];
+      const args: string[] = [];
+      e.params.forEach((cls, i) => {
+        switch (cls) {
+          case "f64":
+            params.push(`double a${i}`);
+            args.push(`a${i}`);
+            break;
+          case "bool":
+            params.push(`uint8_t a${i}`);
+            args.push(`(a${i} != 0)`);
+            break;
+          case "u8":
+            params.push(`uint8_t a${i}`);
+            args.push(`(double)a${i}`);
+            break;
+          case "u32":
+            params.push(`uint32_t a${i}`);
+            args.push(`(double)a${i}`);
+            break;
+          case "i32":
+            params.push(`int32_t a${i}`);
+            args.push(`(double)a${i}`);
+            break;
+          case "string":
+            params.push(`const uint8_t *a${i}_ptr`, `size_t a${i}_len`);
+            args.push(`scr_library_str_in(a${i}_ptr, a${i}_len)`);
+            break;
+          case "bytes":
+            params.push(`const uint8_t *a${i}_ptr`, `size_t a${i}_len`);
+            args.push(`scr_library_bytes_in(a${i}_ptr, a${i}_len)`);
+            break;
+        }
+      });
+      if (e.returns === "string" || e.returns === "bytes") {
+        params.push(`const uint8_t **out`, `size_t *out_len`);
+      }
+      const retType = e.returns === "f64" ? "double" : e.returns === "bool" ? "uint8_t" : "void";
+      const call = `${mangleFunction(e.fnName)}(${args.join(", ")})`;
+      out.push(`${retType} ${e.symbol}(${params.length > 0 ? params.join(", ") : "void"}) {`);
+      out.push(`  scr_library_entry(${autoReset ? "true" : "false"});`);
+      switch (e.returns) {
+        case "void":
+          out.push(`  ${call};`, `  scr_library_check_exc();`);
+          break;
+        case "f64":
+          out.push(`  double sc_r = ${call};`, `  scr_library_check_exc();`, `  return sc_r;`);
+          break;
+        case "bool":
+          out.push(`  bool sc_r = ${call};`, `  scr_library_check_exc();`, `  return (uint8_t)(sc_r ? 1 : 0);`);
+          break;
+        case "string":
+          out.push(`  ScrStr *sc_r = ${call};`, `  scr_library_check_exc();`, `  scr_library_str_out(sc_r, out, out_len);`);
+          break;
+        case "bytes":
+          out.push(`  ScrBytes *sc_r = ${call};`, `  scr_library_check_exc();`, `  scr_library_bytes_out(sc_r, out, out_len);`);
+          break;
+      }
+      out.push(`}`, ``);
+    }
   }
 
   emitAsyncScaffolding(out: string[]): void {

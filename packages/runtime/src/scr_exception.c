@@ -13,6 +13,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef SCR_LIB
+/* The trap funnel's EXECUTABLE expansion: exactly the historical
+ * fputs/vfprintf-to-stderr + abort every trap site used to open-code — the
+ * default lane's bytes and behavior are unchanged by construction. Library
+ * builds (-DSCR_LIB) get the sink-routing definitions from scr_library.c
+ * instead; this pair compiles out there. Lives HERE (the failure-channel
+ * unit, present in every link including the runtime's own unit-test
+ * subsets) rather than in the console unit. */
+_Noreturn void scr_trap(const char *msg) {
+  fputs(msg, stderr);
+  abort();
+}
+
+_Noreturn void scr_trap_fmt(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  abort();
+}
+#endif /* !SCR_LIB */
+
 static ScrExcCell scr_main_exc; /* fiber zero (the main stack) */
 static ScrExcCell *scr_cur = &scr_main_exc;
 
@@ -60,8 +82,7 @@ void scr_exc_clear(void) { scr_exc_reset(); }
 ScrCaught *scr_exc_take(void) {
   ScrCaught *c = calloc(1, sizeof *c);
   if (!c) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   c->rc = 1;
   c->kind = scr_exc_kind;
@@ -153,6 +174,70 @@ ScrStr *scr_caught_to_string(const ScrCaught *c) {
   }
   return scr_str_new("", 0);
 }
+
+#ifdef SCR_LIB
+/* An exception that escaped user code into a generated entry wrapper: the
+ * host contract is that declared entries do not throw, so an escape is a
+ * contract-shaped failure exactly like a trap. Render the same "Uncaught
+ * ..." first line the executable epilogue prints (scr_exc_print_uncaught's
+ * arms, buffer-writing), release the payload, and route the text through
+ * the trap funnel — one failure channel at the boundary. */
+void scr_library_check_exc(void) {
+  if (!scr_exc_pending()) return;
+  static char buf[1024]; /* the message is copied out before the payload dies */
+  size_t n = 0;
+  const char prefix[] = "Uncaught ";
+  memcpy(buf, prefix, sizeof prefix - 1);
+  n = sizeof prefix - 1;
+  const size_t cap = sizeof buf - 2; /* room for '\n' + NUL */
+  switch (scr_exc_kind) {
+  case SCR_EXC_F64:
+    n += scr_f64_to_str(scr_exc_f64, buf + n);
+    break;
+  case SCR_EXC_BOOL: {
+    const char *b = scr_exc_bool ? "true" : "false";
+    size_t bl = strlen(b);
+    memcpy(buf + n, b, bl);
+    n += bl;
+    break;
+  }
+  case SCR_EXC_STR: {
+    const ScrStr *s = (const ScrStr *)scr_exc_payload;
+    size_t take = s->len > cap - n ? cap - n : s->len;
+    memcpy(buf + n, s->data, take);
+    n += take;
+    break;
+  }
+  case SCR_EXC_OBJ:
+    if (scr_error_is(scr_exc_payload)) {
+      ScrStr *s = scr_error_to_string((ScrError *)scr_exc_payload);
+      size_t take = s->len > cap - n ? cap - n : s->len;
+      memcpy(buf + n, s->data, take);
+      n += take;
+      scr_str_release(s);
+      break;
+    }
+    /* fall through: non-Error hierarchy objects render like other refs */
+  case SCR_EXC_REF: {
+    const char obj[] = "[object]";
+    memcpy(buf + n, obj, sizeof obj - 1);
+    n += sizeof obj - 1;
+    break;
+  }
+  case SCR_EXC_NONE:
+  case SCR_EXC_GENRET: { /* unreachable through the pending() gate */
+    const char none[] = "(no exception)";
+    memcpy(buf + n, none, sizeof none - 1);
+    n += sizeof none - 1;
+    break;
+  }
+  }
+  buf[n++] = '\n';
+  buf[n] = '\0';
+  scr_exc_reset(); /* the payload is released before the funnel poisons */
+  scr_trap(buf);
+}
+#endif /* SCR_LIB */
 
 void scr_throw_f64(double v) {
   scr_exc_reset();

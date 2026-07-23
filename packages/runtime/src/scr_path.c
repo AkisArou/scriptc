@@ -37,8 +37,7 @@ static void pb_init(PathBuf *b) {
   b->len = 0;
   b->data = malloc(b->cap);
   if (!b->data) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
 }
 
@@ -47,8 +46,7 @@ static void pb_reserve(PathBuf *b, size_t extra) {
   while (b->len + extra > b->cap) b->cap *= 2;
   char *grown = realloc(b->data, b->cap);
   if (!grown) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   b->data = grown;
 }
@@ -226,8 +224,7 @@ ScrStr *scr_path_join(ScrArr *parts) {
 static void scr_path_cwd(PathBuf *out) {
   char buf[4096];
   if (!getcwd(buf, sizeof buf)) {
-    fputs("scriptc: path.resolve: getcwd failed\n", stderr);
-    abort();
+    scr_trap("scriptc: path.resolve: getcwd failed\n");
   }
   pb_append(out, buf, strlen(buf));
 }
@@ -984,8 +981,7 @@ ScrStr *scr_path_win32_relative(ScrStr *from, ScrStr *to) {
   char *flow = malloc(rfrom->len ? rfrom->len : 1);
   char *tlow = malloc(rto->len ? rto->len : 1);
   if (!flow || !tlow) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   for (size_t k = 0; k < rfrom->len; k++) flow[k] = scr_path_w32_lower(rfrom->data[k]);
   for (size_t k = 0; k < rto->len; k++) tlow[k] = scr_path_w32_lower(rto->data[k]);

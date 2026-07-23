@@ -44,8 +44,7 @@ void scr_sym_release_v(void *p) { scr_sym_release(p); }
 ScrSym *scr_sym_new(ScrStr *desc) {
   ScrSym *s = malloc(sizeof(ScrSym));
   if (!s) {
-    fputs("scriptc: out of memory\n", stderr);
-    abort();
+    scr_trap("scriptc: out of memory\n");
   }
   s->rc = 1;
   s->desc = desc ? scr_str_retain(desc) : NULL;
@@ -75,7 +74,7 @@ ScrSym *scr_sym_for(ScrStr *key) {
   /* First request for this key: a fresh symbol whose description IS the
    * key (the spec's Symbol.for behavior), chained into the registry with
    * the registry's own reference. */
-  if (!g_sym_registry) atexit(scr_sym_registry_cleanup);
+  if (!g_sym_registry) scr_atexit(scr_sym_registry_cleanup);
   ScrSym *s = scr_sym_new(key);
   s->reg_key = scr_str_retain(key);
   s->reg_next = g_sym_registry;

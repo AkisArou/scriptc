@@ -13,8 +13,7 @@ long scr_arr_live_count(void) { return scr_live_arrays; }
 #endif
 
 static void scr_arr_oom(void) {
-  fputs("scriptc: out of memory\n", stderr);
-  abort();
+  scr_trap("scriptc: out of memory\n");
 }
 
 /* JS would return undefined for an OOB read and create holes for a far OOB
@@ -23,10 +22,8 @@ static void scr_arr_oom(void) {
 static void scr_arr_trap_oob(double i, size_t len) {
   char buf[32];
   scr_f64_to_str(i, buf);
-  fprintf(stderr,
-          "scriptc: RangeError: array index %s out of bounds (length %zu)\n",
-          buf, len);
-  abort();
+  scr_trap_fmt("scriptc: RangeError: array index %s out of bounds (length %zu)\n",
+               buf, len);
 }
 
 /* Validate i as an element index. limit is a->len for reads, a->len + 1 for
@@ -264,8 +261,7 @@ double scr_arr_push_ref(ScrArr *a, void *v) {
 
 static uint64_t scr_arr_pop_slot(ScrArr *a) {
   if (a->len == 0) {
-    fputs("scriptc: RangeError: pop() on an empty array\n", stderr);
-    abort();
+    scr_trap("scriptc: RangeError: pop() on an empty array\n");
   }
   return a->data[--a->len];
 }
@@ -283,8 +279,7 @@ void *scr_arr_pop_ref(ScrArr *a) { return scr_slot_to_ptr(scr_arr_pop_slot(a)); 
  * ownership moves out to the caller (no retain). */
 static uint64_t scr_arr_shift_slot(ScrArr *a) {
   if (a->len == 0) {
-    fputs("scriptc: internal error: shift() on an empty array\n", stderr);
-    abort();
+    scr_trap("scriptc: internal error: shift() on an empty array\n");
   }
   uint64_t s = a->data[0];
   a->len--;
@@ -456,8 +451,7 @@ ScrStr *scr_arr_join(ScrArr *a, ScrStr *sep) {
       case SCR_ELEM_BYTES:
       case SCR_ELEM_REF:
         /* The compiler rejects join on ref-element arrays (SC1090). */
-        fputs("scriptc: internal error: join on a ref-element array\n", stderr);
-        abort();
+        scr_trap("scriptc: internal error: join on a ref-element array\n");
     }
   }
   ScrStr *out = scr_str_new(buf, len);

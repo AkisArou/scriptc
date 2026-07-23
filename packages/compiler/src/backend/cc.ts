@@ -654,6 +654,113 @@ async function ensureTlsArchive(sanitize: boolean, driver: CcDriver): Promise<st
   return archive;
 }
 
+/* ── library mode: the static-archive artifact ────────────────────────────
+ * One `scriptc build --lib` invocation produces <name>.lib.a: the program TU
+ * object plus exactly the runtime objects the program's IR gates in, every
+ * TU compiled with -DSCR_LIB (the per-flavor discipline that keeps library
+ * objects apart from executable-lane objects — here trivially, because library
+ * builds compile fresh into the archive and never touch the object cache).
+ * The base set narrows from the executable lane's unconditional sources:
+ * scr_async.c (fibers, timers, the loop) and scr_child.c drop — the
+ * async_free refusal already guarantees nothing references them — and
+ * scr_library.c (sink, arena, reset registry, library funnel) joins. The gated
+ * units a library may reach are the pure-data ones (regex + the vendored matcher, assert,
+ * inspect, symbol, searchParams, emitter+dyn_handle, zlib); every
+ * loop-hooked or ambient unit was refused at SC4005 before emission.
+ * External-symbol contract: undefined references only to libc/libm — which
+ * is why zlib rides the VENDORED per-flavor objects here even on hosts
+ * (the executable lane's system `-lz` cannot ride inside an archive). */
+
+/** The library base: the executable lane's unconditional sources minus the
+ * fiber/loop and child-process units, plus the library-mode TU. */
+const LIB_RUNTIME_SOURCES = [
+  ...RUNTIME_SOURCES.filter((f) => f !== "scr_async.c" && f !== "scr_child.c"),
+  "scr_library.c",
+];
+
+export interface LibArchiveOptions {
+  /** The program TU (.c or .ll — clang compiles either with -c). */
+  cPath: string;
+  /** The archive to produce (<name>.lib.a). */
+  outPath: string;
+  sanitize?: boolean;
+  /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
+  regex?: boolean;
+  assert?: boolean;
+  inspect?: boolean;
+  symbol?: boolean;
+  searchParams?: boolean;
+  emitter?: boolean;
+  zlib?: boolean;
+}
+
+export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> {
+  const rtDir = runtimeSrcDir();
+  const driver = resolveCc();
+  const sanitize = opts.sanitize ?? false;
+  const regex = opts.regex ?? false;
+  const lreObjects = regex ? await ensureLreObjects(sanitize, driver) : [];
+  const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
+  const sources = [
+    ...LIB_RUNTIME_SOURCES,
+    ...(regex ? ["scr_regex.c"] : []),
+    ...(opts.assert || regex || opts.symbol ? ["scr_assert.c"] : []),
+    ...(opts.inspect ? ["scr_inspect.c"] : []),
+    ...(opts.symbol ? ["scr_symbol.c"] : []),
+    ...(opts.searchParams ? ["scr_url_params.c"] : []),
+    ...(opts.emitter ? ["scr_events_emitter.c", "scr_dyn_handle.c"] : []),
+    ...(opts.zlib ? ["scr_zlib.c"] : []),
+  ];
+  const cflags = [
+    "-std=c11",
+    ...driver.targetArgs,
+    ...(sanitize ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"] : ["-O2"]),
+    "-fno-math-errno",
+    "-Wno-deprecated-declarations",
+    "-DSCR_LIB",
+    "-I", rtDir,
+    ...(regex ? ["-I", vendorEngineDir()] : []),
+    ...(opts.zlib ? ["-I", vendorZlibDir()] : []),
+  ];
+  const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
+  const buildDir = await mkdtemp(join(tmpdir(), "scriptc-lib-"));
+  try {
+    const objects: string[] = [];
+    const compileOne = async (src: string, objName: string): Promise<void> => {
+      const obj = join(buildDir, objName);
+      const args = [
+        ...driver.argv.slice(1),
+        ...cflags,
+        ...(src.endsWith(".ll") ? ["-Wno-override-module"] : []),
+        "-c", src,
+        "-o", obj,
+      ];
+      try {
+        await execFileAsync(driver.argv[0] ?? "clang", args);
+      } catch (err) {
+        const stderr = (err as { stderr?: string }).stderr ?? String(err);
+        throw new Error(
+          `${driver.argv.join(" ")} failed compiling ${src} for the library archive.\n` +
+            `This is a scriptc bug (generated/runtime C should always compile) unless the compiler itself is missing/broken.\n\n${stderr}`,
+        );
+      }
+      objects.push(obj);
+    };
+    const stem = basename(opts.cPath).replace(/\.(c|ll)$/, "");
+    await compileOne(opts.cPath, `${stem}.program.o`);
+    const width = Math.min(4, availableParallelism());
+    for (let i = 0; i < sources.length; i += width) {
+      await Promise.all(sources.slice(i, i + width).map((f) => compileOne(join(rtDir, f), f.replace(/\.c$/, ".o"))));
+    }
+    objects.push(...lreObjects, ...zlibObjects);
+    await rm(opts.outPath, { force: true }); // `ar r` would append into a stale archive
+    await mkdir(dirname(opts.outPath), { recursive: true });
+    await execFileAsync(arArgv[0] ?? "ar", [...arArgv.slice(1), "rcs", opts.outPath, ...objects]);
+  } finally {
+    await rm(buildDir, { recursive: true, force: true });
+  }
+}
+
 /* ------------------- build cache (opt-in via SCRIPTC_CACHE_DIR) ----------------
  * Content-addressed caches that let repeat builds of unchanged programs skip
  * clang entirely — the test lanes' dominant cost. Two keyspaces under the
