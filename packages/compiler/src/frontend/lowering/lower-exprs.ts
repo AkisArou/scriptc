@@ -7504,6 +7504,167 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     );
   }
 
+/** `#name in obj` — the ergonomic brand check. In this closed world a
+   * brand is held by exactly the instances of the declaring class
+   * (subclasses included — construction always runs the declaring class's
+   * own initializers), so the test IS `obj instanceof <declaring class>`:
+   * statically decided when the receiver's class sits at/below the
+   * declarer (true) or in a disjoint subtree (false) — both folds under
+   * the instanceof purity rule — and a runtime interval test when the
+   * declarer sits strictly BELOW the receiver's static class (the
+   * narrowing use; tsc types the true branch at the class, and reads
+   * bridge through maybeNarrow's downcast exactly like instanceof). tsc
+   * confines the spelling to the declaring class's body and rejects
+   * primitive/unknown receivers, so Node's in-operator TypeError is
+   * unreachable in compilable programs. Timing residue: JS installs
+   * brands DURING construction, so a check reachable from a base
+   * constructor can observe false mid-construction where this answers
+   * true (SEMANTICS.md). */
+  function lowerPrivateIn(L: Lowerer, expr: ts.BinaryExpression, priv: ts.PrivateIdentifier, loc: SrcLoc): IrExpr {
+    const pname = priv.text;
+    // The declaring class: the nearest enclosing class declaring the name
+    // (JS scoping — an inner class's spelling shadows an outer one's).
+    let classDecl: ts.ClassLikeDeclaration | null = null;
+    let staticBrand = false;
+    for (let n: ts.Node | undefined = priv.parent; n; n = n.parent) {
+      if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) {
+        const owner = n.members.find((m) => {
+          const name = (m as { name?: ts.PropertyName }).name;
+          return name !== undefined && ts.isPrivateIdentifier(name) && name.text === pname;
+        });
+        if (owner) {
+          classDecl = n;
+          staticBrand =
+            ts.canHaveModifiers(owner) &&
+            ts.getModifiers(owner)?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) === true;
+          break;
+        }
+      }
+    }
+    // tsc rejects the spelling outside a declaring class body; defensive.
+    if (!classDecl) L.unsupported("SC1090", expr, `'${pname} in …' outside a class declaring '${pname}'`);
+    if (staticBrand) {
+      L.unsupported(
+        "SC1090",
+        expr,
+        `'${pname} in …' brand checks for private STATICS (JS brands the declaring class OBJECT, not instances — compare against the class value directly)`,
+      );
+    }
+    const info =
+      L.currentClass?.decl === classDecl
+        ? L.currentClass
+        : (() => {
+            const sym = classDecl.name ? L.checker.getSymbolAtLocation(classDecl.name) : undefined;
+            return sym ? L.classBySymbol.get(sym) : undefined;
+          })();
+    if (!info) {
+      L.unsupported(
+        "SC1090",
+        expr,
+        `'${pname} in …' where the declaring class has no lowering (see the class declaration's own diagnostic)`,
+      );
+    }
+    // A GENERIC family: JS has ONE runtime class and ONE brand for every
+    // instantiation, while these layouts mint one class per instantiation
+    // — a cross-instantiation check would answer false where Node says
+    // true, so the family fences rather than silently splitting the brand.
+    if (info.generic || info.genericInstance) {
+      L.unsupported(
+        "SC1090",
+        expr,
+        `'${pname} in …' inside a generic class (JS shares one brand across every instantiation; these layouts mint one class per instantiation)`,
+      );
+    }
+    const recv = L.lowerExpr(expr.right);
+    const declName = info.def.name;
+    // A UNION of class instances (`o: Counter | Helper` — the
+    // discriminating use): every object arm answers membership STATICALLY
+    // (at/below the declarer → true, disjoint subtree → false), so the
+    // whole test collapses to runtime TAG tests — the record-shape 'in'
+    // discrimination, brand form. An arm ABOVE the declarer answers per
+    // VALUE (its slot can hold branded and unbranded instances), and
+    // non-object arms have no brand story — both fence.
+    if (recv.type.kind === "union") {
+      const unionId = recv.type.unionId;
+      const arms = L.unions.get(unionId)?.arms ?? [];
+      const answers: { tag: number; has: boolean }[] = [];
+      let staticAnswers = arms.length > 0;
+      for (const arm of arms) {
+        const tag = L.armTag(unionId, arm);
+        if (tag < 0 || arm.kind !== "object" || L.isSubclassOf(declName, arm.className)) {
+          staticAnswers = false;
+          break;
+        }
+        answers.push({ tag, has: arm.className === declName || L.isSubclassOf(arm.className, declName) });
+      }
+      if (staticAnswers) {
+        const pureRecv = recv.kind === "varRef" || recv.kind === "recordGet" || recv.kind === "fieldGet";
+        const isTag = (tag: number, negated: boolean): IrExpr => ({
+          kind: "unionIsTag",
+          unionId,
+          tag,
+          negated,
+          value: recv,
+          type: BOOL,
+          loc,
+        });
+        const trues = answers.filter((a) => a.has);
+        if (trues.length === answers.length || trues.length === 0) {
+          const ans = trues.length !== 0;
+          if (pureRecv) return { kind: "boolLit", value: ans, type: BOOL, loc };
+          // Constant either way, receiver still evaluates once: one tag
+          // test whose branches agree (the record-'in' rule verbatim).
+          return {
+            kind: "ternary",
+            cond: isTag(answers[0]!.tag, false),
+            then: { kind: "boolLit", value: ans, type: BOOL, loc },
+            else_: { kind: "boolLit", value: ans, type: BOOL, loc },
+            type: BOOL,
+            loc,
+          };
+        }
+        if (trues.length === 1) return isTag(trues[0]!.tag, false);
+        const falses = answers.filter((a) => !a.has);
+        if (falses.length === 1) return isTag(falses[0]!.tag, true);
+        if (pureRecv) {
+          let out: IrExpr = isTag(trues[0]!.tag, false);
+          for (const t of trues.slice(1)) {
+            out = { kind: "logical", op: "||", left: out, right: isTag(t.tag, false), type: BOOL, loc };
+          }
+          return out;
+        }
+        L.unsupported(
+          "SC1090",
+          expr,
+          `statically-decided '${pname} in …' on computed receivers (bind the value to a variable first)`,
+        );
+      }
+    }
+    if (recv.type.kind !== "object") {
+      L.unsupported(
+        "SC1090",
+        expr,
+        `'${pname} in …' on '${L.fmt(recv.type)}' receivers (only class-instance receivers — and unions of classes below or beside the declarer — have a static brand answer; narrow first)`,
+      );
+    }
+    const lhsName = recv.type.className;
+    const lhsInfo = L.classes.get(lhsName);
+    if (!lhsInfo) throw new Error(`lowerer bug: unknown class ${lhsName}`);
+    if (L.isSubclassOf(declName, lhsName)) {
+      // The narrowing direction: the declarer strictly below the
+      // receiver's static class — a strict subclass relation puts both in
+      // a hierarchy, so the vtable interval test always exists.
+      return { kind: "instanceOf", value: recv, className: declName, type: BOOL, loc };
+    }
+    const value = lhsName === declName || L.isSubclassOf(lhsName, declName);
+    if (recv.kind === "varRef") return { kind: "boolLit", value, type: BOOL, loc };
+    L.unsupported(
+      "SC1090",
+      expr,
+      `statically-decided '${pname} in …' on computed operands (bind the value to a variable first)`,
+    );
+  }
+
 /** `"key" in v` — the key-presence test. Three lowered receivers:
    * process.env (getenv(3) presence — Node-exact, an empty value still
    * counts as present), and monomorphic record shapes, where the answer is
@@ -7519,6 +7680,12 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * and dyn/unknown stay fenced. Keys are literal strings — a computed key
    * over a shape would need the runtime key table. */
   export function lowerInExpression(L: Lowerer, expr: ts.BinaryExpression, loc: SrcLoc): IrExpr {
+    // `#name in obj` — the ergonomic brand check (ES2022) — resolves
+    // before any string-key machinery: the left operand is a private
+    // NAME, not a value.
+    if (ts.isPrivateIdentifier(expr.left)) {
+      return lowerPrivateIn(L, expr, expr.left, loc);
+    }
     // Compile-time-known STRING keys fold — literals, and the same
     // const/enum-literal and template folding computed property keys get
     // (foldedStringKeyOf); runtime-valued keys keep the fence.

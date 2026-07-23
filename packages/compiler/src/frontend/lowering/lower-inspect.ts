@@ -100,8 +100,10 @@ function inspectKey(name: string): string {
 function errorRenderable(info: ClassInfo): boolean {
   // The builtin classes' name/message/code live in runtime slots (the
   // ScrError prefix insp.error reads), not IR fields; only USER-declared
-  // fields are own properties the runtime rendering would miss.
-  if (!info.builtinError && info.def.fields.length > 0) return false;
+  // fields are own properties the runtime rendering would miss. #private
+  // fields are NOT own properties — Node never prints them — so they
+  // don't disqualify.
+  if (!info.builtinError && info.def.fields.some((f) => !f.name.startsWith("#"))) return false;
   return info.subclasses.every((s) => errorRenderable(s));
 }
 
@@ -206,7 +208,10 @@ function inspectSupport(L: Lowerer, t: IrType, visiting: Set<string>, out: { rec
         return null;
       }
       visiting.add(t.className);
+      // #private fields never print (Node omits them — not own
+      // properties), so their types don't gate support.
       for (const f of info.def.fields) {
+        if (f.name.startsWith("#")) continue;
         const why = inspectSupport(L, f.type, visiting, out);
         if (why !== null) return why;
       }
@@ -595,7 +600,11 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
       // IR name's module qualifier (`m0.Timer` is the frontend's spelling
       // for a class declared in a non-entry module).
       const display = info.decl?.name?.text ?? info.def.name.replace(/^%/, "");
-      if (info.def.fields.length === 0) {
+      // #private fields never render: they are not properties in any
+      // observable way — Node's inspect omits them entirely (verified),
+      // so a class whose only fields are private prints as `C {}`.
+      const visible = info.def.fields.filter((f) => !f.name.startsWith("#"));
+      if (visible.length === 0) {
         body = [ret(str(`${display} {}`, loc))];
         break;
       }
@@ -610,8 +619,8 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
       // verbatim, never quoted.
       const symNames = new Set(info.symbolFields?.values() ?? []);
       const ordered = [
-        ...info.def.fields.filter((f) => !symNames.has(f.name)),
-        ...info.def.fields.filter((f) => symNames.has(f.name)),
+        ...visible.filter((f) => !symNames.has(f.name)),
+        ...visible.filter((f) => symNames.has(f.name)),
       ];
       for (const f of ordered) {
         const key = symNames.has(f.name) ? f.name : inspectKey(f.name);

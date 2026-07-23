@@ -1,0 +1,76 @@
+private-members.ts:16:3 - error SC1090: redeclaring the private name '#x' of a base class (JS gives each class its own distinct '#x' slot; these layouts have one slot per name — rename one) is not supported yet
+
+  15 | class RedeclareSub extends RedeclareBase {
+  16 |   #x = 2;
+     |   ^~
+  17 |   own(): number {
+
+private-members.ts:21:12 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  20 | }
+  21 | const rs = new RedeclareSub();
+     |            ^~~~~~~~~~~~~~~~~~
+  22 | console.log(rs.read());
+
+private-members.ts:22:13 - error SC1090: method calls like 'rs.read' is not supported yet
+
+  21 | const rs = new RedeclareSub();
+  22 | console.log(rs.read());
+     |             ^~~~~~~~~
+  23 | 
+
+private-members.ts:32:15 - error SC1090: bound method references (call '#m' directly) are not supported yet
+
+  31 |   grab(): () => number {
+  32 |     const f = this.#m;
+     |               ^~~~~~~
+  33 |     return f;
+
+private-members.ts:44:51 - error SC1090: '#v in …' on 'unknown' receivers (only class-instance receivers — and unions of classes below or beside the declarer — have a static brand answer; narrow first) are not supported yet
+
+  43 |   static probe(o: unknown): boolean {
+  44 |     return typeof o === "object" && o !== null && #v in o;
+     |                                                   ^~~~~~~
+  45 |   }
+
+private-members.ts:56:12 - error SC1090: '#s in …' brand checks for private STATICS (JS brands the declaring class OBJECT, not instances — compare against the class value directly) is not supported yet
+
+  55 |   check(o: StaticBrand): boolean {
+  56 |     return #s in o;
+     |            ^~~~~~~
+  57 |   }
+
+private-members.ts:67:12 - error SC1090: reading the private static '#origin' through a class value (JS brands the declaring class object alone — spell the declaring class's name) is not supported yet
+
+  66 |     const K: typeof ViaValue = ViaValue;
+  67 |     return K.#origin;
+     |            ^~~~~~~~~
+  68 |   }
+
+private-members.ts:77:12 - error SC1090: '#tag in …' inside a generic class (JS shares one brand across every instantiation; these layouts mint one class per instantiation) is not supported yet (instantiating class 'GenBrand' with <number>)
+
+  76 |   same(o: GenBrand<number>): boolean {
+  77 |     return #tag in o;
+     |            ^~~~~~~~~
+  78 |   }
+
+private-members.ts:84:3 - error SC1071: async generators (async function*) are not supported yet
+
+  83 | class AsyncGen {
+  84 |   async *#pump(): AsyncGenerator<number, void, undefined> {
+     |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  85 |     yield 1;
+
+private-members.ts:91:12 - error SC1090: constructing through a class value whose class has no lowering (the class declaration itself was rejected — see its own diagnostic) is not supported yet
+
+  90 | }
+  91 | const ag = new AsyncGen();
+     |            ^~~~~~~~~~~~~~
+  92 | void ag.drain();
+
+private-members.ts:92:6 - error SC1090: method calls like 'ag.drain' is not supported yet
+
+  91 | const ag = new AsyncGen();
+  92 | void ag.drain();
+     |      ^~~~~~~~~~
+  93 | 

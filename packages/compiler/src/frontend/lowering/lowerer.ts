@@ -5351,7 +5351,7 @@ export class Lowerer {
       // unresolvable ones never collected, so they skip here too.
       const baseName = ts.isMethodDeclaration(fnLike)
         ? classMemberNameOf(this, fnLike.name)
-        : ts.isIdentifier(fnLike.name)
+        : ts.isIdentifier(fnLike.name) || ts.isPrivateIdentifier(fnLike.name)
           ? fnLike.name.text
           : null;
       if (baseName === null) continue;

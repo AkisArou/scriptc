@@ -32,8 +32,16 @@ export interface ClassInfo {
   /** OWN declared methods only — inherited lookups walk the base chain
    * (findMethodOn). An `abstract` entry is a signature with no body (and
    * no module function): it declares the vtable slot; concrete subclasses
-   * fill it (tsc guarantees every instantiable class implements). */
-  methods: Map<string, { params: ParamShape[]; ret: IrType; abstract?: true; async?: true }>;
+   * fill it (tsc guarantees every instantiable class implements).
+   * #PRIVATE members key by their spelled name ('#m', "get:#x") — no
+   * public identifier can collide, subclass redeclarations of an
+   * inherited private name are fenced at collection, and tsc confines
+   * every access site to the declaring class's body, so the base-chain
+   * walk IS lexical resolution and privates never join vtables (JS's
+   * no-dynamic-dispatch semantics by construction). A `gen` entry is a
+   * #private GENERATOR method: the body is a generator IrFunction and
+   * calls enter through its gen-spawn wrapper. */
+  methods: Map<string, { params: ParamShape[]; ret: IrType; abstract?: true; async?: true; gen?: { yieldT: IrType; nextT: IrType } }>;
   /** OWN GENERIC instance methods (own type parameters — `m<T>(x: T)`),
    * monomorphized per call site like top-level generic functions: instance
    * `n` is the module function `%C.m%n` taking `this` as param 0. They
@@ -1053,7 +1061,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       const fields = new Map<string, IrType>(base ? base.fields : []);
       const symbolFields = new Map<ts.Symbol, string>(base?.symbolFields ?? []);
       const fieldOrder: ClassInfo["fieldOrder"] = [];
-      const methods = new Map<string, { params: ParamShape[]; ret: IrType; abstract?: true; async?: true }>();
+      const methods = new Map<string, { params: ParamShape[]; ret: IrType; abstract?: true; async?: true; gen?: { yieldT: IrType; nextT: IrType } }>();
       // Own accessor declarations ("get:x"/"set:x" → node), for the
       // partial-override analysis below (diagnostics need the node).
       const accessorNodes = new Map<string, ts.AccessorDeclaration>();
@@ -1097,11 +1105,11 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           ts.isPropertyDeclaration(member)
             ? (genericFieldFnNodeOf(member) as ts.ArrowFunction | ts.FunctionExpression)
             : member;
-        if (!ts.isIdentifier(member.name)) {
+        if (!ts.isIdentifier(member.name) && !ts.isPrivateIdentifier(member.name)) {
           L.unsupported("SC1090", member, "computed generic method names");
         }
         if (fnNode.asteriskToken) L.unsupported("SC1071", member);
-        const mName = (member.name as ts.Identifier).text;
+        const mName = (member.name as ts.Identifier | ts.PrivateIdentifier).text;
         const typeParams: ts.Symbol[] = [];
         for (const tp of fnNode.typeParameters!) {
           const sym = L.checker.getSymbolAtLocation(tp.name);
@@ -1167,9 +1175,18 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // exists, so the members that would need one — accessors, and
           // initializer-less fields (undefined until someone assigns
           // them) — keep the fence, each named at its use site.
+          // #PRIVATE statics ride along under their spelled names
+          // ('#count' → the module global %g.s.C.#count, '#make' → the
+          // module function %C.static:#make): tsc confines every access
+          // to the declaring class's body, and the resolution guard in
+          // findStaticOn's callers keeps a SUBCLASS-named receiver
+          // (`D.#s` — Node's brand TypeError) from resolving up the
+          // chain. Class-VALUE receivers fence for privates (a classval
+          // slot can hold a descendant at runtime, and only the declaring
+          // class object carries the brand in JS).
           if (
             ts.isPropertyDeclaration(member) &&
-            ts.isIdentifier(member.name) &&
+            (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) &&
             member.initializer &&
             member.postfixToken?.kind !== ts.SyntaxKind.QuestionToken
           ) {
@@ -1191,7 +1208,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // wrapper), no vtable in sight — statics never dispatch.
           if (
             ts.isMethodDeclaration(member) &&
-            ts.isIdentifier(member.name) &&
+            (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) &&
             member.body &&
             member.typeParameters === undefined &&
             member.asteriskToken === undefined
@@ -1206,7 +1223,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // instantiation).
           if (
             ts.isMethodDeclaration(member) &&
-            ts.isIdentifier(member.name) &&
+            (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) &&
             member.body &&
             member.typeParameters !== undefined
           ) {
@@ -1227,8 +1244,34 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         // 7's ClassElement base carries no `name`; read it structurally
         // (every named member kind stores a PropertyName there).
         const memberName = (member as { name?: ts.PropertyName }).name;
+        // #PRIVATE members compile: their names ('#m') are unspellable by
+        // any public identifier, so they ride the ordinary fields/methods
+        // maps collision-free — with the base-chain walks doubling as
+        // LEXICAL resolution because a subclass re-declaring an inherited
+        // private NAME is fenced here (JS would give the two classes
+        // DISTINCT private slots under one spelling; one name, one slot is
+        // the static story — rename one). tsc guarantees every access site
+        // sits inside the declaring class's body, and privates never
+        // enter vtables (no redeclaration below ⇒ overrideBelow is false
+        // ⇒ every call devirtualizes), which is exactly JS's semantics:
+        // lexically bound, no dynamic dispatch, a subclass cannot
+        // override.
         if (memberName && ts.isPrivateIdentifier(memberName)) {
-          L.unsupported("SC1090", member, "#private class members");
+          const pname = memberName.text;
+          if (
+            base !== null &&
+            (base.fields.has(pname) ||
+              L.findMethodOn(base, pname) !== null ||
+              L.findMethodOn(base, `get:${pname}`) !== null ||
+              L.findMethodOn(base, `set:${pname}`) !== null ||
+              findGenericMethodOn(L, base, pname) !== null)
+          ) {
+            L.unsupported(
+              "SC1090",
+              memberName,
+              `redeclaring the private name '${pname}' of a base class (JS gives each class its own distinct '${pname}' slot; these layouts have one slot per name — rename one)`,
+            );
+          }
         }
         // The EventEmitter API surface is runtime-provided: a subclass
         // member with one of its names would shadow behavior the runtime
@@ -1306,7 +1349,12 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             // get/set pair — declare the field and accessors explicitly.
             L.unsupported("SC1090", member, "auto-accessor fields ('accessor x')");
           }
-          if (!ts.isIdentifier(member.name)) L.unsupported("SC1090", member, "computed field names");
+          // #private fields ride the ordinary field machinery — the '#'
+          // name is unspellable publicly, so the slot never collides, and
+          // enumeration surfaces (inspect) exclude it like Node.
+          if (!ts.isIdentifier(member.name) && !ts.isPrivateIdentifier(member.name)) {
+            L.unsupported("SC1090", member, "computed field names");
+          }
           // A field initialized with a GENERIC arrow/function expression
           // (`time = async <T>(label, fn) => {...}` — the Output.time
           // idiom): a generic MEMBER, not a field. No closure slot can
@@ -1491,15 +1539,28 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         } else if (ts.isMethodDeclaration(member)) {
           const mName = classMemberNameOf(L, member.name);
           if (mName === null) L.unsupported("SC1090", member, "computed method names");
-          // Generator METHODS stay fenced (virtualCall dispatch over
-          // gen-spawn wrappers has no story yet); module-level function*
-          // and object-literal *methods compile.
-          if (member.asteriskToken !== undefined) {
+          // PUBLIC generator METHODS stay fenced (virtualCall dispatch
+          // over gen-spawn wrappers has no story yet); module-level
+          // function* and object-literal *methods compile — and #PRIVATE
+          // generator methods (`*#walk()`) compile below: privates never
+          // enter vtables (a subclass redeclaration is fenced, so
+          // overrideBelow can never flip), every call is a direct call the
+          // emitter routes through the gen-spawn wrapper with `this` as
+          // param 0 — the async-method precedent, generator form.
+          if (member.asteriskToken !== undefined && !ts.isPrivateIdentifier(member.name)) {
             L.unsupported(
               "SC1071",
               member,
-              "generator methods (declare a module-level function* and call it from the method)",
+              "generator methods (a #private generator method compiles — privates never dispatch dynamically; or declare a module-level function* and call it from the method)",
             );
+          }
+          // An async #private generator (`async *#m()`) is still an async
+          // generator — the blanket SC1071 fence.
+          if (
+            member.asteriskToken !== undefined &&
+            member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+          ) {
+            L.unsupported("SC1071", member, "async generators (async function*)");
           }
           // An ABSTRACT method is a signature with no body — type-world,
           // except that it declares the vtable slot: calls through
@@ -1682,7 +1743,16 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
               `overriding ${overridden.sig.async === true ? "the async method" : "a method with an async method"} '${mName}' (async methods dispatch statically — the vtable slot machinery has no fiber-spawn story)`,
             );
           }
-          methods.set(mName, asyncMember ? { params: shapes, ret: ft.ret, async: true as const } : { params: shapes, ret: ft.ret });
+          // A #private GENERATOR method carries its channels on the sig:
+          // the body lowers as a generator IrFunction (`this` as param 0),
+          // and every call — direct by construction — enters through the
+          // emitted gen-spawn wrapper, answering the suspended generator.
+          if (member.asteriskToken !== undefined) {
+            if (ft.ret.kind !== "generator") L.badType(member.name, L.typeOf(member.name));
+            methods.set(mName, { params: shapes, ret: ft.ret, gen: { yieldT: ft.ret.yieldT, nextT: ft.ret.nextT } });
+          } else {
+            methods.set(mName, asyncMember ? { params: shapes, ret: ft.ret, async: true as const } : { params: shapes, ret: ft.ret });
+          }
           // Overrides keep the inherited ABI exactly, so only non-override
           // methods may still refine once the ctor scan runs.
           if (ft.ret.kind === "dyn" && !overridden) {
@@ -1696,7 +1766,9 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // whole-program devirtualization, vtable slots, may-throw) then
           // applies verbatim, with the get and set halves independent.
           const isGet = ts.isGetAccessor(member);
-          if (!ts.isIdentifier(member.name)) {
+          // #private accessors collect as "get:#x"/"set:#x" — the same
+          // reserved spelling, one more unspellable segment.
+          if (!ts.isIdentifier(member.name) && !ts.isPrivateIdentifier(member.name)) {
             L.unsupported("SC1090", member, "computed accessor names");
           }
           // ABSTRACT accessors are the abstract-method story with property
@@ -2798,6 +2870,17 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     if (info.classDecorators?.valueGlobalId !== undefined) return null;
     const loc = locOf(expr);
     const found = findStaticOn(L, info, expr.name.text);
+    // A #private static resolves only through the DECLARING class's own
+    // name: in JS the brand lives on that one constructor object, so
+    // `D.#s` (a subclass receiver) throws Node's TypeError instead of
+    // reaching up the chain — fenced rather than silently resolved.
+    if (found && expr.name.text.startsWith("#") && found.declarer !== info) {
+      L.unsupported(
+        "SC1090",
+        expr,
+        `reading the private static '${expr.name.text}' through the subclass '${info.def.name.replace(/^%|^%m\d+\./, "")}' (JS brands the declaring class object alone — Node throws a TypeError here; spell the declaring class's name)`,
+      );
+    }
     if (found?.field !== undefined) {
       return L.maybeNarrow(
         { kind: "varRef", localId: found.field.globalId, type: found.field.type, loc },
@@ -3148,7 +3231,25 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     throughValue: boolean,
   ): IrExpr | null {
     const loc = locOf(call);
+    // #private statics: through-a-VALUE receivers fence (a classval slot
+    // can hold a descendant at runtime and only the declaring class
+    // object carries the brand in JS), and the direct spelling resolves
+    // only on the declaring class itself — `D.#s` is Node's TypeError.
+    if (access.name.text.startsWith("#") && throughValue) {
+      L.unsupported(
+        "SC1090",
+        call,
+        `calling the private static '${access.name.text}' through a class value (JS brands the declaring class object alone — call it through the class's own name)`,
+      );
+    }
     const found = findStaticOn(L, info, access.name.text);
+    if (found && access.name.text.startsWith("#") && found.declarer !== info) {
+      L.unsupported(
+        "SC1090",
+        call,
+        `calling the private static '${access.name.text}' through the subclass '${info.def.name.replace(/^%|^%m\d+\./, "")}' (JS brands the declaring class object alone — Node throws a TypeError here; spell the declaring class's name)`,
+      );
+    }
     if (!found) {
       // GENERIC static methods: monomorphized like top-level generic
       // functions, called directly as `%C.static:m%n` — with the same
@@ -3244,6 +3345,18 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         `the static member '${member}' of class '${info.def.name.replace(/^%|^%m\d+\./, "")}' (static accessors and initializer-less static fields have no lowering, and Function members like .call/.bind/.prototype have no value form)`,
       );
     }
+    // #private statics never read through class VALUES: the slot can hold
+    // a descendant at runtime and JS brands the declaring class object
+    // alone (Node's TypeError on any other receiver). The direct
+    // class-name spelling resolved in lowerStaticFieldRead, so a private
+    // reaching here is a classval-typed binding.
+    if (member.startsWith("#")) {
+      L.unsupported(
+        "SC1090",
+        expr,
+        `reading the private static '${member}' through a class value (JS brands the declaring class object alone — spell the declaring class's name)`,
+      );
+    }
     if (staticShadowBelow(L, info, member)) {
       L.unsupported(
         "SC1090",
@@ -3274,7 +3387,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
 /** The nearest declaration of `name` at or above `info` — the method a
    * receiver of that static class runs when nothing below overrides it. */
   export function findMethodOn(L: Lowerer, info: ClassInfo | null,
-    name: string,): { declarer: ClassInfo; sig: { params: ParamShape[]; ret: IrType; abstract?: true; async?: true } } | null {
+    name: string,): { declarer: ClassInfo; sig: { params: ParamShape[]; ret: IrType; abstract?: true; async?: true; gen?: { yieldT: IrType; nextT: IrType } } } | null {
     for (let c = info; c; c = c.base) {
       const sig = c.methods.get(name);
       if (sig) return { declarer: c, sig };
@@ -3605,6 +3718,9 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
    * runtime-keyed names — the computed-member fences stay. */
   export function classMemberNameOf(L: Lowerer, name: ts.PropertyName): string | null {
     if (ts.isIdentifier(name)) return name.text;
+    // #private methods key by their spelled name ('#m') — '#' is
+    // unspellable in public identifiers, the accessor-colon precedent.
+    if (ts.isPrivateIdentifier(name)) return name.text;
     if (!ts.isComputedPropertyName(name)) return null;
     let e = name.expression;
     while (ts.isParenthesizedExpression(e)) e = e.expression;
@@ -3838,7 +3954,7 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
     fnLike: ts.MethodDeclaration | ts.AccessorDeclaration,): IrFunction | null {
     const className = info.def.name;
     const thisType: IrType = { kind: "object", className };
-    const memberName = ts.isMethodDeclaration(fnLike) ? classMemberNameOf(L, fnLike.name) : ts.isIdentifier(fnLike.name) ? fnLike.name.text : null;
+    const memberName = ts.isMethodDeclaration(fnLike) ? classMemberNameOf(L, fnLike.name) : ts.isIdentifier(fnLike.name) || ts.isPrivateIdentifier(fnLike.name) ? fnLike.name.text : null;
     if (memberName === null) return null;
     const mName = ts.isMethodDeclaration(fnLike)
       ? memberName
@@ -3854,9 +3970,20 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
     // spawn's argument pack). Dispatch is static by construction — the
     // override fence at collection keeps async methods out of vtables.
     const isAsync = sig.async === true && sig.ret.kind === "promise";
-    const bodyReturn = isAsync && sig.ret.kind === "promise" ? sig.ret.inner : sig.ret;
+    // #PRIVATE GENERATOR methods: the module function is a generator
+    // IrFunction — the body returns the TReturn channel, yields ride
+    // ctx.generator, and every call (direct by construction — privates
+    // never virtualize) enters through the emitted gen-spawn wrapper with
+    // `this` in the argument pack, answering the suspended generator.
+    const genCh = sig.gen !== undefined && sig.ret.kind === "generator" ? sig.gen : null;
+    const bodyReturn = isAsync && sig.ret.kind === "promise"
+      ? sig.ret.inner
+      : genCh !== null
+        ? L.genBodyReturnType(sig.ret)
+        : sig.ret;
     const fnCtx = newFnCtx(false, null, null, bodyReturn);
     fnCtx.isAsync = isAsync;
+    if (genCh !== null) fnCtx.generator = genCh;
     L.fnStack.push(fnCtx);
     try {
       const thisLocal = L.declareThis(thisType);
@@ -3875,6 +4002,7 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
         loc: locOf(fnLike),
       };
       if (isAsync) fn.async = true;
+      if (genCh !== null) fn.generator = genCh;
       return fn;
     } finally {
       L.fnStack.pop();
