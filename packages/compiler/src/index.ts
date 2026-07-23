@@ -5,8 +5,17 @@ import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { loadLibraryProfile, profileTeaching, type LibraryProfile } from "./library/profile.js";
+import {
+  buildSidecar,
+  canonicalModuleGraph,
+  canonicalPath,
+  compilerReleaseVersion,
+  libraryIdentityHashes,
+} from "./library/sidecar.js";
+import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
-import { moduleLibAsyncSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib, type IrLibSection, type IrModule, type IrType } from "./ir/nodes.js";
+import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib, type IrLibSection, type IrModule, type IrType } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { checkPreflight, isNodeTypesPath, loadProgram, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -39,9 +48,26 @@ export {
   LIB_RETURN_CLASSES,
   type LibraryProfile,
   type LibraryExportEntry,
+  type LibrarySidecarConfig,
   type LibParamClass,
   type LibReturnClass,
 } from "./library/profile.js";
+export {
+  abiExportSuffixes,
+  buildSidecar,
+  canonicalModuleGraph,
+  canonicalPath,
+  compilerReleaseVersion,
+  libraryIdentityHashes,
+  SIDECAR_FORMAT,
+  type SidecarDoc,
+  type SidecarBuildInput,
+  type SidecarBuildResult,
+  type TypeRef,
+  type PayloadDescriptor,
+} from "./library/sidecar.js";
+export { validateSidecar } from "./library/sidecar-validate.js";
+export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, overridesDtsPath } from "./frontend/program.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
@@ -153,6 +179,10 @@ interface Frontend {
   /** Library mode's resolution input: the entry file's exported function
    * declarations (call before dispose — it reads the ts7 AST). */
   entryExports: () => Map<string, EntryExportInfo>;
+  /** The contract sidecar's projection input: the entry file's exported
+   * type declarations, function signatures, and convention consts in
+   * declaration order (call before dispose — it reads the ts7 AST). */
+  entryContract: () => ContractFacts;
   sourceTexts: () => Map<string, string>;
   lower: (opts: LowerOptions) => LowerResult;
   /** --npm-static: each requested (or auto-detected) package's outcome —
@@ -348,6 +378,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
     preflight,
     entryText: () => finalLoad.entry.text,
     entryExports: () => entryFunctionExports(finalLoad.entry),
+    entryContract: () => entryContractFacts(finalLoad.entry),
     sourceTexts: () =>
       new Map<string, string>([finalLoad.entry, ...finalLoad.moduleOrder].map((sf) => [sf.fileName, sf.text])),
     lower: (opts) => lowerToIr(finalLoad.program, finalLoad.entry, finalLoad.moduleOrder, { ...opts, startupCrash: finalLoad.startupCrash ?? null }),
@@ -612,7 +643,10 @@ export interface CompileLibraryOptions {
 }
 
 export type CompileLibraryResult =
-  | { ok: true; archivePath: string; cPath: string; backend: "c" | "llvm"; irPath?: string }
+  /** `sidecarPath` is present exactly when the profile declares a
+   * `sidecar` section: the contract JSON written beside the archive by
+   * the same invocation (ask 2). */
+  | { ok: true; archivePath: string; cPath: string; backend: "c" | "llvm"; irPath?: string; sidecarPath?: string }
   | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
 
 /** The marshalling-class fit over IR types (design §4.2 + the ratified
@@ -734,6 +768,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   let entryText: string;
   let sourceTexts: Map<string, string>;
   let entryInfo: Map<string, EntryExportInfo>;
+  let contractFacts: ContractFacts | null;
   try {
     const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
       ok: false,
@@ -756,6 +791,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     }
     if (lowered.module === null) return fail(lowered.diagnostics);
     entryInfo = fe.entryExports();
+    contractFacts = profile.sidecar !== null ? fe.entryContract() : null;
     entryText = fe.entryText();
     sourceTexts = fe.sourceTexts();
   } finally {
@@ -777,6 +813,44 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     return fail([libAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc, profileTeaching(profile, "SC4005"))]);
   }
   mod.lib = resolved.lib;
+
+  // The ask-2 contract sidecar rides the same invocation. Identity first
+  // (schema §2's worked build_id definition over compiler version, profile
+  // bytes, and the sorted canonical module graph; source_hash per the
+  // profile's "module-graph" contract) — the u64 lands on the IR so both
+  // backends emit the identity getters from the ONE value the sidecar
+  // records (V12's coherence by construction), then the projection into
+  // the schema (declaration orders from the AST) and the V1–V14
+  // self-check before anything is written.
+  let sidecarJson: string | null = null;
+  if (profile.sidecar !== null) {
+    const rootDir = dirname(resolve(opts.profilePath));
+    const modules = canonicalModuleGraph(rootDir, sourceTexts);
+    const { buildId, sourceHash } = libraryIdentityHashes(compilerReleaseVersion(), profile.profileBytes, modules);
+    mod.lib.identity = {
+      buildIdSymbol: profile.sidecar.buildIdSymbol,
+      abiVersionSymbol: profile.sidecar.abiVersionSymbol,
+      buildId,
+      abiVersion: profile.sidecar.abiVersion,
+    };
+    const built = buildSidecar({
+      profile,
+      facts: contractFacts!,
+      compilerVersion: compilerReleaseVersion(),
+      entry: canonicalPath(rootDir, entryPath),
+      buildId,
+      sourceHash,
+      deterministic: moduleLibNondeterministicSurface(mod) === null,
+    });
+    if (!built.ok) return fail(built.diagnostics);
+    const violations = validateSidecar(built.doc);
+    if (violations.length > 0) {
+      // The projection above refuses every user-caused shape; a rule
+      // violation surviving to here is an emitter bug.
+      return fail(violations.map((v) => iceDiag(`sidecar self-check failed — ${v}`, { file: entryPath, start: 0, end: 0 })));
+    }
+    sidecarJson = built.json;
+  }
 
   const validation = validateModule(mod);
   if (validation.length > 0) return fail(validation.map((v) => iceDiag(v.message, v.loc)));
@@ -819,11 +893,24 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     emitter: moduleUsesEmitter(mod),
     zlib: moduleUsesZlib(mod),
   });
+
+  // The sidecar lands beside the compiled object, written by the same
+  // invocation (profile-declared name; the neutral default when the
+  // profile states none is <out>.contract.json).
+  let sidecarPath: string | undefined;
+  if (sidecarJson !== null) {
+    sidecarPath =
+      profile.sidecar!.path !== null
+        ? resolve(dirname(archivePath), profile.sidecar!.path)
+        : `${archivePath}.contract.json`;
+    await writeFile(sidecarPath, sidecarJson);
+  }
   return {
     ok: true,
     archivePath,
     cPath,
     backend: profile.emission,
     ...(irPath !== undefined ? { irPath } : {}),
+    ...(sidecarPath !== undefined ? { sidecarPath } : {}),
   };
 }

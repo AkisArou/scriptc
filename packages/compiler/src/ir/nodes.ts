@@ -740,6 +740,23 @@ export interface IrLibSection {
    * posture (every entry prologue resets the arena). */
   resultResetSymbol: string | null;
   exports: IrLibExport[];
+  /** The ask-2 identity getters (present exactly when the profile
+   * declares a sidecar): pure data returns emitted with NO entry
+   * prologue — exempt from the poisoned guard and every runtime touch
+   * (ratified), so a host can read them before init and after a trap. */
+  identity?: IrLibIdentity;
+}
+
+/** The profile-declared identity getters' facts, landed on the IR so both
+ * backends emit the same constants the sidecar records (V12's identity
+ * coherence is one-value-two-writes by construction). */
+export interface IrLibIdentity {
+  buildIdSymbol: string;
+  abiVersionSymbol: string;
+  /** The build_id u64 as exactly 16 lowercase hex digits (the sidecar's
+   * encoding; backends parse it back to emit the integer constant). */
+  buildId: string;
+  abiVersion: number;
 }
 
 export interface IrClassDef {
@@ -5730,6 +5747,74 @@ export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: Sr
     if (on) return { surface, loc: entryLoc };
   }
   return null;
+}
+
+/* ── the sidecar's determinism attestation ───────────────────────────────
+ * `deterministic` is true exactly when the compiled module graph reaches
+ * no ambient-nondeterminism or ambient-authority surface (random, live
+ * clock, environment, filesystem, machine identity) — a static fact of
+ * the graph, proven at compile time, never a runtime hope. Network,
+ * timers, scheduling, and child processes are already impossible here:
+ * the SC4005 async_free gate refused them before any library artifact
+ * emitted. The scan is CONSERVATIVE by design: an ambient family reached
+ * anywhere in the graph demotes the attestation even when a finer
+ * analysis might prove the specific call pure (e.g. date formatting of a
+ * stored value) — the attestation may honestly under-claim, never
+ * over-claim (schema rule V14: computed, never defaulted). */
+
+/** libCall families that demote `deterministic` (prefix match over
+ * IrLibFn spellings). process.stdout/stderr writes are deliberately NOT
+ * here: output is an effect, not a nondeterminism input, and console
+ * policy is the profile's ask-5 business. process.platform/arch and the
+ * version constants fold at compile time, so they are per-binary
+ * constants, not ambient reads. */
+const LIB_NONDETERMINISTIC_PREFIXES: readonly [string, string][] = [
+  ["math.random", "Math.random"],
+  ["crypto.random", "crypto randomness"],
+  ["date.", "the live clock (Date)"],
+  ["perf.", "the live clock (performance)"],
+  ["process.env", "environment reads"],
+  ["process.argv", "process.argv"],
+  ["process.cwd", "process.cwd"],
+  ["process.chdir", "process.chdir"],
+  ["process.pid", "process identity"],
+  ["process.getuid", "process identity"],
+  ["process.getgid", "process identity"],
+  ["process.execPath", "process identity"],
+  ["process.uptime", "the live clock (process.uptime)"],
+  ["process.availableMemory", "machine memory state"],
+  ["process.memoryUsage", "machine memory state"],
+  ["process.kill", "process authority (kill)"],
+  ["process.umask", "process authority (umask)"],
+  ["process.exit", "process authority (exit)"],
+  ["fs.", "the filesystem"],
+  ["os.", "machine/OS identity"],
+];
+
+/** First ambient-nondeterminism or ambient-authority surface the module
+ * graph reaches, or null when the graph is clean (the sidecar then
+ * attests `deterministic: true`). */
+export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
+  let found: string | null = null;
+  const visit = (v: unknown): void => {
+    if (found !== null || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (node.kind === "libCall" && typeof node.fn === "string") {
+      for (const [prefix, surface] of LIB_NONDETERMINISTIC_PREFIXES) {
+        if (node.fn.startsWith(prefix)) {
+          found = surface;
+          return;
+        }
+      }
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
 }
 
 /** The may-throw seed: libCall members that can raise. Every fs.* member
