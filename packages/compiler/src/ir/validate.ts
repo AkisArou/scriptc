@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1157,14 +1157,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     u.arms.forEach((arm, i) => {
       // The unit kinds (undefinedT/nullT) are valid arms — union membership
       // is the ONLY place they may appear; void/union/map/dyn/jsval
-      // stay out (maps have no discriminant to narrow on). A func or set
-      // arm is valid EXACTLY when every other arm is a unit (the
-      // nullable-callback shape and the defaulted-Set-param ABI: unit tag
-      // tests are their narrowing); func/set-beside-data stays out.
+      // stay out (maps have no discriminant to narrow on). Func/set arm
+      // sibling rules live in unionFuncSetArmsOk (shared with the frontend's
+      // union builders): a func arm allows unit and FUNC siblings (the
+      // nullable-callback shape, and the primitive-constructor tables where
+      // closure pointer identity per tag is the narrowing); a set arm is
+      // valid exactly when every other arm is a unit (the defaulted-Set-
+      // param ABI); func/set-beside-data stays out.
       if (arm.kind === "void" || arm.kind === "union" || arm.kind === "map" || arm.kind === "dyn" || arm.kind === "jsval" || arm.kind === "generator") {
         errors.push({ message: `union ${u.id}: arm ${i} is ${arm.kind}`, loc: noLoc });
       }
-      if ((arm.kind === "func" || arm.kind === "set") && !u.arms.every((b, j) => j === i || isUnitType(b))) {
+      if (
+        (arm.kind === "func" || arm.kind === "set") &&
+        !unionFuncSetArmsOk(u.arms)
+      ) {
         errors.push({ message: `union ${u.id}: ${arm.kind} arm ${i} beside non-unit arms`, loc: noLoc });
       }
       if (arm.kind === "record" && !recordsById.has(arm.shapeId)) {

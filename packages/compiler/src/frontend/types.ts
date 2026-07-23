@@ -532,6 +532,32 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       return boxSym.name === "Number" ? F64 : boxSym.name === "String" ? STRING : BOOL;
     }
   }
+  // The lib's PRIMITIVE-CONSTRUCTOR interfaces as TYPES (`typeof String`,
+  // a `type: StringConstructor` record field — the CLI option-table
+  // idiom): the VALUE is the interned coercion closure (lower-exprs mints
+  // one per program), so the type maps to that closure's one concrete
+  // signature — the string-coercion form `(value: string) => primitive`.
+  // String(s) is identity on strings, Number(s) the ECMA StringToNumber,
+  // Boolean(s) emptiness — the parsed-token shape every stored-constructor
+  // call feeds. Calls passing other argument types fence at their site
+  // (the func param coercion), exactly like any other typed closure slot.
+  // Provenance-gated like the boxed wrappers above: a user's own
+  // `interface StringConstructor` maps as a record.
+  {
+    const ctorSym = widened.getSymbol();
+    if (
+      ctorSym &&
+      (ctorSym.name === "StringConstructor" ||
+        ctorSym.name === "NumberConstructor" ||
+        ctorSym.name === "BooleanConstructor") &&
+      checker.declarationsOf(ctorSym).some((d) => ctx.isStdlibFile(d.getSourceFile()))
+    ) {
+      return funcOf(
+        [STRING],
+        ctorSym.name === "StringConstructor" ? STRING : ctorSym.name === "NumberConstructor" ? F64 : BOOL,
+      );
+    }
+  }
   // `symbol` and `unique symbol` (the type of `const k = Symbol(...)` —
   // getBaseTypeOfLiteralType widens unique symbols, but check both flags)
   // map to the symbol identity kind.
@@ -2081,8 +2107,12 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
             // A func arm has no narrowing test against sibling DATA arms —
             // but against pure unit companions the unit TAG tests are the
             // narrowing (cb !== null, cb ?? f, cb?.()), so the nullable-
-            // callback shape `(() => void) | null | undefined` maps.
-            (a.kind === "func" && !arms.every((b) => b === a || isUnitType(b))) ||
+            // callback shape `(() => void) | null | undefined` maps. FUNC
+            // siblings are fine too (`StringConstructor | NumberConstructor`
+            // — the option-table field): closures compare by pointer
+            // identity per tag, so `x === String` is the narrowing, and
+            // typeof answers "function" for every arm.
+            (a.kind === "func" && !arms.every((b) => b === a || b.kind === "func" || isUnitType(b))) ||
             // Promise arms follow the func rule (typeof gives no test
             // against sibling data arms): only the promise-or-absent shape
             // maps — `Promise<T> | undefined`, and `Promise<T> | void`

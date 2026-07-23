@@ -456,6 +456,23 @@ export function funcOf(params: IrType[], ret: IrType): IrType {
   return { kind: "func", params, ret };
 }
 
+/** The union FUNC/SET-arm sibling rule, shared by the frontend's union
+ * builders and the validator: a func arm is valid when every sibling is a
+ * unit (the nullable-callback shape — unit tag tests are the narrowing) or
+ * ANOTHER func arm (the primitive-constructor tables' `StringConstructor |
+ * NumberConstructor` field: closures compare by pointer identity per tag —
+ * unionEq — and `===` against a known constructor is the narrowing; typeof
+ * answers "function" for every func arm). A set arm keeps the unit-only
+ * rule (no narrowing test against data arms). Func-beside-DATA stays out:
+ * typeof could distinguish those, but no lowering exercises it yet. */
+export function unionFuncSetArmsOk(arms: IrType[]): boolean {
+  return arms.every(
+    (a, i) =>
+      (a.kind !== "func" || arms.every((b, j) => j === i || b.kind === "func" || isUnitType(b))) &&
+      (a.kind !== "set" || arms.every((b, j) => j === i || isUnitType(b))),
+  );
+}
+
 /** Canonical, injective text form of an IrType — the building block of
  * shape/union identity keys, generic-function instantiation keys, and the
  * backend's per-type helper interning (jsonStringify/dynCheck walkers).

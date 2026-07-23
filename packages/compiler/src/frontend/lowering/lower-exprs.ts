@@ -7,7 +7,7 @@
 import * as ts from "../ts7/adapter.js";
 import { dirname } from "node:path";
 import type { Lowerer } from "./lowerer.js";
-import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey } from "../../ir/nodes.js";
+import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
@@ -617,6 +617,22 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         if (L.isStdlibSymbol(sym)) {
           return { kind: "numLit", value: expr.text === "NaN" ? NaN : Infinity, type: F64, loc };
         }
+      }
+      // The primitive constructors as VALUES (`const f = String`, an
+      // option table's `type: Boolean` field, `opt.type === Number`): the
+      // interned coercion closure — one synthesized module function per
+      // constructor per program, so every reference is the SAME zero-
+      // capture closure and `===` is JS identity (the type mapping in
+      // types.ts pins the one concrete signature `(value: string) =>
+      // primitive`; direct calls `String(x)` never reach here — the call
+      // lowering intercepts them with the wider static coercions).
+      // JavaScript sources keep the identity-token path below.
+      if (
+        (expr.text === "String" || expr.text === "Number" || expr.text === "Boolean") &&
+        !isJsSourceFile(expr.getSourceFile()) &&
+        L.isStdlibSymbol(L.checker.getSymbolAtLocation(expr))
+      ) {
+        return primitiveCtorClosure(L, expr.text, loc);
       }
       // The lib fence's IDENTIFIER chokepoint: the real standard library
       // resolves names the old minimal ambient world never declared
@@ -8035,6 +8051,18 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       if (!pushAnswer(shape.indexValue)) return null;
     }
     if (joinArms.length === 0) return null;
+    // The join must be a BUILDABLE union: arm kinds the union invariants
+    // admit (no map/dyn/jsval/generator arms; func arms only beside
+    // func/unit siblings — unionFuncSetArmsOk, the validator's rule). A
+    // join mixing, say, a func answer with data answers has no union to
+    // surface as; the caller owns the fence message.
+    if (
+      joinArms.length > 1 &&
+      (!unionFuncSetArmsOk(joinArms) ||
+        joinArms.some((a) => a.kind === "map" || a.kind === "dyn" || a.kind === "jsval" || a.kind === "generator" || a.kind === "caught"))
+    ) {
+      return null;
+    }
     joinArms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
     const type: IrType =
       joinArms.length === 1 ? joinArms[0]! : { kind: "union", unionId: L.unions.intern(joinArms) };
@@ -8627,4 +8655,44 @@ function lowerStreamObjectProperty(L: Lowerer, expr: ts.PropertyAccessExpression
   const info = L.classes.get(recvT.className);
   if (!info || streamSidesOf(L, info) === null) return null;
   return lowerStreamProperty(L, expr, info);
+}
+
+/** The primitive-constructor closure (`String`/`Number`/`Boolean` as a
+ * VALUE): interns one synthesized module function per constructor —
+ * `%builtin.String` et al. — and returns the zero-capture closure over it.
+ * The body IS the string-coercion the type mapping promised
+ * (`(value: string) => primitive`): String is identity, Number the ECMA
+ * StringToNumber (num.fromString — the same runtime call the direct
+ * `Number(s)` lowering emits), Boolean the emptiness test. Interning makes
+ * every reference the SAME immortal closure, so `opt.type === String`
+ * compares like JS function identity. */
+export function primitiveCtorClosure(
+  L: Lowerer,
+  name: "String" | "Number" | "Boolean",
+  loc: SrcLoc,
+): IrExpr {
+  const ret = name === "String" ? STRING : name === "Number" ? F64 : BOOL;
+  const fnT = funcOf([STRING], ret);
+  let fnName = L.primitiveCtorFns.get(name);
+  if (!fnName) {
+    fnName = `%builtin.${name}`;
+    L.primitiveCtorFns.set(name, fnName);
+    const s: IrExpr = { kind: "varRef", localId: "v.0", type: STRING, loc };
+    const value: IrExpr =
+      name === "String"
+        ? s
+        : name === "Number"
+          ? { kind: "libCall", fn: "num.fromString", args: [s], type: F64, loc }
+          : { kind: "strEq", negated: true, left: s, right: { kind: "strLit", value: "", type: STRING, loc }, type: BOOL, loc };
+    const fn: IrFunction = {
+      name: fnName,
+      params: [{ localId: "v.0", name: "value", type: STRING }],
+      returnType: ret,
+      locals: [{ id: "v.0", name: "value", type: STRING, mutable: false }],
+      body: [{ kind: "return", value, loc }],
+      loc,
+    };
+    L.liftedFns.push(fn);
+  }
+  return { kind: "closure", fnName, captures: [], type: fnT, loc };
 }

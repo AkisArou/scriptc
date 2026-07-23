@@ -778,6 +778,12 @@ export class Lowerer {
   /** Synthetic URLSearchParams.forEach loop functions, interned per
    * callback arity/return — Map's pattern over the sp index walk. */
   readonly spHofHelpers = new Map<string, string>();
+  /** The primitive-constructor VALUES (`String`/`Number`/`Boolean` as
+   * bare identifiers — CLI option tables store and compare them): one
+   * synthesized coercion function per constructor per program, interned
+   * here by name so every reference is the SAME zero-capture closure and
+   * `opt.type === String` is JS identity (see primitiveCtorClosure). */
+  readonly primitiveCtorFns = new Map<string, string>();
   /** Optional-chain lowering state. While a chain body lowers, the guarded
    * receiver NODE reads as a chainRecv (typed by the narrowed arm) instead
    * of re-lowering, its checker type reads non-nullish (typeOf), and the
