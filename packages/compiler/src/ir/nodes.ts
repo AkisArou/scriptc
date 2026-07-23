@@ -1578,6 +1578,15 @@ export type IrLibFn =
    * ECMA-262 19.2.4 over a string argument (non-string arguments keep the
    * fence: Node would ToNumber-coerce). Borrows; never throws. */
   | "num.parseFloat"
+  /* ToNumber(string) — ECMA-262 7.1.4.1 StringToNumber (scr_string.c):
+   * trim the JS StrWhiteSpace set, empty/whitespace-only → +0, then the
+   * whole span must be one StrNumericLiteral — signed decimal (Infinity
+   * included, strtod-over-validated-span correct rounding) or unsigned
+   * 0x/0o/0b (exact value, nearest-even; signed forms are NaN) — with
+   * any trailing garbage answering NaN. Number(aString), unary + on
+   * strings, and util.format %d over strings lower here. Borrows; never
+   * throws. */
+  | "num.fromString"
   /** The static URI component codecs (scr_string.c), ECMA-262 Encode/
    * Decode with the component sets over the runtime's UTF-8 strings.
    * str.encodeUriComponent percent-encodes every byte outside the

@@ -3992,6 +3992,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2387-tonumber-argv.ts": {
+   "order": [
+    "<repo>/tests/corpus/2387-tonumber-argv.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2388-tonumber-grammar-zoo.ts": {
+   "order": [
+    "<repo>/tests/corpus/2388-tonumber-grammar-zoo.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2389-tonumber-unary-plus.ts": {
+   "order": [
+    "<repo>/tests/corpus/2389-tonumber-unary-plus.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/240-stdout-write.ts": {
    "order": [
     "<repo>/tests/corpus/240-stdout-write.ts"

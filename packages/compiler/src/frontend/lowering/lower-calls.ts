@@ -2699,9 +2699,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // The lib constructors-as-functions with STATIC conversion semantics:
     // String(x) is exactly the template-literal ToString, Boolean(x) is
     // exactly the condition ToBoolean (union arms included), Number(x) is
-    // ToNumber for the types where it's trivial (numbers pass through,
-    // booleans become 1/0) — string parsing (full ToNumber grammar) has no
-    // static lowering and fences with a pointer at the island parsers.
+    // ToNumber where it lowers exactly: numbers pass through, booleans
+    // become 1/0, and strings run the runtime's ECMA-exact
+    // StringToNumber (num.fromString — the full StringNumericLiteral
+    // grammar, scr_string.c). Other argument types (unions included —
+    // narrow first) keep the fence.
     // Provenance-checked like setTimeout; zero-arg forms are the JS
     // constants ("", false, 0). `new String(...)` (wrapper objects) stays
     // on the SC2020 fence.
@@ -2748,11 +2750,14 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
           loc,
         };
       }
+      if (arg.type.kind === "string") {
+        return { kind: "libCall", fn: "num.fromString", args: [arg], type: F64, loc };
+      }
       L.noLowering(
         `Number of ${L.fmt(arg.type)} values`,
         argNode,
-        arg.type.kind === "string"
-          ? "the full ToNumber string grammar has no static lowering — parseInt(s, 10) compiles statically; parseFloat runs with --dynamic"
+        arg.type.kind === "union"
+          ? "numbers, booleans, and strings lower (the full ToNumber string grammar included) — narrow the union first"
           : undefined,
       );
     }

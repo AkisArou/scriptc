@@ -915,10 +915,15 @@ export function lowerFormatCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc
       case 115: // %s
         return formatSArg(L, node, 0, loc);
       case 100: {
-        // %d — Number(arg) formatted: numbers as-is, booleans 1/0;
-        // the full ToNumber string grammar has no static lowering.
+        // %d — Number(arg) formatted: numbers as-is, booleans 1/0,
+        // strings through the runtime's ECMA-exact StringToNumber
+        // (num.fromString — the same lowering Number(aString) takes).
         const value = L.lowerExpr(node);
         if (value.type.kind === "f64") return { kind: "libCall", fn: "insp.f64", args: [value], type: STRING, loc };
+        if (value.type.kind === "string") {
+          const parsed: IrExpr = { kind: "libCall", fn: "num.fromString", args: [value], type: F64, loc };
+          return { kind: "libCall", fn: "insp.f64", args: [parsed], type: STRING, loc };
+        }
         if (value.type.kind === "bool") {
           return {
             kind: "libCall",
@@ -942,7 +947,7 @@ export function lowerFormatCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc
             loc,
           };
         }
-        L.noLowering(`util.format %d of '${L.fmt(value.type)}' values`, node, "numbers and booleans lower; ToNumber over other types has no static lowering");
+        L.noLowering(`util.format %d of '${L.fmt(value.type)}' values`, node, "numbers, booleans, and strings lower; ToNumber over other types has no static lowering");
         break;
       }
       case 105: {

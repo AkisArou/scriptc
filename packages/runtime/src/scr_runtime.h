@@ -458,6 +458,16 @@ ScrStr *scr_regexp_escape(ScrStr *s);
 double scr_parse_int(ScrStr *s, double radix);
 double scr_parse_float(ScrStr *s);
 
+/* ToNumber(string) — ECMA-262 7.1.4.1 StringToNumber exactly: trim
+ * StrWhiteSpace (the JS set, line terminators included) from both ends,
+ * empty/whitespace-only → +0, then the WHOLE remaining span must be one
+ * StrNumericLiteral — a signed decimal literal ("Infinity" exact-case
+ * included, correctly rounded via strtod over the validated span) or an
+ * UNSIGNED 0x/0o/0b integer literal (exact value rounded to nearest-even;
+ * a sign on those is NaN, per grammar). Any trailing garbage → NaN.
+ * Borrows s; never throws. */
+double scr_string_to_number(ScrStr *s);
+
 /* encodeURIComponent — ECMA-262 Encode with the component unreserved set
  * (ALPHA/DIGIT/- _ . ! ~ * ' ( )): every other byte of the UTF-8 string
  * percent-encodes as uppercase %XX (the spec's per-code-point UTF-8

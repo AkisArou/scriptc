@@ -944,6 +944,94 @@ double scr_parse_float(ScrStr *s) {
   return r;
 }
 
+/* ToNumber(string) — ECMA-262 7.1.4.1 StringToNumber, exactly. The
+ * grammar (StringNumericLiteral) differs from parseFloat's in all three
+ * directions: the WHOLE trimmed span must match (trailing garbage → NaN,
+ * where parseFloat keeps the longest prefix), the non-decimal 0x/0o/0b
+ * integer literals join (UNSIGNED only — a sign on them is NaN), and the
+ * empty/whitespace-only string is +0 (parseFloat: NaN). Decimal spans
+ * convert through strtod like parseFloat (copied first — strtod's own
+ * grammar is wider — inheriting correct rounding, the JSON precedent);
+ * 0x/0o/0b digits are the exact mathematical value rounded to nearest-
+ * even via scr_digits_to_double (u64 fast path, bignum beyond 2^64 —
+ * Node-exact for giant hex, Infinity overflow included: power-of-two
+ * radixes take the exact path, never V8's approximate chunk loop). */
+double scr_string_to_number(ScrStr *s) {
+  const char *p = s->data;
+  size_t b = 0, e = s->len;
+  while (b < e) {
+    size_t adv;
+    uint32_t cp = scr_utf8_decode(p + b, &adv);
+    if (!scr_is_js_whitespace(cp)) break;
+    b += adv;
+  }
+  while (e > b) {
+    size_t cs = e - 1; /* back up to the lead byte of the last char */
+    while (cs > b && ((unsigned char)p[cs] & 0xC0) == 0x80) cs--;
+    size_t adv;
+    uint32_t cp = scr_utf8_decode(p + cs, &adv);
+    if (!scr_is_js_whitespace(cp)) break;
+    e = cs;
+  }
+  if (b == e) return 0.0; /* empty or all StrWhiteSpace */
+  p += b;
+  size_t n = e - b;
+  /* NonDecimalIntegerLiteral: 0x/0X, 0o/0O, 0b/0B — no sign admitted. */
+  if (n >= 2 && p[0] == '0' &&
+      (p[1] == 'x' || p[1] == 'X' || p[1] == 'o' || p[1] == 'O' ||
+       p[1] == 'b' || p[1] == 'B')) {
+    int radix = (p[1] == 'x' || p[1] == 'X') ? 16
+              : (p[1] == 'o' || p[1] == 'O') ? 8
+                                             : 2;
+    size_t i = 2, dig_start = 2;
+    while (i < n && scr_digit_value(p[i]) < radix) i++;
+    if (i == dig_start || i != n) return NAN; /* no digits, or garbage */
+    while (dig_start < i && p[dig_start] == '0') dig_start++;
+    if (dig_start == i) return 0.0;
+    return scr_digits_to_double(p + dig_start, i - dig_start, radix);
+  }
+  /* StrDecimalLiteral, whole-span: [+-]? (Infinity | digits [. digits*]
+   * | . digits) ([eE][+-]?digits)? — nothing before, nothing after. */
+  size_t i = 0;
+  double sign = 1.0;
+  if (p[0] == '+' || p[0] == '-') {
+    if (p[0] == '-') sign = -1.0;
+    i = 1;
+  }
+  if (n - i == 8 && memcmp(p + i, "Infinity", 8) == 0) {
+    return sign * (double)INFINITY;
+  }
+  size_t int_digits = 0, frac_digits = 0;
+  while (i < n && p[i] >= '0' && p[i] <= '9') {
+    i++;
+    int_digits++;
+  }
+  if (i < n && p[i] == '.') {
+    i++;
+    while (i < n && p[i] >= '0' && p[i] <= '9') {
+      i++;
+      frac_digits++;
+    }
+  }
+  if (int_digits == 0 && frac_digits == 0) return NAN; /* ".", "+", "e5" */
+  if (i < n && (p[i] == 'e' || p[i] == 'E')) {
+    i++;
+    if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+    size_t ed = i;
+    while (i < n && p[i] >= '0' && p[i] <= '9') i++;
+    if (i == ed) return NAN; /* "1e", "1e+" — exponent needs digits */
+  }
+  if (i != n) return NAN; /* trailing garbage ("1_000", "1.2.3", "12px") */
+  char buf[64];
+  char *tmp = n < sizeof(buf) ? buf : malloc(n + 1);
+  if (!tmp) scr_oom();
+  memcpy(tmp, p, n);
+  tmp[n] = '\0';
+  double r = strtod(tmp, NULL);
+  if (tmp != buf) free(tmp);
+  return r;
+}
+
 ScrStr *scr_f64_to_scrstr(double x) {
   char buf[32];
   size_t len = scr_f64_to_str(x, buf);

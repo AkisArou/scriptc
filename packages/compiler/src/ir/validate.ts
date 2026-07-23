@@ -195,6 +195,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "math.random": { argTypes: [], result: F64 },
   "num.parseInt": { argTypes: [STRING, F64], result: F64 },
   "num.parseFloat": { argTypes: [STRING], result: F64 },
+  "num.fromString": { argTypes: [STRING], result: F64 },
   "num.isNaN": { argTypes: [F64], result: BOOL },
   "str.encodeUriComponent": { argTypes: [STRING], result: STRING },
   // The base64 globals: the argument is a DOM value (WebIDL ToString
