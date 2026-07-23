@@ -118,6 +118,16 @@ export function workspacePackageOfPath(path: string): string | null {
   return null;
 }
 
+/** Node's relative-specifier family: './x', '../x', and the bare '.' /
+ * '..' directory forms (path resolution treats them identically —
+ * vercel's CLI imports `from '..'` for a parent directory's index).
+ * Anything else is a package, builtin, or package.json-mediated
+ * specifier. ('...' and friends are legal PACKAGE names — only the exact
+ * dot forms are relative.) */
+export function isRelativeSpecifier(spec: string): boolean {
+  return spec === "." || spec === ".." || spec.startsWith("./") || spec.startsWith("../");
+}
+
 /** Package name from a path under node_modules — the LAST node_modules
  * segment (nested installs blame the innermost package), scoped-aware:
  * ".../node_modules/@scope/pkg/dist/x.d.ts" → "@scope/pkg". Paths with no

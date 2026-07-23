@@ -20,6 +20,7 @@ import {
   resolveRelativeModule,
   resolveTypeDirective,
 } from "../../src/frontend/resolve.js";
+import { isRelativeSpecifier } from "../../src/frontend/shared.js";
 import { options5 } from "./harness.js";
 
 const repoRoot = join(import.meta.dirname, "../../../..");
@@ -96,7 +97,9 @@ test("relative and bare specifiers across the whole test tree resolve identicall
   for (const file of files) {
     for (const spec of specifiersOf(file)) {
       const reference = ts5.resolveModuleName(spec, file, OPTS, ts5.sys).resolvedModule ?? null;
-      if (spec.startsWith("./") || spec.startsWith("../")) {
+      // Bare '.' and '..' are the relative directory forms (SEMANTICS 362)
+      // — ts5 resolves them relative too, so they ride the relative arm.
+      if (isRelativeSpecifier(spec)) {
         relative++;
         const ours = resolveRelativeModule(file, spec);
         // The ONE deliberate relative-resolution delta: a PROJECT

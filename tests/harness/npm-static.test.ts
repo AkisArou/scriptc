@@ -50,15 +50,15 @@ async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
 /** Compile one pilot statically (no --dynamic — the whole point) with the
  * named packages opted in; cache-keyed over the program and the vendored
  * packages. */
-async function buildStatic(entry: string, npmStatic: string[]): Promise<string> {
+async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise<string> {
   const hash = createHash("sha256");
   const inputs = [
     entry,
-    ...globSync(join(pilotRoot, "node_modules/**/*.{js,mjs,cjs,json,d.ts}")).sort(),
+    ...globSync(join(pilotRoot, "**/node_modules/**/*.{js,mjs,cjs,json,d.ts}")).sort(),
   ];
   for (const f of inputs) hash.update(f).update(readFileSync(f));
   const key = hash
-    .update(npmStatic.join(","))
+    .update(npmStatic === "auto" ? "auto" : npmStatic.join(","))
     .update(sanitize ? "san" : "plain")
     .digest("hex")
     .slice(0, 16);
@@ -117,6 +117,26 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     ]);
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.stats.statementsFailed).toBe(0);
+  }, 120_000);
+
+  // Auto's runtime-JS probe anchors at the IMPORTING file, not the entry:
+  // shouty is installed only in inner/'s node_modules (the pnpm-monorepo
+  // shape — vercel's CLI deps live in packages/cli/node_modules while the
+  // analysis driver sits outside every package realm), so an entry-anchored
+  // probe answers "no runtime JS entry resolves" for an ordinary install.
+  test("--npm-static=auto probes runtime JS from the importing file's realm", async () => {
+    const entry = join(pilotRoot, "nested/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([{ package: "shouty", status: "static" }]);
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.stats.statementsFailed).toBe(0);
+    const binary = await buildStatic(entry, "auto");
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry]),
+      runBinary(binary, []),
+    ]);
+    expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
 
   // Auto refuses ms: it ships no own .d.ts (the declared-claim criterion),

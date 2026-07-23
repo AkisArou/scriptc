@@ -194,3 +194,20 @@ test("no-types-node: a bare project outside the repo compiles on the fallback de
   const { stdout } = await execFileAsync(result.binaryPath);
   expect(stdout).toBe("hi bare\n");
 });
+
+test("dot-parent: bare '.' and '..' imports build and run (the TS project dialect)", async () => {
+  // The vercel-CLI spelling (`from '..'` for a parent directory's index):
+  // scriptc-only — Node refuses directory imports when running raw TS as
+  // ESM, but the compiled program follows the project's own bundler-
+  // resolution dialect (the SEMANTICS.md relative-specifier note).
+  const outDir = outDirFor("dot-parent");
+  const result = await compile(join(repoRoot, "tests/coverage-fixtures/dot-parent/main.ts"), {
+    outPath: join(outDir, "main"),
+    outDir,
+    sanitize,
+  });
+  expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
+  if (!result.ok) return;
+  const { stdout } = await execFileAsync(result.binaryPath);
+  expect(stdout).toBe("parent-banner:lib-index!\n");
+});

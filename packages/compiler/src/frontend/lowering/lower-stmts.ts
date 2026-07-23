@@ -24,7 +24,7 @@ import { lowerEnumDeclaration } from "./lower-enums.js";
 import { abstractPropertyDeclOf, aliasTypeofNarrows, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
-import { canonicalBuiltinModule } from "../shared.js";
+import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
 import { probeNodeRequireRefusal } from "../npm.js";
 
 /** `const X = /* @__PURE__ *\/ makeX()` at a module's top level: every
@@ -3017,7 +3017,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       if (isCjsJsFile(sf)) {
         const spec = requireSpecOf(expr)!;
         if (
-          !spec.startsWith("./") && !spec.startsWith("../") &&
+          !isRelativeSpecifier(spec) &&
           canonicalBuiltinModule(spec) === null
         ) {
           const refusal = probeNodeRequireRefusal(sf.fileName, spec);

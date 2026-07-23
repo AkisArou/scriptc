@@ -11,7 +11,7 @@ import { checkPreflight, isNodeTypesPath, loadProgram, resolveNpmImport, type Lo
 import { npmStaticIneligibleReason, npmStaticOffenders, npmStaticPackageOfPath } from "./frontend/npm-static.js";
 import { provenanceSources } from "./frontend/provenance-registry.js";
 import { resolveBareModule } from "./frontend/resolve.js";
-import { isJsSourceFileName } from "./frontend/shared.js";
+import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 
@@ -147,21 +147,26 @@ interface Frontend {
  * Rejected candidates report their reason so the coverage output says why
  * auto skipped them. */
 function detectAutoPackages(load: LoadResult, statuses: NpmStaticStatus[]): string[] {
-  const seen = new Map<string, string>(); // package → typesFile
+  // package → the resolved types file AND the file whose import found it:
+  // the runtime-JS probe below must resolve from the SAME importing file,
+  // or a package visible only to a nested package.json realm (a pnpm
+  // monorepo's packages/*/node_modules, unreachable from the entry's own
+  // walk-up) answers "no runtime JS" for perfectly ordinary installs.
+  const seen = new Map<string, { typesFile: string; fromFile: string }>();
   for (const sf of [...load.moduleOrder, load.entry]) {
     if (sf.fileName.includes("/node_modules/")) continue;
     for (const stmt of sf.statements) {
       if (!ts7IsImportWithStringSpec(stmt)) continue;
       const spec = (stmt as { moduleSpecifier: { text: string } }).moduleSpecifier.text;
-      if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("node:") || spec.startsWith("#")) continue;
+      if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
       const npm = resolveNpmImport(sf.fileName, spec);
       if (npm === null || isNodeTypesPath(npm.typesFile)) continue;
-      if (!seen.has(npm.packageName)) seen.set(npm.packageName, npm.typesFile);
+      if (!seen.has(npm.packageName)) seen.set(npm.packageName, { typesFile: npm.typesFile, fromFile: sf.fileName });
     }
   }
   const chosen: string[] = [];
-  for (const [pkg, typesFile] of seen) {
-    const jsEntry = resolveBareModule(load.entry.fileName, pkg, "js-only");
+  for (const [pkg, { typesFile, fromFile }] of seen) {
+    const jsEntry = resolveBareModule(fromFile, pkg, "js-only");
     const reason = npmStaticIneligibleReason(
       pkg,
       typesFile,

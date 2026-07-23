@@ -127,6 +127,26 @@ test("type errors render the same code frame a build prints", () => {
   expect(out).toContain("^");
 });
 
+test("bare '.' and '..' imports are relative edges (the vercel-CLI dialect)", () => {
+  // `from '..'` / `from '.'` resolve as directory imports to the target's
+  // index module — exactly what the project's bundler-resolution checker
+  // answered — so the graph loads and everything compiles statically.
+  const out = report(fixture("dot-parent/main.ts"));
+  expect(out).toContain("(100%)");
+  expect(out).toContain("fully static");
+});
+
+test("a cycle whose top level calls a builtin with a builtin function value is admitted", () => {
+  // vercel's link.ts cluster: `promisify(fs.readFile)` at a cycle member's
+  // top level. Callee and callable argument are both dts-rooted — no user
+  // code can run in the init window — so no SC1016 and the analysis
+  // renders statement counts (the statement itself may stay a
+  // statement-LEVEL blocker; that is a different fence).
+  const out = report(fixture("cycle-inert-builtin/main.ts"));
+  expect(out).not.toContain("circular imports");
+  expect(out).toContain("statements analyzed");
+});
+
 test("every corpus program is 100% static (corpus and coverage agree)", async () => {
   // The differential corpus compiles by definition; coverage must agree.
   // `// @dynamic` programs compile under --dynamic, so analyze them that way.
