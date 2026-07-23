@@ -30,13 +30,6 @@ tuples.ts:16:7 - error SC2011: values of type '[string, ...number[]]' have no st
 
   hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)
 
-tuples.ts:21:15 - error SC1090: union-typed console.log arguments (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
-
-  20 | for (const part of pair) {
-  21 |   console.log(part);
-     |               ^~~~
-  22 | }
-
 tuples.ts:25:33 - error SC1090: spread elements in tuple literals (positions must be spelled out) are not supported yet
 
   24 | // Spread has no fixed positions inside a tuple literal.

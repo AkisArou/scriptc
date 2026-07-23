@@ -1017,7 +1017,10 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         "console.log is the supported way to write a line to stdout; " +
         "the stdout/stderr stream objects have no lowering";
     } else if (container === "console") {
-      hint = "console.log(number | string | boolean ...) is the supported console surface";
+      hint =
+        "console.log/info/debug (stdout) and console.error/warn (stderr) are the supported " +
+        "console surface (arguments render with Node's console semantics: strings verbatim, " +
+        "everything else through the static util.inspect)";
     } else if (member === "prototype") {
       hint =
         "prototype objects are not values here (method lookup is static) — call the method on an instance instead";

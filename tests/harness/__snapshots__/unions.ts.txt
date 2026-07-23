@@ -7,13 +7,6 @@ unions.ts:18:10 - error SC2003: union types must match exactly: expected 'number
 
   hint: narrow the value to a SINGLE arm first (a discriminant check, or '!== undefined'/'!== null' for unit arms); a plain arm value widens into any union that contains it, and a whole union widens into any union whose arms include the source's
 
-unions.ts:32:13 - error SC1090: union-typed console.log arguments (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
-
-  31 | console.log(both, picked === u);
-  32 | console.log(u);
-     |             ^
-  33 | 
-
 unions.ts:36:9 - error SC1090: switch on union-typed values that aren't plain reads (the tests re-read the discriminant — bind it to a const first, or switch on a discriminant field) are not supported yet
 
   35 | // a COMPUTED discriminant rides every desugared test and stays fenced.
@@ -48,20 +41,6 @@ unions.ts:69:19 - error SC1090: '== null' / '!= null' on a 'null | string | unde
   69 | const looseCall = mkNullish() == null;
      |                   ^~~~~~~~~~~~~~~~~~~
   70 | 
-
-unions.ts:84:13 - error SC1090: union-typed console.log arguments (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
-
-  83 | }
-  84 | console.log(subUnionDefault(1));
-     |             ^~~~~~~~~~~~~~~~~~
-  85 | 
-
-unions.ts:91:13 - error SC1090: union-typed console.log arguments (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
-
-  90 | }
-  91 | console.log(mixedDefault("s"));
-     |             ^~~~~~~~~~~~~~~~~
-  92 | 
 
 unions.ts:96:1 - error SC1090: '??=' on non-variable targets (write it out: if (o.f === undefined) o.f = v) are not supported yet
 

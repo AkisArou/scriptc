@@ -17,7 +17,7 @@ These are rejected at compile time with an `SC` code, a code frame, and usually 
 **Types and shapes**
 
 - **Record shapes are exact structs.** Passing `{a, b}` where `{a}` is expected is SC2002. Where the compiler does accept a strict field-subset flow, it copies the record — see divergences below.
-- Union edges: unions used whole where a per-arm answer is needed (`console.log(u)` on a union — narrow first), union-into-union widening, function arms beside data arms.
+- Union edges: unions used whole where a per-arm answer is needed (reading `u.length` on `string | string[]` — narrow first), union-into-union widening outside the re-tag and width rules, function arms beside data arms. (Printing a whole union is fine: `console.log(u)` dispatches per arm.)
 - Watch for **tuple inference**: `Promise.all([work(1), work(2)])` infers a tuple type, and tuple edges (like `.join` on a tuple) are fenced. Type the array first:
 
 ```ts
@@ -37,6 +37,10 @@ const results = await Promise.all(jobs); // number[] — compiles
 - `any` without `--dynamic` is a compile error (SC2011) — use `unknown` and a checked cast, or opt into the engine.
 - `any` and `unknown` ride locals, parameters, and returns — never class fields, array elements, or union arms (record and tuple fields hold `unknown`).
 - Operations on `unknown` beyond the supported surface (truthiness, `typeof` narrowing, property access, `+`, `switch`, `throw`) need a checked cast first.
+
+**Type surface**
+
+scriptc typechecks your program in its own type world: the standard `es2025` lib plus its own ambient declarations. In enumerated places those declarations are deliberately different from stock lib or `@types/node`, typed as what actually compiles — `JSON.parse` returns `unknown` (not `any`), `pop()` returns `T` (not `T | undefined`), the Promise executor's reject reason is pinned to `Error`. So "programs that typecheck" means scriptc's type world, and a program clean under its own `tsc` can still be redirected here — but never with a bare type error it can't reproduce: the tightened declarations get a second-chance preflight (a program clean in the project's own type world passes, and the affected sites meet per-site diagnostics with rewrite hints instead), and where the shipped fallback declarations lack a lowering for a stock member (`console.table`, `console.time`, ...), the member is declared anyway so the call lands on SC2020 naming the supported alternative. `console.log`/`info`/`debug`/`error`/`warn` themselves take `unknown` arguments and render with Node's console semantics — strings verbatim, everything else through the static `util.inspect`.
 
 Run `scriptc build` on a file to get the full, current list for that program — the compiler is always more up to date than this page.
 

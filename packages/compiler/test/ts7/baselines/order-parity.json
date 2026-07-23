@@ -4303,6 +4303,36 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2440-console-inspect-args.ts": {
+   "order": [
+    "<repo>/tests/corpus/2440-console-inspect-args.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2441-console-process-argv.ts": {
+   "order": [
+    "<repo>/tests/corpus/2441-console-process-argv.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2442-union-literal-arm-widening.ts": {
+   "order": [
+    "<repo>/tests/corpus/2442-union-literal-arm-widening.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2443-union-literal-shadow-narrowing.ts": {
+   "order": [
+    "<repo>/tests/corpus/2443-union-literal-shadow-narrowing.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2444-union-literal-reducer-spread.ts": {
+   "order": [
+    "<repo>/tests/corpus/2444-union-literal-reducer-spread.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2445-math-minmax-nary.ts": {
    "order": [
     "<repo>/tests/corpus/2445-math-minmax-nary.ts"
@@ -6246,17 +6276,7 @@
    "order": [
     "<repo>/tests/diagnostics/utility-types.ts"
    ],
-   "diags": [
-    {
-     "code": "SC0001",
-     "message": "Argument of type '{ [s: symbol]: string; }' is not assignable to parameter of type 'string | number | boolean'.",
-     "loc": {
-      "file": "<repo>/tests/diagnostics/utility-types.ts",
-      "start": 950,
-      "end": 958
-     }
-    }
-   ]
+   "diags": []
   },
   "<repo>/tests/diagnostics/var-fences.ts": {
    "order": [
