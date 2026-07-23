@@ -17,6 +17,11 @@ export function npmCases(fixturesRoot: string): NpmCase[] {
   return [
     ...globSync(join(fixturesRoot, "npm/cases/*/main.ts"))
       .sort()
+      // 2465-2469 are the --npm-static bundler-emitted-CJS cases
+      // (npm-static.test.ts drives them with the opt-in): their consumers
+      // import lexer-visible names the shipped .d.ts never declares, so
+      // the flagless island lane cannot even typecheck them by design.
+      .filter((entry) => !/\/246[5-9]-[^/]+\/main\.ts$/.test(entry))
       .map((entry) => ({ name: entry.split("/").at(-2)!, entry })),
     {
       // THE acceptance test: a calculator CLI on the real commander package
