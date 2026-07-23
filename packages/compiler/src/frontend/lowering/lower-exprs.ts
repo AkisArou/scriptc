@@ -7224,7 +7224,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     if (!ts.isIdentifier(recv) || recv.text !== "exports") return null;
     const sf = expr.getSourceFile();
     if (!isJsSourceFile(sf) || isNodeEsmFile(sf)) return null;
-    if (L.resolveLocal(recv) || L.globalOf(recv)) return null; // a user binding shadows
+    if (L.peekLocal(recv) || L.globalOf(recv)) return null; // a user binding shadows
     // Write position is the export-assignment machinery's territory.
     if (ts.isBinaryExpression(expr.parent) && expr.parent.left === expr &&
         expr.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {

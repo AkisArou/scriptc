@@ -3158,7 +3158,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // closure object, plain C call). Generic functions route through
     // monomorphization (the call targets a per-instantiation instance).
     if (ts.isIdentifier(expr.expression) && !L.isSelfReference(expr.expression)) {
-      if (L.isTopLevelFnSymbol(expr.expression) && !L.resolveLocal(expr.expression)) {
+      if (L.isTopLevelFnSymbol(expr.expression) && !L.peekLocal(expr.expression)) {
         // `import g = N.f; g()` — the alias's own source-order guards
         // (a no-op for every non-import= binding).
         fenceEarlyAliasUse(L, expr.expression, expr);
@@ -4322,7 +4322,7 @@ const inliningPredicates = new Set<ts.Symbol>();
     // Direct call of a top-level declared function — the plain-call fast
     // path with the strings array as the leading completed argument.
     if (ts.isIdentifier(expr.tag) && !L.isSelfReference(expr.tag)) {
-      if (L.isTopLevelFnSymbol(expr.tag) && !L.resolveLocal(expr.tag)) {
+      if (L.isTopLevelFnSymbol(expr.tag) && !L.peekLocal(expr.tag)) {
         fenceEarlyAliasUse(L, expr.tag, expr);
         if (L.genericFnOf(expr.tag)) {
           L.unsupported("SC1090", expr, "tagged templates with generic tag functions");

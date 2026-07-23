@@ -25,7 +25,7 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     const mapped = L.mapTypeOf(L.typeOf(node));
     if (mapped?.kind === "jsval") return true;
     if (mapped?.kind !== "promise" && ts.isIdentifier(node)) {
-      const local = L.resolveLocal(node);
+      const local = L.peekLocal(node);
       if (local?.type.kind === "jsval") return true;
       // File-scope handle bindings (a module global slotted jsval by the
       // island-pattern or unchecked-overload rules) take the same rule as

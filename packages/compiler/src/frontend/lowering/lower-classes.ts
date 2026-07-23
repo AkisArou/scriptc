@@ -4697,7 +4697,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
           (isModuleExportsAccess(expr.expression.expression) ||
             (ts.isIdentifier(expr.expression.expression) &&
               expr.expression.expression.text === "exports" &&
-              !L.resolveLocal(expr.expression.expression) &&
+              !L.peekLocal(expr.expression.expression) &&
               !L.globalOf(expr.expression.expression)))) ||
           L.cjsLocalModuleBindingOf(expr.expression.expression))
       ) {
