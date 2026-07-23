@@ -26,12 +26,14 @@ class-decorators.ts:32:3 - error SC1090: accessor decorators (the standard conte
      |   ^~~~~
   33 |   get g(): number {
 
-class-decorators.ts:40:33 - error SC2001: values of type 'ClassDecoratorContext<abstract new (...args: any) => any>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+class-decorators.ts:40:33 - error SC2020: 'ClassDecoratorContext<abstract new (...args: any) => any>' is part of the standard library types but has no scriptc lowering yet
 
   39 | // lowering — single-parameter class decorators compile.
   40 | function withCtx(t: typeof Ctx, context: ClassDecoratorContext): void {}
      |                                 ^~~~~~~
   41 | @withCtx
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 class-decorators.ts:41:1 - error SC1090: class decorators that take the standard 'context' parameter (its object — addInitializer, metadata — has no static lowering; single-parameter decorators compile) is not supported yet
 

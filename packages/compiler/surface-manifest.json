@@ -201,7 +201,7 @@
     {
       "id": "diagnostic.sc2001",
       "kind": "diagnostic-fence",
-      "name": "values of types outside the compilable set",
+      "name": "values of types outside the compilable set (bigint and symbol primitives, constructor objects, and library-derived or unresolved generic shapes)",
       "status": "unsupported",
       "code": "SC2001"
     },
@@ -225,6 +225,41 @@
       "name": "uses of a binding whose declaration did not compile (cascade marker)",
       "status": "unsupported",
       "code": "SC2004"
+    },
+    {
+      "id": "diagnostic.sc2005",
+      "kind": "diagnostic-fence",
+      "name": "values whose type keeps a generic call signature (a compiled function is one concrete signature)",
+      "status": "unsupported",
+      "code": "SC2005"
+    },
+    {
+      "id": "diagnostic.sc2006",
+      "kind": "diagnostic-fence",
+      "name": "index-signature object types outside the supported shape",
+      "status": "unsupported",
+      "code": "SC2006"
+    },
+    {
+      "id": "diagnostic.sc2007",
+      "kind": "diagnostic-fence",
+      "name": "values of overloaded function type (a compiled function value is one signature)",
+      "status": "unsupported",
+      "code": "SC2007"
+    },
+    {
+      "id": "diagnostic.sc2008",
+      "kind": "diagnostic-fence",
+      "name": "intersection types with no resolved lowering",
+      "status": "unsupported",
+      "code": "SC2008"
+    },
+    {
+      "id": "diagnostic.sc2009",
+      "kind": "diagnostic-fence",
+      "name": "supported container and function shapes over a component type outside its slot",
+      "status": "unsupported",
+      "code": "SC2009"
     },
     {
       "id": "diagnostic.sc2010",

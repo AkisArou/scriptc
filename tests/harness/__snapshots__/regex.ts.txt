@@ -50,9 +50,11 @@ regex.ts:10:17 - error SC1090: regex methods as values (call 'test' directly) ar
      |                 ^~~~~~~~
   11 | const maybe: RegExp | undefined = /a/;
 
-regex.ts:11:7 - error SC2001: values of type 'RegExp | undefined' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+regex.ts:11:7 - error SC2009: values of type 'RegExp | undefined' cannot be compiled: the union shape is supported, but 'RegExp' arms have no home in a compiled union yet (no runtime narrowing test exists against sibling arms)
 
   10 | const asValue = /x/.test;
   11 | const maybe: RegExp | undefined = /a/;
      |       ^~~~~
   12 | 
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')

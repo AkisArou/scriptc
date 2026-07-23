@@ -1,0 +1,35 @@
+index-signature-values.ts:6:7 - error SC2006: values of type '{ [s: symbol]: number; }' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
+
+  5 | // A symbol-keyed signature has no lowering.
+  6 | const bySymbol: { [s: symbol]: number } = {};
+    |       ^~~~~~~~
+  7 | console.log(bySymbol);
+
+  hint: string- and number-keyed index signatures over the supported value types compile directly; richer value types want Map<string, V>, and symbol keys have no lowering
+
+index-signature-values.ts:7:13 - error SC2004: uses of 'bySymbol' inherit the blocker on its declaration
+
+  6 | const bySymbol: { [s: symbol]: number } = {};
+  7 | console.log(bySymbol);
+    |             ^~~~~~~~
+  8 | 
+
+  hint: the declaration of 'bySymbol' did not compile — fix the diagnostic reported there and these sites clear with it
+
+index-signature-values.ts:10:7 - error SC2006: values of type 'Record<string, () => void>' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')
+
+   9 | // A function-valued signature is outside the value domain.
+  10 | const handlers: Record<string, () => void> = {};
+     |       ^~~~~~~~
+  11 | console.log(handlers);
+
+  hint: string- and number-keyed index signatures over the supported value types compile directly; richer value types want Map<string, V>, and symbol keys have no lowering
+
+index-signature-values.ts:11:13 - error SC2004: uses of 'handlers' inherit the blocker on its declaration
+
+  10 | const handlers: Record<string, () => void> = {};
+  11 | console.log(handlers);
+     |             ^~~~~~~~
+  12 | 
+
+  hint: the declaration of 'handlers' did not compile — fix the diagnostic reported there and these sites clear with it

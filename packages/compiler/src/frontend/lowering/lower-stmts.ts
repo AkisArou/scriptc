@@ -4540,7 +4540,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     if (iterable.type.kind !== "array") {
       // The lib types strings as iterable too, so those for-ofs typecheck;
       // only arrays, Maps, and Sets have a lowering. Named specifically —
-      // the generic SC2001 would blame the TYPE, which is itself supported.
+      // the blanket type fence would blame the TYPE, which is itself supported.
       if (iterable.type.kind === "string") {
         // JS's string iterator walks code POINTS, not units: each pass
         // yields the whole character (two UTF-16 units for astral chars,

@@ -19,10 +19,13 @@ import {
   anyOpRequiresDynamicDiag,
   blockedBindingUseDiag,
   checkerPanicDiag,
+  componentTypeDiag,
   isCheckerPanic,
   genericSignatureTypeDiag,
   indexSignatureTypeDiag,
+  intersectionTypeDiag,
   noLoweringDiag,
+  overloadedSignatureTypeDiag,
   recordShapeMismatchDiag,
   requiresDynamicApiDiag,
   requiresDynamicPackageDiag,
@@ -70,6 +73,8 @@ import {
 import {
   containsRecord,
   containsUnion,
+  describeComponentBlocker,
+  describeRecordMemberBlocker,
   formatIrType,
   ISLAND_AMBIENT_TYPES,
   isUnitOnlyTsType,
@@ -2141,6 +2146,63 @@ export class Lowerer {
     ) {
       this.pushDiag(requiresDynamicTypeDiag(this.checker.typeToString(type), locOf(node)));
       throw new PoisonError();
+    }
+    // STANDARD-LIBRARY nominal provenance, decided once: interface/class
+    // declarations in the lib's own files (Date, ArrayBuffer, WeakMap, the
+    // iterator/constructor interfaces). Such types report the SC2020 story
+    // below — the same one the index-signature-carrying lib types above
+    // tell — rather than an overload/record claim no user can act on.
+    const stdlibOwnSym = widened.getSymbol();
+    const stdlibNominal =
+      stdlibOwnSym !== undefined &&
+      this.checker.declarationsOf(stdlibOwnSym).some(
+        (d) =>
+          (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
+          this.isStdlibFile(d.getSourceFile()),
+      );
+    // OVERLOADED call signatures (SC2007) — after the generic branch, so a
+    // generic overload set keeps the monomorphization story: a value of a
+    // multi-signature type has no single compiled signature to hold.
+    if (!stdlibNominal && this.checker.getCallSignatures(widened).length > 1) {
+      this.pushDiag(overloadedSignatureTypeDiag(this.checker.typeToString(type), locOf(node)));
+      throw new PoisonError();
+    }
+    // INTERSECTIONS that resolved to no lowering (SC2008). The ones that
+    // compile never get here: member intersections intern through the
+    // record path, callable hybrids map to '%call' records, and pinned
+    // mixin instantiations resolve by chain structure.
+    if (widened.isIntersectionType()) {
+      this.pushDiag(intersectionTypeDiag(this.checker.typeToString(type), locOf(node)));
+      throw new PoisonError();
+    }
+    // SUPPORTED shapes over a component outside its slot (SC2009): the
+    // Map/Set domains, array/tuple elements, union arms, function
+    // parameters/returns. The container is not the blocker — name the
+    // component instead of reciting the supported set. Checked BEFORE the
+    // lib claim so Map/Set/Promise instantiation failures keep their
+    // component story (describeComponentBlocker always answers for those
+    // heads).
+    {
+      const detail = describeComponentBlocker(widened, this.typeCtx);
+      if (detail !== null) {
+        this.pushDiag(componentTypeDiag(this.checker.typeToString(type), detail, locOf(node)));
+        throw new PoisonError();
+      }
+    }
+    // STANDARD-LIBRARY nominal types with no lowering at all: the SC2020
+    // story, naming the type.
+    if (stdlibNominal) {
+      this.pushDiag(noLoweringDiag(this.checker.typeToString(type), locOf(node)));
+      throw new PoisonError();
+    }
+    // USER record shapes blocked by ONE member (SC2009's record arm):
+    // name the member and its type.
+    {
+      const detail = describeRecordMemberBlocker(widened, this.typeCtx);
+      if (detail !== null) {
+        this.pushDiag(componentTypeDiag(this.checker.typeToString(type), detail, locOf(node)));
+        throw new PoisonError();
+      }
     }
     this.pushDiag(unsupportedTypeDiag(this.checker.typeToString(type), locOf(node)));
     throw new PoisonError();

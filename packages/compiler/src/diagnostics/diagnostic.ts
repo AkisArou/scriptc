@@ -190,10 +190,20 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
  * (SC9001/SC9002) report problems or engine tiers, not language/stdlib
  * surface. */
 export const FENCE_CODES: Record<string, { name: string; status: "unsupported" | "dynamic-only" }> = {
-  SC2001: { name: "values of types outside the compilable set", status: "unsupported" },
+  // SC2001 is the residual type fence: the named type-shape families each
+  // carry their own code (SC2005 generic signatures, SC2006 index
+  // signatures, SC2007 overloads, SC2008 intersections, SC2009 component
+  // fences; standard-library types with no lowering report SC2020). What
+  // remains here is the remainder the name enumerates.
+  SC2001: { name: "values of types outside the compilable set (bigint and symbol primitives, constructor objects, and library-derived or unresolved generic shapes)", status: "unsupported" },
   SC2002: { name: "record width subtyping (shapes must match exactly)", status: "unsupported" },
   SC2003: { name: "union-to-union conversions outside the re-tagging rule", status: "unsupported" },
   SC2004: { name: "uses of a binding whose declaration did not compile (cascade marker)", status: "unsupported" },
+  SC2005: { name: "values whose type keeps a generic call signature (a compiled function is one concrete signature)", status: "unsupported" },
+  SC2006: { name: "index-signature object types outside the supported shape", status: "unsupported" },
+  SC2007: { name: "values of overloaded function type (a compiled function value is one signature)", status: "unsupported" },
+  SC2008: { name: "intersection types with no resolved lowering", status: "unsupported" },
+  SC2009: { name: "supported container and function shapes over a component type outside its slot", status: "unsupported" },
   SC2010: { name: "constructs that exist only in the embedded dynamic engine", status: "dynamic-only" },
   SC2011: { name: "'any'-typed values and the operations on them", status: "dynamic-only" },
   SC2012: { name: "standard-library surface that runs in the embedded dynamic engine", status: "dynamic-only" },
@@ -306,6 +316,12 @@ export function unsupportedTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnosti
       hint: "build with --dynamic to run 'any'-typed code in the embedded engine (adds ~620KB to the binary), or stay static with 'unknown' and a checked cast ('x as T')",
     };
   }
+  // The RESIDUAL type fence: the named families (generic signatures —
+  // SC2005, index signatures — SC2006, overloads — SC2007, intersections —
+  // SC2008, component fences — SC2009, standard-library types — SC2020)
+  // all speak before badType reaches for this, so what lands here is the
+  // remainder the registry entry enumerates: bigint/symbol primitives,
+  // constructor objects, and library-derived or unresolved generic shapes.
   return {
     code: "SC2001",
     message:
@@ -342,7 +358,7 @@ export function requiresDynamicTypeDiag(typeText: string, loc: SrcLoc): ScrDiagn
  * supported-types recitation. */
 export function genericSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
   return {
-    code: "SC2001",
+    code: "SC2005",
     message: `values of type '${typeText}' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)`,
     loc,
     milestone: "M2",
@@ -359,11 +375,60 @@ export function genericSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiag
  * The message points at the working alternatives. */
 export function indexSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
   return {
-    code: "SC2001",
+    code: "SC2006",
     message: `values of type '${typeText}' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')`,
     loc,
     milestone: "M2",
     hint: "string- and number-keyed index signatures over the supported value types compile directly; richer value types want Map<string, V>, and symbol keys have no lowering",
+  };
+}
+
+/** A value whose type declares TWO OR MORE call signatures (an overloaded
+ * function type: `{ (x: "a"): string; (x: "b"): number }`, the on()-style
+ * listener registries, overloaded stdlib functions stored as values): a
+ * compiled function value is exactly one signature, so a multi-signature
+ * slot has no instance to hold. CALLS of overloaded declarations resolve
+ * per call site and compile — it is the VALUE position that fences. */
+export function overloadedSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2007",
+    message: `values of type '${typeText}' cannot be compiled: the type declares multiple call signatures (overloads), and a compiled function value is always one concrete signature`,
+    loc,
+    milestone: "M2",
+    hint: "annotate the slot with the ONE signature the program actually calls (e.g. '(x: number) => string'), or wrap the overloaded function in a single-signature arrow",
+  };
+}
+
+/** An intersection type that resolved to no lowering. The intersections
+ * that DO compile never reach this: object-member intersections resolve
+ * through the record path (`A & B` interns the combined shape),
+ * function-with-properties hybrids map to `%call` records, and
+ * mixin-instantiation intersections resolve by chain structure to their
+ * pinned instantiation. What lands here is the remainder — an intersection
+ * part outside those rules, or a mixin intersection no chain pins. */
+export function intersectionTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2008",
+    message: `values of type '${typeText}' cannot be compiled: this intersection resolves to no runtime shape`,
+    loc,
+    milestone: "M2",
+    hint: "restate the intersection as a single interface or type literal with the combined members; mixin-produced intersections compile where the mixin chain pins one instantiation",
+  };
+}
+
+/** A SUPPORTED shape over a component type outside its slot: the Map/Set
+ * key-value domains, array and tuple elements, union arms, function
+ * parameters/returns, and record members. The container is not the blocker
+ * — `detail` (computed by describeComponentBlocker/
+ * describeRecordMemberBlocker in frontend/types.ts, which mirror mapType's
+ * own rules) names the component and the slot it cannot fill. */
+export function componentTypeDiag(typeText: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2009",
+    message: `values of type '${typeText}' cannot be compiled: ${detail}`,
+    loc,
+    milestone: "M2",
+    hint: "the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')",
   };
 }
 
@@ -661,7 +726,7 @@ export function libDynamicDiag(what: string, loc: SrcLoc): ScrDiagnostic {
 }
 
 /** SC4007 — a mapped export whose signature keeps type parameters: every
- * compiled function is one concrete signature (the SC2001 monomorphization
+ * compiled function is one concrete signature (the SC2005 monomorphization
  * rule, re-anchored at the profile entry). */
 export function libGenericExportDiag(exportName: string, loc: SrcLoc): ScrDiagnostic {
   return {

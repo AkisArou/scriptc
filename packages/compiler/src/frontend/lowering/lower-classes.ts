@@ -4949,8 +4949,8 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       // construct-and-set loop, pairs in array order, duplicates
       // overwrite). Other seeds — another Map, general iterables — keep
       // the fence: never silently an empty map. Unsupported key/value
-      // types get their half named specifically instead of the generic
-      // SC2001 (which fires for Map-typed slots elsewhere).
+      // types get their half named specifically instead of the component
+      // fence (SC2009, which names Map slots at value positions elsewhere).
       // `new Array<T>()` and the ELEMENTS forms (`new Array('hi', 'bye')`,
       // any argument list that is not one lone number) ARE array literals
       // — the spec's ArrayCreate + element writes. The one-NUMBER form

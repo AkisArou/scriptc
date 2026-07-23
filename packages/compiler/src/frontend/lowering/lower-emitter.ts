@@ -432,7 +432,7 @@ function lowerListenerArg(
   tuple: IrType[],
 ): IrExpr {
   // Unannotated non-empty parameter lists have no static types (checker
-  // `any`; dyn in JS sources) — say so before the generic SC2001 speaks.
+  // `any`; dyn in JS sources) — say so before the blanket type fence speaks.
   if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && node.parameters.length > 0) {
     for (const p of node.parameters) {
       if (p.type === undefined && ts.isIdentifier(p.name)) {

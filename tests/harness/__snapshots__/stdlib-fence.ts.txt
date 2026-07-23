@@ -41,12 +41,14 @@ stdlib-fence.ts:19:18 - error SC2020: 'Date.parse' is part of the standard libra
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-stdlib-fence.ts:20:7 - error SC2001: values of type 'NumberFormat' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:20:7 - error SC2020: 'NumberFormat' is part of the standard library types but has no scriptc lowering yet
 
   19 | const parsedMs = Date.parse("2024-01-01");
   20 | const fmt = new Intl.NumberFormat();
      |       ^~~
   21 | 
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:20:13 - error SC1090: constructing values other than classes declared in the program is not supported yet
 
@@ -55,12 +57,14 @@ stdlib-fence.ts:20:13 - error SC1090: constructing values other than classes dec
      |             ^~~~~~~~~~~~~~~~~~~~~~~
   21 | 
 
-stdlib-fence.ts:23:7 - error SC2001: values of type 'Date' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:23:7 - error SC2020: 'Date' is part of the standard library types but has no scriptc lowering yet
 
   22 | // Constructors.
   23 | const d = new Date();
      |       ^
   24 | const wm = new WeakMap();
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:23:11 - error SC2020: 'new Date' is part of the standard library types but has no scriptc lowering yet
 
@@ -71,12 +75,14 @@ stdlib-fence.ts:23:11 - error SC2020: 'new Date' is part of the standard library
 
   hint: Date values have no representation — Date.now() and the composed new Date(ms?).toISOString() form compile
 
-stdlib-fence.ts:24:7 - error SC2001: values of type 'WeakMap<WeakKey, any>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:24:7 - error SC2020: 'WeakMap<WeakKey, any>' is part of the standard library types but has no scriptc lowering yet
 
   23 | const d = new Date();
   24 | const wm = new WeakMap();
      |       ^~
   25 | const px = new Proxy({ a: 1 }, {});
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:24:12 - error SC2020: 'new WeakMap' is part of the standard library types but has no scriptc lowering yet
 
@@ -96,12 +102,14 @@ stdlib-fence.ts:25:12 - error SC2020: 'new Proxy' is part of the standard librar
 
   hint: property-access metaprogramming has no static lowering (every property read must resolve at compile time)
 
-stdlib-fence.ts:26:7 - error SC2001: values of type 'ArrayBuffer' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:26:7 - error SC2020: 'ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 
   25 | const px = new Proxy({ a: 1 }, {});
   26 | const buf = new ArrayBuffer(8);
      |       ^~~
   27 | const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds stay fenced
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:26:13 - error SC2020: 'new ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 
@@ -121,12 +129,14 @@ stdlib-fence.ts:27:12 - error SC2020: 'new Set(values)' is part of the standard 
 
   hint: construct the Set empty and add() each value — only an array of already-legal elements (string or number) seeds a Set
 
-stdlib-fence.ts:31:7 - error SC2001: values of type 'AggregateError' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:31:7 - error SC2020: 'AggregateError' is part of the standard library types but has no scriptc lowering yet
 
   30 | // and the unlowered members of lowered error objects.)
   31 | const agg = new AggregateError([]);
      |       ^~~
   32 | const stack = new Error("boom").stack;
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:31:13 - error SC2020: 'new AggregateError' is part of the standard library types but has no scriptc lowering yet
 
@@ -164,12 +174,14 @@ stdlib-fence.ts:38:17 - error SC2020: 'Math.min' is part of the standard library
 
   hint: Math.min lowers with any number of plain arguments or ONE number[] spread — mixed spread/positional lists don't: spread a single array (Math.min(...xs))
 
-stdlib-fence.ts:39:7 - error SC2001: values of type 'ArrayIterator<[number, number]>' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:39:7 - error SC2020: 'ArrayIterator<[number, number]>' is part of the standard library types but has no scriptc lowering yet
 
   38 | const clamped = Math.min(1, ...[2, 3]);
   39 | const entries = [1, 2].entries();
      |       ^~~~~~~
   40 | const arrAt = [1, 2].at(0);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:39:17 - error SC2020: 'number[].entries' is part of the standard library types but has no scriptc lowering yet
 

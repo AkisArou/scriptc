@@ -453,7 +453,10 @@ export function containsUnion(t: IrType): boolean {
 }
 
 /** ts.Type → IrType. Returns null for anything outside the supported
- * surface; the caller turns that into a SC2001 diagnostic with
+ * surface; the caller (badType) classifies the shape and reports the
+ * matching type fence — SC2005 generic signatures, SC2006 index
+ * signatures, SC2007 overloads, SC2008 intersections, SC2009 component
+ * fences, SC2020 library types, SC2001 for the remainder — with
  * checker.typeToString.
  *
  * Literal types are widened FIRST (`const x = 1` has type `1`, `true` has
@@ -616,7 +619,7 @@ let mapTypeDepth = 0;
  * The recursive-shape machinery keys shape identity by checker type, which
  * is sound only for context-FREE mappings: a recursive frame that observes
  * a bump between entry and exit stays fenced (recursive generic-open types
- * report SC2001 instead of interning a per-context-wrong shape). */
+ * stay fenced instead of interning a per-context-wrong shape). */
 let contextResolutions = 0;
 
 export function mapType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
@@ -1114,8 +1117,8 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // provenance, not the name (a user's own `interface Map` maps as a record
   // like any other). Keys are fenced to f64/string (SameValueZero hashing),
   // values to the supported kinds (see isSupportedMapValue); anything
-  // outside stays unmapped — callers report SC2001 with the full type
-  // text, and the `new Map` lowering names the offending half specifically.
+  // outside stays unmapped — callers report the component fence (SC2009)
+  // naming the offending half, as does the `new Map` lowering per site.
   const psym = widened.getSymbol();
   const isStdlibInterface = (name: string): boolean =>
     psym?.name === name &&
@@ -3062,4 +3065,212 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return { fields, ...(indexValue ? { indexValue } : {}), declaredOrder };
   }
+}
+
+/* ── Component-fence classification (SC2009) ───────────────────────────────
+ * badType's post-hoc classifiers: given a type mapType REJECTED, decide
+ * whether the failure lives in a COMPONENT of an otherwise supported shape
+ * — and if so, name it. Pure description: these run only on the failure
+ * path (the build already carries a diagnostic for the site), mirror
+ * mapType's own rules, and never change what maps. Probing through mapType
+ * here is safe for the same reason badType's dynamic probe is: anything
+ * interned on the way belongs to a build that is not emitted. */
+
+/** The recognized stdlib containers and the slot name each type-argument
+ * position plays in their messages. */
+const STDLIB_CONTAINERS: Record<string, { role: (i: number) => string }> = {
+  Map: { role: (i) => (i === 0 ? "key" : "value") },
+  ReadonlyMap: { role: (i) => (i === 0 ? "key" : "value") },
+  Set: { role: () => "element" },
+  ReadonlySet: { role: () => "element" },
+  Promise: { role: () => "value" },
+  Generator: { role: (i) => ["yield", "return", "next"][i] ?? "channel" },
+  AsyncGenerator: { role: (i) => ["yield", "return", "next"][i] ?? "channel" },
+};
+
+/** Arm kinds with no home in a compiled union (mapTypeInner's union rule):
+ * no runtime narrowing test exists against sibling data arms. */
+function armHasUnionHome(arm: IrType, siblingCount: number): boolean {
+  switch (arm.kind) {
+    case "void":
+    case "union":
+    case "map":
+    case "set":
+    case "regex":
+    case "generator":
+    case "dyn":
+      return false;
+    // Promise arms map only beside unit siblings (the promise-or-absent
+    // shape); a data sibling has no narrowing test against them.
+    case "promise":
+      return siblingCount === 0;
+    default:
+      return true;
+  }
+}
+
+/** When an unmapped type is a SUPPORTED container/composite whose failure
+ * lives in a component, answer a message tail naming the component (the
+ * SC2009 story); null when the shape itself is the blocker (the caller
+ * falls through to the other fences). Stdlib container heads (Map, Set,
+ * Promise, generators) ALWAYS answer — their shapes have lowerings, so a
+ * later "no lowering" claim about them would be false. */
+export function describeComponentBlocker(widened: ts.Type, ctx: TypeMapperCtx): string | null {
+  const { checker } = ctx;
+  const text = (t: ts.Type): string => checker.typeToString(t);
+
+  // Stdlib container references (provenance, not the name — a user's own
+  // `interface Map` is a record shape and keeps the record stories).
+  const psym = widened.getSymbol();
+  const container =
+    psym !== undefined &&
+    Object.prototype.hasOwnProperty.call(STDLIB_CONTAINERS, psym.name) &&
+    checker.declarationsOf(psym).some(
+      (d) => ts.isInterfaceDeclaration(d) && ctx.isStdlibFile(d.getSourceFile()),
+    )
+      ? psym.name
+      : undefined;
+  if (container !== undefined) {
+    const spec = STDLIB_CONTAINERS[container]!;
+    const args = checker.getTypeArguments(widened as ts.TypeReference);
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      const role = spec.role(i);
+      const mapped = mapType(arg, ctx);
+      if (!mapped) {
+        return `the ${container} shape is supported, but its ${role} type '${text(arg)}' does not compile`;
+      }
+      if ((container === "Map" || container === "ReadonlyMap") && i === 0 && !isSupportedMapKey(mapped)) {
+        return `the ${container} shape is supported, but keys are limited to numbers and strings — '${text(arg)}' is outside that domain`;
+      }
+      if ((container === "Map" || container === "ReadonlyMap") && i === 1 && !isSupportedMapValue(mapped)) {
+        return `the ${container} shape is supported, but '${text(arg)}' values have no Map slot yet (functions, promises, and nested Maps stay out)`;
+      }
+      if ((container === "Set" || container === "ReadonlySet") && !isSupportedSetElem(mapped)) {
+        return `the ${container} shape is supported, but elements are limited to numbers and strings — '${text(arg)}' is outside that domain`;
+      }
+    }
+    // Every argument passed the per-slot checks and the type still failed:
+    // a composition rule the slots alone don't show (a generator's channel
+    // interplay, a promise wrapper rule). Still the container's story.
+    return `the ${container} shape is supported, but this instantiation's type arguments are outside the supported set`;
+  }
+
+  // Arrays: the element is the failure by construction (a mappable element
+  // makes the array map).
+  if (checker.isArrayType(widened)) {
+    const elemTs = checker.getTypeArguments(widened as ts.TypeReference)[0];
+    if (elemTs === undefined) return null;
+    const elem = mapType(elemTs, ctx);
+    if (!elem) {
+      return `the array shape is supported, but its element type '${text(elemTs)}' does not compile`;
+    }
+    return `the array shape is supported, but '${text(elemTs)}' elements have no array representation yet`;
+  }
+
+  // Tuples: name the first element whose type does not map. Optional/rest
+  // tuples in static builds are dynamic-representable and never get here
+  // (badType's dynamic probe speaks first).
+  if (checker.isTupleType(widened)) {
+    for (const arg of checker.getTypeArguments(widened as ts.TypeReference)) {
+      const et = mapType(arg, ctx);
+      if (et?.kind === "void" && isUnitOnlyTsType(arg)) continue;
+      if (!et || et.kind === "void") {
+        return `the tuple shape is supported, but its element type '${text(arg)}' does not compile`;
+      }
+    }
+    return null;
+  }
+
+  // Unions: name the first arm that does not compile, or the first mapped
+  // arm kind with no union home. Unions have no symbol, so a null answer
+  // falls through to the residual fence, never to a false lib claim.
+  if (widened.isUnionType()) {
+    const parts = widened.getTypes();
+    const UNIT = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null;
+    const dataArms = parts.filter((p) => (p.flags & UNIT) === 0);
+    for (const part of dataArms) {
+      const mapped = mapType(part, ctx);
+      if (!mapped) {
+        return `the union shape is supported, but its arm '${text(part)}' does not compile`;
+      }
+      if (!armHasUnionHome(mapped, dataArms.length - 1)) {
+        return `the union shape is supported, but '${text(part)}' arms have no home in a compiled union yet (no runtime narrowing test exists against sibling arms)`;
+      }
+    }
+    return null;
+  }
+
+  // Single-signature, non-generic function types: rest parameters, a
+  // parameter type, or the return type carries the failure. (Generic and
+  // overloaded signatures have their own fences — SC2005/SC2007 — and
+  // badType runs those first.)
+  const callSigs = checker.getCallSignatures(widened);
+  if (callSigs.length === 1) {
+    const sig = callSigs[0]!;
+    if (sig.getTypeParameters().length > 0) return null;
+    const sigDecl = checker.signatureDeclaration(sig);
+    if (
+      sigDecl !== undefined &&
+      ts.isFunctionLike(sigDecl) &&
+      (sigDecl.parameters.length !== sig.getParameters().length ||
+        bodyReadsArgumentsLocal(sigDecl as { body?: ts.Node }))
+    ) {
+      return `the function shape is supported, but its signature is variadic ('arguments'-reading), and a compiled signature is fixed-arity`;
+    }
+    for (const p of sig.getParameters()) {
+      const decl = checker.valueDeclarationOf(p);
+      if (decl !== undefined && ts.isParameter(decl) && decl.dotDotDotToken !== undefined) {
+        return `the function shape is supported, but its rest parameter '${p.name}' has no compiled calling convention yet (a compiled signature is fixed-arity)`;
+      }
+      const pTs = checker.getTypeOfSymbol(p);
+      if (!mapType(pTs, ctx)) {
+        return `the function shape is supported, but its parameter '${p.name}' has type '${text(pTs)}', which does not compile`;
+      }
+    }
+    const retTs = checker.getReturnTypeOfSignature(sig);
+    if ((retTs.flags & ts.TypeFlags.Never) === 0 && !mapType(retTs, ctx)) {
+      return `the function shape is supported, but its return type '${text(retTs)}' does not compile`;
+    }
+    return null;
+  }
+
+  return null;
+}
+
+/** The record-member arm of the component fence: a USER record shape
+ * blocked by ONE member's type. Runs AFTER badType's stdlib/npm/index-
+ * signature routing, so what reaches it is a plain data shape; a null
+ * answer (no member pinpointed — provenance fences, accessor rules, shape
+ * knots) keeps the residual SC2001 story. */
+export function describeRecordMemberBlocker(widened: ts.Type, ctx: TypeMapperCtx): string | null {
+  const { checker } = ctx;
+  if ((widened.flags & ts.TypeFlags.Object) === 0) return null;
+  if (checker.getCallSignatures(widened).length > 0) return null;
+  if (checker.getConstructSignatures(widened).length > 0) return null;
+  if (checker.isTupleType(widened) || checker.isArrayLikeType(widened)) return null;
+  if (checker.getIndexInfosOfType(widened).length > 0) return null;
+  const widenedSym = widened.getSymbol();
+  if (widenedSym !== undefined && (widenedSym.flags & ts.SymbolFlags.Enum) !== 0) return null;
+  const computed = isMappedShape(widened);
+  for (const p of checker.getPropertiesOfType(widened)) {
+    // Accessor members and symbol-keyed members have their own multi-shaped
+    // rules (mapRecordTypeInner) — no single-member claim is honest there.
+    if ((p.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !== 0) continue;
+    if (p.name.startsWith("__@")) continue;
+    // Computed shapes over LIBRARY members (`Readonly<Date>`): the record
+    // fence there is per-member PROVENANCE (mapRecordTypeInner's rule), not
+    // any one member's type — that story stays with the residual fence.
+    if (computed && checker.declarationsOf(p).some((d) => d.getSourceFile().isDeclarationFile)) {
+      return null;
+    }
+    const fieldTs = checker.getTypeOfSymbol(p);
+    if (isGenericCallableMemberType(fieldTs, checker)) continue;
+    let pt = mapType(fieldTs, ctx);
+    if (pt?.kind === "void" && isUnitOnlyTsType(fieldTs)) pt = unitOnlyUnion(ctx.unions);
+    if (!pt || pt.kind === "void") {
+      return `the record shape is supported, but its member '${p.name}' has type '${checker.typeToString(fieldTs)}', which does not compile`;
+    }
+  }
+  return null;
 }

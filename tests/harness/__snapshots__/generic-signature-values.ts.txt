@@ -1,0 +1,58 @@
+generic-signature-values.ts:5:7 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+
+  4 | const id = <T>(x: T): T => x;
+  5 | const stored = id;
+    |       ^~~~~~
+  6 | console.log(stored(1));
+
+  hint: annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly
+
+generic-signature-values.ts:5:16 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = id' — instantiate explicitly ('id<number>'), or call 'id' directly) is not supported yet
+
+  4 | const id = <T>(x: T): T => x;
+  5 | const stored = id;
+    |                ^~
+  6 | console.log(stored(1));
+
+generic-signature-values.ts:6:13 - error SC2004: uses of 'stored' inherit the blocker on its declaration
+
+  5 | const stored = id;
+  6 | console.log(stored(1));
+    |             ^~~~~~
+  7 | 
+
+  hint: the declaration of 'stored' did not compile — fix the diagnostic reported there and these sites clear with it
+
+generic-signature-values.ts:9:5 - error SC2005: values of type '<T>(x: T) => T' cannot be compiled: the signature keeps its type parameters, and a compiled function is always one concrete signature (generic functions monomorphize per pinned signature — declarations, methods, and never-reassigned module-scope bindings initialized with a generic arrow/function expression)
+
+   8 | // A slot ANNOTATED with a generic signature fences the same way.
+   9 | let held: <T>(x: T) => T = id;
+     |     ^~~~
+  10 | held = id;
+
+  hint: annotate the destination with a concrete signature (e.g. '(x: number) => number'), instantiate explicitly ('f<number>'), or call the generic function directly
+
+generic-signature-values.ts:9:28 - error SC1090: generic functions as values without a pinned concrete signature (annotate the destination — e.g. 'const f: (x: number) => number = id' — instantiate explicitly ('id<number>'), or call 'id' directly) is not supported yet
+
+   8 | // A slot ANNOTATED with a generic signature fences the same way.
+   9 | let held: <T>(x: T) => T = id;
+     |                            ^~
+  10 | held = id;
+
+generic-signature-values.ts:10:1 - error SC2004: uses of 'held' inherit the blocker on its declaration
+
+   9 | let held: <T>(x: T) => T = id;
+  10 | held = id;
+     | ^~~~
+  11 | console.log(held(2));
+
+  hint: the declaration of 'held' did not compile — fix the diagnostic reported there and these sites clear with it
+
+generic-signature-values.ts:11:13 - error SC2004: uses of 'held' inherit the blocker on its declaration
+
+  10 | held = id;
+  11 | console.log(held(2));
+     |             ^~~~
+  12 | 
+
+  hint: the declaration of 'held' did not compile — fix the diagnostic reported there and these sites clear with it

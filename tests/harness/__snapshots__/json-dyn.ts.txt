@@ -46,19 +46,23 @@ json-dyn.ts:38:3 - error SC1090: 'unknown'-typed class fields are not supported 
      |   ^~~~
   39 | }
 
-json-dyn.ts:41:7 - error SC2001: values of type 'unknown[]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+json-dyn.ts:41:7 - error SC2009: values of type 'unknown[]' cannot be compiled: the array shape is supported, but 'unknown' elements have no array representation yet
 
   40 | const anything: any = 5; // checker-`any` bindings ride the DOM now — no fence
   41 | const dynArray: unknown[] = [];
      |       ^~~~~~~~
   42 | const parseRef = JSON.parse;
 
-json-dyn.ts:42:7 - error SC2001: values of type '{ (text: string, reviver?: ((this: any, key: string, value: any) => any) | undefined): any; (text: string): unknown; }' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+json-dyn.ts:42:7 - error SC2007: values of type '{ (text: string, reviver?: ((this: any, key: string, value: any) => any) | undefined): any; (text: string): unknown; }' cannot be compiled: the type declares multiple call signatures (overloads), and a compiled function value is always one concrete signature
 
   41 | const dynArray: unknown[] = [];
   42 | const parseRef = JSON.parse;
      |       ^~~~~~~~
   43 | // BARE undefined-armed unions are not JSON on the STRINGIFY side: Node
+
+  hint: annotate the slot with the ONE signature the program actually calls (e.g. '(x: number) => string'), or wrap the overloaded function in a single-signature arrow
 
 json-dyn.ts:42:18 - error SC1090: JSON methods as values (call 'parse' directly) are not supported yet
 

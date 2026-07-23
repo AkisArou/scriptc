@@ -1055,8 +1055,8 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
    * parameters) against the checker's INSTANTIATED one — the latter is the
    * former with the substitution applied, so the shapes are parallel by
    * construction. A type parameter left unbound only matters if the body
-   * mentions it, where mapType fails with SC2001 (carrying the
-   * instantiation context). */
+   * mentions it, where mapType fails and badType names the shape
+   * (carrying the instantiation context). */
   export function inferTypeParamBindings(L: Lowerer, expr: ts.CallExpression,
     info: GenericFnInfo,
     rsig: ts.Signature,): Map<ts.Symbol, IrType> {
@@ -5635,8 +5635,8 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
    * (Symbol.iterator, Symbol.asyncIterator, Symbol.toStringTag, ...) —
    * language-level protocol uses (for-of, template literals) already
    * compile through their constructs without reifying the symbol, so the
-   * VALUE forms fence with a named message rather than the generic
-   * SymbolConstructor SC2001. */
+   * VALUE forms fence with a named message rather than a blanket
+   * SymbolConstructor type fence. */
   function lowerSymbolStaticCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (call.questionDotToken || access.questionDotToken) return null;
