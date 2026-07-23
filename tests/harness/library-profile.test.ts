@@ -1,15 +1,15 @@
-/* Core-mode profile loader/validator (stage 1 of the core emission mode):
+/* Library-mode profile loader/validator (stage 1 of the library emission mode):
  * every malformation family the design names is SC4001 with the offending
  * JSON path in the message; a well-formed profile round-trips into the
- * resolved CoreProfile shape (entry made absolute against the profile's
+ * resolved LibraryProfile shape (entry made absolute against the profile's
  * own directory, teachings rider captured). */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
-import { loadCoreProfile, profileTeaching } from "@scriptc/compiler";
+import { loadLibraryProfile, profileTeaching } from "@scriptc/compiler";
 
-const dir = mkdtempSync(join(tmpdir(), "scriptc-core-profile-"));
+const dir = mkdtempSync(join(tmpdir(), "scriptc-lib-profile-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 let n = 0;
@@ -22,7 +22,7 @@ function writeProfile(json: unknown): string {
 const good = {
   profile_format: 1,
   name: "conformance-test",
-  entry: "src/core.ts",
+  entry: "src/lib.ts",
   emission: "llvm",
   abi: {
     prefix: "kx_",
@@ -38,7 +38,7 @@ const good = {
 };
 
 function expectSc4001(json: unknown, fragment: string): void {
-  const r = loadCoreProfile(writeProfile(json));
+  const r = loadLibraryProfile(writeProfile(json));
   expect(r.ok).toBe(false);
   if (r.ok) return;
   expect(r.diagnostics).toHaveLength(1);
@@ -46,10 +46,10 @@ function expectSc4001(json: unknown, fragment: string): void {
   expect(r.diagnostics[0]!.message).toContain(fragment);
 }
 
-describe("core profile validation", () => {
+describe("library profile validation", () => {
   test("well-formed profile resolves", () => {
     const path = writeProfile(good);
-    const r = loadCoreProfile(path);
+    const r = loadLibraryProfile(path);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.profile.name).toBe("conformance-test");
@@ -59,13 +59,13 @@ describe("core profile validation", () => {
     expect(r.profile.collectSymbol).toBe("kx_collect");
     expect(r.profile.resultResetSymbol).toBeNull();
     // entry resolves against the profile file's directory
-    expect(r.profile.entry).toBe(join(dir, "src/core.ts"));
+    expect(r.profile.entry).toBe(join(dir, "src/lib.ts"));
     expect(r.profile.exports).toHaveLength(2);
     expect(r.profile.exports[1]!.params).toEqual(["u32", "bool"]);
   });
 
   test("teachings rider: per-code key wins, 'async' is the shared fallback", () => {
-    const r = loadCoreProfile(
+    const r = loadLibraryProfile(
       writeProfile({
         ...good,
         determinism: { teachings: { async: "use kx_schedule instead", SC4004: "wrap it in a sync facade" } },
@@ -99,7 +99,7 @@ describe("core profile validation", () => {
       "unknown field 'exports[0].param'",
     ));
   test("unknown top-level fields are reserved surface, ignored", () => {
-    const r = loadCoreProfile(writeProfile({ ...good, determinism: { deny: ["Math.random"] }, contract: {} }));
+    const r = loadLibraryProfile(writeProfile({ ...good, determinism: { deny: ["Math.random"] }, contract: {} }));
     expect(r.ok).toBe(true);
   });
   test("duplicate symbols", () =>

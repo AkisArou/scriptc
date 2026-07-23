@@ -126,9 +126,9 @@ static void scr_lib_cleanup(void) {
   scr_versions_openssl_str = NULL;
 }
 
-#ifndef SCR_CORE
-/* Executable lane only: a core has no argv and registers no atexit
- * handlers (the emitted core init never calls this; compiling it out keeps
+#ifndef SCR_LIB
+/* Executable lane only: a library artifact has no argv and registers no
+ * atexit handlers (the emitted library init never calls this; keeping it out
  * the archive's objects free of any atexit reference — the K8 ambient
  * audit's bar). */
 void scr_lib_init(int argc, char **argv) {
@@ -136,14 +136,14 @@ void scr_lib_init(int argc, char **argv) {
   scr_lib_argv = argv;
   atexit(scr_lib_cleanup);
 }
-#endif /* !SCR_CORE */
+#endif /* !SCR_LIB */
 
-#ifdef SCR_CORE
-/* Core builds never call scr_lib_init (a core has no argv and registers no
+#ifdef SCR_LIB
+/* Library builds never call scr_lib_init (a library artifact has no argv and registers no
  * atexit handlers); the interned process values above still intern lazily
- * on first read, so the core reset seam releases them here instead —
- * scr_core_reset (scr_core.c) calls this every session reset. */
-void scr_lib_core_cleanup(void) { scr_lib_cleanup(); }
+ * on first read, so the library reset seam releases them here instead —
+ * scr_library_reset (scr_library.c) calls this every session reset. */
+void scr_lib_session_cleanup(void) { scr_lib_cleanup(); }
 #endif
 
 /* Raw argv accessors for the island's process shim (scr_island.c): the

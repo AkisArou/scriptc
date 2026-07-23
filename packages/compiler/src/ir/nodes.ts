@@ -691,19 +691,19 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
-  /** CORE (library) mode: the profile's resolved export map plus the
+  /** LIBRARY mode: the profile's resolved export map plus the
    * mode-provided symbol names, landed ON the IR so both backends emit the
    * external-linkage wrappers and entries from the same facts — the two
    * emissions stay conformance-identical by construction. Absent on every
    * executable build (the backends emit main() exactly as always). */
-  core?: IrCoreSection;
+  lib?: IrLibSection;
 }
 
 /** One export-map entry, resolved: the external ccc symbol, the IR
  * function it wraps, and the marshalling class of each parameter and the
  * return (already validated against the function's IR types — SC4003 ran
  * before this landed on the module). */
-export interface IrCoreExport {
+export interface IrLibExport {
   symbol: string;
   /** IR function name (entry-file top-level, so unqualified). */
   fnName: string;
@@ -711,7 +711,7 @@ export interface IrCoreExport {
   returns: "f64" | "bool" | "string" | "bytes" | "void";
 }
 
-export interface IrCoreSection {
+export interface IrLibSection {
   /** The profile's identity string (artifact header comments only). */
   profileName: string;
   /** Symbol-space hygiene: every external definition below carries it. */
@@ -724,7 +724,7 @@ export interface IrCoreSection {
   /** The declared result-arena reset entry; null selects the auto-reset
    * posture (every entry prologue resets the arena). */
   resultResetSymbol: string | null;
-  exports: IrCoreExport[];
+  exports: IrLibExport[];
 }
 
 export interface IrClassDef {
@@ -5523,19 +5523,19 @@ export function moduleUsesTls(mod: IrModule): boolean {
   return found;
 }
 
-/* ── core mode's async_free gate ─────────────────────────────────────────
- * v1 core mode REQUIRES an async_free module graph (ratified): no async
+/* ── library mode's async_free gate ──────────────────────────────────────
+ * v1 library mode REQUIRES an async_free module graph (ratified): no async
  * functions, no generators, no timers, no event-loop or ambient-process
  * surface anywhere the entry reaches — a static fact of the graph, never a
  * runtime observation. The detector below answers "what does this graph
- * reach that a core cannot link?", first offender with its source anchor;
+ * reach that a library artifact cannot link?", first offender with its source anchor;
  * the structural consequence (scr_async.c / scr_child.c and every
- * loop-hooked unit never join a core link) is safe exactly because this
+ * loop-hooked unit never join a library link) is safe exactly because this
  * refusal ran first. */
 
-/** libCall families a v1 core refuses, with the surface name the SC4005
+/** libCall families a v1 library artifact refuses, with the surface name the SC4005
  * teaching uses. Prefix match over IrLibFn spellings. */
-const CORE_REFUSED_LIB_PREFIXES: readonly [string, string][] = [
+const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   ["timers.", "the timers surface (setTimeout family)"],
   ["tp.", "the timers/promises surface"],
   ["cp.", "the child_process surface"],
@@ -5573,7 +5573,7 @@ const CORE_REFUSED_LIB_PREFIXES: readonly [string, string][] = [
 
 /** Value/type kinds whose mere presence means an excluded unit's code (or
  * a fiber) would have to link. */
-const CORE_REFUSED_KINDS: ReadonlyMap<string, string> = new Map([
+const LIB_MODE_REFUSED_KINDS: ReadonlyMap<string, string> = new Map([
   ["promise", "promise values"],
   ["generator", "generator values"],
   ["awaitExpr", "await"],
@@ -5597,13 +5597,13 @@ const CORE_REFUSED_KINDS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /** First async/event-loop/ambient-process surface the module graph
- * reaches, or null when the graph is async_free (the v1 core requirement).
+ * reaches, or null when the graph is async_free (the v1 library requirement).
  * The generic-walk shape of moduleUsesRegex, tracking the nearest
  * enclosing `loc` so the refusal anchors at the reaching construct; the
  * coarse moduleUses* predicates are the safety net behind the fine-grained
  * table (a surface reached only through a spelling the table misses still
  * refuses, anchored at the entry). */
-export function moduleCoreAsyncSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
+export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
   for (const fn of mod.functions) {
     if (fn.async === true) return { surface: `an async function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
     if (fn.generator !== undefined) {
@@ -5621,13 +5621,13 @@ export function moduleCoreAsyncSurface(mod: IrModule): { surface: string; loc: S
     const node = v as { kind?: unknown; fn?: unknown; loc?: SrcLoc };
     const here = node.loc ?? loc;
     if (typeof node.kind === "string") {
-      const bad = CORE_REFUSED_KINDS.get(node.kind);
+      const bad = LIB_MODE_REFUSED_KINDS.get(node.kind);
       if (bad !== undefined) {
         found = { surface: bad, loc: here };
         return;
       }
       if (node.kind === "libCall" && typeof node.fn === "string") {
-        for (const [prefix, surface] of CORE_REFUSED_LIB_PREFIXES) {
+        for (const [prefix, surface] of LIB_MODE_REFUSED_PREFIXES) {
           if (node.fn.startsWith(prefix)) {
             found = { surface, loc: here };
             return;
@@ -5640,7 +5640,7 @@ export function moduleCoreAsyncSurface(mod: IrModule): { surface: string; loc: S
   visit(mod, entryLoc);
   if (found !== null) return found;
   // Safety net: the coarse unit predicates, entry-anchored. Every one of
-  // these units is excluded from core links, so a true answer that the
+  // these units is excluded from library links, so a true answer that the
   // fine-grained table missed must still refuse.
   const coarse: [boolean, string][] = [
     [moduleUsesProcessEvents(mod), "process signal/exit listeners or the stdin event surface"],

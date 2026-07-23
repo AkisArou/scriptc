@@ -647,34 +647,34 @@ async function ensureTlsArchive(sanitize: boolean, driver: CcDriver): Promise<st
   return archive;
 }
 
-/* ── core (library) mode: the static-archive artifact ─────────────────────
- * One `scriptc core` invocation produces <name>.core.a: the program TU
+/* ── library mode: the static-archive artifact ────────────────────────────
+ * One `scriptc build --lib` invocation produces <name>.lib.a: the program TU
  * object plus exactly the runtime objects the program's IR gates in, every
- * TU compiled with -DSCR_CORE (the per-flavor discipline that keeps core
- * objects apart from executable-lane objects — here trivially, because core
+ * TU compiled with -DSCR_LIB (the per-flavor discipline that keeps library
+ * objects apart from executable-lane objects — here trivially, because library
  * builds compile fresh into the archive and never touch the object cache).
  * The base set narrows from the executable lane's unconditional sources:
  * scr_async.c (fibers, timers, the loop) and scr_child.c drop — the
  * async_free refusal already guarantees nothing references them — and
- * scr_core.c (sink, arena, reset registry, core funnel) joins. The gated
- * units a core may reach are the pure-data ones (regex + the vendored matcher, assert,
+ * scr_library.c (sink, arena, reset registry, library funnel) joins. The gated
+ * units a library may reach are the pure-data ones (regex + the vendored matcher, assert,
  * inspect, symbol, searchParams, emitter+dyn_handle, zlib); every
  * loop-hooked or ambient unit was refused at SC4005 before emission.
  * External-symbol contract: undefined references only to libc/libm — which
  * is why zlib rides the VENDORED per-flavor objects here even on hosts
  * (the executable lane's system `-lz` cannot ride inside an archive). */
 
-/** The core base: the executable lane's unconditional sources minus the
- * fiber/loop and child-process units, plus the core-mode TU. */
-const CORE_RUNTIME_SOURCES = [
+/** The library base: the executable lane's unconditional sources minus the
+ * fiber/loop and child-process units, plus the library-mode TU. */
+const LIB_RUNTIME_SOURCES = [
   ...RUNTIME_SOURCES.filter((f) => f !== "scr_async.c" && f !== "scr_child.c"),
-  "scr_core.c",
+  "scr_library.c",
 ];
 
-export interface CoreArchiveOptions {
+export interface LibArchiveOptions {
   /** The program TU (.c or .ll — clang compiles either with -c). */
   cPath: string;
-  /** The archive to produce (<name>.core.a). */
+  /** The archive to produce (<name>.lib.a). */
   outPath: string;
   sanitize?: boolean;
   /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
@@ -687,7 +687,7 @@ export interface CoreArchiveOptions {
   zlib?: boolean;
 }
 
-export async function compileCoreArchive(opts: CoreArchiveOptions): Promise<void> {
+export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> {
   const rtDir = runtimeSrcDir();
   const driver = resolveCc();
   const sanitize = opts.sanitize ?? false;
@@ -695,7 +695,7 @@ export async function compileCoreArchive(opts: CoreArchiveOptions): Promise<void
   const lreObjects = regex ? await ensureLreObjects(sanitize, driver) : [];
   const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
   const sources = [
-    ...CORE_RUNTIME_SOURCES,
+    ...LIB_RUNTIME_SOURCES,
     ...(regex ? ["scr_regex.c"] : []),
     ...(opts.assert || regex || opts.symbol ? ["scr_assert.c"] : []),
     ...(opts.inspect ? ["scr_inspect.c"] : []),
@@ -710,13 +710,13 @@ export async function compileCoreArchive(opts: CoreArchiveOptions): Promise<void
     ...(sanitize ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"] : ["-O2"]),
     "-fno-math-errno",
     "-Wno-deprecated-declarations",
-    "-DSCR_CORE",
+    "-DSCR_LIB",
     "-I", rtDir,
     ...(regex ? ["-I", vendorEngineDir()] : []),
     ...(opts.zlib ? ["-I", vendorZlibDir()] : []),
   ];
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
-  const buildDir = await mkdtemp(join(tmpdir(), "scriptc-core-"));
+  const buildDir = await mkdtemp(join(tmpdir(), "scriptc-lib-"));
   try {
     const objects: string[] = [];
     const compileOne = async (src: string, objName: string): Promise<void> => {
@@ -733,7 +733,7 @@ export async function compileCoreArchive(opts: CoreArchiveOptions): Promise<void
       } catch (err) {
         const stderr = (err as { stderr?: string }).stderr ?? String(err);
         throw new Error(
-          `${driver.argv.join(" ")} failed compiling ${src} for the core archive.\n` +
+          `${driver.argv.join(" ")} failed compiling ${src} for the library archive.\n` +
             `This is a scriptc bug (generated/runtime C should always compile) unless the compiler itself is missing/broken.\n\n${stderr}`,
         );
       }

@@ -1,4 +1,4 @@
-/* Core mode's export resolution input: what the ENTRY source file exports
+/* Library mode's export resolution input: what the ENTRY source file exports
  * as function declarations. Resolution runs on the frontend's program
  * object after preflight (design §5.3) — the export map may only name
  * exports of the profile's one entry module, and today's compilable export

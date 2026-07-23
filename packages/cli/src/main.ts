@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { analyze, compile, compileC, compileCore, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
+import { analyze, compile, compileC, compileLibrary, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
 
 const USAGE = `scriptc — TypeScript/JavaScript to native executables (experimental)
 
@@ -12,9 +12,10 @@ Usage:
   scriptc run <file.ts|.js> [options]       compile and run
   scriptc coverage <file.ts|.js>            how much compiles statically, and why not
   scriptc coverage <file.ts|.js> --dynamic  what a --dynamic build compiles, and what still blocks it
-  scriptc core --profile <profile.json>     compile the profile's entry module to a
-                                            linkable static archive (<name>.core.a)
-                                            exporting the profile-declared C symbols
+  scriptc build --lib --profile <p.json>    library mode: compile the profile's entry
+                                            module to a linkable static archive
+                                            (<name>.lib.a) exporting the
+                                            profile-declared C symbols
 
 Options:
   -o, --out <path>   output executable path (default: .scriptc/<name>)
@@ -79,6 +80,7 @@ async function main(): Promise<number> {
       dynamic: { type: "boolean", default: false },
       "npm-static": { type: "string", multiple: true },
       "provenance-sources": { type: "boolean", default: false },
+      lib: { type: "boolean", default: false },
       profile: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -92,23 +94,28 @@ async function main(): Promise<number> {
   }
 
   const [command, inputArg] = positionals;
-  if (command !== "build" && command !== "run" && command !== "coverage" && command !== "core") {
+  if (command !== "build" && command !== "run" && command !== "coverage") {
     fail(`unknown command "${command}"\n\n${USAGE}`);
   }
-  if (command === "core") {
-    // The profile names the entry module and pins the emission; the
-    // executable lane's mode flags have no meaning here (core artifacts
-    // are static-tier only, and there is no fallback concept).
+  if (values.lib) {
+    // LIBRARY mode: the profile names the entry module and pins the
+    // emission; the executable lane's mode flags have no meaning here
+    // (library artifacts are static-tier only, and there is no fallback
+    // concept).
+    if (command !== "build") fail(`--lib is a build mode (scriptc build --lib --profile <p.json>)\n\n${USAGE}`);
     const profileArg = values.profile;
-    if (!profileArg) fail(`scriptc core needs --profile <profile.json>\n\n${USAGE}`);
+    if (!profileArg) fail(`scriptc build --lib needs --profile <profile.json>\n\n${USAGE}`);
+    if (inputArg) {
+      fail("scriptc build --lib takes no input positional: the profile names the entry module");
+    }
     if (values.dynamic || values.backend !== undefined || (values["npm-static"] ?? []).length > 0) {
-      fail("scriptc core takes no --dynamic/--backend/--npm-static: the profile pins the emission, and core artifacts are static-tier only");
+      fail("scriptc build --lib takes no --dynamic/--backend/--npm-static: the profile pins the emission, and library artifacts are static-tier only");
     }
     const profilePath = resolve(profileArg);
-    const coreOutDir = values.out ? dirname(resolve(values.out)) : join(dirname(profilePath), ".scriptc");
-    const result = await compileCore({
+    const libOutDir = values.out ? dirname(resolve(values.out)) : join(dirname(profilePath), ".scriptc");
+    const result = await compileLibrary({
       profilePath,
-      outDir: coreOutDir,
+      outDir: libOutDir,
       ...(values.out ? { outPath: resolve(values.out) } : {}),
       emitIr: values["emit-ir"],
       sanitize: values.sanitize,

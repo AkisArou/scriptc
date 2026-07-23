@@ -13,11 +13,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifndef SCR_CORE
+#ifndef SCR_LIB
 /* The trap funnel's EXECUTABLE expansion: exactly the historical
  * fputs/vfprintf-to-stderr + abort every trap site used to open-code — the
- * default lane's bytes and behavior are unchanged by construction. Core
- * builds (-DSCR_CORE) get the sink-routing definitions from scr_core.c
+ * default lane's bytes and behavior are unchanged by construction. Library
+ * builds (-DSCR_LIB) get the sink-routing definitions from scr_library.c
  * instead; this pair compiles out there. Lives HERE (the failure-channel
  * unit, present in every link including the runtime's own unit-test
  * subsets) rather than in the console unit. */
@@ -33,7 +33,7 @@ _Noreturn void scr_trap_fmt(const char *fmt, ...) {
   va_end(ap);
   abort();
 }
-#endif /* !SCR_CORE */
+#endif /* !SCR_LIB */
 
 static ScrExcCell scr_main_exc; /* fiber zero (the main stack) */
 static ScrExcCell *scr_cur = &scr_main_exc;
@@ -175,14 +175,14 @@ ScrStr *scr_caught_to_string(const ScrCaught *c) {
   return scr_str_new("", 0);
 }
 
-#ifdef SCR_CORE
+#ifdef SCR_LIB
 /* An exception that escaped user code into a generated entry wrapper: the
  * host contract is that declared entries do not throw, so an escape is a
  * contract-shaped failure exactly like a trap. Render the same "Uncaught
  * ..." first line the executable epilogue prints (scr_exc_print_uncaught's
  * arms, buffer-writing), release the payload, and route the text through
  * the trap funnel — one failure channel at the boundary. */
-void scr_core_check_exc(void) {
+void scr_library_check_exc(void) {
   if (!scr_exc_pending()) return;
   static char buf[1024]; /* the message is copied out before the payload dies */
   size_t n = 0;
@@ -237,7 +237,7 @@ void scr_core_check_exc(void) {
   scr_exc_reset(); /* the payload is released before the funnel poisons */
   scr_trap(buf);
 }
-#endif /* SCR_CORE */
+#endif /* SCR_LIB */
 
 void scr_throw_f64(double v) {
   scr_exc_reset();

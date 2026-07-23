@@ -1,9 +1,9 @@
-/* The async_free gate (stage 2 of the core emission mode): v1 core mode
+/* The async_free gate (stage 2 of the library emission mode): v1 library mode
  * refuses any async/timer/event-loop/ambient-process surface anywhere in
  * the module graph — SC4005's detector, module-graph-derived, never
  * runtime-observed. Programs here compile fine as EXECUTABLES (the exe
  * lane keeps its loop); what is asserted is the IR-level detection the
- * core path refuses on. */
+ * library path refuses on. */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -13,7 +13,7 @@ const repoRoot = join(import.meta.dirname, "../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 
 async function surfaceOf(name: string, source: string): Promise<string | null> {
-  const outDir = join(cacheDir, "core-asyncfree", name);
+  const outDir = join(cacheDir, "lib-asyncfree", name);
   mkdirSync(outDir, { recursive: true });
   const entry = join(outDir, "main.ts");
   writeFileSync(entry, source);
@@ -27,7 +27,7 @@ async function surfaceOf(name: string, source: string): Promise<string | null> {
     throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
   }
   const mod = JSON.parse(readFileSync(result.irPath!, "utf8")) as ir.IrModule;
-  const hit = ir.moduleCoreAsyncSurface(mod);
+  const hit = ir.moduleLibAsyncSurface(mod);
   if (hit !== null) {
     // The anchor must be usable (a real file offset or the entry fallback).
     expect(hit.loc.file.length).toBeGreaterThan(0);

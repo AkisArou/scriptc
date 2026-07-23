@@ -1,8 +1,8 @@
 // K3 fixture: string/bytes round-trips and result lifetime under both
-// arena postures (the harness builds this core twice — once with the
+// arena postures (the harness builds this library twice — once with the
 // auto-reset profile as written, once with a declared reset symbol patched
 // in). The regex-using export additionally proves the gated matcher unit
-// rides the core archive.
+// rides the library archive.
 export function shout(s: string): string {
   return s.toUpperCase() + "!";
 }

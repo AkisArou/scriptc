@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
     } else {
       printf("poisoned now\n");
       fflush(stdout);
-      kp_ok(1); /* must abort — the core is poisoned */
+      kp_ok(1); /* must abort — the library is poisoned */
       printf("UNREACHABLE\n");
     }
     return 0;

@@ -2,7 +2,7 @@
 // refcounted array, the run-once module guards) fully resets between
 // sessions — two init calls produce identical observable outputs, and
 // under the sanitize flavor the reset seam asserts zero live heap between
-// sessions (the core RC-audit counters).
+// sessions (the library RC-audit counters).
 let counter = 0;
 const seen: string[] = [];
 

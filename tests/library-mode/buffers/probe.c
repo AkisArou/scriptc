@@ -1,4 +1,4 @@
-/* K3 buffer-roundtrip-lifetime probe. Two builds over the same core:
+/* K3 buffer-roundtrip-lifetime probe. Two builds over the same library:
  * without DECLARED_RESET, results are valid until the next call through
  * any profile entry (the auto posture — the probe copies each result out
  * before the next call); with DECLARED_RESET, results ACCUMULATE until

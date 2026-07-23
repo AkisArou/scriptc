@@ -325,12 +325,12 @@ export interface LowerOptions {
    * resolution walk and CJS named-import link check): the program
    * compiles to that startup crash. */
   startupCrash?: StartupCrash | null;
-  /** CORE mode's reachability roots: the profile-mapped exports of the
+  /** LIBRARY mode's reachability roots: the profile-mapped exports of the
    * entry module. Executable builds root at the entry's top level alone
-   * (an unreferenced export dead-strips); a core's exports are called from
+   * (an unreferenced export dead-strips); a library's exports are called from
    * OUTSIDE the graph, so discovery seeds them alongside the init
    * bodies. Names are the entry file's unqualified declaration names. */
-  coreRoots?: readonly string[];
+  libRoots?: readonly string[];
 }
 
 /** The Lowerer's pass configuration (see lowerToIr). */
@@ -382,7 +382,7 @@ export function lowerToIr(
   const dynamic = options.dynamic ?? false;
   const targetPlatform = options.targetPlatform ?? process.platform;
   const startupCrash = options.startupCrash ?? null;
-  const reachable = new Lowerer(program, entry, moduleOrder, dynamic, { targetPlatform }).discover(options.coreRoots);
+  const reachable = new Lowerer(program, entry, moduleOrder, dynamic, { targetPlatform }).discover(options.libRoots);
   const emit = new Lowerer(program, entry, moduleOrder, dynamic, { reachable, targetPlatform, startupCrash });
   const result = emit.run();
   if (options.coverage !== true) return result;
@@ -1775,7 +1775,7 @@ export class Lowerer {
       this.lowerFileInit(fp.sf, fp.topStmts, this.initNameOf.get(fp.sf)!);
       drainInstances();
     });
-    // CORE mode's extra reachability roots (LowerOptions.coreRoots): the
+    // LIBRARY mode's extra reachability roots (LowerOptions.libRoots): the
     // profile-mapped exports are called from outside the graph, so they
     // seed the worklist beside the init bodies. Unknown names are inert
     // (the export-map resolution reports them as SC4002 later).

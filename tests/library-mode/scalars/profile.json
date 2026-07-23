@@ -1,7 +1,7 @@
 {
   "profile_format": 1,
   "name": "conformance-scalars",
-  "entry": "core.ts",
+  "entry": "lib.ts",
   "emission": "llvm",
   "abi": {
     "prefix": "kt_",

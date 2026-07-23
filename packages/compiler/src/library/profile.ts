@@ -1,4 +1,4 @@
-/* Core-mode profile: the published configuration file an embedder ships to
+/* Library-mode profile: the published configuration file an embedder ships to
  * name its ABI (symbol prefix, entry module, export map with per-param/
  * return marshalling classes, and the mode-provided symbol names). The
  * profile is configuration, not code — scriptc knows nothing about any
@@ -8,11 +8,11 @@
  * meaning-changing unknown fields, prefix violations, duplicate symbols,
  * bad C identifiers).
  *
- * Ratified shape (core-mode-design.md §5.1 + the ABI ratification session):
+ * Ratified shape (the ratified library-mode design §5.1 + the ABI ratification session):
  *   {
  *     "profile_format": 1,
  *     "name": "<embedder identity string>",
- *     "entry": "src/core.ts",                  // ONE module, profile-relative
+ *     "entry": "src/lib.ts",                  // ONE module, profile-relative
  *     "emission": "llvm" | "c",                // pins the emission; no fallback
  *     "abi": {
  *       "prefix": "<prefix>_",
@@ -38,32 +38,32 @@
  * changes meaning. */
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { coreProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import { libProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 
 /** Marshalling classes legal in PARAMETER position (v1). */
-export const CORE_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32"] as const;
+export const LIB_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32"] as const;
 /** Marshalling classes legal in RETURN position (v1): the value classes
  * plus void; the integer plumbing classes are param-only until ask 4. */
-export const CORE_RETURN_CLASSES = ["f64", "bool", "string", "bytes", "void"] as const;
+export const LIB_RETURN_CLASSES = ["f64", "bool", "string", "bytes", "void"] as const;
 
-export type CoreParamClass = (typeof CORE_PARAM_CLASSES)[number];
-export type CoreReturnClass = (typeof CORE_RETURN_CLASSES)[number];
+export type LibParamClass = (typeof LIB_PARAM_CLASSES)[number];
+export type LibReturnClass = (typeof LIB_RETURN_CLASSES)[number];
 
-export interface CoreExportEntry {
+export interface LibraryExportEntry {
   /** The entry module's export name. */
   export: string;
   /** The external C symbol the wrapper is emitted under. */
   symbol: string;
-  params: CoreParamClass[];
-  returns: CoreReturnClass;
+  params: LibParamClass[];
+  returns: LibReturnClass;
 }
 
-export interface CoreProfile {
+export interface LibraryProfile {
   profileFormat: 1;
   name: string;
   /** Resolved absolute path of the ONE entry module. */
   entry: string;
-  /** The pinned emission — no fallback concept exists on the core path. */
+  /** The pinned emission — no fallback concept exists on the library path. */
   emission: "llvm" | "c";
   prefix: string;
   initSymbol: string;
@@ -75,7 +75,7 @@ export interface CoreProfile {
   /** §4.3: declared → results accumulate until the host calls it; null →
    * every entry prologue resets the result arena. */
   resultResetSymbol: string | null;
-  exports: CoreExportEntry[];
+  exports: LibraryExportEntry[];
   /** Profile-supplied teaching text appended to refusals (the ratified
    * SC4004/SC4005 rider): keyed by diagnostic code ("SC4005"), with
    * "async" accepted as the shared key for both async-surface codes. */
@@ -117,12 +117,12 @@ function rejectUnknownKeys(obj: object, path: string, known: readonly string[]):
 
 /** Parse + validate a profile file. Returns the profile or the SC4001
  * diagnostics (one per problem found before parsing had to stop). */
-export function loadCoreProfile(
+export function loadLibraryProfile(
   profilePath: string,
-): { ok: true; profile: CoreProfile } | { ok: false; diagnostics: ScrDiagnostic[] } {
+): { ok: true; profile: LibraryProfile } | { ok: false; diagnostics: ScrDiagnostic[] } {
   const fail = (detail: string): { ok: false; diagnostics: ScrDiagnostic[] } => ({
     ok: false,
-    diagnostics: [coreProfileDiag(detail, profilePath)],
+    diagnostics: [libProfileDiag(detail, profilePath)],
   });
   let text: string;
   try {
@@ -168,7 +168,7 @@ export function loadCoreProfile(
 
     const exportsRaw = p["exports"];
     if (!Array.isArray(exportsRaw)) throw new ProfileError("'exports' must be an array");
-    const entries: CoreExportEntry[] = [];
+    const entries: LibraryExportEntry[] = [];
     exportsRaw.forEach((e, i) => {
       const path = `exports[${i}]`;
       if (e === null || typeof e !== "object" || Array.isArray(e)) {
@@ -182,22 +182,22 @@ export function loadCoreProfile(
       const paramsRaw = ee["params"];
       if (!Array.isArray(paramsRaw)) throw new ProfileError(`'${path}.params' must be an array`);
       const params = paramsRaw.map((c, j) => {
-        if (typeof c !== "string" || !(CORE_PARAM_CLASSES as readonly string[]).includes(c)) {
+        if (typeof c !== "string" || !(LIB_PARAM_CLASSES as readonly string[]).includes(c)) {
           throw new ProfileError(
-            `'${path}.params[${j}]' must be one of ${CORE_PARAM_CLASSES.join("/")}, got ${JSON.stringify(c)}`,
+            `'${path}.params[${j}]' must be one of ${LIB_PARAM_CLASSES.join("/")}, got ${JSON.stringify(c)}`,
           );
         }
-        return c as CoreParamClass;
+        return c as LibParamClass;
       });
       const returns = req<string>(ee["returns"], `${path}.returns`, "string");
-      if (!(CORE_RETURN_CLASSES as readonly string[]).includes(returns)) {
+      if (!(LIB_RETURN_CLASSES as readonly string[]).includes(returns)) {
         const detail =
           returns === "u8" || returns === "u32" || returns === "i32"
             ? `'${path}.returns': integer classes are parameter-only in v1 — outbound integer returns wait for the prove-or-refuse machinery (ask 4); return f64 and convert on the host side`
-            : `'${path}.returns' must be one of ${CORE_RETURN_CLASSES.join("/")}, got '${returns}'`;
+            : `'${path}.returns' must be one of ${LIB_RETURN_CLASSES.join("/")}, got '${returns}'`;
         throw new ProfileError(detail);
       }
-      entries.push({ export: exportName, symbol, params, returns: returns as CoreReturnClass });
+      entries.push({ export: exportName, symbol, params, returns: returns as LibReturnClass });
     });
 
     // Pairwise-distinct symbols across the whole declared set (exports +
@@ -263,6 +263,6 @@ export function loadCoreProfile(
 /** The profile's teaching text for one refusal code (the ratified rider:
  * SC4004/SC4005 carry profile-supplied guidance naming the embedder's
  * sanctioned alternative). Falls back to the shared "async" key. */
-export function profileTeaching(profile: CoreProfile, code: string): string | undefined {
+export function profileTeaching(profile: LibraryProfile, code: string): string | undefined {
   return profile.teachings[code] ?? (code === "SC4004" || code === "SC4005" ? profile.teachings["async"] : undefined);
 }

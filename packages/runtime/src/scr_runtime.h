@@ -39,49 +39,49 @@ char *strcasestr(const char *hay, const char *needle);
  * flush-at-exit, RC audit registration (when built with -DSCR_RC_AUDIT). */
 void scr_init(void);
 
-/* ── the trap funnel (scr_console.c; scr_core.c under -DSCR_CORE) ──────
+/* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
  * Every unrecoverable runtime trap — OOM, semantic range traps, internal-
  * invariant failures — funnels through this pair instead of open-coded
  * fputs/fprintf + abort. Executable builds expand to exactly the historical
  * behavior (the message's bytes on stderr, then abort — the default lane
- * must not change by a byte). Core builds (-DSCR_CORE) route the message to
+ * must not change by a byte). Library builds (-DSCR_LIB) route the message to
  * the host-registered panic sink and abort only as the last resort: before
  * registration, or if the sink returns (the ruled host-contract violation —
  * a conforming sink longjmps to a host frame BELOW the entry, never back
- * into core frames). Messages keep their trailing newline in both lanes so
+ * into library frames). Messages keep their trailing newline in both lanes so
  * the funnel is a pure indirection over identical bytes. */
 _Noreturn void scr_trap(const char *msg);
 _Noreturn void scr_trap_fmt(const char *fmt, ...);
 
-/* ── core (library) mode (scr_core.c, linked only into core artifacts) ──
- * A core artifact has no main, no event loop, no signal handlers, no
+/* ── library mode (scr_library.c, linked only into library artifacts) ─────
+ * A library artifact has no main, no event loop, no signal handlers, no
  * atexit registrations, and never touches host stdio modes or buffering:
  * initialization runs inside the profile-named init entry (re-runnable
  * deterministically), traps route to the sink above, and buffer-class
- * results live in a core-owned result arena. Everything here compiles only
- * under -DSCR_CORE; executable builds never contain it. */
-#ifdef SCR_CORE
+ * results live in a library-owned result arena. Everything here compiles only
+ * under -DSCR_LIB; executable builds never contain it. */
+#ifdef SCR_LIB
 typedef struct ScrStr ScrStr;     /* full definitions below (C11 repeat) */
 typedef struct ScrBytes ScrBytes;
 /* The host's panic sink: msg is UTF-8, valid only for the duration of the
  * call; address is the trap site's return address (0 when the toolchain
  * cannot supply one); ctx is the registration's opaque pointer. The sink
- * must not call back into any core entry and must not unwind or longjmp
- * back into core frames. */
-typedef void (*ScrCoreSinkFn)(void *ctx, const uint8_t *msg, size_t msg_len,
+ * must not call back into any library entry and must not unwind or longjmp
+ * back into library frames. */
+typedef void (*ScrLibSinkFn)(void *ctx, const uint8_t *msg, size_t msg_len,
                               uint64_t address);
-void scr_core_set_sink(ScrCoreSinkFn fn, void *ctx); /* latest wins */
+void scr_library_set_sink(ScrLibSinkFn fn, void *ctx); /* latest wins */
 
-/* Entry prologue: aborts deterministically when the core is poisoned (a
+/* Entry prologue: aborts deterministically when the library is poisoned (a
  * trap already fired — no profile entry may run again; recovery is process
  * restart). reset_arena additionally drops the result arena (the
  * auto-reset posture, and the reset/collect entries' shared body). */
-void scr_core_entry(bool reset_arena);
-void scr_core_arena_reset(void);
+void scr_library_entry(bool reset_arena);
+void scr_library_arena_reset(void);
 /* The mode-provided collect entry's body: arena reset + a full cycle
  * collection (snapshot-invariant by construction — collection frees only
  * unreachable cycles). */
-void scr_core_collect(void);
+void scr_library_collect(void);
 
 /* Full session reset, called by the generated init entry AFTER the program
  * TU released and zeroed its globals: pending-exception clear, arena
@@ -89,30 +89,30 @@ void scr_core_collect(void);
  * the library's interned process values, a cycle collection, and — under
  * SCR_RC_AUDIT — the zero-live-heap assertion (a failure is a trap through
  * the sink, never _Exit). */
-void scr_core_reset(void);
-/* Where a unit would atexit() a lazy teardown, core builds register it
- * here instead (called on every scr_core_reset, registered once). */
-void scr_core_register_reset(void (*fn)(void));
+void scr_library_reset(void);
+/* Where a unit would atexit() a lazy teardown, library builds register it
+ * here instead (called on every scr_library_reset, registered once). */
+void scr_library_register_reset(void (*fn)(void));
 /* An escaped exception at an entry boundary: renders the same "Uncaught
  * ..." text the executable epilogue prints, releases the payload, and
  * routes the text through the trap funnel. No-op when nothing is pending.
  * Defined in scr_exception.c (it owns the cell). */
-void scr_core_check_exc(void);
+void scr_library_check_exc(void);
 
 /* Marshalling helpers the generated wrappers call (both emissions share
  * these bodies, which is how the two lanes stay identical by
  * construction). Inbound is borrowed-and-copied; outbound values MOVE into
  * the result arena and stay valid until the next arena reset. String
  * results are NUL-terminated after *out_len bytes (ScrStr's layout). */
-ScrStr *scr_core_str_in(const uint8_t *p, size_t len);   /* +1 */
-ScrBytes *scr_core_bytes_in(const uint8_t *p, size_t len); /* +1, u8 */
-void scr_core_str_out(ScrStr *s, const uint8_t **out, size_t *out_len);
-void scr_core_bytes_out(ScrBytes *b, const uint8_t **out, size_t *out_len);
+ScrStr *scr_library_str_in(const uint8_t *p, size_t len);   /* +1 */
+ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len); /* +1, u8 */
+void scr_library_str_out(ScrStr *s, const uint8_t **out, size_t *out_len);
+void scr_library_bytes_out(ScrBytes *b, const uint8_t **out, size_t *out_len);
 
-#define scr_atexit(fn) scr_core_register_reset(fn)
+#define scr_atexit(fn) scr_library_register_reset(fn)
 #else
 #define scr_atexit(fn) atexit(fn)
-#endif /* SCR_CORE */
+#endif /* SCR_LIB */
 
 /* ── cycle collection (scr_cycle.c) ───────────────────────────────────
  * Reference counting alone cannot free cycles, so every object that can

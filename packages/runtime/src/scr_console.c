@@ -14,7 +14,7 @@
 static long scr_abandoned_fibers = 0;
 void scr_note_abandoned_fibers(long n) { scr_abandoned_fibers = n; }
 
-#ifndef SCR_CORE
+#ifndef SCR_LIB
 #ifdef SCR_RC_AUDIT
 extern long scr_str_live_count(void);     /* scr_string.c */
 extern long scr_arr_live_count(void);     /* scr_array.c */
@@ -97,10 +97,10 @@ void scr_init(void) {
 #endif
   atexit(scr_collect_cycles_at_exit);
 }
-#endif /* !SCR_CORE — a core never touches host stdio modes/buffering and
+#endif /* !SCR_LIB — a library artifact never touches host stdio modes/buffering and
         * registers no atexit handlers: scr_init and its exit hooks (the
         * audit's _Exit(99) included) are executable-lane machinery; the
-        * core session reset lives in scr_core.c. */
+        * library session reset lives in scr_library.c. */
 
 /* ONE formatter for both console streams — console.error/warn print
  * byte-identically to console.log in Node (same inspect rendering), only

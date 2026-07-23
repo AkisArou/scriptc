@@ -1,8 +1,8 @@
-/* Core (library) emission mode — the K-fixture conformance suite over the
+/* Library emission mode — the K-fixture conformance suite over the
  * ratified design. Every fixture runs TWICE, once per emission, with the
  * profile's `emission` field flipped by the harness, and outputs (sink
  * message text included) must be identical across the two runs — the
- * "reference/differential emission" posture; core mode has no fallback
+ * "reference/differential emission" posture; library mode has no fallback
  * concept.
  *
  *   K1  symbols-exact       nm over the archive: prefix-carrying external
@@ -11,7 +11,7 @@
  *   K2  scalar-roundtrip    f64 (-0, NaN, MAX_SAFE_INTEGER), bool, and the
  *                           u8/u32/i32 plumbing classes
  *   K3  buffer-roundtrip    string/bytes in/out, NUL-termination, NULL with
- *                           len 0, BOTH arena postures over one core
+ *                           len 0, BOTH arena postures over one library
  *   K4  init-rerun          three identical sessions (globals, refcounted
  *                           state, run-once guards all reset)
  *   K5  trap-to-sink-once   the range trap's message + address exactly
@@ -19,12 +19,12 @@
  *                           code; a trap during init routes the same
  *   K6  pre-registration    a trap before sink registration aborts
  *   K7  escaped-throw       "Uncaught ..." reaches the sink; the poisoned
- *                           core aborts every later entry deterministically
+ *                           library aborts every later entry deterministically
  *   K8  ambient-audit       no undefined refs to sigaction/signal/
  *                           pthread_create/atexit anywhere in the archive
  *   K9  refusals            SC4002/SC4003/SC4004/SC4005/SC4007 with the
  *                           profile-teaching rider (SC4001 has its own
- *                           suite in core-profile.test.ts)
+ *                           suite in library-profile.test.ts)
  *   K10 sanitized-lane      K4/K5/K7 re-run under ASan + the RC audit
  *                           (arming the per-session zero-live-heap seam)
  */
@@ -32,11 +32,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { compileCore } from "@scriptc/compiler";
+import { compileLibrary } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
-const fixtureRoot = join(repoRoot, "tests/core-mode");
-const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/core-mode");
+const fixtureRoot = join(repoRoot, "tests/library-mode");
+const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-mode");
 
 type Emission = "llvm" | "c";
 const EMISSIONS: Emission[] = ["llvm", "c"];
@@ -48,11 +48,11 @@ interface BuildOpts {
   declaredReset?: string;
 }
 
-/** Build one fixture's core archive for one emission: the fixture's
+/** Build one fixture's library archive for one emission: the fixture's
  * profile.json is patched (emission flipped, entry made absolute, posture
  * overridden when asked) into the build dir, then compiled through the
- * real compileCore pipeline. */
-async function buildCore(
+ * real compileLibrary pipeline. */
+async function buildLibrary(
   fixture: string,
   emission: Emission,
   opts: BuildOpts = {},
@@ -71,7 +71,7 @@ async function buildCore(
   if (opts.declaredReset !== undefined) profile.abi.result_reset_symbol = opts.declaredReset;
   const profilePath = join(outDir, "profile.json");
   writeFileSync(profilePath, JSON.stringify(profile, null, 2));
-  const result = await compileCore({
+  const result = await compileLibrary({
     profilePath,
     outDir,
     sanitize: opts.sanitize ?? false,
@@ -143,9 +143,9 @@ const SCALARS_SYMBOLS = [
   "kt_init", "kt_set_panic_sink", "kt_collect",
 ];
 
-describe.each(EMISSIONS)("core mode, %s emission", (emission) => {
+describe.each(EMISSIONS)("library mode, %s emission", (emission) => {
   test("K1/K2/K8: scalar round-trips, symbol exactness, ambient audit", async () => {
-    const { archive, outDir } = await buildCore("scalars", emission);
+    const { archive, outDir } = await buildLibrary("scalars", emission);
 
     // K2: the scripted call sequence.
     const probe = buildProbe("scalars", archive, outDir);
@@ -163,7 +163,7 @@ describe.each(EMISSIONS)("core mode, %s emission", (emission) => {
 
     // K8: the mechanical ambient audit — the archive references none of
     // the process-disposition or threading surface, and registers no
-    // atexit handlers (core teardown is the reset registry).
+    // atexit handlers (library teardown is the reset registry).
     for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
       expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
     }
@@ -177,7 +177,7 @@ describe.each(EMISSIONS)("core mode, %s emission", (emission) => {
     expect([...undef].filter((s) => loopish.test(s))).toEqual([]);
   });
 
-  /* ── K3: buffers, both arena postures over one core ──────────────────── */
+  /* ── K3: buffers, both arena postures over one library ──────────────────── */
 
   const BUFFERS_EXPECTED = `buffers ready
 shout: ABC! (len 4, nul 1)
@@ -189,7 +189,7 @@ wrap empty: len 2 bytes 60 62
 `;
 
   test("K3: buffer round-trips + lifetime, auto-reset posture", async () => {
-    const { archive, outDir } = await buildCore("buffers", emission);
+    const { archive, outDir } = await buildLibrary("buffers", emission);
     const probe = buildProbe("buffers", archive, outDir);
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -198,7 +198,7 @@ wrap empty: len 2 bytes 60 62
   });
 
   test("K3: buffer lifetime, declared-reset posture (results accumulate)", async () => {
-    const { archive, outDir } = await buildCore("buffers", emission, { declaredReset: "kb_reset" });
+    const { archive, outDir } = await buildLibrary("buffers", emission, { declaredReset: "kb_reset" });
     const probe = buildProbe("buffers", archive, outDir, { defines: ["DECLARED_RESET"] });
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -215,7 +215,7 @@ recall: a,b
 `;
 
   test("K4: three init sessions are byte-identical", async () => {
-    const { archive, outDir } = await buildCore("reinit", emission);
+    const { archive, outDir } = await buildLibrary("reinit", emission);
     const probe = buildProbe("reinit", archive, outDir);
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -226,7 +226,7 @@ recall: a,b
   /* ── K5/K6/K7: the trap channel ──────────────────────────────────────── */
 
   test("K5: a trap delivers to the sink exactly once, host survives", async () => {
-    const { archive, outDir } = await buildCore("traps", emission);
+    const { archive, outDir } = await buildLibrary("traps", emission);
     const probe = buildProbe("traps", archive, outDir);
     const run = runProbe(probe, ["trap"]);
     expect(run.signal).toBeNull();
@@ -241,7 +241,7 @@ survived, sink_calls=1
   });
 
   test("K5: a trap during init routes to the sink the same way", async () => {
-    const { archive, outDir } = await buildCore("init-trap", emission);
+    const { archive, outDir } = await buildLibrary("init-trap", emission);
     const probe = buildProbe("init-trap", archive, outDir);
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -255,7 +255,7 @@ survived init trap, sink_calls=1
   });
 
   test("K7: an escaped throw reaches the sink as 'Uncaught ...'", async () => {
-    const { archive, outDir } = await buildCore("traps", emission);
+    const { archive, outDir } = await buildLibrary("traps", emission);
     const probe = buildProbe("traps", archive, outDir);
     const run = runProbe(probe, ["throw"]);
     expect(run.signal).toBeNull();
@@ -269,8 +269,8 @@ survived, sink_calls=1
     );
   });
 
-  test("K7: the poisoned core aborts every later entry", async () => {
-    const { archive, outDir } = await buildCore("traps", emission);
+  test("K7: the poisoned library aborts every later entry", async () => {
+    const { archive, outDir } = await buildLibrary("traps", emission);
     const probe = buildProbe("traps", archive, outDir);
     const run = runProbe(probe, ["poisoned"]);
     expect(run.signal).toBe("SIGABRT");
@@ -279,7 +279,7 @@ survived, sink_calls=1
   });
 
   test("K6: a trap before sink registration aborts", async () => {
-    const { archive, outDir } = await buildCore("traps", emission);
+    const { archive, outDir } = await buildLibrary("traps", emission);
     const probe = buildProbe("traps", archive, outDir);
     const run = runProbe(probe, ["preregister"]);
     expect(run.signal).toBe("SIGABRT");
@@ -289,7 +289,7 @@ survived, sink_calls=1
   /* ── K10: the sanitized lane (ASan + the RC audit's re-init seam) ────── */
 
   test("K10: K4 under ASan + RC audit (zero live heap across re-init)", async () => {
-    const { archive, outDir } = await buildCore("reinit", emission, { sanitize: true });
+    const { archive, outDir } = await buildLibrary("reinit", emission, { sanitize: true });
     const probe = buildProbe("reinit", archive, outDir, { sanitize: true });
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
@@ -298,7 +298,7 @@ survived, sink_calls=1
   });
 
   test("K10: K5/K7 under ASan", async () => {
-    const { archive, outDir } = await buildCore("traps", emission, { sanitize: true });
+    const { archive, outDir } = await buildLibrary("traps", emission, { sanitize: true });
     const probe = buildProbe("traps", archive, outDir, { sanitize: true });
     const trap = runProbe(probe, ["trap"]);
     expect(trap.status).toBe(0);
@@ -309,7 +309,7 @@ survived, sink_calls=1
   });
 });
 
-/* ── K9: the SC4xxx refusal family, end to end through compileCore ─────── */
+/* ── K9: the SC4xxx refusal family, end to end through compileLibrary ─────── */
 
 let refusalCounter = 0;
 async function refusal(
@@ -318,7 +318,7 @@ async function refusal(
 ): Promise<{ code: string; message: string; hint?: string }[]> {
   const outDir = join(cacheDir, `refusal-${refusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
-  const entry = join(outDir, "core.ts");
+  const entry = join(outDir, "lib.ts");
   writeFileSync(entry, source);
   const profile = {
     profile_format: 1,
@@ -337,13 +337,13 @@ async function refusal(
   };
   const profilePath = join(outDir, "profile.json");
   writeFileSync(profilePath, JSON.stringify(profile));
-  const result = await compileCore({ profilePath, outDir });
+  const result = await compileLibrary({ profilePath, outDir });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
   return result.diagnostics.map((d) => ({ code: d.code, message: d.message, ...(d.hint !== undefined ? { hint: d.hint } : {}) }));
 }
 
-describe("K9: core-mode refusals", () => {
+describe("K9: library-mode refusals", () => {
   test("SC4002: unmapped export name", async () => {
     const diags = await refusal(`export function real(): number { return 1; }\n`, {
       exports: [{ export: "nope", symbol: "kx_nope", params: [], returns: "f64" }],
