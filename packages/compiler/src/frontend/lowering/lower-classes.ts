@@ -3477,6 +3477,34 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     return classOfNew(init);
   }
 
+/** `const r: Repo = new MemRepo()` where EVERY member of the annotation's
+   * checker type is a generic-callable method (`interface Repo { get<T>(id:
+   * string): T }`): the record shape maps EMPTY — generic members are
+   * excluded (no closure slot can hold a generic function) — so the
+   * copy-reshape width coercion would DROP the exact class the method
+   * calls monomorphize against, and in JS the binding IS the instance (no
+   * copy exists). The binding keeps the initializer's class
+   * representation instead: generic-method calls resolve like class-typed
+   * receivers (exactInstanceClassOf reads the same const+new discipline),
+   * and uses that want the empty record width-coerce at the use site.
+   * Const + direct `new` only — a reassignable binding or a produced
+   * value keeps today's record story and its fences. */
+  export function genericIfaceBindingKeepsClass(L: Lowerer, decl: ts.VariableDeclaration,
+    declaredType: IrType,): boolean {
+    if (declaredType.kind !== "record") return false;
+    if (!ts.isIdentifier(decl.name) || decl.initializer === undefined || decl.type === undefined) return false;
+    if ((ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) === 0) return false;
+    let init: ts.Expression = decl.initializer;
+    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    if (!ts.isNewExpression(init)) return false;
+    const shape = L.shapes.get(declaredType.shapeId);
+    if (!shape || shape.fields.length > 0 || shape.indexValue !== undefined || shape.tuple === true) return false;
+    const annT = L.typeOf(decl.name);
+    const props = L.checker.getPropertiesOfType(annT);
+    if (props.length === 0) return false;
+    return props.every((p) => isGenericCallableMemberType(L.checker.getTypeOfSymbol(p), L.checker));
+  }
+
 /** `recv.m<T>(args)` — a GENERIC method call, dispatched STATICALLY: the
    * checker's resolved signature (type arguments substituted, inferred or
    * explicit) keys one instantiation of the nearest declarer's body, and
@@ -3488,7 +3516,8 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
   export function lowerClassGenericMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,
     recvInfo: ClassInfo,
-    found: { declarer: ClassInfo; info: GenericFnInfo },): IrExpr {
+    found: { declarer: ClassInfo; info: GenericFnInfo },
+    recvIr?: IrExpr,): IrExpr {
     const name = access.name.text;
     let { declarer, info } = found;
     if (genericOverrideBelow(L, recvInfo, name)) {
@@ -3510,7 +3539,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     const instance = info.implicitParams
       ? implicitCallInstance(L, call, info)
       : genericCallInstance(L, call, info);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = recvIr ?? L.lowerExpr(access.expression);
     const loc = locOf(call);
     // The declarer sits at/above the receiver's static class on the plain
     // path; the EXACT path can land below it (a base-typed const provably

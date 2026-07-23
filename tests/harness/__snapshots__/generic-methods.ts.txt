@@ -40,7 +40,7 @@ generic-methods.ts:60:13 - error SC1090: reaching the object-literal generic met
      |             ^~~~~~~~~~~~~~~
   61 | rebindable = { m<T>(x: T): T { return x; } };
 
-generic-methods.ts:68:13 - error SC1090: calls of the generic method 'm' with no defining object literal (the declaration is signature-only — only methods declared with a body in an object literal monomorphize) is not supported yet
+generic-methods.ts:68:13 - error SC1090: calls of the generic method 'm' through this receiver (the interface declaration is signature-only and generic methods dispatch statically, so the receiver's runtime class must be provable — bind the receiver to a const initialized with its 'new' expression, e.g. 'const r: HasGeneric = new C(...)') is not supported yet
 
   67 | const viaInterface: HasGeneric = { m<T>(x: T): T { return x; } };
   68 | console.log(viaInterface.m(5));

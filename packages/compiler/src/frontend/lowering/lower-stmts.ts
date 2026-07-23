@@ -17,6 +17,7 @@ import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfS
 import { bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 import type { ClassIteratorInfo } from "./lower-classes.js";
+import { genericIfaceBindingKeepsClass } from "./lower-classes.js";
 import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from "./lower-stream.js";
 import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf } from "./lower-builtins.js";
@@ -2497,6 +2498,14 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       ) {
         type = init.type;
       }
+    }
+    // `const r: Repo = new MemRepo()` over an all-generic-method
+    // interface: the binding keeps the initializer's CLASS representation
+    // (the record shape maps empty and the width copy would drop the
+    // class the generic-method calls monomorphize against) — see
+    // genericIfaceBindingKeepsClass.
+    if (type.kind === "record" && init.type.kind === "object" && genericIfaceBindingKeepsClass(L, decl, type)) {
+      type = init.type;
     }
     // A TDZ box minted DURING this very initializer (a callback inside it
     // captured this const — predeclareForwardCapture's current-statement

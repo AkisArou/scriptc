@@ -21,7 +21,7 @@ import { collectNamespaceStmt, nsPathPrefix } from "./lower-namespaces.js";
 import { collectExpandoMembers } from "./lower-expando.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import type { ClassInfo } from "./lower-classes.js";
-import { decoratorNodesOf, guaranteedDecorationThrow } from "./lower-classes.js";
+import { decoratorNodesOf, genericIfaceBindingKeepsClass, guaranteedDecorationThrow } from "./lower-classes.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 
 /** One file's declarations, split for collection and init-body lowering. */
@@ -1228,6 +1228,18 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                   (uncheckedOverloadHandleCall(L, decl.initializer) ? JSVAL : null))
                 : null;
             let type = handleT ?? L.irTypeOf(nameNode);
+            // `const r: Repo = new MemRepo()` over an all-generic-method
+            // interface: the binding keeps the initializer's CLASS
+            // representation (the record shape maps empty and the width
+            // copy would drop the class the generic-method calls
+            // monomorphize against) — see genericIfaceBindingKeepsClass.
+            if (
+              type.kind === "record" && ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              genericIfaceBindingKeepsClass(L, decl, type)
+            ) {
+              const initT = L.mapTypeOf(L.typeOf(decl.initializer!));
+              if (initT?.kind === "object") type = initT;
+            }
             // A file-scope PATTERN over an ISLAND-bound source (`export
             // let { toString } = 1;` — the engine reads the wrapper's
             // prototype member): the bound value follows the island

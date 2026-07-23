@@ -17,7 +17,7 @@ import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilter
 import { lowerChildStreamMethodCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
 import { lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
-import { EMITTER_API_MEMBERS, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
+import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
 import { lowerConsoleInspectArg, lowerFormatCall } from "./lower-inspect.js";
 import { STREAM_API_MEMBERS, lowerStreamMethodCall, lowerStreamModuleCall, lowerStreamStaticCall, streamSidesOf } from "./lower-stream.js";
@@ -6763,8 +6763,40 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     ) {
       return null;
     }
+    // An INTERFACE-typed receiver over a class instance (`const r: Repo =
+    // new MemRepo(); r.get(...)` — the declaration is signature-only, but
+    // the receiver's exact class is statically proven and the binding
+    // kept the class representation, genericIfaceBindingKeepsClass): the
+    // call is a class generic-method call on that exact class. The
+    // receiver must LOWER as the class — a record-held value (a `let`, a
+    // produced value, a parameter) has already dropped it, and keeps the
+    // named fence below.
+    {
+      const exact = exactInstanceClassOf(L, access.expression);
+      const gfound = exact ? findGenericMethodOn(L, exact, name) : null;
+      if (gfound && ts.isIdentifier(access.expression)) {
+        const recv = L.lowerExpr(access.expression); // identifier reads are pure — no double evaluation
+        if (recv.type.kind === "object") {
+          return lowerClassGenericMethodCall(L, call, access, exact!, gfound, recv);
+        }
+      }
+    }
     const found = objLitGenericFnNodeOf(L, propSym);
     if (!found) {
+      // Interface-declared generic methods dispatch statically, so the
+      // receiver's runtime class must be provable — name that discipline
+      // instead of the object-literal wording when the method lives on an
+      // interface.
+      const onInterface = L.checker
+        .declarationsOf(propSym)
+        .some((d) => d.parent !== undefined && ts.isInterfaceDeclaration(d.parent));
+      if (onInterface) {
+        L.unsupported(
+          "SC1090",
+          call,
+          `calls of the generic method '${name}' through this receiver (the interface declaration is signature-only and generic methods dispatch statically, so the receiver's runtime class must be provable — bind the receiver to a const initialized with its 'new' expression, e.g. 'const r: ${L.checker.typeToString(recvT)} = new C(...)')`,
+        );
+      }
       L.unsupported(
         "SC1090",
         call,
