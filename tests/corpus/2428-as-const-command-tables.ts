@@ -30,8 +30,8 @@ export const agentCommand = {
   arguments: [{ name: "init", required: false }],
   options: [{ ...yesOption, description: "Skip confirmation prompt" }],
   examples: [
-    { name: "Generate", value: "vercel agent init" },
-    { name: "Skip", value: "vercel agent init --yes" },
+    { name: "Generate", value: "mycli agent init" },
+    { name: "Skip", value: "mycli agent init --yes" },
   ],
 } as const;
 console.log(agentCommand.name, agentCommand.aliases.length, agentCommand.arguments.length);

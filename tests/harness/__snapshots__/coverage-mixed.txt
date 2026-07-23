@@ -1,7 +1,7 @@
 scriptc coverage tests/coverage-fixtures/mixed.ts
 
-  statements analyzed   12
-  compile statically    10  (83%)
+  statements analyzed   13
+  compile statically    11  (84%)
 
   blockers:
       ×1  object destructuring of non-record values (the source is array-typed)  SC1031

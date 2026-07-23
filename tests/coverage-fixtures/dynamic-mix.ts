@@ -9,5 +9,6 @@ const root = Math.sqrt(81);
 const up = (19.99).toFixed(1);
 const parsed = Number.parseFloat("1.5"); // the global's string form is static now; the Number static keeps the island
 const raw = __island_eval("6 * 7");
-const flags = root == 81;
+const unknownScore: unknown = 81;
+const flags = unknownScore == 81; // mixed-kind loose equality keeps the fence (same-kind == lowers)
 console.log("done");

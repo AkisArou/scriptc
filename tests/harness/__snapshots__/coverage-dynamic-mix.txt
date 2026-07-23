@@ -1,7 +1,7 @@
 scriptc coverage tests/coverage-fixtures/dynamic-mix.ts
 
-  statements analyzed   8
-  compile statically    2  (25%)
+  statements analyzed   9
+  compile statically    3  (33%)
 
   runs with --dynamic   5 sites (embeds a JS engine, ~620KB — static stays the default)
       ×1  '__island_eval' requires the embedded dynamic engine, which this build does not include                        SC2010
