@@ -11,6 +11,7 @@
     "test:cache-identity": "node tests/harness/cache-identity.mjs",
     "test:watch": "vitest",
     "lint": "eslint packages/compiler/src packages/cli/src",
+    "manifest": "tsx scripts/surface-manifest.mjs",
     "scriptc": "tsx packages/cli/src/main.ts"
   },
   "devDependencies": {

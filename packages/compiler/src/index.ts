@@ -22,6 +22,13 @@ export { emitModule } from "./backend/emission/emitter.js";
 export type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
 export { renderAll, renderDiagnostic } from "./diagnostics/render.js";
 export { renderCoverage, type CoverageInput } from "./coverage/report.js";
+export {
+  generateSurfaceManifest,
+  renderSurfaceManifest,
+  MANIFEST_SCHEMA_VERSION,
+  type SurfaceManifest,
+  type SurfaceManifestEntry,
+} from "./coverage/surface-manifest.js";
 export { validateModule } from "./ir/validate.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, overridesDtsPath } from "./frontend/program.js";
