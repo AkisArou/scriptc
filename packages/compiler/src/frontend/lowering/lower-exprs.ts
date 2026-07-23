@@ -5672,8 +5672,13 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       if (shape && !shape.tuple) {
         // Literal keys — string literals AND numeric literals in their
         // canonical string spelling (`b[1] = v` writes field/key "1", JS's
-        // own key derivation) — name declared fields directly.
-        const litKey = recordKeyLiteralText(target.argumentExpression);
+        // own key derivation) — name declared fields directly. A key
+        // IDENTIFIER whose TYPE proves one literal (a literal-typed const,
+        // a keyof-constrained type parameter bound to a literal inside a
+        // generic instance — `set(o, "a", v)`'s body writing `o[k] = v`)
+        // is the same static field write.
+        const litKey = recordKeyLiteralText(target.argumentExpression) ??
+          recordKeyTypeLiteralText(L, target.argumentExpression);
         if (litKey !== null) {
           const field = shape.fields.find((f) => f.name === litKey);
           if (field) {
