@@ -4315,6 +4315,54 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2450-private-instance-methods.ts": {
+   "order": [
+    "<repo>/tests/corpus/2450-private-instance-methods.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2451-private-fields.ts": {
+   "order": [
+    "<repo>/tests/corpus/2451-private-fields.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2452-private-statics.ts": {
+   "order": [
+    "<repo>/tests/corpus/2452-private-statics.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2453-private-accessors.ts": {
+   "order": [
+    "<repo>/tests/corpus/2453-private-accessors.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2454-private-generator-methods.ts": {
+   "order": [
+    "<repo>/tests/corpus/2454-private-generator-methods.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2455-private-brand-checks.ts": {
+   "order": [
+    "<repo>/tests/corpus/2455-private-brand-checks.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2456-private-async-methods.ts": {
+   "order": [
+    "<repo>/tests/corpus/2456-private-async-methods.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2457-private-members.js": {
+   "order": [
+    "<repo>/tests/corpus/2457-private-members.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6048,6 +6096,12 @@
      "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     }
    ]
+  },
+  "<repo>/tests/diagnostics/private-members.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/private-members.ts"
+   ],
+   "diags": []
   },
   "<repo>/tests/diagnostics/promise-all-fences.ts": {
    "order": [

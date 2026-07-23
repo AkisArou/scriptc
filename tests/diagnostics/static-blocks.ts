@@ -11,19 +11,23 @@ class UsesThis {
 
 // An unreferenced class whose collection poisons for ANOTHER reason still
 // reports eagerly when it carries a static block: the block would have run
-// under Node, so deferral may not swallow it.
+// under Node, so deferral may not swallow it. (#private members lower now,
+// so the poison here is an auto-accessor field.)
 class NeverReferenced {
-  #hidden = 1;
+  accessor hidden = 1;
   static {
     console.log("must not be dropped");
   }
 }
 
-// The classStaticBlock13 shape: the block itself lowers, but reading a
-// static PRIVATE field goes through the class name, which has no value form
-// (only static readonly identifier-named fields lower, as module globals).
+// The classStaticBlock13 shape retired: a static #private FIELD reads
+// through the declaring class's name like any static (corpus 2452). The
+// static-accessor half of the family still has no lowering — the use site
+// in the block fences by name.
 class PrivateStatic {
-  static #x = 123;
+  static get #x(): number {
+    return 123;
+  }
 
   static {
     console.log(PrivateStatic.#x);
