@@ -4303,6 +4303,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2445-math-minmax-nary.ts": {
+   "order": [
+    "<repo>/tests/corpus/2445-math-minmax-nary.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2446-performance-global.ts": {
+   "order": [
+    "<repo>/tests/corpus/2446-performance-global.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6455,6 +6467,12 @@
   "<repo>/tests/fixtures/npm/cases/web-streams/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/web-streams/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/workspace-copied/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/workspace-copied/main.ts"
    ],
    "diags": []
   },

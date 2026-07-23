@@ -285,4 +285,21 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(all).toContain("wslinked");
     expect(all).not.toContain("nothing installed resolves");
   }, 120_000);
+
+  // The COPIED workspace shape classifies exactly like the symlinked one:
+  // node_modules/wscopied is a real directory (no realpath escape — some
+  // workspace installers copy members into node_modules), so detection
+  // reads the workspace ROOT's "workspaces" globs instead. The member is
+  // UNTYPED: its implicit-any module error (the import-site 7016) must
+  // never gate — the package is the program author's own workspace code —
+  // and the flagless build reports the same island-capable per-package
+  // attribution the symlinked twin gets.
+  test("a copied workspace member classifies identically to a symlinked one", () => {
+    const { coverage } = analyze(join(fixturesRoot, "npm/cases/workspace-copied/main.ts"));
+    expect(coverage.preflightFailed).toBe(false);
+    const all = JSON.stringify(coverage.diagnostics);
+    expect(all).toContain("wscopied");
+    expect(all).not.toContain("nothing installed resolves");
+    expect(all).not.toContain("implicitly has an 'any' type");
+  }, 120_000);
 });

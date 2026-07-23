@@ -64,6 +64,7 @@ import {
   isJsSourceFileName,
   isNodeTypesPath,
   isRelativeSpecifier,
+  isWorkspacePackageName,
   JS_ANY_OPERATOR_CODES,
   JS_RELAXED_TSC_CODES,
   overridesDtsPath,
@@ -1269,6 +1270,25 @@ function preflight7(load: LoadResult): {
     if (insideBlockComment(sf.text, d.pos)) return true;
     return d.code === 2300 && commentDup.has(`${d.fileName}:${sf.text.slice(d.pos, d.end)}`);
   };
+  /* A workspace member installed by COPY ships its JS inside node_modules,
+   * where depth-0 exclusion keeps it out of the checker's program — an
+   * UNTYPED member then types as an implicit-any module (TS7016) at every
+   * import site. The symlinked install of the same tree never sees this
+   * (the realpath escapes node_modules and allowJs types the member from
+   * its JS), and the package is the program author's own workspace code
+   * with the island as its execution home — "install @types" is not
+   * actionable — so the copied shape must not gate either: a 7016 whose
+   * specifier names a REGISTERED workspace package (the eager
+   * registration pass above runs first) is suppressed, and the import
+   * takes the same per-site island story as any untyped npm package. */
+  const workspaceImplicitAnySuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
+    if (d.code !== 7016 || d.fileName === undefined || d.pos === undefined || d.end === undefined) return false;
+    const sf = p.getSourceFile(d.fileName);
+    if (!sf) return false;
+    const spec = sf.text.slice(d.pos, d.end).replace(/^['"]|['"]$/g, "");
+    const prefix = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
+    return isWorkspacePackageName(prefix);
+  };
   const errorsOf = (p: ts.Program): ts.Diagnostic[] => {
     const all = ts.getPreEmitDiagnostics(p);
     // First pass: every comment-side 2300's (file, name) — the partners
@@ -1287,6 +1307,7 @@ function preflight7(load: LoadResult): {
         !npmStaticFileSuppressed(d) &&
         !nodeModulesJsSuppressed(d) &&
         !namespaceCalleeSuppressed(p, d) &&
+        !workspaceImplicitAnySuppressed(p, d) &&
         !jsdocTypeSuppressed(p, d, commentDup),
     );
   };

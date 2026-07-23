@@ -570,13 +570,40 @@ declare var AbortSignal: {
  * `body` is honestly `any` — the streaming world lives entirely in the
  * island. The named RequestInit interface is what routes init object
  * literals through the island literal builder. */
+/* Headers — a response's header map (r.headers), island-backed like
+ * Response itself: the value is the engine's real Headers (lowercase
+ * names, combine-on-append, sorted iteration), member reads and calls are
+ * engine ops with validated exits at typed boundaries. Declared to the
+ * implemented surface; constructing one statically (`new Headers()`) keeps
+ * the constructor fence. */
+interface Headers {
+  append(name: string, value: string): void;
+  delete(name: string): void;
+  get(name: string): string | null;
+  getSetCookie(): string[];
+  has(name: string): boolean;
+  set(name: string, value: string): void;
+  forEach(callbackfn: (value: string, key: string, parent: Headers) => void): void;
+}
 interface Response {
   readonly ok: boolean;
   readonly status: number;
   readonly statusText: string;
+  readonly url: string;
+  readonly redirected: boolean;
+  readonly headers: Headers;
   readonly body: any;
+  readonly bodyUsed: boolean;
   json(): Promise<unknown>;
   text(): Promise<string>;
+  /* The whole body as bytes: arrayBuffer() answers the engine's
+   * ArrayBuffer (a handle — read it through `new Uint8Array(...)` in
+   * island code or its byteLength directly); bytes() answers a
+   * Uint8Array, which exits to the static bytes tier at a typed
+   * boundary (`const b: Uint8Array = await r.bytes()` is a validated
+   * copy — divergence 44's aliasing stance). */
+  arrayBuffer(): Promise<ArrayBuffer>;
+  bytes(): Promise<Uint8Array>;
 }
 interface RequestInit {
   method?: string;
@@ -732,6 +759,13 @@ declare module "node:perf_hooks" {
 declare module "perf_hooks" {
   export * from "node:perf_hooks";
 }
+/* Node also exposes the same performance object as a GLOBAL (no import
+ * needed) — the module export and the global are one value, so the global
+ * spelling lowers through the identical perf_hooks tables (name +
+ * provenance, like console/process). With @types/node present this file
+ * stands down and its wider global serves; the lowered surface stays
+ * performance.now() either way. */
+declare var performance: import("node:perf_hooks").Performance;
 
 /* node:module — the ADMIT-THEN-FENCE surface: the import compiles (the
  * module carries no evaluation), and every member keeps a per-site fence.

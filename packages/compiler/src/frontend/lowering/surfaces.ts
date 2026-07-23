@@ -454,8 +454,11 @@ export const ISLAND_SURFACE = {
  * NaN-poisoning ±0-ordered scalar folds; random: arc4random-backed
  * uniform [0,1) — SEMANTICS.md 62). Checked BEFORE the island table
  * (lowerIslandMethodCall), so the tabled arities compile statically and
- * other arities keep the island/fence story; unioned with the island
- * table for the methods-as-values fence (lowerMathProperty). */
+ * other arities keep the island/fence story — except min/max, whose
+ * variadic spelling lowers at ANY plain arity (the n-ary left fold of
+ * the scalar compare; zero arguments answer the fold's ∓Infinity seed);
+ * unioned with the island table for the methods-as-values fence
+ * (lowerMathProperty). */
 export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | undefined> = {
   floor: { fn: "math.floor", arity: 1 },
   abs: { fn: "math.abs", arity: 1 },
@@ -947,8 +950,8 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
       hint = "radix-free conversion is a template literal away: `${x}`; toString(radix) runs under --dynamic";
     } else if (container === "Math" && (member === "min" || member === "max")) {
       hint =
-        `Math.${member} lowers with exactly two arguments or one number[] spread — ` +
-        `nest calls (Math.${member}(a, Math.${member}(b, c))) or spread an array (Math.${member}(...xs))`;
+        `Math.${member} lowers with any number of plain arguments or ONE number[] spread — ` +
+        `mixed spread/positional lists don't: spread a single array (Math.${member}(...xs))`;
     } else if (
       recvIr?.kind === "array" &&
       member === "index" &&
@@ -1155,10 +1158,11 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         : stdlibGlobalNameOf(L, init);
     if (name === null) return false;
     // Only alias OBJECT-shaped globals whose members lower by receiver
-    // identity (process, console, globalThis itself). Function-valued
+    // identity (process, console, globalThis itself, and perf_hooks'
+    // performance — the mockable-clock idiom snapshots it). Function-valued
     // globals (setTimeout) taken as values are a different story — the
     // ordinary value paths (and their fences) apply.
-    if (name !== "process" && name !== "console" && name !== "globalThis") return false;
+    if (name !== "process" && name !== "console" && name !== "globalThis" && name !== "performance") return false;
     const symbol = L.checker.getSymbolAtLocation(nameNode);
     if (!symbol) return false;
     L.stdlibGlobalAliases.set(symbol, name);

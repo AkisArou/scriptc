@@ -14,7 +14,7 @@
  * implementations and requires identical answers. Change 5.9.3's options
  * and these tables are wrong — that is what the suite is for. */
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isNpmStaticPackage, npmStaticPackageOfPath, npmStaticTransformPkgJson } from "./npm-static.js";
 import { provenanceEntryFor } from "./provenance-registry.js";
@@ -50,6 +50,9 @@ interface PkgJson {
   typings?: string;
   main?: string;
   exports?: unknown;
+  /** The workspace ROOT's member declaration: an array of directory globs
+   * (or `{ packages: [...] }` — the tool-config twin of the same field). */
+  workspaces?: unknown;
 }
 
 const pkgJsonCache = new Map<string, PkgJson | null>();
@@ -70,6 +73,103 @@ function pkgJsonOf(dir: string): PkgJson | null {
     pkgJsonCache.set(dir, cached);
   }
   return cached;
+}
+
+/* ── workspace member declarations ───────────────────────────────────────
+ *
+ * Most workspace installs LINK internal packages into node_modules, so a
+ * resolved answer's realpath escapes node_modules and withWorkspace (below)
+ * classifies it from the link alone. Workspace trees that COPY instead of
+ * symlink leave the realpath inside node_modules — but the tree still
+ * declares its members: the workspace ROOT's package.json "workspaces"
+ * globs. These helpers answer the declared member directory for a package
+ * NAME, so a copied install classifies workspace-linked exactly like a
+ * symlinked one. */
+
+/** The "workspaces" patterns of a package.json — the array form or the
+ * `{ packages: [...] }` object twin. Null when absent/malformed. */
+function workspacePatternsOf(pkg: PkgJson | null): string[] | null {
+  const raw =
+    pkg === null
+      ? undefined
+      : Array.isArray(pkg.workspaces)
+        ? pkg.workspaces
+        : typeof pkg.workspaces === "object" && pkg.workspaces !== null
+          ? (pkg.workspaces as { packages?: unknown }).packages
+          : undefined;
+  if (!Array.isArray(raw)) return null;
+  const patterns = raw.filter((p): p is string => typeof p === "string" && !p.startsWith("!"));
+  return patterns.length > 0 ? patterns : null;
+}
+
+/** Expands one workspaces glob under `root` to existing directories.
+ * Segment-wise: `*` expands one directory level, everything else is
+ * literal — the "packages/*" convention (a trailing "/" is tolerated;
+ * node_modules never enumerates). Directories only. */
+function expandWorkspacePattern(root: string, pattern: string): string[] {
+  let dirs = [root];
+  for (const seg of pattern.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    const next: string[] = [];
+    for (const dir of dirs) {
+      if (seg === "*") {
+        let entries: string[];
+        try {
+          entries = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const e of entries) {
+          if (e === "node_modules" || e.startsWith(".")) continue;
+          const child = join(dir, e);
+          if (isDirectory(child)) next.push(child);
+        }
+      } else {
+        const child = join(dir, seg);
+        if (isDirectory(child)) next.push(child);
+      }
+    }
+    dirs = next;
+  }
+  return dirs.filter((d) => d !== root);
+}
+
+/** Declared workspace members by package NAME under a workspaces-bearing
+ * root — each glob-matched directory whose package.json carries a name.
+ * Cached per root (one compile's view; clearResolveCaches resets). */
+const workspaceMembersCache = new Map<string, Map<string, string>>();
+
+function workspaceMembersOf(root: string, patterns: string[]): Map<string, string> {
+  let members = workspaceMembersCache.get(root);
+  if (members === undefined) {
+    members = new Map();
+    for (const pattern of patterns) {
+      for (const dir of expandWorkspacePattern(root, pattern)) {
+        const name = pkgJsonOf(dir)?.name;
+        if (typeof name === "string" && name !== "" && !members.has(name)) members.set(name, dir);
+      }
+    }
+    workspaceMembersCache.set(root, members);
+  }
+  return members;
+}
+
+/** The declared workspace-member directory for `packageName`, found by
+ * walking UP from the directory holding the node_modules that answered —
+ * the nearest workspaces-bearing package.json decides (workspace roots
+ * don't nest; a root whose globs don't name the package answers null).
+ * Realpath'd like the symlink classification stamps. */
+function workspaceMemberDirOf(fromDir: string, packageName: string): string | null {
+  for (let dir = fromDir; ; ) {
+    const patterns = workspacePatternsOf(pkgJsonOf(dir));
+    if (patterns !== null) {
+      const member = workspaceMembersOf(dir, patterns).get(packageName);
+      return member !== undefined ? realpathOr(member) : null;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /* ── relative specifiers ─────────────────────────────────────────────────
@@ -593,10 +693,24 @@ export function resolveBareModule(
     // A workspace link: the answer's realpath escaped node_modules, so the
     // package directory is a symlink into the project. Stamp the realpath'd
     // package root so callers can classify (and register) the package.
+    // Workspace trees that COPY instead of symlink leave the answer inside
+    // node_modules — the workspace ROOT's "workspaces" globs still declare
+    // the member, so a name match stamps the declared member directory and
+    // both install shapes classify identically.
     const withWorkspace = (r: BareResolution | null): BareResolution | null => {
-      if (r === null || isNodeModulesPath(r.typesFile)) return r;
-      const realDir = realpathOr(nmPkgDir);
-      return isNodeModulesPath(realDir) ? r : { ...r, workspaceDir: realDir };
+      if (r === null) return r;
+      if (!isNodeModulesPath(r.typesFile)) {
+        const realDir = realpathOr(nmPkgDir);
+        if (!isNodeModulesPath(realDir)) return { ...r, workspaceDir: realDir };
+      }
+      const normDir = nmPkgDir.split("\\").join("/");
+      const nmIdx = normDir.lastIndexOf("/node_modules/");
+      const root = nmIdx > 0 ? nmPkgDir.slice(0, nmIdx) : null;
+      const member = root !== null ? workspaceMemberDirOf(root, r.packageName) : null;
+      // A member directory inside SOME node_modules (a published tree
+      // copied under an installed package) is plain npm surface, not the
+      // program author's own workspace code.
+      return member !== null && !isNodeModulesPath(member) ? { ...r, workspaceDir: member } : r;
     };
     const rawPkg = pkgJsonOf(nmPkgDir);
     // The opted-in exports lookup runs over the SAME transformed document
@@ -696,6 +810,7 @@ export function resolveTypeDirective(name: string, fromFile: string): string | n
  * compile; a long-lived test process editing fixtures must reset it). */
 export function clearResolveCaches(): void {
   pkgJsonCache.clear();
+  workspaceMembersCache.clear();
 }
 
 /** True when `path` is under a node_modules directory (the
