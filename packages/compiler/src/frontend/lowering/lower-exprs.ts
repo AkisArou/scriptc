@@ -12,7 +12,7 @@ import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReaso
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { PoisonError, jsFuncNameOf, neverTaintedJsType, own } from "./lowerer.js";
-import { IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead } from "./lower-containers.js";
+import { IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead, strCharsCall } from "./lower-containers.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
 import { fenceEnumObjectValue, lowerEnumAccess } from "./lower-enums.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, contextualUndefReadType, fenceEarlyAliasUse, fenceEarlyNsMemberRef, lowerNsIdentifierValue, nsMemberIdentOf, nsUndefRead, nsWritableTarget } from "./lower-namespaces.js";
@@ -3152,6 +3152,13 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         if (src.type.kind === "object") {
           const drained = L.classIteratorDrainCall(src, locOf(el), type.elem);
           if (drained) src = drained;
+        }
+        // `[...s]` on a STRING spreads its code-point characters (the
+        // string iterator's walk — astral chars whole) through the same
+        // interned helper as Array.from(s); the result rides the array
+        // machinery below like any string[] source.
+        if (src.type.kind === "string") {
+          src = strCharsCall(L, src, locOf(el));
         }
         // A same-family array whose ELEMENT lifts (string[] into a
         // (string | symbol)[] literal — per-element wrap/width copy):

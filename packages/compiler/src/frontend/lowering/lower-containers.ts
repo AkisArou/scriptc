@@ -1781,6 +1781,20 @@ import { own, WidthLift } from "./lowerer.js";
         return { kind: "arrayNewLen", length: n, type: arrT, loc };
       }
     }
+    // `Array.from(s)` on a STRING: the string iterator's code-point walk
+    // into a fresh string[] (astral characters stay whole, where a
+    // charAt/index walk would truncate the surrogate halves) — the same
+    // interned helper `[...s]` lowers through.
+    if (args.length === 1 && !ts.isObjectLiteralExpression(args[0]!)) {
+      const src = L.lowerExpr(args[0]!);
+      if (src.type.kind === "string") return strCharsCall(L, src, loc);
+      L.noLowering(
+        "Array.from with this argument shape",
+        call,
+        "Array.from({ length: n }, (v, i) => ...) and Array.from(aString) are the lowered " +
+          "forms — copy arrays with [...a] and drain Map/Set iterators where they are made",
+      );
+    }
     const n =
       args.length === 2 && ts.isObjectLiteralExpression(args[0]!) && args[0]!.properties.length === 1
         ? lowerLengthProp(L, args[0]!.properties[0]!)
@@ -1818,6 +1832,61 @@ import { own, WidthLift } from "./lowerer.js";
       L.liftedFns.push(buildArrayFromLenFn(helper, fnRet, arity, loc));
     }
     return { kind: "call", callee: helper, args: [n, fnArg], type: arrayOf(fnRet), loc };
+  }
+
+/** `Array.from(s)` / `[...s]` on a STRING: the code-point split into a
+   * fresh string[], through one interned helper per module. */
+  export function strCharsCall(L: Lowerer, src: IrExpr, loc: SrcLoc): IrExpr {
+    const key = "strChars";
+    let helper = L.arrHofHelpers.get(key);
+    if (!helper) {
+      helper = "%str.chars";
+      L.arrHofHelpers.set(key, helper);
+      L.liftedFns.push(buildStrCharsFn(helper, loc));
+    }
+    return { kind: "call", callee: helper, args: [src], type: arrayOf(STRING), loc };
+  }
+
+/** The code-point split, from existing IR nodes — the string for-of
+   * desugar's UTF-16 cursor as a function:
+   *
+   *   out = [];
+   *   i = 0;
+   *   while (i < s.length) { ch = cpAt(s, i); i += ch.length; out.push(ch); }
+   *   return out;
+   */
+  function buildStrCharsFn(name: string, loc: SrcLoc): IrFunction {
+    const outT = arrayOf(STRING);
+    const ref = (localId: string, type: IrType): IrExpr => ({ kind: "varRef", localId, type, loc });
+    const sLen = (recv: IrExpr): IrExpr => ({ kind: "strIntrinsic", method: "length", receiver: recv, args: [], type: F64, loc });
+    const body: IrStmt[] = [
+      { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: outT, loc }, loc },
+      { kind: "varDecl", localId: "i.0", init: { kind: "numLit", value: 0, type: F64, loc }, loc },
+      {
+        kind: "while",
+        cond: { kind: "bin", op: "<", left: ref("i.0", F64), right: sLen(ref("s.0", STRING)), type: BOOL, loc },
+        body: [
+          { kind: "varDecl", localId: "ch.0", init: { kind: "strIntrinsic", method: "cpAt", receiver: ref("s.0", STRING), args: [ref("i.0", F64)], type: STRING, loc }, loc },
+          { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: ref("i.0", F64), right: sLen(ref("ch.0", STRING)), type: F64, loc }, loc },
+          { kind: "exprStmt", expr: { kind: "arrIntrinsic", method: "push", receiver: ref("out.0", outT), args: [ref("ch.0", STRING)], type: F64, loc }, loc },
+        ],
+        loc,
+      },
+      { kind: "return", value: ref("out.0", outT), loc },
+    ];
+    return {
+      name,
+      params: [{ localId: "s.0", name: "s", type: STRING }],
+      returnType: outT,
+      locals: [
+        { id: "s.0", name: "s", type: STRING, mutable: true },
+        { id: "out.0", name: "out", type: outT, mutable: false },
+        { id: "i.0", name: "i", type: F64, mutable: true },
+        { id: "ch.0", name: "ch", type: STRING, mutable: false },
+      ],
+      body,
+      loc,
+    };
   }
 
 /** The lowered `length` value of the one-property source literal, or null
