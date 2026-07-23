@@ -4,13 +4,19 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+## 0.0.3
+
+<!-- release:start -->
+
+The supported-surface manifest: the static tier, machine-readable.
+
 ### Features
 
 - **Surface manifest**: each release now ships a machine-readable `surface-manifest.json` — the language and stdlib surface the static tier compiles at that version, with stable per-entry ids so tooling can diff two releases mechanically. Every non-static entry carries the diagnostic code the compiler raises for it. Attached to the GitHub release and shipped inside `@scriptc/compiler` as `@scriptc/compiler/surface-manifest.json`; regenerate with `pnpm manifest`.
 
-## 0.0.2
+<!-- release:end -->
 
-<!-- release:start -->
+## 0.0.2
 
 Compiler fixes and static-surface growth driven by the first days of real-world use.
 
@@ -26,8 +32,6 @@ Compiler fixes and static-surface growth driven by the first days of real-world 
 - `scriptc coverage` now renders the same diagnostics a build prints — code frames included — when analysis stops on type errors or import fences, instead of a bare summary line.
 - The LLVM backend's runtime declarations are now mechanically checked against the C runtime's prototypes at test time; two latent signature mismatches were found and fixed.
 - Import-cycle admission accepts declaration-only initialization windows whose calls resolve entirely to declaration files, widening the set of legal ESM cycles that compile statically.
-
-<!-- release:end -->
 
 ## 0.0.1
 
