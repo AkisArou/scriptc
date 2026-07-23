@@ -10,7 +10,7 @@ import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
-import { builtinFenceHintOf, builtinModuleFnOf, NARROW_FIRST } from "./surfaces.js";
+import { builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
 import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
@@ -19,7 +19,7 @@ import { lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateR
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
 import { EMITTER_API_MEMBERS, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
-import { lowerFormatCall } from "./lower-inspect.js";
+import { lowerConsoleInspectArg, lowerFormatCall } from "./lower-inspect.js";
 import { STREAM_API_MEMBERS, lowerStreamMethodCall, lowerStreamModuleCall, lowerStreamStaticCall, streamSidesOf } from "./lower-stream.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, contextualUndefReadType, fenceEarlyAliasUse, fenceEarlyNsMemberRef, nsMemberIdentOf, nsPathPrefix, nsUndefRead } from "./lower-namespaces.js";
 import { declSymbolOf } from "./lower-modules.js";
@@ -2431,14 +2431,16 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
 
     const consoleMember = L.consoleCallMember(expr);
     if (consoleMember !== null) {
-      // console.log writes stdout; console.error and console.warn are one
-      // stream in Node (warn IS error) and write stderr with the exact same
-      // formatting. The ambient signature accepts (number | string |
-      // boolean)[], which a union of those arms satisfies — so tsc lets
-      // `console.log(u)` through and the fence lives here. A NARROWED use
-      // already lowered to the arm via maybeNarrow; only genuinely-union
-      // args are rejected.
+      // console.log/info/debug write stdout; console.error and console.warn
+      // are one stream in Node (warn IS error, info and debug ARE log) and
+      // write stderr with the exact same formatting. Node's formatter is
+      // formatWithOptions: string arguments print verbatim, numbers and
+      // booleans directly, and EVERYTHING else through util.inspect at the
+      // rest-args depth 2 — which the static inspect machinery renders
+      // here (arrays, records, unions, Maps/Sets, undefined/null, ...);
+      // shapes inspect cannot render keep honest per-argument fences.
       const surface = `console.${consoleMember}`;
+      const stdoutMember = consoleMember === "log" || consoleMember === "info" || consoleMember === "debug";
       // A LITERAL format string with %-specifiers and further arguments
       // (`console.log('Mismatched %s function calls. Expected %s, actual
       // %d.', name, seg, n)` — test/common's exit report): Node's console
@@ -2454,7 +2456,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         const formatted = lowerFormatCall(L, expr, loc, false);
         return {
           kind: "intrinsic",
-          name: consoleMember === "log" ? "console.log" : "console.error",
+          name: stdoutMember ? "console.log" : "console.error",
           args: [formatted],
           type: VOID,
           loc,
@@ -2470,13 +2472,6 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
             "SC1090",
             a,
             `${surface} of 'any' values (wrap it: ${surface}(\`\${v}\`), or validate with 'as <type>' first)`,
-          );
-        }
-        if (lowered.type.kind === "union") {
-          L.unsupported(
-            "SC1090",
-            a,
-            `union-typed ${surface} arguments (${NARROW_FIRST})`,
           );
         }
         // Checked-dynamic values carry their own shape, so the runtime
@@ -2519,23 +2514,22 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
             loc,
           } satisfies IrExpr;
         }
-        // With the fallback console the signature already restricts args to
-        // number | string | boolean (anything else is a type error); with
-        // @types/node's console.log(...any[]) everything typechecks, so the
-        // fence moves here.
-        if (lowered.type.kind !== "f64" && lowered.type.kind !== "string" && lowered.type.kind !== "bool") {
-          L.unsupported(
-            "SC1090",
-            a,
-            `${surface} of '${L.fmt(lowered.type)}' values ` +
-              `(only number, string, and boolean arguments lower)`,
-          );
+        // number/string/boolean ride the ScrLogArg protocol directly (the
+        // runtime formats them Node-exactly — including -0).
+        if (lowered.type.kind === "f64" || lowered.type.kind === "string" || lowered.type.kind === "bool") {
+          return lowered;
         }
-        return lowered;
+        // Everything else renders through the static inspect machinery at
+        // the rest-args depth 2 (formatWithOptions): arrays, records,
+        // unions (a string arm prints VERBATIM — the console.log vs
+        // inspect distinction, per arm), Maps/Sets, plain undefined/null,
+        // regexes, symbols, error values, Buffers. Shapes inspect cannot
+        // render fence honestly with the reason.
+        return lowerConsoleInspectArg(L, a, lowered, surface, loc);
       });
       return {
         kind: "intrinsic",
-        name: consoleMember === "log" ? "console.log" : "console.error",
+        name: stdoutMember ? "console.log" : "console.error",
         args,
         type: VOID,
         loc,

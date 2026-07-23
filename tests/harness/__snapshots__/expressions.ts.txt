@@ -11,10 +11,3 @@ expressions.ts:5:11 - error SC1090: typeof expressions on statically-typed value
   5 | const m = typeof "ab".indexOf("b"); // a CALL operand — pure computations fold now
     |           ^~~~~~~~~~~~~~~~~~~~~~~~
   6 | const u = n === 3 ? 1 : 2;
-
-expressions.ts:9:25 - error SC1090: union-typed console.log arguments (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
-
-   8 | const mixed = n === 3 && s;
-   9 | console.log(t, m, u, b, mixed);
-     |                         ^~~~~
-  10 | 

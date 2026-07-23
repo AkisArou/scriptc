@@ -641,6 +641,134 @@ function inspectHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
   return name;
 }
 
+/* ── the console/format top-level value rendering ────────────────────── */
+
+/** Node's formatWithOptions REST-ARG rule over one statically-typed value
+ * (console.log's non-format arguments, util.format's %s and trailing
+ * arguments): a STRING prints VERBATIM — never quote-wrapped, the classic
+ * console.log vs inspect distinction — and every other kind renders
+ * exactly as inspect at the given depth. Unions dispatch per arm AT
+ * RUNTIME through an interned helper, so a string arm stays verbatim
+ * while its sibling arms inspect. Callers check inspectSupport first. */
+export function formatValueExpr(L: Lowerer, t: IrType, value: IrExpr, depth: number, loc: SrcLoc): IrExpr {
+  switch (t.kind) {
+    case "string":
+      return value;
+    case "f64":
+      return { kind: "libCall", fn: "insp.f64", args: [value], type: STRING, loc };
+    case "bool":
+      return { kind: "toString", operand: value, type: STRING, loc };
+    case "undefinedT":
+      return str("undefined", loc);
+    case "nullT":
+      return str("null", loc);
+    case "symbol":
+      return { kind: "libCall", fn: "sym.toString", args: [value], type: STRING, loc };
+    case "dyn":
+      return { kind: "libCall", fn: "insp.dynS", args: [value, num(depth, loc)], type: STRING, loc };
+    case "union":
+      return { kind: "call", callee: formatUnionHelper(L, t, depth, loc), args: [value], type: STRING, loc };
+    default:
+      return inspectExpr(L, t, value, num(0, loc), num(depth, loc), loc);
+  }
+}
+
+/** `%util.fmtv.<n>(v): string` — formatValueExpr's runtime dispatch over a
+ * union's arms (interned per union + depth, the inspectHelper pattern).
+ * The TOP-LEVEL union rule only: nested unions inside composites keep
+ * inspect's own rendering, where string arms quote — exactly Node. */
+function formatUnionHelper(L: Lowerer, t: IrType & { kind: "union" }, depth: number, loc: SrcLoc): string {
+  const key = `fmtv:${typeKey(t)}:${depth}`;
+  const existing = L.inspectHelpers.get(key);
+  if (existing) return existing;
+  const name = `%util.fmtv.${L.inspectHelpers.size}`;
+  L.inspectHelpers.set(key, name);
+  const def = L.unions.get(t.unionId);
+  if (!def) throw new Error(`format value over unknown union ${t.unionId}`);
+  const v = (): IrExpr => ({ kind: "varRef", localId: "v.0", type: t, loc });
+  const body: IrStmt[] = [];
+  def.arms.forEach((arm, tag) => {
+    const narrowed: IrExpr = { kind: "unionNarrow", unionId: t.unionId, tag, value: v(), type: arm, loc };
+    body.push({
+      kind: "if",
+      cond: { kind: "unionIsTag", unionId: t.unionId, tag, negated: false, value: v(), type: BOOL, loc },
+      then: [{ kind: "return", value: formatValueExpr(L, arm, narrowed, depth, loc), loc }],
+      else_: null,
+      loc,
+    });
+  });
+  body.push({ kind: "return", value: str("", loc), loc }); // unreachable: some arm always matches
+  L.liftedFns.push({
+    name,
+    params: [{ localId: "v.0", name: "v", type: t }],
+    returnType: STRING,
+    locals: [{ id: "v.0", name: "v", type: t, mutable: false }],
+    body,
+    loc,
+  });
+  return name;
+}
+
+/** One console.log/info/debug/error/warn argument OUTSIDE the direct
+ * scalar set (number/string/boolean ride the ScrLogArg protocol
+ * untouched, and dyn/function values have their own paths at the call
+ * site): the rendered STRING under Node's console semantics — inspect at
+ * the rest-args depth 2 — or the honest fence naming the first
+ * unsupported constituent. */
+export function lowerConsoleInspectArg(
+  L: Lowerer,
+  node: ts.Expression,
+  value: IrExpr,
+  surface: string,
+  loc: SrcLoc,
+): IrExpr {
+  const t = value.type;
+  if (t.kind === "undefinedT" || t.kind === "nullT") {
+    // The baked text ("undefined"/"null"): the operand is a literal or a
+    // pure read, so dropping its evaluation loses nothing. Effectful
+    // unit-typed operands keep a fence — a silent skip is banned.
+    if (value.kind !== "unitLit" && !pureReemittable(value)) {
+      L.unsupported(
+        "SC1090",
+        node,
+        `${surface} of an effectful '${L.fmt(t)}'-typed expression (evaluate it first: const v = ...; ${surface}(v))`,
+      );
+    }
+    return str(t.kind === "undefinedT" ? "undefined" : "null", loc);
+  }
+  if (t.kind === "bytes") {
+    // One runtime representation serves Buffer AND Uint8Array; their
+    // renderings differ, so the argument's checker type picks — and only
+    // Buffer lowers (lowerInspectCall's stance).
+    const tname = L.checker.typeToString(L.checker.getBaseTypeOfLiteralType(L.typeOf(node)));
+    const isBuffer =
+      tname === "Buffer" || tname === "NonSharedBuffer" || tname.startsWith("Buffer<") || tname.startsWith("NonSharedBuffer<");
+    if (t.elem !== "u8" || !isBuffer) {
+      L.unsupported(
+        "SC1090",
+        node,
+        `${surface} of '${tname}' values (Buffer's <Buffer ..> form is the lowered typed-array rendering; other typed arrays fence)`,
+      );
+    }
+    return inspectExpr(L, t, value, num(0, loc), num(2, loc), loc);
+  }
+  if (t.kind === "void") {
+    // Node prints "undefined" for a void call's result; a void expression
+    // is not a value here, so the composition fences with the rewrite.
+    L.unsupported(
+      "SC1090",
+      node,
+      `${surface} of a void call result (call it as its own statement, then ${surface}(undefined))`,
+    );
+  }
+  const walk = { recursive: false };
+  const reason = inspectSupport(L, t, new Set(), walk);
+  if (reason !== null) {
+    L.unsupported("SC1090", node, `${surface} of '${L.fmt(t)}' values (${reason})`);
+  }
+  return formatValueExpr(L, t, value, 2, loc);
+}
+
 /* ── the callsite: options, direct function/class names ──────────────── */
 
 /** The parsed options literal: the resolved depth (numeric; Infinity for
@@ -815,6 +943,15 @@ function formatSArg(L: Lowerer, node: ts.Expression, depth: number, loc: SrcLoc)
   if (t.kind === "symbol") return { kind: "libCall", fn: "sym.toString", args: [value], type: STRING, loc };
   if (t.kind === "dyn") {
     return { kind: "libCall", fn: "insp.dynS", args: [value, num(depth, loc)], type: STRING, loc };
+  }
+  // A UNION argument dispatches per arm at runtime: a string arm prints
+  // VERBATIM (typeof arg === 'string' in Node's formatter — inspect's
+  // quoting never applies at the top level), every other arm inspects.
+  if (t.kind === "union") {
+    const walk = { recursive: false };
+    const reason = inspectSupport(L, t, new Set(), walk);
+    if (reason !== null) L.noLowering(`util.format %s of '${L.fmt(t)}' values`, node, reason);
+    return formatValueExpr(L, t, value, depth, loc);
   }
   if (t.kind === "object" && !isErrorClass(L, t.className)) {
     // hasBuiltInToString: a class with its OWN toString goes through

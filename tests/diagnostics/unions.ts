@@ -19,9 +19,9 @@ function ambiguousArm(x: WideArm | number): { n: number } | { m: string } | numb
 }
 const na = ambiguousArm(5);
 
-// Truthiness, logical operators, and === over whole unions now LOWER
-// (per-union helpers); what stays fenced here is PRINTING a whole union
-// (console.log needs the arm's ToString).
+// Truthiness, logical operators, === — and PRINTING — over whole unions
+// now LOWER (per-union helpers; console.log dispatches per arm with
+// Node's console semantics: string arms verbatim, others inspected).
 const u = mk();
 if (u) {
   console.log("truthy");

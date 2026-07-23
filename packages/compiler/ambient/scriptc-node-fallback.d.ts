@@ -1,7 +1,11 @@
 /* The FALLBACK Node-ish declarations — shipped into the program ONLY when
  * the target project has no @types/node (see loadProgram): console, the
  * process global, and the "node:fs" module, typed as exactly the supported
- * surface so unsupported uses are honest TYPE errors.
+ * surface so unsupported uses are honest TYPE errors. Where a member is
+ * part of the stock lib surface but has no lowering, prefer DECLARING it
+ * (console's non-lowered members below): a program that typechecks under
+ * its own tsc then reaches the per-site lowering fence with its hint,
+ * instead of a fallback-manufactured type error it cannot reproduce.
  *
  * When the project's node_modules contains @types/node, this file STANDS
  * DOWN — its declarations would collide with @types/node's own (`declare
@@ -70,14 +74,41 @@ declare namespace NodeJS {
   }
 }
 
-/* log writes stdout; error and warn are ONE stream in Node (warn IS error
- * under another name) and write stderr with the exact same formatting.
- * stderr is unbuffered (stdout flushes first, so merged 2>&1 output keeps
- * source order). */
+/* log/info/debug write stdout (info and debug ARE log in Node); error and
+ * warn are ONE stream (warn IS error under another name) and write stderr
+ * with the exact same formatting. stderr is unbuffered (stdout flushes
+ * first, so merged 2>&1 output keeps source order). Arguments take Node's
+ * console semantics: strings verbatim, everything else through the static
+ * util.inspect rendering — so the parameters are unknown[], like stock
+ * lib's console; values inspect cannot render statically (functions inside
+ * composites, class hierarchies, `any`) fence per argument with a hint.
+ *
+ * The REMAINING stock console members are declared too — not because they
+ * lower (none do), but so a program that typechecks under its own tsc
+ * reaches the per-site SC2020 fence naming the member and the supported
+ * surface, instead of dying on a fallback-manufactured type error its own
+ * tsc cannot reproduce. */
 declare const console: {
-  log(...args: (number | string | boolean)[]): void;
-  error(...args: (number | string | boolean)[]): void;
-  warn(...args: (number | string | boolean)[]): void;
+  log(...args: unknown[]): void;
+  info(...args: unknown[]): void;
+  debug(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  assert(condition?: unknown, ...data: unknown[]): void;
+  clear(): void;
+  count(label?: string): void;
+  countReset(label?: string): void;
+  dir(item?: unknown, options?: unknown): void;
+  dirxml(...data: unknown[]): void;
+  group(...data: unknown[]): void;
+  groupCollapsed(...data: unknown[]): void;
+  groupEnd(): void;
+  table(tabularData?: unknown, properties?: readonly string[]): void;
+  time(label?: string): void;
+  timeEnd(label?: string): void;
+  timeLog(label?: string, ...data: unknown[]): void;
+  timeStamp(label?: string): void;
+  trace(...data: unknown[]): void;
 };
 
 /* The process global (Node-like, deliberately tiny). Every member lowers to

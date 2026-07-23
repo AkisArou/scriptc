@@ -15,8 +15,8 @@ pair[i] = "b";
 const opt: [string, number?] = ["x"];
 const rest: [string, ...number[]] = ["y", 1, 2];
 
-// Heterogeneous tuples ITERATE now (positions snapshot into the union) —
-// the union-typed loop variable meets console.log's own narrow-first fence.
+// Heterogeneous tuples ITERATE now (positions snapshot into the union),
+// and the union-typed loop variable PRINTS (per-arm console rendering).
 for (const part of pair) {
   console.log(part);
 }

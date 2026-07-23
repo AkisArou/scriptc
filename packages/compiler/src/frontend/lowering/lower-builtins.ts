@@ -5991,15 +5991,19 @@ export function isConsoleLog(L: Lowerer, call: ts.CallExpression): boolean {
   }
 
 /** The console member of a `console.<member>(...)` call, for the lowered
-   * trio: "log" (stdout), and "error"/"warn" (both stderr — Node's warn IS
+   * set: "log"/"info"/"debug" (stdout — Node's info and debug ARE log
+   * under other names), and "error"/"warn" (both stderr — Node's warn IS
    * error under another name; the output is identical). Provenance-checked
-   * like every stdlib global. Null for anything else (console.info,
-   * console.table, a user's own console binding, ...). */
-  export function consoleCallMember(L: Lowerer, call: ts.CallExpression): "log" | "error" | "warn" | null {
+   * like every stdlib global. Null for anything else (console.table, a
+   * user's own console binding, ...). */
+  export function consoleCallMember(
+    L: Lowerer,
+    call: ts.CallExpression,
+  ): "log" | "info" | "debug" | "error" | "warn" | null {
     if (!ts.isPropertyAccessExpression(call.expression)) return null;
     const access = call.expression;
     if (access.questionDotToken || call.questionDotToken) return null;
     const name = access.name.text;
-    if (name !== "log" && name !== "error" && name !== "warn") return null;
+    if (name !== "log" && name !== "info" && name !== "debug" && name !== "error" && name !== "warn") return null;
     return L.isStdlibGlobal(access.expression, "console") ? name : null;
   }
