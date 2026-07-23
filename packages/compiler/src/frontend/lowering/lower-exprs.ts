@@ -1878,9 +1878,24 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     }
     if (other.type.kind === "union") {
       const tag = L.armTag(other.type.unionId, unit.type);
-      // A union without that unit arm cannot compare equal; tsc rejects
-      // no-overlap comparisons before lowering, so this is defensive.
-      if (tag < 0) return null;
+      if (tag < 0) {
+        // A union WITHOUT that unit arm: legal TS (`miss === null` on a
+        // `number | undefined` — null/undefined guard comparisons are
+        // permitted against nullable-adjacent types), and === never
+        // coerces, so the answer is the constant `negated`. The literal
+        // must NOT flow into the union representation (the unionEq
+        // fallback would coerce it through the stranded-arm trap and
+        // throw where Node answers false). JS still evaluates the
+        // operand, so a non-droppable one (`xs.find(f) === null` — the
+        // callback's effects are observable) rides one throwaway tag
+        // test; droppable reads fold to the bare literal.
+        const answer: IrExpr = { kind: "boolLit", value: negated, type: BOOL, loc };
+        if (droppableStatic(other)) return answer;
+        const evalOnce: IrExpr = {
+          kind: "unionIsTag", unionId: other.type.unionId, tag: 0, negated: false, value: other, type: BOOL, loc,
+        };
+        return { kind: "logical", op: negated ? "||" : "&&", left: evalOnce, right: answer, type: BOOL, loc };
+      }
       return {
         kind: "unionIsTag",
         unionId: other.type.unionId,

@@ -2651,15 +2651,26 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
               "effectful case tests in a union-typed switch (bind the test value to a const first)",
             );
           }
-          pendingTests.push({
-            kind: "unionEq",
-            unionId: unionType.unionId,
-            negated: false,
-            left: disc,
-            right: L.coerceInto(clause.expression, test, unionType),
-            type: BOOL,
-            loc: locOf(clause.expression),
-          });
+          // A unit-literal test takes the unit-comparison lowering: a tag
+          // test when the arm exists, the constant FALSE when the union
+          // lacks it (`case null:` on a `number | undefined` — legal TS,
+          // never matches; coercing the literal into the union would hit
+          // the stranded-arm trap and throw where JS just skips the case).
+          const unitTest =
+            test.kind === "unitLit"
+              ? L.lowerUnitComparison(disc, test, false, locOf(clause.expression))
+              : null;
+          pendingTests.push(
+            unitTest ?? {
+              kind: "unionEq",
+              unionId: unionType.unionId,
+              negated: false,
+              left: disc,
+              right: L.coerceInto(clause.expression, test, unionType),
+              type: BOOL,
+              loc: locOf(clause.expression),
+            },
+          );
         }
         const isDefault = ts.isDefaultClause(clause);
         if (clause.statements.length === 0 && !isDefault && i < clauses.length - 1) {
