@@ -484,6 +484,64 @@ ScrStr *scr_str_encode_uri_component(ScrStr *s);
  * malformed") and returns NULL. Borrows s; result +1. */
 ScrStr *scr_str_decode_uri_component(ScrStr *s);
 
+/* The non-throwing core of decodeURIComponent: NULL on malformed input
+ * instead of the URIError — the try/catch shape node:querystring's
+ * unescape wraps around decodeURIComponent (scr_qs.c's strict pass). */
+ScrStr *scr_str_decode_uri_component_try(ScrStr *s);
+
+/* ── node:querystring (scr_qs.c — LINK-GATED by moduleUsesQs; the
+ * scr_url_params.c precedent: pure data transforms, no loop hooks).
+ * querystring.escape needs no entry here: Node's qsEscape encodes exactly
+ * the component unreserved set, so the frontend lowers it to
+ * scr_str_encode_uri_component (always linked; a program using only
+ * escape never pulls this unit). */
+
+/* querystring.unescape — Node's qsUnescape: strict decodeURIComponent
+ * first, and on failure the lenient legacy unescapeBuffer(s).toString()
+ * (valid %XX escapes decode to their byte, malformed escapes copy
+ * literally, every non-escape UTF-16 CODE UNIT truncates to its low byte
+ * — Node's Buffer element write — and the byte buffer decodes as UTF-8
+ * with U+FFFD replacement per maximal subpart, Buffer.toString's rule).
+ * Borrows s; result +1; never throws. */
+ScrStr *scr_qs_unescape(const ScrStr *s);
+
+/* querystring.parse — Node v24's scan state machine, byte-wise over the
+ * UTF-8 storage (equivalent to the code-unit scan for well-formed input:
+ * the machine compares sep/eq sequences positionally and treats '%'/'+'/
+ * hex as ASCII, and multibyte alignment is preserved). Decoded pairs land
+ * in `out` — the PURE-index-signature Dict record's overflow map (the
+ * emitters pass rec->sc_ovf) — grouped like Node's addKeyVal: a first
+ * value stores the `str_tag` union arm, a repeat REPLACES it with a
+ * two-element string[] wrapped in `arr_tag`, later repeats push. sep/eq
+ * fall back to "&"/"=" when empty (Node's falsy rule; the frontend
+ * completes omitted/null arguments to the defaults). max_keys is Node's
+ * rule exactly: > 0 caps the PAIR count (empty skipped segments count,
+ * like Node's --pairs), anything else (0, negatives, NaN) is unlimited;
+ * the frontend completes the omitted option to 1000. Only the DEFAULT
+ * decoder runs (custom decodeURIComponent options fence at compile time),
+ * so '+' means ' ' and segments decode with scr_qs_unescape's semantics
+ * only when they carry a full valid %XX triple (Node's encodeCheck).
+ * Borrows everything; never throws. */
+typedef struct ScrMap ScrMap; /* full definition below (C11 repeat) */
+void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
+                       const ScrStr *eq, double max_keys, uint32_t str_tag,
+                       uint32_t arr_tag);
+
+/* querystring.stringify — Node's stringify over a borrowed DOM value (the
+ * frontend dynFroms the typed record; JS-world dyn values pass straight
+ * through). Non-object DOMs answer "" like Node; object keys iterate in
+ * JS own-key order (scr_dyn_obj_keys — array-index keys ascending first,
+ * then insertion order, Node's ObjectKeys). Values serialize per Node's
+ * encodeStringified: strings escape, finite numbers render shortest-
+ * roundtrip then escape ('1e+21' → '1e%2B21'), booleans are bare
+ * true/false, arrays expand to repeated keys (empty arrays emit NOTHING,
+ * key included), and everything else (null, undefined, nested objects/
+ * arrays, functions) is the empty value — key and eq still emitted.
+ * sep/eq fall back to "&"/"=" when empty (Node's `sep ||= '&'`). Result
+ * +1; never throws. */
+ScrStr *scr_qs_stringify(const struct ScrDyn *obj, const ScrStr *sep,
+                         const ScrStr *eq);
+
 /* encodeURI — the same ECMA-262 Encode() with the reserved set and '#'
  * kept unescaped (scr_encode_uri_impl's keep_reserved arm). Total by the
  * well-formed-UTF-8 invariant. Borrows s; result +1. */

@@ -1212,7 +1212,12 @@ static int scr_uri_hex_byte(const char *p, size_t rem) {
   return (hi << 4) | lo;
 }
 
-ScrStr *scr_str_decode_uri_component(ScrStr *s) {
+/* The non-throwing core of decodeURIComponent: NULL on malformed input
+ * (bad hex, invalid UTF-8 octets) instead of the URIError — the
+ * querystring unit's unescape needs exactly the try/catch shape Node's
+ * qsUnescape wraps around decodeURIComponent (scr_qs.c), and the throwing
+ * entry point below stays byte-identical by rethrowing over NULL. */
+ScrStr *scr_str_decode_uri_component_try(ScrStr *s) {
   /* Decoding only ever shrinks (%XX → 1 byte), so len is a safe cap. */
   ScrStr *out = scr_str_alloc_raw(0, s->len);
   size_t w = 0;
@@ -1258,7 +1263,15 @@ ScrStr *scr_str_decode_uri_component(ScrStr *s) {
   return out;
 malformed:
   scr_str_release(out);
-  scr_uri_malformed();
   return NULL;
+}
+
+ScrStr *scr_str_decode_uri_component(ScrStr *s) {
+  ScrStr *out = scr_str_decode_uri_component_try(s);
+  if (!out) {
+    scr_uri_malformed();
+    return NULL;
+  }
+  return out;
 }
 

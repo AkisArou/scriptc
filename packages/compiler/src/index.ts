@@ -4,7 +4,7 @@ import { compileC, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { checkerPanicDiag, iceDiag, isCheckerPanic, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
-import { moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib } from "./ir/nodes.js";
+import { moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { checkPreflight, isNodeTypesPath, loadProgram, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -494,6 +494,9 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     // The link switch for scr_url_params.c: sp.* libCalls, the
     // url.searchParams getter, or a searchParams-kind type on the IR.
     searchParams: moduleUsesSearchParams(lowered.module),
+    // The link switch for scr_qs.c: the qs.* libCalls that live there
+    // (parse/stringify/unescape; escape rides the always-linked encoder).
+    qs: moduleUsesQs(lowered.module),
     // The link switch for scr_stream.c: the node:stream class surface on
     // the IR (stream libCalls or the %Readable-family class defs).
     stream: moduleUsesStream(lowered.module),

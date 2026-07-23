@@ -384,6 +384,14 @@ const LIB_FN_SYMS: Record<string, string> = {
   "sp.toString": "scr_sp_to_string",
   "sp.keyAt": "scr_sp_key_at",
   "sp.valAt": "scr_sp_val_at",
+  // node:querystring (scr_qs.c): unescape/stringify are plain generic
+  // calls (never throw; string results +1), and escape IS the component
+  // encoder (Node's qsEscape set equals encodeURIComponent's) so it emits
+  // the always-linked codec. qs.parse is special-cased in emitLibCall
+  // (the result dictionary's construction).
+  "qs.escape": "scr_str_encode_uri_component",
+  "qs.unescape": "scr_qs_unescape",
+  "qs.stringify": "scr_qs_stringify",
   // Timer handle bookkeeping (never throws; the comma-shaped chaining
   // forms are special-cased in emitLibCall).
   "timers.hasRef": "scr_timer_has_ref",
@@ -9318,6 +9326,31 @@ class LlEmitter {
       // non-handles — nothing runs (arguments still evaluate).
       for (const a of e.args) this.emitExpr(a);
       return { name: "", type: e.type };
+    }
+    if (e.fn === "qs.parse") {
+      // The ParsedUrlQuery dictionary: a fresh pure-index-signature
+      // record whose overflow map the runtime scan fills
+      // (scr_qs_parse_into groups repeats into string[] buckets) — the
+      // C emitter's shape exactly. The frontend verified the structure;
+      // lookups here only guard emitter bugs. Args: qs, sep, eq, maxKeys.
+      if (e.type.kind !== "record") throw new Error("llvm emitter bug: qs.parse result is not a record");
+      const dictShape = this.recordsById.get(e.type.shapeId);
+      const iv = dictShape?.indexValue;
+      if (!dictShape || iv?.kind !== "union") throw new Error("llvm emitter bug: qs.parse dict shape");
+      const ivDef = this.unionsById.get(iv.unionId);
+      const strTag = ivDef?.arms.findIndex((a) => a.kind === "string") ?? -1;
+      const arrTag = ivDef?.arms.findIndex((a) => a.kind === "array") ?? -1;
+      if (strTag < 0 || arrTag < 0) throw new Error("llvm emitter bug: qs.parse index union lacks its arms");
+      const args = e.args.map((a) => this.emitExpr(a));
+      this.declare(`declare void @scr_qs_parse_into(ptr, ptr, ptr, ptr, double, i32, i32)`);
+      const dict = B.tmp();
+      B.line(`${dict} = call ptr @${mangleRecordNew(e.type.shapeId)}()`);
+      const out = this.own({ name: dict, type: e.type });
+      const ovf = this.recordOvfPtr(dict, e.type.shapeId);
+      B.line(
+        `call void @scr_qs_parse_into(ptr ${ovf}, ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${args[2]!.name}, double ${args[3]!.name}, i32 ${strTag}, i32 ${arrTag})`,
+      );
+      return out;
     }
     if (e.fn === "os.networkInterfaces") {
       // The Dict<NetworkInterfaceInfo[]> record, built inline from a

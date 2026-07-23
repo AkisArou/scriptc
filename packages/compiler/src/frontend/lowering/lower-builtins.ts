@@ -13,6 +13,8 @@ import {
   FS_READDIR_DOCUMENTED_OPTIONS,
   FS_WATCH_DOCUMENTED_OPTIONS,
   FS_WRITE_FILE_DOCUMENTED_OPTIONS,
+  QS_PARSE_DOCUMENTED_OPTIONS,
+  QS_STRINGIFY_DOCUMENTED_OPTIONS,
   READLINE_DOCUMENTED_OPTIONS,
   builtinConstLit,
   fenceOrDropOptionKey,
@@ -403,6 +405,20 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     }
     if (bi.module === "os" && bi.member === "userInfo") {
       return lowerOsUserInfoCall(L, expr, loc);
+    }
+    // node:querystring — parse/stringify are entirely special-cased (the
+    // sep/eq/options completions, parse's call-site-shaped dictionary
+    // result, stringify's DOM-crossing object argument); decode/encode
+    // are Node's own aliases of the pair (`const decode = parse` in the
+    // module source) and take the same lowerings. escape/unescape ride
+    // the generic table tail below.
+    if (bi.module === "querystring") {
+      if (bi.member === "parse" || bi.member === "decode") {
+        return lowerQuerystringParseCall(L, expr, loc);
+      }
+      if (bi.member === "stringify" || bi.member === "encode") {
+        return lowerQuerystringStringifyCall(L, expr, loc);
+      }
     }
     // node:timers/promises — setTimeout([delay]) and setImmediate(): void
     // promises the shared timer heap settles. The omitted delay completes
@@ -4500,6 +4516,187 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
     }
     return { kind: "recordLit", fields, type: result, loc };
+  }
+
+  /** querystring's sep/eq arguments: an omitted argument, the literal
+   * null, and the literal undefined all mean the default (Node's falsy
+   * rule — parse(s, null, null, opts) is the canonical maxKeys spelling);
+   * a string expression passes through (the runtime applies the same
+   * falsy rule to '' at runtime). Everything else fences. */
+  function qsSepEqArg(L: Lowerer, node: ts.Expression | undefined, dflt: string,
+    what: string, loc: SrcLoc,): IrExpr {
+    if (
+      !node ||
+      node.kind === ts.SyntaxKind.NullKeyword ||
+      (ts.isIdentifier(node) && node.text === "undefined")
+    ) {
+      return { kind: "strLit", value: dflt, type: STRING, loc };
+    }
+    const v = L.lowerExpr(node);
+    if (v.type.kind !== "string") {
+      L.noLowering(
+        `${what} with a '${L.fmt(v.type)}' separator`,
+        node,
+        "pass a string, or null/undefined for the default (narrow unions first)",
+      );
+    }
+    return v;
+  }
+
+  /** querystring.parse / querystring.decode: the scan runs in the runtime
+   * (scr_qs_parse_into fills the result dictionary's overflow map), so the
+   * frontend completes sep/eq/maxKeys to Node's defaults and verifies the
+   * call site's mapped result IS the ParsedUrlQuery dictionary — a pure
+   * index-signature record over `string | string[]` (an undefined arm
+   * tolerated: @types/node's Dict) — the networkInterfaces verification
+   * stance. The default decoder is the one lowered decoder; a custom
+   * decodeURIComponent option fences by name. */
+  export function lowerQuerystringParseCall(L: Lowerer, call: ts.CallExpression, loc: SrcLoc): IrExpr {
+    if (call.arguments.length > 4 || call.arguments.some(ts.isSpreadElement)) {
+      L.noLowering(`querystring.parse with ${call.arguments.length} arguments`, call);
+    }
+    const fence: () => never = () =>
+      L.noLowering(
+        "querystring.parse where the result is not the ParsedUrlQuery dictionary",
+        call,
+        "the `{ [key: string]: string | string[] }` shape is the supported result",
+      );
+    const result = L.mapTypeOf(L.typeOf(call));
+    if (result?.kind !== "record") fence();
+    const dictShape = L.shapes.get(result.shapeId);
+    if (!dictShape || dictShape.tuple || dictShape.fields.length > 0 || !dictShape.indexValue) fence();
+    const iv = dictShape.indexValue;
+    if (iv.kind !== "union") fence();
+    const ivDef = L.unions.get(iv.unionId);
+    if (!ivDef) fence();
+    let sawStr = false;
+    let sawArr = false;
+    for (const arm of ivDef.arms) {
+      if (arm.kind === "string") sawStr = true;
+      else if (arm.kind === "array" && arm.elem.kind === "string") sawArr = true;
+      // undefined rides @types/node's Dict; the f64 arm is the
+      // header-family canonicalization (types.ts interns every
+      // `string | string[]`-slotted dictionary as the one canonical
+      // header shape, whose slot adds number type-level only — parse
+      // never stores one).
+      else if (arm.kind !== "undefinedT" && arm.kind !== "f64") fence();
+    }
+    if (!sawStr || !sawArr) fence();
+    const str = call.arguments[0]
+      ? L.lowerExprExpecting(call.arguments[0], STRING)
+      : L.noLowering("querystring.parse without a query string", call);
+    const sep = qsSepEqArg(L, call.arguments[1], "&", "querystring.parse", loc);
+    const eq = qsSepEqArg(L, call.arguments[2], "=", "querystring.parse", loc);
+    // The options walk: maxKeys lowers (Node's rule — > 0 caps the pair
+    // count, 0 and negatives mean unlimited — lives in the runtime, so
+    // any number expression works); a custom decodeURIComponent changes
+    // every decoded byte and fences by name.
+    let maxKeys: IrExpr = { kind: "numLit", value: 1000, type: F64, loc };
+    const optsNode = call.arguments[3];
+    if (optsNode) {
+      if (!ts.isObjectLiteralExpression(optsNode)) {
+        L.noLowering(
+          "querystring.parse with a non-literal options argument",
+          optsNode,
+          "the supported form spells the options inline: parse(s, sep, eq, { maxKeys: n })",
+        );
+      }
+      for (const p of optsNode.properties) {
+        const m = optionMember(p);
+        if (!m) {
+          L.noLowering(
+            "querystring.parse with this options shape",
+            p,
+            "spreads and computed keys have no lowering — write each member inline",
+          );
+        }
+        if (m.name === "maxKeys") {
+          maxKeys = L.lowerExprExpecting(m.value, F64);
+        } else if (m.name === "decodeURIComponent") {
+          L.noLowering(
+            "querystring.parse with a custom decodeURIComponent",
+            p,
+            "the default decoder is the lowered surface (strict decodeURIComponent with Node's lenient fallback)",
+          );
+        } else {
+          fenceOrDropOptionKey(
+            L, p, m.name, "querystring.parse", QS_PARSE_DOCUMENTED_OPTIONS,
+            "maxKeys is the supported option",
+          );
+        }
+      }
+    }
+    return { kind: "libCall", fn: "qs.parse", args: [str, sep, eq, maxKeys], type: result, loc };
+  }
+
+  /** querystring.stringify / querystring.encode: the object crosses as a
+   * DOM value (dynFrom — JSON-safe records and, in JS sources, dyn values
+   * directly) and Node's encodeStringified rules run in the runtime
+   * (scr_qs_stringify), so arrays expand to repeated keys and
+   * null/undefined values are empty. The default encoder is the one
+   * lowered encoder; a custom encodeURIComponent option fences by name. */
+  export function lowerQuerystringStringifyCall(L: Lowerer, call: ts.CallExpression, loc: SrcLoc): IrExpr {
+    if (call.arguments.length > 4 || call.arguments.some(ts.isSpreadElement)) {
+      L.noLowering(`querystring.stringify with ${call.arguments.length} arguments`, call);
+    }
+    const objNode = call.arguments[0];
+    // stringify() / stringify(undefined) / stringify(null): Node answers
+    // '' for every non-object — the constant folds.
+    if (
+      !objNode ||
+      objNode.kind === ts.SyntaxKind.NullKeyword ||
+      (ts.isIdentifier(objNode) && objNode.text === "undefined")
+    ) {
+      return { kind: "strLit", value: "", type: STRING, loc };
+    }
+    const objV = L.lowerExpr(objNode);
+    let obj: IrExpr;
+    if (objV.type.kind === "dyn") {
+      obj = objV;
+    } else if (objV.type.kind === "record" && L.dynConvertible(objV.type)) {
+      obj = { kind: "dynFrom", value: objV, type: DYN, loc };
+    } else {
+      L.noLowering(
+        `querystring.stringify of '${L.fmt(objV.type)}' values`,
+        objNode,
+        "pass a record of string/number/boolean values (arrays of those expand to repeated keys; null/undefined values serialize empty)",
+      );
+    }
+    const sep = qsSepEqArg(L, call.arguments[1], "&", "querystring.stringify", loc);
+    const eq = qsSepEqArg(L, call.arguments[2], "=", "querystring.stringify", loc);
+    const optsNode = call.arguments[3];
+    if (optsNode) {
+      if (!ts.isObjectLiteralExpression(optsNode)) {
+        L.noLowering(
+          "querystring.stringify with a non-literal options argument",
+          optsNode,
+          "the supported form spells the options inline (and the only documented option, encodeURIComponent, has no lowering)",
+        );
+      }
+      for (const p of optsNode.properties) {
+        const m = optionMember(p);
+        if (!m) {
+          L.noLowering(
+            "querystring.stringify with this options shape",
+            p,
+            "spreads and computed keys have no lowering — write each member inline",
+          );
+        }
+        if (m.name === "encodeURIComponent") {
+          L.noLowering(
+            "querystring.stringify with a custom encodeURIComponent",
+            p,
+            "the default encoder (querystring.escape's component set) is the lowered surface",
+          );
+        } else {
+          fenceOrDropOptionKey(
+            L, p, m.name, "querystring.stringify", QS_STRINGIFY_DOCUMENTED_OPTIONS,
+            "no stringify options have a lowering",
+          );
+        }
+      }
+    }
+    return { kind: "libCall", fn: "qs.stringify", args: [obj, sep, eq], type: STRING, loc };
   }
 
   export function lowerOsNetworkInterfacesCall(L: Lowerer, call: ts.CallExpression, loc: SrcLoc): IrExpr {

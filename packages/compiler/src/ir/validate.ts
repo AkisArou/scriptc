@@ -251,6 +251,14 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "sp.toString": { argTypes: [SEARCH_PARAMS_T], result: STRING },
   "sp.keyAt": { argTypes: [SEARCH_PARAMS_T, F64], result: STRING },
   "sp.valAt": { argTypes: [SEARCH_PARAMS_T, F64], result: STRING },
+  // node:querystring. qs.parse's result is the call site's ParsedUrlQuery
+  // dictionary record (VOID is the networkInterfaces sentinel — the
+  // libCall case checks the structure); qs.stringify's object argument
+  // is a DOM value (the frontend dynFroms typed records).
+  "qs.parse": { argTypes: [STRING, STRING, STRING, F64], result: VOID },
+  "qs.stringify": { argTypes: [DYN, STRING, STRING], result: STRING },
+  "qs.escape": { argTypes: [STRING], result: STRING },
+  "qs.unescape": { argTypes: [STRING], result: STRING },
   "fs.statSync": { argTypes: [STRING], result: STATS_T },
   "fs.lstatSync": { argTypes: [STRING], result: STATS_T },
   "fs.openSync": { argTypes: [STRING, STRING], result: F64 },
@@ -3531,6 +3539,25 @@ function validateFunction(
           ok = ok && infoDef !== undefined && infoDef.arms.length === 2 && infoDef.arms.every((a) => a.kind === "record");
           if (!ok) {
             err(`libCall os.networkInterfaces must return the NetworkInterfaceInfo dictionary record`, e.loc);
+          }
+          break;
+        }
+        if (e.fn === "qs.parse") {
+          // Result: a pure index-signature record whose value union
+          // carries a string arm and a string[] arm (undefined tolerated
+          // — @types/node's Dict — and f64 too: the header-family
+          // canonicalization interns every such dictionary with the
+          // number arm, type-level only) — the structure
+          // lowerQuerystringParseCall pinned.
+          const shape = e.type.kind === "record" ? records.get(e.type.shapeId) : undefined;
+          let ok = shape !== undefined && !shape.tuple && shape.fields.length === 0 && shape.indexValue !== undefined;
+          const ivDef = ok && shape!.indexValue!.kind === "union" ? unions.get(shape!.indexValue!.unionId) : undefined;
+          ok = ok && ivDef !== undefined &&
+            ivDef.arms.some((a) => a.kind === "string") &&
+            ivDef.arms.some((a) => a.kind === "array" && a.elem.kind === "string") &&
+            ivDef.arms.every((a) => a.kind === "string" || a.kind === "array" || a.kind === "undefinedT" || a.kind === "f64");
+          if (!ok) {
+            err(`libCall qs.parse must return the ParsedUrlQuery dictionary record`, e.loc);
           }
           break;
         }

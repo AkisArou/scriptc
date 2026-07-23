@@ -230,6 +230,16 @@ export const DNS_LOOKUP_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   "family", "hints", "all", "order", "verbatim",
 ]);
 
+/** querystring.parse's documented option keys (Node v24). */
+export const QS_PARSE_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
+  "maxKeys", "decodeURIComponent",
+]);
+
+/** querystring.stringify's documented option keys (Node v24). */
+export const QS_STRINGIFY_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
+  "encodeURIComponent",
+]);
+
 /** readline.createInterface's documented option keys. */
 export const READLINE_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   "input", "output", "completer", "terminal", "history", "historySize",
@@ -654,6 +664,23 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
   // end are special-cased (lowerNew + lowerStringDecoderMethodCall); no
   // function members exist to table.
   string_decoder: {},
+  // node:querystring — the legacy query-string codec (NOT URLSearchParams;
+  // the escaping and '+' rules differ). escape/unescape ride the table
+  // path directly; parse and stringify are special-cased in
+  // lowerBuiltinModuleCall (parse's result is the call site's mapped
+  // ParsedUrlQuery dictionary — the networkInterfaces verification stance
+  // — and its sep/eq/options complete there; stringify's object argument
+  // crosses as a DOM value). decode/encode are Node's own aliases of
+  // parse/stringify (`const decode = parse` in lib/querystring.js) and
+  // route to the same special cases; the entries carry canonical shapes.
+  querystring: {
+    parse: { fn: "qs.parse", params: [STRING], result: VOID },
+    decode: { fn: "qs.parse", params: [STRING], result: VOID },
+    stringify: { fn: "qs.stringify", params: [DYN], result: STRING },
+    encode: { fn: "qs.stringify", params: [DYN], result: STRING },
+    escape: { fn: "qs.escape", params: [STRING], result: STRING },
+    unescape: { fn: "qs.unescape", params: [STRING], result: STRING },
+  },
   // node:readline: createInterface's options are entirely special-cased
   // (exactly { input: process.stdin, output?: process.stdout } — see
   // lowerBuiltinModuleCall); the entry carries the canonical shape. The

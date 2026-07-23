@@ -1715,6 +1715,31 @@ export type IrLibFn =
   | "sp.toString"
   | "sp.keyAt"
   | "sp.valAt"
+  /** node:querystring (scr_qs.c — link-gated by moduleUsesQs; NOT
+   * URLSearchParams: the legacy codec's escaping and '+' rules differ).
+   * qs.escape is Node's qsEscape, which encodes exactly the component
+   * unreserved set — it emits the always-linked
+   * scr_str_encode_uri_component, so escape-only programs never pull the
+   * unit. qs.unescape is Node's qsUnescape: strict decodeURIComponent
+   * first, the lenient legacy unescapeBuffer fallback on failure (never
+   * throws). qs.parse takes (str, sep, eq, maxKeys) — the frontend
+   * completes omitted/null sep/eq to "&"/"=" and the omitted maxKeys
+   * option to Node's 1000 (0 and negatives mean unlimited, Node's rule) —
+   * and its result type is the CALL SITE's mapped ParsedUrlQuery shape (a
+   * pure index-signature record over `string | string[]`, an undefined
+   * arm tolerated — @types/node's Dict), verified structurally by the
+   * frontend (lowerQuerystringParseCall); the emitters construct the
+   * record and hand its overflow map to scr_qs_parse_into with the two
+   * union tags. qs.stringify takes (obj, sep, eq) with obj a DOM value
+   * (the frontend dynFroms the typed record; JS-world dyn values pass
+   * through) — Node's encodeStringified rules run in the runtime, so
+   * arrays expand to repeated keys and null/undefined/nested objects are
+   * empty values. Custom encoder/decoder options fence at compile time.
+   * All borrow; string results +1; none throw. */
+  | "qs.parse"
+  | "qs.stringify"
+  | "qs.escape"
+  | "qs.unescape"
   /** ES Symbol values (scr_symbol.c — link-gated by moduleUsesSymbol).
    * sym.new: `Symbol(desc)` — a fresh runtime-unique identity (+1) whose
    * one arg is the description string (borrowed); sym.newAnon is the
@@ -5302,6 +5327,33 @@ export function moduleUsesSearchParams(mod: IrModule): boolean {
       return;
     }
     if (node.kind === "searchParams") {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** True when the module uses the node:querystring surface — the qs.*
+ * libCalls that live in scr_qs.c (parse/stringify/unescape; qs.escape
+ * emits the always-linked component encoder and deliberately does NOT
+ * flip this switch) — the link switch that pulls scr_qs.c into the
+ * binary (the moduleUsesSearchParams precedent: pure data transforms, no
+ * loop hooks, cross-compiles everywhere). qs-free programs keep their
+ * exact link line. Same generic-walk shape as moduleUsesZlib. */
+export function moduleUsesQs(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (node.kind === "libCall" && typeof node.fn === "string" &&
+        (node.fn === "qs.parse" || node.fn === "qs.stringify" || node.fn === "qs.unescape")) {
       found = true;
       return;
     }

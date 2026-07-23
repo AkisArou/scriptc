@@ -2578,6 +2578,38 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_sp_key_at(${arg(0)}, ${arg(1)})`);
           case "sp.valAt":
             return finish(`scr_sp_val_at(${arg(0)}, ${arg(1)})`);
+          // node:querystring (scr_qs.c — linked exactly when parse/
+          // stringify/unescape appear, moduleUsesQs). escape IS the
+          // component encoder (Node's qsEscape set equals
+          // encodeURIComponent's), so it emits the always-linked codec
+          // and never pulls the unit. Borrow; string results +1; no throw.
+          case "qs.escape":
+            return finish(`scr_str_encode_uri_component(${arg(0)})`);
+          case "qs.unescape":
+            return finish(`scr_qs_unescape(${arg(0)})`);
+          case "qs.stringify":
+            return finish(`scr_qs_stringify(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "qs.parse": {
+            // The ParsedUrlQuery dictionary: a fresh pure-index-signature
+            // record whose overflow map the runtime scan fills
+            // (scr_qs_parse_into groups repeats into string[] buckets).
+            // The frontend verified the shape (lowerQuerystringParseCall);
+            // lookups here only guard emitter bugs. Args: qs, sep, eq,
+            // maxKeys.
+            if (e.type.kind !== "record") throw new Error("emitter bug: qs.parse result is not a record");
+            const dictShape = E.recordsById.get(e.type.shapeId);
+            const iv = dictShape?.indexValue;
+            if (!dictShape || iv?.kind !== "union") throw new Error("emitter bug: qs.parse dict shape");
+            const ivDef = E.unionsById.get(iv.unionId);
+            const strTag = ivDef?.arms.findIndex((a) => a.kind === "string") ?? -1;
+            const arrTag = ivDef?.arms.findIndex((a) => a.kind === "array") ?? -1;
+            if (strTag < 0 || arrTag < 0) throw new Error("emitter bug: qs.parse index union lacks its arms");
+            const dict = E.newTemp(e.type, `${mangleRecordNew(e.type.shapeId)}()`);
+            E.line(
+              `scr_qs_parse_into(${dict.name}->${OVERFLOW_MEMBER}, ${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${strTag}, ${arrTag});${E.srcComment(e.loc)}`,
+            );
+            return dict;
+          }
           // Stats (scr_lib.c): statSync throws like the other sync fs
           // calls; the getters are pure reads.
           case "fs.openSync":
