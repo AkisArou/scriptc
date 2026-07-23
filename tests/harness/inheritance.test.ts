@@ -193,8 +193,11 @@ r.on("data", (b: Buffer) => console.log(b.toString()));
   test("a runtime-fenced nested class extending a stream still compiles to C", async () => {
     // The phase-1 reachable bug: a class declared inside a block (a
     // runtime fence in JS) whose instances are captured emitted capture-
-    // box RC adapters for the uncollected class — a C compile error. The
-    // box is inert now (no instance can exist; every use traps).
+    // box RC adapters for the uncollected class — a C compile error.
+    // run()'s unregistered-class sweep now rewrites such type slots to
+    // the inert f64 placeholder before emission (no instance can exist;
+    // every use traps), so the capture box is a PLAIN-kind box and the
+    // class never reaches the emitter at all.
     const c = await emittedC(
       "stream-nested-fence",
       `const { Readable } = require("stream");
@@ -210,7 +213,8 @@ r.on("data", (b: Buffer) => console.log(b.toString()));
       "js",
     );
     expect(c).not.toContain("sc_retain_R_v");
-    expect(c).toContain("uncollected class, all uses trap");
+    expect(c).not.toContain("uncollected class");
+    expect(c).toMatch(/sc_l_stream_0 = scr_box_new\(SCR_BOX_\w+\)/);
   });
 
   test("a getter-only override of a pair fills the set slot with a thrower", async () => {
