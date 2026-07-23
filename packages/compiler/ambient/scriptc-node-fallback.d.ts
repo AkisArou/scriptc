@@ -718,6 +718,21 @@ declare module "diagnostics_channel" {
   export * from "node:diagnostics_channel";
 }
 
+/* node:perf_hooks — performance.now() over the runtime's process-start-
+ * anchored monotonic clock (Node's timeOrigin for a compiled program),
+ * fractional milliseconds. The .bind(performance) spelling lowers to the
+ * same clock as a plain () => number function value (prettier's mockable
+ * getTimestamp); everything else fences per member. */
+declare module "node:perf_hooks" {
+  export interface Performance {
+    now(): number;
+  }
+  export const performance: Performance;
+}
+declare module "perf_hooks" {
+  export * from "node:perf_hooks";
+}
+
 /* The synchronous node:fs surface — utf8-only, no options objects, no
  * Buffers. Importing "node:fs" resolves here (preflight allowlists exactly
  * the ambient-declared node: modules); every function lowers to a `libCall`

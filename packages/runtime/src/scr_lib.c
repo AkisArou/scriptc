@@ -1093,6 +1093,16 @@ double scr_process_uptime(void) {
   return (scr_uptime_now_ms() - scr_uptime_t0_ms) / 1000.0;
 }
 
+/* perf_hooks performance.now(): milliseconds since the process's own
+ * start (Node's timeOrigin anchor), fractional — the same monotonic
+ * clock and anchor as uptime, in Node's performance.now units. */
+double scr_perf_now(void) {
+#ifdef _WIN32
+  if (scr_uptime_t0_ms == 0) scr_uptime_anchor_init();
+#endif
+  return scr_uptime_now_ms() - scr_uptime_t0_ms;
+}
+
 #ifdef _WIN32
 /* GetProcessTimes/GetThreadTimes answer 100ns units; Node reports µs. */
 static double scr_filetime_us(FILETIME ft) {

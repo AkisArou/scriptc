@@ -14,7 +14,7 @@ import { builtinFenceHintOf, builtinModuleFnOf, NARROW_FIRST } from "./surfaces.
 import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
-import { lowerChildStreamMethodCall, lowerDirentMethodCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
+import { lowerChildStreamMethodCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
 import { lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
 import { EMITTER_API_MEMBERS, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
@@ -3302,6 +3302,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // as named builtin imports — before anything below tries to lower
         // the namespace object itself as a receiver.
         L.lowerNamespaceBuiltinCall(expr, expr.expression) ??
+        // The node:perf_hooks spoke: performance.now() and its
+        // .bind(performance) function value over the runtime's
+        // process-start-anchored monotonic clock.
+        lowerPerfHooksCall(L, expr, expr.expression) ??
         // The composed crypto pattern (randomBytes(n).toString(enc))
         // — its receiver is a Buffer-typed CALL no other lowering claims.
         L.lowerCryptoComposedCall(expr, expr.expression) ??

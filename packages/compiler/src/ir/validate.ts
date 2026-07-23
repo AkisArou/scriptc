@@ -109,6 +109,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "timers.clearImmediate": { argTypes: [F64], result: VOID },
   "process.nextTick": { argTypes: [{ kind: "func", params: [], ret: VOID }], result: VOID },
   "process.uptime": { argTypes: [], result: F64 },
+  "perf.now": { argTypes: [], result: F64 },
   "process.availableMemory": { argTypes: [], result: F64 },
   "process.constrainedMemory": { argTypes: [], result: F64 },
   "process.cpuUser": { argTypes: [], result: F64 },

@@ -193,6 +193,88 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     return builtinConstLit(value, locOf(expr));
   }
 
+/** True for any spelling of node:perf_hooks' `performance` object — the
+   * named import binding, a namespace/default-import member, or the
+   * require twins (all through the shared builtin tables). */
+  export function isPerfHooksPerformanceExpr(L: Lowerer, node: ts.Expression): boolean {
+    if (ts.isIdentifier(node)) {
+      const bi = builtinImportOf(L, node);
+      return bi !== null && bi.module === "perf_hooks" && bi.member === "performance";
+    }
+    if (ts.isPropertyAccessExpression(node) && !node.questionDotToken) {
+      const bi = L.builtinMemberOf(node);
+      return bi !== null && bi.module === "perf_hooks" && bi.member === "performance";
+    }
+    return false;
+  }
+
+/** The node:perf_hooks spoke: `performance.now()` reads the runtime's
+   * monotonic clock anchored at process start — Node's timeOrigin for a
+   * compiled program, fractional milliseconds — and
+   * `performance.now.bind(performance)` (prettier's mockable
+   * getTimestamp) is the same clock as a plain () => number function
+   * value. Other members on the performance object fence by name; null
+   * for non-perf_hooks callees (the call chain keeps trying). */
+  export function lowerPerfHooksCall(L: Lowerer, expr: ts.CallExpression, access: ts.PropertyAccessExpression): IrExpr | null {
+    if (access.questionDotToken) return null;
+    const loc = locOf(expr);
+    if (access.name.text === "now" && isPerfHooksPerformanceExpr(L, access.expression)) {
+      if (expr.arguments.length !== 0) {
+        L.noLowering("performance.now with arguments", expr, "Node's performance.now takes none");
+      }
+      return { kind: "libCall", fn: "perf.now", args: [], type: F64, loc };
+    }
+    if (
+      access.name.text === "bind" &&
+      ts.isPropertyAccessExpression(access.expression) &&
+      !access.expression.questionDotToken &&
+      access.expression.name.text === "now" &&
+      isPerfHooksPerformanceExpr(L, access.expression.expression)
+    ) {
+      if (expr.arguments.length !== 1 || !isPerfHooksPerformanceExpr(L, expr.arguments[0]!)) {
+        L.noLowering(
+          "this performance.now.bind form",
+          expr,
+          "performance.now.bind(performance) is the lowered function-value spelling",
+        );
+      }
+      return {
+        kind: "closure",
+        fnName: perfNowFnValueOf(L),
+        captures: [],
+        type: funcOf([], F64),
+        loc,
+      };
+    }
+    if (isPerfHooksPerformanceExpr(L, access.expression)) {
+      L.noLowering(
+        `perf_hooks performance.${access.name.text}`,
+        expr,
+        "performance.now() — and its .bind(performance) function value — is the lowered surface",
+      );
+    }
+    return null;
+  }
+
+/** The memoized () => number lifted wrapper behind
+   * performance.now.bind(performance): a plain function value over the
+   * same perf.now libCall. */
+  function perfNowFnValueOf(L: Lowerer): string {
+    const name = "%perf.now.value";
+    if (!L.liftedFns.some((f) => f.name === name)) {
+      const loc: SrcLoc = { file: "<builtin>", start: 0, end: 0 };
+      L.liftedFns.push({
+        name,
+        params: [],
+        returnType: F64,
+        locals: [],
+        body: [{ kind: "return", value: { kind: "libCall", fn: "perf.now", args: [], type: F64, loc }, loc }],
+        loc,
+      });
+    }
+    return name;
+  }
+
 /** True for `const { NGHTTP2_CANCEL, ... } = http2.constants` — a plain
    * object destructure (identifier elements, renames allowed, no rest/
    * defaults/nesting) over the constants object whose every name is in

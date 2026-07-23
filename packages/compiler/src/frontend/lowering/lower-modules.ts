@@ -205,9 +205,28 @@ export interface FileParts {
     const builder = L.dynamic ? new NpmGraphBuilder() : null;
     for (const fp of parts) {
       for (const stmt of fp.sf.statements) {
-        if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
-        const clause = stmt.importClause;
-        if (clause?.phaseModifier === ts.SyntaxKind.TypeKeyword) continue;
+        // NAMED re-exports from npm packages (`export { isUrl } from
+        // "url-or-path"` — preflight admitted them): import-plus-export
+        // plumbing — the island load registers at this statement's
+        // position, and each binding keys the same aliased symbol a
+        // direct import would, so consumers' alias chains land on the
+        // same storage.
+        const reexport =
+          ts.isExportDeclaration(stmt) &&
+          !stmt.isTypeOnly &&
+          stmt.moduleSpecifier !== undefined &&
+          ts.isStringLiteral(stmt.moduleSpecifier) &&
+          stmt.exportClause !== undefined &&
+          ts.isNamedExports(stmt.exportClause) &&
+          stmt.exportClause.elements.some((e) => !e.isTypeOnly) &&
+          !stmt.moduleSpecifier.text.startsWith("#")
+            ? stmt.exportClause
+            : null;
+        if (reexport === null && (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier))) continue;
+        const specNode = ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) ? stmt.moduleSpecifier : undefined;
+        if (specNode === undefined || !ts.isStringLiteral(specNode)) continue;
+        const clause = ts.isImportDeclaration(stmt) ? stmt.importClause : undefined;
+        if (ts.isImportDeclaration(stmt) && clause?.phaseModifier === ts.SyntaxKind.TypeKeyword) continue;
         if (
           clause?.namedBindings &&
           ts.isNamedImports(clause.namedBindings) &&
@@ -216,7 +235,7 @@ export interface FileParts {
         ) {
           continue;
         }
-        const spec = stmt.moduleSpecifier.text;
+        const spec = specNode.text;
         const npm = resolveNpmImport(fp.sf.fileName, spec);
         // --npm-static: an opted-in package that made it through preflight
         // is a PROGRAM-MODULE dependency — its entry sits in the module
@@ -287,7 +306,7 @@ export interface FileParts {
           type: JSVAL,
           loc,
         });
-        const bind = (nameNode: ts.Identifier, exportName: string): void => {
+        const bind = (nameNode: ts.Identifier | ts.StringLiteral, exportName: string): void => {
           let symbol = L.checker.getSymbolAtLocation(nameNode);
           if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
             symbol = L.checker.getAliasedSymbol(symbol);
@@ -306,6 +325,13 @@ export interface FileParts {
           }
           actions.push({ kind: "assign", localId: g.id, value: importExpr(exportName), loc });
         };
+        if (reexport !== null) {
+          for (const el of reexport.elements) {
+            if (el.isTypeOnly) continue;
+            bind(el.name, el.propertyName?.text ?? el.name.text);
+          }
+          continue;
+        }
         if (!clause) {
           // Side-effect import: load for its top-level effects, keep nothing.
           actions.push({ kind: "exprStmt", expr: importExpr("*"), loc });
@@ -673,28 +699,31 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
       // is honest exactly when the target cannot be reassigned (consts,
       // function/class declarations — reassignment of those is fenced
       // elsewhere): Node's default binding would NOT see a later write
-      // (snapshot), the alias-resolved read would (live). Mutable targets
-      // fence by name instead of diverging silently.
+      // (snapshot), the alias-resolved read would (live). MUTABLE targets
+      // (`export default someLet` — prettier's visitor-keys.evaluate.js
+      // reassigns the let, then default-exports it) get SNAPSHOT storage
+      // instead: Node's default binding captures the value once, when the
+      // export statement runs, so the default registers its own const
+      // global keyed by the DEFAULT alias symbol — the `import x = N.y`
+      // snapshot precedent. Importer reads stop at it through
+      // resolveValueSymbol's default-snapshot walk instead of chasing the
+      // alias to the live let.
       if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
         const symbol = defaultExportSymbolOf(L, sf);
         if (!symbol) continue;
         if (symbol.flags & ts.SymbolFlags.Alias) {
           const target = L.checker.getAliasedSymbol(symbol);
           const vd = L.checker.valueDeclarationOf(target);
-          if (
+          const mutableVar =
             vd !== undefined &&
             ts.isVariableDeclaration(vd) &&
             !vd.getSourceFile().isDeclarationFile &&
-            (ts.getCombinedNodeFlags(vd) & ts.NodeFlags.Const) === 0
-          ) {
-            L.pushDiag(unsupportedDiag(
-              "SC1012",
-              locOf(stmt),
-              `default-exporting the mutable binding '${stmt.expression.getText()}'`,
-              "Node exports a SNAPSHOT taken when the export statement runs, which is not modeled for let/var targets — export a const, or use a named export (export { x }) for a live binding",
-            ));
-          }
-          continue; // alias plumbing — importers resolve to the target's storage
+            (ts.getCombinedNodeFlags(vd) & ts.NodeFlags.Const) === 0;
+          // Immutable targets: alias plumbing — importers resolve to the
+          // target's storage (the alias-resolved read IS the snapshot when
+          // nothing can reassign). Mutable targets fall through to the
+          // expression-default registration below.
+          if (!mutableVar) continue;
         }
         // A default whose expression is a decorated class expression with
         // a PROVABLY-THROWING decoration (the ambient-decorator shape):
@@ -1384,17 +1413,18 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
    * assignment of the pre-registered `default` global — evaluated at the
    * statement's source position, exactly where Node runs it (Node's
    * expression defaults snapshot exactly once, here). ENTITY-NAME defaults
-   * are alias plumbing with no storage of their own: the statement lowers
-   * to nothing — collection either accepted the alias (const/function/
-   * class targets, where importers' alias-resolved reads equal the
-   * snapshot) or already fenced it (mutable targets), and re-lowering
-   * would double-report. A NON-alias default whose type had no
+   * of immutable targets are alias plumbing with no storage of their own:
+   * the statement lowers to nothing — importers' alias-resolved reads
+   * equal the snapshot. MUTABLE entity-name defaults registered snapshot
+   * storage in collection and assign it here like any expression default
+   * (the identifier read takes the let's value at this statement's
+   * position — Node's snapshot). A NON-alias default whose type had no
    * registration (collection reported the blocker) re-lowers the
    * expression so the expression's OWN diagnostic wins when it has one,
    * then poisons. */
   export function lowerDefaultExport(L: Lowerer, stmt: ts.ExportAssignment): IrStmt | null {
     const symbol = defaultExportSymbolOf(L, stmt.getSourceFile());
-    if (symbol && symbol.flags & ts.SymbolFlags.Alias) return null;
+    if (symbol && symbol.flags & ts.SymbolFlags.Alias && !L.globalsBySymbol.has(symbol)) return null;
     const g = symbol ? L.globalsBySymbol.get(symbol) : undefined;
     if (!g) {
       // A provably-throwing decorated class expression registered no
