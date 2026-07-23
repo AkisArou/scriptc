@@ -170,6 +170,31 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
   },
 };
 
+/** The construct-fence codes MINTED BY FACTORY FUNCTIONS below (never keys
+ * of UNSUPPORTED): the other half of the enumerable code registry, indexed
+ * so the surface manifest (coverage/surface-manifest.ts) can catalog every
+ * refusal code a program's constructs can meet. `status` says what the
+ * refusal means for the construct: "dynamic-only" codes mark constructs
+ * that RUN under --dynamic (the report's dynamic-capable family —
+ * SC2010/SC2011/SC2012/SC2013); "unsupported" codes mark constructs with
+ * no lowering on either tier. Process-level codes are deliberately absent:
+ * preflight gates (SC0001–SC0004), comptime evaluation failures (SC1110),
+ * the alternate-backend tier refusal (SC3001), and internal errors
+ * (SC9001/SC9002) report problems or engine tiers, not language/stdlib
+ * surface. */
+export const FENCE_CODES: Record<string, { name: string; status: "unsupported" | "dynamic-only" }> = {
+  SC2001: { name: "values of types outside the compilable set", status: "unsupported" },
+  SC2002: { name: "record width subtyping (shapes must match exactly)", status: "unsupported" },
+  SC2003: { name: "union-to-union conversions outside the re-tagging rule", status: "unsupported" },
+  SC2004: { name: "uses of a binding whose declaration did not compile (cascade marker)", status: "unsupported" },
+  SC2010: { name: "constructs that exist only in the embedded dynamic engine", status: "dynamic-only" },
+  SC2011: { name: "'any'-typed values and the operations on them", status: "dynamic-only" },
+  SC2012: { name: "standard-library surface that runs in the embedded dynamic engine", status: "dynamic-only" },
+  SC2013: { name: "npm package imports and values (the package's implementation runs in the embedded engine)", status: "dynamic-only" },
+  SC2020: { name: "standard-library or @types/node surface with no lowering", status: "unsupported" },
+  SC2030: { name: "npm package code that cannot be embedded for the dynamic engine", status: "unsupported" },
+};
+
 export function unsupportedDiag(
   code: keyof typeof UNSUPPORTED & `SC${number}`,
   loc: SrcLoc,

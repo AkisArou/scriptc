@@ -16,11 +16,13 @@
     ".": "./dist/index.js",
     "./scriptc.d.ts": "./ambient/scriptc.d.ts",
     "./scriptc-overrides.d.ts": "./ambient/scriptc-overrides.d.ts",
-    "./scriptc-node-fallback.d.ts": "./ambient/scriptc-node-fallback.d.ts"
+    "./scriptc-node-fallback.d.ts": "./ambient/scriptc-node-fallback.d.ts",
+    "./surface-manifest.json": "./surface-manifest.json"
   },
   "files": [
     "dist",
-    "ambient"
+    "ambient",
+    "surface-manifest.json"
   ],
   "publishConfig": {
     "access": "public"

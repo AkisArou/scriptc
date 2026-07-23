@@ -138,22 +138,45 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # The GitHub release is a tag and notes only — scriptc has no platform
-  # binary assets to stage (programs compile on the user's machine) — so
-  # it runs AFTER a successful npm publish and never gates it. The body is
-  # the CHANGELOG.md block between the release:start/release:end markers,
-  # which RELEASING.md keeps on the latest entry only.
+  # The GitHub release is a tag, notes, and one asset: the surface
+  # manifest (packages/compiler/surface-manifest.json — the machine-
+  # readable listing of the surface the static tier compiles at this
+  # version, regenerated here and verified against the committed file).
+  # scriptc has no platform binary assets to stage (programs compile on
+  # the user's machine), so the job runs AFTER a successful npm publish
+  # and never gates it. The body is the CHANGELOG.md block between the
+  # release:start/release:end markers, which RELEASING.md keeps on the
+  # latest entry only.
   github-release:
     name: Create GitHub Release
     needs: [check-release, publish]
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # Regenerate the surface manifest from this tree and require it to
+      # match the committed file byte-for-byte — the same staleness guard
+      # the test suite runs — so the attached asset is provably the
+      # manifest of the code being released.
+      - name: Generate surface manifest
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm manifest --check
 
       - name: Extract changelog entry
         run: |
@@ -173,7 +196,7 @@ jobs:
           TAG="v$VERSION"
 
           if gh release view "$TAG" &>/dev/null; then
-            echo "Release $TAG already exists, skipping"
+            echo "Release $TAG already exists, skipping creation"
           else
             echo "Creating release $TAG..."
             gh release create "$TAG" \
@@ -181,5 +204,9 @@ jobs:
               --title "$TAG" \
               --notes-file /tmp/release-notes.md
           fi
+
+          # Attach the surface manifest (idempotent: --clobber makes
+          # re-runs replace the asset instead of failing).
+          gh release upload "$TAG" packages/compiler/surface-manifest.json --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
