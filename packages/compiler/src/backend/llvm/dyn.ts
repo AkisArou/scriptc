@@ -25,7 +25,7 @@ import type { IrType } from "../../ir/nodes.js";
 import { DYN_HANDLE_KINDS, isRefCounted, typeKey } from "../../ir/nodes.js";
 import { mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
-import { arrNewCall, elemAccess, llFieldType, releaseSym, traceArg, vAdapters } from "./shapes.js";
+import { arrNewCall, elemAccess, llFieldType, releaseSym, traceAdapter, traceArg, vAdapters } from "./shapes.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import type { WalkerHost } from "./walkers.js";
 
@@ -1042,6 +1042,15 @@ export class LlDyn {
           return b;
         };
         host.declare(`declare void @scr_dyn_obj_set(ptr, ptr, i64, ptr)`);
+        // CYCLE-CAPABLE shapes guard the deep copy: enter TRAPS on a value
+        // already being converted (a cyclic value has no finite DOM copy —
+        // SEMANTICS.md; the C emitter's contract exactly).
+        const cyclicRec = traceAdapter(host, t) !== null;
+        if (cyclicRec) {
+          host.declare(`declare void @scr_dyn_from_enter(ptr)`);
+          host.declare(`declare void @scr_dyn_from_leave()`);
+          B.line(`call void @scr_dyn_from_enter(ptr %v)`);
+        }
         if (shape.tuple) {
           // A tuple converts as the JSON ARRAY it is everywhere else.
           host.declare(`declare ptr @scr_dyn_new_arr()`);
@@ -1055,6 +1064,7 @@ export class LlDyn {
             B.line(`${conv} = call ptr @${this.toDynHelper(f.type)}(${this.valTy(f.type)} ${fv})`);
             B.line(`call void @scr_dyn_arr_push(ptr ${d}, ptr ${conv})`);
           }
+          if (cyclicRec) B.line(`call void @scr_dyn_from_leave()`);
           B.terminate(`ret ptr ${d}`);
           break;
         }
@@ -1156,6 +1166,7 @@ export class LlDyn {
           B.startBlock(le);
           B.line(`call void @scr_arr_release(ptr ${ks})`);
         }
+        if (cyclicRec) B.line(`call void @scr_dyn_from_leave()`);
         B.terminate(`ret ptr ${d}`);
         break;
       }
@@ -1164,6 +1175,13 @@ export class LlDyn {
         host.declare(`declare ptr @scr_dyn_new_arr()`);
         host.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
         host.declare(`declare double @scr_arr_len(ptr)`);
+        // Cycle-capable arrays guard the deep copy like records above.
+        const cyclicArr = traceAdapter(host, t) !== null;
+        if (cyclicArr) {
+          host.declare(`declare void @scr_dyn_from_enter(ptr)`);
+          host.declare(`declare void @scr_dyn_from_leave()`);
+          B.line(`call void @scr_dyn_from_enter(ptr %v)`);
+        }
         const d = B.tmp();
         B.line(`${d} = call ptr @scr_dyn_new_arr()`);
         const len = B.tmp();
@@ -1211,6 +1229,7 @@ export class LlDyn {
         B.line(`store double ${i2}, ptr ${iSlot}`);
         B.br(lc);
         B.startBlock(le);
+        if (cyclicArr) B.line(`call void @scr_dyn_from_leave()`);
         B.terminate(`ret ptr ${d}`);
         break;
       }

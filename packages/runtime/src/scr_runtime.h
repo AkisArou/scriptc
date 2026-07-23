@@ -2917,14 +2917,48 @@ extern void scr_dyn_listener_fire_err(ScrClosure *cb, ScrStr *msg);
 
 /* Output buffer for the compiler-emitted type-directed JSON serializers.
  * Value-typed and stack-allocated by the emitted code; _finish hands the
- * bytes over as a +1 ScrStr and frees the buffer storage. */
+ * bytes over as a +1 ScrStr and frees the buffer storage (including the
+ * circular-detection stack below). */
+struct ScrJsonSeenEnt;
 typedef struct {
   char *data;
   size_t len;
   size_t cap;
+  /* Circular-structure detection for RECURSIVE record types (cyclic
+   * values must throw Node's exact TypeError, never recurse forever):
+   * the stack of container values currently being serialized, each with
+   * its outgoing edge label (the member being written). Only walkers over
+   * cycle-CAPABLE types (the collector-fixpoint set) maintain it; acyclic
+   * types keep the zero-cost path. */
+  struct ScrJsonSeenEnt *seen;
+  size_t seen_len;
+  size_t seen_cap;
 } ScrJsonBuf;
 
 void scr_jb_init(ScrJsonBuf *b);
+/* Push a container onto the circular-detection stack before serializing
+ * its members. If `v` is already ON the stack, throws V8's exact
+ * "Converting circular structure to JSON" TypeError (the --> starting at /
+ * |property/index hops/--- closes the circle rendering, ellipsis rules
+ * included) and returns false — the caller returns immediately; the
+ * emitted stringify site runs the pending check. `is_array` picks the
+ * constructor name in the message ('Array' for arrays AND tuple shapes —
+ * their JS values are arrays — 'Object' for records). */
+bool scr_jb_enter(ScrJsonBuf *b, const void *v, bool is_array);
+void scr_jb_leave(ScrJsonBuf *b);
+/* Record the edge currently being serialized on the stack top: a static
+ * property name (emitted C literal), an overflow key (borrowed for the
+ * duration of the member write), or an array/tuple index. */
+void scr_jb_edge_prop(ScrJsonBuf *b, const char *name);
+void scr_jb_edge_key(ScrJsonBuf *b, const ScrStr *key);
+void scr_jb_edge_idx(ScrJsonBuf *b, size_t i);
+
+/* Circular guard for the compiler-emitted typed→dyn converters (sc_td_*
+ * over cycle-capable containers): enter TRAPS on a value already being
+ * converted (a cyclic value has no finite DOM copy — Node shares the
+ * reference instead; SEMANTICS.md), else pushes. */
+void scr_dyn_from_enter(const void *v);
+void scr_dyn_from_leave(void);
 void scr_jb_putc(ScrJsonBuf *b, char c);
 void scr_jb_puts(ScrJsonBuf *b, const char *s);
 /* JS JSON.stringify number rules: NaN/±Infinity → null, -0 → 0, else
@@ -4095,6 +4129,18 @@ ScrStr *scr_insp_jsval(ScrJsval *v, double recurse, double depth);
 #endif
 void scr_insp_begin(double recurse);
 void scr_insp_entry(ScrStr *s, bool is_num);
+/* Circular references, Node-exact (<ref *N> / [Circular *N]): the
+ * compiler-emitted helpers over CYCLE-CAPABLE composites call circ_check
+ * FIRST (a value already on the traversal stack answers its circular id,
+ * assigned in discovery order — the caller renders scr_insp_circular and
+ * descends no further), seen_push after begin, and ref_wrap around end's
+ * result (pops the stack; values in the circular map gain the "<ref *N> "
+ * prefix). State resets at each top-level value's first frame
+ * (scr_insp_begin(1)). ref_wrap BORROWS s and returns +1. */
+double scr_insp_circ_check(const void *v);
+void scr_insp_seen_push(const void *v);
+ScrStr *scr_insp_circular(double id);
+ScrStr *scr_insp_ref_wrap(const void *v, ScrStr *s);
 ScrStr *scr_insp_more_items(double remaining); /* "... N more items" */
 ScrStr *scr_insp_key(ScrStr *k); /* bare-or-quoted property-name ladder; +1 */
 ScrStr *scr_insp_end(ScrStr *base, ScrStr *b0, ScrStr *b1, double recurse,
@@ -5039,6 +5085,11 @@ void scr_assert_fail_msg(ScrStr *message); /* takes ownership; always throws */
 ScrStr *scr_assert_inspect_str(const ScrStr *s); /* util.inspect quoting; +1 */
 void scr_assert_ok(bool pass, ScrStr *message);
 bool scr_assert_same_value_f64(double a, double b); /* Object.is */
+/* deepStrictEqual over cyclic values: pair memo (enter answers true for
+ * a pair already being compared — Node's coinductive memo; leave pops).
+ * The compiler-emitted helpers over cycle-capable types wrap with these. */
+bool scr_assert_deq_enter(const void *a, const void *b);
+void scr_assert_deq_leave(void);
 void scr_assert_eq_f64(double a, double b, bool negated, bool deep, ScrStr *msg, bool has_msg);
 void scr_assert_eq_str(ScrStr *a, ScrStr *b, bool negated, bool deep, ScrStr *msg, bool has_msg);
 void scr_assert_eq_bool(bool a, bool b, bool negated, bool deep, ScrStr *msg, bool has_msg);

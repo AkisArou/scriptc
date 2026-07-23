@@ -55,6 +55,9 @@ void scr_jb_init(ScrJsonBuf *b) {
   b->data = NULL;
   b->len = 0;
   b->cap = 0;
+  b->seen = NULL;
+  b->seen_len = 0;
+  b->seen_cap = 0;
 }
 
 static void scr_jb_grow(ScrJsonBuf *b, size_t need) {
@@ -76,6 +79,7 @@ static void scr_jb_grow(ScrJsonBuf *b, size_t need) {
 /* Abandon a buffer (parser error paths). */
 static void scr_jb_dispose(ScrJsonBuf *b) {
   if (b->data) scr_str_release(SCR_JB_STR(b));
+  free(b->seen);
   scr_jb_init(b);
 }
 
@@ -143,6 +147,10 @@ void scr_jb_put_json_str(ScrJsonBuf *b, const ScrStr *s) {
 }
 
 ScrStr *scr_jb_finish(ScrJsonBuf *b) {
+  free(b->seen);
+  b->seen = NULL;
+  b->seen_len = 0;
+  b->seen_cap = 0;
   if (!b->data) return scr_str_new("", 0);
   ScrStr *s = SCR_JB_STR(b);
   s->len = b->len;
@@ -152,6 +160,144 @@ ScrStr *scr_jb_finish(ScrJsonBuf *b) {
   if (s->cap > scr_jb_hint) scr_jb_hint = s->cap < (1 << 16) ? s->cap : (1 << 16);
   scr_jb_init(b);
   return s;
+}
+
+/* ── circular-structure detection ──────────────────────────────────────
+ * RECURSIVE record types permit runtime reference cycles; JSON.stringify
+ * of a cyclic value throws V8's exact TypeError. The compiler-emitted
+ * walkers over cycle-CAPABLE containers (records whose shape carries a
+ * collector header, arrays of them, tuple shapes alike) bracket their
+ * bodies with enter/leave and stamp the current member edge before each
+ * cycle-capable member write; everything acyclic pays nothing. Detection
+ * is STACK membership (a DAG serializes the shared subtree twice, exactly
+ * like Node — only a path back to an ancestor is circular).
+ *
+ * The message mirrors V8's ConstructCircularStructureErrorMessage byte
+ * for byte: the starting object (where the repeat lands), one line per
+ * hop from it to the top of the stack ("property 'x' -> object with
+ * constructor 'Y'" / "index N -> ..."), the middle elided as "..." when
+ * there are more than three hops (first two + last one shown), and the
+ * closing edge. Constructor names are exactly 'Object'/'Array' — the only
+ * containers JSON-safe types admit. */
+typedef struct ScrJsonSeenEnt {
+  const void *ptr;
+  bool is_array;
+  const char *prop;       /* static property edge (emitted C literal) */
+  const ScrStr *prop_str; /* overflow-key edge (borrowed for the write) */
+  size_t index;           /* array/tuple index edge */
+} ScrJsonSeenEnt;
+
+static void scr_jb_put_edge(ScrJsonBuf *m, const ScrJsonSeenEnt *e) {
+  if (e->prop || e->prop_str) {
+    scr_jb_puts(m, "property '");
+    if (e->prop) scr_jb_puts(m, e->prop);
+    else scr_jb_write(m, e->prop_str->data, e->prop_str->len);
+    scr_jb_putc(m, '\'');
+    return;
+  }
+  scr_jb_puts(m, "index ");
+  scr_jb_put_f64(m, (double)e->index);
+}
+
+static void scr_jb_put_ctor(ScrJsonBuf *m, bool is_array) {
+  scr_jb_puts(m, is_array ? "object with constructor 'Array'" : "object with constructor 'Object'");
+}
+
+bool scr_jb_enter(ScrJsonBuf *b, const void *v, bool is_array) {
+  for (size_t i = 0; i < b->seen_len; i++) {
+    if (b->seen[i].ptr != v) continue;
+    ScrJsonBuf m;
+    scr_jb_init(&m);
+    scr_jb_puts(&m, "Converting circular structure to JSON\n    --> starting at ");
+    scr_jb_put_ctor(&m, b->seen[i].is_array);
+    const size_t n = b->seen_len;
+    const size_t hops = n - 1 - i; /* intermediate lines (j = i+1 .. n-1) */
+    for (size_t j = i + 1; j < n; j++) {
+      if (hops > 3 && j - (i + 1) == 2) {
+        scr_jb_puts(&m, "\n    |     ...");
+        j = n - 2; /* the loop increment lands on the LAST hop */
+        continue;
+      }
+      scr_jb_puts(&m, "\n    |     ");
+      scr_jb_put_edge(&m, &b->seen[j - 1]);
+      scr_jb_puts(&m, " -> ");
+      scr_jb_put_ctor(&m, b->seen[j].is_array);
+    }
+    scr_jb_puts(&m, "\n    --- ");
+    scr_jb_put_edge(&m, &b->seen[n - 1]);
+    scr_jb_puts(&m, " closes the circle");
+    scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&m));
+    return false;
+  }
+  if (b->seen_len == b->seen_cap) {
+    size_t cap = b->seen_cap ? b->seen_cap * 2 : 8;
+    ScrJsonSeenEnt *grown = realloc(b->seen, cap * sizeof *grown);
+    if (!grown) scr_json_oom();
+    b->seen = grown;
+    b->seen_cap = cap;
+  }
+  ScrJsonSeenEnt *e = &b->seen[b->seen_len++];
+  e->ptr = v;
+  e->is_array = is_array;
+  e->prop = NULL;
+  e->prop_str = NULL;
+  e->index = 0;
+  return true;
+}
+
+void scr_jb_leave(ScrJsonBuf *b) {
+  if (b->seen_len > 0) b->seen_len--;
+}
+
+void scr_jb_edge_prop(ScrJsonBuf *b, const char *name) {
+  ScrJsonSeenEnt *e = &b->seen[b->seen_len - 1];
+  e->prop = name;
+  e->prop_str = NULL;
+}
+
+void scr_jb_edge_key(ScrJsonBuf *b, const ScrStr *key) {
+  ScrJsonSeenEnt *e = &b->seen[b->seen_len - 1];
+  e->prop = NULL;
+  e->prop_str = key;
+}
+
+void scr_jb_edge_idx(ScrJsonBuf *b, size_t i) {
+  ScrJsonSeenEnt *e = &b->seen[b->seen_len - 1];
+  e->prop = NULL;
+  e->prop_str = NULL;
+  e->index = i;
+}
+
+/* ── circular guard for the typed→dyn converters (sc_td_*) ────────────
+ * A recursive-typed value crossing into a checked-dynamic slot DEEP-
+ * COPIES into the DOM; a cyclic value has no finite copy. Node never
+ * copies (an unknown-typed binding shares the reference), so there is no
+ * Node-exact error to throw — the conversion TRAPS loudly instead
+ * (SEMANTICS.md documents the divergence). The emitted converters over
+ * cycle-capable containers bracket their walks with enter/leave; the
+ * stack is global (conversions never interleave). */
+static const void **g_td_seen;
+static size_t g_td_nseen;
+static size_t g_td_cap;
+
+void scr_dyn_from_enter(const void *v) {
+  for (size_t i = 0; i < g_td_nseen; i++) {
+    if (g_td_seen[i] == v) {
+      scr_trap("scriptc: cannot convert a circular structure into a checked-dynamic value "
+               "(unknown-typed slots deep-copy; break the cycle first)\n");
+    }
+  }
+  if (g_td_nseen == g_td_cap) {
+    g_td_cap = g_td_cap ? g_td_cap * 2 : 8;
+    const void **grown = realloc(g_td_seen, g_td_cap * sizeof *grown);
+    if (!grown) scr_json_oom();
+    g_td_seen = grown;
+  }
+  g_td_seen[g_td_nseen++] = v;
+}
+
+void scr_dyn_from_leave(void) {
+  if (g_td_nseen > 0) g_td_nseen--;
 }
 
 /* ── DOM lifecycle ─────────────────────────────────────────────────────

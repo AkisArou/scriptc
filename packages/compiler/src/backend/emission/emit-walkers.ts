@@ -509,6 +509,15 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       case "record": {
         const shape = E.recordsById.get(t.shapeId);
         if (!shape) throw new Error(`emitter bug: jsonStringify of unknown shape ${t.shapeId}`);
+        // CYCLE-CAPABLE shapes (recursive record types — the collector-
+        // fixpoint set) bracket the walk with the circular-detection
+        // stack: a value already being serialized above throws V8's exact
+        // circular-structure TypeError (scr_jb_enter). Edge labels stamp
+        // only before members whose walk can re-enter (cycle-capable
+        // types); acyclic shapes pay nothing.
+        const cyclic = E.traceAdapterC(t) !== null;
+        const edgeable = (ft: IrType): boolean => cyclic && E.traceAdapterC(ft) !== null;
+        if (cyclic) d.push(`  if (!scr_jb_enter(b, v, ${shape.tuple ? "true" : "false"})) return; /* circular: pending TypeError */`);
         // A tuple serializes as a JSON ARRAY in index order — JS-exact
         // (JSON.stringify(["a", 1]) is `["a",1]`). Every position is
         // required, so labels/commas are static like all-required records.
@@ -517,9 +526,11 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`  scr_jb_putc(b, '[');`);
           byIndex.forEach((f, i) => {
             if (i > 0) d.push(`  scr_jb_putc(b, ',');`);
+            if (edgeable(f.type)) d.push(`  scr_jb_edge_idx(b, ${i});`);
             d.push(`  ${E.jsonWriteHelper(f.type)}(b, v->${mangleField(f.name)});`);
           });
           d.push(`  scr_jb_putc(b, ']');`);
+          if (cyclic) d.push(`  scr_jb_leave(b);`);
           break;
         }
         // Fields serialize in DECLARED order — JS insertion order, exactly
@@ -551,6 +562,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           emitFields.forEach((f, i) => {
             const label = cStringLiteral(Buffer.from(`${i > 0 ? "," : ""}"${f.name}":`, "utf8"));
             d.push(`  scr_jb_puts(b, ${label});`);
+            if (edgeable(f.type)) d.push(`  scr_jb_edge_prop(b, ${cStringLiteral(Buffer.from(f.name, "utf8"))});`);
             // Refcounted fields are BORROWED straight off the struct (the
             // record itself is borrowed for the whole call).
             d.push(`  ${E.jsonWriteHelper(f.type)}(b, v->${mangleField(f.name)});`);
@@ -567,6 +579,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             d.push(`${pad}if (!first) scr_jb_putc(b, ',');`);
             d.push(`${pad}first = false;`);
             d.push(`${pad}scr_jb_puts(b, ${label});`);
+            if (edgeable(f.type)) d.push(`${pad}scr_jb_edge_prop(b, ${cStringLiteral(Buffer.from(f.name, "utf8"))});`);
             d.push(`${pad}${E.jsonWriteHelper(f.type)}(b, v->${mangleField(f.name)});`);
             if (utag >= 0) d.push(`  }`);
           }
@@ -608,6 +621,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             d.push(`      first = false;`);
             d.push(`      scr_jb_put_json_str(b, k);`);
             d.push(`      scr_jb_putc(b, ':');`);
+            if (edgeable(iv)) d.push(`      scr_jb_edge_key(b, k);`);
             d.push(`      ${E.jsonWriteHelper(iv)}(b, e);`);
             d.push(`      scr_str_release(k);`);
             if (isRefCounted(iv)) d.push(`      ${releaseCallC(iv, "e")};`);
@@ -617,6 +631,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           }
         }
         d.push(`  scr_jb_putc(b, '}');`);
+        if (cyclic) d.push(`  scr_jb_leave(b);`);
         break;
       }
       case "dyn":
@@ -630,9 +645,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       case "array": {
         const elem = t.elem;
         const w = E.jsonWriteHelper(elem);
+        // A cycle-capable array (elements can point back at it) joins the
+        // circular-detection stack exactly like a cycle-capable record.
+        const cyclic = E.traceAdapterC(t) !== null;
+        if (cyclic) d.push(`  if (!scr_jb_enter(b, v, true)) return; /* circular: pending TypeError */`);
         d.push(`  scr_jb_putc(b, '[');`);
         d.push(`  for (size_t i = 0; i < v->len; i++) {`);
         d.push(`    if (i > 0) scr_jb_putc(b, ',');`);
+        if (cyclic) d.push(`    scr_jb_edge_idx(b, i);`);
         if (elem.kind === "f64") {
           d.push(`    ${w}(b, scr_arr_get_f64(v, (double)i));`);
         } else if (elem.kind === "bool") {
@@ -645,6 +665,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         }
         d.push(`  }`);
         d.push(`  scr_jb_putc(b, ']');`);
+        if (cyclic) d.push(`  scr_jb_leave(b);`);
         break;
       }
       case "union": {
@@ -1326,6 +1347,11 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       case "record": {
         const shape = E.recordsById.get(t.shapeId);
         if (!shape) throw new Error(`emitter bug: to-dyn of unknown shape ${t.shapeId}`);
+        // CYCLE-CAPABLE shapes guard the deep copy: a cyclic value has no
+        // finite DOM copy, so enter TRAPS on re-entry (SEMANTICS.md — Node
+        // shares the reference instead of copying).
+        const cyclicRec = E.traceAdapterC(t) !== null;
+        if (cyclicRec) d.push(`  scr_dyn_from_enter(v);`);
         if (shape.tuple) {
           // A tuple converts as the JSON ARRAY it is everywhere else.
           const byIndex = [...shape.fields].sort((a, b) => Number(a.name) - Number(b.name));
@@ -1333,6 +1359,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           for (const f of byIndex) {
             d.push(`  scr_dyn_arr_push(d, ${E.toDynHelper(f.type)}(v->${mangleField(f.name)}));`);
           }
+          if (cyclicRec) d.push(`  scr_dyn_from_leave();`);
           d.push(`  return d;`);
           break;
         }
@@ -1383,11 +1410,15 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`    scr_arr_release(ks);`);
           d.push(`  }`);
         }
+        if (cyclicRec) d.push(`  scr_dyn_from_leave();`);
         d.push(`  return d;`);
         break;
       }
       case "array": {
         const elem = t.elem;
+        // Cycle-capable arrays guard the deep copy like records above.
+        const cyclicArr = E.traceAdapterC(t) !== null;
+        if (cyclicArr) d.push(`  scr_dyn_from_enter(v);`);
         d.push(`  ScrDyn *d = scr_dyn_new_arr();`);
         d.push(`  for (size_t i = 0; i < v->len; i++) {`);
         if (elem.kind === "f64") {
@@ -1400,6 +1431,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`    ${releaseCallC(elem, "e")};`);
         }
         d.push(`  }`);
+        if (cyclicArr) d.push(`  scr_dyn_from_leave();`);
         d.push(`  return d;`);
         break;
       }

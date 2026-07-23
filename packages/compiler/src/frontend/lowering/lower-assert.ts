@@ -25,6 +25,7 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { jsFuncNameOf, own } from "./lowerer.js";
 import { NARROW_FIRST } from "./surfaces.js";
+import { typeReachesItself } from "./lower-inspect.js";
 import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrLibFn, IrStmt, IrType, REGEX, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
 /** node:assert/strict binds the loose NAMES to the strict comparisons —
@@ -1299,7 +1300,7 @@ function deepEqHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
       ? boolLit(true)
       : { kind: "call", callee: deepEqHelper(L, elemT, loc), args: [x, y], type: BOOL, loc };
 
-  const locals: { id: string; name: string; type: IrType; mutable: boolean }[] = [
+  let locals: { id: string; name: string; type: IrType; mutable: boolean }[] = [
     { id: "a.0", name: "a", type: t, mutable: false },
     { id: "b.0", name: "b", type: t, mutable: false },
   ];
@@ -1444,6 +1445,46 @@ function deepEqHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
     }
     default:
       throw new Error(`assert deep-equal helper over unexpected type ${typeKey(t)}`);
+  }
+
+  // CYCLE-CAPABLE containers (recursive record types and their arrays/
+  // maps) wrap the structural walk in the runtime PAIR MEMO: identical
+  // references are deep-equal without walking, and a (a, b) pair already
+  // being compared answers equal — Node's memoization, so equal cyclic
+  // structures compare true instead of recursing forever. The walk moves
+  // into a sibling function; `name` becomes the memo wrapper every caller
+  // (recursion included) enters through.
+  if ((t.kind === "record" || t.kind === "array" || t.kind === "map") && typeReachesItself(L, t)) {
+    const walkName = `${name}.walk`;
+    L.liftedFns.push({
+      name: walkName,
+      params: [
+        { localId: "a.0", name: "a", type: t },
+        { localId: "b.0", name: "b", type: t },
+      ],
+      returnType: BOOL,
+      locals,
+      body,
+      loc,
+    });
+    locals = [
+      { id: "a.0", name: "a", type: t, mutable: false },
+      { id: "b.0", name: "b", type: t, mutable: false },
+      { id: "eq.0", name: "eq", type: BOOL, mutable: false },
+    ];
+    body = [
+      { kind: "if", cond: { kind: "bin", op: "===", left: a(), right: b(), type: BOOL, loc }, then: [ret(boolLit(true))], else_: null, loc },
+      {
+        kind: "if",
+        cond: { kind: "libCall", fn: "assert.deqEnter", args: [a(), b()], type: BOOL, loc },
+        then: [ret(boolLit(true))],
+        else_: null,
+        loc,
+      },
+      { kind: "varDecl", localId: "eq.0", init: { kind: "call", callee: walkName, args: [a(), b()], type: BOOL, loc }, loc },
+      { kind: "exprStmt", expr: { kind: "libCall", fn: "assert.deqLeave", args: [], type: VOID, loc }, loc },
+      ret(ref("eq.0", BOOL)),
+    ];
   }
 
   L.liftedFns.push({

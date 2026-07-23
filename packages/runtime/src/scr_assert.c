@@ -150,6 +150,37 @@ void scr_assert_ok(bool pass, ScrStr *message) {
 
 /* SameValue over doubles — Object.is, the comparison of strictEqual AND
  * deepStrictEqual for numbers (NaN equals NaN; +0 and -0 differ). */
+/* ── deepStrictEqual over cyclic values ────────────────────────────────
+ * RECURSIVE record types permit reference cycles; Node's deep equality
+ * memoizes (value1, value2) pairs so equal cyclic structures compare
+ * true instead of recursing forever. The compiler-emitted per-type
+ * helpers over cycle-capable types wrap their walks in enter/leave: a
+ * PAIR already being compared answers equal (the coinductive step —
+ * Node's memo behavior exactly). The stack is global (comparisons never
+ * interleave; the emitted walks cannot throw mid-compare). */
+static struct { const void *a, *b; } *g_deq_stack;
+static size_t g_deq_len;
+static size_t g_deq_cap;
+
+bool scr_assert_deq_enter(const void *a, const void *b) {
+  for (size_t i = 0; i < g_deq_len; i++) {
+    if (g_deq_stack[i].a == a && g_deq_stack[i].b == b) return true;
+  }
+  if (g_deq_len == g_deq_cap) {
+    g_deq_cap = g_deq_cap ? g_deq_cap * 2 : 8;
+    g_deq_stack = realloc(g_deq_stack, g_deq_cap * sizeof *g_deq_stack);
+    if (!g_deq_stack) scr_assert_oom();
+  }
+  g_deq_stack[g_deq_len].a = a;
+  g_deq_stack[g_deq_len].b = b;
+  g_deq_len++;
+  return false;
+}
+
+void scr_assert_deq_leave(void) {
+  if (g_deq_len > 0) g_deq_len--;
+}
+
 bool scr_assert_same_value_f64(double a, double b) {
   if (a == b) return a != 0.0 || signbit(a) == signbit(b);
   return isnan(a) && isnan(b);
