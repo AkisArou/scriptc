@@ -6162,6 +6162,24 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     if (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken) {
       const nullTest = lowerLooseNullCompare(L, expr, loc);
       if (nullTest) return nullTest;
+      // SAME-KIND loose equality IS strict equality (the spec's ==
+      // dispatches to === when both operands share a type): `typeof v ==
+      // 'object'`, `n != 0`, `flag == true` all lower exactly. Mixed
+      // kinds (where == coerces) keep the fence.
+      {
+        const negated = op === ts.SyntaxKind.ExclamationEqualsToken;
+        const left = L.lowerExpr(expr.left);
+        const right = L.lowerExpr(expr.right);
+        if (left.type.kind === "string" && right.type.kind === "string") {
+          return { kind: "strEq", negated, left, right, type: BOOL, loc };
+        }
+        if (
+          (left.type.kind === "f64" && right.type.kind === "f64") ||
+          (left.type.kind === "bool" && right.type.kind === "bool")
+        ) {
+          return { kind: "bin", op: negated ? "!==" : "===", left, right, type: BOOL, loc };
+        }
+      }
       L.unsupported("SC1040", expr);
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
