@@ -1436,6 +1436,24 @@ function preflight7(load: LoadResult): {
           ) {
             continue;
           }
+          // NAMED re-exports from an INSTALLED npm package (`export
+          // { isUrl } from "url-or-path"` — prettier's universal facade,
+          // `export { visitorKeys as default } from "@glimmer/syntax"`):
+          // import-plus-export plumbing. collectNpmImports registers the
+          // island load at this statement's position in the exporter's
+          // init and keys each binding by the same aliased symbol a
+          // direct import would, so consumer reads resolve identically
+          // through the alias chain. Star re-exports and unresolvable
+          // specifiers keep the fence (no member list to bind / nothing
+          // installed to load).
+          if (
+            stmt.exportClause !== undefined &&
+            ts.isNamedExports(stmt.exportClause) &&
+            !fromSpec.startsWith("#") &&
+            resolveNpmImport7(sf.fileName, fromSpec) !== null
+          ) {
+            continue;
+          }
           diags.push(unsupportedDiag("SC1014", locOf7(stmt), "re-exports from packages or builtin modules"));
           continue;
         }
@@ -1472,6 +1490,19 @@ function preflight7(load: LoadResult): {
       const spec = specNode.text;
       const isRelative = isRelativeSpecifier(spec);
       const isBare = !isRelative && !ambientModules.has(spec);
+      // --npm-static: an opted-in package importing node:module admits
+      // for PROGRAM code (per-member fences, divergence 370) but marks
+      // the PACKAGE an offender — the only member, createRequire, has no
+      // static story, and bundler banners (esbuild's
+      // __createRequire(import.meta.url) prologue) run it at module
+      // INIT, so a static compile would fence at load where the island
+      // runs the package as shipped.
+      if (canonicalBuiltinModule(spec) === "module") {
+        const pkg = npmStaticPackageOfPath(sf.fileName);
+        if (pkg !== null) {
+          reportNpmStaticOffender(pkg, "it imports node:module (createRequire has no static story; the island serves the package)");
+        }
+      }
       // An import edge Node's own resolution refuses BEFORE any module
       // evaluates: recorded as a startup-crash candidate (the Node-order
       // walk below picks the first one Node would report; the program

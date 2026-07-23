@@ -864,6 +864,12 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
     // child_process.execFile itself exists to be promisified — the same
     // story from the other end.
   },
+  module: {
+    createRequire:
+      "createRequire loads CommonJS from disk at RUNTIME (prettier's config/plugin loading) — " +
+      "a compiled program's modules are fixed at build time, so no lowering can exist; " +
+      "in JS sources the call defers to a runtime error naming this pattern",
+  },
   child_process: {
     execFile:
       "the callback form has no lowering — promisify it: " +

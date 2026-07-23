@@ -126,7 +126,9 @@ const PROBES: Probe[] = [
     source:
       'type Hybrid = { base: string; [k: string]: string };\nconst h: Hybrid = { base: "b", extra: "e" };\ndelete h["extra"];\nconsole.log(h.base);\n',
   },
-  { id: "diagnostic.sc1031", source: "class C {\n  f = 1;\n}\nconst { f } = new C();\nconsole.log(0);\n" },
+  // Class-instance field/getter destructures graduated (corpus 2429); the
+  // METHOD-extraction refusal carries the sample now.
+  { id: "diagnostic.sc1031", source: "class C {\n  f = 1;\n  m(): number {\n    return this.f;\n  }\n}\nconst { m } = new C();\nconsole.log(m());\n" },
   { id: "diagnostic.sc1121", source: 'console.log(/ab/g.test("abab"));\n' },
   {
     id: "node-builtin.zlib.gzipSync",

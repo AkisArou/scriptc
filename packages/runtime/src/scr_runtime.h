@@ -1675,6 +1675,9 @@ double scr_process_umask(double mask);
  * has no answer). scr_active_resources (scr_async.c) walks the loop's
  * own bookkeeping — 'Timeout'/'Immediate' strings, +1. */
 double scr_process_uptime(void);
+/* perf_hooks performance.now(): fractional ms since process start (the
+ * uptime anchor — Node's timeOrigin for a compiled program). */
+double scr_perf_now(void);
 double scr_cpu_user(void);
 double scr_cpu_system(void);
 double scr_cpu_user_diff(double prev);

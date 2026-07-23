@@ -227,6 +227,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "process.versionsOpenssl": "scr_process_versions_openssl",
   "process.umask": "scr_process_umask",
   "process.uptime": "scr_process_uptime",
+  "perf.now": "scr_perf_now",
   "process.availableMemory": "scr_available_memory",
   "process.constrainedMemory": "scr_constrained_memory",
   "process.cpuUser": "scr_cpu_user",

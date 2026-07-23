@@ -2591,6 +2591,8 @@ export type IrLibFn =
    * (or firing, uncleared) timer, 'Immediate' per queued unfired
    * immediate; unmodeled resource kinds are absent (SEMANTICS.md). */
   | "process.uptime"
+  /** perf_hooks performance.now(): fractional ms since process start. */
+  | "perf.now"
   | "process.availableMemory"
   | "process.constrainedMemory"
   | "process.cpuUser"

@@ -80,7 +80,7 @@ import {
   withUndefinedArm as withUndefinedArmCanonical,
 } from "../types.js";
 import { CompoundOp, IslandFnEntry, boundaryIntoIslandMsg, boundaryOutOfIslandMsg, BuiltinModuleFn, builtinConstLit, builtinModuleConstOf, builtinFenceHintOf, builtinModuleFnOf, stdlibMemberFence, isStdlibMember, isStdlibSymbol, isStdlibGlobal, stdlibGlobalMember, nodeTypesOnlySymbol } from "./surfaces.js";
-import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonImports, moduleArtifacts, collectGlobals, declSymbolOf, lowerFileInit, lowerDefaultExport, buildMain, appendDynamicImportModules } from "./lower-modules.js";
+import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonImports, moduleArtifacts, collectGlobals, declSymbolOf, defaultExportSymbolOf, lowerFileInit, lowerDefaultExport, buildMain, appendDynamicImportModules } from "./lower-modules.js";
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction } from "./lower-calls.js";
@@ -1148,6 +1148,16 @@ export class Lowerer {
         this.flushDeferred(symbol);
         return symbol;
       }
+      // DEFAULT-SNAPSHOT storage lives on the EXPORTER'S default alias
+      // symbol (`export default someLet` — collectGlobals registers the
+      // Node-semantics snapshot there). getAliasedSymbol would resolve
+      // PAST it to the live let; walk the default-import hops and stop at
+      // the first default symbol carrying storage instead.
+      const snap = this.defaultSnapshotSymbolOf(symbol);
+      if (snap) {
+        this.flushDeferred(snap);
+        return snap;
+      }
       symbol = this.checker.getAliasedSymbol(symbol);
     }
     // CommonJS export plumbing: a binding that resolved to a PROPERTY of a
@@ -1161,6 +1171,45 @@ export class Lowerer {
     if (cjsValue) symbol = cjsValue;
     this.flushDeferred(symbol);
     return symbol;
+  }
+
+  /** The default-snapshot storage symbol a DEFAULT-import alias chain
+   * lands on, or null. A mutable entity-name default (`export default
+   * someLet`) registers its Node-semantics snapshot global under the
+   * exporter's default ALIAS symbol; the checker's getAliasedSymbol
+   * resolves through that symbol to the live let, so this walk follows
+   * the default hops syntactically — default import clauses, `{ default
+   * as x }` specifiers, `export { default } from` re-exports — and stops
+   * at the first default symbol carrying registered storage. Local
+   * `export { x as default }` specifiers (no module specifier) are LIVE
+   * bindings in Node and fall through to ordinary alias resolution. */
+  private defaultSnapshotSymbolOf(alias: ts.Symbol): ts.Symbol | null {
+    let sym: ts.Symbol | undefined = alias;
+    for (let hop = 0; sym !== undefined && hop < 32; hop++) {
+      if (hop > 0 && sym.flags & ts.SymbolFlags.Alias && this.globalsBySymbol.has(sym)) return sym;
+      const d = this.checker
+        .declarationsOf(sym)
+        .find((x) => ts.isImportClause(x) || ts.isImportSpecifier(x) || ts.isExportSpecifier(x));
+      let spec: ts.Expression | undefined;
+      let name: string | undefined;
+      if (d && ts.isImportClause(d) && ts.isImportDeclaration(d.parent)) {
+        spec = d.parent.moduleSpecifier;
+        name = "default";
+      } else if (d && ts.isImportSpecifier(d)) {
+        const idecl: ts.Node = d.parent.parent.parent;
+        if (ts.isImportDeclaration(idecl)) spec = idecl.moduleSpecifier;
+        name = (d.propertyName ?? d.name).text;
+      } else if (d && ts.isExportSpecifier(d)) {
+        const edecl: ts.Node = d.parent.parent;
+        if (ts.isExportDeclaration(edecl)) spec = edecl.moduleSpecifier;
+        name = (d.propertyName ?? d.name).text;
+      }
+      if (d === undefined || spec === undefined || !ts.isStringLiteral(spec) || name !== "default") return null;
+      const dep = resolveImport(this.program, d.getSourceFile(), spec.text);
+      if (!dep) return null;
+      sym = defaultExportSymbolOf(this, dep) ?? undefined;
+    }
+    return null;
   }
 
   /** A module's CJS export-table member symbol by NAME (the checker's
@@ -2914,7 +2963,7 @@ export class Lowerer {
    * lift, or null when the pair isn't width-coercible. Callers that must
    * validate a WHOLE plan before interning anything (the retag helper's
    * per-arm width lifts) probe with this. */
-  recordWidthPlan(fromId: string, toId: string): Map<string, { src: IrType; lift: WidthLift } | { absent: true; utag: number }> | null {
+  recordWidthPlan(fromId: string, toId: string): Map<string, { src: IrType; lift: WidthLift } | { absent: true; utag: number } | { absentDyn: true }> | null {
     const from = this.shapes.get(fromId);
     const to = this.shapes.get(toId);
     if (!from || !to || from.indexValue || to.indexValue) return null;
@@ -2927,17 +2976,25 @@ export class Lowerer {
     if (this.widthPlanning.has(key)) return new Map();
     this.widthPlanning.add(key);
     try {
-      type FieldLift = { src: IrType; lift: WidthLift } | { absent: true; utag: number };
+      type FieldLift = { src: IrType; lift: WidthLift } | { absent: true; utag: number } | { absentDyn: true };
       const plan = new Map<string, FieldLift>();
       for (const tf of to.fields) {
         const ff = from.fields.find((f) => f.name === tf.name);
         if (!ff) {
           // A target field MISSING on the source: legal exactly when it is
           // optional-flavored (an undefined-armed union) — the unset field
-          // IS the undefined arm, the same rule literal completion applies.
-          // Never for tuples: a completed position would change .length
-          // and JSON where Node keeps the source arity.
-          if (from.tuple || tf.type.kind !== "union") return null;
+          // IS the undefined arm, the same rule literal completion applies
+          // — or 'unknown' (a dyn slot holds the DOM undefined, exactly
+          // the absent-property read: prettier's `getFileInfo(file, {})`
+          // against `{ plugins: unknown, ... }`). Never for tuples: a
+          // completed position would change .length and JSON where Node
+          // keeps the source arity.
+          if (from.tuple) return null;
+          if (tf.type.kind === "dyn") {
+            plan.set(tf.name, { absentDyn: true });
+            continue;
+          }
+          if (tf.type.kind !== "union") return null;
           const def = this.unions.get(tf.type.unionId);
           const utag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
           if (utag < 0) return null;
@@ -2985,6 +3042,11 @@ export class Lowerer {
             kind: "recordLit",
             fields: to.fields.map((f) => {
               const lift = plan.get(f.name)!;
+              if ("absentDyn" in lift) {
+                // The unset 'unknown' field: the DOM undefined — exactly
+                // the absent-property read's answer.
+                return { name: f.name, value: dynUndefinedExpr(loc) };
+              }
               if ("absent" in lift) {
                 if (f.type.kind !== "union") throw new Error("lowerer bug: absent lift against a non-union field");
                 // The unset optional field: build the undefined arm.

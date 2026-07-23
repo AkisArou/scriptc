@@ -17,7 +17,7 @@
       "name": "package imports",
       "status": "unsupported",
       "code": "SC1010",
-      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, and node:test modules (bare or node:-prefixed) are supported"
+      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
       "id": "diagnostic.sc1012",
@@ -786,6 +786,21 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.module",
+      "kind": "node-builtin",
+      "name": "node:module",
+      "status": "static",
+      "note": "recognized module (node:-prefixed specifier only, matching Node)"
+    },
+    {
+      "id": "node-builtin.module.createRequire",
+      "kind": "node-builtin",
+      "name": "module.createRequire",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "createRequire loads CommonJS from disk at RUNTIME (prettier's config/plugin loading) — a compiled program's modules are fixed at build time, so no lowering can exist; in JS sources the call defers to a runtime error naming this pattern"
+    },
+    {
       "id": "node-builtin.net",
       "kind": "node-builtin",
       "name": "net",
@@ -1090,6 +1105,13 @@
       "kind": "node-builtin",
       "name": "path/win32.toNamespacedPath",
       "status": "static"
+    },
+    {
+      "id": "node-builtin.perf_hooks",
+      "kind": "node-builtin",
+      "name": "perf_hooks",
+      "status": "static",
+      "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
       "id": "node-builtin.readline",
