@@ -4,9 +4,18 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.5
+## 0.0.6
 
 <!-- release:start -->
+
+### Features
+
+- **Recursive types compile statically**: self-referential interfaces (`interface TreeNode { label: string; children: TreeNode[] }`), mutually recursive types, and recursive unions — the AST/tree/linked-list class — now map to native representations. Cyclic values are collected by the cycle collector; `JSON.stringify` on a cyclic value throws V8's exact circular-structure error; `console.log` prints Node's circular reference markers; `JSON.parse(x) as T` validates recursive shapes with path-exact failures.
+
+<!-- release:end -->
+
+## 0.0.5
+
 
 ### Features
 
@@ -16,8 +25,6 @@ All notable changes to scriptc will be documented in this file.
 ### Fixes
 
 - Two compile-time crashes on unusual shipped-JavaScript shapes (probe reads that mutated locals, captures through non-lifted functions) now compile or fence with a named diagnostic.
-
-<!-- release:end -->
 
 ## 0.0.4
 
