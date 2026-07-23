@@ -1490,6 +1490,19 @@ function preflight7(load: LoadResult): {
       const spec = specNode.text;
       const isRelative = isRelativeSpecifier(spec);
       const isBare = !isRelative && !ambientModules.has(spec);
+      // --npm-static: an opted-in package importing node:module admits
+      // for PROGRAM code (per-member fences, divergence 370) but marks
+      // the PACKAGE an offender — the only member, createRequire, has no
+      // static story, and bundler banners (esbuild's
+      // __createRequire(import.meta.url) prologue) run it at module
+      // INIT, so a static compile would fence at load where the island
+      // runs the package as shipped.
+      if (canonicalBuiltinModule(spec) === "module") {
+        const pkg = npmStaticPackageOfPath(sf.fileName);
+        if (pkg !== null) {
+          reportNpmStaticOffender(pkg, "it imports node:module (createRequire has no static story; the island serves the package)");
+        }
+      }
       // An import edge Node's own resolution refuses BEFORE any module
       // evaluates: recorded as a startup-crash candidate (the Node-order
       // walk below picks the first one Node would report; the program
