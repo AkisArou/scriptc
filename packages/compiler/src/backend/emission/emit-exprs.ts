@@ -4770,6 +4770,23 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // Object.assign over DOM values: own members copy, the target
             // returns (+1); non-object receivers throw like Node.
             return finish(`scr_dyn_assign(${arg(0)}, ${arg(1)})`);
+          case "dyn.packPush":
+            // Variadic Object.assign's source pack: a plain source
+            // retains in (both args borrowed). Never throws.
+            return finish(`scr_dyn_pack_push(${arg(0)}, ${arg(1)})`);
+          case "dyn.packPushSpread":
+            // A spread source flattens through the spread-call walk —
+            // V8's exact TypeError texts (may-throw seed set); the string
+            // spells the spread expression for the nullish form.
+            return finish(`scr_dyn_pack_push_spread(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "dyn.packPushSpreadIter":
+            // The non-last/multi-spread positions: V8's iterator-protocol
+            // failure texts describe the value (may-throw seed set).
+            return finish(`scr_dyn_pack_push_spread_iter(${arg(0)}, ${arg(1)})`);
+          case "dyn.assignAll":
+            // The flattened pack copies onto the target left to right;
+            // the target returns (+1). Nullish targets throw like Node.
+            return finish(`scr_dyn_assign_all(${arg(0)}, ${arg(1)})`);
           case "dyn.hasOwn":
             // Object.hasOwn over a DOM receiver (throws on nullish, like
             // Node's ToObject).

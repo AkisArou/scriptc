@@ -6647,6 +6647,90 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
           }
         }
       }
+      // `Object.assign(target, ...sources)` over a CHECKED-DYNAMIC target
+      // — the n-ary/spread form (`Object.assign({}, ...plugins.map(p =>
+      // p.options), coreOptions)`, support.js's option-table merge). The
+      // sources pack into one fresh DOM array FIRST — plain sources
+      // retain in, spread sources flatten through the spread-call walk
+      // (V8's exact TypeError texts, the source spelling carried for the
+      // nullish form) — so every source evaluates and flattens before any
+      // copying (JS's ArgumentListEvaluation: a throwing spread leaves
+      // the target untouched), then one runtime walk copies each source's
+      // own enumerable keys left to right and answers the TARGET
+      // (identity, like JS). Each source must enter the dyn world (dyn
+      // already, or dynFrom's JSON-safe conversion — a STATIC array
+      // spread copies in at the boundary, the documented aliasing
+      // stance); anything else keeps the fence. Targets: dyn values, a
+      // FRESH object-literal target (`Object.assign({}, ...)` — no alias
+      // exists, so building it as a DOM object instead of a record is
+      // unobservable), or a nullish unit (Node's ToObject TypeError
+      // throws at the call, catchably); aliased record targets keep the
+      // fence — their identity could not survive the conversion.
+      if (call.arguments.length >= 1 && !ts.isSpreadElement(call.arguments[0]!)) {
+        let targetNode: ts.Expression = call.arguments[0]!;
+        while (ts.isParenthesizedExpression(targetNode)) targetNode = targetNode.expression;
+        const freshLiteralTarget = ts.isObjectLiteralExpression(targetNode);
+        const tProbe = freshLiteralTarget ? null : probeLower(L, call.arguments[0]!);
+        const tKind = tProbe?.type.kind;
+        if (freshLiteralTarget || tKind === "dyn" || tKind === "nullT" || tKind === "undefinedT") {
+          const loc = locOf(call);
+          const target = L.lowerExprExpecting(call.arguments[0]!, DYN);
+          if (target.type.kind === "dyn") {
+            const t = L.declareHiddenLocal("%oat", DYN);
+            const p = L.declareHiddenLocal("%oap", DYN);
+            const tRef = (): IrExpr => ({ kind: "varRef", localId: t.id, type: DYN, loc });
+            const pRef = (): IrExpr => ({ kind: "varRef", localId: p.id, type: DYN, loc });
+            const stmts: IrStmt[] = [
+              { kind: "varDecl", localId: t.id, init: target, loc },
+              { kind: "varDecl", localId: p.id, init: { kind: "dynArrLit", elems: [], type: DYN, loc }, loc },
+            ];
+            // V8 spells the optimized apply-path texts (the expression
+            // named for a nullish source) only when the spread is the
+            // SINGLE LAST argument; every other spread position drives
+            // the real iterator protocol, whose failure describes the
+            // value — the two runtime variants, picked here by position.
+            const sources = call.arguments.slice(1);
+            const spreadCount = sources.filter((a) => ts.isSpreadElement(a)).length;
+            let ok = true;
+            for (let i = 0; i < sources.length; i++) {
+              const argNode = sources[i]!;
+              const spread = ts.isSpreadElement(argNode);
+              const srcNode = spread ? argNode.expression : argNode;
+              const src = L.coerceToExpected(L.lowerExpr(srcNode), DYN);
+              if (src.type.kind !== "dyn") {
+                ok = false;
+                break;
+              }
+              const argLoc = locOf(argNode);
+              const optimized = spreadCount === 1 && i === sources.length - 1;
+              stmts.push({
+                kind: "exprStmt",
+                expr: spread
+                  ? optimized
+                    ? {
+                        kind: "libCall",
+                        fn: "dyn.packPushSpread",
+                        args: [pRef(), src, { kind: "strLit", value: srcNode.getText(), type: STRING, loc: argLoc }],
+                        type: VOID,
+                        loc: argLoc,
+                      }
+                    : { kind: "libCall", fn: "dyn.packPushSpreadIter", args: [pRef(), src], type: VOID, loc: argLoc }
+                  : { kind: "libCall", fn: "dyn.packPush", args: [pRef(), src], type: VOID, loc: argLoc },
+                loc: argLoc,
+              });
+            }
+            if (ok) {
+              return {
+                kind: "seqExpr",
+                stmts,
+                result: { kind: "libCall", fn: "dyn.assignAll", args: [tRef(), pRef()], type: DYN, loc },
+                type: DYN,
+                loc,
+              };
+            }
+          }
+        }
+      }
       return null;
     }
     // Object.defineProperties over a CHECKED-DYNAMIC target (test/common's

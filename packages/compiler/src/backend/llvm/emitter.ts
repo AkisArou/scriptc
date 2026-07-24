@@ -684,6 +684,13 @@ const LIB_FN_SYMS: Record<string, string> = {
   "dyn.objKeys": "scr_dyn_obj_keys",
   "dyn.hasOwn": "scr_dyn_has_own",
   "dyn.assign": "scr_dyn_assign",
+  // variadic Object.assign: the source pack (push never throws; the
+  // spread flatten throws V8's spread-call TypeErrors) and the final
+  // left-to-right copy (ToObject TypeError on a nullish target).
+  "dyn.packPush": "scr_dyn_pack_push",
+  "dyn.packPushSpread": "scr_dyn_pack_push_spread",
+  "dyn.packPushSpreadIter": "scr_dyn_pack_push_spread_iter",
+  "dyn.assignAll": "scr_dyn_assign_all",
   "dyn.objValues": "scr_dyn_obj_values",
   "dyn.objEntries": "scr_dyn_obj_entries",
   "dyn.structuredClone": "scr_structured_clone",

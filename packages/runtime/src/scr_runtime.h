@@ -2716,8 +2716,24 @@ ScrDyn *scr_dyn_obj_keys(const ScrDyn *v);
  * TypeError; every other kind answers false. */
 bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key);
 /* Object.assign over DOM values (+1 target back; ToObject TypeError on a
- * nullish target). */
+ * nullish target). Sources copy their own enumerable keys exactly as
+ * Object.keys lists them: OBJ members, ARR/STR/BYTES index keys; nullish
+ * and scalar/function/handle sources copy nothing. */
 ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src);
+/* Variadic Object.assign (the spread-source form): the compiler packs
+ * every source into one fresh DOM array — pack_push retains a plain
+ * source in (BORROWED), pack_push_spread flattens a spread source through
+ * the spread-call walk (V8's exact TypeError texts, `what` spelling the
+ * spread expression; MAY THROW pending) — then assign_all copies each
+ * pack element's own members onto the target left to right and answers
+ * the target retained (+1; ToObject TypeError on a nullish target). */
+void scr_dyn_pack_push(ScrDyn *pack, ScrDyn *v);
+void scr_dyn_pack_push_spread(ScrDyn *pack, const ScrDyn *src, const ScrStr *what);
+/* The iterated-path twin — a spread that is NOT the single last argument
+ * takes V8's iterator-protocol failure texts, which describe the VALUE
+ * ("object null", "number 5", ...) instead of spelling the expression. */
+void scr_dyn_pack_push_spread_iter(ScrDyn *pack, const ScrDyn *src);
+ScrDyn *scr_dyn_assign_all(ScrDyn *target, const ScrDyn *sources);
 ScrDyn *scr_dyn_obj_values(const ScrDyn *v);
 ScrDyn *scr_dyn_obj_entries(const ScrDyn *v);
 

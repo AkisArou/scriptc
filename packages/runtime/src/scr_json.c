@@ -2266,21 +2266,123 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
 
 ScrDyn *scr_dyn_obj_keys(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWALK_KEYS); }
 
+/* One source's own enumerable members onto an OBJ target — the
+ * CopyDataProperties walk Object.assign runs per source. OBJ sources copy
+ * their members directly (last write wins); the index-keyed kinds
+ * (arrays, strings, bytes) ride the entries walk, so the copied key set
+ * is EXACTLY what Object.keys answers for that kind (string sources per
+ * UTF-16 code unit, like Node's String exotic object); nullish sources
+ * copy nothing (Node skips them) and the scalar/function/handle kinds
+ * have no own enumerable string keys. Non-OBJ targets copy nothing (the
+ * existing two-arg stance — a DOM array target has no property table). */
+static void scr_dyn_assign_from(ScrDyn *target, const ScrDyn *src) {
+  if (target->kind != SCR_DYN_OBJ) return;
+  if (src->kind == SCR_DYN_UNDEF || src->kind == SCR_DYN_NULL) return;
+  if (src->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < src->v.obj.len; i++) {
+      scr_dyn_obj_set(target, src->v.obj.entries[i].key,
+                      src->v.obj.entries[i].key_len,
+                      scr_dyn_retain(src->v.obj.entries[i].value));
+    }
+    return;
+  }
+  if (src->kind != SCR_DYN_ARR && src->kind != SCR_DYN_STR &&
+      src->kind != SCR_DYN_BYTES) {
+    return;
+  }
+  ScrDyn *pairs = scr_dyn_obj_entries(src); /* +1; never throws here */
+  if (pairs == NULL) return;
+  if (pairs->kind == SCR_DYN_ARR) {
+    for (size_t i = 0; i < pairs->v.arr.len; i++) {
+      const ScrDyn *pair = pairs->v.arr.items[i];
+      if (pair->kind != SCR_DYN_ARR || pair->v.arr.len != 2) continue;
+      const ScrDyn *k = pair->v.arr.items[0];
+      if (k->kind != SCR_DYN_STR) continue;
+      scr_dyn_obj_set(target, k->v.str->data, k->v.str->len,
+                      scr_dyn_retain(pair->v.arr.items[1]));
+    }
+  }
+  scr_dyn_release(pairs);
+}
+
 /* Object.assign over DOM values: copies `src`'s own members onto `target`
  * (last write wins) and answers the target retained (+1). Nullish
  * receivers throw Node's ToObject TypeError; nullish sources copy
- * nothing; non-object sources copy nothing DOM-representable. */
+ * nothing; index-keyed sources (arrays/strings/bytes) copy their index
+ * keys like Node; the remaining kinds have no own enumerable keys. */
 ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
   if (target->kind == SCR_DYN_UNDEF || target->kind == SCR_DYN_NULL) {
     const char *m = "Cannot convert undefined or null to object";
     scr_throw_error_msg(SCR_ERR_TYPE, m, strlen(m));
     return NULL;
   }
-  if (target->kind == SCR_DYN_OBJ && src->kind == SCR_DYN_OBJ) {
-    for (size_t i = 0; i < src->v.obj.len; i++) {
-      scr_dyn_obj_set(target, src->v.obj.entries[i].key,
-                      src->v.obj.entries[i].key_len,
-                      scr_dyn_retain(src->v.obj.entries[i].value));
+  scr_dyn_assign_from(target, src);
+  return scr_dyn_retain(target);
+}
+
+/* Variadic Object.assign's argument pack (the `Object.assign({},
+ * ...arr.map(f), tail)` shape): the compiler builds one fresh DOM array
+ * of sources — plain arguments push borrowed (+1 in), spread arguments
+ * flatten through the spread-call walk (scr_dyn_arr_push_spread's V8
+ * TypeError texts, `what` spelling the spread expression for the nullish
+ * form) — so every source evaluates and flattens BEFORE any copying,
+ * exactly JS's ArgumentListEvaluation. */
+void scr_dyn_pack_push(ScrDyn *pack, ScrDyn *v) {
+  scr_dyn_arr_push(pack, scr_dyn_retain(v));
+}
+
+void scr_dyn_pack_push_spread(ScrDyn *pack, const ScrDyn *src, const ScrStr *what) {
+  scr_dyn_arr_push_spread(pack, src, what->data);
+}
+
+/* The ITERATED-path spread completion: V8 only takes the optimized
+ * apply-path texts (scr_dyn_arr_push_spread's — the expression spelled
+ * for nullish sources) when the spread is the SINGLE LAST argument; a spread
+ * followed by more arguments, or one of several spreads, drives the real
+ * iterator protocol, whose failure text describes the VALUE instead —
+ * "undefined", "object null", "number 5", "boolean true", "function",
+ * bare "object" — + " is not iterable (cannot read property
+ * Symbol(Symbol.iterator))". The compiler picks the variant by the
+ * spread's syntactic position. MAY THROW (pending). Borrows src. */
+void scr_dyn_pack_push_spread_iter(ScrDyn *pack, const ScrDyn *src) {
+  if (src->kind == SCR_DYN_ARR || src->kind == SCR_DYN_BYTES ||
+      src->kind == SCR_DYN_STR) {
+    scr_dyn_arr_push_spread(pack, src, ""); /* iterable kinds never throw */
+    return;
+  }
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  switch (src->kind) {
+  case SCR_DYN_UNDEF: scr_jb_puts(&b, "undefined"); break;
+  case SCR_DYN_NULL: scr_jb_puts(&b, "object null"); break;
+  case SCR_DYN_NUM: {
+    scr_jb_puts(&b, "number ");
+    ScrStr *s = scr_f64_to_scrstr(src->v.num);
+    for (size_t i = 0; i < s->len; i++) scr_jb_putc(&b, s->data[i]);
+    scr_str_release(s);
+    break;
+  }
+  case SCR_DYN_BOOL: scr_jb_puts(&b, src->v.b ? "boolean true" : "boolean false"); break;
+  case SCR_DYN_FUNC: scr_jb_puts(&b, "function"); break;
+  default: scr_jb_puts(&b, "object"); break; /* OBJ/HANDLE/PROMISE */
+  }
+  scr_jb_puts(&b, " is not iterable (cannot read property Symbol(Symbol.iterator))");
+  scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+}
+
+/* Object.assign(target, ...sources) over the flattened pack: the nullish
+ * ToObject TypeError first (Node throws before looking at sources), then
+ * each source's own-member copy left to right, answering the target
+ * retained (+1) — identity, like JS. */
+ScrDyn *scr_dyn_assign_all(ScrDyn *target, const ScrDyn *sources) {
+  if (target->kind == SCR_DYN_UNDEF || target->kind == SCR_DYN_NULL) {
+    const char *m = "Cannot convert undefined or null to object";
+    scr_throw_error_msg(SCR_ERR_TYPE, m, strlen(m));
+    return NULL;
+  }
+  if (sources->kind == SCR_DYN_ARR) {
+    for (size_t i = 0; i < sources->v.arr.len; i++) {
+      scr_dyn_assign_from(target, sources->v.arr.items[i]);
     }
   }
   return scr_dyn_retain(target);
