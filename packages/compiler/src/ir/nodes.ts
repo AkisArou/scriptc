@@ -1736,6 +1736,11 @@ export type IrLibFn =
    * forms keep their island lowering. Results +1; never throw. */
   | "num.toExponential"
   | "num.toFixed0"
+  /** Object.is over two numbers — the spec's SameValue on doubles: NaN
+   * equals NaN, +0 differs from -0, everything else is `===`. Plain bool
+   * result; never throws. (Union-armed operands take unionEq's sameValue
+   * flag instead — this is the both-f64 fast path.) */
+  | "num.sameValue"
   /** `delete process.env[NAME]` — unsetenv(3): the mutation is visible to
    * every later read (process.envGet asks getenv fresh) and inherited by
    * spawned children, exactly Node. Statement position only (JS's boolean
@@ -4293,11 +4298,15 @@ export type IrExpr =
    * comparison (`u === "text"`) arrives here after the frontend wraps the
    * plain side (payload identity is preserved by the wrap, so ref-arm
    * semantics stay JS-exact). Operands are borrowed; result is a plain
-   * bool. `negated` is the `!==` spelling. */
+   * bool. `negated` is the `!==` spelling. `sameValue` upgrades the f64
+   * arm's compare from `===` to SameValue (NaN equals NaN, +0 differs
+   * from -0) — the Object.is lowering; every other arm's compare is
+   * shared between the two semantics. */
   | {
       kind: "unionEq";
       unionId: string;
       negated: boolean;
+      sameValue: boolean;
       left: IrExpr;
       right: IrExpr;
       type: IrType;

@@ -7131,6 +7131,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
               kind: "unionEq",
               unionId: ut.unionId,
               negated,
+              sameValue: false,
               left: L.coerceInto(expr.left, left, ut),
               right: L.coerceInto(expr.right, right, ut),
               type: BOOL,

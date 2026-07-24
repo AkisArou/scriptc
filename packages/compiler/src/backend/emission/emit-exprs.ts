@@ -1945,11 +1945,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, e.negated ? `!(${test})` : test);
       }
       case "unionEq": {
-        // Strict equality of the ARM values via the per-union helper (tag
-        // compare + per-arm payload compare). Both boxes are borrowed.
+        // Strict equality (or Object.is's SameValue — the f64 arm's
+        // compare is the one difference) of the ARM values via the
+        // per-union helper (tag compare + per-arm payload compare). Both
+        // boxes are borrowed.
         const l = E.emitExpr(e.left);
         const r = E.emitExpr(e.right);
-        const call = `${E.unionEqHelper(e.unionId)}(${l.name}, ${r.name})`;
+        const call = `${E.unionEqHelper(e.unionId, e.sameValue)}(${l.name}, ${r.name})`;
         return E.newTemp(e.type, e.negated ? `!${call}` : call);
       }
       case "caughtTest": {
@@ -2498,6 +2500,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_num_to_exponential(${arg(0)})`);
           case "num.toFixed0":
             return finish(`scr_num_to_fixed0(${arg(0)})`);
+          // Object.is over two numbers — SameValue on doubles. No throw.
+          case "num.sameValue":
+            return finish(`scr_num_same_value(${arg(0)}, ${arg(1)})`);
           // The URL surface (scr_url.c): construction and the two
           // fileURLToPath receiver forms throw catchable TypeErrors
           // (may-throw seed set); the getters are pure reads. Receivers

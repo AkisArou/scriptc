@@ -3486,6 +3486,14 @@ ScrStr *scr_num_to_fixed0(double x) {
   return r;
 }
 
+/* Object.is over two numbers — the spec's SameValue on doubles: NaN
+ * equals NaN, +0 differs from -0, everything else is ==. */
+bool scr_num_same_value(double a, double b) {
+  if (a != a) return b != b;
+  if (a == 0 && b == 0) return signbit(a) == signbit(b);
+  return a == b;
+}
+
 bool scr_num_is_nan(double x) { return isnan(x) != 0; }
 
 bool scr_num_is_integer(double x) { return isfinite(x) && trunc(x) == x; }

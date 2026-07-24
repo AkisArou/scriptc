@@ -3898,6 +3898,10 @@ bool scr_num_is_safe_integer(double x);
 ScrStr *scr_num_to_exponential(double x);
 ScrStr *scr_num_to_fixed0(double x);
 
+/* Object.is over two numbers — the spec's SameValue on doubles: NaN
+ * equals NaN, +0 differs from -0, everything else is ==. Never throws. */
+bool scr_num_same_value(double a, double b);
+
 /* ── Date, the composed slice (scr_lib.c) ─────────────────────────────
  * Date values have no representation; the runtime surface is exactly
  * Date.now() and toISOString over a millisecond time value. */

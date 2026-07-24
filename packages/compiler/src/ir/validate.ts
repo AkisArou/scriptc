@@ -209,6 +209,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "regexp.escape": { argTypes: [STRING], result: STRING },
   "num.toExponential": { argTypes: [F64], result: STRING },
   "num.toFixed0": { argTypes: [F64], result: STRING },
+  "num.sameValue": { argTypes: [F64, F64], result: BOOL },
   "sym.new": { argTypes: [STRING], result: SYMBOL_T },
   "sym.newAnon": { argTypes: [], result: SYMBOL_T },
   "sym.for": { argTypes: [STRING], result: SYMBOL_T },

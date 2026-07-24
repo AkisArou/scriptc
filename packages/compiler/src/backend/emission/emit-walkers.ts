@@ -113,22 +113,26 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
     return name;
   }
 
-/** The per-union strict-equality helper (interned per unionId):
+/** The per-union strict-equality helper (interned per unionId, with a
+   * separate SameValue variant per unionId when Object.is reaches it):
    * different tags are never equal; equal tags compare the arm values —
-   * unit arms equal, f64 with C == (NaN !== NaN, +0 === -0), strings by
-   * bytes, bools by value, ref arms by POINTER identity (JS object
-   * equality). Borrows both operands. */
-  export function unionEqHelper(E: CEmitter, unionId: string): string {
-    const existing = E.unionEqFns.get(unionId);
+   * unit arms equal, f64 with C == (NaN !== NaN, +0 === -0) or SameValue
+   * (NaN equals NaN, +0 differs from -0) under the sameValue flag,
+   * strings by bytes, bools by value, ref arms by POINTER identity (JS
+   * object equality). Borrows both operands. */
+  export function unionEqHelper(E: CEmitter, unionId: string, sameValue: boolean): string {
+    const key = sameValue ? `sv:${unionId}` : unionId;
+    const existing = E.unionEqFns.get(key);
     if (existing) return existing;
     const def = E.unionsById.get(unionId);
     if (!def) throw new Error(`emitter bug: equality of unknown union ${unionId}`);
     const name = `sc_ue_${E.unionEqFns.size}`;
-    E.unionEqFns.set(unionId, name);
+    E.unionEqFns.set(key, name);
+    const what = sameValue ? "SameValue" : "strict equality";
     const sig = `static bool ${name}(ScrUnion *a, ScrUnion *b)`;
-    E.walkerProtos.push(`${sig}; /* strict equality ${unionId} */`);
+    E.walkerProtos.push(`${sig}; /* ${what} ${unionId} */`);
     const d: string[] = [
-      `${sig} { /* strict equality ${unionId} */`,
+      `${sig} { /* ${what} ${unionId} */`,
       `  if (a->tag != b->tag) return false;`,
       `  switch (a->tag) {`,
     ];
@@ -139,7 +143,11 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
           d.push(`  case ${i}: return true;`);
           break;
         case "f64":
-          d.push(`  case ${i}: return scr_union_get_f64(a) == scr_union_get_f64(b);`);
+          d.push(
+            sameValue
+              ? `  case ${i}: return scr_num_same_value(scr_union_get_f64(a), scr_union_get_f64(b));`
+              : `  case ${i}: return scr_union_get_f64(a) == scr_union_get_f64(b);`,
+          );
           break;
         case "bool":
           d.push(`  case ${i}: return scr_union_get_bool(a) == scr_union_get_bool(b);`);

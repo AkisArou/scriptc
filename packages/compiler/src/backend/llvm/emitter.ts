@@ -185,6 +185,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "dyn.errInstanceof": "scr_dyn_err_instanceof",
   "num.toExponential": "scr_num_to_exponential",
   "num.toFixed0": "scr_num_to_fixed0",
+  "num.sameValue": "scr_num_same_value",
   "number.isFinite": "scr_num_is_finite",
   "number.isNaN": "scr_num_is_nan",
   "number.isInteger": "scr_num_is_integer",
@@ -4336,7 +4337,14 @@ class LlEmitter {
               const t = B.tmp();
               B.line(`${a} = call double @scr_union_get_f64(ptr ${l.name})`);
               B.line(`${b} = call double @scr_union_get_f64(ptr ${r.name})`);
-              B.line(`${t} = fcmp oeq double ${a}, ${b}`);
+              if (e.sameValue) {
+                // Object.is's f64 compare: NaN equals NaN, +0 differs
+                // from -0 — the runtime SameValue.
+                this.declare(`declare zeroext i1 @scr_num_same_value(double, double)`);
+                B.line(`${t} = call zeroext i1 @scr_num_same_value(double ${a}, double ${b})`);
+              } else {
+                B.line(`${t} = fcmp oeq double ${a}, ${b}`);
+              }
               B.line(`store i1 ${t}, ptr ${slot}`);
               break;
             }
