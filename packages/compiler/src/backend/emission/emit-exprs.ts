@@ -1631,6 +1631,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         }
         return E.newTemp(e.type, `${E.toDynHelper(v.type)}(${v.name})`);
       }
+      case "dynFromJsval": {
+        // Island value → DOM: the by-reference wrap (scr_dyn_from_jsval
+        // retains the cell in; engine scalars normalize to native DOM
+        // kinds at wrap time). Operand borrowed, result +1, never throws.
+        const v = E.emitExpr(e.value);
+        return E.newTemp(e.type, `scr_dyn_from_jsval(${v.name})`);
+      }
       case "dynCall": {
         // Calling a dyn value: args are already dyn (the lowering boxed or
         // converted them); everything is BORROWED by scr_dyn_call — the
@@ -1909,6 +1916,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "dynHasKey": {
         // `"k" in pkg`: a kind-guarded presence answer, computed against
         // the literal key at compile time — no allocation, borrowed box.
+        // An ISLAND-held receiver fences loudly (Node asks the real
+        // engine object — `false` would be a silent wrong answer), so
+        // the temp rides the fallible path.
         const d = E.emitExpr(e.value);
         const keyBytes = Buffer.from(e.key, "utf8");
         const keyLit = cStringLiteral(keyBytes);
@@ -1919,8 +1929,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             : /^(0|[1-9][0-9]*)$/.test(e.key) && Number(e.key) <= Number.MAX_SAFE_INTEGER
               ? `${d.name}->v.arr.len > ${e.key}`
               : "false";
-        const test = `(${d.name}->kind == SCR_DYN_OBJ ? (${objTest}) : ${d.name}->kind == SCR_DYN_ARR ? (${arrTest}) : false)`;
-        return E.newTemp(e.type, e.negated ? `!${test}` : test);
+        const test = `(${d.name}->kind == SCR_DYN_OBJ ? (${objTest}) : ${d.name}->kind == SCR_DYN_ARR ? (${arrTest}) : scr_dyn_isl_fence(${d.name}, "'in'"))`;
+        return E.fallibleTemp(e.type, e.negated ? `!${test}` : test);
       }
       case "dynScalarEq": {
         // dyn vs scalar strict equality: kind test + payload compare.
@@ -1943,29 +1953,43 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       }
       case "dynTest": {
         // A pure kind compare on the DOM node — borrowed; only the truthy
-        // form also reads a scalar payload.
+        // form also reads a scalar payload. ISLAND-held nodes (the jsval
+        // kind — engine objects/arrays/functions only, scalars normalize
+        // at wrap time) route the tests that depend on the engine's
+        // answer through the scr_dyn_isl_* helpers (false on every other
+        // kind, so the calls stay unconditional); narrowing never changes
+        // representation (SEMANTICS.md).
         const d = E.emitExpr(e.value);
         const test =
           e.test === "nullish"
             ? `(${d.name}->kind == SCR_DYN_UNDEF || ${d.name}->kind == SCR_DYN_NULL)`
             : e.test === "object"
               ? // `typeof v === "object"`: objects, arrays, bytes, native
-                // handles, promises, AND null.
-                `(${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE || ${d.name}->kind == SCR_DYN_NULL)`
+                // handles, promises, AND null — engine-held objects by the
+                // engine's own typeof.
+                `(${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE || ${d.name}->kind == SCR_DYN_NULL || scr_dyn_isl_typeof_is(${d.name}, "object"))`
               : e.test === "truthy"
                 ? // ToBoolean over the DOM: bool by value; number falsy for
                   // 0, -0 (== 0 in C), and NaN (self-inequality); string
                   // falsy when empty; obj/arr/bytes/func/handle always true;
-                  // the remaining kinds (undefined, null) always false.
-                  `(${d.name}->kind == SCR_DYN_BOOL ? ${d.name}->v.b : ${d.name}->kind == SCR_DYN_NUM ? (${d.name}->v.num == ${d.name}->v.num && ${d.name}->v.num != 0) : ${d.name}->kind == SCR_DYN_STR ? ${d.name}->v.str->len != 0 : (${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_FUNC || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE))`
+                  // JSVAL through the runtime's routed arm (the bigint 0n
+                  // edge); the remaining kinds (undefined, null) always false.
+                  `(${d.name}->kind == SCR_DYN_BOOL ? ${d.name}->v.b : ${d.name}->kind == SCR_DYN_NUM ? (${d.name}->v.num == ${d.name}->v.num && ${d.name}->v.num != 0) : ${d.name}->kind == SCR_DYN_STR ? ${d.name}->v.str->len != 0 : ${d.name}->kind == SCR_DYN_JSVAL ? scr_dyn_truthy(${d.name}) : (${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_FUNC || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE))`
                 : e.test === "error"
                   ? // `u instanceof Error`: the DOM's error encoding — an
                     // object carrying the reserved "%error" marker key
-                    // (built by caughtToDyn for Error payloads).
-                    `(${d.name}->kind == SCR_DYN_OBJ && scr_dyn_obj_get(${d.name}, "%error", 6) != NULL)`
-                  : `${d.name}->kind == ${
-                      { string: "SCR_DYN_STR", number: "SCR_DYN_NUM", boolean: "SCR_DYN_BOOL", undefined: "SCR_DYN_UNDEF", null: "SCR_DYN_NULL", bytes: "SCR_DYN_BYTES", array: "SCR_DYN_ARR", function: "SCR_DYN_FUNC" }[e.test]
-                    }`;
+                    // (built by caughtToDyn for Error payloads) — or a real
+                    // engine Error held by reference.
+                    `((${d.name}->kind == SCR_DYN_OBJ && scr_dyn_obj_get(${d.name}, "%error", 6) != NULL) || scr_dyn_isl_is_error(${d.name}))`
+                  : e.test === "array"
+                    ? // Array.isArray: the DOM's array kind, or the engine's
+                      // own answer for an engine-held value.
+                      `(${d.name}->kind == SCR_DYN_ARR || scr_dyn_isl_is_array(${d.name}))`
+                    : e.test === "function"
+                      ? `(${d.name}->kind == SCR_DYN_FUNC || scr_dyn_isl_typeof_is(${d.name}, "function"))`
+                      : `${d.name}->kind == ${
+                          { string: "SCR_DYN_STR", number: "SCR_DYN_NUM", boolean: "SCR_DYN_BOOL", undefined: "SCR_DYN_UNDEF", null: "SCR_DYN_NULL", bytes: "SCR_DYN_BYTES" }[e.test]
+                        }`;
         return E.newTemp(e.type, e.negated ? `!(${test})` : test);
       }
       case "unionEq": {

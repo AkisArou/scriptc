@@ -50,6 +50,7 @@ export const DK = {
   FUNC: 8,
   HANDLE: 9,
   PROMISE: 10,
+  JSVAL: 11, /* SCR_DYN_JSVAL — island values held by reference */
 } as const;
 
 /** What the dyn helpers need beyond the walker host: interned immortal
@@ -1446,12 +1447,20 @@ export class LlDyn {
       const kd = this.kindOf(B, "%d");
       const done = B.newLabel("ds.d");
       const labels = new Map<number, string>();
-      for (const k of [DK.NULL, DK.BOOL, DK.NUM, DK.STR, DK.ARR, DK.OBJ, DK.UNDEF, DK.BYTES, DK.FUNC, DK.HANDLE, DK.PROMISE]) {
+      for (const k of [DK.NULL, DK.BOOL, DK.NUM, DK.STR, DK.ARR, DK.OBJ, DK.UNDEF, DK.BYTES, DK.FUNC, DK.HANDLE, DK.PROMISE, DK.JSVAL]) {
         labels.set(k, B.newLabel(`ds.k${k}`));
       }
       B.terminate(
         `switch i32 ${kd}, label %${done} [ ${[...labels].map(([k, l]) => `i32 ${k}, label %${l}`).join(" ")} ]`,
       );
+      B.startBlock(labels.get(DK.JSVAL)!);
+      {
+        // Island-held: the engine's own ToString (a bridged failure
+        // leaves the exception pending and appends nothing).
+        host.declare(`declare void @scr_dyn_isl_tostr_buf(ptr, ptr)`);
+        B.line(`call void @scr_dyn_isl_tostr_buf(ptr %b, ptr %d)`);
+        B.br(done);
+      }
       B.startBlock(labels.get(DK.UNDEF)!);
       this.puts(B, "%b", "undefined");
       B.br(done);
@@ -1912,6 +1921,22 @@ export class LlDyn {
       B.terminate(`ret ptr null`);
       B.startBlock(lNext);
     }
+    // ISLAND-held receivers: Node reads the real engine property — the
+    // undefined tail below would be a silent wrong answer (the retired
+    // fence-box bug's .length -> 0). Loud fence (lane dyn-routing-ops).
+    {
+      const isJv = B.tmp();
+      B.line(`${isJv} = icmp eq i32 ${kd}, ${DK.JSVAL}`);
+      const lJv = B.newLabel("kg.jv");
+      const lNext = B.newLabel("kg.n");
+      B.condBr(isJv, lJv, lNext);
+      B.startBlock(lJv);
+      host.declare(`declare ptr @scr_dyn_isl_key_fence(ptr, ptr)`);
+      const r = B.tmp();
+      B.line(`${r} = call ptr @scr_dyn_isl_key_fence(ptr %d, ptr %k)`);
+      B.terminate(`ret ptr ${r}`);
+      B.startBlock(lNext);
+    }
     // OBJ: the own member (+1) or the undefined singleton.
     {
       const isObj = B.tmp();
@@ -2289,6 +2314,22 @@ export class LlDyn {
     host.declare(`declare void @scr_str_release(ptr)`);
     const B = new BlockBuilder();
     const kd = this.kindOf(B, "%d");
+    // ISLAND-held sources: an engine array IS iterable — the not-iterable
+    // TypeError below would be a wrong claim. Loud fence (lane
+    // dyn-routing-ops).
+    {
+      const isJv = B.tmp();
+      B.line(`${isJv} = icmp eq i32 ${kd}, ${DK.JSVAL}`);
+      const lJv = B.newLabel("din.jv");
+      const lNotJv = B.newLabel("din.njv");
+      B.condBr(isJv, lJv, lNotJv);
+      B.startBlock(lJv);
+      host.declare(`declare zeroext i1 @scr_dyn_isl_fence(ptr, ptr)`);
+      const f = B.tmp();
+      B.line(`${f} = call zeroext i1 @scr_dyn_isl_fence(ptr %d, ptr ${host.cstr("iteration")})`);
+      B.terminate(`ret ptr null`);
+      B.startBlock(lNotJv);
+    }
     const okA = B.tmp();
     const okS = B.tmp();
     const okB = B.tmp();

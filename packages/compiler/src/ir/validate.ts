@@ -2807,6 +2807,17 @@ function validateFunction(
         }
         break;
       }
+      case "dynFromJsval": {
+        // The jsval→DOM crossing: exactly a jsval operand into a dyn
+        // result (the by-reference island wrap; scalars normalize at
+        // runtime).
+        checkExpr(e.value);
+        if (e.type.kind !== "dyn") err(`dynFromJsval must be dyn-typed, got ${e.type.kind}`, e.loc);
+        if (e.value.type.kind !== "jsval") {
+          err(`dynFromJsval operand must be jsval, got ${e.value.type.kind}`, e.loc);
+        }
+        break;
+      }
       case "dynCall": {
         checkExpr(e.callee);
         expectType(e.callee, DYN, "dynCall callee");
