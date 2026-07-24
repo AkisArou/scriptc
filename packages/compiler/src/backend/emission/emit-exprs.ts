@@ -1019,6 +1019,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               e.type,
               `scr_bytes_slice(${r.name}, ${args[0]?.name ?? "0"}, ${args[1]?.name ?? "INFINITY"})`,
             );
+          case "subarray":
+            // Same defaults; the result is a +1 VIEW aliasing the
+            // receiver's storage (subarray / Buffer's slice).
+            return E.newTemp(
+              e.type,
+              `scr_bytes_subarray(${r.name}, ${args[0]?.name ?? "0"}, ${args[1]?.name ?? "INFINITY"})`,
+            );
           case "setFrom": {
             // dst.set(src, offset?) — void; throws Node's RangeError on
             // overflow (may-throw seed).
@@ -1082,6 +1089,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.emitPendingCheck();
             return t;
           }
+          case "fillElem":
+            // Per-element TypedArray fill (non-u8): slice-style index
+            // defaults, never throws; the receiver comes back +1.
+            return E.newTemp(
+              e.type,
+              `scr_bytes_fill_elem(${r.name}, ${args[0]!.name}, ${args[1]?.name ?? "0"}, ${args[2]?.name ?? "INFINITY"})`,
+            );
           case "fillStr": {
             const n = e.args.length - 2;
             const t = E.newTemp(

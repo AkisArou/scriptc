@@ -4207,13 +4207,15 @@ double scr_bit_not(double a);
 /* ── typed arrays / Buffer (scr_bytes.c) ──────────────────────────────
  * ONE runtime representation for Uint8Array/Uint32Array/Float32Array,
  * Node's Buffer (a Uint8Array subclass), and DataView: a refcounted,
- * MUTABLE, fixed-length element buffer. Typed arrays OWN their storage
- * (backing == NULL) — subarray()/slice() both COPY (slice matches JS;
- * subarray's sharing is a documented divergence, SEMANTICS.md) — so a
- * typed array never aliases another and its byteOffset is always 0. The
- * ONE view kind is DataView (scr_dataview_new): a u8-elem ScrBytes whose
- * `data` points INTO an owner's storage and whose `backing` retains that
- * owner, so reads/writes through the view alias the source JS-exactly.
+ * MUTABLE, fixed-length element buffer. An ScrBytes either OWNS its
+ * storage (backing == NULL, byteOffset 0) or is a VIEW: its `data` points
+ * INTO an owner's storage and its `backing` retains that owner (chain
+ * depth is always exactly 1 — views over views resolve to the owner at
+ * construction), so reads/writes through the view alias the source
+ * JS-exactly. Views come from DataView (scr_dataview_new) and from
+ * subarray()/Buffer-slice() (scr_bytes_subarray — Buffer's slice is
+ * subarray's deprecated alias in Node); only the plain typed arrays'
+ * slice() copies (scr_bytes_slice, matching JS).
  * Elements are scalars only and the backing edge is acyclic by
  * construction (owners point at nothing): never part of a cycle, no
  * trace. Element reads widen to double; writes coerce JS-exactly (ToUint8
@@ -4236,10 +4238,10 @@ typedef struct ScrBytes {
   size_t len; /* ELEMENT count, fixed at construction */
   ScrBytesElem elem;
   uint8_t *data; /* len * elem_size bytes; owned unless backing is set */
-  /* NULL for owners (every typed array/Buffer). A DataView sets this to
-   * the retained OWNER it aliases (chain depth is always exactly 1: views
-   * over a view's .buffer resolve to the owner at construction) and its
-   * `data` points into backing->data — released, never freed. */
+  /* NULL for owners. A view (DataView, subarray, Buffer-slice) sets this
+   * to the retained OWNER it aliases (chain depth is always exactly 1:
+   * views over views resolve to the owner at construction) and its `data`
+   * points into backing->data — released, never freed. */
   struct ScrBytes *backing;
 } ScrBytes;
 
@@ -4344,9 +4346,20 @@ void scr_bytes_set(ScrBytes *b, double i, double v);
 
 /* TypedArray.prototype.slice(start, end): relative indices clamp like
  * string/array slice (ToIntegerOrInfinity, negatives from the end); the
- * result is a fresh same-kind copy. subarray() lowers here too — a COPY,
- * the documented divergence. Never throws. */
+ * result is a fresh same-kind copy. Never throws. */
 ScrBytes *scr_bytes_slice(const ScrBytes *b, double start, double end); /* +1 */
+
+/* TypedArray.prototype.fill on non-u8 receivers: per-element fill with
+ * the element write's coercion, slice-clamped relative indices; answers
+ * the receiver +1 (chaining). Never throws. */
+ScrBytes *scr_bytes_fill_elem(ScrBytes *b, double v, double start, double end); /* +1 */
+
+/* TypedArray.prototype.subarray(start, end) — and Buffer's slice(), its
+ * deprecated alias: a same-elem VIEW aliasing the receiver's storage
+ * (mutations visible both ways, JS-exactly). The view retains the OWNER
+ * (chain depth exactly 1, the DataView rule) and its byteOffset composes.
+ * Same index clamping as slice; never throws. */
+ScrBytes *scr_bytes_subarray(ScrBytes *b, double start, double end); /* +1 */
 
 /* dst.set(src, offset): same-kind bulk copy (memmove — dst may be src).
  * offset goes through ToIntegerOrInfinity; a negative offset or

@@ -3222,8 +3222,8 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         L.unsupported(
           "SC1090",
           expr,
-          "'.buffer' outside new DataView(x.buffer, ...) — scriptc typed arrays own their storage: " +
-            "no free-standing ArrayBuffer value exists, and slice()/subarray() copy",
+          "'.buffer' outside new DataView(x.buffer, ...) — no free-standing ArrayBuffer value " +
+            "exists in scriptc: subarray() answers an aliasing view directly",
         );
       }
       if (name === "slice" || name === "subarray" || name === "set" || name === "toString") {

@@ -1,6 +1,8 @@
 /* Typed arrays / Buffer: ONE runtime representation (ScrBytes — see the
- * header contract). Element buffers own their storage outright: no views,
- * no byteOffset, slice/subarray both copy. Coercions are JS-exact
+ * header contract). An ScrBytes either OWNS its storage or is a VIEW into
+ * an owner's (backing set, chain depth exactly 1): DataView, subarray(),
+ * and Buffer's slice() all alias JS-exactly; only the plain typed arrays'
+ * slice() copies. Coercions are JS-exact
  * (ToUint8/ToUint32 modular truncation, double→float rounding); the
  * encoding conversions (utf8 with WHATWG replacement, hex, base64) match
  * Node byte-for-byte — the differential corpus holds them to it. */
@@ -164,7 +166,7 @@ void scr_bytes_set(ScrBytes *b, double i, double v) {
   }
 }
 
-/* ── slice / subarray (both COPY) ──────────────────────────────────────── */
+/* ── slice (copy) / subarray (view) ────────────────────────────────────── */
 
 /* Relative index: ToIntegerOrInfinity, negatives from the end, clamped. */
 static size_t scr_bytes_rel_index(double i, size_t len) {
@@ -184,6 +186,41 @@ ScrBytes *scr_bytes_slice(const ScrBytes *b, double start, double end) {
   ScrBytes *out = scr_bytes_alloc(b->elem, count);
   memcpy(out->data, b->data + s * esize, count * esize);
   return out;
+}
+
+/* TypedArray.prototype.fill on non-u8 receivers: per-ELEMENT fill with
+ * the element write's JS-exact coercion (ToUint32/ToInt32 wrap, f32
+ * rounding), slice-clamped relative indices; answers the receiver +1
+ * (chaining). Never throws — Buffer's throwing fill family is separate. */
+ScrBytes *scr_bytes_fill_elem(ScrBytes *b, double v, double start, double end) {
+  size_t s = scr_bytes_rel_index(start, b->len);
+  size_t e = scr_bytes_rel_index(end, b->len);
+  for (size_t i = s; i < e; i++) scr_bytes_set(b, (double)i, v);
+  return scr_bytes_retain(b);
+}
+
+/* subarray(start, end): a same-elem VIEW over the receiver's storage —
+ * TypedArray.prototype.subarray and Buffer's slice()/subarray() all alias
+ * in JS (mutations are visible both ways; buffer-swap through a slice is
+ * the canonical Node use). Chain depth stays exactly 1: a subarray of a
+ * view retains the OWNER, offsets composed here (the DataView rule).
+ * Relative indices clamp like slice; never throws. */
+ScrBytes *scr_bytes_subarray(ScrBytes *b, double start, double end) {
+  size_t s = scr_bytes_rel_index(start, b->len);
+  size_t e = scr_bytes_rel_index(end, b->len);
+  size_t count = e > s ? e - s : 0;
+  ScrBytes *owner = b->backing ? b->backing : b;
+  ScrBytes *v = malloc(sizeof(ScrBytes));
+  if (!v) scr_bytes_oom();
+  v->rc = 1;
+  v->len = count;
+  v->elem = b->elem;
+  v->data = b->data + s * scr_bytes_elem_size(b->elem);
+  v->backing = scr_bytes_retain(owner);
+#ifdef SCR_RC_AUDIT
+  scr_live_bytes++;
+#endif
+  return v;
 }
 
 void scr_bytes_set_from(ScrBytes *dst, const ScrBytes *src, double offset) {

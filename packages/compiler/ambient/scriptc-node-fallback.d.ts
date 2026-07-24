@@ -447,7 +447,10 @@ interface Buffer<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> extends
 }
 interface BufferConstructor {
   from(data: string, encoding?: BufferEncoding): Buffer;
-  from(data: Uint8Array | ArrayBuffer | readonly number[]): Buffer;
+  /* The ArrayBuffer form is the VIEW construction: x.buffer with an
+   * optional byte offset/length shares x's storage (the subarray rule). */
+  from(data: ArrayBuffer, byteOffset?: number, length?: number): Buffer;
+  from(data: Uint8Array | readonly number[]): Buffer;
   alloc(size: number, fill?: string | number | Uint8Array, encoding?: BufferEncoding): Buffer;
   compare(buf1: Uint8Array, buf2: Uint8Array): number;
   /* alloc without the zero-fill guarantee — the lowering zero-fills

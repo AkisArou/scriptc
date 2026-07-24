@@ -8902,6 +8902,16 @@ class LlEmitter {
           true,
           false,
         );
+      case "subarray":
+        // A +1 VIEW aliasing the receiver's storage (subarray / Buffer's
+        // slice); same index defaults as slice.
+        return call(
+          "scr_bytes_subarray",
+          "ptr (ptr, double, double)",
+          `ptr ${r.name}, double ${args[0]?.name ?? f64Lit(0)}, double ${args[1]?.name ?? F64_INF}`,
+          true,
+          false,
+        );
       case "setFrom":
         // dst.set(src, offset?) — void; throws Node's RangeError on
         // overflow.
@@ -8989,6 +8999,16 @@ class LlEmitter {
         B.line(`${t} = fcmp one double ${idx.name}, ${f64Lit(-1)}`);
         return { name: t, type: e.type };
       }
+      case "fillElem":
+        // Per-element TypedArray fill (non-u8): slice-style index
+        // defaults, never throws; the receiver comes back +1.
+        return call(
+          "scr_bytes_fill_elem",
+          "ptr (ptr, double, double, double)",
+          `ptr ${r.name}, double ${args[0]!.name}, double ${args[1]?.name ?? f64Lit(0)}, double ${args[2]?.name ?? F64_INF}`,
+          true,
+          false,
+        );
       case "fill":
       case "fillNum": {
         const sym = method === "fill" ? "scr_bytes_fill" : "scr_bytes_fill_num";

@@ -4750,8 +4750,33 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
       }
       const receiver = L.lowerExpr(access.expression);
       const args = call.arguments.map((a) => L.lowerExprExpecting(a, F64));
-      // subarray COPIES here (no views exist) — SEMANTICS.md documents it.
-      return { kind: "bytesIntrinsic", method: "slice", receiver, args, type: receiverIr, loc };
+      // subarray is a VIEW (TypedArray.prototype.subarray aliases), and
+      // Buffer's slice() is subarray's deprecated Node alias — resolved by
+      // where the member is declared, the toString discipline below. Only
+      // the plain typed arrays' slice() copies (JS-exact).
+      const declaredOnBuffer =
+        name === "slice" &&
+        (() => {
+          const nameSym = L.checker.getSymbolAtLocation(access.name);
+          return nameSym !== undefined && L.checker.declarationsOf(nameSym).some(
+            (d) => ts.isInterfaceDeclaration(d.parent) && d.parent.name.text === "Buffer",
+          );
+        })();
+      const method = name === "subarray" || declaredOnBuffer ? "subarray" : "slice";
+      return { kind: "bytesIntrinsic", method, receiver, args, type: receiverIr, loc };
+    }
+    if (name === "fill" && receiverIr.elem !== "u8") {
+      // TypedArray.prototype.fill on the non-u8 kinds: per-element value
+      // coercion, slice-clamped relative indices, never throws. u8
+      // receivers keep the Buffer fill family (string patterns, throwing
+      // offset validation) — lowerBufferInstanceMethod's surface.
+      if (nArgs < 1 || nArgs > 3) {
+        L.noLowering(`.fill with ${nArgs} arguments on typed arrays`, call);
+      }
+      const receiver = L.lowerExpr(access.expression);
+      const v = L.lowerExprExpecting(call.arguments[0]!, F64);
+      const idx = call.arguments.slice(1).map((a) => L.lowerExprExpecting(a, F64));
+      return { kind: "bytesIntrinsic", method: "fillElem", receiver, args: [v, ...idx], type: receiverIr, loc };
     }
     if (name === "set") {
       if (nArgs < 1 || nArgs > 2) {
@@ -5227,6 +5252,24 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
     const loc = locOf(call);
     const args = call.arguments;
     if (member === "from") {
+      // Buffer.from(x.buffer[, byteOffset[, length]]): a u8 VIEW sharing
+      // x's storage (Node shares the ArrayBuffer; length is in BYTES).
+      // The first argument must be the SYNTACTIC `.buffer` of a typed
+      // array — the DataView peel — and the construction rides the same
+      // dataViewNew intrinsic (offset/length validation throws Node's
+      // DataView-shaped RangeErrors; valid indices behave exactly).
+      if (
+        args.length >= 1 && args.length <= 3 && !args.some(ts.isSpreadElement) &&
+        ts.isPropertyAccessExpression(args[0]!) && args[0].name.text === "buffer"
+      ) {
+        const srcNode = args[0].expression;
+        const srcIr = L.mapTypeOf(L.typeOf(srcNode));
+        if (srcIr?.kind === "bytes") {
+          const receiver = L.lowerExpr(srcNode);
+          const idxArgs = args.slice(1).map((a) => L.lowerExprExpecting(a, F64));
+          return { kind: "bytesIntrinsic", method: "dataViewNew", receiver, args: idxArgs, type: BYTES_U8, loc };
+        }
+      }
       if (args.length >= 1 && args.length <= 2 && !ts.isSpreadElement(args[0]!)) {
         const argNode = args[0]!;
         if (ts.isArrayLiteralExpression(argNode) && !argNode.elements.some(ts.isSpreadElement)) {
@@ -5258,7 +5301,8 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
         "Buffer.from with this argument shape",
         call,
         "supported: Buffer.from(string, encoding?) with a literal encoding, Buffer.from(u8Array) — a copy — " +
-          "or Buffer.from(number[]); ArrayBuffers do not exist here (narrow unions first)",
+          "Buffer.from(number[]), or Buffer.from(x.buffer, byteOffset?, length?) — a view sharing x's " +
+          "storage (no free-standing ArrayBuffer value exists; narrow unions first)",
       );
     }
     if (member === "alloc" || member === "allocUnsafe") {
