@@ -2503,6 +2503,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           // Object.is over two numbers — SameValue on doubles. No throw.
           case "num.sameValue":
             return finish(`scr_num_same_value(${arg(0)}, ${arg(1)})`);
+          // Intl.NumberFormat("en-US").format / toLocaleString("en-US")
+          // with default options (scr_lib.c). +1 string; no throw.
+          case "intl.numFormatEnUs":
+            return finish(`scr_intl_num_format_en_us(${arg(0)})`);
           // The URL surface (scr_url.c): construction and the two
           // fileURLToPath receiver forms throw catchable TypeErrors
           // (may-throw seed set); the getters are pure reads. Receivers

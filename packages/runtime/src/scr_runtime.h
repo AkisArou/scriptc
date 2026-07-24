@@ -3867,6 +3867,12 @@ void scr_jsval_cast_fail(ScrJsval *v, const ScrStr *target);
  */
 size_t scr_f64_to_str(double x, char *buf);
 
+/* The Ryū digit core (scr_number.c), shared with the Intl en-US number
+ * formatter: the shortest round-tripping digits of a POSITIVE finite
+ * double — value = 0.digits × 10^n, no trailing zeros, NUL-terminated.
+ * Returns k, the digit count (≤ 17). */
+int scr_f64_digits(double x, char digits[18], int *n_out);
+
 /* ToString for template literals / string coercion. Returns +1. */
 ScrStr *scr_f64_to_scrstr(double x);
 ScrStr *scr_bool_to_scrstr(bool b); /* interned "true"/"false" */
@@ -3901,6 +3907,14 @@ ScrStr *scr_num_to_fixed0(double x);
 /* Object.is over two numbers — the spec's SameValue on doubles: NaN
  * equals NaN, +0 differs from -0, everything else is ==. Never throws. */
 bool scr_num_same_value(double a, double b);
+
+/* Intl.NumberFormat("en-US").format(x) / x.toLocaleString("en-US") with
+ * default options: decimal notation, 0–3 fraction digits rounded half-up
+ * on the shortest round-tripping decimal (ICU's rounding input — NOT
+ * toFixed's exact-value rounding), "," grouping every three integer
+ * digits, "∞"/"NaN" texts, "-0" for negative inputs rounding to zero.
+ * en-US is the one embedded locale. Result +1; never throws. */
+ScrStr *scr_intl_num_format_en_us(double x);
 
 /* ── Date, the composed slice (scr_lib.c) ─────────────────────────────
  * Date values have no representation; the runtime surface is exactly

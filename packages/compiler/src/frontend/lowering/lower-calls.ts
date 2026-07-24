@@ -3589,6 +3589,9 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         lowerSymbolStaticCall(L, expr, expr.expression) ??
         lowerSymbolMethodCall(L, expr, expr.expression) ??
         lowerRegExpStaticCall(L, expr, expr.expression) ??
+        // The composed en-US Intl.NumberFormat form — before the member
+        // fences (the receiver's Intl.NumberFormat type has no mapping).
+        lowerIntlNumberFormatCall(L, expr, expr.expression) ??
         lowerGroupByStaticCall(L, expr, expr.expression) ??
         // Iterator-helper chains rooted at arr.values() — before the
         // array method paths (the terminal names collide with array
@@ -4285,6 +4288,43 @@ const inliningPredicates = new Set<ts.Symbol>();
       if (operand.type.kind !== "f64") return null;
       const fn = name === "toExponential" ? "num.toExponential" : "num.toFixed0";
       return { kind: "libCall", fn, args: [operand], type: STRING, loc };
+    }
+    // Number.prototype.toLocaleString("en-US") — the spec makes it
+    // NumberFormat(locale).format(this), so the en-US embedded formatter
+    // answers exactly. The unlowered forms fence by NAME: no locale (the
+    // host environment's default, which a compiled binary cannot carry),
+    // other locales (ICU data the binary does not embed), options bags.
+    if (name === "toLocaleString" && recvKind === "f64") {
+      if (call.arguments.length === 0) {
+        L.noLowering(
+          "Number.prototype.toLocaleString without a locale",
+          call,
+          "the default locale is the host environment's, which a compiled binary cannot carry — " +
+            'pass it explicitly: x.toLocaleString("en-US")',
+        );
+      }
+      if (call.arguments.length > 1) {
+        L.noLowering(
+          "Number.prototype.toLocaleString with an options bag",
+          call,
+          "the embedded data covers DEFAULT options only (decimal notation, up to 3 fraction " +
+            'digits, grouping) — x.toLocaleString("en-US")',
+        );
+      }
+      const locNode = call.arguments[0]!;
+      if (ts.isSpreadElement(locNode) || !ts.isStringLiteralLike(locNode) || locNode.text !== "en-US") {
+        L.noLowering(
+          !ts.isSpreadElement(locNode) && ts.isStringLiteralLike(locNode)
+            ? `Number.prototype.toLocaleString at locale "${locNode.text}"`
+            : "Number.prototype.toLocaleString with a non-literal locale",
+          locNode,
+          '"en-US" (Node\'s default-build locale) is the one locale whose data the runtime embeds — ' +
+            "everything else is ICU data the binary does not carry",
+        );
+      }
+      const operand = L.lowerExpr(recv);
+      if (operand.type.kind !== "f64") return null;
+      return { kind: "libCall", fn: "intl.numFormatEnUs", args: [operand], type: STRING, loc };
     }
     if (name === "charAt" && recvKind === "string" && call.arguments.length === 1 &&
         !ts.isSpreadElement(call.arguments[0]!)) {
@@ -6145,6 +6185,81 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     const arg = L.lowerExprExpecting(call.arguments[0]!, STRING);
     if (arg.type.kind !== "string") L.badType(call.arguments[0]!, L.typeOf(call.arguments[0]!));
     return { kind: "libCall", fn: "regexp.escape", args: [arg], type: STRING, loc: locOf(call) };
+  }
+
+  /** The composed en-US Intl.NumberFormat form: `new Intl.NumberFormat(
+   * "en-US").format(x)` (and the callable spelling without `new` — the
+   * spec makes them the same formatter). Only the COMPOSED form lowers —
+   * formatter values have no representation — and only the one locale
+   * whose data the runtime embeds, with default options: decimal
+   * notation, 0–3 fraction digits rounded half-up on the shortest
+   * round-tripping decimal (ICU's rounding input — format(1.0005) is
+   * "1.001" though toFixed(3) answers "1.000"), "," grouping. The
+   * unlowered forms fence by NAME (no locale — the host environment's
+   * default, which a compiled binary cannot carry; other locales — ICU
+   * data the binary does not embed; options bags; non-number arguments).
+   * Null when the callee isn't a NumberFormat-construction .format. */
+  function lowerIntlNumberFormatCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    if (call.questionDotToken || access.questionDotToken) return null;
+    if (access.name.text !== "format") return null;
+    let recv: ts.Expression = access.expression;
+    while (ts.isParenthesizedExpression(recv)) recv = recv.expression;
+    let ctorArgs: readonly ts.Expression[];
+    if (ts.isNewExpression(recv) || (ts.isCallExpression(recv) && !recv.questionDotToken)) {
+      const ctor = recv.expression;
+      if (
+        !ts.isPropertyAccessExpression(ctor) || ctor.questionDotToken ||
+        ctor.name.text !== "NumberFormat" || !L.isStdlibGlobal(ctor.expression, "Intl")
+      ) {
+        return null;
+      }
+      ctorArgs = recv.arguments ?? [];
+    } else {
+      return null;
+    }
+    const loc = locOf(call);
+    if (ctorArgs.length === 0) {
+      L.noLowering(
+        "Intl.NumberFormat without a locale",
+        recv,
+        "the default locale is the host environment's, which a compiled binary cannot carry — " +
+          'pass it explicitly: new Intl.NumberFormat("en-US").format(x)',
+      );
+    }
+    if (ctorArgs.length > 1) {
+      L.noLowering(
+        "Intl.NumberFormat with an options bag",
+        ctorArgs[1]!,
+        "the embedded data covers DEFAULT options only (decimal notation, up to 3 fraction digits, " +
+          'grouping) — new Intl.NumberFormat("en-US").format(x)',
+      );
+    }
+    const locArg = ctorArgs[0]!;
+    if (ts.isSpreadElement(locArg) || !ts.isStringLiteralLike(locArg) || locArg.text !== "en-US") {
+      L.noLowering(
+        !ts.isSpreadElement(locArg) && ts.isStringLiteralLike(locArg)
+          ? `Intl.NumberFormat at locale "${locArg.text}"`
+          : "Intl.NumberFormat with a non-literal locale",
+        locArg,
+        '"en-US" (Node\'s default-build locale) is the one locale whose data the runtime embeds — ' +
+          "everything else is ICU data the binary does not carry",
+      );
+    }
+    if (call.arguments.length !== 1 || ts.isSpreadElement(call.arguments[0]!)) {
+      L.noLowering(`Intl.NumberFormat("en-US").format with ${call.arguments.length} arguments`, call);
+    }
+    const argNode = call.arguments[0]!;
+    if (L.mapTypeOf(L.typeOf(argNode))?.kind !== "f64") {
+      L.noLowering(
+        `Intl.NumberFormat("en-US").format over a '${L.checker.typeToString(L.typeOf(argNode))}'`,
+        argNode,
+        "a number argument is the lowered form (bigint and numeric-string inputs have no representation)",
+      );
+    }
+    const arg = L.lowerExprExpecting(argNode, F64);
+    if (arg.type.kind !== "f64") L.badType(argNode, L.typeOf(argNode));
+    return { kind: "libCall", fn: "intl.numFormatEnUs", args: [arg], type: STRING, loc };
   }
 
   /** Object.is over statically disjoint kinds: the constant false, with

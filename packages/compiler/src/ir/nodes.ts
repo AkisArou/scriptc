@@ -1741,6 +1741,15 @@ export type IrLibFn =
    * result; never throws. (Union-armed operands take unionEq's sameValue
    * flag instead — this is the both-f64 fast path.) */
   | "num.sameValue"
+  /** `new Intl.NumberFormat("en-US").format(x)` and
+   * `x.toLocaleString("en-US")` with DEFAULT options — the one locale
+   * whose data the runtime embeds (Node's default-build locale): decimal
+   * notation, 0–3 fraction digits rounded half-up on the SHORTEST
+   * round-tripping decimal (ICU's rounding input, probed vs Node —
+   * format(1.0005) is "1.001" though toFixed(3) answers "1.000"), ","
+   * grouping every three integer digits, "∞"/"NaN" texts, and "-0" for
+   * negative inputs rounding to zero. Result +1; never throws. */
+  | "intl.numFormatEnUs"
   /** `delete process.env[NAME]` — unsetenv(3): the mutation is visible to
    * every later read (process.envGet asks getenv fresh) and inherited by
    * spawned children, exactly Node. Statement position only (JS's boolean

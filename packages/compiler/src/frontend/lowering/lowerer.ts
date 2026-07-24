@@ -2201,12 +2201,25 @@ export class Lowerer {
     // story, naming the type — and for the families with a WHY, the same
     // pointed reason the identifier/constructor chokepoints teach.
     if (stdlibNominal) {
+      const intlHint =
+        "Intl formatter values have no representation — the COMPOSED en-US forms lower: " +
+        'new Intl.NumberFormat("en-US").format(x) and x.toLocaleString("en-US") with default options; ' +
+        "the rest is ICU locale data the binary does not carry";
       const typeHints: Record<string, string | undefined> = {
         ArrayBuffer:
           "no free-standing ArrayBuffer value exists — typed arrays own their storage " +
           "(new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)",
         SharedArrayBuffer:
           "no shared-memory threads exist in a compiled program — Uint8Array is the byte storage",
+        NumberFormat: intlHint,
+        DateTimeFormat: intlHint,
+        DurationFormat: intlHint,
+        PluralRules: intlHint,
+        Collator: intlHint,
+        ListFormat: intlHint,
+        RelativeTimeFormat: intlHint,
+        Segmenter: intlHint,
+        DisplayNames: intlHint,
       };
       this.pushDiag(
         noLoweringDiag(this.checker.typeToString(type), locOf(node), typeHints[stdlibOwnSym?.name ?? ""]),

@@ -24,27 +24,19 @@
  * unchanged. Provides d2d(), d2d_small_int(), decimalLength17(), div10(). */
 #include "../vendor/ryu/d2s.c"
 
-size_t scr_f64_to_str(double x, char *buf) {
-  if (isnan(x)) return (size_t)(stpcpy(buf, "NaN") - buf);
-  if (x == 0) return (size_t)(stpcpy(buf, "0") - buf); /* covers -0 */
-  if (isinf(x)) {
-    return (size_t)(stpcpy(buf, x < 0 ? "-Infinity" : "Infinity") - buf);
-  }
-
-  char *out = buf;
-  if (x < 0) {
-    *out++ = '-';
-    x = -x;
-  }
-
-  /* Shortest round-tripping digits via Ryū. Mirrors d2s_buffered_n's
-   * dispatch: the exact small-integer fast path first (trailing decimal
-   * zeros folded into the exponent), the full algorithm otherwise. */
+/* The Ryū digit core, shared by the ECMA placement below and the Intl
+ * en-US number formatter (scr_lib.c): the shortest round-tripping digit
+ * string for a positive finite double — value = 0.digits × 10^n with no
+ * trailing zeros. Returns k (the digit count, ≤ 17); digits is
+ * NUL-terminated. Mirrors d2s_buffered_n's dispatch: the exact
+ * small-integer fast path first (trailing decimal zeros folded into the
+ * exponent), the full algorithm otherwise. */
+int scr_f64_digits(double x, char digits[18], int *n_out) {
   uint64_t bits;
   memcpy(&bits, &x, sizeof bits);
   const uint64_t ieeeMantissa = bits & ((1ull << DOUBLE_MANTISSA_BITS) - 1);
   const uint32_t ieeeExponent =
-      (uint32_t)(bits >> DOUBLE_MANTISSA_BITS); /* sign already stripped */
+      (uint32_t)(bits >> DOUBLE_MANTISSA_BITS); /* sign must be stripped */
   floating_decimal_64 v;
   if (d2d_small_int(ieeeMantissa, ieeeExponent, &v)) {
     for (;;) {
@@ -60,9 +52,8 @@ size_t scr_f64_to_str(double x, char *buf) {
 
   /* Ryū's (mantissa, exponent) → ECMA's (digits, k, n): the k mantissa
    * digits have no trailing zeros, and value = 0.digits * 10^n. */
-  char digits[18];
   int k = (int)decimalLength17(v.mantissa);
-  int n = v.exponent + k;
+  *n_out = v.exponent + k;
   digits[k] = '\0';
   uint64_t m = v.mantissa;
   for (int i = k - 1; i >= 0; i--) {
@@ -70,6 +61,25 @@ size_t scr_f64_to_str(double x, char *buf) {
     digits[i] = (char)('0' + (uint32_t)m - 10 * (uint32_t)q);
     m = q;
   }
+  return k;
+}
+
+size_t scr_f64_to_str(double x, char *buf) {
+  if (isnan(x)) return (size_t)(stpcpy(buf, "NaN") - buf);
+  if (x == 0) return (size_t)(stpcpy(buf, "0") - buf); /* covers -0 */
+  if (isinf(x)) {
+    return (size_t)(stpcpy(buf, x < 0 ? "-Infinity" : "Infinity") - buf);
+  }
+
+  char *out = buf;
+  if (x < 0) {
+    *out++ = '-';
+    x = -x;
+  }
+
+  char digits[18];
+  int n;
+  int k = scr_f64_digits(x, digits, &n);
 
   if (k <= n && n <= 21) {
     /* Integer: digits followed by n-k zeros. */
