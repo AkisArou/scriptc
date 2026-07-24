@@ -2454,6 +2454,14 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
    * lowerVarDecl (module-global assignment for pre-registered file-scope
    * names, declareLocal otherwise), or a nested pattern through its own
    * hidden temp. */
+  /** An island-world ('any'-flavored) checker spelling: bare jsval or an
+   * array of jsvals (`(string | object)[]` absorbed by its jsval arm) —
+   * the shapes the runtime-world local rule keeps DYN when the value
+   * lowered checked-dynamic. */
+  function jsvalFlavoredType(t: IrType): boolean {
+    return t.kind === "jsval" || (t.kind === "array" && t.elem.kind === "jsval");
+  }
+
   export function bindPatternTarget(L: Lowerer, name: ts.BindingName,
     value: IrExpr,
     isLet: boolean,
@@ -2477,7 +2485,22 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         out.push({ kind: "assign", localId: hoisted.id, value: L.coerceInto(name, value, hoisted.type), loc });
         return;
       }
-      const type = L.irTypeOf(name);
+      // The runtime-world local rule, dyn side (383(d)'s dispatch stance):
+      // a pattern binding whose VALUE lowered checked-dynamic stays dyn
+      // where the checker spells an island-world type (`function f({
+      // plugins = [] } = {})` over a JSDoc '(string | object)[]=' member —
+      // the read is a DOM keyed read whose members may be wrapped island
+      // values) or a type with no mapping at all (the varDecl rule's
+      // unmappable-declared-type stance, `string | object` bindings
+      // included). Marshaling here would fence or deep-copy; the value's
+      // world is the honest dispatch.
+      const dynStays =
+        value.type.kind === "dyn" &&
+        (() => {
+          const mapped = L.mapTypeOf(L.typeOf(name));
+          return mapped === null || (L.dynamic && jsvalFlavoredType(mapped));
+        })();
+      const type = dynStays ? DYN : L.irTypeOf(name);
       if (type.kind === "void") L.badType(name, L.typeOf(name));
       const coerced = L.coerceInto(name, value, type);
       const local = L.declareLocal(name, name.text, type, isLet);
@@ -2786,6 +2809,16 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
           // uncheckedOverloadHandleCall.
           (init.type.kind === "jsval" && uncheckedOverloadHandleCall(L, decl.initializer) ? JSVAL : null))
         : null) ??
+      // The runtime-world local rule, dyn side (383(d)'s dispatch stance —
+      // the island-HANDLE local rule's mirror): a binding whose
+      // INITIALIZER lowered checked-dynamic stays dyn even where the
+      // checker spells 'any' (`const parsers = options.parsers ?? {}` over
+      // an 'object'-typed bag — the read is a DOM keyed read). Marshaling
+      // into the engine here would deep-copy data and sever aliasing; the
+      // value's world is the honest dispatch, and every use site already
+      // handles dyn (validated exits, routed engine ops for wrapped
+      // island members).
+      (L.dynamic && init.type.kind === "dyn" && jsvalFlavoredType(L.mapTypeOf(L.typeOf(decl.name)) ?? DYN) ? DYN : null) ??
       (bindingTainted ? null : L.mapTypeOf(L.typeOf(decl.name))) ??
       (init.type.kind === "dyn" ? DYN : null);
     // A JS `let x = {}`: TS's empty-object-literal type admits ANY later
@@ -3757,8 +3790,25 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
             // o.x = v on an island receiver: engine property write; the
             // value marshals in (a static RHS crosses by value/copy).
             const obj = L.lowerExpr(expr.left.expression);
-            const value = L.jsvalIn(L.lowerExpr(expr.right), expr.right);
             const loc = locOf(expr);
+            // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
+            // receiver whose value LOWERED checked-dynamic (`bag.nested.x
+            // = v` behind an 'object'-typed bag) takes the DOM keyed
+            // write — the routed JSVAL arm lands it on the real engine
+            // object.
+            if (obj.type.kind === "dyn") {
+              const key: IrExpr = { kind: "strLit", value: expr.left.name.text, type: STRING, loc: locOf(expr.left.name) };
+              const value = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
+              if (value.type.kind !== "dyn") {
+                L.unsupported("SC1100", expr.right, `assigning '${L.fmt(value.type)}' values through 'unknown' receivers`);
+              }
+              return {
+                kind: "exprStmt",
+                expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc },
+                loc,
+              };
+            }
+            const value = L.jsvalIn(L.lowerExpr(expr.right), expr.right);
             return {
               kind: "exprStmt",
               expr: { kind: "jsOp", op: "setProp", name: expr.left.name.text, args: [obj, value], type: VOID, loc },

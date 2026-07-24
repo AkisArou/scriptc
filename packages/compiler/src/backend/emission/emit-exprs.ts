@@ -488,6 +488,27 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           if (isRefCounted(e.type)) E.currentFrame().push({ name, type: e.type });
           return { name, type: e.type };
         }
+        if (e.left.type.kind === "dyn") {
+          // `a ?? b` on a checked-dynamic left: the runtime kind decides
+          // (UNDEF/NULL take the default; a wrapped island value asks the
+          // engine); the right runs lazily in its branch (already dyn).
+          const l = E.emitExpr(e.left);
+          E.moveTemp(l);
+          const name = `sc_t${E.tempCounter++}`;
+          E.line(`${cDecl(e.type, name)};`);
+          E.line(`if (scr_dyn_is_nullish(${l.name})) {`);
+          E.indent++;
+          E.releaseValue(l.name, e.left.type);
+          E.emitBranchInto(name, e.right);
+          E.indent--;
+          E.line(`} else {`);
+          E.indent++;
+          E.line(`${name} = ${l.name};`);
+          E.indent--;
+          E.line(`}`);
+          if (isRefCounted(e.type)) E.currentFrame().push({ name, type: e.type });
+          return { name, type: e.type };
+        }
         if (e.left.type.kind !== "union") throw new Error("emitter bug: nullish left is not a union");
         const def = E.unionsById.get(e.left.type.unionId);
         if (!def) throw new Error(`emitter bug: nullish of unknown union ${e.left.type.unionId}`);

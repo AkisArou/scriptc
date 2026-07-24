@@ -598,16 +598,13 @@ ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, con
  * the exception pending. */
 ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const char *what) {
   if (d->kind == SCR_DYN_JSVAL) {
-    /* An engine value may well BE callable — "is not a function" would
-     * be a wrong claim. Loud fence, callee spelled, until lane
-     * dyn-routing-ops arms the call through scr_jsval_call. */
-    ScrJsonBuf b;
-    scr_jb_init(&b);
-    scr_jb_puts(&b, "calling '");
-    scr_jb_puts(&b, what);
-    scr_jb_puts(&b, "' on an island value held in 'unknown' is not supported yet");
-    scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
-    return NULL;
+    /* An ENGINE callee: the call routes through scr_jsval_call with the
+     * uniform argument conversion (wrapped cells by reference, DOM data
+     * deep-copied, FUNC boxes through the host shim); a non-callable
+     * engine value throws the ENGINE's own TypeError, bridged catchably.
+     * `what` is unused — the engine's message names the failure. */
+    (void)what;
+    return scr_dyn_jsval_ops()->call(d->v.jsval.cell, args, argc);
   }
   if (d->kind != SCR_DYN_FUNC) {
     ScrJsonBuf b;
@@ -803,15 +800,21 @@ bool scr_dyn_isl_fence(const ScrDyn *d, const char *what) {
   return false;
 }
 
-ScrDyn *scr_dyn_isl_key_fence(const ScrDyn *d, const ScrStr *k) {
-  (void)d;
-  ScrJsonBuf b;
-  scr_jb_init(&b);
-  scr_jb_puts(&b, "reading '");
-  for (size_t i = 0; i < k->len; i++) scr_jb_putc(&b, k->data[i]);
-  scr_jb_puts(&b, "' on an island value held in 'unknown' is not supported yet");
-  scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
-  return NULL;
+ScrDyn *scr_dyn_isl_key_get(const ScrDyn *d, const ScrStr *k) {
+  /* The emitted keyed read's JSVAL arm: o[k] runs in the ENGINE (getters
+   * included, their throws bridged) and the result wraps back scalar-
+   * normalized — the retired `.length -> fence` row (and before that,
+   * the fence box's silent `.length -> 0`). */
+  return scr_dyn_jsval_ops()->key_get(d->v.jsval.cell, k);
+}
+
+bool scr_dyn_is_nullish(const ScrDyn *d) {
+  if (d->kind == SCR_DYN_UNDEF || d->kind == SCR_DYN_NULL) return true;
+  /* JSVAL defensively routes to the engine's own test — the wrap
+   * constructor scalar-normalizes engine null/undefined away, so this
+   * arm answers false unless a producer bypassed it. */
+  if (d->kind == SCR_DYN_JSVAL) return scr_dyn_jsval_ops()->is_nullish(d->v.jsval.cell);
+  return false;
 }
 
 void scr_dyn_isl_tostr_buf(ScrJsonBuf *b, const ScrDyn *d) {
@@ -1052,12 +1055,15 @@ static bool scr_dyn_json_write(ScrJsonBuf *b, const ScrDyn *d) {
     scr_jb_puts(b, "{}");
     return true;
   case SCR_DYN_JSVAL: {
-    /* Node walks the engine object's own enumerable props (the engine
-     * even has to_json) — an un-armed route today; fence loudly rather
-     * than fabricate a shape (the honesty ladder; lane: dom-jsval-long-tail). */
-    const char *msg = "JSON.stringify of an island value held in 'unknown' is not supported yet";
-    scr_throw_error_msg(SCR_ERR_ERROR, msg, strlen(msg));
-    return true; /* pending exception; caller checks */
+    /* The ENGINE's own JSON.stringify text splices in (toJSON protocols,
+     * cycle TypeErrors — the engine's, bridged catchably). An engine
+     * FUNCTION is absent under stringify, like the DOM's FUNC kind. */
+    if (scr_dyn_isl_typeof_is(d, "function")) return false;
+    ScrStr *j = scr_dyn_jsval_ops()->to_json(d->v.jsval.cell);
+    if (!j) return true; /* pending exception; caller checks */
+    scr_jb_write(b, j->data, j->len);
+    scr_str_release(j);
+    return true;
   }
   case SCR_DYN_HANDLE:
   default: {
@@ -1377,15 +1383,10 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
     return;
   }
   if (recv->kind == SCR_DYN_JSVAL) {
-    /* Node writes through to the engine object (aliasing preserved) —
-     * lane dyn-routing-ops arms it; until then the loud ladder, never a
-     * silent drop and never the wrong "Cannot create property" claim. */
-    ScrJsonBuf b;
-    scr_jb_init(&b);
-    scr_jb_puts(&b, "setting '");
-    for (size_t i = 0; i < key->len; i++) scr_jb_putc(&b, key->data[i]);
-    scr_jb_puts(&b, "' on an island value held in 'unknown' is not supported yet");
-    scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
+    /* The write lands on the REAL engine object (aliasing preserved —
+     * island-side readers see it); the value crosses through the uniform
+     * from_dyn conversion, and engine refusals bridge catchably. */
+    scr_dyn_jsval_ops()->key_set(recv->v.jsval.cell, key, value);
     return;
   }
   ScrJsonBuf b;
@@ -1463,10 +1464,18 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
     return;
   }
   case SCR_DYN_JSVAL: {
-    /* Un-armed walker: fence loudly (lane dom-jsval-long-tail routes it
-     * to the engine's own stringify). */
-    scr_dyn_isl_fence(d, "JSON.stringify");
-    scr_jb_puts(b, "null"); /* never surfaces: the pending throw wins */
+    /* The ENGINE's own JSON.stringify text splices in (toJSON protocols,
+     * cycle TypeErrors — all the engine's, bridged catchably). An engine
+     * FUNCTION serializes like the DOM's FUNC kind (dropped from objects
+     * by the member loop below; null defensively elsewhere). */
+    if (scr_dyn_isl_typeof_is(d, "function")) {
+      scr_jb_puts(b, "null");
+      return;
+    }
+    ScrStr *j = scr_dyn_jsval_ops()->to_json(d->v.jsval.cell);
+    if (!j) return; /* bridged — the pending throw wins */
+    for (size_t i = 0; i < j->len; i++) scr_jb_putc(b, j->data[i]);
+    scr_str_release(j);
     return;
   }
   case SCR_DYN_OBJ: {
@@ -1475,6 +1484,7 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
     for (size_t i = 0; i < d->v.obj.len; i++) {
       const ScrDynEntry *e = &d->v.obj.entries[i];
       if (e->value->kind == SCR_DYN_UNDEF || e->value->kind == SCR_DYN_FUNC) continue; /* dropped, like Node */
+      if (e->value->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(e->value, "function")) continue; /* engine functions drop too */
       if (!first) scr_jb_putc(b, ',');
       first = false;
       /* Keys escape exactly like string values (put_json_str quotes). */
@@ -2329,13 +2339,10 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
     return NULL;
   }
   if (v->kind == SCR_DYN_JSVAL) {
-    /* Node walks the engine object's own enumerable keys — an empty
-     * answer would be a silent wrong one. Loud fence (lane
-     * dyn-routing-ops routes these to the engine). */
-    scr_dyn_isl_fence(v, mode == SCR_OBJWALK_KEYS ? "Object.keys"
-                        : mode == SCR_OBJWALK_VALUES ? "Object.values"
-                                                     : "Object.entries");
-    return NULL;
+    /* The ENGINE walks its own object (own-key order, getters running,
+     * Object.entries' pairs) and the results come back as a NATIVE DOM
+     * array — keys are DOM strings, values wrap per element. */
+    return scr_dyn_jsval_ops()->obj_walk(v->v.jsval.cell, (int)mode);
   }
   ScrDyn *out = scr_dyn_new_arr();
   if (v->kind == SCR_DYN_OBJ) {
@@ -2448,11 +2455,31 @@ ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
     scr_throw_error_msg(SCR_ERR_TYPE, m, strlen(m));
     return NULL;
   }
-  /* Engine-held operands: Node copies real own properties either way —
-   * a silent no-op copy would be a wrong answer. Loud fence. */
-  scr_dyn_isl_fence(target, "Object.assign");
-  if (!scr_exc_pending()) scr_dyn_isl_fence(src, "Object.assign");
-  if (scr_exc_pending()) return NULL;
+  if (target->kind == SCR_DYN_JSVAL) {
+    /* An ENGINE target: the copy runs in the engine (Object.assign's own
+     * semantics — setters fire, own-enumerable order); the source enters
+     * per the uniform conversion (a wrapped source spreads by reference,
+     * DOM data as the usual member deep copy). */
+    if (!scr_dyn_jsval_ops()->assign(target->v.jsval.cell, src)) return NULL;
+    return scr_dyn_retain(target);
+  }
+  if (src->kind == SCR_DYN_JSVAL) {
+    /* A wrapped SOURCE onto a DOM target: the engine lists its own
+     * [key, value] pairs (getters running) and each lands as a DOM
+     * member — values wrap per element, scalars normalized. */
+    if (target->kind == SCR_DYN_OBJ) {
+      ScrDyn *entries = scr_dyn_jsval_ops()->obj_walk(src->v.jsval.cell, 2);
+      if (!entries) return NULL;
+      for (size_t i = 0; i < entries->v.arr.len; i++) {
+        const ScrDyn *pair = entries->v.arr.items[i];
+        const ScrDyn *k = pair->v.arr.items[0];
+        scr_dyn_obj_set(target, k->v.str->data, k->v.str->len,
+                        scr_dyn_retain(pair->v.arr.items[1]));
+      }
+      scr_dyn_release(entries);
+    }
+    return scr_dyn_retain(target);
+  }
   if (target->kind == SCR_DYN_OBJ && src->kind == SCR_DYN_OBJ) {
     for (size_t i = 0; i < src->v.obj.len; i++) {
       scr_dyn_obj_set(target, src->v.obj.entries[i].key,
@@ -2469,9 +2496,12 @@ bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key) {
     scr_throw_error_msg(SCR_ERR_TYPE, m, strlen(m));
     return false;
   }
-  /* Engine-held: Node asks the real object — `false` would be a silent
-   * wrong answer. Loud fence (throws, answers false with it pending). */
-  if (v->kind == SCR_DYN_JSVAL) return scr_dyn_isl_fence(v, "Object.hasOwn");
+  /* Engine-held: the ENGINE's own Object.hasOwn answers (a bridged
+   * surprise leaves the exception pending and answers false — callers
+   * check pending like every fallible dyn op). */
+  if (v->kind == SCR_DYN_JSVAL) {
+    return scr_dyn_jsval_ops()->has_own(v->v.jsval.cell, key) == 1;
+  }
   if (v->kind == SCR_DYN_OBJ) {
     return scr_dyn_obj_get(v, key->data, key->len) != NULL;
   }

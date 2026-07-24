@@ -6657,6 +6657,16 @@ export class Lowerer {
           const local = this.declareLocal(decl.name, decl.name.text, JSVAL, isLet);
           return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
         }
+        // The CHECKED-DYNAMIC twin of the handle rescue (the runtime-world
+        // local rule): an unmappable declared type over a dyn initializer
+        // (`const first = plugins[0]` — the checker spells 'string |
+        // object' while the read is a DOM keyed read) keeps the binding
+        // dyn; typed use sites ride validated extractions and the routed
+        // engine ops, exactly the JSON.parse-binding story.
+        if (mapped === null && init.type.kind === "dyn") {
+          const local = this.declareLocal(decl.name, decl.name.text, DYN, isLet);
+          return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
+        }
         if (mapped === null) this.badType(decl.name, this.typeOf(decl.name));
         // A mappable declared type with a non-island initializer: the
         // standard path owns it (the initializer lowered clean; re-running

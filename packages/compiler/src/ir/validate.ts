@@ -1812,6 +1812,13 @@ function validateFunction(
           if (e.type.kind !== "jsval") err("jsval nullish must answer jsval", e.loc);
           break;
         }
+        // The CHECKED-DYNAMIC form: the runtime kind decides (the
+        // emitters' scr_dyn_is_nullish arm) — left, right, and result
+        // all live in the DOM.
+        if (e.left.type.kind === "dyn") {
+          if (e.type.kind !== "dyn") err("dyn nullish must answer dyn", e.loc);
+          break;
+        }
         if (e.left.type.kind !== "union") {
           err(`nullish left must be a union, got ${e.left.type.kind}`, e.loc);
           break;

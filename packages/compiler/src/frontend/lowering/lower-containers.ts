@@ -6779,6 +6779,26 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
     const { fnArg, arity } = hofCallbackArg(L, argNode, [DYN], DYN);
     const ret = fnArg.type.ret;
     if (ret.kind !== "array") {
+      // A DYNAMIC-returning callback (`plugins.flatMap((plugin) =>
+      // plugin.languages ?? [])` — the getSupportInfo shape, where the
+      // callback's members ride the DOM): the call dispatches on the
+      // RECEIVER's runtime kind (dynInvoke) with the callback boxed —
+      // a wrapped ISLAND receiver runs the ENGINE's own JS-exact
+      // Array.prototype.flatMap (the routed-ops lane), a native DOM
+      // array runs the runtime's flatMap, and non-arrays throw Node's
+      // TypeError. The result stays dyn, checked per use.
+      if (ret.kind === "dyn" || ret.kind === "jsval") {
+        const boxed: IrExpr = { kind: "dynFrom", value: fnArg, type: DYN, loc };
+        return {
+          kind: "dynInvoke",
+          recv,
+          method: "flatMap",
+          calleeName: access.getText(),
+          args: [boxed],
+          type: DYN,
+          loc,
+        };
+      }
       L.unsupported(
         "SC1090",
         call,

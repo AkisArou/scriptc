@@ -2934,12 +2934,39 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       return islandPrimitiveExit(L, expr, result);
     }
     if (L.isIslandExpr(expr.expression)) {
+      // `o.m(...)` where o LOWERS checked-dynamic and the checker types
+      // `o.m` 'any' (a member read behind an 'object'/'unknown'-typed
+      // bag): METHOD-CALL semantics — receiver-kind dispatch (dynInvoke),
+      // so `this` binds and a WRAPPED island receiver runs the ENGINE's
+      // own method (the routed-ops lane). A stored-member dynCall would
+      // call engine prototype methods receiverless — the this-less
+      // `list.slice()` ToObject TypeError. Spread arguments keep the
+      // stored-member path below (the runtime-arity lane owns them).
+      if (
+        ts.isPropertyAccessExpression(expr.expression) &&
+        !expr.expression.questionDotToken &&
+        !expr.questionDotToken &&
+        !expr.arguments.some((a) => ts.isSpreadElement(a))
+      ) {
+        const recvProbe = probeLower(L, expr.expression.expression);
+        if (recvProbe?.type.kind === "dyn") {
+          const args = expr.arguments.map((a) => L.lowerExprExpecting(a, DYN));
+          return {
+            kind: "dynInvoke",
+            recv: recvProbe,
+            method: expr.expression.name.text,
+            calleeName: expr.expression.getText(),
+            args,
+            type: DYN,
+            loc,
+          };
+        }
+      }
       const callee = L.lowerExpr(expr.expression);
       // A checker-`any` callee that LOWERED checked-dynamic (a dyn member
       // chain's stored function): the DOM's own call — dynCall reads and
       // calls the stored member with Node's is-not-a-function TypeError
-      // on refusal. Island-typed arguments meet the boundary pass's
-      // dynCall rule (no jsval→DOM bridge exists — the named fence).
+      // on refusal.
       if (callee.type.kind === "dyn") {
         const args = expr.arguments.map((a) => L.lowerExprExpecting(a, DYN));
         const calleeName = ts.isPropertyAccessExpression(expr.expression)

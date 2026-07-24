@@ -1013,11 +1013,11 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     d.push(`    return scr_dyn_retain(m ? m : scr_dyn_undefined());`);
     d.push(`  }`);
     d.push(`  if (d->kind == SCR_DYN_JSVAL) {`);
-    d.push(`    /* Island-held: Node reads the real engine property — the`);
-    d.push(`     * undefined tail below would be a silent wrong answer (the`);
-    d.push(`     * retired fence-box bug's .length -> 0). Loud fence until`);
-    d.push(`     * lane dyn-routing-ops routes it through scr_jsval_get_prop. */`);
-    d.push(`    return scr_dyn_isl_key_fence(d, k);`);
+    d.push(`    /* Island-held: o[k] reads the REAL engine property (getters`);
+    d.push(`     * included, throws bridged catchably) and the result wraps`);
+    d.push(`     * back scalar-normalized — the routed keyed read that retired`);
+    d.push(`     * the fence (and before it, the fence box's .length -> 0). */`);
+    d.push(`    return scr_dyn_isl_key_get(d, k);`);
     d.push(`  }`);
     d.push(`  if (d->kind == SCR_DYN_HANDLE) {`);
     d.push(`    /* Native handles: the tag's modeled properties (req.url,`);
@@ -1603,6 +1603,9 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
   function toDynExprC(E: CEmitter, t: IrType, expr: string): string {
     if (t.kind === "dyn") return `scr_dyn_retain(${expr})`;
     if (t.kind === "func") return `${E.dynFuncBoxHelper(t)}(${expr}, NULL)`;
+    // An island value wraps by reference (scalar-normalizing) — the
+    // jsval-returning callback shape of the routed-dispatch lane.
+    if (t.kind === "jsval") return `scr_dyn_from_jsval(${expr})`;
     return `${E.toDynHelper(t)}(${expr})`;
   }
 
@@ -1627,6 +1630,16 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       d.push(`    const ScrDyn *ad = ${i} < argc ? args[${i}] : scr_dyn_undefined();`);
       if (p.kind === "dyn") {
         d.push(`    a${i} = scr_dyn_retain((ScrDyn *)ad);`);
+      } else if (p.kind === "jsval") {
+        // A checker-'any' param: the DOM argument enters the island —
+        // wrapped cells unwrap by reference, data deep-copies, boxed
+        // functions cross through the host shim; a kind with no crossing
+        // throws the catchable TypeError (NULL + pending).
+        d.push(`    a${i} = scr_jsval_from_dyn(ad);`);
+        const undo = t.params
+          .slice(0, i)
+          .flatMap((q, j) => (isRefCounted(q) ? [`${releaseCallC(q, `a${j}`)};`] : []));
+        d.push(`    if (!a${i}) { ${undo.join(" ")}${undo.length > 0 ? " " : ""}return NULL; }`);
       } else {
         d.push(`    ScrDynPath pp = { NULL, NULL, ${i} };`);
         d.push(`    a${i} = ${E.dynCheckHelper(p)}(ad, &pp);`);

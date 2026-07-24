@@ -459,7 +459,16 @@ static bool scr_assert_dyn_same_value(const ScrDyn *a, const ScrDyn *b) {
  * memo here where Node carries one (documented divergence). */
 static bool scr_assert_dyn_deep_eq(const ScrDyn *a, const ScrDyn *b) {
   if (a == b) return true;
-  if (a->kind != b->kind) return false;
+  if (a->kind != b->kind) {
+    /* A MIXED comparison with an island side (wrapped engine object vs
+     * DOM data): Node walks both structurally — a plain `false` would
+     * mint a fabricated AssertionError for values Node may call equal.
+     * Loud fence (the long-tail lane's structural walk). */
+    if (a->kind == SCR_DYN_JSVAL || b->kind == SCR_DYN_JSVAL) {
+      scr_dyn_isl_fence(a->kind == SCR_DYN_JSVAL ? a : b, "deepStrictEqual");
+    }
+    return false;
+  }
   switch (a->kind) {
     case SCR_DYN_UNDEF:
     case SCR_DYN_NULL:

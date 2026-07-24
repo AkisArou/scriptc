@@ -2301,7 +2301,18 @@ export function pureReemittable(e: IrExpr): boolean {
   export function lowerNullishCoalesce(L: Lowerer, expr: ts.BinaryExpression, loc: SrcLoc): IrExpr {
     const left = L.lowerExpr(expr.left);
     if (left.type.kind === "dyn") {
-      L.unsupported("SC1100", expr, "nullish coalescing on 'unknown' values");
+      // `a ?? b` on a CHECKED-DYNAMIC left: the deciding test is the
+      // runtime kind (scr_dyn_is_nullish — UNDEF/NULL take the default;
+      // a wrapped island value routes to the engine's test, defensively:
+      // the wrap constructor scalar-normalizes engine null/undefined
+      // away). Both sides live in the DOM — the right converts through
+      // the usual boundary and evaluates lazily in its branch; a default
+      // with no dyn representation keeps the fence.
+      const right = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
+      if (right.type.kind !== "dyn") {
+        L.unsupported("SC1100", expr, "nullish coalescing on 'unknown' values against defaults with no dynamic representation");
+      }
+      return { kind: "nullish", left, right, type: DYN, loc };
     }
     if (left.type.kind === "jsval") {
       // `a ?? b` on an ISLAND value: the engine's own nullish test — the
@@ -3209,6 +3220,23 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         const read: IrExpr = { kind: "jsOp", op: "getProp", name: "length", args: [receiver], type: JSVAL, loc: locOf(expr) };
         if (expr.questionDotToken) return read;
         return { kind: "jsExit", value: read, type: F64, loc: locOf(expr) };
+      }
+      // A CHECKED-DYNAMIC value behind an array-typed checker spelling
+      // (`Object.keys(u).length` — the dyn walk answers a DOM array while
+      // tsc spells string[]): the runtime-world dispatch — a DOM keyed
+      // read validated into the declared number (a lying length throws
+      // the catchable TypeError, the dynCheck stance).
+      if (receiver.type.kind === "dyn") {
+        const read: IrExpr = {
+          kind: "dynKeyGet",
+          key: { kind: "strLit", value: "length", type: STRING, loc: locOf(expr) },
+          ...(expr.questionDotToken ? { optional: true as const } : {}),
+          value: receiver,
+          type: DYN,
+          loc: locOf(expr),
+        };
+        if (expr.questionDotToken) return read;
+        return { kind: "dynCheck", value: read, type: F64, loc: locOf(expr) };
       }
       return kind === "string"
         ? { kind: "strIntrinsic", method: "length", receiver, args: [], type: F64, loc: locOf(expr) }
@@ -5452,7 +5480,27 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       ? null
       : L.mapTypeOf(L.typeOf(expr.expression));
     if (receiverIr?.kind === "jsval") {
-      return islandElementRead(L, expr, L.lowerExpr(expr.expression));
+      // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
+      // receiver whose value LOWERED checked-dynamic (`bag.list[0]` where
+      // bag.list is a routed keyed read off a wrapped island value) takes
+      // the DOM keyed read below — the routed JSVAL arm reads the real
+      // engine element; a jsval-lowered receiver keeps the island read.
+      const recv = L.lowerExpr(expr.expression);
+      if (recv.type.kind !== "dyn") return islandElementRead(L, expr, recv);
+      const rawKey = L.lowerExpr(expr.argumentExpression);
+      const key: IrExpr | null =
+        rawKey.type.kind === "string"
+          ? rawKey
+          : rawKey.type.kind === "f64"
+            ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
+            : null;
+      if (key) {
+        const opt = chainGuardedByQuestionDot(expr.expression);
+        return L.maybeNarrow(
+          { kind: "dynKeyGet", key, ...(opt ? { optional: true as const } : {}), value: recv, type: DYN, loc: locOf(expr) },
+          expr,
+        );
+      }
     }
     // Typed-array element read `b[i]` — like arrayGet with a scalar
     // result; any invalid index traps (the array discipline; JS would
@@ -5938,6 +5986,29 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     const receiverIr = L.mapTypeOf(L.typeOf(target.expression));
     if (receiverIr?.kind === "jsval") {
       const obj = L.lowerExpr(target.expression);
+      // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
+      // receiver whose value LOWERED checked-dynamic takes the DOM keyed
+      // write — the routed JSVAL arm lands it on the real engine object.
+      if (obj.type.kind === "dyn") {
+        const loc = locOf(expr);
+        const rawKey = L.lowerExpr(target.argumentExpression);
+        const key: IrExpr =
+          rawKey.type.kind === "f64" || rawKey.type.kind === "bool" || rawKey.type.kind === "dyn"
+            ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
+            : rawKey;
+        if (key.type.kind !== "string") {
+          L.unsupported("SC1090", target.argumentExpression, `'${L.fmt(key.type)}'-typed keys in keyed writes through 'unknown' values`);
+        }
+        const value = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
+        if (value.type.kind !== "dyn") {
+          L.unsupported("SC1100", expr.right, `assigning '${L.fmt(value.type)}' values through 'unknown' receivers`);
+        }
+        return {
+          kind: "exprStmt",
+          expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc },
+          loc,
+        };
+      }
       const key = L.jsvalIn(L.lowerExpr(target.argumentExpression), target.argumentExpression);
       const value = L.jsvalIn(L.lowerExpr(expr.right), expr.right);
       const loc = locOf(expr);

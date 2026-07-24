@@ -1921,9 +1921,9 @@ export class LlDyn {
       B.terminate(`ret ptr null`);
       B.startBlock(lNext);
     }
-    // ISLAND-held receivers: Node reads the real engine property — the
-    // undefined tail below would be a silent wrong answer (the retired
-    // fence-box bug's .length -> 0). Loud fence (lane dyn-routing-ops).
+    // ISLAND-held receivers: o[k] reads the REAL engine property (getters
+    // included, throws bridged catchably) and the result wraps back
+    // scalar-normalized — the routed keyed read that retired the fence.
     {
       const isJv = B.tmp();
       B.line(`${isJv} = icmp eq i32 ${kd}, ${DK.JSVAL}`);
@@ -1931,9 +1931,9 @@ export class LlDyn {
       const lNext = B.newLabel("kg.n");
       B.condBr(isJv, lJv, lNext);
       B.startBlock(lJv);
-      host.declare(`declare ptr @scr_dyn_isl_key_fence(ptr, ptr)`);
+      host.declare(`declare ptr @scr_dyn_isl_key_get(ptr, ptr)`);
       const r = B.tmp();
-      B.line(`${r} = call ptr @scr_dyn_isl_key_fence(ptr %d, ptr %k)`);
+      B.line(`${r} = call ptr @scr_dyn_isl_key_get(ptr %d, ptr %k)`);
       B.terminate(`ret ptr ${r}`);
       B.startBlock(lNext);
     }
@@ -2556,6 +2556,14 @@ export class LlDyn {
       B.line(`${r} = call ptr @${box}(ptr ${expr}, ptr null)`);
       return r;
     }
+    if (t.kind === "jsval") {
+      // An island value wraps by reference (scalar-normalizing) — the
+      // jsval-returning callback shape of the routed-dispatch lane.
+      this.host.declare(`declare ptr @scr_dyn_from_jsval(ptr)`);
+      const r = B.tmp();
+      B.line(`${r} = call ptr @scr_dyn_from_jsval(ptr ${expr})`);
+      return r;
+    }
     const r = B.tmp();
     B.line(`${r} = call ptr @${this.toDynHelper(t)}(${this.valTy(t)} ${expr})`);
     return r;
@@ -2599,6 +2607,26 @@ export class LlDyn {
       B.line(`${ad} = load ptr, ptr ${adSlot}`);
       if (p.kind === "dyn") {
         argNames.push(this.retainDyn(B, ad));
+      } else if (p.kind === "jsval") {
+        // A checker-'any' param: the DOM argument enters the island —
+        // wrapped cells unwrap by reference, data deep-copies, boxed
+        // functions cross through the host shim; a kind with no crossing
+        // throws the catchable TypeError (null + pending).
+        host.declare(`declare ptr @scr_jsval_from_dyn(ptr)`);
+        const a = B.tmp();
+        B.line(`${a} = call ptr @scr_jsval_from_dyn(ptr ${ad})`);
+        const isNull = B.tmp();
+        B.line(`${isNull} = icmp eq ptr ${a}, null`);
+        const lFail = B.newLabel("dfk.jf");
+        const lOk = B.newLabel("dfk.jo");
+        B.condBr(isNull, lFail, lOk);
+        B.startBlock(lFail);
+        t.params.slice(0, i).forEach((q, j) => {
+          if (isRefCounted(q)) B.line(`call void ${releaseSym(host, q)}(ptr ${argNames[j]})`);
+        });
+        B.terminate(`ret ptr null`);
+        B.startBlock(lOk);
+        argNames.push(a);
       } else {
         const pathSlot = B.slot();
         B.entryAllocas.push(`${pathSlot} = alloca %ScrDynPath`);

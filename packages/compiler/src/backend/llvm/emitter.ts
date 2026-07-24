@@ -4501,6 +4501,33 @@ class LlEmitter {
           B.line(`${t} = load ptr, ptr ${slot}`);
           return this.own({ name: t, type: e.type });
         }
+        if (e.left.type.kind === "dyn") {
+          // The checked-dynamic form: the runtime kind decides (UNDEF/
+          // NULL take the default; a wrapped island value asks the
+          // engine); the right runs lazily in its branch (already dyn).
+          const l = this.emitExpr(e.left);
+          this.moveTemp(l);
+          this.declare(`declare zeroext i1 @scr_dyn_is_nullish(ptr)`);
+          const slot = B.slot();
+          B.entryAllocas.push(`${slot} = alloca ptr`);
+          const isN = B.tmp();
+          B.line(`${isN} = call zeroext i1 @scr_dyn_is_nullish(ptr ${l.name})`);
+          const lu = B.newLabel("nuld.u");
+          const lv = B.newLabel("nuld.v");
+          const lj = B.newLabel("nuld.j");
+          B.condBr(isN, lu, lv);
+          B.startBlock(lu);
+          this.releaseValue(l.name, e.left.type);
+          this.emitBranchInto(slot, e.right);
+          B.br(lj);
+          B.startBlock(lv);
+          B.line(`store ptr ${l.name}, ptr ${slot}`);
+          B.br(lj);
+          B.startBlock(lj);
+          const t = B.tmp();
+          B.line(`${t} = load ptr, ptr ${slot}`);
+          return this.own({ name: t, type: e.type });
+        }
         if (e.left.type.kind !== "union") throw new Error("llvm emitter bug: nullish left is not a union");
         const def = this.unionsById.get(e.left.type.unionId);
         if (!def) throw new Error(`llvm emitter bug: nullish of unknown union ${e.left.type.unionId}`);

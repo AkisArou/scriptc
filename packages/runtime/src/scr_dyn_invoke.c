@@ -191,12 +191,12 @@ static ScrDyn *dyn_call_cb(ScrDyn *cb, ScrDyn *item, size_t i, ScrDyn *recv) {
 static bool dyn_cb_check(ScrDyn *const *args, size_t argc) {
   ScrDyn *cb = argc > 0 ? args[0] : scr_dyn_undefined();
   if (cb->kind == SCR_DYN_FUNC) return true;
-  if (cb->kind == SCR_DYN_JSVAL) {
-    /* An engine callback may well be callable — "is not a function"
-     * would be a wrong claim. Loud fence (lane dyn-routing-ops). */
-    scr_dyn_isl_fence(cb, "callback calls");
-    return false;
-  }
+  /* An ENGINE function is callable — scr_dyn_call's JSVAL arm routes it
+   * (the loops below call through scr_dyn_call, which converts the DOM
+   * element arguments per the uniform crossing). A wrapped NON-function
+   * falls through to the display path: String(cb) renders through the
+   * engine, exactly Node's message. */
+  if (cb->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(cb, "function")) return true;
   ScrJsonBuf b;
   scr_jb_init(&b);
   scr_dyn_display_buf(&b, cb);
@@ -300,7 +300,7 @@ static bool dyn_arr_sort(ScrDyn *recv, ScrDyn *cmp) {
 /* Names each prototype declares BEYOND what's implemented here — these
  * fence loudly instead of mis-answering "is not a function". */
 static bool dyn_arr_proto_unimpl(const char *m) {
-  static const char *names[] = { "splice", "reduce", "reduceRight", "flat", "flatMap",
+  static const char *names[] = { "splice", "reduce", "reduceRight", "flat",
     "fill", "copyWithin", "keys", "values", "entries", "toReversed", "toSorted", "toSpliced",
     "with", "toString", "toLocaleString", NULL };
   for (size_t i = 0; names[i]; i++) if (dyn_name_is(m, names[i])) return true;
@@ -336,25 +336,25 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
     return scr_dynh_dispatch(recv, method, args, argc, what);
   }
 
-  /* Island-held receivers: the engine's own prototypes would run these
-   * (JS-exact) — lane dyn-routing-ops routes them through
-   * scr_jsval_call_method; until then, the loud ladder with the method
-   * named, never "is not a function" (a wrong claim for real methods). */
+  /* Island-held receivers: the ENGINE runs its own prototypes (JS-exact
+   * flatMap/map/forEach/filter — Array.prototype is the engine's) through
+   * scr_jsval_call_method; arguments cross per the uniform conversion
+   * (wrapped cells by reference, DOM data deep-copied, FUNC boxes through
+   * the host shim), a missing member throws the engine's own TypeError,
+   * and the result wraps back scalar-normalized. `what` is unused — the
+   * engine's message names the failure. */
   if (recv->kind == SCR_DYN_JSVAL) {
-    ScrJsonBuf b;
-    scr_jb_init(&b);
-    scr_jb_puts(&b, "calling '");
-    scr_jb_puts(&b, method);
-    scr_jb_puts(&b, "' on an island value held in 'unknown' is not supported yet");
-    scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
-    return NULL;
+    return scr_dyn_jsval_ops()->invoke(recv->v.jsval.cell, method, args, argc, what);
   }
 
   /* OBJ: the own member calls (own properties shadow prototypes in JS
    * too); anything else is Node's is-not-a-function. */
   if (recv->kind == SCR_DYN_OBJ) {
     ScrDyn *m = scr_dyn_obj_get(recv, method, strlen(method));
-    if (m && m->kind == SCR_DYN_FUNC) {
+    if (m && (m->kind == SCR_DYN_FUNC ||
+              /* a WRAPPED engine function stored as a DOM member: the
+               * routed call (scr_dyn_call's JSVAL arm) runs it. */
+              (m->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(m, "function")))) {
       /* JS binds the receiver for the call (`obj.method()` — this === obj):
        * the ambient-receiver window (scr_runtime.h). */
       scr_dyn_this_push_dyn(recv);
@@ -398,6 +398,23 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
     if (dyn_name_is(method, "bind") || dyn_name_is(method, "toString")) {
       dyn_throw_unsupported("Function", method);
       return NULL;
+    }
+    /* An OWN property on the FUNC box (defineProperties writes — the
+     * mustCall-wrapper expando family): a callable member runs with the
+     * box bound (JS's o.m() receiver), everything else keeps Node's
+     * is-not-a-function. */
+    {
+      ScrDyn *own = scr_dyn_fn_get(recv, method, strlen(method));
+      if (own) {
+        if (own->kind == SCR_DYN_FUNC || own->kind == SCR_DYN_JSVAL) {
+          scr_dyn_this_push_dyn(recv);
+          ScrDyn *r = scr_dyn_call(own, args, argc, what);
+          scr_dyn_this_pop();
+          scr_dyn_release(own);
+          return r;
+        }
+        scr_dyn_release(own);
+      }
     }
     dyn_throw_not_fn(what);
     return NULL;
@@ -565,6 +582,53 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
       if (dyn_name_is(method, "find")) return scr_dyn_retain(scr_dyn_undefined());
       if (dyn_name_is(method, "findIndex")) return scr_dyn_new_num(-1);
       return scr_dyn_retain(scr_dyn_undefined()); /* forEach */
+    }
+    if (dyn_name_is(method, "flatMap")) {
+      /* JS Array.prototype.flatMap over a DOM array: map + a depth-1
+       * flatten. Native DOM-array results flatten element-by-element; a
+       * WRAPPED engine array flattens through the routed keyed reads
+       * (elements wrap back scalar-normalized); everything else pushes
+       * as a single element (JS keeps non-array callback results whole).
+       * JS's spec snapshots the length up front (elements appended by
+       * the callback are not visited). */
+      if (!dyn_cb_check(args, argc)) return NULL;
+      ScrDyn *cb = args[0];
+      ScrDyn *out = scr_dyn_new_arr();
+      size_t n = recv->v.arr.len;
+      for (size_t i = 0; i < n && i < recv->v.arr.len; i++) {
+        ScrDyn *item = scr_dyn_retain(recv->v.arr.items[i]);
+        ScrDyn *r = dyn_call_cb(cb, item, i, recv);
+        scr_dyn_release(item);
+        if (!r) { scr_dyn_release(out); return NULL; }
+        if (r->kind == SCR_DYN_ARR) {
+          for (size_t j = 0; j < r->v.arr.len; j++) {
+            scr_dyn_arr_push(out, scr_dyn_retain(r->v.arr.items[j]));
+          }
+          scr_dyn_release(r);
+        } else if (scr_dyn_isl_is_array(r)) {
+          /* An engine-array result: length + element reads through the
+           * routed engine ops (a bridged surprise unwinds). */
+          ScrStr *lk = scr_str_new("length", 6);
+          ScrDyn *lenv = scr_dyn_isl_key_get(r, lk);
+          scr_str_release(lk);
+          if (!lenv) { scr_dyn_release(r); scr_dyn_release(out); return NULL; }
+          size_t rn = lenv->kind == SCR_DYN_NUM ? (size_t)lenv->v.num : 0;
+          scr_dyn_release(lenv);
+          for (size_t j = 0; j < rn; j++) {
+            char idx[24];
+            int ilen = snprintf(idx, sizeof idx, "%zu", j);
+            ScrStr *jk = scr_str_new(idx, (size_t)ilen);
+            ScrDyn *el = scr_dyn_isl_key_get(r, jk);
+            scr_str_release(jk);
+            if (!el) { scr_dyn_release(r); scr_dyn_release(out); return NULL; }
+            scr_dyn_arr_push(out, el); /* ownership moves in */
+          }
+          scr_dyn_release(r);
+        } else {
+          scr_dyn_arr_push(out, r); /* ownership moves in */
+        }
+      }
+      return out;
     }
     if (dyn_name_is(method, "sort")) {
       ScrDyn *cmp = argc > 0 ? args[0] : scr_dyn_undefined();

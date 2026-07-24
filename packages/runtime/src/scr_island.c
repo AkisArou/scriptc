@@ -380,6 +380,9 @@ enum {
   ISL_H_ITERN,
   ISL_H_ITER,
   ISL_H_CALLSPREAD,
+  ISL_H_OBJWALK,
+  ISL_H_HASOWN,
+  ISL_H_ASSIGN,
   ISL_H_COUNT,
 };
 
@@ -428,7 +431,13 @@ static const char isl_prelude[] =
     "throw new TypeError(w+\" is not iterable (cannot read property \"+s+\")\");"
     "if(typeof s[Symbol.iterator]!==\"function\")"
     "throw new TypeError(\"Spread syntax requires ...iterable[Symbol.iterator] to be a function\");"
-    "return f(...p,...s)}]";
+    "return f(...p,...s)},"
+    /* ISL_H_OBJWALK / ISL_H_HASOWN / ISL_H_ASSIGN: the Object statics a
+     * wrapped (SCR_DYN_JSVAL) receiver routes here — the engine's own
+     * semantics (own-key order, getters running, ToObject refusals). */
+    "(o,m)=>m===0?Object.keys(o):m===1?Object.values(o):Object.entries(o),"
+    "(o,k)=>Object.hasOwn(o,k),"
+    "(t,s)=>Object.assign(t,s)]";
 
 static void isl_free_boot(void);
 static void isl_prom_wraps_teardown(void);
@@ -963,8 +972,9 @@ ScrJsval *scr_jsval_from_json(const ScrStr *json) {
  * STATIC code the engine cannot re-enter through a data copy). */
 static const char *isl_dyn_unmarshalable(const ScrDyn *d) {
   switch (d->kind) {
-  case SCR_DYN_FUNC:
-    return "a function";
+  /* SCR_DYN_FUNC is NOT here: a boxed function crosses as the generic
+   * host-function shim (isl_dynfn_new below) — the routed-call lane's
+   * uniform argument conversion. */
   case SCR_DYN_HANDLE:
     return "a runtime handle";
   case SCR_DYN_PROMISE:
@@ -986,8 +996,16 @@ static const char *isl_dyn_unmarshalable(const ScrDyn *d) {
   }
 }
 
+static JSValue isl_dynfn_new(const ScrDyn *d); /* the DOM-function shim, below */
+
 static JSValue isl_from_dyn(const ScrDyn *d) {
   switch (d->kind) {
+  case SCR_DYN_FUNC:
+    /* A boxed DOM function enters as ONE generic host-function shim over
+     * its uniform call thunk (ScrDynThunk): engine args wrap as DOM
+     * values, the thunk runs, the DOM result converts back. Each
+     * crossing mints a fresh engine function (documented). */
+    return isl_dynfn_new(d);
   case SCR_DYN_UNDEF:
     return JS_UNDEFINED;
   case SCR_DYN_NULL:
@@ -1081,6 +1099,216 @@ static bool isl_dynjs_strict_eq(ScrJsval *a, ScrJsval *b) {
 static bool isl_dynjs_is_array(ScrJsval *cell) { return JS_IsArray(cell->v); }
 static bool isl_dynjs_is_error(ScrJsval *cell) { return JS_IsError(cell->v); }
 
+static const ScrDynJsvalOps isl_dynjs_ops;
+
+/* The jsval→DOM wrap over a RAW engine value (BORROWED) — the scalar
+ * normalization the cell constructor applies, shared by the routed-op
+ * result conversions (which hold a JSValue, not a cell). Composites mint
+ * a fresh cell over the SAME engine value (identity is the value — the
+ * engine's === and the unwrap both go through it). */
+static ScrDyn *isl_dyn_from_value(JSValue v) {
+  if (JS_IsUndefined(v)) return scr_dyn_retain(scr_dyn_undefined());
+  if (JS_IsNull(v)) return scr_dyn_new_null();
+  if (JS_IsBool(v)) return scr_dyn_new_bool(JS_ToBool(isl_ctx, v) > 0);
+  if (JS_IsNumber(v)) {
+    double num = 0;
+    JS_ToFloat64(isl_ctx, &num, v); /* cannot fail on a number */
+    return scr_dyn_new_num(num);
+  }
+  if (JS_IsString(v)) {
+    ScrStr *s = isl_js_to_str(v); /* cannot bridge on a string */
+    ScrDyn *d = scr_dyn_new_str(s);
+    scr_str_release(s);
+    return d;
+  }
+  return scr_dyn_alloc_jsval(isl_cell_new(JS_DupValue(isl_ctx, v)), &isl_dynjs_ops);
+}
+
+/* ── the routed operation set (the ScrDynJsvalOps rows scr_json.c and
+ * scr_dyn_invoke.c dispatch through) ─────────────────────────────────
+ * Keys enter as engine strings through the GETIDX/SETIDX helpers (any
+ * byte content, canonical-index semantics are the engine's own); dyn
+ * arguments cross through scr_jsval_from_dyn (wrapped cells by
+ * reference, data as the usual deep copy, FUNC boxes through the shim);
+ * results wrap back scalar-normalized. Engine throws bridge catchably
+ * with the engine's message. */
+
+static ScrDyn *isl_dynjs_key_get(ScrJsval *cell, const ScrStr *k) {
+  isl_entry();
+  JSValue key = JS_NewStringLen(isl_ctx, k->data, k->len);
+  JSValue argv[2] = {cell->v, key};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_GETIDX], JS_UNDEFINED, 2, argv);
+  JS_FreeValue(isl_ctx, key);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  ScrDyn *d = isl_dyn_from_value(r);
+  JS_FreeValue(isl_ctx, r);
+  return d;
+}
+
+static bool isl_dynjs_key_set(ScrJsval *cell, const ScrStr *k, const ScrDyn *v) {
+  ScrJsval *vj = scr_jsval_from_dyn(v);
+  if (!vj) return false; /* unmarshalable value — the catchable TypeError */
+  isl_entry();
+  JSValue key = JS_NewStringLen(isl_ctx, k->data, k->len);
+  JSValue argv[3] = {cell->v, key, vj->v};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_SETIDX], JS_UNDEFINED, 3, argv);
+  JS_FreeValue(isl_ctx, key);
+  scr_jsval_release(vj);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return false;
+  }
+  JS_FreeValue(isl_ctx, r);
+  return true;
+}
+
+/* Convert argc dyn arguments for a routed call; frees what it built on
+ * failure. Returns false with the exception pending. */
+static bool isl_dynjs_args_in(ScrDyn *const *args, size_t argc, ScrJsval **cells) {
+  for (size_t i = 0; i < argc; i++) {
+    cells[i] = scr_jsval_from_dyn(args[i]);
+    if (!cells[i]) {
+      for (size_t j = 0; j < i; j++) scr_jsval_release(cells[j]);
+      return false;
+    }
+  }
+  return true;
+}
+
+static ScrDyn *isl_dynjs_call(ScrJsval *cell, ScrDyn *const *args, size_t argc) {
+  ScrJsval *stack_cells[8];
+  ScrJsval **cells = argc <= 8 ? stack_cells : malloc(argc * sizeof *cells);
+  if (!isl_dynjs_args_in(args, argc, cells)) {
+    if (cells != stack_cells) free(cells);
+    return NULL;
+  }
+  ScrJsval *r = scr_jsval_call(cell, (int)argc, cells);
+  for (size_t i = 0; i < argc; i++) scr_jsval_release(cells[i]);
+  if (cells != stack_cells) free(cells);
+  if (!r) return NULL;
+  ScrDyn *d = isl_dyn_from_value(r->v);
+  scr_jsval_release(r);
+  return d;
+}
+
+static ScrDyn *isl_dynjs_invoke(ScrJsval *cell, const char *method, ScrDyn *const *args, size_t argc, const char *what) {
+  isl_entry();
+  JSValue fn = JS_GetPropertyStr(isl_ctx, cell->v, method); /* owned */
+  if (JS_IsException(fn)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  if (!JS_IsFunction(isl_ctx, fn)) {
+    /* Node's spelled TypeError (V8's text), front-run before the
+     * engine's terser "not a function". */
+    JS_FreeValue(isl_ctx, fn);
+    ScrJsonBuf b;
+    scr_jb_init(&b);
+    scr_jb_puts(&b, what);
+    scr_jb_puts(&b, " is not a function");
+    scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+    return NULL;
+  }
+  ScrJsval *stack_cells[8];
+  ScrJsval **cells = argc <= 8 ? stack_cells : malloc(argc * sizeof *cells);
+  if (!isl_dynjs_args_in(args, argc, cells)) {
+    JS_FreeValue(isl_ctx, fn);
+    if (cells != stack_cells) free(cells);
+    return NULL;
+  }
+  JSValue stack_args[8];
+  JSValue *argv = argc <= 8 ? stack_args : malloc(argc * sizeof(JSValue));
+  for (size_t i = 0; i < argc; i++) argv[i] = cells[i]->v;
+  JSValue r = JS_Call(isl_ctx, fn, cell->v, (int)argc, argv); /* this = receiver */
+  if (argv != stack_args) free(argv);
+  JS_FreeValue(isl_ctx, fn);
+  for (size_t i = 0; i < argc; i++) scr_jsval_release(cells[i]);
+  if (cells != stack_cells) free(cells);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  ScrDyn *d = isl_dyn_from_value(r);
+  JS_FreeValue(isl_ctx, r);
+  return d;
+}
+
+static bool isl_dynjs_is_nullish(ScrJsval *cell) {
+  return JS_IsUndefined(cell->v) || JS_IsNull(cell->v);
+}
+
+static ScrDyn *isl_dynjs_obj_walk(ScrJsval *cell, int mode) {
+  isl_entry();
+  JSValue m = JS_NewInt32(isl_ctx, mode);
+  JSValue argv[2] = {cell->v, m};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_OBJWALK], JS_UNDEFINED, 2, argv);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  /* The engine array unpacks into a NATIVE DOM array (keys are DOM
+   * strings, values wrap per element, entries become native pairs) so
+   * the results iterate/index/measure at native speed. */
+  int64_t len = 0;
+  JSValue lv = JS_GetPropertyStr(isl_ctx, r, "length");
+  JS_ToInt64(isl_ctx, &len, lv);
+  JS_FreeValue(isl_ctx, lv);
+  ScrDyn *out = scr_dyn_new_arr();
+  for (int64_t i = 0; i < len; i++) {
+    JSValue e = JS_GetPropertyUint32(isl_ctx, r, (uint32_t)i);
+    if (mode == 2) {
+      JSValue k = JS_GetPropertyUint32(isl_ctx, e, 0);
+      JSValue v = JS_GetPropertyUint32(isl_ctx, e, 1);
+      ScrDyn *pair = scr_dyn_new_arr();
+      scr_dyn_arr_push(pair, isl_dyn_from_value(k));
+      scr_dyn_arr_push(pair, isl_dyn_from_value(v));
+      scr_dyn_arr_push(out, pair);
+      JS_FreeValue(isl_ctx, k);
+      JS_FreeValue(isl_ctx, v);
+    } else {
+      scr_dyn_arr_push(out, isl_dyn_from_value(e));
+    }
+    JS_FreeValue(isl_ctx, e);
+  }
+  JS_FreeValue(isl_ctx, r);
+  return out;
+}
+
+static int isl_dynjs_has_own(ScrJsval *cell, const ScrStr *k) {
+  isl_entry();
+  JSValue key = JS_NewStringLen(isl_ctx, k->data, k->len);
+  JSValue argv[2] = {cell->v, key};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_HASOWN], JS_UNDEFINED, 2, argv);
+  JS_FreeValue(isl_ctx, key);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return -1;
+  }
+  int b = JS_ToBool(isl_ctx, r);
+  JS_FreeValue(isl_ctx, r);
+  return b > 0 ? 1 : 0;
+}
+
+static bool isl_dynjs_assign(ScrJsval *cell, const ScrDyn *src) {
+  ScrJsval *sj = scr_jsval_from_dyn(src);
+  if (!sj) return false;
+  isl_entry();
+  JSValue argv[2] = {cell->v, sj->v};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_ASSIGN], JS_UNDEFINED, 2, argv);
+  scr_jsval_release(sj);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return false;
+  }
+  JS_FreeValue(isl_ctx, r);
+  return true;
+}
+
+static ScrStr *isl_dynjs_to_json(ScrJsval *cell) { return scr_jsval_to_json(cell); }
+
 static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_release,
   isl_dynjs_typeof,
@@ -1089,6 +1317,15 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_strict_eq,
   isl_dynjs_is_array,
   isl_dynjs_is_error,
+  isl_dynjs_key_get,
+  isl_dynjs_key_set,
+  isl_dynjs_call,
+  isl_dynjs_invoke,
+  isl_dynjs_is_nullish,
+  isl_dynjs_obj_walk,
+  isl_dynjs_has_own,
+  isl_dynjs_assign,
+  isl_dynjs_to_json,
 };
 
 ScrDyn *scr_dyn_from_jsval(ScrJsval *cell) {
@@ -1416,9 +1653,14 @@ static const JSClassDef isl_hostfn_class = {
     .finalizer = isl_hostfn_finalizer,
 };
 
+static JSClassID isl_dynfn_class_id;      /* the DOM-function shim, below */
+static const JSClassDef isl_dynfn_class;
+
 static void isl_register_hostfn_class(void) {
   JS_NewClassID(isl_rt, &isl_hostfn_class_id);
   JS_NewClass(isl_rt, isl_hostfn_class_id, &isl_hostfn_class);
+  JS_NewClassID(isl_rt, &isl_dynfn_class_id);
+  JS_NewClass(isl_rt, isl_dynfn_class_id, &isl_dynfn_class);
   isl_register_bridge_class();
 }
 
@@ -1574,6 +1816,87 @@ ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
   JSValue fn = JS_NewCFunctionData(isl_ctx, isl_hostfn_invoke, arity < 0 ? -arity - 1 : arity, 0, 1, data);
   JS_FreeValue(isl_ctx, box); /* fn's func_data holds its own reference */
   return isl_cell_new(fn);
+}
+
+/* ── the generic DOM-function shim (a boxed SCR_DYN_FUNC entering the
+ * island) ─────────────────────────────────────────────────────────────
+ * ONE shim serves every boxed function because the box's call thunk is a
+ * single uniform C signature (ScrDynThunk): engine arguments wrap as DOM
+ * values (scalar-normalizing — the jsval→DOM constructor's stance), the
+ * thunk validates them against the closure's declared parameter types
+ * and runs it, and the DOM result converts back through the from_dyn
+ * rules (wrapped cells by reference, data as a deep copy, nested
+ * functions through this same shim). OWNERSHIP: the engine function's
+ * opaque box owns ONE reference on the whole ScrDyn FUNC node (closure
+ * and descriptor ride inside); the engine finalizer releases it — at
+ * teardown that runs before the RC audit, the isl_hostfn story. A
+ * scriptc exception thrown inside reverse-bridges to an engine throw;
+ * the receiver (`this`) is deliberately not forwarded (the typed
+ * host-function stance — dyn thunks read the ambient receiver, which no
+ * engine call site binds). Each crossing mints a FRESH engine function:
+ * re-crossing identity is not preserved (SEMANTICS.md). */
+
+static JSClassID isl_dynfn_class_id = 0;
+
+static void isl_dynfn_finalizer(JSRuntime *rt, JSValueConst val) {
+  (void)rt;
+  ScrDyn *box = JS_GetOpaque(val, isl_dynfn_class_id);
+  if (box) scr_dyn_release(box);
+}
+
+static const JSClassDef isl_dynfn_class = {
+    .class_name = "ScrDynFn",
+    .finalizer = isl_dynfn_finalizer,
+};
+
+static JSValue isl_dynfn_invoke(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv, int magic, JSValueConst *func_data) {
+  (void)this_val;
+  (void)magic;
+  ScrDyn *box = JS_GetOpaque(func_data[0], isl_dynfn_class_id);
+  if (!box) return JS_ThrowTypeError(ctx, "detached scriptc function");
+  ScrDyn *stack_args[8];
+  ScrDyn **dargs = argc <= 8 ? stack_args : malloc((size_t)argc * sizeof *dargs);
+  for (int i = 0; i < argc; i++) dargs[i] = isl_dyn_from_value(argv[i]);
+  bool strayed_before = isl_anchor_strayed;
+  isl_host_depth++;
+  ScrDyn *r = box->v.fn.thunk(box->v.fn.clo, dargs, (size_t)argc);
+  isl_host_depth--;
+  if (isl_anchor_strayed && !strayed_before) {
+    /* The isl_hostfn_invoke re-anchor dance: a fiber the callback spawned
+     * moved the engine's overflow anchor off this stack. */
+    isl_anchor_here();
+    isl_anchor_strayed = strayed_before;
+  }
+  for (int i = 0; i < argc; i++) scr_dyn_release(dargs[i]);
+  if (dargs != stack_args) free(dargs);
+  if (scr_exc_pending()) {
+    if (r) scr_dyn_release(r);
+    return isl_throw_pending(ctx);
+  }
+  if (!r) return JS_UNDEFINED;
+  /* The thunk's DOM result converts back per the from_dyn rules; a kind
+   * with no crossing (a handle, a promise) throws the same catchable
+   * TypeError from_dyn would. */
+  const char *bad = isl_dyn_unmarshalable(r);
+  if (bad != NULL) {
+    scr_dyn_release(r);
+    return JS_ThrowTypeError(ctx, "an 'unknown' value holding %s cannot enter dynamically-executed code", bad);
+  }
+  JSValue out = isl_from_dyn(r);
+  scr_dyn_release(r);
+  return out; /* JS_EXCEPTION passes through as the engine throw */
+}
+
+/* A fresh engine function over a boxed DOM function (borrows d — the
+ * opaque box retains it). */
+static JSValue isl_dynfn_new(const ScrDyn *d) {
+  JSValue boxv = JS_NewObjectClass(isl_ctx, isl_dynfn_class_id);
+  JS_SetOpaque(boxv, scr_dyn_retain((ScrDyn *)d));
+  JSValueConst data[1] = {boxv};
+  JSValue fn = JS_NewCFunctionData(isl_ctx, isl_dynfn_invoke, (int)d->v.fn.arity, 0, 1, data);
+  JS_FreeValue(isl_ctx, boxv); /* fn's func_data holds its own reference */
+  return fn;
 }
 
 /* The typed adapters' absence test for `T | undefined` parameters. */

@@ -12,15 +12,6 @@ destructuring-fences.ts:29:12 - error SC1031: rest bindings packing the remainin
      |            ^~~~~~~~~~
   30 | console.log(f, Object.keys(restOfC).length);
 
-destructuring-fences.ts:30:16 - error SC1100: '.length()' on 'unknown' array receivers are not supported yet
-
-  29 | const { f, ...restOfC } = new C(); // rest over a class instance keeps the fence
-  30 | console.log(f, Object.keys(restOfC).length);
-     |                ^~~~~~~~~~~~~~~~~~~~
-  31 | const { onlyIn } = new C(); // tsc types the setter-only read; the fence names it
-
-  hint: validate with 'as <type>' first — the cast checks the dynamic value at runtime and throws on mismatch
-
 destructuring-fences.ts:31:9 - error SC1090: reading a property that has only a setter ('onlyIn' — Node would yield undefined) is not supported yet
 
   30 | console.log(f, Object.keys(restOfC).length);

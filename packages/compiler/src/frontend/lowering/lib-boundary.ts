@@ -239,7 +239,11 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
     e.args.forEach((a, i) => {
       if (a.type.kind === "dyn") return;
       if (a.type.kind === "jsval") {
-        fence(L, "SC1100", a.loc, "passing 'any'-typed values into calls through 'unknown' values (validate with 'as <type>' first)");
+        // An island value in a checked-dynamic argument slot: the
+        // jsval→DOM crossing (by-reference wrap, scalars normalized) —
+        // the routed call converts it back by reference at the boundary.
+        e.args[i] = { kind: "dynFromJsval", value: a, type: DYN, loc: a.loc };
+        return;
       }
       if (a.kind === "unitLit" || L.dynConvertible(a.type)) {
         e.args[i] = { kind: "dynFrom", value: a, type: DYN, loc: a.loc };

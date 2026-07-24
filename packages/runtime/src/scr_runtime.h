@@ -2991,6 +2991,37 @@ typedef struct ScrDynJsvalOps {
   bool (*strict_eq)(ScrJsval *a, ScrJsval *b); /* engine ===; never throws */
   bool (*is_array)(ScrJsval *cell);   /* Array.isArray, engine-side */
   bool (*is_error)(ScrJsval *cell);   /* native Error instance, engine-side */
+  /* ── the routed operation set (lane dyn-routing-ops) ────────────────
+   * Each routes to the engine at the moment of use and converts at the
+   * boundary: dyn ARGUMENTS cross through scr_jsval_from_dyn (wrapped
+   * cells unwrap by reference, DOM data deep-copies, DOM FUNC boxes
+   * cross through the generic host-function shim), engine RESULTS come
+   * back through scr_dyn_from_jsval (scalar-normalizing). Fallible ops
+   * bridge the ENGINE's exception catchably and answer NULL/false/-1. */
+  ScrDyn *(*key_get)(ScrJsval *cell, const ScrStr *k); /* o[k]; +1 or NULL pending */
+  bool (*key_set)(ScrJsval *cell, const ScrStr *k, const ScrDyn *v); /* false = pending */
+  ScrDyn *(*call)(ScrJsval *cell, ScrDyn *const *args, size_t argc); /* f(...); +1 or NULL pending */
+  /* o.m(...) — the ENGINE's own prototypes run (JS-exact flatMap/map/
+   * forEach/...). A missing or non-callable member throws Node's
+   * "<what> is not a function" (the call site's spelling — V8's text,
+   * front-run before the engine's terser claim). */
+  ScrDyn *(*invoke)(ScrJsval *cell, const char *method, ScrDyn *const *args, size_t argc, const char *what);
+  bool (*is_nullish)(ScrJsval *cell); /* engine undefined/null; never throws
+                                       * (always false today — the wrap
+                                       * constructor scalar-normalizes) */
+  /* Object.keys/values/entries (mode 0/1/2) as a NATIVE DOM array (+1):
+   * keys are DOM strings, values wrap per element, entries are native
+   * DOM pairs. NULL with the engine's exception pending on refusal. */
+  ScrDyn *(*obj_walk)(ScrJsval *cell, int mode);
+  int (*has_own)(ScrJsval *cell, const ScrStr *k); /* 0/1; -1 = pending */
+  /* Object.assign(target, src) with the ENGINE target: src converts per
+   * member semantics (a wrapped src spreads by reference; DOM data
+   * enters as the usual deep copy). false = pending. */
+  bool (*assign)(ScrJsval *cell, const ScrDyn *src);
+  /* JSON.stringify text of the engine value (+1) — the engine's own
+   * stringify (toJSON protocols, cycle TypeErrors). NULL + pending when
+   * not JSON-representable. */
+  ScrStr *(*to_json)(ScrJsval *cell);
 } ScrDynJsvalOps;
 
 /* The allocator view the gated constructor uses (installs the ops);
@@ -3011,10 +3042,16 @@ bool scr_dyn_isl_is_error(const ScrDyn *d);
  * Callers gate un-armed operations with it — never a silent wrong
  * answer (the retired fence-box bug). */
 bool scr_dyn_isl_fence(const ScrDyn *d, const char *what);
-/* The emitted keyed-read fence (sc_dyn_key_get's JSVAL arm): throws
- * "reading '<k>' on an island value held in 'unknown' is not supported
- * yet" and returns NULL. d MUST be a JSVAL node. */
-ScrDyn *scr_dyn_isl_key_fence(const ScrDyn *d, const ScrStr *k);
+/* The emitted keyed READ's JSVAL arm (sc_dyn_key_get): routes o[k] to the
+ * engine through the installed ops and wraps the result back (+1, scalars
+ * normalized) — the retired `.length -> fence` row. d MUST be a JSVAL
+ * node; NULL with the engine's exception bridged catchably. */
+ScrDyn *scr_dyn_isl_key_get(const ScrDyn *d, const ScrStr *k);
+/* The `??`/optional-chain nullish test over a DOM value: UNDEF/NULL
+ * native, JSVAL through the engine's own test (defensively — the wrap
+ * constructor scalar-normalizes engine null/undefined away), every other
+ * kind false. Never throws. */
+bool scr_dyn_is_nullish(const ScrDyn *d);
 /* scr_dyn_isl_tostr_buf (the display walkers' JSVAL arm) is declared
  * with the ScrJsonBuf surface below. */
 
@@ -3819,12 +3856,16 @@ ScrJsval *scr_jsval_from_f64(double v);
 ScrJsval *scr_jsval_from_bool(bool v);
 ScrJsval *scr_jsval_from_str(const ScrStr *s);
 ScrJsval *scr_jsval_from_json(const ScrStr *json);
-/* A CHECKED-DYNAMIC (DOM) value entering the island — deep copy, data
- * kinds only (a boxed function/handle/promise throws the catchable
- * TypeError). A JSVAL node unwraps to its OWN cell (+1) — an engine
- * value that crossed into the DOM and back is the SAME engine value, by
- * reference (nested JSVAL members embed their engine values directly).
- * NULL with a pending exception on failure. Borrows d. */
+/* A CHECKED-DYNAMIC (DOM) value entering the island — deep copy for data
+ * kinds (a boxed handle/promise throws the catchable TypeError). A JSVAL
+ * node unwraps to its OWN cell (+1) — an engine value that crossed into
+ * the DOM and back is the SAME engine value, by reference (nested JSVAL
+ * members embed their engine values directly). A boxed FUNCTION crosses
+ * as one generic host-function shim over its uniform ScrDynThunk: the
+ * shim wraps engine arguments as DOM values (scalar-normalizing), calls
+ * the thunk, and converts the DOM result back — each crossing mints a
+ * fresh engine function (identity is not preserved for re-crossings;
+ * SEMANTICS.md). NULL with a pending exception on failure. Borrows d. */
 ScrJsval *scr_jsval_from_dyn(const ScrDyn *d);
 
 /* The jsval→DOM crossing (the IR's dynFromJsval): wraps an island value

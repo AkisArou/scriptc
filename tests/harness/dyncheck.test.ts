@@ -722,11 +722,13 @@ console.log("unreachable", req.url);
 
   /* ── the jsval→DOM crossing's honesty ladder (SCR_DYN_JSVAL) ────────
    * The armed rows (typeof/truthiness/String()/===, the narrowing tests,
-   * the identity round trip) are corpus-tested differentially (2578,
-   * 2579, npm jsval-into-dyn). These pin the LOUD fences of every
-   * un-armed DOM walk over an island-held value — the retired fence box
-   * answered typeof "function" and .length 0 SILENTLY here; a wrong
-   * answer is never acceptable, a named refusal is. All --dynamic. */
+   * the identity round trip; the routed-ops lane's keyed read/write,
+   * calls, method dispatch, Object statics, JSON.stringify) are
+   * corpus-tested differentially (2578, 2579, 2582-2585, npm
+   * jsval-into-dyn). These pin the LOUD fences of every DOM walk still
+   * un-armed over an island-held value — the retired fence box answered
+   * typeof "function" and .length 0 SILENTLY here; a wrong answer is
+   * never acceptable, a named refusal is. All --dynamic. */
 
   // A JS-lane `any` producer: JSDoc-`any` returns are ISLAND values under
   // --dynamic (a bare record literal would infer a typed record and take
@@ -737,30 +739,27 @@ console.log("unreachable", req.url);
 const u: unknown = eng;
 `;
 
-  test("a keyed read on an island-held unknown fences loudly (the retired .length -> 0 bug)", async () => {
+  test("a keyed read on an island-held unknown routes to the engine (the retired .length fence)", async () => {
     const r = await compileAndRun(
       "jsval-key-read",
       `/** @returns {any} */
 function mint() { return { a: 1, list: [1, 2, 3] }; }
 const eng = mint();
 /** @param {object} bag */
-function probe(bag) { console.log(bag.list.length); }
+function probe(bag) { console.log(bag.list.length, bag.a, bag.missing === undefined); }
 probe(eng);
 `,
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "reading 'list' on an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("3 1 true\n");
   });
 
-  test("a method call on an island-held unknown fences with the member named", async () => {
-    // The JS lane's member calls on dyn receivers ride dynKeyGet+dynCall
-    // here, so the keyed-read fence fires first (the member named); the
-    // scr_dyn_invoke dispatch path carries its own JSVAL fence for the
-    // shapes that reach it.
+  test("a method call on an island-held unknown runs the engine's own prototype", async () => {
+    // scr_dyn_invoke's JSVAL arm routes to scr_jsval_call_method — the
+    // ENGINE's Array.prototype.slice runs (JS-exact), and the result
+    // wraps back for further routed reads.
     const r = await compileAndRun(
       "jsval-method",
       `/** @returns {any} */
@@ -768,18 +767,16 @@ function mint() { return [{ languages: ["js"] }]; }
 const eng = mint();
 /** @param {object} plugins */
 function walk(plugins) { return plugins.slice(); }
-walk(eng);
+console.log(\`\${walk(eng).length}\`);
 `,
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "reading 'slice' on an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("1\n");
   });
 
-  test("JSON.stringify of an island-held unknown fences loudly", async () => {
+  test("JSON.stringify of an island-held unknown is the engine's own stringify", async () => {
     const r = await compileAndRun(
       "jsval-stringify",
       wrapPreamble + `console.log(JSON.stringify(u));
@@ -787,10 +784,8 @@ walk(eng);
       "ts",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "JSON.stringify of an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('{"a":1,"list":[1,2,3]}\n');
   });
 
   test("structuredClone of an island-held unknown fences loudly", async () => {
@@ -808,23 +803,21 @@ console.log("unreachable", typeof c);
     );
   });
 
-  test("Object.keys over an island-held unknown fences loudly", async () => {
+  test("Object.keys over an island-held unknown walks the engine object", async () => {
     const r = await compileAndRun(
       "jsval-keys",
       `/** @returns {any} */
-function mint() { return { a: 1 }; }
+function mint() { return { a: 1, b: 2 }; }
 const eng = mint();
 /** @param {object} bag */
 function keys(bag) { return Object.keys(bag); }
-console.log(keys(eng).length);
+console.log(keys(eng).length, keys(eng).join(","));
 `,
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "Object.keys on an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("2 a,b\n");
   });
 
   test("deepStrictEqual over island-held values: identity passes, structure fences", async () => {
@@ -886,23 +879,24 @@ firstOf(eng);
     expect(r.stderr).toContain("array destructuring of non-array values");
   });
 
-  test("a keyed write through an island-held unknown fences (never a silent drop)", async () => {
+  test("a keyed write through an island-held unknown lands on the real engine object", async () => {
+    // Aliasing preserved: the island-side reader sees the write made
+    // through the wrapped alias (the retired setting-fence row).
     const r = await compileAndRun(
       "jsval-key-write",
       `/** @returns {any} */
 function mint() { return { a: 1 }; }
 const eng = mint();
 /** @param {object} bag */
-function poke(bag) { bag.a = 2; }
+function poke(bag) { bag.a = 2; bag.fresh = "x"; }
 poke(eng);
+console.log(\`\${eng.a} \${eng.fresh}\`);
 `,
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "setting 'a' on an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("2 x\n");
   });
 
   test("'in' over an island-held unknown fences (never a silent false)", async () => {
@@ -933,7 +927,7 @@ console.log(has(eng));
 let caught = 0;
 function probe(u: unknown): void {
   try {
-    JSON.stringify(u);
+    structuredClone(u);
   } catch (e) {
     if (e instanceof Error) caught++;
   }

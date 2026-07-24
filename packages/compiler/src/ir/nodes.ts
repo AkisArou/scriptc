@@ -5102,8 +5102,15 @@ export function canBoxFuncIntoDyn(
 ): boolean {
   return (
     t.kind === "func" &&
-    t.params.every((p) => p.kind === "dyn" || canDynCheckTo(p, getRecord, getUnion)) &&
-    (t.ret.kind === "void" || t.ret.kind === "dyn" || canConvertToDyn(t.ret, getRecord, getUnion))
+    // A jsval (island) param converts through scr_jsval_from_dyn in the
+    // thunk (wrapped cells unwrap by reference, DOM data deep-copies) —
+    // the checker-'any' callback params of the routed-dispatch lane
+    // (`bag.list.map((x) => ...)` with x typed any).
+    t.params.every((p) => p.kind === "dyn" || p.kind === "jsval" || canDynCheckTo(p, getRecord, getUnion)) &&
+    // A jsval return converts through the by-reference wrap
+    // (dynFromJsval — the thunk's result conversion), so engine-returning
+    // callbacks box too: the routed-dispatch lane's flatMap shape.
+    (t.ret.kind === "void" || t.ret.kind === "dyn" || t.ret.kind === "jsval" || canConvertToDyn(t.ret, getRecord, getUnion))
   );
 }
 
