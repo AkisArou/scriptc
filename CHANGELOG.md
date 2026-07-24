@@ -4,6 +4,11 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+### Fixes
+
+- The 0.0.11 restore's written-binding decline was wider than its rationale, and two carve-outs bring the lost shapes back: a written binding whose declared type has no static mapping keeps the compiling no-storage trap claim (ordinary storage could only fence), and a statement-position assignment whose right side provably throws before the write no longer counts against the claim at all.
+- A class extending a base the compiler itself rejected now fails the build eagerly with the base's real blocker, in JavaScript inputs too — the deferred fence compiled a binary that refused at startup where Node defines the base fine and runs on. Leaf rejected classes keep the runtime-deferral story.
+
 ## 0.0.11
 
 <!-- release:start -->

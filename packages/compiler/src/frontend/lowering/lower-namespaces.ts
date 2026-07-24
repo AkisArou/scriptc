@@ -414,14 +414,27 @@ export function ambientUndefVarRootOf(L: Lowerer, e: ts.Expression): ts.Identifi
  * never RUN either way — module init unwinds at the declaration's throw,
  * which the initializer READ lowers to through the ordinary chain walk
  * (lower-exprs) — so runtime semantics are identical; only the binding's
- * storage story changes. */
+ * storage story changes.
+ *
+ * The decline is exactly as wide as its rationale: it only buys anything
+ * when ordinary storage COMPILES, so a written binding whose declared
+ * type has no static mapping keeps the trap claim (registration would
+ * only trade the compiling no-storage stance for a guaranteed SC2009 on
+ * a value that never exists — `var x = a(); x = y` over the recursive
+ * interface pair, recursiveInheritance2). bindingEverWritten itself
+ * skips the write forms the no-storage lowering already compiles (a
+ * statement-position `x = <ambient-rooted chain>` IS the RHS root's
+ * throw — lowerExprStatement never touches the target's storage). */
 export function trapDeclRootOf(L: Lowerer, decl: ts.VariableDeclaration): ts.Identifier | null {
   if (decl.initializer === undefined) return null;
   const root = ambientUndefVarRootOf(L, decl.initializer);
   if (root === null) return null;
   for (const nameNode of boundIdentifiersOf(decl.name)) {
     const sym = L.checker.getSymbolAtLocation(nameNode);
-    if (sym && bindingEverWritten(L, sym, decl.getSourceFile())) return null;
+    if (sym && bindingEverWritten(L, sym, decl.getSourceFile())) {
+      const mapped = L.mapTypeOf(L.checker.getTypeOfSymbol(sym));
+      if (mapped !== null && mapped.kind !== "void") return null;
+    }
   }
   return root;
 }
@@ -431,7 +444,17 @@ export function trapDeclRootOf(L: Lowerer, decl: ts.VariableDeclaration): ts.Ide
  * imported bindings are read-only): an assignment LHS (compound forms
  * included), a destructuring-assignment element, ++/--, or a bare
  * for-in/of cursor. Resolution is plain getSymbolAtLocation — a probe
- * must not flush deferred diagnostics or fence. */
+ * must not flush deferred diagnostics or fence.
+ *
+ * One write form does NOT count: a statement-position plain `=` whose
+ * RHS chain roots at an ambient-undefined name. That statement lowers to
+ * the RHS root's throw before any target resolution (lowerExprStatement's
+ * first claim — Node evaluates the RHS first and dies there), so it never
+ * needs the binding's storage and cannot justify declining the trap claim
+ * (`export let c = obj["prop"]<T>\`…\`; c = obj.prop<T>\`…\`` — the
+ * taggedTemplatesWithTypeArguments1 shape, where the decline pushed the
+ * initializer into an ordinary lowering that fences). ambientUndefVarRootOf
+ * carries its own collect-guard, so the extra question stays a probe. */
 function bindingEverWritten(L: Lowerer, sym: ts.Symbol, sf: ts.SourceFile): boolean {
   const symText = sym.name;
   const namesSym = (e: ts.Node): boolean =>
@@ -455,8 +478,16 @@ function bindingEverWritten(L: Lowerer, sym: ts.Symbol, sf: ts.SourceFile): bool
       if (k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment) {
         let lhs: ts.Expression = n.left;
         while (ts.isParenthesizedExpression(lhs)) lhs = lhs.expression;
-        if (namesSym(lhs)) written = true;
-        else if (ts.isArrayLiteralExpression(lhs) || ts.isObjectLiteralExpression(lhs)) {
+        const throwsBeforeTheWrite = (): boolean => {
+          if (k !== ts.SyntaxKind.EqualsToken || !ts.isIdentifier(lhs)) return false;
+          let p: ts.Node = n.parent;
+          while (ts.isParenthesizedExpression(p)) p = p.parent;
+          if (!ts.isExpressionStatement(p)) return false;
+          return ambientUndefVarRootOf(L, n.right) !== null;
+        };
+        if (namesSym(lhs)) {
+          if (!throwsBeforeTheWrite()) written = true;
+        } else if (ts.isArrayLiteralExpression(lhs) || ts.isObjectLiteralExpression(lhs)) {
           if (patternWrites(lhs)) written = true;
         }
       }

@@ -263,6 +263,71 @@ console.log(new exports.O().a());
     expect(r.stderr).toMatch(/^Uncaught Error: .* \[SC1090 at .*extends-reassigned-property\.cjs:\d+\]\n$/);
   });
 
+  test("a LEAF class whose collection fenced defers to its statement (JS lane)", async () => {
+    // The JS deferral's leaf edge: a class nothing extends keeps the
+    // runtime-fence story even when its shape has no lowering
+    // (constructor-assigned field shadowing its own method) — the build
+    // succeeds, statements before the class statement run, and the class
+    // statement throws the recorded fence. Only the EXTENDS edge reports
+    // at compile time (diagnostics js-extends-poisoned-base pins that).
+    const r = await compileAndRun(
+      "leaf-shadowing-class-defers",
+      `'use strict';
+console.log("before");
+class X {
+  constructor() {
+    this.m = "not callable";
+  }
+  m() {
+    console.log("method");
+  }
+}
+const x = new X();
+x.m();
+console.log("unreachable");
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("before\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: constructor-assigned fields shadowing methods are not supported yet \[SC1090 at .*leaf-shadowing-class-defers\.cjs:5\]\n$/,
+    );
+  });
+
+  test("a DERIVED class of a clean base keeps the deferral when only the derived is poisoned (JS lane)", async () => {
+    // The other side of the extends-edge rule: the derived class's OWN
+    // fence (a constructor-assigned field shadowing an INHERITED method)
+    // stays deferred — the base collected fine, so the eager
+    // poisoned-base report has nothing to flush, and the derived class
+    // statement is the runtime fence exactly like a leaf.
+    const r = await compileAndRun(
+      "derived-shadowing-class-defers",
+      `'use strict';
+console.log("before");
+class A {
+  foo() {
+    return 4;
+  }
+}
+class B extends A {
+  constructor() {
+    super();
+    this.foo = () => 3;
+  }
+}
+const i = new B();
+console.log(i.foo());
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("before\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: constructor-assigned fields shadowing methods are not supported yet \[SC1090 at .*derived-shadowing-class-defers\.cjs:11\]\n$/,
+    );
+  });
+
   test("destructuring a SURFACED builtin global's member is a named fence at the pattern (JS lane)", async () => {
     // `const { max } = Math` would detach a member whose lowering is
     // keyed to its receiver (Math.max) — the pattern fences by member
