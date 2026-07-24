@@ -208,7 +208,7 @@
     {
       "id": "diagnostic.sc2002",
       "kind": "diagnostic-fence",
-      "name": "record width subtyping (shapes must match exactly)",
+      "name": "record shape flows outside the width-copy rules (shapes must match exactly or width-coerce)",
       "status": "unsupported",
       "code": "SC2002"
     },

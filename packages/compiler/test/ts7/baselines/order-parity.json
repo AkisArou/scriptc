@@ -4730,6 +4730,30 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2556-width-hybrid-shapes.ts": {
+   "order": [
+    "<repo>/tests/corpus/2556-width-hybrid-shapes.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2557-width-field-lifts.ts": {
+   "order": [
+    "<repo>/tests/corpus/2557-width-field-lifts.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2558-index-signature-func-values.ts": {
+   "order": [
+    "<repo>/tests/corpus/2558-index-signature-func-values.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2559-index-signature-container-values.ts": {
+   "order": [
+    "<repo>/tests/corpus/2559-index-signature-container-values.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6509,6 +6533,12 @@
   "<repo>/tests/diagnostics/promise-all-fences.ts": {
    "order": [
     "<repo>/tests/diagnostics/promise-all-fences.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/record-width.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/record-width.ts"
    ],
    "diags": []
   },

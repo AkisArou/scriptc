@@ -55,6 +55,13 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       // the path already says where.
       case "func":
         return "function";
+      // Map/Set-valued index signatures (Record<string, Map<K, V>>): only
+      // reachable through the keyed-read miss trap's message — no dynCheck
+      // ever expects one.
+      case "map":
+        return "Map";
+      case "set":
+        return "Set";
       default: {
         // Runtime HANDLE targets name the class ("expected
         // IncomingMessage at $, got string").

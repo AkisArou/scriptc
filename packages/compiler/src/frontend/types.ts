@@ -2910,8 +2910,10 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
   // BOTH signatures at once (string + number) collapse into the one store
   // when their value types intern identically (tsc requires only
   // assignability; unequal slots would need a per-key answer the store
-  // cannot give). Value types outside the map-value world stay unmapped
-  // (isSupportedIndexValue).
+  // cannot give). The value domain is the overflow store's
+  // (isSupportedIndexValue): the map-value kinds plus 'unknown', functions
+  // (the command-registry pattern), Maps/Sets, and nested index-signature
+  // records; everything else stays unmapped.
   let indexValue: IrType | undefined;
   const indexInfos = checker.getIndexInfosOfType(widened);
   if (indexInfos.length > 0) {
