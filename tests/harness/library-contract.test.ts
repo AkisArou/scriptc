@@ -19,6 +19,8 @@
  *     the clock-touching fixture attests deterministic: false
  *   - SC4009: unprojectable designations refuse with the declaration
  *     named, never guessed around
+ *   - ask-5 §4: the full-fence worked-example profile compiles a clean
+ *     program and the computed attestation agrees — deterministic: true
  */
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -309,6 +311,19 @@ identity stable: 1
     expect(doc.channels.chrome_msg).toBeNull();
     expect(doc.channels.env_msgs).toEqual([]);
     expect(doc.integer_slots).toEqual([]);
+  });
+
+  test("ask-5 §4 invariant: the full-fence profile compiles and attests deterministic: true", async () => {
+    // The worked-example determinism profile (real manifest ids) over a
+    // clean program: every fence loads, none is reached, compilation
+    // succeeds, and the sidecar's COMPUTED attestation agrees with the
+    // fences' construction — deterministic: true. A program that compiles
+    // under full fences yet attests false is a bug in one of the two
+    // scans (spec §4), and this pin is what recognizes it.
+    const { doc } = await buildContract("fences-attest", emission);
+    expect(validateSidecar(doc)).toEqual([]);
+    expect(doc.deterministic).toBe(true);
+    expect(doc.async_free).toBe(true);
   });
 
   test("ask-3 §2 adversarial order shapes + §3 spread-union composition", async () => {

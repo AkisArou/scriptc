@@ -57,6 +57,15 @@
  *                           refuses SC4020 naming the failed bar — never
  *                           a generic SC1010/SC2013 — and builtins keep
  *                           the SC4005 async_free story
+ *   K14 determinism-fences  the ask-5 deny-by-manifest-id surface: a
+ *                           reached fenced static surface refuses SC4008
+ *                           (id + name + attributed teaching note, both
+ *                           selector forms), unreached fences emit
+ *                           byte-identical code to a fence-free build,
+ *                           the generalized teachings map decorates any
+ *                           refusal by code or manifest id, and fencing
+ *                           an already-refusing surface only adds the
+ *                           note (its own code survives)
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -524,7 +533,8 @@ let refusalCounter = 0;
 async function refusal(
   source: string,
   profilePatch: Record<string, unknown>,
-): Promise<{ code: string; message: string; hint?: string }[]> {
+  emission: Emission = "c",
+): Promise<{ code: string; message: string; hint?: string; note?: string; file: string }[]> {
   const outDir = join(cacheDir, `refusal-${refusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
   const entry = join(outDir, "lib.ts");
@@ -533,7 +543,7 @@ async function refusal(
     profile_format: 1,
     name: "refusal-fixture",
     entry,
-    emission: "c",
+    emission,
     abi: {
       prefix: "kx_",
       init_symbol: "kx_init",
@@ -549,7 +559,13 @@ async function refusal(
   const result = await compileLibrary({ profilePath, outDir });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
-  return result.diagnostics.map((d) => ({ code: d.code, message: d.message, ...(d.hint !== undefined ? { hint: d.hint } : {}) }));
+  return result.diagnostics.map((d) => ({
+    code: d.code,
+    message: d.message,
+    ...(d.hint !== undefined ? { hint: d.hint } : {}),
+    ...(d.note !== undefined ? { note: d.note } : {}),
+    file: d.loc.file,
+  }));
 }
 
 describe("K9: library-mode refusals", () => {
@@ -580,24 +596,26 @@ describe("K9: library-mode refusals", () => {
     expect(diags[0]!.message).toContain("2 parameter(s)");
   });
 
-  test("SC4004: a mapped async export, with the profile teaching", async () => {
+  test("SC4004: a mapped async export, with the profile teaching as the attributed note", async () => {
     const diags = await refusal(`export async function tick(): Promise<number> { return 1; }\n`, {
       exports: [{ export: "tick", symbol: "kx_tick", params: [], returns: "f64" }],
       determinism: { teachings: { async: "use the host scheduler entry instead" } },
     });
     expect(diags[0]!.code).toBe("SC4004");
     expect(diags[0]!.hint).toContain("synchronous facade");
-    expect(diags[0]!.hint).toContain("use the host scheduler entry instead");
+    // The teaching arrives as its own visibly-attributed note — the
+    // tool's hint stays the tool's.
+    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: use the host scheduler entry instead");
   });
 
-  test("SC4005: a timer anywhere in the graph, teaching verbatim", async () => {
+  test("SC4005: a timer anywhere in the graph, teaching as the attributed note", async () => {
     const diags = await refusal(`setTimeout(() => {}, 1);\nexport function f(): number { return 1; }\n`, {
       exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
       determinism: { teachings: { SC4005: "schedule through the embedder frame loop" } },
     });
     expect(diags[0]!.code).toBe("SC4005");
     expect(diags[0]!.message).toContain("timers");
-    expect(diags[0]!.hint).toContain("schedule through the embedder frame loop");
+    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: schedule through the embedder frame loop");
   });
 
   test("SC4007: a generic export", async () => {
@@ -620,7 +638,7 @@ async function npmRefusal(
   entryFile: string,
   exports: unknown[],
   profilePatch: Record<string, unknown> = {},
-): Promise<{ code: string; message: string; hint?: string; file: string }[]> {
+): Promise<{ code: string; message: string; hint?: string; note?: string; file: string }[]> {
   const outDir = join(cacheDir, `npm-refusal-${npmRefusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
   const profile = {
@@ -647,6 +665,7 @@ async function npmRefusal(
     code: d.code,
     message: d.message,
     ...(d.hint !== undefined ? { hint: d.hint } : {}),
+    ...(d.note !== undefined ? { note: d.note } : {}),
     file: d.loc.file,
   }));
 }
@@ -683,14 +702,14 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
     expect(diags[0]!.message).toContain("no own .d.ts");
   });
 
-  test("the profile teaching rides the SC4020 hint", async () => {
+  test("the profile teaching rides SC4020 as the attributed note", async () => {
     const diags = await npmRefusal(
       "lib-markers.ts",
       [{ export: "f", symbol: "kx_f", params: [], returns: "string" }],
       { determinism: { teachings: { SC4020: "request the vendored copy from the embedder SDK" } } },
     );
     expect(diags[0]!.code).toBe("SC4020");
-    expect(diags[0]!.hint).toContain("request the vendored copy from the embedder SDK");
+    expect(diags[0]!.note).toBe("from the 'npm-refusal-fixture' profile: request the vendored copy from the embedder SDK");
   });
 
   test("a builtin pulling the event loop keeps the SC4005 story, not a new fence", async () => {
@@ -700,5 +719,142 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
     );
     expect(diags[0]!.code).toBe("SC4005");
     expect(diags[0]!.message).toContain("timers");
+  });
+});
+
+/* ── K14: the ask-5 determinism fences (spec §1–§2) ───────────────────────
+ * The profile's `determinism.fences` deny surfaces by surface-manifest id
+ * at compile time. Reached STATIC surfaces refuse SC4008 with the fence's
+ * teaching as the attributed note; fenced surfaces the static tier
+ * refuses anyway keep their own code with the teaching riding it; and the
+ * generalized `teachings` map attaches text to any refusal by code or
+ * manifest id. Both emissions run the refusal cases too — the refusal is
+ * pre-emission, but the profile pins the emission and conformance asserts
+ * the answer is emission-invariant. */
+
+const WORKED_FENCES = [
+  { id: "stdlib.math.random", teaching: "randomness is an effect: request it from the host and receive it as a Msg." },
+  { prefix: "node-builtin.fs.", teaching: "files are effects: declare reads and writes as commands the host executes." },
+  { prefix: "node-builtin.net.", teaching: "network is an effect: declare requests as commands; responses arrive as Msgs." },
+  { prefix: "node-builtin.os.", teaching: "machine identity is an effect: ask the host." },
+  { prefix: "node-builtin.crypto.", teaching: "randomness and digests come from the host." },
+];
+
+describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
+  test("a reached id-fenced surface refuses SC4008 with code, id, and attributed teaching", async () => {
+    const diags = await refusal(
+      `export function roll(): number { return Math.random(); }\n`,
+      {
+        exports: [{ export: "roll", symbol: "kx_roll", params: [], returns: "f64" }],
+        determinism: { fences: WORKED_FENCES },
+      },
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'stdlib.math.random'");
+    expect(diags[0]!.message).toContain("Math.random");
+    expect(diags[0]!.note).toBe(
+      "from the 'refusal-fixture' profile: randomness is an effect: request it from the host and receive it as a Msg.",
+    );
+    // Anchored at the reaching construct, not the profile file.
+    expect(diags[0]!.file.endsWith("lib.ts")).toBe(true);
+  });
+
+  test("a reached prefix-fenced surface refuses SC4008 naming the covered member id", async () => {
+    const diags = await refusal(
+      `import { readFileSync } from "node:fs";\nexport function f(): number { return readFileSync("x", "utf8").length; }\n`,
+      {
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: { fences: WORKED_FENCES },
+      },
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'node-builtin.fs.readFileSync'");
+    expect(diags[0]!.note).toContain("files are effects");
+  });
+
+  test("unreached fences compile at zero cost: the emitted code is byte-identical", async () => {
+    // ONE entry file feeds both builds (emitted C/LLVM embeds the entry's
+    // path in provenance comments; the fence's cost is what's measured,
+    // not the build directory's spelling).
+    const entryDir = join(cacheDir, `fence-zerocost-${emission}`);
+    mkdirSync(entryDir, { recursive: true });
+    const entry = join(entryDir, "lib.ts");
+    writeFileSync(entry, `export function f(): number { return 41 + 1; }\n`);
+    const emitted: string[] = [];
+    for (const fenced of [false, true]) {
+      const outDir = join(cacheDir, `fence-zerocost-${emission}-${fenced ? "fenced" : "plain"}`);
+      mkdirSync(outDir, { recursive: true });
+      const profilePath = join(outDir, "profile.json");
+      writeFileSync(
+        profilePath,
+        JSON.stringify({
+          profile_format: 1,
+          name: "fence-zerocost",
+          entry,
+          emission,
+          abi: {
+            prefix: "kx_",
+            init_symbol: "kx_init",
+            sink_register_symbol: "kx_set_panic_sink",
+            collect_symbol: null,
+            result_reset_symbol: null,
+          },
+          exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+          ...(fenced ? { determinism: { fences: WORKED_FENCES } } : {}),
+        }),
+      );
+      const result = await compileLibrary({ profilePath, outDir });
+      if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+      emitted.push(readFileSync(result.cPath, "utf8"));
+    }
+    expect(emitted[1]).toBe(emitted[0]);
+  });
+
+  test("a code-keyed teachings entry rides a non-fence refusal as the attributed note", async () => {
+    const diags = await refusal(
+      `export function f(): number { return "abc".normalize().length; }\n`,
+      {
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: { teachings: { SC2020: "host strings arrive normalized; never renormalize in a core" } },
+      },
+      emission,
+    );
+    expect(diags[0]!.code).toBe("SC2020");
+    expect(diags[0]!.note).toBe(
+      "from the 'refusal-fixture' profile: host strings arrive normalized; never renormalize in a core",
+    );
+  });
+
+  test("a manifest-id-keyed teachings entry attaches to that surface's own refusal", async () => {
+    const diags = await refusal(
+      `export function f(): number { return Math.sin(1); }\n`,
+      {
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: { teachings: { "stdlib.math.sin": "trig runs in the host; request it as an effect" } },
+      },
+      emission,
+    );
+    // The surface's own code, not a fence code: the id key attaches text
+    // to the refusal that already fires.
+    expect(diags[0]!.code).toBe("SC2012");
+    expect(diags[0]!.message).toContain("Math.sin");
+    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: trig runs in the host; request it as an effect");
+  });
+
+  test("fencing a surface the static tier refuses anyway changes only the message", async () => {
+    const diags = await refusal(
+      `export function f(): number { return Math.sin(1); }\n`,
+      {
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: { fences: [{ id: "stdlib.math.sin", teaching: "trig is host math" }] },
+      },
+      emission,
+    );
+    // The existing refusal's code survives — the fence never re-codes a
+    // surface that already refuses; its teaching rides as the note.
+    expect(diags[0]!.code).toBe("SC2012");
+    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: trig is host math");
   });
 });

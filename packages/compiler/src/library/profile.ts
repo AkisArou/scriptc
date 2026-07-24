@@ -26,13 +26,24 @@
  *     "sidecar": { ... },                      // ask-2 contract sidecar
  *                                              // (see below); absent =
  *                                              // no sidecar is emitted
- *     "determinism": { ... }                   // ask-5 surface, reserved;
- *                                              // only `teachings` and
- *                                              // `remediations` are read
- *                                              // today (the SC4004/SC4005
- *                                              // teaching rider + the
+ *     "determinism": { ... }                   // the ask-5 surface:
+ *                                              // `teachings`/`remediations`
+ *                                              // maps (the SC4004/SC4005
+ *                                              // rider generalized + the
  *                                              // structured trap-teaching
  *                                              // encoding's text sources)
+ *                                              // and the `fences` array —
+ *                                              // deny-by-manifest-id
+ *                                              // entries, each exactly one
+ *                                              // of id/prefix plus optional
+ *                                              // teaching/remediation
+ *                                              // (fence-eval.ts resolves
+ *                                              // them against this
+ *                                              // release's surface
+ *                                              // manifest at load);
+ *                                              // everything else under
+ *                                              // `determinism` stays
+ *                                              // reserved and ignored
  *   }
  *
  * The `sidecar` section (ask 2): when present, the same invocation that
@@ -77,6 +88,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { libProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import { resolveLibraryFences, type LibraryFenceDecl, type ResolvedLibraryFence } from "./fence-eval.js";
 
 /** Marshalling classes legal in PARAMETER position (v1). */
 export const LIB_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32"] as const;
@@ -165,6 +177,11 @@ export interface LibraryProfile {
    * field is absent from the assembled bytes when the profile supplies
    * none. Same reserved-byte validation as `teachings`. */
   remediations: Readonly<Record<string, string>>;
+  /** The ask-5 determinism fences, resolved at load against this compiler
+   * release's surface manifest (fence-eval.ts): unknown ids/prefixes and
+   * unpoliceable static entries refused SC4001, never accepted as inert.
+   * Empty when the profile declares none. */
+  fences: readonly ResolvedLibraryFence[];
 }
 
 const C_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -373,17 +390,33 @@ export function loadLibraryProfile(
       exportNames.add(e.export);
     });
 
-    // Ask-5 surface: only the teachings and remediations riders are read
-    // today; everything else under `determinism` is reserved and ignored.
-    // Both maps feed the structured trap-teaching encoding, which reserves
-    // 0x01 (the version marker) and 0x1F (the field separator): a key or
-    // value carrying either would corrupt the assembled sink message, so
-    // both are refused at load. Keys are diagnostic codes validated ONLY
-    // as tokens free of the reserved bytes — embedder code spaces belong
+    // Ask-5 surface: the teachings/remediations riders and the fences
+    // array are read; everything else under `determinism` is reserved and
+    // ignored. Teaching/remediation TEXT refuses every control byte below
+    // 0x20 except newline (the ratified constraint: 0x01 and 0x1F are the
+    // structured trap encoding's marker and separator — either inside
+    // profile-authored text would corrupt the assembled sink message; the
+    // remaining control bytes have no honest place in teaching prose) and
+    // caps at 512 UTF-8 bytes per string. Keys are diagnostic codes
+    // validated ONLY as control-free tokens — embedder code spaces belong
     // to the embedder (SC is the compiler registry's); membership is
     // never checked here.
     const teachings: Record<string, string> = {};
     const remediations: Record<string, string> = {};
+    let fences: ResolvedLibraryFence[] = [];
+    const RESERVED_TEXT = /[\u0000-\u0009\u000b-\u001f]/;
+    const RESERVED_KEY = /[\u0000-\u001f]/;
+    const checkRiderText = (v: string, path: string): void => {
+      if (RESERVED_TEXT.test(v)) {
+        throw new ProfileError(
+          `'${path}' contains a reserved byte — control bytes below 0x20 are refused (0x01 and 0x1F are the structured trap encoding's marker and separator); teaching and remediation text must be plain UTF-8, newlines only`,
+        );
+      }
+      const bytes = new TextEncoder().encode(v).length;
+      if (bytes > 512) {
+        throw new ProfileError(`'${path}' is ${bytes} bytes — teaching and remediation strings cap at 512 bytes`);
+      }
+    };
     const det = p["determinism"];
     if (det !== undefined && det !== null && typeof det === "object" && !Array.isArray(det)) {
       const readRider = (rider: "teachings" | "remediations", into: Record<string, string>): void => {
@@ -391,21 +424,58 @@ export function loadLibraryProfile(
         if (t === undefined || t === null || typeof t !== "object" || Array.isArray(t)) return;
         for (const [k, v] of Object.entries(t as Record<string, unknown>)) {
           if (typeof v !== "string") continue;
-          if (/[\u0001\u001f]/.test(k)) {
+          if (RESERVED_KEY.test(k)) {
             throw new ProfileError(
               `'determinism.${rider}' key ${JSON.stringify(k)} contains a reserved byte — 0x01 and 0x1F are the structured trap encoding's marker and separator; a code must be a plain token`,
             );
           }
-          if (/[\u0001\u001f]/.test(v)) {
-            throw new ProfileError(
-              `'determinism.${rider}.${k}' contains a reserved byte — 0x01 and 0x1F are the structured trap encoding's marker and separator; teaching and remediation text must be plain UTF-8`,
-            );
-          }
+          checkRiderText(v, `determinism.${rider}.${k}`);
           into[k] = v;
         }
       };
       readRider("teachings", teachings);
       readRider("remediations", remediations);
+
+      // The fences array (spec §1): each entry exactly one of id/prefix
+      // plus optional teaching/remediation, unknown fields refused (a typo
+      // here silently disarms a denial), and the selector resolved against
+      // this release's surface manifest — unknown ids/prefixes refuse
+      // loudly (ratified: fence profiles pin per compiler release).
+      const fencesRaw = (det as Record<string, unknown>)["fences"];
+      if (fencesRaw !== undefined && fencesRaw !== null) {
+        if (!Array.isArray(fencesRaw)) throw new ProfileError("'determinism.fences' must be an array");
+        const decls: LibraryFenceDecl[] = fencesRaw.map((f, i) => {
+          const path = `determinism.fences[${i}]`;
+          if (f === null || typeof f !== "object" || Array.isArray(f)) {
+            throw new ProfileError(`'${path}' must be an object`);
+          }
+          rejectUnknownKeys(f, path, ["id", "prefix", "teaching", "remediation"]);
+          const ff = f as Record<string, unknown>;
+          if ((ff["id"] === undefined) === (ff["prefix"] === undefined)) {
+            throw new ProfileError(`'${path}' must carry exactly one of 'id' or 'prefix'`);
+          }
+          const decl: LibraryFenceDecl = { path };
+          if (ff["id"] !== undefined) {
+            const id = req<string>(ff["id"], `${path}.id`, "string");
+            if (id === "") throw new ProfileError(`'${path}.id' must be a non-empty manifest entry id`);
+            decl.id = id;
+          } else {
+            const prefix = req<string>(ff["prefix"], `${path}.prefix`, "string");
+            if (prefix === "") throw new ProfileError(`'${path}.prefix' must be a non-empty manifest id prefix`);
+            decl.prefix = prefix;
+          }
+          for (const rider of ["teaching", "remediation"] as const) {
+            if (ff[rider] === undefined) continue;
+            const text = req<string>(ff[rider], `${path}.${rider}`, "string");
+            checkRiderText(text, `${path}.${rider}`);
+            decl[rider] = text;
+          }
+          return decl;
+        });
+        const resolved = resolveLibraryFences(decls);
+        if (!resolved.ok) throw new ProfileError(resolved.detail);
+        fences = resolved.fences;
+      }
     }
 
     const entry = isAbsolute(entryRel) ? entryRel : resolve(dirname(profilePath), entryRel);
@@ -426,6 +496,7 @@ export function loadLibraryProfile(
         profileBytes: bytes,
         teachings,
         remediations,
+        fences,
       },
     };
   } catch (e) {
@@ -443,7 +514,17 @@ export function profileTeaching(profile: LibraryProfile, code: string): string |
 
 /** The profile's remediation text for one code — the structured
  * trap-teaching message's optional fourth field. No shared-key fallback:
- * a remediation names one code's fix. */
+ * a remediation names one code's fix. A fence entry's `remediation` feeds
+ * the same lookup through the codes its covered manifest entries carry
+ * (spec §3: "a remediation in a fence entry or a `remediations` map" —
+ * one data source for the field that already exists); an explicit map key
+ * wins over a fence's, and the first declared fence wins among fences. */
 export function profileRemediation(profile: LibraryProfile, code: string): string | undefined {
-  return profile.remediations[code];
+  const direct = profile.remediations[code];
+  if (direct !== undefined) return direct;
+  for (const fence of profile.fences) {
+    if (fence.remediation === undefined) continue;
+    if (fence.surfaces.some((s) => s.code === code)) return fence.remediation;
+  }
+  return undefined;
 }
