@@ -1151,7 +1151,12 @@ export class Lowerer {
         const recvDecl = recvDecls.find(ts.isImportClause) ?? recvDecls[0];
         if (recvDecl && ts.isVariableDeclaration(recvDecl) && recvDecl.initializer) {
           const spec = requireSpecOf(recvDecl.initializer);
-          const dep = spec !== null ? resolveImport(this.program, recvDecl.getSourceFile(), spec) : null;
+          const dep =
+            spec === null
+              ? null
+              : isRelativeSpecifier(spec)
+                ? resolveImport(this.program, recvDecl.getSourceFile(), spec)
+                : npmStaticDepSf7(this.program, recvDecl.getSourceFile(), spec);
           if (dep) symbol = this.cjsModuleExportSymbol(dep, ident.text);
         } else if (recvDecl && ts.isImportClause(recvDecl)) {
           // The DEFAULT-import spelling of the same binding: the dep is
@@ -1327,12 +1332,14 @@ export class Lowerer {
 
   /** True when `expr` is an identifier bound by a top-level
    * `const x = require("./local")` of a RELATIVE module — the CommonJS
-   * namespace binding — or by a DEFAULT import of a CommonJS JS module
-   * (`import d from "./lib.cjs"`: Node binds d to module.exports, the
-   * same value require answers). Member accesses on it resolve through
-   * the export table (property symbols → resolveValueSymbol); the bare
-   * value keeps the namespace-object fence, like ESM namespace imports
-   * of builtins. */
+   * namespace binding — or of a bare specifier naming an opted-in
+   * --npm-static package (its CJS entry is a program module, so the
+   * binding is the same namespace over the same export table), or by a
+   * DEFAULT import of a CommonJS JS module (`import d from "./lib.cjs"`:
+   * Node binds d to module.exports, the same value require answers).
+   * Member accesses on it resolve through the export table (property
+   * symbols → resolveValueSymbol); the bare value keeps the
+   * namespace-object fence, like ESM namespace imports of builtins. */
   cjsLocalModuleBindingOf(expr: ts.Expression): boolean {
     if (!ts.isIdentifier(expr)) return false;
     const sym = this.checker.getSymbolAtLocation(expr);
@@ -1346,7 +1353,13 @@ export class Lowerer {
         return false;
       }
       const spec = requireSpecOf(decl.initializer);
-      if (spec === null || !isRelativeSpecifier(spec)) return false;
+      if (spec === null) return false;
+      if (
+        !isRelativeSpecifier(spec) &&
+        npmStaticDepSf7(this.program, decl.getSourceFile(), spec) === null
+      ) {
+        return false;
+      }
     }
     // SINGLE-VALUE exporters (`module.exports = Countdown` / `= double` /
     // `= 42`): the requirer's binding IS the exported value, not a
@@ -1443,12 +1456,15 @@ export class Lowerer {
   /** The lowering of a CommonJS `require("./local")` occurrence: a call of
    * the required module's run-once %init at exactly this statement's
    * position — Node's inline evaluation, with the guard supplying the
-   * cache-hit behavior for every require after the first. Null when the
-   * specifier is not a relative program module (builtins load nothing;
-   * anything else kept its preflight fence). */
+   * cache-hit behavior for every require after the first. Bare specifiers
+   * naming an opted-in --npm-static package resolve to that package's
+   * program entry (the same edge preflight admitted — bundle dists require
+   * their external dependencies by name). Null for everything else
+   * (builtins load nothing; the rest kept its preflight fence). */
   requireInitStmt(spec: string, node: ts.Node): IrStmt | null {
-    if (!isRelativeSpecifier(spec)) return null;
-    const dep = resolveImport(this.program, node.getSourceFile(), spec);
+    const dep = isRelativeSpecifier(spec)
+      ? resolveImport(this.program, node.getSourceFile(), spec)
+      : npmStaticDepSf7(this.program, node.getSourceFile(), spec);
     if (!dep || dep.fileName.endsWith(".json")) return null;
     const initName = this.initNameOf.get(dep);
     if (initName === undefined) return null;

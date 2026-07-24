@@ -364,13 +364,21 @@ export function npmStaticFsShadow(): NpmStaticFsShadow | null {
       // program serves checker and lowering, so the rewrite is the text
       // everywhere downstream (statement walks, the CJS lexer link check,
       // diagnostics rendering; original line offsets survive by
-      // construction).
+      // construction). A `degrade` answer (a __toESM interop construct the
+      // recognizers cannot finish) marks the PACKAGE an offender with the
+      // reason — the fallback loop islands it, never a failed build — and
+      // the file serves untouched for the doomed load.
       if (path.endsWith(".js") || path.endsWith(".cjs")) {
         const hit = rewriteCache.get(path);
         if (hit !== undefined) return hit ?? undefined;
         let rewritten: string | null = null;
         try {
-          rewritten = rewriteBundlerCjsExports(readFileSync(path, "utf8"), path);
+          const answer = rewriteBundlerCjsExports(readFileSync(path, "utf8"), path);
+          if (answer !== null && typeof answer === "object") {
+            reportNpmStaticOffender(target.pkg, answer.degrade);
+          } else {
+            rewritten = answer;
+          }
         } catch {
           rewritten = null; // unreadable/unparseable: fall through untouched
         }

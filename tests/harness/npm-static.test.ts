@@ -55,7 +55,7 @@ async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise
   const inputs = [
     entry,
     ...globSync(join(pilotRoot, "**/node_modules/**/*.{js,mjs,cjs,json,d.ts}")).sort(),
-    // the bundler-emitted-CJS mini packages (cases 2465-2469)
+    // the bundler-emitted-CJS mini packages (cases 2465-2469, 2556-2557)
     ...globSync(join(fixturesRoot, "npm/node_modules/gt*/**/*.{js,json}")).sort(),
   ];
   for (const f of inputs) hash.update(f).update(readFileSync(f));
@@ -329,6 +329,91 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 180_000);
+
+  /* ── 2556-2557: esbuild's __toESM interop around EXTERNAL (unbundled)
+   * dependencies ─ the wrapper erases (the recognized helper pads down to
+   * the bare require it wraps), member accesses model on the required
+   * package's canonical table, `.default` binds the module for plain-CJS
+   * targets (and unconditionally under the `, 1` node-mode variant) and
+   * stays a member read for __esModule-stamped ones; interop the
+   * recognizer cannot finish degrades the package with a note naming the
+   * construct. */
+
+  // 2556: gtwrap wraps a plain-CJS external (gtcore — default IS the
+  // module) and an esbuild-bundle external (gtable — stamped, named
+  // getter passthrough); driven paths byte-match Node, and the undriven
+  // inline `__toESM(require(…)).tag` form costs nothing.
+  test("bundler-emitted CJS 2556-toesm-external compiles statically and byte-matches Node", async () => {
+    const entry = join(fixturesRoot, "npm/cases/2556-toesm-external/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: ["gtwrap", "gtcore", "gtable"] });
+    expect(coverage.npmStatic).toEqual([
+      { package: "gtwrap", status: "static" },
+      { package: "gtcore", status: "static" },
+      { package: "gtable", status: "static" },
+    ]);
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics).toHaveLength(0);
+    const binary = await buildStatic(entry, ["gtwrap", "gtcore", "gtable"]);
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry]),
+      runBinary(binary, []),
+    ]);
+    expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+  }, 180_000);
+
+  // The interop's require edge is a require like any other: with only
+  // gtwrap opted in, the erased wrapper's require("gtcore") meets the
+  // existing SC1010 fence anchored in gtwrap's files, and the package
+  // degrades with the module-naming note — preflight and lowering agree.
+  test("__toESM of an unopted dependency degrades the wrapping package with the require note", () => {
+    const entry = join(fixturesRoot, "npm/cases/2556-toesm-external/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: ["gtwrap"] });
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "gtwrap",
+        status: "fallback",
+        detail: expect.stringContaining("'gtcore'") as string,
+      },
+    ]);
+  }, 120_000);
+
+  // 2557: a __toESM whose TEXT deviates beyond the structural recognizer
+  // (a hand-rolled block-body interop). The rewrite must not guess: the
+  // package degrades to the island with a note NAMING the construct —
+  // never a failed build, and never the silent alternative (the live
+  // helper chain's `var __create = Object.create;` fences at module load
+  // while the report claims "static").
+  test("a deviant __toESM helper degrades the package with a construct-naming note", () => {
+    const entry = join(fixturesRoot, "npm/cases/2557-toesm-drift/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: ["gtdrift", "gtcore"] });
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "gtdrift",
+        status: "fallback",
+        detail: expect.stringContaining("__toESM") as string,
+      },
+      { package: "gtcore", status: "static" },
+    ]);
+  }, 120_000);
+
+  // Auto must not newly admit what the recognition cannot finish: the
+  // eligibility heuristics pick gtdrift (own .d.ts, unminified, no
+  // runtime markers), the attempt runs, and the SAME construct-naming
+  // degrade answers — the preflight refusal and the lowering agree.
+  test("--npm-static=auto degrades a deviant __toESM package with the same note", () => {
+    const entry = join(fixturesRoot, "npm/cases/2557-toesm-drift/main.ts");
+    const { coverage } = analyze(entry, { npmStatic: "auto" });
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "gtdrift",
+        status: "fallback",
+        detail: expect.stringContaining("__toESM") as string,
+      },
+    ]);
+  }, 120_000);
 
   // 2469: a TYPE-ONLY surface name (an interface) has no JS value the
   // inferred surface can carry — the import-site SC0001 NAMES the package,
