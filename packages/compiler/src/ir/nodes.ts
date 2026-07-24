@@ -6123,8 +6123,12 @@ export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: Sr
  * here: output is an effect, not a nondeterminism input, and console
  * policy is the profile's ask-5 business. process.platform/arch and the
  * version constants fold at compile time, so they are per-binary
- * constants, not ambient reads. */
-const LIB_NONDETERMINISTIC_PREFIXES: readonly [string, string][] = [
+ * constants, not ambient reads. Exported for the attestation-parity test
+ * (tests/harness/surface-manifest.test.ts): every spelling this table
+ * demotes on must be deniable by a manifest-id fence, or the ask-5 §4
+ * invariant (compiles under full fences ⇒ deterministic) cannot be
+ * stated. */
+export const LIB_NONDETERMINISTIC_PREFIXES: readonly [string, string][] = [
   ["math.random", "Math.random"],
   ["crypto.random", "crypto randomness"],
   ["date.", "the live clock (Date)"],

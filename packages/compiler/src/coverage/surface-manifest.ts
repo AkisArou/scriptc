@@ -40,6 +40,7 @@
 import { FENCE_CODES, UNSUPPORTED } from "../diagnostics/diagnostic.js";
 import { SUPPORTED_BUILTIN_MODULES, SUPPORTED_NODE_MODULES } from "../frontend/shared.js";
 import {
+  AMBIENT_SURFACE_FNS,
   ARRAY_METHODS,
   BUILTIN_MODULE_CONSTS,
   BUILTIN_MODULE_FENCE_HINTS,
@@ -82,7 +83,8 @@ export const MANIFEST_SCHEMA_VERSION = 1;
  * never read as a support claim in either direction. */
 const COVERAGE_NOTES: string[] = [
   "Entries are projected mechanically from the compiler's own decision tables: the diagnostics registry, the unsupported-syntax dispatch tables, the stdlib and node-builtin lowering tables, and the supported-builtin-module list. Nothing is hand-maintained; the manifest regenerates byte-identically from the source tree at this version.",
-  "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, process, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, and global functions (parseInt, parseFloat, isNaN, isFinite).",
+  "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, global functions (parseInt, parseFloat, isNaN, isFinite), and the process surface outside its ambient slice.",
+  "The ambient-nondeterminism and ambient-authority surfaces the library sidecar's determinism attestation scans ARE projected even where they lower through dedicated code paths — the Date compositions (stdlib.date.*), perf_hooks' performance.now, and the process global's ambient reads and authority calls (node-builtin.process.*) — so a determinism fence can name every surface the attestation demotes on.",
   "stdlib and node-builtin member entries name surface whose LOWERED call forms are constrained (arity, argument shapes); declared call forms outside the lowered set are refused per site, with code SC2020 for standard-library and node-builtin surface.",
   "Entries with status 'unsupported' or 'dynamic-only' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
   "Entries with status 'dynamic-only' compile when the build embeds the dynamic engine (--dynamic); without the flag each use site is refused with the entry's code.",
@@ -287,6 +289,20 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
         ...(hint !== undefined ? { note: hint } : {}),
       });
     }
+  }
+
+  // ── ambient dedicated-path surfaces: the attestation's ground ─────────
+  // Date/perf_hooks/process rows from the one ambient table — each entry
+  // is fenceable by construction (its row carries the reach-witnessing
+  // libCall spellings the fence detector uses).
+  for (const row of AMBIENT_SURFACE_FNS) {
+    add({
+      id: row.id,
+      kind: row.kind,
+      name: row.name,
+      status: "static",
+      ...(row.note !== undefined ? { note: row.note } : {}),
+    });
   }
 
   // ── diagnostic-fence: the enumerable refusal codes ─────────────────────

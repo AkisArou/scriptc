@@ -776,6 +776,153 @@ export const BUILTIN_MODULE_CONSTS: Record<string, Record<string, string | numbe
   cluster: { isPrimary: true, isMaster: true, isWorker: false },
 };
 
+/** ALTERNATE libCall spellings of tabled builtin members: lowerings the
+ * dispatch special-cases around the table row (Buffer/fd/options forms,
+ * the JS checked-validation variants) still ARE the member's surface —
+ * the sidecar's determinism attestation demotes on them by prefix, so the
+ * member's fence detector must witness them too (fencing one spelling
+ * fences the operation, the trimLeft/trimStart rule). Keyed like
+ * BUILTIN_MODULE_FNS; consumed by the fence taxonomy
+ * (library/fence-eval.ts) and the attestation-parity test. */
+export const BUILTIN_MODULE_FN_ALIASES: Record<string, Record<string, readonly IrLibFn[] | undefined> | undefined> = {
+  fs: {
+    // The Buffer form (no encoding), the fd forms (readFileSync(fd[,
+    // "utf8"])), and the checked-dynamic encoding form.
+    readFileSync: ["fs.readFileSyncBuf", "fs.readFileSyncBytes", "fs.readFileSyncDyn", "fs.readFdSync", "fs.readFdSyncBytes"],
+    // The bytes-data form and the { mode } options form.
+    writeFileSync: ["fs.writeFileSyncBytes", "fs.writeFileModeSync"],
+    // The { recursive, mode } option lowerings.
+    mkdirSync: ["fs.mkdirModeSync", "fs.mkdirRecursiveSync", "fs.mkdirRecursiveModeSync"],
+    // The { recursive, force } and maxRetries/retryDelay option lowerings.
+    rmSync: ["fs.rmOptsSync", "fs.rmRetrySync"],
+    // The { withFileTypes: true } Dirent form.
+    readdirSync: ["fs.readdirTypesSync"],
+    // The JS-source validation-ladder variant (lowerFsLadderCall): the
+    // real mkdtemp runs when the options leave utf8 semantics.
+    mkdtempSync: ["fs.mkdtempSyncChk"],
+    // lchmodSync is chmod's no-follow spelling, JS-ladder only (TypeScript
+    // callers fence per site); the ladder runs the REAL lchmod on APPLE,
+    // so the chmod fence witnesses it — fencing one spelling fences the
+    // operation.
+    chmodSync: ["fs.lchmodSyncChk"],
+    // The two-argument listener form.
+    watch: ["fs.watchCb"],
+  },
+  "fs/promises": {
+    // The Buffer form (no encoding).
+    readFile: ["fsp.readFileBytes"],
+  },
+  crypto: {
+    // The composed randomBytes(n).toString(enc) chain keeps its one-libCall
+    // lowering (lowerCryptoComposedCall) — same surface, no Buffer.
+    randomBytes: ["crypto.randomBytesToString"],
+  },
+  os: {
+    // lowerOsUserInfoCall assembles the record from scalar libCalls.
+    userInfo: ["os.userHomedir", "os.userShell"],
+  },
+};
+
+/** Ambient surfaces lowered through DEDICATED code paths (no lowering-table
+ * row): the Date compositions, perf_hooks' performance.now, and the process
+ * global's ambient reads and authority calls. These are the determinism
+ * attestation's ground (ir/nodes.ts's LIB_NONDETERMINISTIC_PREFIXES), so
+ * each row projects one surface-manifest entry — a permanent, fenceable id
+ * — and carries the libCall spellings that witness the surface's reach in
+ * a compiled graph (the fence detector and the attestation must agree; the
+ * parity test in tests/harness/surface-manifest.test.ts holds them to it). */
+export interface AmbientSurfaceRow {
+  /** The manifest entry id (stable diff key — permanent API). */
+  id: string;
+  kind: "stdlib" | "node-builtin";
+  /** Human-readable surface name (the manifest's `name`). */
+  name: string;
+  /** The IrLibFn spellings whose reach witnesses the surface. */
+  fns: readonly IrLibFn[];
+  note?: string;
+}
+
+export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
+  // ── the Date slice (lowerDateCall): Date.now/Date.UTC and the composed
+  // new Date(...).getTime()/.toISOString() forms — the worked-example
+  // "stdlib.date." family of the ask-5 spec.
+  {
+    id: "stdlib.date.now",
+    kind: "stdlib",
+    name: "Date.now",
+    fns: ["date.now"],
+    note: "the live clock; the zero-argument new Date() compositions read it too",
+  },
+  {
+    id: "stdlib.date.UTC",
+    kind: "stdlib",
+    name: "Date.UTC",
+    fns: ["date.utc"],
+    note: "the lowered call form takes 1 to 7 number arguments",
+  },
+  {
+    id: "stdlib.date.getTime",
+    kind: "stdlib",
+    name: "Date.prototype.getTime",
+    fns: ["date.parseGetTime"],
+    note: "the composed new Date(dateString).getTime() form; new Date().getTime() is stdlib.date.now's surface",
+  },
+  {
+    id: "stdlib.date.toISOString",
+    kind: "stdlib",
+    name: "Date.prototype.toISOString",
+    fns: ["date.toISOString"],
+    note: "the composed new Date(ms?).toISOString() form",
+  },
+  // ── perf_hooks (lowerPerfHooksCall): the monotonic clock.
+  {
+    id: "node-builtin.perf_hooks.performance.now",
+    kind: "node-builtin",
+    name: "perf_hooks.performance.now",
+    fns: ["perf.now"],
+    note: "the global performance object and the performance.now.bind(performance) function value reach the same clock",
+  },
+  // ── the process global's ambient reads and authority calls
+  // (lowerProcessProperty/lowerProcessMethodCall — process is a
+  // provenance-checked global here, not an importable module).
+  {
+    id: "node-builtin.process.env",
+    kind: "node-builtin",
+    name: "process.env",
+    fns: ["process.envGet", "process.envSet", "process.envUnset", "process.envPairs"],
+    note: "reads, writes, deletes, and enumeration of the process environment (the process global)",
+  },
+  { id: "node-builtin.process.argv", kind: "node-builtin", name: "process.argv", fns: ["process.argv"] },
+  { id: "node-builtin.process.cwd", kind: "node-builtin", name: "process.cwd", fns: ["process.cwd"] },
+  { id: "node-builtin.process.chdir", kind: "node-builtin", name: "process.chdir", fns: ["process.chdir"] },
+  { id: "node-builtin.process.pid", kind: "node-builtin", name: "process.pid", fns: ["process.pid"] },
+  { id: "node-builtin.process.getuid", kind: "node-builtin", name: "process.getuid", fns: ["process.getuid"] },
+  { id: "node-builtin.process.getgid", kind: "node-builtin", name: "process.getgid", fns: ["process.getgid"] },
+  { id: "node-builtin.process.execPath", kind: "node-builtin", name: "process.execPath", fns: ["process.execPath"] },
+  { id: "node-builtin.process.uptime", kind: "node-builtin", name: "process.uptime", fns: ["process.uptime"] },
+  {
+    id: "node-builtin.process.availableMemory",
+    kind: "node-builtin",
+    name: "process.availableMemory",
+    fns: ["process.availableMemory"],
+  },
+  {
+    id: "node-builtin.process.kill",
+    kind: "node-builtin",
+    name: "process.kill",
+    fns: ["process.kill", "process.killNum"],
+    note: "the signal-name and signal-number forms are one surface",
+  },
+  { id: "node-builtin.process.umask", kind: "node-builtin", name: "process.umask", fns: ["process.umask"] },
+  {
+    id: "node-builtin.process.exit",
+    kind: "node-builtin",
+    name: "process.exit",
+    fns: ["process.exit", "process.exiting"],
+    note: "process.exit and the process._exiting flag read are one surface",
+  },
+];
+
 /** The win32-target overrides of the bare modules' constants: path's
  * constants ARE the path/win32 namespace's, and os.EOL is CRLF (Node's
  * `isWindows ? '\r\n' : '\n'`). */

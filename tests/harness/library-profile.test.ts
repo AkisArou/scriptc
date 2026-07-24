@@ -325,13 +325,41 @@ describe("library profile fences", () => {
 
   test("an id matching nothing in this release's manifest refuses (ratified strictness)", () => {
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.date.now" }] } },
+      { ...good, determinism: { fences: [{ id: "stdlib.chrono.now" }] } },
       "determinism.fences[0].id",
     );
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.date.now" }] } },
+      { ...good, determinism: { fences: [{ id: "stdlib.chrono.now" }] } },
       "names no entry",
     );
+  });
+
+  test("the ask-5 worked example's Date family resolves: the attestation's ground is fenceable", () => {
+    // The spec's own worked prefix ('stdlib.date.') plus the other ambient
+    // families the determinism attestation demotes on — every one resolves
+    // against the manifest with detectors, so the §4 invariant is statable.
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        determinism: {
+          fences: [
+            { prefix: "stdlib.date." },
+            { prefix: "node-builtin.process." },
+            { prefix: "node-builtin.perf_hooks." },
+          ],
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dateIds = r.profile.fences[0]!.surfaces.map((s) => s.id);
+    expect(dateIds).toEqual(["stdlib.date.UTC", "stdlib.date.getTime", "stdlib.date.now", "stdlib.date.toISOString"]);
+    expect(r.profile.fences[0]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
+    const processIds = r.profile.fences[1]!.surfaces.map((s) => s.id);
+    expect(processIds).toContain("node-builtin.process.env");
+    expect(processIds).toContain("node-builtin.process.exit");
+    expect(r.profile.fences[1]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
+    expect(r.profile.fences[2]!.surfaces.map((s) => s.id)).toEqual(["node-builtin.perf_hooks.performance.now"]);
   });
 
   test("a prefix matching nothing refuses — the spec's illustrative spelling included", () => {

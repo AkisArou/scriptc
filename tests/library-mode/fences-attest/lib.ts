@@ -1,11 +1,13 @@
 // The ask-5 §4 invariant fixture: the worked-example determinism profile
-// (translated into this release's real manifest ids) over a program that
-// COMPILES under it. Every fence is present and unreached, and the
-// sidecar's computed attestation must come out `deterministic: true` —
-// with fences covering the ambient-nondeterminism surfaces, determinism
-// holds by construction for whatever compiles, so a program that compiles
-// under full fences yet attests false is a bug in one of the two scans,
-// never ambiguity.
+// (translated into this release's real manifest ids, extended to fence
+// EVERY ambient family the attestation demotes on — the Date compositions,
+// the process global's ambient slice, and perf_hooks included) over a
+// program that COMPILES under it. Every fence is present and unreached,
+// and the sidecar's computed attestation must come out `deterministic:
+// true` — with fences covering the ambient-nondeterminism surfaces,
+// determinism holds by construction for whatever compiles, so a program
+// that compiles under full fences yet attests false is a bug in one of
+// the two scans, never ambiguity.
 
 export interface Model {
   total: number;

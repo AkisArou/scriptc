@@ -738,6 +738,12 @@ const WORKED_FENCES = [
   { prefix: "node-builtin.net.", teaching: "network is an effect: declare requests as commands; responses arrive as Msgs." },
   { prefix: "node-builtin.os.", teaching: "machine identity is an effect: ask the host." },
   { prefix: "node-builtin.crypto.", teaching: "randomness and digests come from the host." },
+  // The remaining ambient families the determinism attestation demotes on
+  // — with these, the fence set covers every attestation-known surface
+  // (the ask-5 §4 invariant's full-fence profile).
+  { prefix: "stdlib.date.", teaching: "time is an effect: the host passes the clock in as a Msg." },
+  { prefix: "node-builtin.process.", teaching: "process ambient state and authority belong to the host." },
+  { prefix: "node-builtin.perf_hooks.", teaching: "the monotonic clock is the host's." },
 ];
 
 describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
@@ -758,6 +764,40 @@ describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
     );
     // Anchored at the reaching construct, not the profile file.
     expect(diags[0]!.file.endsWith("lib.ts")).toBe(true);
+  });
+
+  test("Date.now under the full-fence profile refuses SC4008 naming the Date entry", async () => {
+    // The §4 invariant's teeth: before the Date family had manifest
+    // entries, Date.now() compiled under every declarable fence set and
+    // attested `deterministic: false` post hoc — now the full-fence
+    // profile refuses it at compile time.
+    const diags = await refusal(
+      `export function stamp(): number { return Date.now(); }\n`,
+      {
+        exports: [{ export: "stamp", symbol: "kx_stamp", params: [], returns: "f64" }],
+        determinism: { fences: WORKED_FENCES },
+      },
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'stdlib.date.now'");
+    expect(diags[0]!.message).toContain("Date.now");
+    expect(diags[0]!.note).toContain("time is an effect");
+    expect(diags[0]!.file.endsWith("lib.ts")).toBe(true);
+  });
+
+  test("a process.env read under the full-fence profile refuses SC4008 naming the process entry", async () => {
+    const diags = await refusal(
+      `export function home(): number { return (process.env["HOME"] ?? "").length; }\n`,
+      {
+        exports: [{ export: "home", symbol: "kx_home", params: [], returns: "f64" }],
+        determinism: { fences: WORKED_FENCES },
+      },
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'node-builtin.process.env'");
+    expect(diags[0]!.note).toContain("process ambient state");
   });
 
   test("a reached prefix-fenced surface refuses SC4008 naming the covered member id", async () => {

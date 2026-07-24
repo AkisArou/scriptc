@@ -51,8 +51,10 @@
 import { generateSurfaceManifest, type SurfaceEntryKind, type SurfaceManifestEntry } from "../coverage/surface-manifest.js";
 import { libFenceDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import {
+  AMBIENT_SURFACE_FNS,
   BUILTIN_MODULE_CONSTS,
   BUILTIN_MODULE_FNS,
+  BUILTIN_MODULE_FN_ALIASES,
   STATIC_MATH_FNS,
   STR_METHODS,
 } from "../frontend/lowering/surfaces.js";
@@ -115,6 +117,10 @@ interface FenceTaxonomy {
   builtinRoots: Map<string, readonly string[]>;
   /** node-builtin constant ids: reads fold to literals at compile time. */
   foldedIds: Set<string>;
+  /** Ambient dedicated-path surfaces (Date/perf_hooks/process): manifest
+   * id → the libCall spellings witnessing reach (AMBIENT_SURFACE_FNS —
+   * the same rows the manifest projects the entries from). */
+  ambientFns: Map<string, readonly string[]>;
 }
 
 let taxonomy: FenceTaxonomy | null = null;
@@ -142,6 +148,9 @@ function fenceTaxonomy(): FenceTaxonomy {
         if (w !== undefined) fns.add(w.fn);
       }
       if (mod === "url" && member === "pathToFileURL") fns.add("url.pathToFileURLWin32");
+      // Alternate spellings the dispatch special-cases around the table
+      // row (Buffer/fd/options forms) are the same surface.
+      for (const alias of BUILTIN_MODULE_FN_ALIASES[mod]?.[member] ?? []) fns.add(alias);
       builtinFns.set(`${builtinRootId(mod)}.${member}`, [...fns]);
       for (const f of fns) root.add(f);
     }
@@ -150,7 +159,8 @@ function fenceTaxonomy(): FenceTaxonomy {
   for (const [mod, members] of Object.entries(BUILTIN_MODULE_CONSTS)) {
     for (const member of Object.keys(members!)) foldedIds.add(`${builtinRootId(mod)}.${member}`);
   }
-  taxonomy = { byId, ids: manifest.entries.map((e) => e.id), builtinFns, builtinRoots, foldedIds };
+  const ambientFns = new Map(AMBIENT_SURFACE_FNS.map((row) => [row.id, row.fns as readonly string[]]));
+  taxonomy = { byId, ids: manifest.entries.map((e) => e.id), builtinFns, builtinRoots, foldedIds, ambientFns };
   return taxonomy;
 }
 
@@ -189,6 +199,10 @@ function classifySurface(entry: SurfaceManifestEntry, tax: FenceTaxonomy): Surfa
       why: "reads of it fold to a per-binary constant at compile time — the artifact performs no runtime read a fence could deny",
     };
   }
+  // Ambient dedicated-path surfaces (Date/perf_hooks/process): the row
+  // that projected the entry carries its reach witness.
+  const ambient = tax.ambientFns.get(entry.id);
+  if (ambient !== undefined) return { kind: "detector", detector: { libFns: ambient } };
   const builtinFns = tax.builtinFns.get(entry.id);
   if (builtinFns !== undefined) return { kind: "detector", detector: { libFns: builtinFns } };
   const rootFns = tax.builtinRoots.get(entry.id);

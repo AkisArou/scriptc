@@ -3,7 +3,8 @@
   "compilerVersion": "0.0.10",
   "coverage": [
     "Entries are projected mechanically from the compiler's own decision tables: the diagnostics registry, the unsupported-syntax dispatch tables, the stdlib and node-builtin lowering tables, and the supported-builtin-module list. Nothing is hand-maintained; the manifest regenerates byte-identically from the source tree at this version.",
-    "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, process, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, and global functions (parseInt, parseFloat, isNaN, isFinite).",
+    "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, global functions (parseInt, parseFloat, isNaN, isFinite), and the process surface outside its ambient slice.",
+    "The ambient-nondeterminism and ambient-authority surfaces the library sidecar's determinism attestation scans ARE projected even where they lower through dedicated code paths — the Date compositions (stdlib.date.*), perf_hooks' performance.now, and the process global's ambient reads and authority calls (node-builtin.process.*) — so a determinism fence can name every surface the attestation demotes on.",
     "stdlib and node-builtin member entries name surface whose LOWERED call forms are constrained (arity, argument shapes); declared call forms outside the lowered set are refused per site, with code SC2020 for standard-library and node-builtin surface.",
     "Entries with status 'unsupported' or 'dynamic-only' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
     "Entries with status 'dynamic-only' compile when the build embeds the dynamic engine (--dynamic); without the flag each use site is refused with the entry's code.",
@@ -1149,6 +1150,94 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.perf_hooks.performance.now",
+      "kind": "node-builtin",
+      "name": "perf_hooks.performance.now",
+      "status": "static",
+      "note": "the global performance object and the performance.now.bind(performance) function value reach the same clock"
+    },
+    {
+      "id": "node-builtin.process.argv",
+      "kind": "node-builtin",
+      "name": "process.argv",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.availableMemory",
+      "kind": "node-builtin",
+      "name": "process.availableMemory",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.chdir",
+      "kind": "node-builtin",
+      "name": "process.chdir",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.cwd",
+      "kind": "node-builtin",
+      "name": "process.cwd",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.env",
+      "kind": "node-builtin",
+      "name": "process.env",
+      "status": "static",
+      "note": "reads, writes, deletes, and enumeration of the process environment (the process global)"
+    },
+    {
+      "id": "node-builtin.process.execPath",
+      "kind": "node-builtin",
+      "name": "process.execPath",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.exit",
+      "kind": "node-builtin",
+      "name": "process.exit",
+      "status": "static",
+      "note": "process.exit and the process._exiting flag read are one surface"
+    },
+    {
+      "id": "node-builtin.process.getgid",
+      "kind": "node-builtin",
+      "name": "process.getgid",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.getuid",
+      "kind": "node-builtin",
+      "name": "process.getuid",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.kill",
+      "kind": "node-builtin",
+      "name": "process.kill",
+      "status": "static",
+      "note": "the signal-name and signal-number forms are one surface"
+    },
+    {
+      "id": "node-builtin.process.pid",
+      "kind": "node-builtin",
+      "name": "process.pid",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.umask",
+      "kind": "node-builtin",
+      "name": "process.umask",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.uptime",
+      "kind": "node-builtin",
+      "name": "process.uptime",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.querystring",
       "kind": "node-builtin",
       "name": "querystring",
@@ -1528,6 +1617,34 @@
       "kind": "stdlib",
       "name": "Array.prototype.some",
       "status": "static"
+    },
+    {
+      "id": "stdlib.date.UTC",
+      "kind": "stdlib",
+      "name": "Date.UTC",
+      "status": "static",
+      "note": "the lowered call form takes 1 to 7 number arguments"
+    },
+    {
+      "id": "stdlib.date.getTime",
+      "kind": "stdlib",
+      "name": "Date.prototype.getTime",
+      "status": "static",
+      "note": "the composed new Date(dateString).getTime() form; new Date().getTime() is stdlib.date.now's surface"
+    },
+    {
+      "id": "stdlib.date.now",
+      "kind": "stdlib",
+      "name": "Date.now",
+      "status": "static",
+      "note": "the live clock; the zero-argument new Date() compositions read it too"
+    },
+    {
+      "id": "stdlib.date.toISOString",
+      "kind": "stdlib",
+      "name": "Date.prototype.toISOString",
+      "status": "static",
+      "note": "the composed new Date(ms?).toISOString() form"
     },
     {
       "id": "stdlib.map.clear",
