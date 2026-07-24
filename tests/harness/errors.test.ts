@@ -263,6 +263,47 @@ console.log(new exports.O().a());
     expect(r.stderr).toMatch(/^Uncaught Error: .* \[SC1090 at .*extends-reassigned-property\.cjs:\d+\]\n$/);
   });
 
+  test("destructuring a SURFACED builtin global's member is a named fence at the pattern (JS lane)", async () => {
+    // `const { max } = Math` would detach a member whose lowering is
+    // keyed to its receiver (Math.max) — the pattern fences by member
+    // and global name instead of binding a token whose calls fail late.
+    // Corpus 2558 pins the OPAQUE globals, where members DO bind tokens.
+    const r = await compileAndRun(
+      "destructure-surfaced-global",
+      `'use strict';
+const { max } = Math;
+console.log(max(1, 2));
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: destructuring the member 'max' of the builtin global 'Math' \(a detached member loses its receiver-keyed lowering — call it through the global\) is not supported yet \[SC1031 at .*destructure-surfaced-global\.cjs:2\]\n$/,
+    );
+  });
+
+  test("an OPAQUE global's destructured member binds a token; uses fence lazily per site (JS lane)", async () => {
+    // The node-suite webcrypto prologue: `const { subtle } =
+    // globalThis.crypto` binds the member identity token, so the program
+    // RUNS past the destructure (the eager pattern fence used to kill it
+    // at that line) and each use meets its own named fence.
+    const r = await compileAndRun(
+      "destructure-opaque-global",
+      `'use strict';
+const { subtle } = globalThis.crypto;
+console.log('bound', !!subtle);
+subtle.digest('SHA-256');
+`,
+      "cjs",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("bound true\n");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: method calls like 'subtle\.digest' is not supported yet \[SC1090 at .*destructure-opaque-global\.cjs:4\]\n$/,
+    );
+  });
+
   test("a 7000-level expression is a named deferred fence, not a stack overflow (JS lane)", async () => {
     // The binderBinaryExpressionStress depth: an AST deep enough that the
     // PREFLIGHT walks (the checker facade's prefetch sweep, the require

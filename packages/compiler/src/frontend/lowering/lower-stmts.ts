@@ -5,15 +5,15 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerForOfGenerator, lowerYieldStarStatement } from "./lower-generators.js";
-import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrJsOp, IrLocal, IrStmt, IrType, JSVAL, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrGlobal, IrJsOp, IrLocal, IrStmt, IrType, JSVAL, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import { PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, neverTaintedJsType, stmtUsesIsland, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { cjsExportAssignmentOf, cjsExportDiscardReason, cjsExportTargetLiteral, isCjsJsFile, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
-import { COMPOUND_ASSIGN_OPS, CompoundOp, UNSUPPORTED_STMT, isStdlibMember, sideEffectFreeOptionValue, stdlibGlobalAliasDecl, stdlibGlobalNameOf } from "./surfaces.js";
+import { COMPOUND_ASSIGN_OPS, CompoundOp, STR_METHODS, UNSUPPORTED_STMT, isStdlibMember, sideEffectFreeOptionValue, stdlibGlobalAliasDecl, stdlibGlobalNameOf } from "./surfaces.js";
 import { isProvenanceSourceFile } from "../provenance-registry.js";
 import { lowerImportEquals, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.js";
-import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape } from "./lower-containers.js";
+import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape, strCharsCall } from "./lower-containers.js";
 import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 import type { ClassInfo, ClassIteratorInfo } from "./lower-classes.js";
@@ -979,6 +979,18 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // tsc already rejects this (TS1182); defensive.
       L.unsupported("SC1031", decl);
     }
+    // A STDLIB-GLOBAL source in a JavaScript file (`const { subtle } =
+    // globalThis.crypto`, `const { Console } = console` — the suite's
+    // webcrypto/console prologues): each element binds a member IDENTITY
+    // TOKEN, the identifier chokepoint's rule one member deep — see
+    // stdlibGlobalTokenDestructure. Checked before the initializer
+    // lowers: the whole-global spelling would answer the global's own
+    // token (a string), and the pattern would meet the string fences
+    // below blaming the token's carrier type instead of the global.
+    {
+      const tokenBound = stdlibGlobalTokenDestructure(L, decl, isLet);
+      if (tokenBound !== null) return tokenBound;
+    }
     let init = L.lowerExpr(decl.initializer);
     // A TS `any`-origin source whose lowered value is NOT a destructurable
     // shape (`var { x } = <any>0` — the cast erases to the f64; a dyn
@@ -995,6 +1007,26 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     ) {
       L.anyOpFence("destructuring", decl);
     }
+    // An IR-string source the CHECKER does not type as a string is a
+    // builtin identity token that leaked through a JS local (`const c =
+    // globalThis.crypto; const { x } = c` — the local adopted the token's
+    // carrier type): the value is a token, not a string — the string
+    // lowerings below would read the CARRIER (its length, its code
+    // points), numbers and characters Node never sees. The fence names
+    // the checker's own type instead of the carrier.
+    if (
+      init.type.kind === "string" &&
+      isJsSourceFile(decl.getSourceFile()) &&
+      !checkerStringSource(L, decl.initializer)
+    ) {
+      L.unsupported(
+        "SC1031",
+        decl.name,
+        ts.isArrayBindingPattern(decl.name)
+          ? `array destructuring of non-array values (the source is '${L.checker.typeToString(L.typeOf(decl.initializer))}'-typed)`
+          : `object destructuring of non-record values (the source is '${L.checker.typeToString(L.typeOf(decl.initializer))}'-typed)`,
+      );
+    }
     // PRIMITIVE and unit sources (`let { toString } = 1`, `const [c] =
     // "xy"`, `var [] = null`): JS destructures any value by reading
     // through its wrapper object — prototype members included — or throws
@@ -1002,10 +1034,19 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     // pattern has an engine form, --dynamic marshals the value in and
     // runs the REAL pattern (lowerJsvalBindingPattern); a static build
     // reports the dynamic-family choice instead of the dead-end type
-    // recitation.
+    // recitation. STRING sources whose pattern the static path claims
+    // whole (staticStringPattern — code-point positions, `length`
+    // bindings) skip the gate in STATIC builds: lowerBindingPattern's
+    // string branches are exact there, and the diagnostic would report a
+    // dynamic-engine dependency the program does not have. --dynamic
+    // keeps the engine route for every string pattern — the engine binds
+    // undefined past the last code point where the static chars array
+    // inherits the array divergence's trap.
     if (
       (init.type.kind === "f64" || init.type.kind === "bool" || init.type.kind === "string" || isUnitType(init.type)) &&
       !isJsSourceFile(decl.getSourceFile()) &&
+      !(!L.dynamic && init.type.kind === "string" &&
+        staticStringPattern(L, decl.name as ts.ArrayBindingPattern | ts.ObjectBindingPattern)) &&
       enginePatternSpec(L, decl.name as ts.ArrayBindingPattern | ts.ObjectBindingPattern) !== null
     ) {
       if (!L.dynamic) {
@@ -1168,6 +1209,34 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
           }
           return;
         }
+      }
+      // STRING sources (`const [a, b] = str`): array destructuring walks
+      // the STRING ITERATOR — code points, astral characters whole —
+      // which is Array.from(string)'s own machinery (%str.chars), so the
+      // source splits once into a hidden chars array and the pattern
+      // lowers as an array pattern over string[]. Positions, holes,
+      // defaults (with the bounds test), rest (the remaining code points
+      // pack fresh — JS's surplus packing builds a new array too), and
+      // nested patterns all ride the array machinery below — which also
+      // means a position past the LAST code point inherits the array
+      // divergence (the read traps where JS binds undefined; a DEFAULTED
+      // position carries its bounds test and fires exactly there).
+      // Callers vetted the source as a checker-typed string: builtin
+      // identity tokens (IR strings the checker types otherwise) fence
+      // before reaching here.
+      if (srcType.kind === "string") {
+        const loc = locOf(pattern);
+        const charsT = arrayOf(STRING);
+        const chars = L.declareHiddenLocal("%dchars", charsT);
+        out.push({ kind: "varDecl", localId: chars.id, init: strCharsCall(L, srcRef(), loc), loc });
+        L.lowerBindingPattern(
+          pattern,
+          () => ({ kind: "varRef", localId: chars.id, type: charsT, loc }),
+          charsT,
+          isLet,
+          out,
+        );
+        return;
       }
       if (srcType.kind !== "array") {
         L.unsupported(
@@ -1377,6 +1446,50 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         return;
       }
     }
+    // A STRING source under an OBJECT pattern (`const { length } = str`):
+    // JS reads through the wrapper object, whose one own DATA property is
+    // `length` — the strLen intrinsic, exact, renames and (dead) defaults
+    // included (length always exists and is never undefined, so a default
+    // never evaluates — JS's rule). Everything else on the wrapper is a
+    // prototype METHOD (detached, it loses its receiver) or absent (the
+    // read is undefined, which the binding's type cannot hold) — named
+    // fences either way; rest packs the wrapper's own INDICES (JS's
+    // CopyDataProperties copies one property per code UNIT) and fences
+    // naming that. Callers vetted the source as a checker-typed string —
+    // builtin identity tokens fence before reaching here.
+    if (srcType.kind === "string") {
+      for (const el of pattern.elements) {
+        if (el.name === undefined) continue;
+        const loc = locOf(el);
+        if (el.dotDotDotToken) {
+          L.unsupported(
+            "SC1031",
+            el,
+            "rest bindings over string sources (JS packs the wrapper's per-code-unit indices — split with [...s] instead)",
+          );
+        }
+        const prop = el.propertyName ?? el.name;
+        const propName = ts.isIdentifier(prop) || ts.isComputedPropertyName(prop) || ts.isStringLiteralLike(prop) || ts.isNumericLiteral(prop)
+          ? patternKeyNameOf(L, prop as ts.PropertyName)
+          : null;
+        if (propName === null) {
+          L.unsupported("SC1031", el, "destructuring with computed keys that do not fold to one property name");
+        }
+        if (propName !== "length") {
+          L.unsupported(
+            "SC1031",
+            el,
+            Object.hasOwn(STR_METHODS, propName)
+              ? `destructuring the method '${propName}' of a string (a detached method loses its receiver — call it through the value)`
+              : `destructuring the property '${propName}' strings do not carry as data ('length' is the one own data property)`,
+          );
+        }
+        let value: IrExpr = { kind: "strIntrinsic", method: "length", receiver: srcRef(), args: [], type: F64, loc };
+        if (el.initializer) value = applyBindingDefault(L, el, value);
+        L.bindPatternTarget(el.name, value, isLet, out);
+      }
+      return;
+    }
     if (srcType.kind !== "record") {
       L.unsupported(
         "SC1031",
@@ -1510,6 +1623,187 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       return L.foldedStringKeyOf(prop);
     }
     return null;
+  }
+
+/** True when the CHECKER types this expression as a string in every arm
+   * (unions of string-likes included). The IR carries builtin IDENTITY
+   * TOKENS as strings too (`globalThis.crypto` taken as a value in a JS
+   * file, or a local that adopted such a value's carrier type), and those
+   * must never reach the string-source destructuring lowerings — the
+   * callers fence with the checker's own type name instead. */
+  function checkerStringSource(L: Lowerer, e: ts.Expression): boolean {
+    const stringLike = (t: ts.Type): boolean => {
+      if ((t.flags & ts.TypeFlags.StringLike) !== 0) return true;
+      if (t.isUnionType()) return t.getTypes().every(stringLike);
+      return false;
+    };
+    return stringLike(L.typeOf(e));
+  }
+
+/** True when a pattern over a STRING source lowers statically whole —
+   * every element a form the chars-array/wrapper-read desugars carry.
+   * Array patterns take positions, holes, defaults, rest (a nested rest
+   * pattern must be an ARRAY pattern — it destructures the packed
+   * string[]), and nested patterns, whose elements are single code
+   * points and recurse through this same test. Object patterns take
+   * `length` bindings — shorthand, renamed, or (dead-)defaulted.
+   * Anything else — wrapper methods, computed keys, rest over the
+   * wrapper — keeps the engine gate (--dynamic runs the real pattern;
+   * a static build reports the dynamic-family choice). */
+  function staticStringPattern(L: Lowerer, pattern: ts.ArrayBindingPattern | ts.ObjectBindingPattern): boolean {
+    if (ts.isArrayBindingPattern(pattern)) {
+      return pattern.elements.every((el) => {
+        if (ts.isOmittedExpression(el) || el.name === undefined) return true;
+        if (el.dotDotDotToken) {
+          // The rest binds string[]: identifier targets and nested ARRAY
+          // patterns ride the array machinery; an object pattern over the
+          // packed array keeps its fence.
+          return ts.isIdentifier(el.name) || ts.isArrayBindingPattern(el.name);
+        }
+        if (ts.isIdentifier(el.name)) return true;
+        return staticStringPattern(L, el.name);
+      });
+    }
+    return pattern.elements.every((el) => {
+      if (el.name === undefined) return true;
+      if (el.dotDotDotToken || !ts.isIdentifier(el.name)) return false;
+      const prop = el.propertyName ?? el.name;
+      const propName = ts.isIdentifier(prop) || ts.isComputedPropertyName(prop) || ts.isStringLiteralLike(prop) || ts.isNumericLiteral(prop)
+        ? patternKeyNameOf(L, prop as ts.PropertyName)
+        : null;
+      return propName === "length";
+    });
+  }
+
+/** The stdlib globals whose members destructure to MEMBER identity
+   * tokens: the OPAQUE globals — no member of theirs has a lowered
+   * surface, so a token binding trades the eager pattern fence for the
+   * per-site token rules and loses nothing. Globals with REAL member
+   * surfaces (Math.max, JSON.stringify, process.env, console.log) stay
+   * OUT: their detached members would ride the token's quiet
+   * own-property-undefined reads where the property spelling works, so
+   * those patterns keep an eager fence naming the global. `console` is
+   * the one split surface: its five CALL members fence by name, while
+   * the rest (`Console` — the suite's constructor-identity probe) have
+   * no surface to lose and bind tokens. */
+  const TOKEN_OPAQUE_GLOBALS: ReadonlySet<string> = new Set(["crypto"]);
+  const CONSOLE_CALL_MEMBERS: ReadonlySet<string> = new Set(["log", "info", "debug", "error", "warn"]);
+
+/** `const { subtle } = globalThis.crypto`, `const { Console } = console`,
+   * `const { crypto } = globalThis` — an object pattern over a STDLIB
+   * GLOBAL in a JavaScript file (the suite's webcrypto/console
+   * prologues): the identifier chokepoint's identity-token rule, one
+   * member deep. The global taken as a value is an opaque token, and a
+   * member taken off an OPAQUE global is the same kind of value — one
+   * global, one member, one interned string — so plain elements bind
+   * MEMBER tokens (`[builtin crypto.subtle]`), and identity flows agree
+   * across destructures of the same member. A member of GLOBALTHIS that
+   * is itself a canonical global (`const { crypto } = globalThis` —
+   * `declare var` globals are properties of `typeof globalThis`,
+   * stdlib-provenance-checked so user script globals stay out) binds the
+   * global's OWN token, byte-equal to the bare and property spellings'
+   * answers, AND registers in stdlibGlobalAliases — the destructured
+   * twin of stdlibGlobalAliasDecl — so receiver-position uses resolve
+   * through every surface exactly like the bare global (`const { Math }
+   * = globalThis; Math.max(...)` is Math.max). What a token cannot do
+   * meets the per-site rules lazily at each USE — member reads answer
+   * the wrapper's own-property undefined, calls throw Node-shaped
+   * is-not-a-function TypeErrors — at the use's own line, where the
+   * pattern-level fence killed the program at the destructure.
+   *
+   * Everything this rule does NOT claim over a stdlib-global source
+   * fences HERE, naming the global — never the token's carrier string
+   * type: rest (the member set is not statically enumerable), defaults
+   * (member presence is not statically testable), nested patterns,
+   * computed keys, members of the SURFACED globals (detached members
+   * lose their receiver-keyed lowerings), and `var`/TDZ-predeclared/
+   * pre-registered bindings whose slots no token can inhabit. Null only
+   * when the source is not a stdlib global at all, or in TypeScript
+   * files (the identifier chokepoint fences the global there first). */
+  function stdlibGlobalTokenDestructure(L: Lowerer, decl: ts.VariableDeclaration, isLet: boolean): IrStmt[] | null {
+    if (decl.initializer === undefined || !isJsSourceFile(decl.getSourceFile())) return null;
+    const globalName = stdlibGlobalNameOf(L, decl.initializer);
+    if (globalName === null) return null;
+    if (!ts.isObjectBindingPattern(decl.name)) {
+      L.unsupported(
+        "SC1031",
+        decl.name,
+        `array destructuring of the builtin global '${globalName}' (builtin globals are not iterable)`,
+      );
+    }
+    if (isVarDeclared(decl)) {
+      L.unsupported("SC1031", decl.name, `var-declared patterns over the builtin global '${globalName}'`);
+    }
+    const srcT = L.typeOf(decl.initializer);
+    const binds: { name: ts.Identifier; token: string; alias: string | null; g: IrGlobal | undefined }[] = [];
+    for (const el of decl.name.elements) {
+      if (el.name === undefined) continue;
+      if (el.dotDotDotToken) {
+        L.unsupported("SC1031", el, `rest bindings over the builtin global '${globalName}' (the member set is not statically enumerable)`);
+      }
+      if (el.initializer !== undefined) {
+        L.unsupported("SC1031", el, `binding defaults over the builtin global '${globalName}' (member presence is not statically testable)`);
+      }
+      if (!ts.isIdentifier(el.name)) {
+        L.unsupported("SC1031", el, `nested patterns over the builtin global '${globalName}'`);
+      }
+      const prop = el.propertyName ?? el.name;
+      const propName = ts.isIdentifier(prop) || ts.isComputedPropertyName(prop) || ts.isStringLiteralLike(prop) || ts.isNumericLiteral(prop)
+        ? patternKeyNameOf(L, prop as ts.PropertyName)
+        : null;
+      if (propName === null) {
+        L.unsupported("SC1031", el, "destructuring with computed keys that do not fold to one property name");
+      }
+      let token: string;
+      let alias: string | null = null;
+      if (globalName === "globalThis") {
+        // The member must BE a stdlib global (user script vars are
+        // properties of `typeof globalThis` too — their values are real
+        // and this rule has none to give).
+        const member = L.checker.getPropertyOfType(srcT, propName);
+        if (member === undefined || !L.isStdlibSymbol(member)) {
+          L.unsupported("SC1031", el, `destructuring the non-builtin member '${propName}' of 'globalThis'`);
+        }
+        const canonical = member.name === "global" ? "globalThis" : member.name;
+        token = `[builtin ${canonical}]`;
+        alias = canonical;
+      } else if (globalName === "console" && !CONSOLE_CALL_MEMBERS.has(propName)) {
+        token = `[builtin console.${propName}]`;
+      } else if (TOKEN_OPAQUE_GLOBALS.has(globalName)) {
+        token = `[builtin ${globalName}.${propName}]`;
+      } else {
+        L.unsupported(
+          "SC1031",
+          el,
+          `destructuring the member '${propName}' of the builtin global '${globalName}' (a detached member loses its receiver-keyed lowering — call it through the global)`,
+        );
+      }
+      const symbol = L.checker.getSymbolAtLocation(el.name);
+      if (!symbol || L.tdzPredeclared.has(symbol)) {
+        L.unsupported("SC1031", el, `bindings with predeclared slots over the builtin global '${globalName}'`);
+      }
+      const g = L.globalsBySymbol.get(symbol);
+      if (g !== undefined && g.type.kind !== "string" && g.type.kind !== "dyn") {
+        L.unsupported("SC1031", el, `bindings with '${L.fmt(g.type)}' storage over the builtin global '${globalName}'`);
+      }
+      binds.push({ name: el.name, token, alias, g });
+    }
+    const out: IrStmt[] = [];
+    for (const b of binds) {
+      const loc = locOf(b.name);
+      const token: IrExpr = { kind: "strLit", value: b.token, type: STRING, loc };
+      if (b.alias !== null) {
+        const symbol = L.checker.getSymbolAtLocation(b.name);
+        if (symbol) L.stdlibGlobalAliases.set(symbol, b.alias);
+      }
+      if (b.g !== undefined) {
+        out.push({ kind: "assign", localId: b.g.id, value: L.coerceInto(b.name, token, b.g.type), loc });
+      } else {
+        const local = L.declareLocal(b.name, b.name.text, STRING, isLet);
+        out.push({ kind: "varDecl", localId: local.id, init: token, loc });
+      }
+    }
+    return out;
   }
 
 /** `x = dflt` on a pattern position whose source value always EXISTS
@@ -4147,6 +4441,39 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     rhs: ts.Expression | null,
     blame: ts.Node,
     loc: SrcLoc,): { stmts: IrStmt[]; value: IrExpr } {
+    // IR-string sources in JS files split two ways the carrier type
+    // cannot: a STDLIB GLOBAL (`({ subtle } = globalThis.crypto)`) — the
+    // declaration path binds member identity tokens into FRESH bindings,
+    // but assignment targets carry their own checker-typed slots no token
+    // can honestly inhabit — and a LEAKED token (a local that adopted a
+    // global's carrier type), where the string lowerings below would read
+    // the carrier itself. Both keep fences naming the truth; empty
+    // patterns stay pure (RequireObjectCoercible/GetIterator hold for
+    // globals and strings alike).
+    {
+      const patternEmpty = ts.isObjectLiteralExpression(target)
+        ? target.properties.length === 0
+        : target.elements.length === 0;
+      if (!patternEmpty && rhs !== null && isJsSourceFile(rhs.getSourceFile())) {
+        const globalName = stdlibGlobalNameOf(L, rhs);
+        if (globalName !== null) {
+          L.unsupported(
+            "SC1031",
+            blame,
+            `destructuring assignment from the builtin global '${globalName}' (bind the members with a const destructuring declaration instead)`,
+          );
+        }
+        if (init.type.kind === "string" && !checkerStringSource(L, rhs)) {
+          L.unsupported(
+            "SC1031",
+            blame,
+            ts.isArrayLiteralExpression(target)
+              ? `array destructuring assignment from non-array values (the source is '${L.checker.typeToString(L.typeOf(rhs))}'-typed)`
+              : `destructuring assignment from non-record values (the source is '${L.checker.typeToString(L.typeOf(rhs))}'-typed)`,
+          );
+        }
+      }
+    }
     const tmp = L.declareHiddenLocal("%destr", init.type);
     const out: IrStmt[] = [{ kind: "varDecl", localId: tmp.id, init, loc }];
     const tmpRef = (): IrExpr => ({ kind: "varRef", localId: tmp.id, type: init.type, loc });
@@ -4350,6 +4677,82 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         }
         return { stmts: out, value };
       }
+    }
+    // A STRING source under an object ASSIGNMENT pattern (`({ length: n }
+    // = s)`): the declaration path's wrapper rule in assignment position —
+    // `length` is the wrapper's one own data property (the strLen
+    // intrinsic; a default is dead code — length always exists and is
+    // never undefined, so JS never evaluates it either); identifier,
+    // property, and element targets ride the shared target plumbing.
+    // Methods, unknown names, computed keys, spreads, and accessor
+    // properties keep the declaration path's named fences. Callers vetted
+    // the source as a checker-typed string.
+    if (init.type.kind === "string") {
+      for (const prop of target.properties) {
+        const propLoc = locOf(prop);
+        if (ts.isSpreadAssignment(prop)) {
+          L.unsupported(
+            "SC1031",
+            prop,
+            "rest bindings over string sources (JS packs the wrapper's per-code-unit indices — split with [...s] instead)",
+          );
+        }
+        let fieldName: string;
+        let bindTo: ts.Expression;
+        if (ts.isShorthandPropertyAssignment(prop)) {
+          fieldName = (prop.name as ts.Identifier).text;
+          bindTo = prop.name as ts.Identifier;
+        } else if (ts.isPropertyAssignment(prop)) {
+          const folded = patternKeyNameOf(L, prop.name);
+          if (folded === null) {
+            L.unsupported("SC1031", prop, "destructuring assignment with computed keys that do not fold to one property name");
+          }
+          fieldName = folded;
+          bindTo = prop.initializer;
+          // `({ length: n = 3 } = s)`: the default is dead (length always
+          // exists) — strip it, exactly the evaluation JS skips.
+          if (ts.isBinaryExpression(bindTo) && bindTo.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+            bindTo = bindTo.left;
+          }
+        } else {
+          L.unsupported("SC1031", prop, "destructuring assignment with getter/setter or method properties");
+        }
+        if (fieldName !== "length") {
+          L.unsupported(
+            "SC1031",
+            prop,
+            Object.hasOwn(STR_METHODS, fieldName)
+              ? `destructuring the method '${fieldName}' of a string (a detached method loses its receiver — call it through the value)`
+              : `destructuring the property '${fieldName}' strings do not carry as data ('length' is the one own data property)`,
+          );
+        }
+        const readOf = (): IrExpr =>
+          ({ kind: "strIntrinsic", method: "length", receiver: tmpRef(), args: [], type: F64, loc: propLoc });
+        while (ts.isParenthesizedExpression(bindTo)) bindTo = bindTo.expression;
+        if (!ts.isIdentifier(bindTo)) {
+          lowerAssignTargetInto(L, out, bindTo, prop, null, readOf);
+          continue;
+        }
+        let targetBinding: { id: string; type: IrType } | null;
+        if (ts.isShorthandPropertyAssignment(prop)) {
+          const valueSymbol = L.checker.getShorthandAssignmentValueSymbol(prop) ?? null;
+          const local = valueSymbol ? L.resolveKey(valueSymbol, bindTo) : null;
+          const g = valueSymbol ? L.globalsBySymbol.get(valueSymbol) : undefined;
+          targetBinding = local ? { id: local.id, type: local.type } : g ? { id: g.id, type: g.type } : null;
+        } else {
+          targetBinding = L.resolveWritable(bindTo);
+        }
+        if (!targetBinding) {
+          L.rejectUnresolved(bindTo, `assignment to '${bindTo.text}' (not a writable local or module global)`);
+        }
+        out.push({
+          kind: "assign",
+          localId: targetBinding.id,
+          value: L.coerceInto(prop, readOf(), targetBinding.type),
+          loc: propLoc,
+        });
+      }
+      return { stmts: out, value };
     }
     if (init.type.kind !== "record") {
       L.unsupported(
@@ -4697,7 +5100,23 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     tmpRef: () => IrExpr,
     blame: ts.Node,
     loc: SrcLoc,): void {
-    const srcType = tmpRef().type;
+    let srcType = tmpRef().type;
+    // A STRING source (`[a, b] = s`): the declaration path's rule in
+    // assignment position — the string iterator's code-point split
+    // (%str.chars, astral characters whole) into a hidden chars array,
+    // then the pattern proceeds as an array pattern over string[]
+    // (defaults with the bounds test, rest packing the remaining code
+    // points, elisions; positions past the last code point inherit the
+    // array divergence). The EMPTY pattern skips the split — GetIterator
+    // + close, nothing observable — through the iterable early-return
+    // below. Callers vetted the source as a checker-typed string.
+    if (srcType.kind === "string" && target.elements.length > 0) {
+      const charsT = arrayOf(STRING);
+      const chars = L.declareHiddenLocal("%dchars", charsT);
+      out.push({ kind: "varDecl", localId: chars.id, init: strCharsCall(L, tmpRef(), loc), loc });
+      tmpRef = () => ({ kind: "varRef", localId: chars.id, type: charsT, loc });
+      srcType = charsT;
+    }
     // A sole leading rest whose operand is ITSELF an array pattern
     // (`[...[a, b = 0]] = t`): the rest collects every element, then the
     // inner pattern destructures the collection — over arrays/tuples that
@@ -5548,18 +5967,22 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
   function lowerForOfString(L: Lowerer, stmt: ts.ForOfStatement, iterable: IrExpr, labels?: string[]): IrStmt {
     let exprTarget: { id: string; type: IrType } | null = null;
     let exprTargetNode: ts.Identifier | null = null;
+    let exprPattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression | null = null;
     if (!ts.isVariableDeclarationList(stmt.initializer)) {
       // `for (v of "hello")` over a PRE-DECLARED identifier: assign the
-      // existing binding per pass (the array head's rule). Member and
-      // destructuring targets keep the fence — a string yields single
-      // characters, so patterns over them stay the non-array fences.
+      // existing binding per pass (the array head's rule). PATTERN heads
+      // (`for ([a] of "xy")`) destructure the per-iteration code point
+      // through the string-source assignment lowerings; member targets
+      // keep the fence.
       let target: ts.Node = stmt.initializer;
       while (ts.isParenthesizedExpression(target)) target = target.expression;
       if (ts.isIdentifier(target)) {
         exprTarget = L.resolveWritable(target);
         exprTargetNode = target;
+      } else if (ts.isObjectLiteralExpression(target) || ts.isArrayLiteralExpression(target)) {
+        exprPattern = target;
       }
-      if (!exprTarget) {
+      if (!exprTarget && !exprPattern) {
         L.unsupported(
           "SC1090",
           stmt.initializer,
@@ -5573,7 +5996,6 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     }
     const isLet = list !== null && (list.flags & ts.NodeFlags.Let) !== 0;
     const decl = list ? list.declarations[0]! : null; // the grammar allows exactly one
-    if (decl && !ts.isIdentifier(decl.name)) L.unsupported("SC1031", decl.name);
     const loc = locOf(stmt);
     L.scopes.push(new Map());
     try {
@@ -5585,9 +6007,16 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       // `for (var c of str)`: the character mechanics stay on a hidden
       // per-iteration local; the body opens by assigning it into the ONE
       // hoisted var binding (see forOfVarTarget). Pre-declared expression
-      // heads assign their existing binding the same way.
-      const varTarget = exprTarget ?? (decl ? forOfVarTarget(L, decl) : null);
-      const ch = varTarget
+      // heads assign their existing binding the same way. PATTERN heads
+      // (`for (const [half] of "😀x")`) destructure the per-iteration
+      // code point through the string-source pattern lowerings — each
+      // element is a genuine one-code-point string.
+      const declPattern =
+        decl !== null && !ts.isIdentifier(decl.name)
+          ? (decl.name as ts.ArrayBindingPattern | ts.ObjectBindingPattern)
+          : null;
+      const varTarget = exprTarget ?? (decl && !declPattern ? forOfVarTarget(L, decl) : null);
+      const ch = varTarget || declPattern || exprPattern
         ? L.declareHiddenLocal("%vof", STRING)
         : L.declareLocal(decl!.name as ts.Identifier, (decl!.name as ts.Identifier).text, STRING, isLet);
       const chRef: IrExpr = { kind: "varRef", localId: ch.id, type: STRING, loc };
@@ -5615,6 +6044,12 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           loc,
         },
       ];
+      if (declPattern) {
+        L.lowerBindingPattern(declPattern, () => chRef, STRING, isLet, head);
+      }
+      if (exprPattern) {
+        head.push(lowerDestructuringAssign(L, exprPattern, chRef, exprPattern, loc));
+      }
       const body = L.inCtl("loop", () => L.lowerScopedBlock(stmt.statement), labels);
       return {
         kind: "block",

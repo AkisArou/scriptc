@@ -4730,9 +4730,9 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2570-buffer-arg-validation.cjs": {
+  "<repo>/tests/corpus/2575-string-destructuring-decl.ts": {
    "order": [
-    "<repo>/tests/corpus/2570-buffer-arg-validation.cjs"
+    "<repo>/tests/corpus/2575-string-destructuring-decl.ts"
    ],
    "diags": []
   },
@@ -4742,9 +4742,9 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2571-searchparams-arg-validation.cjs": {
+  "<repo>/tests/corpus/2576-string-destructuring-assign.ts": {
    "order": [
-    "<repo>/tests/corpus/2571-searchparams-arg-validation.cjs"
+    "<repo>/tests/corpus/2576-string-destructuring-assign.ts"
    ],
    "diags": []
   },
@@ -4754,21 +4754,15 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2577-builtin-global-destructuring.js": {
+   "order": [
+    "<repo>/tests/corpus/2577-builtin-global-destructuring.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2558-index-signature-func-values.ts": {
    "order": [
     "<repo>/tests/corpus/2558-index-signature-func-values.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/2572-readable-emitted-readable-flag.cjs": {
-   "order": [
-    "<repo>/tests/corpus/2572-readable-emitted-readable-flag.cjs"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/2573-fs-url-arg-ladders.cjs": {
-   "order": [
-    "<repo>/tests/corpus/2573-fs-url-arg-ladders.cjs"
    ],
    "diags": []
   },
@@ -4781,12 +4775,6 @@
   "<repo>/tests/corpus/2560-arraybuffer-dataview-set.ts": {
    "order": [
     "<repo>/tests/corpus/2560-arraybuffer-dataview-set.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/2574-emitter-max-listeners-ladders.cjs": {
-   "order": [
-    "<repo>/tests/corpus/2574-emitter-max-listeners-ladders.cjs"
    ],
    "diags": []
   },
@@ -4841,6 +4829,36 @@
   "<repo>/tests/corpus/2569-upcast-identity.ts": {
    "order": [
     "<repo>/tests/corpus/2569-upcast-identity.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2570-buffer-arg-validation.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2570-buffer-arg-validation.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2571-searchparams-arg-validation.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2571-searchparams-arg-validation.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2572-readable-emitted-readable-flag.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2572-readable-emitted-readable-flag.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2573-fs-url-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2573-fs-url-arg-ladders.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2574-emitter-max-listeners-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2574-emitter-max-listeners-ladders.cjs"
    ],
    "diags": []
   },
