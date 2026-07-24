@@ -209,7 +209,7 @@ export interface GenericInstance {
         const raw = L.irTypeOf(param.name);
         // A DYNAMIC-TIER pattern source (`function f({} = a)` with
         // `a: any` — jsval for island values, dyn for the checked-dynamic
-        // DOM): the slot holds its tier's undefined DIRECTLY, so the ABI
+        // dyn): the slot holds its tier's undefined DIRECTLY, so the ABI
         // is the slot itself — no synthesized union; the prologue tests
         // undefined at runtime (declareParams).
         if (raw.kind === "dyn" || raw.kind === "jsval") {
@@ -227,7 +227,7 @@ export interface GenericInstance {
     }
     if (param.dotDotDotToken) {
       // A JS rest param with no static element type (`(...args)` — any[]):
-      // the VARIADIC dyn form. The lifted function takes one trailing DOM
+      // the VARIADIC dyn form. The lifted function takes one trailing dyn
       // ARRAY param the dyn call thunk fills with the call's surplus
       // arguments; the binding is that array (dynRest — funcType marks
       // `rest`, and the value only ever calls through the boxed thunk).
@@ -256,7 +256,7 @@ export interface GenericInstance {
       const raw = L.irTypeOf(param.name);
       // A DYNAMIC-TIER defaulted param (`function f(x = a)` with `a: any`
       // — tsc types x any; jsval for island values, dyn for the checked-
-      // dynamic DOM): the slot holds its tier's undefined directly, so
+      // dynamic dyn): the slot holds its tier's undefined directly, so
       // the ABI is the slot itself and the prologue's default test is the
       // runtime undefined test (declareParams).
       if (raw.kind === "dyn" || raw.kind === "jsval") {
@@ -292,7 +292,7 @@ export interface GenericInstance {
     if (param.questionToken && !L.bareUndefinedArmedUnion(type) && type.kind !== "dyn" && type.kind !== "jsval") {
       // `x?: unknown` where unknown came from an annotation: undefined is
       // absorbed into the hole type, so no undefined ARM exists — but a
-      // checked-dynamic slot holds the DOM undefined directly (`bar?: any`
+      // checked-dynamic slot holds the dyn undefined directly (`bar?: any`
       // — an omitted call passes it, undefinedArgFor), and an island slot
       // the engine's own undefined likewise (`options?: [string?]` — an
       // optional-tuple param, jsval-mapped), so dyn and jsval params stay
@@ -384,7 +384,7 @@ export interface GenericInstance {
         // A missing argument for a CHECKED-DYNAMIC param (an implicit-any
         // JS signature called short — `mustCall(fn)` with `expected`
         // omitted): JS fills undefined, and the dyn slot holds exactly
-        // that — the undefined DOM value. tsc's arity families don't gate
+        // that — the undefined dyn value. tsc's arity families don't gate
         // .js builds (SEMANTICS.md 116), so the completion lands here.
         if (shape.type.kind === "dyn") {
           return { kind: "dynFrom", value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc }, type: DYN, loc };
@@ -410,7 +410,7 @@ export interface GenericInstance {
     } else if (restAt >= 0 && shapes[restAt]!.mode === "dynRest") {
       // The VARIADIC dyn pack (a JS `...args` with no static element
       // type, or the synthetic `arguments` slot): surplus arguments
-      // convert through the dyn boundary into one fresh DOM array —
+      // convert through the dyn boundary into one fresh dyn array —
       // exactly what the boxed call thunk builds for indirect calls.
       const elems = sources.slice(restAt).map((a): IrExpr => {
         if (isIr(a)) return L.coerceInto(blame, a.ir, DYN);
@@ -531,11 +531,11 @@ export interface GenericInstance {
   }
 
 /** The synthesized argument for an omitted omittable param: the interned
-   * undefined arm of the param's `T | undefined` ABI union, or the DOM
+   * undefined arm of the param's `T | undefined` ABI union, or the checked-dynamic tree
    * undefined for a checked-dynamic param (`bar?: any`). */
 /** The "absent argument" value for a param SLOT type, or null when the
    * slot cannot hold one: the interned undefined arm for undefined-armed
-   * unions, the DOM undefined for checked-dynamic slots, the engine's own
+   * unions, the dyn undefined for checked-dynamic slots, the engine's own
    * undefined for island slots. Shared by every call-completion loop
    * (direct calls and calls through func-typed values). */
   export function omittedArgFor(L: Lowerer, type: IrType, loc: SrcLoc): IrExpr | null {
@@ -690,7 +690,7 @@ export interface GenericInstance {
     // A DYN body that can complete without returning (a JS function whose
     // guarded return may not run — mustSucceed's `if (typeof fn ===
     // 'function') return fn.apply(...)`): JS completes with undefined —
-    // the undefined DOM value.
+    // the undefined dyn value.
     if (bodyReturn.kind === "dyn") {
       body.push({
         kind: "return",
@@ -747,7 +747,7 @@ export interface GenericInstance {
     // The RECORD twin (the tracing suite's traced closures — `function ()
     // { return expectedResult; }` infers `{ foo: string }`): JS object
     // literals are checked-dynamic VALUES, so a record-typed return would
-    // copy the DOM value into a struct at the return and copy it back out
+    // copy the dyn value into a struct at the return and copy it back out
     // at any dyn boundary — identity lost twice (found.result !==
     // expectedResult where Node passes the object through). The inferred
     // shape is inference, not a contract: the return stays checked-
@@ -1532,7 +1532,7 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
         if (!distinct.some((t) => typeEquals(t, e.stmt.value.type))) distinct.push(e.stmt.value.type);
       }
       if (distinct.length === 0) {
-        final = DYN; // no valued return: JS completes with undefined — the DOM undefined, today's slot
+        final = DYN; // no valued return: JS completes with undefined — the dyn undefined, today's slot
       } else if (distinct.length === 1) {
         const t = distinct[0]!;
         final = !sawBare ? t : t.kind === "dyn" ? DYN : (L.withUndefinedArmOf(t) ?? DYN);
@@ -1654,7 +1654,7 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     const inst = genericValueInstance(L, ref, info, bindings);
     // The value's type is the completed ABI signature — exact-arity, the
     // declared-function value rule (dynRest slots stay out of the param
-    // list; the rest marker carries the trailing DOM-array ABI).
+    // list; the rest marker carries the trailing dyn-array ABI).
     const funcType: IrType = {
       kind: "func",
       params: inst.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
@@ -2657,7 +2657,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // non-format argument: strings VERBATIM, everything else through
         // inspect at the rest-args depth 2 (formatWithOptions) — scalar
         // kinds byte-exactly, boxed functions as [Function: name] /
-        // [Function (anonymous)], composites through the dyn DOM walk
+        // [Function (anonymous)], composites through the dyn walk
         // (insp.dyn). Never throws — Node's console.log never does.
         if (lowered.type.kind === "dyn") {
           return {
@@ -2778,10 +2778,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       return { kind: "libCall", fn: "timers.queueMicrotask", args: [adapted], type: VOID, loc };
     }
 
-    // structuredClone: the JSON-safe + bytes subset over the DOM, deep;
+    // structuredClone: the JSON-safe + bytes subset over the checked-dynamic tree, deep;
     // %DOMException clones through WebIDL serialization (name/message,
     // the code re-derives). Functions/handles throw the spec's catchable
-    // DataCloneError; cycles fence (the DOM cannot represent them — Node
+    // DataCloneError; cycles fence (the checked-dynamic tree cannot represent them — Node
     // clones cycles, a documented divergence). Option validation throws
     // Node's exact errors; the zero-argument call Node's
     // ERR_MISSING_ARGS. Provenance-checked like setTimeout.
@@ -2812,7 +2812,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       const valueNode = expr.arguments[0]!;
       // A NON-EMPTY transfer array of static values: nothing static is
       // transferable, so the call is Node's DataCloneError — decided here
-      // (the list's values need no DOM representation to fail). An EMPTY
+      // (the list's values need no dyn representation to fail). An EMPTY
       // literal transfer list is a no-op member and drops.
       {
         let optNode = expr.arguments[1];
@@ -2845,8 +2845,8 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       const value = toDynArg(valueNode);
       const cloned: IrExpr = { kind: "libCall", fn: "dyn.structuredClone", args: [value, optsArg], type: DYN, loc };
       // The declared result is the value's own type (the generic's T):
-      // validate the DOM copy back into it when the type can be checked;
-      // dyn-typed and unmappable results stay DOM values (JS files).
+      // validate the dyn copy back into it when the type can be checked;
+      // dyn-typed and unmappable results stay dyn values (JS files).
       const resultT = L.mapTypeOf(L.typeOf(expr));
       if (
         resultT !== null && resultT.kind !== "dyn" && resultT.kind !== "void" &&
@@ -2964,7 +2964,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       L.isIslandExpr(expr.expression.expression)
     ) {
       const receiver = L.lowerExpr(expr.expression.expression);
-      // A checker-`any` receiver whose VALUE lives in the DOM (a
+      // A checker-`any` receiver whose VALUE lives in the checked-dynamic tree (a
       // checked-dynamic local behind the any-typed spelling — the JS
       // WeakSet placeholder, rest-args arrays): the checked-dynamic
       // method machinery owns it — receiver-kind dispatch, stored-member
@@ -3016,7 +3016,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       }
       const callee = L.lowerExpr(expr.expression);
       // A checker-`any` callee that LOWERED checked-dynamic (a dyn member
-      // chain's stored function): the DOM's own call — dynCall reads and
+      // chain's stored function): the checked-dynamic tree's own call — dynCall reads and
       // calls the stored member with Node's is-not-a-function TypeError
       // on refusal.
       if (callee.type.kind === "dyn") {
@@ -3303,7 +3303,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       }
       // STATIC atob/btoa (str.atob / str.btoa — scr_string.c; WHATWG
       // forgiving-base64, Node is the oracle). The argument crosses as a
-      // DOM value: WebIDL ToString runs in the runtime over the DOM kind
+      // dyn value: WebIDL ToString runs in the runtime over the dyn kind
       // (Node's atob(null) decodes "null"), a malformed input throws the
       // catchable DOMException InvalidCharacterError, and the
       // zero-argument call throws Node's TypeError [ERR_MISSING_ARGS].
@@ -3815,7 +3815,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     if (callee.type.kind === "dyn") {
       if (expr.arguments.some((a) => ts.isSpreadElement(a))) {
         // The runtime-arity lane: a dyn callee is already boxed — the
-        // spread-marked dynCall applies through a fresh DOM argument
+        // spread-marked dynCall applies through a fresh dyn argument
         // array (lowerSpreadArgsCall). Sources outside it keep the fence.
         const spreadServed = lowerSpreadArgsCall(L, expr, callee, loc);
         if (spreadServed) return spreadServed;
@@ -3896,7 +3896,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // skip — not a shape this surface models; fence.
     for (let i = args.length; i < params.length; i++) {
       // A missing argument completes with the slot's absent value — the
-      // interned undefined arm, the DOM undefined for checked-dynamic
+      // interned undefined arm, the dyn undefined for checked-dynamic
       // slots (a JS-inferred wrapper like mustCall's, called short), or
       // the engine undefined for island slots.
       const absent = omittedArgFor(L, params[i]!, loc);
@@ -3917,7 +3917,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
    * - CHECKED-DYNAMIC (dyn spread sources — a JS rest binding, a dyn
    *   value): box the callee (dynFrom; a dyn callee is already boxed),
    *   convert every argument into dyn, and emit the spread-marked dynCall
-   *   — the emitters build one fresh DOM argument array (spreads flatten
+   *   — the emitters build one fresh dyn argument array (spreads flatten
    *   left-to-right, non-iterables throw V8's TypeError) and apply through
    *   it; the boxed thunk delivers JS arity exactly. Result dyn, checked
    *   per use like every any-origin value.
@@ -4017,7 +4017,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
 
 /** METHOD calls on dyn receivers (`pkg.name.replace(...)`, `rawName.split`,
  * `ws.packages.filter(...)` — JSON.parse-derived values): validate the
- * receiver's DOM kind, extract, and ride the STATIC method machinery — the
+ * receiver's dyn kind, extract, and ride the STATIC method machinery — the
  * dyn boundary's trust-but-verify stance extended to receivers. The
  * receiver-kind mismatch throws V8's own catchable TypeErrors (nullish:
  * "Cannot read properties of undefined (reading 'replace')"; other kinds:
@@ -4025,14 +4025,14 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
  * evaluate, where JS evaluates them first for the non-nullish case
  * (SEMANTICS.md). String methods ride the string/regex intrinsic tables
  * through a validated-string receiver; `.filter` runs the predicate over
- * the DOM array and validated-extracts the survivors into the element type
+ * the dyn array and validated-extracts the survivors into the element type
  * the checker committed the result to. Null when the receiver isn't a dyn
  * value or the method isn't claimable (the method-call fence stays). */
   function lowerDynReceiverMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (L.chainBlocked(call, access)) return null;
     // Only checker-untyped receivers: `any`/`unknown`, or the `any[]` an
-    // Array.isArray guard narrows them to (the value is STILL the DOM
+    // Array.isArray guard narrows them to (the value is STILL the checked-dynamic tree
     // array — scalar narrowings bridge through maybeNarrow's dynCheck and
     // take the ordinary typed paths, but there is no static home for an
     // any-elemented array). Typed receivers keep their own lowerings.
@@ -4062,16 +4062,16 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     if (recv.type.kind !== "dyn") return null;
     // Typed-destination filter first (validated extraction into a real
     // T[]); an untyped destination falls through to the runtime dispatch
-    // below (the survivors stay DOM values).
+    // below (the survivors stay dyn values).
     if (access.name.text === "filter") {
       const extracted = lowerDynArrayFilterCall(L, call, access, recv);
       if (extracted) return extracted;
     }
     if (access.name.text === "flatMap") return lowerDynArrayFlatMapCall(L, call, access, recv);
-    // String methods claim only names NO other DOM-representable kind's
+    // String methods claim only names NO other dyn-representable kind's
     // prototype declares (Array carries includes/indexOf/slice too): for
     // these, "the receiver is a string, or the call throws V8's TypeError"
-    // IS Node's semantics for every possible DOM value. Shared names would
+    // IS Node's semantics for every possible dyn value. Shared names would
     // need a receiver-kind dispatch — they keep the fence.
     if (DYN_STRING_ONLY_METHODS.has(access.name.text)) {
       const checked = (): IrExpr => dynStringReceiver(L, recv, access);
@@ -4105,7 +4105,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     }
     // SHARED prototype names with a runtime dispatch (scr_dyn_invoke):
     // push/slice/join/forEach/map/apply/... dispatch on the receiver's
-    // RUNTIME kind — the honest answer for names more than one DOM-
+    // RUNTIME kind — the honest answer for names more than one dyn-
     // representable prototype declares (test/common's mustCall internals:
     // mustCallChecks.push(context), failed.forEach(fn), fn.apply(this,
     // args)). Implemented (kind, name) pairs run JS-exact; real-but-
@@ -4127,18 +4127,18 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         loc: locOf(call),
       };
     }
-    // Names NO DOM-representable prototype declares: the member can only
+    // Names NO dyn-representable prototype declares: the member can only
     // be an OWN property, so "read the member, call it" IS Node's
-    // semantics for every possible DOM value — `handlers.onDone(x)` on a
+    // semantics for every possible dyn value — `handlers.onDone(x)` on a
     // checked-dynamic object calls the stored function (dynKeyGet answers
     // the member or undefined; dynCall throws Node's exact catchable
     // "handlers.onDone is not a function" on a non-function). Prototype
     // names (map/join/hasOwnProperty/call/...) keep the fence: on a real
-    // DOM array/string/object Node would run the METHOD, which no stored
+    // dyn array/string/object Node would run the METHOD, which no stored
     // member models. Order note: JS reads the callee before evaluating
     // arguments — dynKeyGet's undefined-receiver TypeError fires first,
     // exactly Node.
-    if (DOM_PROTO_METHOD_NAMES.has(access.name.text)) return null;
+    if (DYN_PROTO_METHOD_NAMES.has(access.name.text)) return null;
     // Optional forms (`obj.cb?.()`, `obj?.cb()`) belong to the chain
     // machinery's short-circuit semantics — not modeled here yet.
     if (call.questionDotToken || access.questionDotToken) return null;
@@ -4157,12 +4157,12 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     return { kind: "dynCall", callee: member, calleeName: access.getText(), args, type: DYN, loc };
   }
 
-/** Prototype method names of the DOM-representable kinds (String, Array,
+/** Prototype method names of the checked-dynamic tree-representable kinds (String, Array,
  * Object, Function, Number prototypes): a dyn receiver call on one of
  * these could be a REAL method on a real value, which a stored-member
  * read would silently mis-answer — they keep the fence. Everything else
- * is own-property-or-throw for every DOM value (the honest dynCall). */
-const DOM_PROTO_METHOD_NAMES = new Set([
+ * is own-property-or-throw for every dyn value (the honest dynCall). */
+const DYN_PROTO_METHOD_NAMES = new Set([
   // Object.prototype
   "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString", "toString", "valueOf",
   // Function.prototype
@@ -4178,7 +4178,7 @@ const DOM_PROTO_METHOD_NAMES = new Set([
 ]);
 
 /** The SHARED prototype names scr_dyn_invoke dispatches at runtime (the
- * subset of DOM_PROTO_METHOD_NAMES with a receiver-kind dispatch): the
+ * subset of DYN_PROTO_METHOD_NAMES with a receiver-kind dispatch): the
  * runtime runs the real method for the receiver's kind, throws Node's
  * is-not-a-function where the kind's prototype lacks the name, and
  * fences LOUDLY on real-but-unimplemented pairs. */
@@ -4192,7 +4192,7 @@ export const DYN_DISPATCH_METHODS = new Set([
   // the runtime kind so a boxed IncomingMessage/ServerResponse/Socket
   // routes onto the same entry points the static lowerings use (modeled
   // members) or the loud not-supported ladder (real-but-unmodeled ones).
-  // On every other DOM kind they answer exactly what the stored-member
+  // On every other dyn kind they answer exactly what the stored-member
   // path answered (OBJ own members call; the rest throw Node's
   // is-not-a-function).
   "on", "once", "addListener", "removeListener", "off", "removeAllListeners",
@@ -4207,11 +4207,11 @@ export const DYN_DISPATCH_METHODS = new Set([
   // The netServer half of the handle surface (`let server; server =
   // createServer(...)` — the handle lives in a dyn binding whose
   // closures the checker cannot narrow): listen/close dispatch onto the
-  // server ops; no other DOM prototype declares either name, so the
+  // server ops; no other dyn prototype declares either name, so the
   // remainder keeps the stored-member answers.
   "listen", "close",
   // Promise.prototype (SCR_DYN_PROMISE receivers): the reaction trio
-  // rides the fiber machinery (scr_dyn_promise_then); on every other DOM
+  // rides the fiber machinery (scr_dyn_promise_then); on every other dyn
   // kind then/catch/finally answer the stored-member path (OBJ own
   // members call, the rest throw Node's is-not-a-function).
   "then", "catch", "finally",
@@ -4226,7 +4226,7 @@ export const DYN_DISPATCH_METHODS = new Set([
 ]);
 
 /** STR_METHODS ∪ the regex-form names, MINUS everything Array (or any
- * other DOM kind's prototype) also declares. */
+ * other dyn kind's prototype) also declares. */
 const DYN_STRING_ONLY_METHODS = new Set([
   "charCodeAt", "charAt", "startsWith", "endsWith", "substring", "repeat",
   "trim", "trimStart", "trimEnd", "split", "padStart", "padEnd",
@@ -4234,8 +4234,8 @@ const DYN_STRING_ONLY_METHODS = new Set([
   "search",
 ]);
 
-/** `Array.isArray(v)` — a real runtime test on `unknown` values (the DOM's
- * array kind: DOM arrays answer true, bytes/objects/scalars false — exactly
+/** `Array.isArray(v)` — a real runtime test on `unknown` values (the checked-dynamic tree's
+ * array kind: dyn arrays answer true, bytes/objects/scalars false — exactly
  * JS, Uint8Array included), a compile-time constant on statically-typed
  * ones (an `T[]` value IS an array, every other static kind is not; folded
  * only over side-effect-free reads, the `in`-operator discipline; unions
@@ -4985,7 +4985,7 @@ const inliningPredicates = new Set<ts.Symbol>();
     // VARIADIC JS functions: a dynRest param (above), or a plain function
     // whose body reads `arguments` (test/common's mustCall wrapper —
     // `function() { ...; return fn.apply(this, arguments); }`). Both mark
-    // the func type `rest`: the lifted body takes one trailing DOM-array
+    // the func type `rest`: the lifted body takes one trailing dyn-array
     // param, filled by the boxed call thunk with the call's arguments
     // from index params.length on. `arguments` is only claimed in
     // ZERO-param functions (there it IS the surplus array); alongside
@@ -5010,7 +5010,7 @@ const inliningPredicates = new Set<ts.Symbol>();
       shapes,
       funcType: {
         kind: "func",
-        // dynRest is EXCLUDED (the boxed thunk fills the trailing DOM
+        // dynRest is EXCLUDED (the boxed thunk fills the trailing dyn
         // array — no spelled slot); islandRest is INCLUDED (the trailing
         // jsval param IS the engine arguments array, the REST host-call
         // adapter's one uniform shape).
@@ -5104,7 +5104,7 @@ const inliningPredicates = new Set<ts.Symbol>();
     try {
       const { params, prologue } = L.declareParams(node.parameters, shapes);
       // The VARIADIC `arguments` form (rest-marked with no declared rest
-      // param): a synthetic trailing DOM-array param carries the call's
+      // param): a synthetic trailing dyn-array param carries the call's
       // arguments; `arguments` reads resolve to it (identifier lowering).
       if (funcType.rest && !shapes.some((s) => s.mode === "dynRest" || s.mode === "islandRest")) {
         const argsLocal = L.declareHiddenLocal("%arguments", DYN);
@@ -5208,7 +5208,7 @@ const inliningPredicates = new Set<ts.Symbol>();
         first.loc.start,
       );
       const params: IrParam[] = funcType.params.map((t, i) => ({ localId: `%pf${i}`, name: `%pf${i}`, type: t }));
-      // A REST-MARKED value type hides one synthetic trailing DOM-array
+      // A REST-MARKED value type hides one synthetic trailing dyn-array
       // param in the lifted function (the boxed call thunk fills it) —
       // the fence lambda must spell that slot too or the validator's
       // closure-signature check trips (SC9001). Island rest types SPELL
@@ -5427,7 +5427,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       // A TYPED handler on a DYN-settling promise (the tracePromise
       // result's `.then((value) => ...)` — the checker's generic
       // instantiation typed the parameter, but the settled value is a
-      // DOM value): box the handler and ride the dyn-handler desugar
+      // dyn value): box the handler and ride the dyn-handler desugar
       // below — its call thunk validates the settled value into the
       // declared parameter type (the per-arg dynCheck), Node's own
       // runtime contract for a value that came off the wire untyped.
@@ -5441,10 +5441,10 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       }
       // A CHECKED-DYNAMIC handler VALUE (`p.then(common.mustCall())` — the
       // Node-suite wrapper is an untyped rest-args function): the same
-      // async desugar with the handler called through the DOM — the
+      // async desugar with the handler called through the checked-dynamic tree — the
       // settled value boxes (dyn passes through; void arrives as JS's
       // explicit undefined argument), the result promise settles with the
-      // handler's DOM result. A receiver rejection passes through the
+      // handler's dyn result. A receiver rejection passes through the
       // await like the typed path; the dyn call's own argument checking
       // throws Node's TypeError for non-callables.
       if (cb.type.kind === "dyn") {
@@ -5456,7 +5456,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
           L.unsupported(
             "SC1090",
             call.arguments[0]!,
-            `then handlers receiving '${L.fmt(v.type)}' values through an untyped handler (the settled value cannot cross the DOM boundary)`,
+            `then handlers receiving '${L.fmt(v.type)}' values through an untyped handler (the settled value cannot cross the checked-dynamic tree boundary)`,
           );
         };
         const resultT: IrType & { kind: "promise" } = { kind: "promise", inner: DYN };
@@ -5692,8 +5692,8 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     }
 
     // .catch on a DYN-SETTLING promise (the tracePromise result's
-    // `.catch((e) => ...)`): the rejection reason is a DOM value, so the
-    // handler runs through the DOM — a lifted async helper awaits the
+    // `.catch((e) => ...)`): the rejection reason is a dyn value, so the
+    // handler runs through the checked-dynamic tree — a lifted async helper awaits the
     // receiver, passes fulfillments through as dyn, and on rejection
     // calls the boxed handler with caughtToDyn's identity-preserving
     // snapshot (the dyn-then desugar's catch twin).
@@ -5890,7 +5890,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       } else if (R.kind === "dyn") {
         // A checked-dynamic result (the dyn-handler .then's promise-of-dyn
         // chained into .catch): falling off the handler's end resolves
-        // with the DOM undefined.
+        // with the dyn undefined.
         catchBody.push({ kind: "return", value: dynUndefinedExpr(loc), loc });
       } else if (R.kind === "jsval") {
         // A package-typed result (Promise<Command> — the parseAsync().catch
@@ -6696,7 +6696,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
         // REAL prototype semantics: reads delegate LIVE, writes shadow,
         // and inspect renders Node's exact shapes ("[Object: null
         // prototype]" included). null and engine-held (jsval) prototypes
-        // route; checked-dynamic (DOM) prototypes keep the named fence —
+        // route; checked-dynamic (dyn) prototypes keep the named fence —
         // their marshal into the engine is a DEEP COPY, so a later
         // prototype mutation would be invisible through the created
         // object where Node delegates live.
@@ -6767,7 +6767,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
         const tProbe = probeLower(L, call.arguments[0]!);
         const sProbe = probeLower(L, call.arguments[1]!);
         // CHECKED-DYNAMIC target and source (the JS file-scope
-        // object-literal identity story): the runtime DOM copy — own
+        // object-literal identity story): the runtime dyn copy — own
         // members of the source land on the target, which returns.
         if (tProbe?.type.kind === "dyn") {
           const loc = locOf(call);
@@ -6803,7 +6803,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       // `Object.assign(target, ...sources)` over a CHECKED-DYNAMIC target
       // — the n-ary/spread form (`Object.assign({}, ...plugins.map(p =>
       // p.options), coreOptions)`, support.js's option-table merge). The
-      // sources pack into one fresh DOM array FIRST — plain sources
+      // sources pack into one fresh dyn array FIRST — plain sources
       // retain in, spread sources flatten through the spread-call walk
       // (V8's exact TypeError texts, the source spelling carried for the
       // nullish form) — so every source evaluates and flattens before any
@@ -6815,7 +6815,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       // spread copies in at the boundary, the documented aliasing
       // stance); anything else keeps the fence. Targets: dyn values, a
       // FRESH object-literal target (`Object.assign({}, ...)` — no alias
-      // exists, so building it as a DOM object instead of a record is
+      // exists, so building it as a dyn object instead of a record is
       // unobservable), or a nullish unit (Node's ToObject TypeError
       // throws at the call, catchably); aliased record targets keep the
       // fence — their identity could not survive the conversion.
@@ -6889,7 +6889,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     // Object.defineProperties over a CHECKED-DYNAMIC target (test/common's
     // _mustCallInner copying name/length onto the mustCall wrapper): the
     // runtime turns each descriptor's `value` into a plain own property on
-    // the DOM node (OBJ members; FUNC nodes carry an own-property table) —
+    // the dyn node (OBJ members; FUNC nodes carry an own-property table) —
     // flags accepted and ignored, accessors throw loudly (SEMANTICS.md).
     // The result is the target, like JS. Typed targets keep the fence:
     // static shapes have no property table to extend.
@@ -6959,7 +6959,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       const keyNode = call.arguments[1]!;
       const probed = probeLower(L, recvNode);
       // A CHECKED-DYNAMIC receiver (the JS file-scope object-literal
-      // identity story): the runtime DOM probe — OBJ member presence, ARR
+      // identity story): the runtime dyn probe — OBJ member presence, ARR
       // index bounds, Node's ToObject TypeError on nullish.
       if (probed?.type.kind === "dyn") {
         const loc = locOf(call);
@@ -6992,9 +6992,9 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     const argNode = call.arguments[0]!;
     // A CHECKED-DYNAMIC argument — the checker may still spell a record
     // type (the JS file-scope object-literal identity story stores the
-    // DOM object), so the LOWERED value's kind is the dispatch: the
-    // runtime walks the DOM node's own keys (integer-like keys first,
-    // JS's own-key order) and answers a DOM array.
+    // dyn object), so the LOWERED value's kind is the dispatch: the
+    // runtime walks the dyn node's own keys (integer-like keys first,
+    // JS's own-key order) and answers a dyn array.
     {
       const probed = probeLower(L, argNode);
       const isDyn = probed?.type.kind === "dyn";
@@ -7222,7 +7222,7 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       const { params, prologue } = L.declareParams(decl.parameters, sig.params);
       // The synthetic `arguments` slot (a dynRest shape BEYOND the declared
       // parameters — collectSignatureInner appended it): one trailing
-      // DOM-array param, resolved by `arguments` reads.
+      // dyn-array param, resolved by `arguments` reads.
       if (sig.params.length > decl.parameters.length && sig.params[sig.params.length - 1]!.mode === "dynRest") {
         const argsLocal = L.declareHiddenLocal("%arguments", DYN);
         params.push({ localId: argsLocal.id, name: "%arguments", type: DYN });

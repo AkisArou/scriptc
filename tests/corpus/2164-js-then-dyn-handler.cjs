@@ -1,6 +1,6 @@
 // `.then(handler)` with a CHECKED-DYNAMIC handler VALUE (the Node-suite
 // `p.then(common.mustCall())` shape): the settled value crosses into the
-// handler through the DOM (void settles deliver JS's explicit undefined
+// handler through the checked-dynamic tree (void settles deliver JS's explicit undefined
 // argument), rejections pass through to a chained .catch, and the traced
 // microtask ordering matches Node's.
 'use strict';

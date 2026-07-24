@@ -1,5 +1,5 @@
 // assert.strictEqual / notStrictEqual over CHECKED-DYNAMIC operands —
-// SameValue over the DOM kinds: numbers (NaN, ±0), strings, booleans,
+// SameValue over the dyn kinds: numbers (NaN, ±0), strings, booleans,
 // null/undefined units, node identity for objects/arrays, BOXED-CLOSURE
 // identity for functions (one function crossing the unknown boundary
 // twice is still one JS function). Generated failure messages are
@@ -60,7 +60,7 @@ console.log(msgOf(() => assert.notStrictEqual(dnan, 0 / 0)));
 // The static stacked-number form carries the same `^` indicator.
 console.log(msgOf(() => assert.strictEqual(1234567, 1234568)));
 
-// Composite failures: reference-equality headers over the DOM rendering.
+// Composite failures: reference-equality headers over the checked-dynamic tree rendering.
 console.log(msgOf(() => assert.strictEqual(dobj, dobj2)));
 console.log(msgOf(() => assert.strictEqual(dobj, dobj3)));
 console.log(msgOf(() => assert.strictEqual(dobj, 5)));
@@ -84,7 +84,7 @@ console.log(uf1 === uf2, uf1 === ug); // dyn === carries the same closure identi
 console.log(msgOf(() => assert.strictEqual(uf1, ug)));
 console.log(msgOf(() => assert.notStrictEqual(uf1, f)));
 
-// assert(dyn) / assert.ok(dyn): ToBoolean over the DOM kind.
+// assert(dyn) / assert.ok(dyn): ToBoolean over the dyn kind.
 assert(dnum);
 assert.ok(dstr);
 assert(dobj);

@@ -246,7 +246,7 @@ declare var process: {
   on(event: "SIGINT" | "SIGTERM", listener: () => void): void;
   on(event: "exit", listener: (code: number) => void): void;
   /* 'warning' — Node's process-warning channel: listeners receive the
-   * warning Error (as a DOM value); emitWarning and the runtime's
+   * warning Error (as a dyn value); emitWarning and the runtime's
    * deprecation sites dispatch synchronously (SEMANTICS.md). */
   on(event: "warning", listener: (warning: Error & { code?: string }) => void): void;
   /* 'unhandledRejection' — dispatched per never-observed rejection at
@@ -266,7 +266,7 @@ declare var process: {
   emitWarning(warning: string | Error, ...args: any[]): void;
 };
 
-/* ── globals a real CLI's sources reference (all @types/node or DOM-lib
+/* ── globals a real CLI's sources reference (all @types/node or dyn-lib
  * territory; the fallback declares the slice so projects PREFLIGHT and
  * every reached use lands on the SC2020 fence — or a real lowering where
  * one exists — instead of "Cannot find name"). With @types/node these
@@ -341,7 +341,7 @@ declare var AbortController: { new (): AbortController };
  * them below): base64 → binary string and back, Latin-1 domain like the
  * WHATWG originals. The parameter is `unknown` because WebIDL ToStrings
  * whatever arrives (Node's atob(null) decodes "null") — the coercion
- * runs in the runtime over the DOM kind, and the Node suite exercises
+ * runs in the runtime over the dyn kind, and the Node suite exercises
  * it; malformed input throws the catchable DOMException
  * InvalidCharacterError, the zero-argument call Node's TypeError
  * [ERR_MISSING_ARGS]. */
@@ -708,7 +708,7 @@ declare module "timers/promises" {
  * traceSync/traceCallback run Node's publish choreography in the runtime
  * (context defaults to a fresh {}); tracePromise is declared (the member
  * exists in Node) but fences at the call site — the traced function's
- * promise cannot cross the DOM boundary yet. */
+ * promise cannot cross the checked-dynamic tree boundary yet. */
 declare module "node:diagnostics_channel" {
   export type ChannelListener = (message: unknown, name: string) => void;
   export interface Channel {
@@ -2498,7 +2498,7 @@ declare module "http2" {
     setTimeout(msecs: number, callback?: () => void): void;
     ping(callback: (err: Error | null, duration: number, payload: Uint8Array) => void): boolean;
     /* The settings surface rides the checked-dynamic machinery (records
-     * cross as DOM values — the suite's mustCall listeners are dyn). */
+     * cross as dyn values — the suite's mustCall listeners are dyn). */
     settings(settings?: any, callback?: any): void;
     readonly localSettings: any;
     readonly remoteSettings: any;
@@ -2761,7 +2761,7 @@ declare module "node:tty" {
 declare module "async_hooks" {
   /* AsyncLocalStorage: fiber-carried context snapshots — run/getStore/
    * exit/enterWith/disable lower onto the runtime's active-slot machinery
-   * (als.* libCalls); values cross as DOM values. */
+   * (als.* libCalls); values cross as dyn values. */
   export class AsyncLocalStorage<T = any> {
     constructor();
     run<R>(store: T, callback: (...args: any[]) => R, ...args: any[]): R;

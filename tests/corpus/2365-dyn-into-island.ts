@@ -1,7 +1,7 @@
 // @dynamic
 // A CHECKED-DYNAMIC (`unknown`) value entering 'any'-typed island code,
 // and async OBJECT-LITERAL methods (`{ async load() {...} }` — the lazy
-// service-registry pattern): the DOM deep-copies into engine values
+// service-registry pattern): the checked-dynamic tree deep-copies into engine values
 // (scr_jsval_from_dyn), and the shorthand async method rides the whole
 // async closure machinery.
 interface Entry {
@@ -34,7 +34,7 @@ console.log(`${anyCfg.svc} ${anyCfg.port + 1}`);
 console.log(`${anyCfg.list.length} ${anyCfg.list[0] + anyCfg.list[1]}`);
 console.log(`${anyCfg.flag === null}`);
 
-// Nested DOM trees preserve undefined-valued members where JSON cannot:
+// Nested dyn trees preserve undefined-valued members where JSON cannot:
 // build one through dynFrom (a record with an unset optional) and cross.
 interface Opt {
   a: number;

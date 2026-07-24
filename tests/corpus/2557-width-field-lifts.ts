@@ -1,5 +1,5 @@
 // Per-field width lifts beyond copy/wrap/narrow: 'unknown' destination
-// fields (the static->DOM deep copy), derived->base class fields (the
+// fields (the static->dyn deep copy), derived->base class fields (the
 // prefix-layout upcast), and function fields whose signatures differ
 // only by clean mechanical conversions. Reads happen after the narrow,
 // where the copy is observationally identical to Node's aliasing.

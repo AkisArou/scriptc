@@ -396,15 +396,15 @@ void scr_assert_ref_eq_fn(const ScrClosure *a, const ScrClosure *b, bool negated
 }
 
 /* ── strictEqual / deepStrictEqual over CHECKED-DYNAMIC (dyn) operands ──
- * The DOM carries the value's kind at runtime, so one entry point serves
+ * The checked-dynamic tree carries the value's kind at runtime, so one entry point serves
  * the whole quartet: SameValue for the strict pair (numbers by Object.is,
  * strings by bytes, units by kind, arrays/objects/bytes by node identity,
  * functions by the BOXED CLOSURE — two dyn crossings of one function are
- * the same JS function), a structural DOM walk for the deep pair.
+ * the same JS function), a structural dyn walk for the deep pair.
  *
  * Failure messages reproduce Node's assertion_error.js against the v24
  * sources: inspectValue is a compact:false / sorted:true / depth-1000
- * rendering of the DOM (each entry on its own line, entries sorted by
+ * rendering of the checked-dynamic tree (each entry on its own line, entries sorted by
  * their RENDERED text — Node's `sorted: true` sorts formatted entries),
  * the simple/stacked scalar forms match the static paths byte-for-byte,
  * and composite diffs run the real myers line diff with Node's printer
@@ -415,7 +415,7 @@ void scr_assert_ref_eq_fn(const ScrClosure *a, const ScrClosure *b, bool negated
  * the [Function: name] form, and values rendering past ~4096 lines fall
  * back to the whole-value +/- form without context collapsing. */
 
-/* JS SameValue over two DOM values (Object.is — the strictEqual and
+/* JS SameValue over two dyn values (Object.is — the strictEqual and
  * notStrictEqual comparison). Functions compare by boxed closure: the
  * ScrDyn box is a boundary artifact, the closure IS the JS identity. */
 static bool scr_assert_dyn_same_value(const ScrDyn *a, const ScrDyn *b) {
@@ -449,19 +449,19 @@ static bool scr_assert_dyn_same_value(const ScrDyn *a, const ScrDyn *b) {
   }
 }
 
-/* Node's strict deep equality over two DOM values: kind-wise — Object.is
+/* Node's strict deep equality over two dyn values: kind-wise — Object.is
  * numbers, byte-equal strings, units by kind, per-element arrays,
- * key-set-plus-values objects (DOM keys are unique, so equal lengths and
+ * key-set-plus-values objects (dyn keys are unique, so equal lengths and
  * an a⊆b value walk prove the bijection), brand-aware bytes (the buffer
  * flavor bit IS the Buffer-vs-Uint8Array prototype Node compares first),
  * reference identity for functions (boxed closure). Plain recursion:
- * JSON-origin DOMs are trees; a keyed-write cycle (h.self = h) has no
+ * JSON-origin dyn values are trees; a keyed-write cycle (h.self = h) has no
  * memo here where Node carries one (documented divergence). */
 static bool scr_assert_dyn_deep_eq(const ScrDyn *a, const ScrDyn *b) {
   if (a == b) return true;
   if (a->kind != b->kind) {
     /* A MIXED comparison with an island side (wrapped engine object vs
-     * DOM data): Node walks both structurally — a plain `false` would
+     * dyn data): Node walks both structurally — a plain `false` would
      * mint a fabricated AssertionError for values Node may call equal.
      * Loud fence (the long-tail lane's structural walk). */
     if (a->kind == SCR_DYN_JSVAL || b->kind == SCR_DYN_JSVAL) {
@@ -528,7 +528,7 @@ static bool scr_assert_dyn_deep_eq(const ScrDyn *a, const ScrDyn *b) {
   return false; /* unreachable */
 }
 
-/* ── inspectValue over the DOM (assertion_error.js's inspect options:
+/* ── inspectValue over the checked-dynamic tree (assertion_error.js's inspect options:
  * compact:false, sorted:true, depth 1000, maxArrayLength Infinity) ───── */
 
 #define SCR_ASSERT_CF_DEPTH 1000
@@ -924,7 +924,7 @@ static bool scr_assert_print_myers(ScrAssertBuf *b, const ScrDiffOp *diff, size_
 
 /* ── the dyn entry point ─────────────────────────────────────────────── */
 
-/* Is this DOM kind `typeof == "object" && != null` to assertion_error.js? */
+/* Is this dyn kind `typeof == "object" && != null` to assertion_error.js? */
 static bool scr_assert_dyn_is_object(const ScrDyn *d) {
   return d->kind == SCR_DYN_ARR || d->kind == SCR_DYN_OBJ || d->kind == SCR_DYN_BYTES ||
          d->kind == SCR_DYN_HANDLE || d->kind == SCR_DYN_PROMISE ||
@@ -1095,7 +1095,7 @@ static void scr_assert_dyn_neq_fail(ScrDyn *a, bool deep, ScrStr *msg, bool has_
 }
 
 /* strictEqual / notStrictEqual / deepStrictEqual / notDeepStrictEqual
- * where either operand is a checked-dynamic value (both arrive as DOM
+ * where either operand is a checked-dynamic value (both arrive as dyn
  * values — the frontend boxes a static side). Borrows everything. */
 void scr_assert_eq_dyn(ScrDyn *a, ScrDyn *b, bool negated, bool deep,
                        ScrStr *msg, bool has_msg) {
@@ -1113,7 +1113,7 @@ void scr_assert_eq_dyn(ScrDyn *a, ScrDyn *b, bool negated, bool deep,
 }
 
 /* Node's expectsError over an error-INSTANCE expected (assert.throws/
- * rejects second argument): every key of the expected DOM error (the
+ * rejects second argument): every key of the expected dyn error (the
  * %error marker skipped; name/message/code is the encoding's surface)
  * must deep-strict-equal the caught value's — extra ACTUAL keys are fine
  * (Node walks the expected's keys only). A mismatch fails through the
@@ -1441,7 +1441,7 @@ void scr_assert_iferror_bool(bool v) {
 }
 
 /* The checked-dynamic argument (test/common's mustSucceed wrapper): the
- * DOM kind dispatches — units pass quietly, %error-marked objects (the
+ * dyn kind dispatches — units pass quietly, %error-marked objects (the
  * caughtToDyn encoding) throw with the error's message (its name when
  * the message is empty, Node's rule), everything else throws with the
  * value's inspection. */

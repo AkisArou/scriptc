@@ -1,5 +1,5 @@
 // `u instanceof Uint8Array` on an `unknown` value: a runtime test of the
-// DOM's bytes kind, with tsc's narrowing typing the true branch (reads
+// dyn's bytes kind, with tsc's narrowing typing the true branch (reads
 // bridge through the validated extraction). Buffer IS a Uint8Array in Node
 // and rides the same bytes kind here, so both worlds answer true for it.
 // The stdin toBytes(chunk: unknown) pattern.
@@ -23,7 +23,7 @@ console.log(viaBuffer.length, viaBuffer[0], viaBuffer[1]);
 const viaNumber = toBytes(42);
 console.log(viaNumber.length);
 
-// The bare test as a value over every DOM kind, and negated flow.
+// The bare test as a value over every dyn kind, and negated flow.
 const u: unknown = src;
 const un: unknown = 7;
 const us: unknown = "hi";

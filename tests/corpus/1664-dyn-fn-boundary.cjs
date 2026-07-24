@@ -1,6 +1,6 @@
 // The checked-dynamic FUNCTION boundary, IN direction: a typed closure
 // passed to an untyped JS helper (the implicit-any param is a dyn slot)
-// boxes as the DOM's callable kind — identity and callability preserved.
+// boxes as the checked-dynamic tree's callable kind — identity and callability preserved.
 // Calls through the box validate each argument against the closure's
 // declared signature and convert the result back; JS arity semantics
 // hold (extra arguments ignored, missing arguments are undefined).

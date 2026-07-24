@@ -1,4 +1,4 @@
-// `throw` of CHECKED-DYNAMIC values in JS files: the DOM node rides the
+// `throw` of CHECKED-DYNAMIC values in JS files: the dyn node rides the
 // exception cell BY REFERENCE — a caught dyn is the same node every other
 // holder sees (assert.strictEqual against the original error answers
 // true, the error-identity cache), scalar dyn throws re-materialize their
@@ -13,7 +13,7 @@ try {
   take(boom);
 } catch (err) {
   console.log('caught', err.name, err.message);
-  assert.strictEqual(err, boom); // one error object, one DOM identity
+  assert.strictEqual(err, boom); // one error object, one dyn identity
   console.log('identity ok');
 }
 

@@ -1,7 +1,7 @@
 // Keyed writes where the OBJECT is the dynamic thing: JSON.parse receivers
-// and unknown-lowered lets take the DOM keyed write (dyn.keySet) — later
+// and unknown-lowered lets take the dyn keyed write (dyn.keySet) — later
 // writes win, number keys stringify (ToPropertyKey), values convert into
-// the DOM — with dyn-keyed reads, Object.keys' own-key order (index keys
+// the checked-dynamic tree — with dyn-keyed reads, Object.keys' own-key order (index keys
 // first), a dyn MEMBER receiver, and Node's TypeErrors on non-object
 // receivers (null's "Cannot set properties", the strict-mode "Cannot
 // create property" on primitives).

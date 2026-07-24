@@ -295,7 +295,7 @@ export function vAdapters(host: ShapeHost, t: IrType): { retain: string; release
       host.declare(`declare void @scr_jsval_release_v(ptr)`);
       return { retain: "@scr_jsval_retain_v", release: "@scr_jsval_release_v" };
     case "dyn":
-      // DOM values (the `unknown` boundary): the runtime's `_v` pair —
+      // dyn values (the `unknown` boundary): the runtime's `_v` pair —
       // scr_dyn_retain is a header inline, so the `_v` symbols serve both
       // roles. UNTRACED (the dyn→closure stance: cycles through dyn are
       // never collected, SEMANTICS.md) — traceAdapter answers null.

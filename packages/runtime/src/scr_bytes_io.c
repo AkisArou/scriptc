@@ -61,7 +61,7 @@ ScrBytes *scr_fs_read_file_bytes(ScrStr *path) {
  * utf8 answers a string, Node's other real encodings meet the loud
  * not-supported ladder, unknown names throw ERR_UNKNOWN_ENCODING, and an
  * options object dispatches on its `encoding` member (Node's form). +1
- * DOM value, or NULL with the exception pending. */
+ * dyn value, or NULL with the exception pending. */
 ScrDyn *scr_fs_read_file_sync_dyn(ScrStr *path, const ScrDyn *enc) {
   if (enc->kind == SCR_DYN_OBJ) {
     ScrDyn *ev = scr_dyn_obj_get((ScrDyn *)enc, "encoding", 8); /* borrowed */
@@ -166,7 +166,7 @@ bool scr_process_stderr_write_bytes(const ScrBytes *b) {
 
 /* ── the checked-dynamic Buffer compare/equals validators ──────────────
  * Node's argument ladders for buf.equals / buf.compare / Buffer.compare
- * over DOM-boxed arguments (the invalid-input probes: string needles,
+ * over dyn-boxed arguments (the invalid-input probes: string needles,
  * '0' offsets, null/object range args). A well-typed dyn still computes
  * the real answer — validation, not a constant fence. */
 
@@ -260,7 +260,7 @@ double scr_fs_to_unix_timestamp(const ScrDyn *t) {
 
 /* ── the fs argument-validation ladders (checked-dynamic lane) ─────────
  * Each fs.*Chk libCall replicates its API's Node-order validation over
- * DOM values and throws Node's exact typed errors; when every validation
+ * dyn values and throws Node's exact typed errors; when every validation
  * passes, the honest tail runs — the real operation where one exists
  * (mkdtempSync, lchmodSync on macOS), the compiler-rendered SC2020 fence
  * otherwise (scr_throw_lowering_fence). All arguments borrowed. */
@@ -282,7 +282,7 @@ static bool scr_fs_cb_chk(const ScrDyn *cb, const char *name) {
 }
 
 /* getValidatedPath: strings and Buffers pass (URL instances never reach
- * these ladders — the DOM has no URL kind here, and Node would accept
+ * these ladders — the checked-dynamic tree has no URL kind here, and Node would accept
  * only file: URLs anyway). */
 static bool scr_fs_path_chk(const ScrDyn *p, const char *name) {
   if (p->kind == SCR_DYN_STR || p->kind == SCR_DYN_BYTES) return true;
@@ -522,7 +522,7 @@ static void scr_fs_lchmod_apply(const ScrDyn *path, const ScrDyn *mode) {
 }
 #endif
 
-/* Answers the DOM undefined (+1) on success — lchmodSync's JS value, so
+/* Answers the dyn undefined (+1) on success — lchmodSync's JS value, so
  * return-position uses lower; NULL with the exception pending. */
 ScrDyn *scr_fs_lchmod_sync_chk(const ScrDyn *path, const ScrDyn *mode) {
   if (!scr_fs_lchmod_defined("fs.lchmodSync")) return NULL;

@@ -641,7 +641,7 @@ function cjsScalarLiteral(e: ts.Expression): boolean {
 /** True when a JS file-scope declaration's initializer provably LOWERS to
  * a checked-dynamic (or unit) value, so a DYN module global can hold it:
  * no initializer, a unit literal, or a checker-`any` call/member/
- * identifier read (any-typed operations lower through the DOM in JS).
+ * identifier read (any-typed operations lower through the checked-dynamic tree in JS).
  * `new` expressions stay OUT even when checker-any (`new Anon.Sub()` over
  * an expando class member constructs a TYPED instance — corpus 2032), as
  * does everything else (object/array literals have their own rules;
@@ -661,7 +661,7 @@ function jsDynHoldableInitializer(L: Lowerer, init: ts.Expression | undefined): 
   // A CALL whose inferred type has no static mapping and whose residue
   // falls to the checked-dynamic kind (`const exec = common.mustCall(() =>
   // ... exec ...)` — the wrapper's rest-args type is not checker-`any`,
-  // but the VALUE lowers through the DOM the same way): registering the
+  // but the VALUE lowers through the checked-dynamic tree the same way): registering the
   // dyn global BEFORE the initializer lowers is what lets the callback
   // capture the binding itself — the Node-suite self-referential-const
   // idiom. Non-dyn residues (pure single-signature function types, typed
@@ -796,7 +796,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             const strict = L.checker.getTypeOfSymbol(symbol);
             const t = L.mapTypeOf(strict) ?? dynFallbackType(L, nameNode, strict);
             if (!t || t.kind === "void") L.badType(typeNode, strict);
-            // `module.exports.Strings = Strings` naming a DOM-HOLDING
+            // `module.exports.Strings = Strings` naming a dyn-HOLDING
             // const (the JS file-scope object-literal identity story): the
             // export ALIASES the const's own dyn global — one storage, one
             // owner, identity by construction (a record-typed second slot
@@ -818,7 +818,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                     for (const d of L.checker.declarationsOf(symbol)) L.globalsByDeclNode.set(d, vG);
                     return;
                   }
-                  // A mutable (`let`) DOM source: separate DYN storage IS
+                  // A mutable (`let`) dyn source: separate DYN storage IS
                   // Node's copy-of-the-reference at this statement (later
                   // reassignments of the let stay invisible through the
                   // export). The id must not collide with the let's own
@@ -1156,7 +1156,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
           try {
             // A JS file-scope evolving ARRAY (`const mustCallChecks = [];`
             // — test/common's exit-accounting ledger): the strict type
-            // (any[]) has no mapping, but the VALUE is the DOM array the
+            // (any[]) has no mapping, but the VALUE is the dyn array the
             // literal builds (lowerArrayLiteral's JS fallback) — register
             // a checked-dynamic global so separately-declared function
             // bodies (runCallChecks, _mustCallInner) reach the SAME
@@ -1181,11 +1181,11 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             // the literal's contract — the SAME object flows into untyped
             // callees, gets stamped by them, and is compared back against
             // the binding (assert.strictEqual(found, input)). A static
-            // record global would re-box at every DOM crossing and lose
-            // that identity, so the binding holds the DOM object itself.
+            // record global would re-box at every dyn crossing and lose
+            // that identity, so the binding holds the dyn object itself.
             // Gated to literals that are PURE DATA WRITTEN INLINE — every
             // property a non-computed PropertyAssignment whose value is
-            // dyn-representable (unmappable member types are the DOM
+            // dyn-representable (unmappable member types are the checked-dynamic tree
             // fallback's own case) — so shorthand aggregates (test/common's
             // export object: alias plumbing importers resolve THROUGH),
             // spreads, accessors, and literals holding unconvertible typed
@@ -1210,7 +1210,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
               continue;
             }
             // A JS file-scope ANY-RESIDUE binding whose VALUE provably
-            // lives in the DOM: no initializer (`let catchWarning;` —
+            // lives in the checked-dynamic tree: no initializer (`let catchWarning;` —
             // test/common's warning ledger), a unit initializer (`let
             // localhostIPv4 = null;` — the lazy-cache idiom), or an
             // initializer whose own checker type is `any` (`const handler
@@ -1220,7 +1220,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             // storage instead of fencing per reference. Typed-but-
             // unmappable initializers (`new Set(...)` — a real Set the
             // decl keeps as an %init local) stay OUT: forcing those into
-            // the DOM would trade their working typed representation for
+            // the checked-dynamic tree would trade their working typed representation for
             // fences.
             if (
               isJsSourceFile(sf) && !L.mapTypeOf(L.typeOf(nameNode)) &&
@@ -1233,7 +1233,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                 const g: IrGlobal = { id: `%g.${tag}${nsPrefix}${nameNode.text}`, name: nameNode.text, type: DYN, mutable: isLet };
                 L.globalsBySymbol.set(symbol, g);
                 L.globalsList.push(g);
-                // Mutable dyn globals hold the DOM undefined from module
+                // Mutable dyn globals hold the dyn undefined from module
                 // entry (the main path's rule below): a closure called
                 // above the declaration reads undefined instead of
                 // faulting on NULL.
@@ -1341,7 +1341,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             // infers a record (`const wrapped = function () { return
             // expectedResult; }`): the closure VALUE lowers with a dyn
             // return (declaredReturnType's record twin — JS object
-            // literals are DOM values, and a record return would copy
+            // literals are dyn values, and a record return would copy
             // identity away), so the binding's slot must agree or an
             // adapter would re-copy at the assignment.
             if (
@@ -1378,7 +1378,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             L.globalsList.push(g);
             // Mutable checked-dynamic LET globals ride the same entry
             // init: a closure called above the declaration statement
-            // reads the DOM undefined instead of faulting on NULL — the
+            // reads the dyn undefined instead of faulting on NULL — the
             // dyn face of let's documented pre-declaration window (Node
             // throws the TDZ ReferenceError there).
             if (isVarDeclared(decl) || (g.type.kind === "dyn" && g.mutable)) {
@@ -1428,7 +1428,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
    * must hold the interned undefined arm BEFORE the body runs (a function
    * called above the declaration statement may read it — lowerFileInit
    * emits the assigns right after the run-once guard). Checked-dynamic
-   * slots hold the DOM undefined the same way (a NULL dyn is a trap, not
+   * slots hold the dyn undefined the same way (a NULL dyn is a trap, not
    * a value). Other types need nothing: tsc's flow analysis rejects their
    * direct early reads, and closure reads share let's documented
    * zero/NULL divergence window. */
@@ -1436,7 +1436,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
     // 'any' globals need the entry init exactly like undefined-armed
     // unions: tsc never guards `any` reads, so `var x: any;` is readable
     // before any assignment and its slot must hold its world's undefined
-    // — the ENGINE's for jsval (--dynamic), the DOM's for dyn (static) —
+    // — the ENGINE's for jsval (--dynamic), the checked-dynamic tree's for dyn (static) —
     // rather than a C-level NULL (an op or validated exit on NULL is
     // memory-unsafe, not a TypeError).
     if (g.type.kind !== "union" && g.type.kind !== "jsval" && g.type.kind !== "dyn") return;
@@ -1638,7 +1638,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
       // Module-scope `var` hoisting: undefined-armed var globals hold the
       // interned undefined from module entry (before any body statement —
       // a function called above the declaration reads `undefined`, exactly
-      // Node); checked-dynamic var globals hold the DOM undefined the same
+      // Node); checked-dynamic var globals hold the dyn undefined the same
       // way. After the guard: a cache-hit revisit must not reset them.
       for (const g of L.varGlobalEntryInits.get(sf) ?? []) {
         const wrapped = g.type.kind === "dyn" ? dynUndefinedExpr(loc0) : L.unassignedSlotInit(g.type, loc0);

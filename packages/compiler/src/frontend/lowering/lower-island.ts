@@ -98,9 +98,9 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
       return { kind: "jsOp", op: e.type.kind === "undefinedT" ? "undefLit" : "nullLit", args: [], type: JSVAL, loc: e.loc };
     }
     if (e.type.kind === "dyn") {
-      // A CHECKED-DYNAMIC value entering the island: the DOM tree
+      // A CHECKED-DYNAMIC value entering the island: the dyn tree
       // deep-copies into engine values — exactly coerceToExpected's
-      // jsval-IN rule (data kinds only; a DOM carrying a boxed
+      // jsval-IN rule (data kinds only; a dyn carrying a boxed
       // function/handle throws the catchable TypeError at runtime).
       return { kind: "jsMarshal", value: e, type: JSVAL, loc: e.loc };
     }

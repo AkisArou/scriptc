@@ -44,9 +44,9 @@ static void scr_error_gcfree(void *obj) {
   scr_cyc_free(e);
 }
 
-/* DOMException teardown: the ScrError fields plus the owned cause DOM
+/* DOMException teardown: the ScrError fields plus the owned cause dyn
  * value. The cause is a ScrDyn — scr_json.c territory — and this file
- * must stay linkable WITHOUT the DOM (the runtime C-unit tests link
+ * must stay linkable WITHOUT the checked-dynamic tree (the runtime C-unit tests link
  * subsets), so the drop goes through a hook scr_json.c installs before
  * any cause can exist (scr_domex_new is the only producer). */
 static void (*scr_domex_cause_drop)(void *obj) = NULL;
@@ -273,7 +273,7 @@ void scr_undef_global_read(ScrStr *name) {
 /* ── DOMException ─────────────────────────────────────────────────────
  * The web-standard error shape (a Node global since v17): the ScrError
  * prefix plus the WebIDL slots (legacy numeric code, the options form's
- * cause). Construction resolves WebIDL's optionality over borrowed DOM
+ * cause). Construction resolves WebIDL's optionality over borrowed dyn
  * arguments — one place, shared by the compiled `new DOMException(...)`
  * and the runtime's own throw sites (atob/btoa). */
 

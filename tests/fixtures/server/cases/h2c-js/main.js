@@ -1,7 +1,7 @@
 /* The JS-lane h2c loop: a common.mustCall-shaped wrapper makes the
  * listeners checked-dynamic (the Node-suite shape), so the stream and
  * session handles cross into dyn code and dispatch their members through
- * the h2 DOM handle ops. Self-contained; stdout compared across lanes. */
+ * the h2 dyn handle ops. Self-contained; stdout compared across lanes. */
 'use strict';
 
 function mustCall(fn) {

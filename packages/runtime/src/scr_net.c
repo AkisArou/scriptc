@@ -1603,7 +1603,7 @@ ScrNetSocket *scr_net_connect(double port, ScrStr *host /*borrowed, nullable*/,
 }
 
 /* ── the connect option-bag validation ladders (checked-dynamic lane) ──
- * Node-order validation over DOM option values with Node's exact typed
+ * Node-order validation over dyn option values with Node's exact typed
  * errors; the honest tail (connect for the validated forms, the
  * compiler-rendered fence for bags with unmodeled keys) runs only after
  * every validation passes. */

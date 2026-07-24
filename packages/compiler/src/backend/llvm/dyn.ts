@@ -1,6 +1,6 @@
-/* The dyn (ScrDyn DOM) helper EMITTERS for the LLVM backend — the .ll
+/* The dyn (ScrDyn dyn) helper EMITTERS for the LLVM backend — the .ll
  * mirror of emit-walkers.ts's dyn slice: per-type match predicates
- * (dynMatchHelper), checked builders (dynCheckHelper), static→DOM
+ * (dynMatchHelper), checked builders (dynCheckHelper), static→dyn
  * converters (toDynHelper), the type-independent singletons (String
  * (unknown), caught→dyn, the keyed read, the destructuring
  * RequireObjectCoercible, GetIterator+N), and the checked-dynamic
@@ -9,7 +9,7 @@
  * ownership, same path-annotated failure texts — so the differential
  * suite's byte-parity contract holds through either backend.
  *
- * DOM layout facts this file compiles against (scr_runtime.h):
+ * dyn layout facts this file compiles against (scr_runtime.h):
  *   ScrDyn   { size_t rc; ScrDynKind kind; bool buffer; union v; }
  *            kind at +8 (i32), buffer at +12 (i8), v at +16.
  *            v.num double | v.b i8 | v.str/v.bytes ptr at +16;
@@ -92,9 +92,9 @@ export class LlDyn {
     return t.kind === "f64" ? "double" : t.kind === "bool" ? "i1" : "ptr";
   }
 
-  /* ── DOM node plumbing ─────────────────────────────────────────────── */
+  /* ── dyn node plumbing ─────────────────────────────────────────────── */
 
-  /** Loads a DOM node's kind tag (i32 at +8). */
+  /** Loads a dyn node's kind tag (i32 at +8). */
   private kindOf(B: BlockBuilder, d: string): string {
     const p = B.tmp();
     const k = B.tmp();
@@ -190,7 +190,7 @@ export class LlDyn {
     return t;
   }
 
-  /** THE immortal undefined DOM value (borrowed — retain to own). */
+  /** THE immortal undefined dyn value (borrowed — retain to own). */
   private undef(B: BlockBuilder): string {
     this.host.declare(`declare ptr @scr_dyn_undefined()`);
     const t = B.tmp();
@@ -327,7 +327,7 @@ export class LlDyn {
 
   /* ── dynMatchHelper (emit-walkers.ts, ported) ──────────────────────── */
 
-  /** `sc_dm_<n>(ptr d) -> i1` — does this DOM fit T? Never throws. */
+  /** `sc_dm_<n>(ptr d) -> i1` — does this dyn fit T? Never throws. */
   dynMatchHelper(t: IrType): string {
     const key = typeKey(t);
     const existing = this.dynMatchers.get(key);
@@ -358,7 +358,7 @@ export class LlDyn {
         kindIs(DK.UNDEF);
         break;
       case "dyn":
-        // An `unknown` target: every DOM value fits, undefined included.
+        // An `unknown` target: every dyn value fits, undefined included.
         B.terminate(`ret i1 true`);
         break;
       case "bytes":
@@ -521,7 +521,7 @@ export class LlDyn {
 
   /* ── dynCheckHelper (emit-walkers.ts, ported) ──────────────────────── */
 
-  /** `sc_dc_<n>(ptr d, ptr path) -> T` — validate the DOM against T and
+  /** `sc_dc_<n>(ptr d, ptr path) -> T` — validate the checked-dynamic tree against T and
    * BUILD the typed value (+1), or throw the catchable path-annotated
    * TypeError and return a dummy with the pending flag set. */
   dynCheckHelper(t: IrType): string {
@@ -572,7 +572,7 @@ export class LlDyn {
         break;
       }
       case "dyn": {
-        // An `unknown` slot: the DOM subtree passes through as-is.
+        // An `unknown` slot: the checked-dynamic tree subtree passes through as-is.
         const r = this.retainDyn(B, "%d");
         B.terminate(`ret ptr ${r}`);
         break;
@@ -589,15 +589,15 @@ export class LlDyn {
       }
       case "object": {
         // The %Error extraction (an instanceof-Error narrow on unknown):
-        // validate the DOM's error encoding — the reserved "%error" marker
+        // validate the checked-dynamic tree's error encoding — the reserved "%error" marker
         // caughtToDyn builds — and extract through the runtime's IDENTITY
-        // CACHE (scr_error_from_dyn): a DOM error that came from a runtime
+        // CACHE (scr_error_from_dyn): a dyn error that came from a runtime
         // ScrError answers that very instance, so out-and-back crossings
         // compare reference-equal (the tracing suite's shape); alien
         // %error objects rebuild once and cache the pair. The C walker's
         // arm exactly.
         if (t.className !== "%Error") {
-          throw new Error(`llvm emitter bug: dynCheck of class ${t.className} (only %Error extracts from the DOM)`);
+          throw new Error(`llvm emitter bug: dynCheck of class ${t.className} (only %Error extracts from the checked-dynamic tree)`);
         }
         const kd = this.kindOf(B, "%d");
         const isObj = B.tmp();
@@ -703,7 +703,7 @@ export class LlDyn {
           const m = this.objGetLit(B, "%d", f.name);
           if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
-            // one IS the undefined DOM value.
+            // one IS the undefined dyn value.
             const has = B.tmp();
             B.line(`${has} = icmp ne ptr ${m}, null`);
             const sel = B.tmp();
@@ -970,7 +970,7 @@ export class LlDyn {
 
   /* ── toDynHelper (emit-walkers.ts, ported) ─────────────────────────── */
 
-  /** `sc_td_<n>(<T> v) -> ptr` — build a fresh dyn DOM value from a
+  /** `sc_td_<n>(<T> v) -> ptr` — build a fresh dyn value from a
    * static one (+1), DEEP-COPYING composites. Borrows the operand.
    * Never throws. */
   toDynHelper(t: IrType): string {
@@ -1004,7 +1004,7 @@ export class LlDyn {
         break;
       }
       case "object": {
-        // %Error only (canConvertToDyn's gate): the DOM's error encoding.
+        // %Error only (canConvertToDyn's gate): the checked-dynamic tree's error encoding.
         if (t.className !== "%Error") {
           throw new Error(`llvm emitter bug: to-dyn of class ${t.className}`);
         }
@@ -1044,7 +1044,7 @@ export class LlDyn {
         };
         host.declare(`declare void @scr_dyn_obj_set(ptr, ptr, i64, ptr)`);
         // CYCLE-CAPABLE shapes guard the deep copy: enter TRAPS on a value
-        // already being converted (a cyclic value has no finite DOM copy —
+        // already being converted (a cyclic value has no finite dyn copy —
         // SEMANTICS.md; the C emitter's contract exactly).
         const cyclicRec = traceAdapter(host, t) !== null;
         if (cyclicRec) {
@@ -1302,7 +1302,7 @@ export class LlDyn {
       case "promise": {
         // Promises box by REFERENCE (SCR_DYN_PROMISE — identity is the
         // promise): promise<dyn> carries its ScrPromise directly (the
-        // payload is already a DOM value); any other inner boxes an
+        // payload is already a dyn value); any other inner boxes an
         // ADAPTER promise whose settle callback converts the payload
         // (rejections copy raw inside the runtime's cb-waiter machinery).
         if (t.inner.kind === "dyn") {
@@ -1343,10 +1343,10 @@ export class LlDyn {
     return name;
   }
 
-  /** The DOM-promise settle adapter for one fulfillment payload type —
+  /** The checked-dynamic tree-promise settle adapter for one fulfillment payload type —
    * promiseDynAdapterHelper (emit-walkers.ts), ported:
    * `void sc_pda_<n>(ptr %dst, ptr %src)` reads src's fulfilled payload
-   * by its compile-time kind, converts it to a DOM value, and fulfills
+   * by its compile-time kind, converts it to a dyn value, and fulfills
    * dst with it (scr_dyn_new_promise_adapting's callback; rejections
    * never reach an adapter — the runtime copies them raw). Interned per
    * inner typeKey. */
@@ -1437,7 +1437,7 @@ export class LlDyn {
 
   /* ── the dyn ToString pair (dynToStrHelper, ported) ────────────────── */
 
-  /** Node's String() over a DOM value — sc_ds (+1 result) over the
+  /** Node's String() over a dyn value — sc_ds (+1 result) over the
    * recursive sc_ds_buf walker. Borrowed operand; never throws. */
   dynToStrHelper(): string {
     if (this.dynToStrFn) return this.dynToStrFn;
@@ -1537,7 +1537,7 @@ export class LlDyn {
       }
       B.startBlock(labels.get(DK.OBJ)!);
       {
-        // The DOM's error encoding renders Error.prototype.toString;
+        // The checked-dynamic tree's error encoding renders Error.prototype.toString;
         // plain objects are "[object Object]".
         const marker = this.objGetLit(B, "%d", "%error");
         const isErr = B.tmp();
@@ -1823,14 +1823,14 @@ export class LlDyn {
       B.condBr(isErr, lErr, lDef);
       B.startBlock(lErr);
       // The identity-cached crossing (scr_json.c): one error instance,
-      // one DOM node — the C walker's arm exactly.
+      // one dyn node — the C walker's arm exactly.
       host.declare(`declare ptr @scr_dyn_from_error(ptr)`);
       const r = B.tmp();
       B.line(`${r} = call ptr @scr_dyn_from_error(ptr ${p})`);
       B.terminate(`ret ptr ${r}`);
     }
     B.startBlock(lDef);
-    // SCR_EXC_REF: a thrown DOM value passes back BY REFERENCE (identity
+    // SCR_EXC_REF: a thrown dyn value passes back BY REFERENCE (identity
     // with every other holder — the dyn adapters discriminate); non-dyn
     // REF and non-Error objects keep the "[object Object]" approximation
     // — truthy, typeof "object", fields unreadable.
@@ -1870,7 +1870,7 @@ export class LlDyn {
 
   /* ── the keyed read (dynKeyGetHelper, ported) ──────────────────────── */
 
-  /** `sc_dyn_key_get(ptr d, ptr k, i1 opt) -> ptr` — d[k] on a DOM value.
+  /** `sc_dyn_key_get(ptr d, ptr k, i1 opt) -> ptr` — d[k] on a dyn value.
    * Result +1; throws on non-optional nullish receivers. */
   dynKeyGetHelper(): string {
     const memoKey = "%dynKeyGet";
@@ -2581,7 +2581,7 @@ export class LlDyn {
 
   /** The call thunk for one closure signature: validate each dyn arg
    * into the declared param type, call through the closure, convert the
-   * result back to a DOM value (+1). */
+   * result back to a dyn value (+1). */
   dynFuncThunkHelper(t: IrType & { kind: "func" }): string {
     const key = typeKey(t);
     const existing = this.dynFuncThunks.get(key);
@@ -2592,7 +2592,7 @@ export class LlDyn {
     const B = new BlockBuilder();
     const argNames: string[] = [];
     t.params.forEach((p, i) => {
-      // JS arity: a missing argument IS the undefined DOM value.
+      // JS arity: a missing argument IS the undefined dyn value.
       const adSlot = B.slot();
       B.entryAllocas.push(`${adSlot} = alloca ptr`);
       const has = B.tmp();
@@ -2618,7 +2618,7 @@ export class LlDyn {
       if (p.kind === "dyn") {
         argNames.push(this.retainDyn(B, ad));
       } else if (p.kind === "jsval") {
-        // A checker-'any' param: the DOM argument enters the island —
+        // A checker-'any' param: the dyn argument enters the island —
         // wrapped cells unwrap by reference, data deep-copies, boxed
         // functions cross through the host shim; a kind with no crossing
         // throws the catchable TypeError (null + pending).
@@ -2659,7 +2659,7 @@ export class LlDyn {
         argNames.push(a);
       }
     });
-    // VARIADIC (rest-marked) signatures: one extra trailing DOM-array
+    // VARIADIC (rest-marked) signatures: one extra trailing dyn-array
     // param carries the call's arguments from index params.length on.
     let rest: string | null = null;
     if (t.rest) {

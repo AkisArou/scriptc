@@ -9,7 +9,7 @@ json-dyn.ts:12:9 - error SC1100: switch statements on 'unknown' values are not s
 
 json-dyn.ts:21:35 - error SC1101: converting typed values to 'unknown' is not supported yet
 
-  20 | // DOM representation (Maps, classes, bytes).
+  20 | // dyn representation (Maps, classes, bytes).
   21 | const typedIntoUnknown: unknown = new Map<string, number>();
      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~
   22 | function wantsUnknown(x: unknown): void {}
@@ -48,7 +48,7 @@ json-dyn.ts:38:3 - error SC1090: 'unknown'-typed class fields are not supported 
 
 json-dyn.ts:42:7 - error SC2007: values of type '{ (text: string, reviver?: ((this: any, key: string, value: any) => any) | undefined): any; (text: string): unknown; }' cannot be compiled: the type declares multiple call signatures (overloads), and a compiled function value is always one concrete signature
 
-  41 | const dynArray: unknown[] = []; // unknown[] IS the DOM array now — no fence (corpus 2585)
+  41 | const dynArray: unknown[] = []; // unknown[] IS the dyn array now — no fence (corpus 2585)
   42 | const parseRef = JSON.parse;
      |       ^~~~~~~~
   43 | // BARE undefined-armed unions are not JSON on the STRINGIFY side: Node
@@ -57,7 +57,7 @@ json-dyn.ts:42:7 - error SC2007: values of type '{ (text: string, reviver?: ((th
 
 json-dyn.ts:42:18 - error SC1090: JSON methods as values (call 'parse' directly) are not supported yet
 
-  41 | const dynArray: unknown[] = []; // unknown[] IS the DOM array now — no fence (corpus 2585)
+  41 | const dynArray: unknown[] = []; // unknown[] IS the dyn array now — no fence (corpus 2585)
   42 | const parseRef = JSON.parse;
      |                  ^~~~~~~~~~
   43 | // BARE undefined-armed unions are not JSON on the STRINGIFY side: Node

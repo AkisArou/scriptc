@@ -195,7 +195,7 @@ export class CEmitter {
   readonly unionJoinFns = new Map<string, string>();
   readonly dynMatchers = new Map<string, string>();
   readonly dynBuilders = new Map<string, string>();
-  /** Static→DOM converters (sc_td_*), per typeKey; dynamic-keyed record
+  /** Static→dyn converters (sc_td_*), per typeKey; dynamic-keyed record
    * read helpers (sc_rkg_*), per shapeId|result typeKey; dynamic-keyed
    * write helpers (sc_rks_*), per shapeId. */
   readonly toDynFns = new Map<string, string>();
@@ -205,8 +205,8 @@ export class CEmitter {
   readonly dynFuncThunks = new Map<string, string>();
   readonly dynFuncBoxes = new Map<string, string>();
   readonly dynFuncAdapters = new Map<string, string>();
-  /** DOM-promise settle adapters (sc_pda_*), per INNER typeKey: convert a
-   * typed fulfillment payload into the boxed destination's DOM payload
+  /** dyn-promise settle adapters (sc_pda_*), per INNER typeKey: convert a
+   * typed fulfillment payload into the boxed destination's dyn payload
    * (scr_dyn_new_promise_adapting's callback — toDynHelper's promise arm). */
   readonly promiseDynAdapters = new Map<string, string>();
   readonly recordKeyGetFns = new Map<string, string>();
@@ -758,7 +758,7 @@ export class CEmitter {
       // Net-surface programs fill the loop's net hooks before %main — the
       // net unit (scr_net.c) links only when this line is emitted (cc.ts
       // gates on the same predicate, like events). The dyn-install twin
-      // stamps the netSocket handle-dispatch ops into the DOM core so
+      // stamps the netSocket handle-dispatch ops into the dyn core so
       // sockets can cross the checked-dynamic boundary (SCR_DYN_HANDLE).
       ...(moduleUsesNet(this.mod) ? [`  scr_net_install();`, `  scr_net_dyn_install();`] : []),
       // Http-surface programs additionally stamp the httpReq/httpRes
@@ -1050,11 +1050,11 @@ export class CEmitter {
   }
 
   /* ── type-directed JSON walkers (jsonStringify / dynCheck) ────────────
-   * No DOM is built for stringify and no tags are consulted: the STATIC IR
+   * No dyn is built for stringify and no tags are consulted: the STATIC IR
    * type drives everything, one emitted helper per typeKey (interned, like
-   * the array-HOF desugars). dynCheck helpers walk the runtime DOM (ScrDyn)
+   * the array-HOF desugars). dynCheck helpers walk the runtime dyn (ScrDyn)
    * against the target type: match predicates (sc_dm_*) answer "does this
-   * DOM fit?" without throwing (union arms are tried in canonical order —
+   * dyn fit?" without throwing (union arms are tried in canonical order —
    * first FULL match wins), and builders (sc_dc_*) construct the typed
    * value (+1) or throw a path-annotated TypeError through the exception
    * cell. Recursion terminates because recursive shapes/unions are rejected
@@ -1512,7 +1512,7 @@ export class CEmitter {
         // own non-zero test.
         return `${t.name} != 0`;
       case "dyn":
-        // ToBoolean over the DOM kind (scr_dyn_truthy — JS-exact for
+        // ToBoolean over the dyn kind (scr_dyn_truthy — JS-exact for
         // every kind; borrowed, never throws): `v || dflt` and condition
         // descent on checked-dynamic values.
         return `scr_dyn_truthy(${t.name})`;

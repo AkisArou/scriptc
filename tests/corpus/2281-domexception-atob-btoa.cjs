@@ -1,7 +1,7 @@
 // DOMException + atob/btoa: the web-standard error shape (a fifth
 // runtime error class — name/code table, options-form cause, Error
 // toString) and the WHATWG forgiving-base64 globals (WebIDL ToString
-// over the DOM kind, InvalidCharacterError throws, latin1 domain).
+// over the dyn kind, InvalidCharacterError throws, latin1 domain).
 // typeof answers 'function' for stdlib globals (the identity-token
 // story folds before the operand lowers).
 'use strict';

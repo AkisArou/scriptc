@@ -66,11 +66,11 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
         const result: IrExpr = { kind: "jsOp", op: "callMethod", name, args: [receiver, ...args], type: JSVAL, loc };
         return islandPrimitiveExit(L, call, result);
       }
-      // An array-mapped CHECKER type whose VALUE lives in the DOM
-      // (`Object.keys(dynObj).sort()` — the key-walk answers a DOM array):
+      // An array-mapped CHECKER type whose VALUE lives in the checked-dynamic tree
+      // (`Object.keys(dynObj).sort()` — the key-walk answers a dyn array):
       // the record family's array sibling. Methods with a runtime
       // receiver-kind dispatch ride dynInvoke — the real method runs on
-      // the DOM array, JS-exact; the rest keep an honest fence instead of
+      // the dyn array, JS-exact; the rest keep an honest fence instead of
       // handing a static array intrinsic a dyn receiver (the validator
       // ICE). Consumers validate the dyn result where a static type is
       // required (dynCheck — the member-read discipline).
@@ -374,7 +374,7 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     // A DYN-receiver HOF's callback (`parsed.flatMap((value) => ...)`):
     // the contextual signature types the unannotated param `any` (the
     // receiver is checker-`any[]`), while the VALUE each call receives is
-    // the DOM element `unknown` code sees — narrow the param declaration
+    // the dyn element `unknown` code sees — narrow the param declaration
     // to `unknown` so it lowers as the dyn it carries (typeof tests and
     // validated extractions ride as usual) instead of fencing on `any`.
     const overridden: ts.Node[] = [];
@@ -4418,7 +4418,7 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     if (!entry) return null;
     // A validated dyn receiver (`pkg.name.replace(...)` on a JSON.parse
     // value) arrives pre-extracted through `dynReceiver`; its checker type
-    // is `any`, so the type/symbol gates don't apply — the DOM value's
+    // is `any`, so the type/symbol gates don't apply — the dyn value's
     // methods can only BE the string intrinsics.
     if (dynReceiver === undefined) {
       const receiverIr = L.mapTypeOf(L.typeOf(access.expression));
@@ -5027,7 +5027,7 @@ function lowerBufferInstanceMethod(L: Lowerer, call: ts.CallExpression,
   // literals) wrap in dynFrom, `undefined` literals ride the same wrap.
   // Fences (never returns) when the value cannot cross — an island jsval.
   const chkArg = (i: number): IrExpr => {
-    // Object literals take the DOM literal path directly (method members
+    // Object literals take the dyn literal path directly (method members
     // box as dyn functions — the typed record fence never applies).
     if (ts.isObjectLiteralExpression(args[i]!)) {
       return lowerDynObjectLiteral(L, args[i] as ts.ObjectLiteralExpression);
@@ -5424,7 +5424,7 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
    * result order is Node-exact; hybrids inherit the documented
    * declared-then-overflow divergence. Values surface as the checker's
    * result element type: identity, an arm-into-union wrap, or (dyn
-   * results) the DOM conversion — recordKeyGet's own surfacing rules for
+   * results) the dyn conversion — recordKeyGet's own surfacing rules for
    * the overflow, mirrored statically for declared fields. */
   export function lowerObjectIterOverIndexShape(L: Lowerer, call: ts.CallExpression,
     member: "keys" | "values" | "entries",
@@ -5931,7 +5931,7 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
     // own declared name owns the key). Every other target field defaults
     // to its undefined arm (fresh record), so it must be optional-flavored
     // and must accept a runtime collision (dyn slots validate via dynCheck
-    // — fields must be DOM-convertible; typed slots write through
+    // — fields must be dyn-convertible; typed slots write through
     // directly).
     type FieldInit =
       | { name: string; kind: "undef"; unionId: string; utag: number }
@@ -5973,7 +5973,7 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
     // target also declares. Non-dyn slots store THROUGH on a collision, so
     // such writes need every declared field to BE the slot type (the
     // validator's recordKeySet rule); dyn slots validate per field
-    // (dynCheck), so each field must be DOM-convertible. Writes to
+    // (dynCheck), so each field must be dyn-convertible. Writes to
     // literal names the target does NOT declare are overflowOnly and
     // exempt — which is what lets a direct-initialized required field
     // (`id: number` beside a `number | undefined` slot) coexist with a
@@ -6760,7 +6760,7 @@ export type IndexMergeContributor =
 
 /* ── dyn METHOD receivers ──────────────────────────────────────────────────
  * Method calls on `unknown`/JSON.parse-derived receivers (`pkg.name
- * .replace(...)`, `ws.packages.filter(...)`): validate the receiver's DOM
+ * .replace(...)`, `ws.packages.filter(...)`): validate the receiver's dyn
  * kind, extract, then ride the STATIC method machinery — the dyn boundary's
  * trust-but-VERIFY stance extended to receivers. A receiver of the wrong
  * kind throws the catchable Node-shaped TypeError V8 would ("x.replace is
@@ -6878,9 +6878,9 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
     };
   }
 
-/** `d.filter(pred)` on a dyn receiver: the receiver must BE a DOM array
+/** `d.filter(pred)` on a dyn receiver: the receiver must BE a dyn array
  * (else the Node-shaped TypeError above); the predicate runs per element
- * over the DOM value, and each SURVIVOR is validated-extracted into the
+ * over the dyn value, and each SURVIVOR is validated-extracted into the
  * result's element type T — the type the checker already committed the
  * call to (the contextual `RouteMapping[]`/`string[]` slot). Extraction is
  * the checked-cast machinery: a survivor that doesn't fit T throws the
@@ -6916,8 +6916,8 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
     if (!elemT || !L.jsonSafe(elemT)) {
       // No JSON-representable destination (`const failed = checks.filter(
       // fn)` in untyped JS — test/common's runCallChecks): the result
-      // STAYS in the DOM — the runtime prototype dispatch (scr_dyn_invoke)
-      // runs the real filter over the DOM array and the survivors keep
+      // STAYS in the checked-dynamic tree — the runtime prototype dispatch (scr_dyn_invoke)
+      // runs the real filter over the dyn array and the survivors keep
       // their dyn selves, no extraction needed. The typed-destination path
       // above stays preferred: it hands back a real T[].
       return null;
@@ -6941,9 +6941,9 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
 
 /** `.flatMap(f)` on a dyn ('unknown'/`any[]`-narrowed) receiver where the
    * callback returns a STATIC array (`parsed.flatMap((v) => typeof v ===
-   * "string" ? parseTldList(v) : [])` — the tlds-file shape): the DOM
+   * "string" ? parseTldList(v) : [])` — the tlds-file shape): the checked-dynamic tree
    * array walks element-by-element, the callback sees each element as the
-   * DOM value `unknown` code sees, and its typed results concatenate —
+   * dyn value `unknown` code sees, and its typed results concatenate —
    * depth-1 flatten by construction, no validation needed on the results
    * (they are already typed; only the RECEIVER is dynamic). Non-array
    * receivers throw the Node-shaped TypeError. Callbacks returning
@@ -6960,10 +6960,10 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
     if (ret.kind !== "array") {
       // A DYNAMIC-returning callback (`plugins.flatMap((plugin) =>
       // plugin.languages ?? [])` — the getSupportInfo shape, where the
-      // callback's members ride the DOM): the call dispatches on the
+      // callback's members ride the checked-dynamic tree): the call dispatches on the
       // RECEIVER's runtime kind (dynInvoke) with the callback boxed —
       // a wrapped ISLAND receiver runs the ENGINE's own JS-exact
-      // Array.prototype.flatMap (the routed-ops lane), a native DOM
+      // Array.prototype.flatMap (the routed-ops lane), a native dyn
       // array runs the runtime's flatMap, and non-arrays throw Node's
       // TypeError. The result stays dyn, checked per use.
       if (ret.kind === "dyn" || ret.kind === "jsval") {
@@ -7139,10 +7139,10 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
 
 /** out = []; n = d.length; for (i..n) { v = d[i]; if (f(v, i, d)) out.push(
  * check<T>(v)); } return out; — with the receiver-kind gate up front. The
- * length reads ONCE (the DOM is immutable under the static surface), the
+ * length reads ONCE (the checked-dynamic tree is immutable under the static surface), the
  * element reads through the canonical-index keyed read, the callback gets
  * whatever prefix of (element, index, receiver) it declares — the element
- * and receiver as DOM values, exactly what `unknown` code sees. */
+ * and receiver as dyn values, exactly what `unknown` code sees. */
   function buildDynFilterFn(name: string, elemT: IrType, arity: number, loc: SrcLoc): IrFunction {
     const outT = arrayOf(elemT);
     const fnT = funcOf([DYN, F64, DYN].slice(0, arity), BOOL);

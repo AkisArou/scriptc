@@ -1,9 +1,9 @@
 // @dynamic
 // The repro-2 shape without npm: a JSDoc `@param {object}` slot is
 // checked-dynamic, and an 'any'-typed engine value flowing into it
-// CONVERTS (the jsval→DOM wrap) instead of fencing — prettier's
+// CONVERTS (the jsval→dyn wrap) instead of fencing — prettier's
 // getSupportInfo({ plugins = [] } = {}) family. The wrapped member also
-// rides a DOM object literal and destructures back out, and the armed
+// rides a dyn object literal and destructures back out, and the armed
 // rows answer through the engine.
 
 /** @returns {any} */
@@ -41,6 +41,6 @@ function same(a, b) {
 console.log("same value:", same(out, plug));
 
 // The default arm still fires for an absent member (the wrap never
-// disturbs the nullish test on real DOM kinds).
+// disturbs the nullish test on real dyn kinds).
 probeBag({ tag: "t2" });
 probeBag();

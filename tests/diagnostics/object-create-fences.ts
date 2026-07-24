@@ -9,7 +9,7 @@
 const base = { indent: 2 };
 const viaRecord = Object.create(base);
 
-// A checked-dynamic (DOM) prototype.
+// A checked-dynamic (dyn) prototype.
 const dynProto: object = JSON.parse('{"a":1}');
 const viaDyn = Object.create(dynProto);
 

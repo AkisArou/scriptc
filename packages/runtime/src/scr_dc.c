@@ -1,13 +1,13 @@
 /* node:diagnostics_channel — the in-process pub/sub core (scr_runtime.h
  * has the API contract). Linked only when the IR carries dc.* libCalls
- * (cc.ts; the zlib gating precedent), pure data structure over the DOM —
+ * (cc.ts; the zlib gating precedent), pure data structure over the checked-dynamic tree —
  * no loop hooks, no platform seams, cross-compiles everywhere.
  *
  * - The registry is process-global and append-only (Node's channels are
  *   process-lived too — its WeakRefMap only collects channels nothing
  *   references, which a compiled program cannot observe). Handles are
  *   1-based indexes so a zeroed f64 can never alias channel 0.
- * - Subscribers are DOM FUNCTION values. unsubscribe matches by the
+ * - Subscribers are dyn FUNCTION values. unsubscribe matches by the
  *   UNDERLYING closure when both sides are functions (boxing one function
  *   twice yields distinct ScrDyn nodes sharing one ScrClosure, and JS has
  *   ONE function object), falling back to node identity.
@@ -98,7 +98,7 @@ static ScrDcChannel *dc_of(double handle) {
 }
 
 /* Node's ERR_INVALID_ARG_TYPE for a non-function subscriber — the
- * "Received ..." tail covers the DOM kinds (determineSpecificType lite;
+ * "Received ..." tail covers the dyn kinds (determineSpecificType lite;
  * scr_dyn_handle.c's full renderer is not linked here). */
 static void dc_throw_bad_fn_arg(const ScrDyn *cb, const char *arg_name) {
   const char *received = "an instance of Object";
@@ -341,7 +341,7 @@ ScrDyn *scr_dc_chan_run_stores(double handle, ScrDyn *data, ScrDyn *fn, ScrDyn *
 /* ── TracingChannel ────────────────────────────────────────────────────
  * A registry entry of five channel indexes (start/end/asyncStart/asyncEnd/
  * error), handled as a 1-based f64 like Channel. The trace choreography
- * lives here in C over the DOM: publishes stash the pending traced-call /
+ * lives here in C over the checked-dynamic tree: publishes stash the pending traced-call /
  * subscriber exception in a ScrCaught box first (compiled subscriber
  * bodies run with a CLEAR cell — a pending flag would unwind them at
  * their first call) and re-raise after, so throws propagate exactly like
@@ -468,8 +468,8 @@ bool scr_dc_tc_unsubscribe(double h, ScrDyn *handlers) {
   return done;
 }
 
-/* The pending exception as a DOM value for ctx.error: scr_caught_to_dyn
- * (scr_json.c) — identity-preserving for DOM payloads and %Error
+/* The pending exception as a dyn value for ctx.error: scr_caught_to_dyn
+ * (scr_json.c) — identity-preserving for dyn payloads and %Error
  * instances (the identity-cached crossing: the stamped ctx.error compares
  * reference-equal to the thrown error's other boxings). */
 
@@ -586,7 +586,7 @@ static void dc_tp_entry(ScrFiber *self, void *ap) {
   free(a);
 }
 
-/* The traced result as a promise (+1): a DOM promise unwraps, anything
+/* The traced result as a promise (+1): a dyn promise unwraps, anything
  * else is PromiseResolve'd (Node converts non-promise returns; a raw
  * non-promise return on the NO-SUBSCRIBER path wraps too — the lowering
  * types the result Promise<unknown>, a wrap Node skips, SEMANTICS.md). */
@@ -728,7 +728,7 @@ ScrDyn *scr_dc_tc_trace_callback(double h, ScrDyn *fn, double position, ScrDyn *
     dc_throw_bad_fn_arg(cb, "callback");
     return NULL;
   }
-  /* Splice the wrapper in (a fresh argument vector; the DOM array is
+  /* Splice the wrapper in (a fresh argument vector; the dyn array is
    * borrowed and Node's splice mutation is unobservable through it — the
    * caller rebuilt it from the call site's arguments). */
   ScrClosure *clo = scr_closure_new((void *)dc_tc_wrapped_cb, 3);

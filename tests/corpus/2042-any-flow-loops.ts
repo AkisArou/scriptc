@@ -1,6 +1,6 @@
 // Flow over `any` bindings: the checker's own control-flow types narrow
 // evolving-any reads (the free shadow analysis), typeof tests answer from
-// the DOM kind table, and for-of/for-in assign PRE-DECLARED any bindings
+// the dyn kind table, and for-of/for-in assign PRE-DECLARED any bindings
 // per pass — the classic ES5-era corpus shapes.
 
 // typeof narrowing on an any binding compiles the branch concretely.
@@ -52,7 +52,7 @@ try {
 console.log(`${foo}`);
 
 // Ternary joining an any binding with a function expression: the function
-// arm boxes into the DOM, the join stays checked-dynamic.
+// arm boxes into the checked-dynamic tree, the join stays checked-dynamic.
 let a: any;
 const c = true ? a : function () {};
 console.log(typeof c);

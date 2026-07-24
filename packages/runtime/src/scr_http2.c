@@ -2589,7 +2589,7 @@ void scr_http2_settings_thunk0(ScrClosure *cb, ScrDyn *settings) {
 }
 
 /* The typed lane's DYN spellings (session receivers with mustCall-style
- * callbacks): the raw DOM function crosses the lib boundary and fires
+ * callbacks): the raw dyn function crosses the lib boundary and fires
  * through the same runtime-built listener closures the dyn handle ops
  * use — Node's exact payload shapes. */
 static void scr_h2_dyn_fire_settings(ScrClosure *cb, ScrDyn *settings /*+1*/);
@@ -2689,7 +2689,7 @@ void scr_http2_goaway_thunk0(ScrClosure *cb, double code, double last) {
  * parameter, or a handle stored in an untyped binding) dispatch their
  * members here, the scr_http.c req/res ops precedent: `.on(...)` wires a
  * runtime-built listener closure over the dyn callback, header events
- * build a DOM headers object from the pairs, method calls decode dyn
+ * build a dyn headers object from the pairs, method calls decode dyn
  * args onto the static entry points, and property reads box the scalar
  * answers. Real-but-unmodeled members throw the loud ladder; names the
  * surface never had throw Node's "<x> is not a function". */
@@ -2791,7 +2791,7 @@ static void scr_h2_dyn_fire_goaway(ScrClosure *cb, double code, double last) {
   scr_dyn_release(fn);
 }
 
-/* Flatten a DOM headers object into the flat pairs array (numbers via
+/* Flatten a dyn headers object into the flat pairs array (numbers via
  * String(n); the :status/:method/... pseudo-headers pass through). */
 static ScrArr *scr_h2_dom_to_pairs(const ScrDyn *headers) {
   ScrArr *pairs = scr_arr_new(SCR_ELEM_STR, headers->v.obj.len * 2);

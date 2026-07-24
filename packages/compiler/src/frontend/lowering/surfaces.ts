@@ -673,7 +673,7 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
   // lowerBuiltinModuleCall (parse's result is the call site's mapped
   // ParsedUrlQuery dictionary — the networkInterfaces verification stance
   // — and its sep/eq/options complete there; stringify's object argument
-  // crosses as a DOM value). decode/encode are Node's own aliases of
+  // crosses as a dyn value). decode/encode are Node's own aliases of
   // parse/stringify (`const decode = parse` in lib/querystring.js) and
   // route to the same special cases; the entries carry canonical shapes.
   querystring: {
@@ -745,7 +745,7 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
   },
   // node:diagnostics_channel — the pub/sub core. channel() answers an f64
   // handle (types.ts maps Channel to F64); the subscriber arguments box
-  // into the DOM (special-cased in lowerBuiltinModuleCall — the entries
+  // into the checked-dynamic tree (special-cased in lowerBuiltinModuleCall — the entries
   // carry canonical shapes and route the dispatch). The Channel method
   // surface lowers through lowerDcChannelMethodCall/lowerDcChannelProperty.
   diagnostics_channel: {

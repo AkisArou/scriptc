@@ -46,7 +46,7 @@ console.log(describe(JSON.parse("[1,2,3]")));
 console.log(describe(JSON.parse("null")));
 console.log(describe(JSON.parse("42")));
 console.log(describe(JSON.parse("{}")));
-// typeof-object and isArray over every DOM kind.
+// typeof-object and isArray over every dyn kind.
 const cases: string[] = ['"s"', "1", "true", "null", "[]", "{}", '[{"deep":[]}]'];
 for (const src of cases) {
   const v: unknown = JSON.parse(src);

@@ -1,5 +1,5 @@
 // JSON.stringify over a dyn ROOT (unknown and the top object types): the
-// runtime's DOM walker serializes what the type-directed serializers
+// runtime's dyn walker serializes what the type-directed serializers
 // cannot see statically — the JSON.parse round-trip, unknown-typed locals,
 // `{}`/`Object`/`object` slots. Number/string/bool/null/array/object are
 // JS-exact; undefined MEMBERS drop like Node's; the pretty-print form
@@ -32,6 +32,6 @@ console.log(JSON.stringify(t1), JSON.stringify(t2), JSON.stringify(t3));
 const pretty: unknown = JSON.parse('{"a":1,"b":[true,null]}');
 console.log(JSON.stringify(pretty, null, 2));
 
-// Non-finite numbers inside the DOM serialize as null, like Node.
+// Non-finite numbers inside the checked-dynamic tree serialize as null, like Node.
 const nf: unknown = { inf: Infinity, nan: 0 / 0, neg: -0 };
 console.log(JSON.stringify(nf));

@@ -1,4 +1,4 @@
-// Promises CROSS the checked-dynamic DOM (SCR_DYN_PROMISE): a typed
+// Promises CROSS the checked-dynamic tree (SCR_DYN_PROMISE): a typed
 // promise boxes by reference when it flows through an untyped wrapper
 // (promise<dyn> directly, other inners through the emitted settle
 // adapter), typeof/String()/JSON.stringify answer Node's object forms,
@@ -20,7 +20,7 @@ const boxedOnce = id(p);
 console.log(typeof boxedOnce, String(boxedOnce), JSON.stringify({ p: boxedOnce }));
 console.log('same value:', id(boxedOnce) === id(boxedOnce));
 
-// .then on the dyn receiver: the settled value arrives as a DOM value,
+// .then on the dyn receiver: the settled value arrives as a dyn value,
 // the handler's return feeds the chained promise, and a returned promise
 // is ADOPTED before the next link runs.
 boxedOnce

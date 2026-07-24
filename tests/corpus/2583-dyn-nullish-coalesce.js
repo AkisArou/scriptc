@@ -3,8 +3,8 @@
 // (lane dyn-routing-ops — a win beyond the jsval crossing): the deciding
 // test is the runtime kind (only undefined/null take the default — 0,
 // "", and false do not), the right side evaluates LAZILY, and both sides
-// live in the DOM. A wrapped island value is never nullish (the wrap
-// constructor scalar-normalizes engine null/undefined to native DOM
+// live in the checked-dynamic tree. A wrapped island value is never nullish (the wrap
+// constructor scalar-normalizes engine null/undefined to native dyn
 // kinds first). The dyn-flatMap relaxation rides the same shapes:
 // dyn-returning callbacks dispatch at runtime (the getSupportInfo line).
 
@@ -37,7 +37,7 @@ function probe(bag) {
 }
 probe(parsed);
 
-// The flatMap relaxation over a NATIVE DOM array: dyn-returning
+// The flatMap relaxation over a NATIVE dyn array: dyn-returning
 // callbacks dispatch at runtime — array results flatten one level,
 // non-array results stay whole, exactly JS.
 /** @param {object} bag */

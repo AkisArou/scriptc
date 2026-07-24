@@ -4,7 +4,7 @@
  * scriptc's divergence overrides (parse(): unknown; reject pins
  * `(reason: Error) => void`). Pins preflight's project-world second chance:
  * this program is ANALYZABLE (never a SC0001 wall). The unknown reads
- * LOWER now (the DOM keyed read, corpus 1544); what still fails at
+ * LOWER now (the dyn keyed read, corpus 1544); what still fails at
  * lowering is the override-affected reject — the reason-coercion fence
  * for the string reason. A bound reject called with an Error is the
  * SUPPORTED surface and lowers cleanly. */

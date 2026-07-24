@@ -1,4 +1,4 @@
-// Keyed reads on the dyn DOM (a JSON.parse result): dot and bracket forms,
+// Keyed reads on the dyn (a JSON.parse result): dot and bracket forms,
 // `in` presence tests, optional-chain steps (unit receivers answer
 // undefined), array/string `length`, canonical array indices, the
 // dyn-or-unit ternary join (`typeof pkg.name === "string" ? pkg.name : null`),

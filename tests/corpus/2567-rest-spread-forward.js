@@ -1,5 +1,5 @@
 // The rest-forwarding idiom — `(...args) => from(...args)` — in the
-// checked-dynamic tier: a JS rest binding (a DOM array) spread-forwards
+// checked-dynamic tier: a JS rest binding (a dyn array) spread-forwards
 // through the runtime-arity lane (the spread-marked dynCall: one fresh
 // argument array, flattened left-to-right, applied through the boxed
 // thunk with JS arity). Variants: forwarding to a function declaration,

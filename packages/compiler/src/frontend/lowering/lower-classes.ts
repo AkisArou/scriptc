@@ -4818,7 +4818,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       // like Node's message property default.
       const errInfo = L.builtinErrorInfoOf(symbol);
       // `new DOMException(message?, nameOrOptions?)`: both arguments cross
-      // as DOM values (absent → the DOM undefined), and the runtime owns
+      // as dyn values (absent → the dyn undefined), and the runtime owns
       // WebIDL's resolution — ToString of the message ("" for undefined),
       // name from a string / an options object's `name` member (with the
       // `cause` own-property record) / "Error" for absent, and the legacy
@@ -5105,7 +5105,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
         const targs = L.checker.getTypeArguments(tsType as ts.TypeReference);
         // JAVASCRIPT `new Map()` whose arguments never resolved past
         // Map<any, any> (no annotation, no contextual type, no seed): the
-        // WeakMap stance below — the VALUE lowers as an opaque DOM object
+        // WeakMap stance below — the VALUE lowers as an opaque dyn object
         // (identity and truthiness are real), and every reached METHOD use
         // meets its own per-site fence at runtime. The formatter's
         // config-cache shape: module init constructs the caches
@@ -5148,7 +5148,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       // `new WeakMap()` / `new WeakSet()` in JAVASCRIPT sources: no weak
       // container exists in the value model, but harness code constructs
       // one unconditionally and touches it only on paths tests don't
-      // reach — the value lowers as an opaque DOM object (identity only;
+      // reach — the value lowers as an opaque dyn object (identity only;
       // every reached METHOD use meets its own per-site fence → runtime
       // fence). TypeScript keeps the compile fence.
       if (
@@ -5264,14 +5264,14 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
         // `new Promise(setImmediate)` (the Node-suite early-exit shape):
         // the executor IS the stdlib setImmediate, so resolve rides the
         // immediate queue — a dedicated runtime constructor arms an
-        // immediate that fulfills with the undefined DOM value.
+        // immediate that fulfills with the undefined dyn value.
         {
           const a0 = args[0]!;
           if (ts.isIdentifier(a0) && a0.text === "setImmediate") {
             const sym = L.checker.getSymbolAtLocation(a0);
             const decls = sym ? L.checker.declarationsOf(sym) : [];
             if (decls.length > 0 && decls.every((d) => L.isStdlibFile(d.getSourceFile()))) {
-              // The settled value is the undefined DOM value — the result
+              // The settled value is the undefined dyn value — the result
               // is promise<dyn> whatever T the checker inferred for the
               // unusual executor (Promise<unknown> in the suite's shape).
               return {

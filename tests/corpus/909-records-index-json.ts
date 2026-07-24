@@ -23,7 +23,7 @@ q["web_search"] = "0.3";
 q["ghost"] = undefined;
 console.log(JSON.stringify(q));
 
-// Nested values stringify through the DOM (numbers, booleans, arrays,
+// Nested values stringify through the checked-dynamic tree (numbers, booleans, arrays,
 // objects — JS-exact escapes and number formatting).
 const r: Pricing = {};
 r["n"] = 1e21;

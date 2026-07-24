@@ -1,11 +1,11 @@
 // @dynamic
 // The routed Object statics over island values held in 'unknown' (lane
 // dyn-routing-ops): keys/values/entries walk the ENGINE object (own-key
-// order) and answer NATIVE DOM arrays (keys are DOM strings, values wrap
+// order) and answer NATIVE dyn arrays (keys are dyn strings, values wrap
 // per element, entries are native pairs); hasOwn asks the engine;
 // Object.assign copies in BOTH directions (engine target: the engine's
-// own assign, aliasing preserved; DOM target: the engine lists its pairs
-// and each lands as a DOM member). JSON.stringify of a wrapped value is
+// own assign, aliasing preserved; dyn target: the engine lists its pairs
+// and each lands as a dyn member). JSON.stringify of a wrapped value is
 // the engine's own stringify.
 
 /** @returns {any} */
@@ -32,7 +32,7 @@ function probe(bag) {
   Object.assign(bag, parsed);
   console.log(bag.x, bag.b);
 
-  // DOM TARGET: the wrapped source's own pairs land as DOM members.
+  // dyn TARGET: the wrapped source's own pairs land as dyn members.
   const dom = JSON.parse('{"keep":1}');
   Object.assign(dom, bag.extra);
   console.log(JSON.stringify(dom));

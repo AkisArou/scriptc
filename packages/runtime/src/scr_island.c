@@ -979,11 +979,11 @@ ScrJsval *scr_jsval_from_json(const ScrStr *json) {
   return isl_cell_new(v);
 }
 
-/* ── marshal in: a CHECKED-DYNAMIC (DOM) value ────────────────────────
+/* ── marshal in: a CHECKED-DYNAMIC (dyn) value ────────────────────────
  * `unknown` flowing into 'any'-typed code (`const cfg = isJson ?
- * JSON.parse(text) : islandParser(text)`): the DOM tree rebuilds as
+ * JSON.parse(text) : islandParser(text)`): the dyn tree rebuilds as
  * engine values — a DEEP COPY, the jsMarshal aliasing stance. Data kinds
- * only: a DOM carrying a boxed function, a native handle, or a promise
+ * only: a dyn carrying a boxed function, a native handle, or a promise
  * throws the catchable TypeError naming the kind (the box's thunk calls
  * STATIC code the engine cannot re-enter through a data copy). */
 static const char *isl_dyn_unmarshalable(const ScrDyn *d) {
@@ -1012,14 +1012,14 @@ static const char *isl_dyn_unmarshalable(const ScrDyn *d) {
   }
 }
 
-static JSValue isl_dynfn_new(const ScrDyn *d); /* the DOM-function shim, below */
+static JSValue isl_dynfn_new(const ScrDyn *d); /* the checked-dynamic tree-function shim, below */
 
 static JSValue isl_from_dyn(const ScrDyn *d) {
   switch (d->kind) {
   case SCR_DYN_FUNC:
-    /* A boxed DOM function enters as ONE generic host-function shim over
-     * its uniform call thunk (ScrDynThunk): engine args wrap as DOM
-     * values, the thunk runs, the DOM result converts back. Each
+    /* A boxed dyn function enters as ONE generic host-function shim over
+     * its uniform call thunk (ScrDynThunk): engine args wrap as dyn
+     * values, the thunk runs, the dyn result converts back. Each
      * crossing mints a fresh engine function (documented). */
     return isl_dynfn_new(d);
   case SCR_DYN_UNDEF:
@@ -1033,7 +1033,7 @@ static JSValue isl_from_dyn(const ScrDyn *d) {
   case SCR_DYN_STR:
     return JS_NewStringLen(isl_ctx, d->v.str->data, d->v.str->len);
   case SCR_DYN_BYTES:
-    /* Only u8 payloads reach the DOM today (scr_json.c's stringify note). */
+    /* Only u8 payloads reach the checked-dynamic tree today (scr_json.c's stringify note). */
     return JS_NewUint8ArrayCopy(isl_ctx, d->v.bytes->data, d->v.bytes->len);
   case SCR_DYN_ARR: {
     JSValue arr = JS_NewArray(isl_ctx);
@@ -1063,7 +1063,7 @@ static JSValue isl_from_dyn(const ScrDyn *d) {
     return obj;
   }
   case SCR_DYN_JSVAL:
-    /* An engine value riding inside DOM data: embed the SAME engine
+    /* An engine value riding inside dyn data: embed the SAME engine
      * value by reference — the identity round trip, member position. */
     return JS_DupValue(isl_ctx, d->v.jsval.cell->v);
   default:
@@ -1073,7 +1073,7 @@ static JSValue isl_from_dyn(const ScrDyn *d) {
 }
 
 ScrJsval *scr_jsval_from_dyn(const ScrDyn *d) {
-  /* The identity round trip: an engine value that crossed into the DOM
+  /* The identity round trip: an engine value that crossed into the checked-dynamic tree
    * (scr_dyn_from_jsval) and back is the SAME engine value, by reference
    * — the one direction that used to throw (SEMANTICS.md supersedes the
    * "one unbridgeable mix"). */
@@ -1095,10 +1095,10 @@ ScrJsval *scr_jsval_from_dyn(const ScrDyn *d) {
   return isl_cell_new(v);
 }
 
-/* ── the jsval→DOM crossing (SCR_DYN_JSVAL's constructor + ops) ───────
+/* ── the jsval→dyn crossing (SCR_DYN_JSVAL's constructor + ops) ───────
  * The reverse direction: an 'any'-typed engine value flowing into an
- * 'unknown'/'object'/JS-residue slot wraps BY REFERENCE as the DOM's
- * island kind. The DOM core (scr_json.c) stays island-free — it routes
+ * 'unknown'/'object'/JS-residue slot wraps BY REFERENCE as the checked-dynamic tree's
+ * island kind. The dyn core (scr_json.c) stays island-free — it routes
  * the armed operations (typeof/truthy/String()/===, the narrowing
  * tests) through these installed ops; everything un-armed there keeps
  * the loud "not supported yet" ladder. */
@@ -1117,7 +1117,7 @@ static bool isl_dynjs_is_error(ScrJsval *cell) { return JS_IsError(cell->v); }
 
 static const ScrDynJsvalOps isl_dynjs_ops;
 
-/* The jsval→DOM wrap over a RAW engine value (BORROWED) — the scalar
+/* The jsval→dyn wrap over a RAW engine value (BORROWED) — the scalar
  * normalization the cell constructor applies, shared by the routed-op
  * result conversions (which hold a JSValue, not a cell). Composites mint
  * a fresh cell over the SAME engine value (identity is the value — the
@@ -1265,7 +1265,7 @@ static ScrDyn *isl_dynjs_obj_walk(ScrJsval *cell, int mode) {
     isl_bridge_exception();
     return NULL;
   }
-  /* The engine array unpacks into a NATIVE DOM array (keys are DOM
+  /* The engine array unpacks into a NATIVE dyn array (keys are dyn
    * strings, values wrap per element, entries become native pairs) so
    * the results iterate/index/measure at native speed. */
   int64_t len = 0;
@@ -1338,7 +1338,7 @@ static ScrDyn *isl_dynjs_iter_drain(ScrJsval *cell, bool spread, const ScrStr *s
     isl_bridge_exception();
     return NULL;
   }
-  /* The drained engine array unpacks into a fresh DOM array — elements
+  /* The drained engine array unpacks into a fresh dyn array — elements
    * wrap back scalar-normalized (composites stay engine values by
    * reference), exactly the obj_walk unpack. */
   int64_t len = 0;
@@ -1378,9 +1378,9 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
 ScrDyn *scr_dyn_from_jsval(ScrJsval *cell) {
   isl_entry();
   JSValue v = cell->v;
-  /* Scalar normalization: engine-reported scalars become the NATIVE DOM
+  /* Scalar normalization: engine-reported scalars become the NATIVE dyn
    * kinds at wrap time (the strict exits cannot fail on them), so every
-   * scalar path in the DOM core — ===, typeof tests, JSON of leaves —
+   * scalar path in the dyn core — ===, typeof tests, JSON of leaves —
    * stays untouched and the JSVAL kind never competes with them. */
   if (JS_IsUndefined(v)) return scr_dyn_retain(scr_dyn_undefined());
   if (JS_IsNull(v)) return scr_dyn_new_null();
@@ -1700,7 +1700,7 @@ static const JSClassDef isl_hostfn_class = {
     .finalizer = isl_hostfn_finalizer,
 };
 
-static JSClassID isl_dynfn_class_id;      /* the DOM-function shim, below */
+static JSClassID isl_dynfn_class_id;      /* the checked-dynamic tree-function shim, below */
 static const JSClassDef isl_dynfn_class;
 
 static void isl_register_hostfn_class(void) {
@@ -1865,13 +1865,13 @@ ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
   return isl_cell_new(fn);
 }
 
-/* ── the generic DOM-function shim (a boxed SCR_DYN_FUNC entering the
+/* ── the generic dyn-function shim (a boxed SCR_DYN_FUNC entering the
  * island) ─────────────────────────────────────────────────────────────
  * ONE shim serves every boxed function because the box's call thunk is a
- * single uniform C signature (ScrDynThunk): engine arguments wrap as DOM
- * values (scalar-normalizing — the jsval→DOM constructor's stance), the
+ * single uniform C signature (ScrDynThunk): engine arguments wrap as dyn
+ * values (scalar-normalizing — the jsval→dyn constructor's stance), the
  * thunk validates them against the closure's declared parameter types
- * and runs it, and the DOM result converts back through the from_dyn
+ * and runs it, and the dyn result converts back through the from_dyn
  * rules (wrapped cells by reference, data as a deep copy, nested
  * functions through this same shim). OWNERSHIP: the engine function's
  * opaque box owns ONE reference on the whole ScrDyn FUNC node (closure
@@ -1922,7 +1922,7 @@ static JSValue isl_dynfn_invoke(JSContext *ctx, JSValueConst this_val, int argc,
     return isl_throw_pending(ctx);
   }
   if (!r) return JS_UNDEFINED;
-  /* The thunk's DOM result converts back per the from_dyn rules; a kind
+  /* The thunk's dyn result converts back per the from_dyn rules; a kind
    * with no crossing (a handle, a promise) throws the same catchable
    * TypeError from_dyn would. */
   const char *bad = isl_dyn_unmarshalable(r);
@@ -1935,7 +1935,7 @@ static JSValue isl_dynfn_invoke(JSContext *ctx, JSValueConst this_val, int argc,
   return out; /* JS_EXCEPTION passes through as the engine throw */
 }
 
-/* A fresh engine function over a boxed DOM function (borrows d — the
+/* A fresh engine function over a boxed dyn function (borrows d — the
  * opaque box retains it). */
 static JSValue isl_dynfn_new(const ScrDyn *d) {
   JSValue boxv = JS_NewObjectClass(isl_ctx, isl_dynfn_class_id);

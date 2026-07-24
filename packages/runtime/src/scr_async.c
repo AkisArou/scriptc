@@ -272,7 +272,7 @@ struct ScrFiber {
 
 /* ── AsyncLocalStorage (node:async_hooks) ─────────────────────────────
  * Stores are process-lived ids; the CONTEXT is an immutable refcounted
- * snapshot of (store id → DOM value) entries. One ACTIVE SLOT pointer
+ * snapshot of (store id → dyn value) entries. One ACTIVE SLOT pointer
  * (the exc-cell pattern): main owns a static slot, every fiber owns its
  * own field, scr_switch repoints the active slot — so run()'s window
  * rides the fiber across awaits, and a spawned fiber INHERITS the
@@ -1009,7 +1009,7 @@ ScrStr *scr_promise_payload_str(ScrPromise *p) {
   return scr_str_retain((ScrStr *)p->payload);
 }
 /* Thin views for the gated dyn-async TU (scr_async_dyn.c): the payload
- * KIND, whether a REF payload is a DOM value (the dyn adapters), and the
+ * KIND, whether a REF payload is a dyn value (the dyn adapters), and the
  * settled-await primitive (park/hop + rejection re-throw; true =
  * fulfilled). */
 static bool scr_await_settled(ScrPromise *p); /* defined with the await family */
@@ -1424,12 +1424,12 @@ ScrPromise *scr_tp_set_immediate(void) {
   return p;
 }
 
-/* ── setImmediate as a first-class DOM value ─────────────────────────
+/* ── setImmediate as a first-class dyn value ─────────────────────────
  * The global passed AS A FUNCTION VALUE into untyped code (the Node-suite
  * traceCallback shape: `channel.traceCallback(setImmediate, 0, ctx, null,
  * cb)`). The minted dyn callable schedules its own immediate that calls
  * args[0] with the remaining arguments (Node's setImmediate(cb, ...args)
- * contract) and answers undefined (the Immediate handle object has no DOM
+ * contract) and answers undefined (the Immediate handle object has no dyn
  * story — clearImmediate over this value is not modeled). A non-function
  * first argument throws Node's ERR_INVALID_ARG_TYPE synchronously. */
 
@@ -2030,7 +2030,7 @@ void scr_loop_set_island_rejections(bool (*fn)(bool print)) {
 }
 
 /* ── process.on('unhandledRejection') ─────────────────────────────────
- * DOM listeners called per never-observed rejection instead of the
+ * dyn listeners called per never-observed rejection instead of the
  * default report below. Node fires the event at end-of-turn; the
  * compiled runtime fires at loop exhaustion, where the ledger is
  * decided — the same values, later (SEMANTICS.md; mustCall-style

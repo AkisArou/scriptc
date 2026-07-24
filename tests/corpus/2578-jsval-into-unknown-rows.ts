@@ -1,9 +1,9 @@
 // @dynamic
-// The jsval→DOM crossing (SCR_DYN_JSVAL): an 'any'-typed engine value
+// The jsval→dyn crossing (SCR_DYN_JSVAL): an 'any'-typed engine value
 // flowing into 'unknown' slots wraps by reference, and the armed row-1..3
 // ops answer through the engine — typeof, truthiness, String(), and ===
 // (two wraps of one engine value are the same JS value). Engine scalars
-// normalize to native DOM kinds at wrap time, so scalar anys into unknown
+// normalize to native dyn kinds at wrap time, so scalar anys into unknown
 // behave exactly like their native kinds.
 const objv: any = { a: 1, b: [1, 2] };
 const arrv: any = [3, 4, 5];
@@ -22,7 +22,7 @@ console.log(String(uo));
 console.log(String(ua));
 
 // Row 3: === — two wraps of ONE engine value compare equal; distinct
-// engine values do not; a wrapped value never equals DOM data.
+// engine values do not; a wrapped value never equals dyn data.
 const uo2: unknown = objv;
 console.log(uo === uo2, uo === ua, uo === JSON.parse('{"a":1}'));
 
@@ -33,7 +33,7 @@ function back(v: any): boolean {
 console.log(back(uo));
 
 // Scalar normalization: number/string/boolean/null/undefined anys into
-// unknown become NATIVE DOM kinds — typeof tests, ===, and JSON of
+// unknown become NATIVE dyn kinds — typeof tests, ===, and JSON of
 // leaves all stay native.
 const n: any = 5;
 const s: any = "hi";

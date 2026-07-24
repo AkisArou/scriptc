@@ -41,7 +41,7 @@ try {
   console.log('unreachable');
 } catch (e) {
   console.log('caught', e.message);
-  assert.strictEqual(e, boom); // one error object, one DOM identity
+  assert.strictEqual(e, boom); // one error object, one dyn identity
   console.log('rethrow identity ok');
 }
 console.log(events.join(' | '));

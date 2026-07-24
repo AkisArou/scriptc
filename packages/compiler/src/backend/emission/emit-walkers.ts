@@ -35,7 +35,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       // omitting the key).
       case "undefinedT":
         return "undefined";
-      // dyn fields accept any DOM value — only reachable in messages as a
+      // dyn fields accept any dyn value — only reachable in messages as a
       // sibling of a failing field, never as the failure itself.
       case "dyn":
         return "unknown";
@@ -277,7 +277,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
   }
 
 /** The dyn ToString helper pair (interned once, type-independent):
-   * Node's String() over a DOM value — "undefined"/"null" texts, bools,
+   * Node's String() over a dyn value — "undefined"/"null" texts, bools,
    * JS-exact number formatting (NaN/Infinity spelled out — NOT the JSON
    * null), strings verbatim, arrays via Array.prototype.toString (join
    * with ","; null/undefined ELEMENTS print empty, nested arrays flatten
@@ -318,7 +318,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       `    break;`,
       `  case SCR_DYN_OBJ:`,
       `    if (scr_dyn_obj_get(d, "%error", 6)) {`,
-      `      /* The DOM's error encoding (caughtToDyn): Error.prototype`,
+      `      /* The checked-dynamic tree's error encoding (caughtToDyn): Error.prototype`,
       `       * .toString over the encoded name/message — Node's String(err),`,
       `       * which carries no stack either. */`,
       `      const ScrDyn *en = scr_dyn_obj_get(d, "name", 4);`,
@@ -390,12 +390,12 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 /** The caught→dyn converter (interned once, type-independent): a catch
    * binding flowing into an `unknown` slot — the typed→unknown deep-copy
    * stance over the exception snapshot's runtime kind. Scalar payloads
-   * convert exactly; an Error-family OBJ payload becomes the DOM's error
+   * convert exactly; an Error-family OBJ payload becomes the checked-dynamic tree's error
    * encoding — the reserved "%error" marker plus name/message (and code
    * when stamped), so `instanceof Error`, the %Error extraction, and
    * String() answer like Node; every other payload (REF — records, arrays,
    * closures, unions — and non-Error hierarchy objects, type-erased at
-   * runtime) becomes an EMPTY DOM object (SEMANTICS.md 67). Borrows the
+   * runtime) becomes an EMPTY dyn object (SEMANTICS.md 67). Borrows the
    * snapshot; the result is a fresh tree (+1). Never throws. */
   export function caughtToDynHelper(E: CEmitter): string {
     if (E.caughtToDynFn) return E.caughtToDynFn;
@@ -412,14 +412,14 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       `  case SCR_EXC_OBJ:`,
       `    if (scr_error_is(c->payload)) {`,
       `      /* The identity-cached crossing (scr_json.c): the SAME error`,
-      `       * instance boxes to ONE DOM node however it crosses, so a`,
+      `       * instance boxes to ONE dyn node however it crosses, so a`,
       `       * caught dyn compares reference-equal to the thrown error's`,
       `       * other boxings, like Node. */`,
       `      return scr_dyn_from_error((const ScrError *)c->payload);`,
       `    }`,
       `    /* FALLTHROUGH: a non-Error hierarchy object is type-erased */`,
       `  case SCR_EXC_REF:`,
-      `    /* A thrown DOM value passes back BY REFERENCE (identity with`,
+      `    /* A thrown dyn value passes back BY REFERENCE (identity with`,
       `     * every other holder of the node — the traced-throw shape). */`,
       `    if (c->retain_fn == scr_dyn_retain_v) return scr_dyn_retain((ScrDyn *)c->payload);`,
       `    /* FALLTHROUGH */`,
@@ -655,7 +655,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         break;
       }
       case "dyn":
-        // Overflow values under an `unknown` index signature: the DOM
+        // Overflow values under an `unknown` index signature: the checked-dynamic tree
         // serializes itself (runtime walker) — object members holding
         // undefined drop, array slots holding undefined print null,
         // exactly Node. Bare JSON.stringify of dyn stays frontend-fenced;
@@ -731,7 +731,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
   }
 
 /** The emitted match predicate for one dynCheck target type:
-   * `static bool sc_dm_<n>(const ScrDyn *d)` — does this DOM fit T?
+   * `static bool sc_dm_<n>(const ScrDyn *d)` — does this dyn fit T?
    * Never throws, builds nothing; union builders use it to try arms in
    * canonical order (first FULL match wins). Records are width-tolerant
    * here too: extra keys are ignored, only declared fields are examined. */
@@ -760,18 +760,18 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         d.push(`  return d->kind == SCR_DYN_NULL;`);
         break;
       case "undefinedT":
-        // JSON text never parses to undefined, but the DOM can HOLD it now
+        // JSON text never parses to undefined, but the checked-dynamic tree can HOLD it now
         // (overflow reads/conversions under `unknown` index signatures):
-        // the undefined DOM value matches exactly the undefined arm.
+        // the undefined dyn value matches exactly the undefined arm.
         d.push(`  return d->kind == SCR_DYN_UNDEF;`);
         break;
       case "dyn":
-        // An `unknown` target: every DOM value fits, undefined included.
+        // An `unknown` target: every dyn value fits, undefined included.
         d.push(`  (void)d;`);
         d.push(`  return true;`);
         break;
       case "bytes":
-        // A Uint8Array target (the DOM carries u8 payloads only).
+        // A Uint8Array target (the checked-dynamic tree carries u8 payloads only).
         if (t.elem !== "u8") throw new Error(`emitter bug: dynMatch of bytes<${t.elem}>`);
         d.push(`  return d->kind == SCR_DYN_BYTES;`);
         break;
@@ -792,7 +792,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         }
         d.push(`  if (d->kind != SCR_DYN_OBJ) return false;`);
         // dyn ('unknown') fields match ANY value, present or missing (a
-        // missing key builds the undefined DOM value) — no test to emit.
+        // missing key builds the undefined dyn value) — no test to emit.
         if (shape.fields.some((f) => f.type.kind !== "dyn")) d.push(`  const ScrDyn *m;`);
         for (const f of shape.fields) {
           if (f.type.kind === "dyn") continue;
@@ -842,7 +842,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         if (!def) throw new Error(`emitter bug: dynCheck of unknown union ${t.unionId}`);
         // The undefined arm participates: parsed JSON never contains
         // undefined (a MISSING record key was the arm's only source), but
-        // the DOM can hold the undefined value now — overflow entries
+        // the checked-dynamic tree can hold the undefined value now — overflow entries
         // under `unknown` index signatures — and it matches exactly the
         // undefined arm.
         const arms = def.arms.map((a) => `${E.dynMatchHelper(a)}(d)`);
@@ -857,7 +857,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     return name;
   }
 
-/** The emitted keyed read on a dyn DOM value:
+/** The emitted keyed read on a dyn value:
    * `static ScrDyn *sc_dyn_key_get(ScrDyn *d, ScrStr *k, bool opt)` —
    * OBJ answers the member (+1) or the undefined singleton (own-property
    * answer); ARR answers `length` and canonical in-range indices, STR
@@ -904,14 +904,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     return name;
   }
 
-  /** GetIterator + first-N steps over a DOM value (the dynIterN node), as
+  /** GetIterator + first-N steps over a dyn value (the dynIterN node), as
    * array destructuring sees it: arrays step by index, strings by CODE
    * POINT (the string iterator — astral chars arrive unsplit), Buffers by
    * byte; everything else throws V8's exact not-iterable TypeError
    * ("undefined is not iterable …", "object null is not iterable …",
    * "number 1 is not iterable …", "boolean true …", "object …",
    * "function …" — each with the "(cannot read property
-   * Symbol(Symbol.iterator))" tail). Returns a fresh +1 DOM array of
+   * Symbol(Symbol.iterator))" tail). Returns a fresh +1 dyn array of
    * exactly n elements, undefined-padded past the end. */
   export function dynIterNHelper(E: CEmitter): string {
     const memoKey = "%dynIterN";
@@ -1077,7 +1077,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
 
 /** The emitted checked builder for one dynCheck target type:
    * `static T sc_dc_<n>(const ScrDyn *d, const ScrDynPath *path)` —
-   * validate the DOM against T and BUILD the typed value (+1), or throw a
+   * validate the checked-dynamic tree against T and BUILD the typed value (+1), or throw a
    * catchable, path-annotated TypeError-shaped string through the exception
    * cell and return a dummy (0/false/NULL) with the pending flag set.
    * Recursive calls propagate a pending exception by releasing the
@@ -1107,7 +1107,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         d.push(`  return scr_str_retain(d->v.str);`);
         break;
       case "dyn":
-        // An `unknown` slot (a dyn record field): the DOM subtree passes
+        // An `unknown` slot (a dyn record field): the checked-dynamic tree subtree passes
         // through as-is — nothing to validate, nothing to build.
         d.push(`  (void)path;`);
         d.push(`  return scr_dyn_retain((ScrDyn *)d);`);
@@ -1121,14 +1121,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         break;
       case "object":
         // The %Error extraction (an instanceof-Error narrow on unknown):
-        // validate the DOM's error encoding — the reserved "%error" marker
+        // validate the checked-dynamic tree's error encoding — the reserved "%error" marker
         // caughtToDyn builds — and extract through the runtime's IDENTITY
-        // CACHE (scr_error_from_dyn): a DOM error that came from a runtime
+        // CACHE (scr_error_from_dyn): a dyn error that came from a runtime
         // ScrError answers that very instance, so out-and-back crossings
         // compare reference-equal (the tracing suite's shape); alien
         // %error objects rebuild once and cache the pair.
         if (t.className !== "%Error") {
-          throw new Error(`emitter bug: dynCheck of class ${t.className} (only %Error extracts from the DOM)`);
+          throw new Error(`emitter bug: dynCheck of class ${t.className} (only %Error extracts from the checked-dynamic tree)`);
         }
         d.push(`  if (d->kind != SCR_DYN_OBJ || !scr_dyn_obj_get(d, "%error", 6)) { scr_dyn_check_fail(path, ${want}, d); return NULL; }`);
         d.push(`  return scr_error_from_dyn(d);`);
@@ -1175,7 +1175,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`    const ScrDyn *m = scr_dyn_obj_get(d, ${keyLit}, ${keyLen});`);
           if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
-            // one IS the undefined DOM value (JS's missing-property read).
+            // one IS the undefined dyn value (JS's missing-property read).
             d.push(`    (void)p;`);
             d.push(`    r->${mangleField(f.name)} = scr_dyn_retain(m ? (ScrDyn *)m : scr_dyn_undefined());`);
           } else if (utag >= 0 && f.type.kind === "union") {
@@ -1195,7 +1195,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         }
         // Index-signature shapes CAPTURE undeclared keys into the overflow
         // map (width tolerance became width capture — plain shapes above
-        // keep ignoring extras). dyn value types retain the DOM subtree
+        // keep ignoring extras). dyn value types retain the checked-dynamic tree subtree
         // as-is; concrete types validate each entry with its key path.
         if (shape.indexValue) {
           const iv = shape.indexValue;
@@ -1253,7 +1253,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           if (arm.kind === "undefinedT") {
             // Parsed JSON never matches here (no undefined in JSON text —
             // a MISSING record key builds this arm in the record builder
-            // above), but the undefined DOM value can arrive from
+            // above), but the undefined dyn value can arrive from
             // `unknown` index-signature overflows and builds the interned
             // unit instance exactly like null.
             d.push(`  if (${m}(d)) {`);
@@ -1324,12 +1324,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     return name;
   }
 
-/** The emitted static→DOM converter for one type:
-   * `static ScrDyn *sc_td_<n>(<T> v)` — build a fresh dyn DOM value from a
+/** The emitted static→dyn converter for one type:
+   * `static ScrDyn *sc_td_<n>(<T> v)` — build a fresh dyn value from a
    * static one (+1), DEEP-COPYING composites (a dyn value never aliases
    * static storage — the jsMarshal stance). Domain: the JSON-safe kinds
    * plus undefined-armed unions (the undefined arm becomes the undefined
-   * DOM singleton) and index-signature records (whose overflow entries
+   * dyn singleton) and index-signature records (whose overflow entries
    * copy over). The operand is borrowed. Never throws. */
   export function toDynHelper(E: CEmitter, t: IrType): string {
     const key = typeKey(t);
@@ -1352,14 +1352,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         break;
       case "undefinedT":
         // A bare unit field (`x: undefined` in a record — the tls
-        // options-record's explicit-absent member): the DOM unit value.
+        // options-record's explicit-absent member): the dyn unit value.
         d.push(`  (void)v; return scr_dyn_retain(scr_dyn_undefined());`);
         break;
       case "nullT":
         d.push(`  (void)v; return scr_dyn_new_null();`);
         break;
       case "object":
-        // %Error only (canConvertToDyn's gate): the DOM's error encoding.
+        // %Error only (canConvertToDyn's gate): the checked-dynamic tree's error encoding.
         if (t.className !== "%Error") {
           throw new Error(`emitter bug: to-dyn of class ${t.className}`);
         }
@@ -1367,12 +1367,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         break;
       case "dyn":
         // A dyn member of a converting composite (a dyn record field): the
-        // DOM value passes through by reference — already a DOM, already
+        // dyn value passes through by reference — already a dyn, already
         // immutable-through-copies.
         d.push(`  return scr_dyn_retain(v);`);
         break;
       case "bytes":
-        // bytes<u8> → the DOM's bytes kind, payload COPIED (the boundary
+        // bytes<u8> → the checked-dynamic tree's bytes kind, payload COPIED (the boundary
         // stance; stdin chunks into unknown-typed helpers).
         if (t.elem !== "u8") throw new Error(`emitter bug: to-dyn of bytes<${t.elem}>`);
         d.push(`  return scr_dyn_new_bytes_copy(v);`);
@@ -1381,7 +1381,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         const shape = E.recordsById.get(t.shapeId);
         if (!shape) throw new Error(`emitter bug: to-dyn of unknown shape ${t.shapeId}`);
         // CYCLE-CAPABLE shapes guard the deep copy: a cyclic value has no
-        // finite DOM copy, so enter TRAPS on re-entry (SEMANTICS.md — Node
+        // finite dyn copy, so enter TRAPS on re-entry (SEMANTICS.md — Node
         // shares the reference instead of copying).
         const cyclicRec = E.traceAdapterC(t) !== null;
         if (cyclicRec) d.push(`  scr_dyn_from_enter(v);`);
@@ -1397,11 +1397,11 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           break;
         }
         d.push(`  ScrDyn *d = scr_dyn_new_obj();`);
-        // Keys insert in DECLARED order — the DOM object's insertion order
+        // Keys insert in DECLARED order — the dyn object's insertion order
         // is observable (Object.keys/for-in over checked-dynamic values,
         // dyn JSON), so it must be JS's (SEMANTICS.md 36's stance, same as
         // the JSON writer above). Internal '%'-fields declaredOrder omits
-        // still enter the DOM (after the visible keys) so a
+        // still enter the checked-dynamic tree (after the visible keys) so a
         // record→dyn→record round trip keeps their data.
         {
           const byName = new Map(shape.fields.map((f) => [f.name, f]));
@@ -1496,7 +1496,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       case "promise": {
         // Promises box by REFERENCE (SCR_DYN_PROMISE — identity is the
         // promise): promise<dyn> carries its ScrPromise directly (the
-        // payload is already a DOM value); any other inner boxes an
+        // payload is already a dyn value); any other inner boxes an
         // ADAPTER promise whose settle callback converts the payload
         // (rejections copy raw inside the runtime's cb-waiter machinery).
         if (t.inner.kind === "dyn") {
@@ -1523,9 +1523,9 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     return name;
   }
 
-/** The DOM-promise settle adapter for one fulfillment payload type:
+/** The checked-dynamic tree-promise settle adapter for one fulfillment payload type:
    * `static void sc_pda_<n>(ScrPromise *dst, ScrPromise *src)` — read
-   * src's fulfilled payload by its compile-time kind, convert it to a DOM
+   * src's fulfilled payload by its compile-time kind, convert it to a dyn
    * value, and fulfill dst with it (scr_dyn_new_promise_adapting's
    * callback; rejections never reach an adapter — the runtime copies them
    * raw). Interned per inner typeKey. */
@@ -1583,10 +1583,10 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
    *
    *   sc_dfk_<n> — the CALL THUNK a dyn-boxed closure carries: validate
    *   each dyn argument into the declared param type (JS arity: extras
-   *   ignored, missing args are the undefined DOM value — a param type
+   *   ignored, missing args are the undefined dyn value — a param type
    *   the undefined value fails checks throws the path-annotated
    *   TypeError), call through the closure, convert the result back to a
-   *   DOM value (+1).
+   *   dyn value (+1).
    *
    *   sc_dfb_<n> — the BOX builder dynFrom emits: a fresh SCR_DYN_FUNC
    *   node carrying the retained closure, the thunk, the arity, the
@@ -1626,7 +1626,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     if (t.params.length === 0) d.push(`  (void)args;`);
     d.push(`  (void)argc;`);
     t.params.forEach((p, i) => {
-      // JS arity: a missing argument IS the undefined DOM value; the
+      // JS arity: a missing argument IS the undefined dyn value; the
       // param's own check decides whether that flies (dyn params take
       // anything; a number param throws the catchable TypeError).
       d.push(`  ${cDecl(p, `a${i}`)};`);
@@ -1635,7 +1635,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       if (p.kind === "dyn") {
         d.push(`    a${i} = scr_dyn_retain((ScrDyn *)ad);`);
       } else if (p.kind === "jsval") {
-        // A checker-'any' param: the DOM argument enters the island —
+        // A checker-'any' param: the dyn argument enters the island —
         // wrapped cells unwrap by reference, data deep-copies, boxed
         // functions cross through the host shim; a kind with no crossing
         // throws the catchable TypeError (NULL + pending).
@@ -1654,7 +1654,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       }
       d.push(`  }`);
     });
-    // VARIADIC (rest-marked) signatures: one extra trailing DOM-array
+    // VARIADIC (rest-marked) signatures: one extra trailing dyn-array
     // param carries the call's arguments from index params.length on —
     // the mustCall wrapper's `arguments`, a JS `...args`. Built fresh per
     // call (+1, moved into the callee like every param).
@@ -1765,7 +1765,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
    * answer first (string comparisons in canonical order; the frontend
    * proved each surfaces as T: identity, a to-dyn conversion, or an
    * arm-into-union wrap), then the overflow map on index-signature shapes.
-   * A MISSING key yields the undefined DOM value (T dyn), the undefined
+   * A MISSING key yields the undefined dyn value (T dyn), the undefined
    * arm (T undefined-armed union), or TRAPS with the key text (the array
    * OOB policy — the checker claimed T and no undefined is representable).
    * Borrows both; refcounted results are owned (+1). */

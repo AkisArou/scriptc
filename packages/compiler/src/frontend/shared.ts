@@ -313,7 +313,7 @@ export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([
   // annotate its variable, so the demand is unsatisfiable in source —
   // exactly the implicit-any story above. The values stay 'unknown' and
   // every use meets the lowerer's per-site unknown fences (member reads
-  // ride the checked-dynamic DOM; unsupported operations fence loudly).
+  // ride the checked-dynamic tree; unsupported operations fence loudly).
   18046, 2571,
 ]);
 

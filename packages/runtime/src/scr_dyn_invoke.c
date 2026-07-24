@@ -1,10 +1,10 @@
 /* Prototype-method dispatch on checked-dynamic receivers (scr_dyn_invoke)
- * and its companions: JS String() over the DOM (scr_dyn_display — join
+ * and its companions: JS String() over the checked-dynamic tree (scr_dyn_display — join
  * and the error texts need it standalone) and Object.defineProperties
- * over DOM values (scr_dyn_define_props). Linked only when the IR
+ * over dyn values (scr_dyn_define_props). Linked only when the IR
  * carries dynInvoke nodes or dyn.defineProps calls (cc.ts gates on
  * moduleUsesDynInvoke — the scr_assert.c precedent), so dispatch-free
- * binaries keep their exact size class. The DOM itself lives in
+ * binaries keep their exact size class. The checked-dynamic tree itself lives in
  * scr_json.c; this unit uses only its public surface plus ScrJsonBuf.
  */
 #include "scr_runtime.h"
@@ -16,8 +16,8 @@
 
 /* ── checked-dynamic METHOD DISPATCH (scr_dyn_invoke) ──────────────────
  *
- * `recv.m(args)` where recv is a DOM value and `m` is a name a
- * DOM-representable prototype declares (Array/String/Function shared
+ * `recv.m(args)` where recv is a dyn value and `m` is a name a
+ * dyn-representable prototype declares (Array/String/Function shared
  * names — push, slice, forEach, apply, ...): a stored-member read would
  * silently mis-answer real methods, so the dispatch runs HERE, over the
  * receiver's runtime kind. test/common's mustCall internals are the
@@ -38,10 +38,10 @@
  * recv/args are BORROWED; the result is owned (+1). MAY THROW (returns
  * NULL with the exception pending). */
 
-/* JS String() over a DOM value, runtime-side (join needs it standalone —
+/* JS String() over a dyn value, runtime-side (join needs it standalone —
  * the emitted sc_ds walker exists only in programs that spell
  * String(unknown) themselves). Same rules: arrays join with "," and
- * null/undefined elements print empty, the DOM's error encoding renders
+ * null/undefined elements print empty, the checked-dynamic tree's error encoding renders
  * "name: message", functions render the native-code form, plain objects
  * are [object Object]. */
 static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
@@ -192,7 +192,7 @@ static bool dyn_cb_check(ScrDyn *const *args, size_t argc) {
   ScrDyn *cb = argc > 0 ? args[0] : scr_dyn_undefined();
   if (cb->kind == SCR_DYN_FUNC) return true;
   /* An ENGINE function is callable — scr_dyn_call's JSVAL arm routes it
-   * (the loops below call through scr_dyn_call, which converts the DOM
+   * (the loops below call through scr_dyn_call, which converts the checked-dynamic tree
    * element arguments per the uniform crossing). A wrapped NON-function
    * falls through to the display path: String(cb) renders through the
    * engine, exactly Node's message. */
@@ -215,7 +215,7 @@ static ScrDyn *scr_dynh_dispatch(ScrDyn *recv, const char *method, ScrDyn *const
   return ops->invoke(recv->v.handle.ptr, recv, method, args, argc, what);
 }
 
-/* JS Array.prototype.sort over a DOM array: the spec's snapshot-sort —
+/* JS Array.prototype.sort over a dyn array: the spec's snapshot-sort —
  * elements copy (retained) into a work list, a stable merge sort orders
  * it (undefined elements sink to the end before any comparator runs),
  * and the ordered list writes back index by index, so a comparator that
@@ -339,7 +339,7 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
   /* Island-held receivers: the ENGINE runs its own prototypes (JS-exact
    * flatMap/map/forEach/filter — Array.prototype is the engine's) through
    * scr_jsval_call_method; arguments cross per the uniform conversion
-   * (wrapped cells by reference, DOM data deep-copied, FUNC boxes through
+   * (wrapped cells by reference, dyn data deep-copied, FUNC boxes through
    * the host shim), a missing member throws the engine's own TypeError,
    * and the result wraps back scalar-normalized. `what` is unused — the
    * engine's message names the failure. */
@@ -352,7 +352,7 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
   if (recv->kind == SCR_DYN_OBJ) {
     ScrDyn *m = scr_dyn_obj_get(recv, method, strlen(method));
     if (m && (m->kind == SCR_DYN_FUNC ||
-              /* a WRAPPED engine function stored as a DOM member: the
+              /* a WRAPPED engine function stored as a dyn member: the
                * routed call (scr_dyn_call's JSVAL arm) runs it. */
               (m->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(m, "function")))) {
       /* JS binds the receiver for the call (`obj.method()` — this === obj):
@@ -584,8 +584,8 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
       return scr_dyn_retain(scr_dyn_undefined()); /* forEach */
     }
     if (dyn_name_is(method, "flatMap")) {
-      /* JS Array.prototype.flatMap over a DOM array: map + a depth-1
-       * flatten. Native DOM-array results flatten element-by-element; a
+      /* JS Array.prototype.flatMap over a dyn array: map + a depth-1
+       * flatten. Native dyn-array results flatten element-by-element; a
        * WRAPPED engine array flattens through the routed keyed reads
        * (elements wrap back scalar-normalized); everything else pushes
        * as a single element (JS keeps non-array callback results whole).
@@ -682,9 +682,9 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
   return NULL;
 }
 
-/* Object.defineProperties over DOM values (see scr_runtime.h). Value
+/* Object.defineProperties over dyn values (see scr_runtime.h). Value
  * descriptors only: writable/enumerable/configurable accepted and IGNORED
- * (DOM properties are plain data properties — SEMANTICS.md); get/set
+ * (dyn properties are plain data properties — SEMANTICS.md); get/set
  * throw the loud unsupported Error, never a silent drop. */
 ScrDyn *scr_dyn_define_props(ScrDyn *target, ScrDyn *descs) {
   /* Island-held operands ARE objects to Node — the non-object TypeError

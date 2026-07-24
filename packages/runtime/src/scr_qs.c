@@ -429,7 +429,7 @@ void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
 
 /* ── stringify ───────────────────────────────────────────────────────── */
 
-/* Node's encodeStringified over one DOM value: strings escape, finite
+/* Node's encodeStringified over one dyn value: strings escape, finite
  * numbers render then escape, booleans are bare, everything else is the
  * empty value. Appends to b. */
 static void qs_stringify_value(QsBuf *b, const ScrDyn *v) {

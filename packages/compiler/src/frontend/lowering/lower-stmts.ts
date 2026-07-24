@@ -456,7 +456,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     const local: IrLocal = { id: `${name}.${count}`, name, type, mutable: true };
     L.ctx.locals.push(local);
     L.ctx.scopes[0]!.set(symbol, local);
-    // A checked-dynamic slot holds the DOM undefined (a NULL dyn is a
+    // A checked-dynamic slot holds the dyn undefined (a NULL dyn is a
     // trap); everything else rides unassignedSlotInit (interned union arm,
     // engine undefined for jsval).
     const wrapped = type.kind === "dyn" ? dynUndefinedExpr(locOf(nameNode)) : L.unassignedSlotInit(type, locOf(nameNode));
@@ -473,7 +473,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
    * such reads `undefined`, never a TDZ error, so the hoisted slot must
    * hold `undefined` from function entry — which is only honest for
    * undefined-armed union types (the interned arm) and checked-dynamic
-   * bindings (the DOM undefined). Everything else returns false
+   * bindings (the dyn undefined). Everything else returns false
    * and the reference lands on the named fence in rejectUnresolvedSymbol:
    * a slot of a narrower type has no bit pattern for the `undefined` Node
    * would yield if the capture ran early, and guessing "it won't" is the
@@ -502,7 +502,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     const ctx = owner.ctx;
     // Only a slot that can hold `undefined` can carry the pre-
     // initialization reads: an undefined-armed union (the interned arm),
-    // a checked-dynamic binding (the DOM undefined), or a jsval 'any'
+    // a checked-dynamic binding (the dyn undefined), or a jsval 'any'
     // binding (the engine's undefined).
     const type = varBindingType(L, nameNode);
     if (!type) return false;
@@ -726,7 +726,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // A bare `return;` in a union-returning function yields undefined
       // (JS), which the undefined arm carries — tsc only allows the bare
       // form when the return type includes undefined/void. A CHECKED-
-      // DYNAMIC return slot holds the DOM undefined directly (the
+      // DYNAMIC return slot holds the dyn undefined directly (the
       // appendImplicitUndefinedReturn rule). What remains is JS-only —
       // a JSDoc return claim the body contradicts (ms's parse: `@return
       // {Number}` with a bare early `return;`): no undefined fits the
@@ -796,11 +796,11 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // rejected via the type fence.
       const value = L.lowerExpr(stmt.expression);
       if (value.type.kind === "void") L.badType(stmt.expression, L.typeOf(stmt.expression));
-      // A dyn throw rides the REF cell arm (scr_throw_ref over the DOM
+      // A dyn throw rides the REF cell arm (scr_throw_ref over the checked-dynamic tree
       // node — identity preserved through catch bindings, caughtToDyn
       // passes it back by reference). The JS-lane traced-call shape:
-      // `throw err` where err arrived as a DOM argument. instanceof
-      // narrowing over the payload stays false (the DOM's %error encoding
+      // `throw err` where err arrived as a dyn argument. instanceof
+      // narrowing over the payload stays false (the checked-dynamic tree's %error encoding
       // is not a hierarchy object — SEMANTICS.md).
       return { kind: "throw", value, loc: locOf(stmt) };
     }
@@ -994,7 +994,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     let init = L.lowerExpr(decl.initializer);
     // A TS `any`-origin source whose lowered value is NOT a destructurable
     // shape (`var { x } = <any>0` — the cast erases to the f64; a dyn
-    // value — the DOM has no destructure): JS reads the properties off
+    // value — the checked-dynamic tree has no destructure): JS reads the properties off
     // whatever the value is (a number answers undefined) — engine
     // semantics, the dynamic-family fence. Record and array sources fall
     // through to their lowerings, island handles to theirs (--dynamic
@@ -1252,16 +1252,16 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         );
         return;
       }
-      // DYN sources (`const [a, b] = d` over a DOM value, `([_, code]) =>`
+      // DYN sources (`const [a, b] = d` over a dyn value, `([_, code]) =>`
       // params destructuring dyn callback arguments — the suite harness's
       // _expectWarning shapes): the source packs ONCE through the spread
       // walk (dyn.iterPack — arrays element-by-element, strings by code
       // point, bytes by byte; every other kind throws V8's destructuring
       // TypeError, the compile-time spelling when the source has one),
       // then positions bind the pack's index keys as dyn values — reads
-      // past the end bind undefined, exactly JS. Defaults fire on the DOM
+      // past the end bind undefined, exactly JS. Defaults fire on the checked-dynamic tree
       // undefined (JS's rule); rest elements keep the fence (surplus
-      // packing over the DOM needs a slice the IR does not spell yet).
+      // packing over the checked-dynamic tree needs a slice the IR does not spell yet).
       if (srcType.kind === "dyn") {
         const loc = locOf(pattern);
         const pack = L.declareHiddenLocal("%dpack", DYN);
@@ -1291,8 +1291,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
             loc: elLoc,
           };
           if (el.initializer) {
-            // The default fires exactly on the DOM undefined (JS's rule),
-            // its value converting into the DOM like any dyn-slot value.
+            // The default fires exactly on the dyn undefined (JS's rule),
+            // its value converting into the checked-dynamic tree like any dyn-slot value.
             const rl = L.declareHiddenLocal("%delem", DYN);
             out.push({ kind: "varDecl", localId: rl.id, init: value, loc: elLoc });
             const ref = (): IrExpr => ({ kind: "varRef", localId: rl.id, type: DYN, loc: elLoc });
@@ -1301,7 +1301,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
               L.unsupported(
                 "SC1031",
                 el.initializer,
-                `defaults of '${L.fmt(dflt.type)}' type over checked-dynamic sources (the value cannot convert into the DOM)`,
+                `defaults of '${L.fmt(dflt.type)}' type over checked-dynamic sources (the value cannot convert into the checked-dynamic tree)`,
               );
             }
             value = {
@@ -2568,7 +2568,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // a pattern binding whose VALUE lowered checked-dynamic stays dyn
       // where the checker spells an island-world type (`function f({
       // plugins = [] } = {})` over a JSDoc '(string | object)[]=' member —
-      // the read is a DOM keyed read whose members may be wrapped island
+      // the read is a dyn keyed read whose members may be wrapped island
       // values) or a type with no mapping at all (the varDecl rule's
       // unmappable-declared-type stance, `string | object` bindings
       // included). Marshaling here would fence or deep-copy; the value's
@@ -2829,7 +2829,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         // hoisting), and re-running the statement — a declaration inside
         // a loop — must NOT reset the persisting binding.
         if (isVarDeclared(decl)) return null;
-        // Checked-dynamic globals hold the DOM undefined from their
+        // Checked-dynamic globals hold the dyn undefined from their
         // declaration statement on; unions and jsval ride
         // unassignedSlotInit's arms.
         const wrapped = g.type.kind === "dyn" ? dynUndefinedExpr(locOf(decl)) : L.unassignedSlotInit(g.type, locOf(decl));
@@ -2884,7 +2884,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       const local = L.declareLocal(decl.name, decl.name.text, type, isLet);
       // tsc's definite-assignment analysis never guards `any` reads, so
       // uninitialized bindings must hold their world's undefined, never
-      // NULL: unions the interned arm, dyn the DOM undefined, jsval the
+      // NULL: unions the interned arm, dyn the dyn undefined, jsval the
       // engine's — all readable immediately, exactly Node.
       const init = type.kind === "dyn" ? dynUndefinedExpr(locOf(decl)) : L.unassignedSlotInit(type, locOf(decl));
       return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
@@ -2908,7 +2908,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     }
     // A dyn initializer under an unmappable declared type (`const ws =
     // pkg.workspaces` — the lowering world types the unknown-receiver read
-    // `any`, which a static build cannot hold): the VALUE is a DOM
+    // `any`, which a static build cannot hold): the VALUE is a dyn
     // subtree, so the local stays dyn — later narrowing tests and checked
     // casts read it like any JSON.parse result.
     // `const p = import("./m")` / `const ns = await import("./m")`: the
@@ -2934,7 +2934,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       // the island-HANDLE local rule's mirror): a binding whose
       // INITIALIZER lowered checked-dynamic stays dyn even where the
       // checker spells 'any' (`const parsers = options.parsers ?? {}` over
-      // an 'object'-typed bag — the read is a DOM keyed read). Marshaling
+      // an 'object'-typed bag — the read is a dyn keyed read). Marshaling
       // into the engine here would deep-copy data and sever aliasing; the
       // value's world is the honest dispatch, and every use site already
       // handles dyn (validated exits, routed engine ops for wrapped
@@ -2960,7 +2960,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // pushes of anything non-numeric would fence and typed exits would
     // mismatch the checker's evolved reads downstream. The binding is
     // checked-dynamic instead (the `let x = {}` stance, and lower-modules'
-    // file-scope evolving-array rule): pushes ride the DOM array, typed
+    // file-scope evolving-array rule): pushes ride the dyn array, typed
     // exits dynCheck.
     if ((type === null || type.kind === "array") && isJsSourceFile(decl.getSourceFile())) {
       let initExpr: ts.Expression = decl.initializer;
@@ -3947,7 +3947,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
             const loc = locOf(expr);
             // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
             // receiver whose value LOWERED checked-dynamic (`bag.nested.x
-            // = v` behind an 'object'-typed bag) takes the DOM keyed
+            // = v` behind an 'object'-typed bag) takes the dyn keyed
             // write — the routed JSVAL arm lands it on the real engine
             // object.
             if (obj.type.kind === "dyn") {
@@ -4059,7 +4059,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           }
           // `h.onDone = cb` on a CHECKED-DYNAMIC receiver (a JS `let h =
           // {}` evolving object, an implicit-any param, a dyn member
-          // chain): the DOM keyed write — the value converts INTO dyn
+          // chain): the dyn keyed write — the value converts INTO dyn
           // (closures box), the runtime sets the member on OBJ receivers
           // and throws Node's TypeErrors on the rest. The receiver is
           // PROBED (probeLower) and claimed exactly when it lowers to
@@ -4079,7 +4079,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           }
           // `events.defaultMaxListeners = v` in STATEMENT position — the
           // module-property write Node validates (the lowerBinary
-          // expression twin): the value crosses into the DOM, the runtime
+          // expression twin): the value crosses into the checked-dynamic tree, the runtime
           // ladder throws Node's exact errors, valid numbers apply.
           if (!expr.left.questionDotToken && expr.left.name.text === "defaultMaxListeners") {
             const bi = L.builtinMemberOf(expr.left);
@@ -4394,7 +4394,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     ) {
       // JS any-origin operands: check to number and compute natively
       // (the binary-operator stance) — the dyn target takes the result
-      // back through the usual DOM conversion.
+      // back through the usual dyn conversion.
       const checkNum = (e: IrExpr): IrExpr =>
         e.type.kind === "dyn" ? { kind: "dynCheck", value: e, type: F64, loc: e.loc } : e;
       const computed: IrExpr = { kind: "bin", op: compound, left: checkNum(read), right: checkNum(rhs), type: F64, loc };
@@ -5258,7 +5258,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       // keys resolve statically (the record path's rule) — the keyed read
       // below takes the folded name. A RUNTIME-valued key over an ISLAND
       // source reads through the engine's own indexing at the element's
-      // pattern position (`({ [key]: w } = src)`); over the DOM the fence
+      // pattern position (`({ [key]: w } = src)`); over the checked-dynamic tree the fence
       // stays.
       const folded = patternKeyNameOf(L, prop.name);
       if (folded === null) {
@@ -6112,13 +6112,13 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
    * run — a divergence only a custom island iterator with a return()
    * method can observe. */
   /** For-of over a CHECKED-DYNAMIC iterable: the source packs ONCE
-   * through the spread walk (dyn.iterPack — DOM arrays element-by-
+   * through the spread walk (dyn.iterPack — dyn arrays element-by-
    * element, strings by code point, bytes by byte; a WRAPPED engine
    * value drains through the ENGINE's own iterator protocol via the
    * iter_drain arm; every other kind throws V8's not-iterable
    * TypeError, the identifier spelling when the head has one), then a
    * hidden index loop binds each element as a dyn value. The pack is an
-   * eager SNAPSHOT (the matchAll stance): body mutations of a DOM-array
+   * eager SNAPSHOT (the matchAll stance): body mutations of a dyn-array
    * source don't extend the iteration where JS's live array iterator
    * would — documented divergence; engine sources drain through their
    * own protocol, so generators/Maps/Sets step exactly once like Node. */

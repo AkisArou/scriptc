@@ -391,7 +391,7 @@ enum {
 
 extern ScrVt scr_error_vts[5]; /* indexed by SCR_ERR_*; main() stamps pre/post */
 
-struct ScrDyn; /* full declaration below (the DOM section) */
+struct ScrDyn; /* full declaration below (the checked-dynamic tree section) */
 
 /* DOMException: the ScrError prefix (identical member order — an upcast is
  * a pointer reinterpret) plus the WebIDL slots. The extra slots are HIDDEN
@@ -409,11 +409,11 @@ typedef struct ScrDomException {
   struct ScrDyn *cause; /* owned; NULL when has_cause is false */
 } ScrDomException;
 
-/* new DOMException(message?, nameOrOptions?) — both DOM args borrowed,
- * NULL-tolerant (NULL = absent = the DOM undefined). Returns +1. Never
- * throws (DOM ToString is total). Lives in scr_json.c (the args are DOM
+/* new DOMException(message?, nameOrOptions?) — both dyn args borrowed,
+ * NULL-tolerant (NULL = absent = the dyn undefined). Returns +1. Never
+ * throws (dyn ToString is total). Lives in scr_json.c (the args are dyn
  * values); the dyn-free half below stays in scr_error.c so the error
- * unit links without the DOM. */
+ * unit links without the checked-dynamic tree. */
 ScrError *scr_domex_new(const struct ScrDyn *message, const struct ScrDyn *name_or_options);
 /* scr_error.c's dyn-free DOMException half: the blank allocation the
  * constructors fill, the WebIDL name→legacy-code table, and the cause
@@ -423,7 +423,7 @@ double scr_domex_code_of(const ScrStr *name);
 void scr_domex_install_cause_drop(void (*fn)(void *obj));
 double scr_domex_code(ScrError *e);           /* borrowed receiver */
 bool scr_domex_has_cause(ScrError *e);        /* borrowed receiver */
-struct ScrDyn *scr_domex_cause(ScrError *e);  /* +1 (DOM undefined when absent) */
+struct ScrDyn *scr_domex_cause(ScrError *e);  /* +1 (dyn undefined when absent) */
 /* structuredClone of a DOMException: WebIDL serialization — name/message
  * copy, the code re-derives, cause does not serialize. Borrowed receiver
  * and options (validated; throws on bad options / non-empty transfer).
@@ -666,9 +666,9 @@ void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
                        const ScrStr *eq, double max_keys, uint32_t str_tag,
                        uint32_t arr_tag);
 
-/* querystring.stringify — Node's stringify over a borrowed DOM value (the
+/* querystring.stringify — Node's stringify over a borrowed dyn value (the
  * frontend dynFroms the typed record; JS-world dyn values pass straight
- * through). Non-object DOMs answer "" like Node; object keys iterate in
+ * through). Non-object dyn values answer "" like Node; object keys iterate in
  * JS own-key order (scr_dyn_obj_keys — array-index keys ascending first,
  * then insertion order, Node's ObjectKeys). Values serialize per Node's
  * encodeStringified: strings escape, finite numbers render shortest-
@@ -686,8 +686,8 @@ ScrStr *scr_qs_stringify(const struct ScrDyn *obj, const ScrStr *sep,
  * well-formed-UTF-8 invariant. Borrows s; result +1. */
 ScrStr *scr_encode_uri(ScrStr *s);
 /* atob/btoa — the WHATWG base64 globals (Node globals since v16). The
- * argument is a borrowed DOM value: WebIDL ToString runs here over the
- * DOM kind (Node's atob(null) decodes "null"). scr_atob decodes
+ * argument is a borrowed dyn value: WebIDL ToString runs here over the
+ * dyn kind (Node's atob(null) decodes "null"). scr_atob decodes
  * forgiving-base64 (ASCII whitespace stripped, %4==0 strips up to two
  * '=', %4==1 refuses, leftover bits discarded) into the latin1 code
  * points as a UTF-8 string; malformed input THROWS the catchable
@@ -1548,7 +1548,7 @@ void scr_stream_st_trace(ScrStreamState *st, ScrTraceVisit visit, void *ctx);
 /* The dyn-flavored completion-callback glues (the JS lane's implicitly-
  * any option callbacks / underscore methods): the emitted invoke thunks
  * mint a callable dyn (scr_dyn_new_func) over a 1-cap closure boxing the
- * retained stream, with the kind's glue — arguments arrive as DOM
+ * retained stream, with the kind's glue — arguments arrive as dyn
  * values (error: null/undefined, a {message} object, or a string;
  * transform/flush data: bytes, a string, or absent). */
 typedef struct ScrDyn ScrDyn; /* full declaration below (C11 repeat) */
@@ -1780,7 +1780,7 @@ ScrStr *scr_caught_to_string(const ScrCaught *c);
  * checks. */
 void *scr_caught_check_obj(const ScrCaught *c, size_t pre, size_t post,
                             const char *cls);
-/* The snapshot as a DOM value (scr_json.c): identity-preserving for dyn
+/* The snapshot as a dyn value (scr_json.c): identity-preserving for dyn
  * payloads and %Error instances, scalars by value, the type-erased empty
  * object for the rest (SEMANTICS.md 67). Borrows the box; +1. */
 typedef struct ScrDyn ScrDyn; /* full definition below (C11 repeat) */
@@ -2033,7 +2033,7 @@ ScrPromise *scr_tp_set_immediate(void);
  * A process-global name→channel registry; channel handles are 1-based
  * f64 indexes into it (Node's channels are process-lived too, its
  * WeakRef machinery aside — the registry tears down atexit before the
- * RC audit). Subscribers are DOM FUNCTION values, identity-matched by
+ * RC audit). Subscribers are dyn FUNCTION values, identity-matched by
  * unsubscribe (the underlying closure, so re-boxings of one function
  * still match — JS has ONE function object). publish calls each
  * subscriber of a SNAPSHOT with (message, name); a subscriber's throw
@@ -2057,8 +2057,8 @@ ScrStr *scr_dc_chan_name(double handle);
  * handlers object's five event keys (truthy slots route to the per-channel
  * add/remove — a non-function slot throws there, Node's order);
  * unsubscribe answers Node's all-found conjunction. traceSync/traceCallback
- * mirror Node's publish choreography over the DOM: ctx must be an OBJ (the
- * lowering builds the default `{}`), fn/thisArg/args are DOM values (args
+ * mirror Node's publish choreography over the checked-dynamic tree: ctx must be an OBJ (the
+ * lowering builds the default `{}`), fn/thisArg/args are dyn values (args
  * an ARR of the call arguments); the traced call binds thisArg as the
  * ambient receiver; result/error stamp onto ctx before end/error publish;
  * a traced throw and a subscriber throw both propagate (MAY THROW). All
@@ -2524,15 +2524,15 @@ double scr_os_ifaddrs_scopeid(const ScrIfaddrs *s, size_t i);
 void scr_os_ifaddrs_free(ScrIfaddrs *s);
 
 /* ── JSON + dynamic values (scr_json.c) ─────────────────────────────
- * A dyn value — the compiled form of `unknown` — is a refcounted JSON DOM
+ * A dyn value — the compiled form of `unknown` — is a refcounted JSON dyn
  * tree: the result of JSON.parse, inert until a CHECKED CAST validates it
  * against a static type. The compiler emits the validation walkers
  * (sc_dc_* builders / sc_dm_* match predicates) and the type-directed
  * stringify serializers (sc_jw_*) per program; this runtime slice provides
- * the DOM itself, the RFC 8259 parser, the shared failure path
+ * the checked-dynamic tree itself, the RFC 8259 parser, the shared failure path
  * (scr_dyn_check_fail), and the output buffer the serializers append to.
  *
- * Ownership: the DOM owns its children (strings, items, entry keys+values);
+ * Ownership: the checked-dynamic tree owns its children (strings, items, entry keys+values);
  * releasing the root releases the tree recursively. scr_json_parse borrows
  * the text and returns +1 — or THROWS a catchable string shaped like Node's
  * V8 messages ("Unexpected end of JSON input"; approximate fidelity, see
@@ -2548,15 +2548,15 @@ typedef enum {
   SCR_DYN_ARR,
   SCR_DYN_OBJ,
   /* The undefined VALUE. Never produced by the parser (JSON text has no
-   * undefined) — it enters the DOM through index-signature overflow reads
+   * undefined) — it enters the checked-dynamic tree through index-signature overflow reads
    * (a missing key), optional-chain unit paths on dyn results, and the
-   * compiler's static→DOM converters (an undefined-armed union's unit
+   * compiler's static→dyn converters (an undefined-armed union's unit
    * arm). One immortal instance (scr_dyn_undefined); JSON serialization
    * drops object members holding it and prints null for array slots,
    * exactly Node. dynCheck matches it against exactly the undefined arm. */
   SCR_DYN_UNDEF,
   /* A Uint8Array/Buffer VALUE. Never produced by the parser — it enters
-   * the DOM through the compiler's static→DOM converters (a bytes<u8>
+   * the checked-dynamic tree through the compiler's static→dyn converters (a bytes<u8>
    * value flowing into an `unknown` slot: stdin chunks passed to
    * unknown-typed helpers). Owns a ScrBytes payload (a COPY of the static
    * source — the boundary's aliasing stance). typeof answers "object"
@@ -2565,13 +2565,13 @@ typedef enum {
    * object form ({"0":1}), and dynCheck extracts a fresh copy against a
    * Uint8Array target. */
   SCR_DYN_BYTES,
-  /* A FUNCTION value. Never produced by the parser — it enters the DOM
-   * through the compiler's static→DOM converters (a typed closure flowing
+  /* A FUNCTION value. Never produced by the parser — it enters the checked-dynamic tree
+   * through the compiler's static→dyn converters (a typed closure flowing
    * into an `unknown` slot: `mustCall(fn)`-style untyped JS helpers). Owns
    * a ScrClosure plus a compiler-emitted CALL THUNK that validates dyn
    * arguments into the closure's declared parameter types (per-arg
    * dynCheck — JS arity semantics: extra args ignored, missing args are
-   * the undefined DOM value) and converts the result back to a DOM value.
+   * the undefined dyn value) and converts the result back to a dyn value.
    * `sig` is the compiler's interned signature key: dynCheck against an
    * IDENTICAL function type unwraps the closure directly; any other
    * (adaptable) function target wraps the box in a per-target adapter
@@ -2583,7 +2583,7 @@ typedef enum {
   /* A NATIVE HANDLE value (httpReq/httpRes/netSocket crossing the checked-
    * dynamic boundary — `server.on('request', mustCall((req, res) => ...))`
    * makes the listener dyn, so the event tuple must box). Never produced
-   * by the parser — it enters the DOM through the compiler's static→DOM
+   * by the parser — it enters the checked-dynamic tree through the compiler's static→dyn
    * converters and the per-target function adapters. Boxes by REFERENCE
    * (a retained pointer + a handle-type tag): handles are stateful I/O
    * objects, so identity is the HANDLE, not the box — strict equality
@@ -2598,12 +2598,12 @@ typedef enum {
    * "[object Object]" (Object.prototype.toString — Node's answer for
    * these classes), JSON serialization and util.inspect fence loudly. */
   SCR_DYN_HANDLE,
-  /* A PROMISE value. Never produced by the parser — it enters the DOM
-   * through the compiler's static→DOM converters (a promise flowing into
+  /* A PROMISE value. Never produced by the parser — it enters the checked-dynamic tree
+   * through the compiler's static→dyn converters (a promise flowing into
    * an `any`/`unknown` slot: the traced-function boundary of
    * dc.tracingChannel.tracePromise, a dyn-boxed async closure's return).
    * Boxes by REFERENCE (a retained ScrPromise + the boundary contract
-   * that a DOM-crossing promise settles with a DOM payload: promise<dyn>
+   * that a dyn-crossing promise settles with a dyn payload: promise<dyn>
    * boxes its ScrPromise directly, other inner types box an ADAPTER
    * promise whose emitted settle callback converts the payload — see
    * scr_dyn_new_promise_adapting). Identity is the PROMISE, not the box
@@ -2617,31 +2617,31 @@ typedef enum {
    * (the dyn→closure stance): a cycle THROUGH a dyn-boxed promise is
    * merely never collected. */
   SCR_DYN_PROMISE,
-  /* An ISLAND (engine-held) value — the jsval→DOM crossing. Never
-   * produced by the parser — it enters the DOM through the gated
+  /* An ISLAND (engine-held) value — the jsval→dyn crossing. Never
+   * produced by the parser — it enters the checked-dynamic tree through the gated
    * constructor scr_dyn_from_jsval (scr_island.c): an 'any'-typed value
    * flowing into an 'unknown'/'object'/JS-residue slot. Boxes by
    * REFERENCE (a retained ScrJsval cell). The constructor SCALAR-
    * NORMALIZES: engine numbers/strings/booleans/null/undefined convert
-   * to the native DOM kinds at wrap time, so JSVAL nodes only ever hold
+   * to the native dyn kinds at wrap time, so JSVAL nodes only ever hold
    * engine objects, arrays, and functions (plus the symbol/bigint edge —
-   * kinds the DOM cannot represent at all). Identity is the CELL's
+   * kinds the checked-dynamic tree cannot represent at all). Identity is the CELL's
    * engine value: strict equality routes to the engine's === (two wraps
    * of one engine value compare equal), and scr_jsval_from_dyn unwraps
    * the SAME cell back (+1) — the boundary is identity-preserving for
    * engine-born values. typeof/truthiness/String() route to the engine
-   * per use (scr_dyn_jsval_ops); every DOM walk without an armed route
+   * per use (scr_dyn_jsval_ops); every dyn walk without an armed route
    * (JSON, structuredClone, deepStrictEqual, inspect, keyed access,
    * calls, iteration) throws the LOUD "not supported yet" ladder — never
    * a silent wrong answer. The dyn→cell edge is NOT visible to the cycle
-   * collector (the dyn→closure stance): a cycle DOM → cell → engine
-   * object → host closure → DOM is merely never collected (the
+   * collector (the dyn→closure stance): a cycle dyn → cell → engine
+   * object → host closure → dyn is merely never collected (the
    * documented cross-boundary-cycle divergence). Enum position: LAST —
    * the LLVM backend hardcodes the preceding kind numbers. */
   SCR_DYN_JSVAL,
 } ScrDynKind;
 
-/* The handle-type tags the DOM can carry. The set is deliberately the
+/* The handle-type tags the checked-dynamic tree can carry. The set is deliberately the
  * HANDLE kinds whose member surfaces already have complete static
  * lowerings (the http/net receiver surface); new kinds join by adding a
  * tag + an ops registration in their owning unit. */
@@ -2659,7 +2659,7 @@ typedef struct ScrDyn ScrDyn;
 typedef struct ScrBytes ScrBytes; /* full definition below (C11 repeat) */
 typedef struct ScrClosure ScrClosure; /* full definition below (C11 repeat) */
 typedef struct ScrJsval ScrJsval; /* opaque island cell (C11 repeat; the
-                                   * always-linked DOM core never touches
+                                   * always-linked dyn core never touches
                                    * its engine value — only the gated ops
                                    * installed by scr_dyn_from_jsval do) */
 
@@ -2667,7 +2667,7 @@ typedef struct ScrJsval ScrJsval; /* opaque island cell (C11 repeat; the
  * dyn arguments against the boxed closure's declared parameter types (a
  * mismatch throws the catchable path-annotated TypeError and returns NULL
  * with the exception pending), calls through the closure, and returns the
- * result as an owned (+1) DOM value. `args` entries are BORROWED. */
+ * result as an owned (+1) dyn value. `args` entries are BORROWED. */
 typedef ScrDyn *(*ScrDynThunk)(ScrClosure *clo, ScrDyn *const *args, size_t argc);
 
 /* Object member. Keys are malloc'd UTF-8 bytes (NUL-terminated for
@@ -2688,7 +2688,7 @@ struct ScrDyn {
    * its elements ("1,2,3"). Everything else ignores it. */
   bool buffer;
   /* SCR_DYN_OBJ flavor: true for Object.create(null)'s dictionary — an
-   * object with NO prototype. Method dispatch needs nothing (the DOM's
+   * object with NO prototype. Method dispatch needs nothing (the checked-dynamic tree's
    * OBJ dispatch is already own-member-only, which IS Node's null-proto
    * answer); util.inspect prefixes "[Object: null prototype]", and
    * deepStrictEqual separates it from plain objects (Node compares
@@ -2719,7 +2719,7 @@ struct ScrDyn {
      * settle — the settle-releases-listeners story. */
     struct { void *ptr; ScrDynHandleTag tag; } handle;
     /* SCR_DYN_PROMISE: the retained promise. The boundary contract: it
-     * settles with a DOM payload (SCR_EXC_REF ScrDyn fulfillment or a
+     * settles with a dyn payload (SCR_EXC_REF ScrDyn fulfillment or a
      * void fulfillment awaiters read as the undefined value) — the
      * emitted converters guarantee it (direct box for promise<dyn>,
      * adapter promise otherwise). */
@@ -2747,22 +2747,22 @@ ScrDyn *scr_json_parse(ScrStr *text);
 /* BORROWED member lookup on a SCR_DYN_OBJ; NULL when the key is absent. */
 ScrDyn *scr_dyn_obj_get(const ScrDyn *d, const char *key, size_t key_len);
 
-/* Object.keys/values/entries over the DOM: JS own-key order (array-index
- * keys ascending first), DOM-array results (+1); values/entries RETAIN
+/* Object.keys/values/entries over the checked-dynamic tree: JS own-key order (array-index
+ * keys ascending first), dyn-array results (+1); values/entries RETAIN
  * member nodes. null/undefined receivers throw Node's catchable
  * TypeError. */
 ScrDyn *scr_dyn_obj_keys(const ScrDyn *v);
-/* Object.hasOwn over a DOM receiver: OBJ member presence, ARR index
+/* Object.hasOwn over a dyn receiver: OBJ member presence, ARR index
  * bounds ("length" included); nullish receivers throw Node's ToObject
  * TypeError; every other kind answers false. */
 bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key);
-/* Object.assign over DOM values (+1 target back; ToObject TypeError on a
+/* Object.assign over dyn values (+1 target back; ToObject TypeError on a
  * nullish target). Sources copy their own enumerable keys exactly as
  * Object.keys lists them: OBJ members, ARR/STR/BYTES index keys; nullish
  * and scalar/function/handle sources copy nothing. */
 ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src);
 /* Variadic Object.assign (the spread-source form): the compiler packs
- * every source into one fresh DOM array — pack_push retains a plain
+ * every source into one fresh dyn array — pack_push retains a plain
  * source in (BORROWED), pack_push_spread flattens a spread source through
  * the spread-call walk (V8's exact TypeError texts, `what` spelling the
  * spread expression; MAY THROW pending) — then assign_all copies each
@@ -2778,8 +2778,8 @@ ScrDyn *scr_dyn_assign_all(ScrDyn *target, const ScrDyn *sources);
 ScrDyn *scr_dyn_obj_values(const ScrDyn *v);
 ScrDyn *scr_dyn_obj_entries(const ScrDyn *v);
 
-/* DOM construction — the compiler-emitted static→dyn converters (sc_td_*)
- * and index-signature overflow machinery build DOM values directly.
+/* dyn construction — the compiler-emitted static→dyn converters (sc_td_*)
+ * and index-signature overflow machinery build dyn values directly.
  * Constructors return +1; _new_str RETAINS the string into the node.
  * arr_push and obj_set take OWNERSHIP of the value (+1 moves in); obj_set
  * COPIES the key bytes and replaces a duplicate key's value (later wins,
@@ -2807,13 +2807,13 @@ ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d);
 void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item);
 /* Spread completion for a runtime-arity argument list (`f(...xs)` in the
  * checked-dynamic tier): flattens `src` into `arr` per JS's spread over the
- * DOM's iterable kinds — arrays element-by-element (retained), strings by
+ * dyn's iterable kinds — arrays element-by-element (retained), strings by
  * code POINT (the string iterator), bytes by byte — and throws V8's exact
  * SPREAD-CALL TypeError for every other kind (pending; callers check):
  * nullish sources spell the spread expression (`what`), everything else is
  * the generic "Spread syntax requires ..." text. Borrows src. */
 void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what);
-/* Destructuring pack over a DOM source: iterable kinds (arrays, strings by
+/* Destructuring pack over a dyn source: iterable kinds (arrays, strings by
  * code point, bytes) collect into a fresh array (+1); every other kind
  * throws V8's destructuring TypeError — `msg` verbatim when non-empty (the
  * compile-time source spelling), else the runtime kind wording. Borrows
@@ -2832,7 +2832,7 @@ void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value
  * non-object kinds throw Node's catchable TypeErrors (strict-mode
  * wording). All three operands BORROWED (the value is retained in). */
 void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value);
-/* Bare `typeof v` on a dyn value: the DOM kind's JS answer (+1 string;
+/* Bare `typeof v` on a dyn value: the dyn kind's JS answer (+1 string;
  * null answers "object"). Never throws. */
 ScrStr *scr_dyn_typeof(const ScrDyn *d);
 /* Receiver-kind-dispatched toString() (Buffer-flavored bytes decode per
@@ -2843,7 +2843,7 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc);
  * null-prototype dictionary throws "<what> is not a function" — its
  * prototype chain has no toString (Node's answer). */
 ScrStr *scr_dyn_to_string_method(const ScrDyn *d, const ScrStr *enc, const ScrStr *what);
-/* JS String() over the DOM kind (units render "null"/"undefined" where
+/* JS String() over the dyn kind (units render "null"/"undefined" where
  * scr_dyn_to_string throws) — the web globals' WebIDL ToString. +1. */
 ScrStr *scr_dyn_string_coerce(const ScrDyn *d);
 /* JS ToString WITH the object protocol (user toString/valueOf members
@@ -2852,14 +2852,14 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d);
 ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d);
 
 /* `d instanceof TypeError` (and the other builtin error classes) on a
- * checked-dynamic value: the from_error cache resolves the DOM encoding
+ * checked-dynamic value: the from_error cache resolves the dyn encoding
  * back to its runtime error and the class's stamped preorder interval
- * answers. A DOM value that never came from an error answers false. */
+ * answers. A dyn value that never came from an error answers false. */
 bool scr_dyn_err_instanceof(const ScrDyn *d, double kind);
 
-/* structuredClone over the DOM: JSON-safe data + bytes deep-copy;
+/* structuredClone over the checked-dynamic tree: JSON-safe data + bytes deep-copy;
  * functions/handles throw the spec's catchable DataCloneError; cycles
- * throw the scriptc fence (the DOM cannot represent them). Option
+ * throw the scriptc fence (the checked-dynamic tree cannot represent them). Option
  * validation (shared with scr_domex_clone) throws Node's exact
  * TypeErrors; any non-empty transfer list throws DataCloneError. The
  * _missing form is the zero-argument call: always throws Node's
@@ -2867,13 +2867,13 @@ bool scr_dyn_err_instanceof(const ScrDyn *d, double kind);
 ScrDyn *scr_structured_clone(const ScrDyn *value, const ScrDyn *options);
 ScrDyn *scr_structured_clone_missing(void);
 ScrDyn *scr_structured_clone_transfer_fail(void); /* always throws DataCloneError */
-/* Validates a structuredClone options DOM value (throws on failure —
+/* Validates a structuredClone options dyn value (throws on failure —
  * callers must check scr_exc_pending). Borrowed, NULL-tolerant. */
 void scr_sc_validate_options(const ScrDyn *options);
-/* An %Error as the boundary's DOM shape ({name, message[, code]}).
+/* An %Error as the boundary's dyn shape ({name, message[, code]}).
  * Borrows; +1. */
 ScrDyn *scr_dyn_from_error(const ScrError *e);
-/* The reverse extraction, riding the same identity cache: a DOM error
+/* The reverse extraction, riding the same identity cache: a dyn error
  * that came from a runtime ScrError answers THAT instance (+1;
  * out-and-back crossings compare reference-equal); alien %error objects
  * rebuild once and enter the cache. Borrows d. */
@@ -2882,16 +2882,16 @@ ScrError *scr_error_from_dyn(const ScrDyn *d); /* scr_async_dyn.c (gated) */
  * the gated extraction reads/writes through these). */
 ScrError *scr_errdyn_err_of(const ScrDyn *d); /* +1 or NULL */
 void scr_errdyn_put(ScrError *e, ScrDyn *d);  /* retains both sides */
-/* ToBoolean over the DOM kind (JS-exact); borrowed, never throws. */
+/* ToBoolean over the dyn kind (JS-exact); borrowed, never throws. */
 bool scr_dyn_truthy(const ScrDyn *d);
-/* JS String() over a DOM value (arrays join, [object Object], the error
+/* JS String() over a dyn value (arrays join, [object Object], the error
  * encoding renders "name: message"); borrowed, result +1, never throws. */
 ScrStr *scr_dyn_display(const ScrDyn *d);
-/* JS === over two DOM values: scalars by value, units by kind, everything
+/* JS === over two dyn values: scalars by value, units by kind, everything
  * reference-shaped by node identity. Borrowed; never throws. */
 bool scr_dyn_strict_eq(const ScrDyn *a, const ScrDyn *b);
 /* Prototype-method dispatch on a dyn receiver (`recv.m(...)` where `m` is
- * a name a DOM-representable prototype declares — push/slice/forEach/
+ * a name a dyn-representable prototype declares — push/slice/forEach/
  * apply/...): implemented (kind, name) pairs run JS-exact semantics; a
  * real-but-unimplemented method throws a LOUD "not supported yet" Error;
  * a name the kind's prototype lacks throws Node's "<what> is not a
@@ -2903,14 +2903,14 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
  * for anonymous) and "length" (the boxed arity). Returns +1, or NULL when
  * the key answers nothing (the caller's undefined). Never throws. */
 ScrDyn *scr_dyn_fn_get(const ScrDyn *d, const char *key, size_t key_len);
-/* Object.defineProperties over DOM values (targets: OBJ and FUNC): each
+/* Object.defineProperties over dyn values (targets: OBJ and FUNC): each
  * descriptor's `value` becomes a plain own property — writable/enumerable/
- * configurable are accepted and IGNORED (DOM properties are plain data
+ * configurable are accepted and IGNORED (dyn properties are plain data
  * properties; SEMANTICS.md), get/set throw the loud unsupported Error.
  * Returns the target (+1, JS's return), or NULL with a pending catchable
  * TypeError (non-object target/descriptor — Node's messages). */
 ScrDyn *scr_dyn_define_props(ScrDyn *target, ScrDyn *descs);
-/* Boxes a closure as a callable DOM value. Ownership of `clo` MOVES in
+/* Boxes a closure as a callable dyn value. Ownership of `clo` MOVES in
  * (callers retain first when they keep their own reference); `sig`/`name`
  * must be static literals (the box never frees them; name may be NULL). */
 ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, const char *sig, const char *name);
@@ -2920,7 +2920,7 @@ ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, con
  * boxed thunk (per-arg checks live there). `args` entries are BORROWED;
  * the result is owned (+1), or NULL with the exception pending. */
 ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const char *what);
-/* scr_dyn_call over a DOM ARRAY's elements (the spread-application form —
+/* scr_dyn_call over a dyn ARRAY's elements (the spread-application form —
  * `f(...args)` after the emitted argument array is built): argv IS the
  * array's items. Borrows both; result owned (+1), or NULL pending. */
 ScrDyn *scr_dyn_apply(const ScrDyn *d, const ScrDyn *args, const char *what);
@@ -2942,7 +2942,7 @@ typedef struct ScrDynPath {
  * scriptc-specific behavior — JS `as` never checks (SEMANTICS.md). */
 void scr_dyn_check_fail(const ScrDynPath *path, const char *want, const ScrDyn *got);
 
-/* ── native handles in the DOM (SCR_DYN_HANDLE) ────────────────────────
+/* ── native handles in the checked-dynamic tree (SCR_DYN_HANDLE) ────────────────────────
  * Per-tag dispatch ops, registered by the handle's owning unit
  * (scr_http_dyn_install / scr_net_dyn_install — emitted main() calls
  * them exactly when the unit is linked, the scr_net_install story), so
@@ -2961,7 +2961,7 @@ typedef struct ScrDynHandleOps {
   ScrDyn *(*invoke)(void *h, ScrDyn *self, const char *method, ScrDyn *const *args, size_t argc, const char *what);
   /* Property READ with a static equivalent (req.url, res.statusCode):
    * +1 boxed value; NULL = no such modeled property (the caller answers
-   * the undefined singleton — the DOM's own-property stance); may throw
+   * the undefined singleton — the checked-dynamic tree's own-property stance); may throw
    * the loud ladder for real-but-unmodeled names (NULL + pending). */
   ScrDyn *(*get)(void *h, const char *key, size_t key_len);
   /* Property WRITE with a static equivalent (res.statusCode = 200):
@@ -2997,13 +2997,13 @@ ScrDyn *scr_dyn_new_handle(void *h, ScrDynHandleTag tag);
 void *scr_dyn_handle_unbox(const ScrDyn *d, ScrDynHandleTag tag, const ScrDynPath *path, const char *want);
 /* Keyed read on a HANDLE box (the emitted sc_dyn_key_get's arm): the
  * tag's modeled properties answer boxed values; everything else answers
- * the undefined singleton (the DOM's own-property stance — SEMANTICS.md)
+ * the undefined singleton (the checked-dynamic tree's own-property stance — SEMANTICS.md)
  * unless the ops fence it loudly. +1, or NULL with a pending exception. */
 ScrDyn *scr_dyn_handle_key_get(const ScrDyn *d, const ScrStr *k);
 
-/* ── promises in the DOM (SCR_DYN_PROMISE) ────────────────────────────
+/* ── promises in the checked-dynamic tree (SCR_DYN_PROMISE) ────────────────────────────
  * Boxes by REFERENCE (+1 box; retains p). The boundary contract: p
- * settles with a DOM payload — promise<dyn> boxes directly; other inner
+ * settles with a dyn payload — promise<dyn> boxes directly; other inner
  * types go through scr_dyn_new_promise_adapting, which parks an emitted
  * payload-converting adapter (the Promise.race cb-waiter machinery) on
  * `src` and boxes the fresh destination promise instead. Rejections copy
@@ -3020,7 +3020,7 @@ ScrDyn *scr_dyn_new_promise_adapting(ScrPromise *src,
 /* BORROWED peek at the boxed promise; NULL when d is not a promise box. */
 ScrPromise *scr_dyn_promise_of(const ScrDyn *d);
 
-/* ── island values in the DOM (SCR_DYN_JSVAL) ─────────────────────────
+/* ── island values in the checked-dynamic tree (SCR_DYN_JSVAL) ─────────────────────────
  * Engine routing ops for JSVAL nodes, installed by the gated constructor
  * (scr_dyn_from_jsval, scr_island.c — the scr_dyn_alloc_promise hook
  * story: JSVAL nodes exist only after the constructor ran, so the ops
@@ -3040,7 +3040,7 @@ typedef struct ScrDynJsvalOps {
   /* ── the routed operation set (lane dyn-routing-ops) ────────────────
    * Each routes to the engine at the moment of use and converts at the
    * boundary: dyn ARGUMENTS cross through scr_jsval_from_dyn (wrapped
-   * cells unwrap by reference, DOM data deep-copies, DOM FUNC boxes
+   * cells unwrap by reference, dyn data deep-copies, dyn FUNC boxes
    * cross through the generic host-function shim), engine RESULTS come
    * back through scr_dyn_from_jsval (scalar-normalizing). Fallible ops
    * bridge the ENGINE's exception catchably and answer NULL/false/-1. */
@@ -3055,20 +3055,20 @@ typedef struct ScrDynJsvalOps {
   bool (*is_nullish)(ScrJsval *cell); /* engine undefined/null; never throws
                                        * (always false today — the wrap
                                        * constructor scalar-normalizes) */
-  /* Object.keys/values/entries (mode 0/1/2) as a NATIVE DOM array (+1):
-   * keys are DOM strings, values wrap per element, entries are native
-   * DOM pairs. NULL with the engine's exception pending on refusal. */
+  /* Object.keys/values/entries (mode 0/1/2) as a NATIVE dyn array (+1):
+   * keys are dyn strings, values wrap per element, entries are native
+   * dyn pairs. NULL with the engine's exception pending on refusal. */
   ScrDyn *(*obj_walk)(ScrJsval *cell, int mode);
   int (*has_own)(ScrJsval *cell, const ScrStr *k); /* 0/1; -1 = pending */
   /* Object.assign(target, src) with the ENGINE target: src converts per
-   * member semantics (a wrapped src spreads by reference; DOM data
+   * member semantics (a wrapped src spreads by reference; dyn data
    * enters as the usual deep copy). false = pending. */
   bool (*assign)(ScrJsval *cell, const ScrDyn *src);
   /* JSON.stringify text of the engine value (+1) — the engine's own
    * stringify (toJSON protocols, cycle TypeErrors). NULL + pending when
    * not JSON-representable. */
   ScrStr *(*to_json)(ScrJsval *cell);
-  /* Drain the ENGINE's own iterator protocol into a fresh DOM array
+  /* Drain the ENGINE's own iterator protocol into a fresh dyn array
    * (elements wrap back scalar-normalized) — the for-of/destructuring/
    * spread arm over a wrapped value. The guard's TypeError wording on a
    * non-iterable: spread true takes V8's spread-call text; otherwise the
@@ -3102,7 +3102,7 @@ bool scr_dyn_isl_fence(const ScrDyn *d, const char *what);
  * normalized) — the retired `.length -> fence` row. d MUST be a JSVAL
  * node; NULL with the engine's exception bridged catchably. */
 ScrDyn *scr_dyn_isl_key_get(const ScrDyn *d, const ScrStr *k);
-/* The `??`/optional-chain nullish test over a DOM value: UNDEF/NULL
+/* The `??`/optional-chain nullish test over a dyn value: UNDEF/NULL
  * native, JSVAL through the engine's own test (defensively — the wrap
  * constructor scalar-normalizes engine null/undefined away), every other
  * kind false. Never throws. */
@@ -3128,7 +3128,7 @@ bool scr_dyn_is_nullish(const ScrDyn *d);
 void scr_dyn_this_push(void *h, ScrDynHandleTag tag); /* h BORROWED (the firing site holds it); NULL binds undefined */
 void scr_dyn_this_push_dyn(const ScrDyn *v);          /* retained for the window */
 void scr_dyn_this_pop(void);
-/* The innermost binding as a DOM value (+1): a boxed handle, the pushed
+/* The innermost binding as a dyn value (+1): a boxed handle, the pushed
  * dyn value, or the undefined singleton (empty stack, NULL handle, or a
  * handle whose tag has no installed ops — a unit that fires without its
  * dyn half never binds). */
@@ -3140,7 +3140,7 @@ ScrDyn *scr_dyn_this_get(void);
 void scr_dyn_chunk_enc(bool utf8);
 ScrDyn *scr_dyn_new_chunk(const ScrBytes *b);
 
-/* util.format's %j over a DOM value: the JSON.stringify text (+1),
+/* util.format's %j over a dyn value: the JSON.stringify text (+1),
  * "undefined" when the root drops (undefined/function), or NULL with a
  * pending exception (a runtime handle inside the tree fences loudly). */
 ScrStr *scr_dyn_format_j(const ScrDyn *d);
@@ -3178,7 +3178,7 @@ void scr_throw_lowering_fence(const ScrStr *msg);
 size_t scr_num_received(double v, char out[48]);
 /* Listener-closure builders for the handle dispatchers' .on(...) paths:
  * a runtime-built ScrClosure whose capture is the boxed dyn listener and
- * whose invoke boxes the event tuple back into the DOM and calls through
+ * whose invoke boxes the event tuple back into the checked-dynamic tree and calls through
  * the checked-dynamic machinery. The matching fn-pointer shapes are the
  * per-event thunk types the registration entries take (fire0's zero-arg
  * convention / ScrNetDataFn / ScrChildErrFn). cb borrowed; result +1. */
@@ -3237,7 +3237,7 @@ void scr_jb_edge_idx(ScrJsonBuf *b, size_t i);
 
 /* Circular guard for the compiler-emitted typed→dyn converters (sc_td_*
  * over cycle-capable containers): enter TRAPS on a value already being
- * converted (a cyclic value has no finite DOM copy — Node shares the
+ * converted (a cyclic value has no finite dyn copy — Node shares the
  * reference instead; SEMANTICS.md), else pushes. */
 void scr_dyn_from_enter(const void *v);
 void scr_dyn_from_leave(void);
@@ -3256,7 +3256,7 @@ void scr_jb_put_json_str(ScrJsonBuf *b, const ScrStr *s);
  * the exception PENDING and appends nothing — the loud path, never a
  * fabricated rendering. */
 void scr_dyn_isl_tostr_buf(ScrJsonBuf *b, const ScrDyn *d);
-/* JSON-serialize a DOM value into the buffer — the sc_jw_* walker for the
+/* JSON-serialize a dyn value into the buffer — the sc_jw_* walker for the
  * dyn leaves the compiler cannot type: object members holding undefined
  * DROP, array slots holding undefined print null (exactly Node). */
 void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d);
@@ -3300,23 +3300,23 @@ bool scr_await_bool(ScrPromise *p);
 ScrStr *scr_await_str(ScrPromise *p); /* +1 */
 void *scr_await_ref(ScrPromise *p);   /* +1 via the stored retain */
 void scr_await_void(ScrPromise *p);
-/* The DOM-crossing await (SCR_DYN_PROMISE's boundary contract): the
- * payload as a DOM value (+1; void fulfillments answer the undefined
+/* The checked-dynamic tree-crossing await (SCR_DYN_PROMISE's boundary contract): the
+ * payload as a dyn value (+1; void fulfillments answer the undefined
  * value), or NULL with the rejection re-thrown into the awaiter. */
 ScrDyn *scr_await_dyn(ScrPromise *p);
-/* `await v` over a checked-dynamic VALUE: DOM promises adopt, everything
+/* `await v` over a checked-dynamic VALUE: dyn promises adopt, everything
  * else takes JS's one-hop non-thenable await and answers itself (+1). */
 ScrDyn *scr_await_dyn_value(ScrDyn *v);
-/* .then/.catch/.finally over a DOM promise (scr_dyn_invoke's promise arm
+/* .then/.catch/.finally over a dyn promise (scr_dyn_invoke's promise arm
  * and the compiled dyn-receiver path): one reaction fiber per
- * registration — awaits src, runs the DOM handler (non-callable handlers
- * pass the settlement through; a returned DOM promise is adopted), and
+ * registration — awaits src, runs the checked-dynamic tree handler (non-callable handlers
+ * pass the settlement through; a returned dyn promise is adopted), and
  * settles a fresh result promise, answered BOXED (+1). Microtask-exact
  * ordering rides the fiber machinery. */
 ScrDyn *scr_dyn_promise_then(ScrPromise *src, ScrDyn *onf, ScrDyn *onr, ScrDyn *onfin);
 /* ── AsyncLocalStorage (node:async_hooks — scr_async.c) ───────────────
  * Stores are process-lived f64 handles; the CONTEXT is an immutable
- * refcounted snapshot of (store → DOM value) entries riding the fiber
+ * refcounted snapshot of (store → dyn value) entries riding the fiber
  * machinery: one active-slot pointer (the exc-cell pattern) swapped at
  * every fiber switch, inherited by spawned fibers (Node's init-time
  * capture). enter answers the PREVIOUS snapshot (owned) for restore —
@@ -3344,12 +3344,12 @@ ScrAlsCtx *scr_als_enter_absent(double id);         /* exit()'s cleared arm */
 void scr_als_restore(ScrAlsCtx *prev);              /* moves prev back in */
 void scr_als_enter_with(double id, ScrDyn *value);  /* no restore point (enterWith) */
 void scr_als_disable(double id);
-/* run/exit: enter (or clear), call the DOM function with the forwarded
+/* run/exit: enter (or clear), call the dyn function with the forwarded
  * argument vector, restore (the finally). Result +1 or NULL pending. */
 ScrDyn *scr_als_run(double id, ScrDyn *value, ScrDyn *fn, ScrDyn *args);
 ScrDyn *scr_als_exit_run(double id, ScrDyn *fn, ScrDyn *args);
 
-/* process.on('unhandledRejection', fn): DOM listeners dispatched per
+/* process.on('unhandledRejection', fn): dyn listeners dispatched per
  * never-observed rejection at loop end — (reason, promise), suppressing
  * the default report and the exit-1 (Node's handled-event contract; the
  * end-of-turn vs loop-end timing is a SEMANTICS.md divergence). Throws
@@ -3359,15 +3359,15 @@ void scr_process_on_unhandled_rejection(ScrDyn *fn);
  * (scr_async_dyn.c → scr_report_unhandled_rejections; NULL = default
  * report). Runtime-internal. */
 extern bool (*scr_urj_deliver_fn)(ScrPromise *p);
-/* A rejected promise's reason as a DOM value (identity-preserving for
+/* A rejected promise's reason as a dyn value (identity-preserving for
  * dyn payloads and %Error instances). +1. */
 ScrDyn *scr_promise_reason_dyn(const ScrPromise *p);
 /* process warnings (scr_lib.c — always linked so any unit can emit a
- * deprecation): DOM listeners plus Node's default stderr report
+ * deprecation): dyn listeners plus Node's default stderr report
  * ("(node:pid) [CODE] Name: message" and a detail second line). Emission
  * is SYNCHRONOUS at the call (Node defers a tick — SEMANTICS.md 138's
  * precedent). scr_process_emit_warning takes the ARGUMENT VECTOR as one
- * DOM array and applies Node's full grammar/TypeErrors; scr_emit_warning
+ * dyn array and applies Node's full grammar/TypeErrors; scr_emit_warning
  * is the C-side deprecation entry. */
 void scr_process_on_warning(ScrDyn *fn);
 void scr_process_off_warning(ScrDyn *fn);
@@ -3447,7 +3447,7 @@ void scr_set_timeout(ScrClosure *cb, double ms); /* cb ownership moves in */
  * works). An unknown handle is a no-op, like Node. */
 double scr_set_interval(ScrClosure *cb, double ms); /* cb ownership moves in */
 /* `new Promise(setImmediate)`: a fresh promise an armed immediate
- * fulfills with the undefined DOM value (+1). */
+ * fulfills with the undefined dyn value (+1). */
 ScrPromise *scr_immediate_promise(void);
 void scr_clear_interval(double handle);
 /* The island timer bridge (scr_web.c): a one-shot entry WITH a clear
@@ -3484,7 +3484,7 @@ double scr_set_immediate(ScrClosure *cb); /* cb ownership moves in */
  * synchronously on a non-function; borrowed. */
 void scr_queue_microtask(ScrClosure *cb);
 void scr_queue_microtask_dyn(const ScrDyn *cb);
-/* setImmediate AS A DOM VALUE (the traceCallback shape): a minted dyn
+/* setImmediate AS A dyn VALUE (the traceCallback shape): a minted dyn
  * callable that schedules args[0](args[1..]) on the immediate queue and
  * answers undefined; a non-function first argument throws Node's
  * ERR_INVALID_ARG_TYPE. Result +1. */
@@ -3929,24 +3929,24 @@ ScrJsval *scr_jsval_from_f64(double v);
 ScrJsval *scr_jsval_from_bool(bool v);
 ScrJsval *scr_jsval_from_str(const ScrStr *s);
 ScrJsval *scr_jsval_from_json(const ScrStr *json);
-/* A CHECKED-DYNAMIC (DOM) value entering the island — deep copy for data
+/* A CHECKED-DYNAMIC (dyn) value entering the island — deep copy for data
  * kinds (a boxed handle/promise throws the catchable TypeError). A JSVAL
  * node unwraps to its OWN cell (+1) — an engine value that crossed into
- * the DOM and back is the SAME engine value, by reference (nested JSVAL
+ * the checked-dynamic tree and back is the SAME engine value, by reference (nested JSVAL
  * members embed their engine values directly). A boxed FUNCTION crosses
  * as one generic host-function shim over its uniform ScrDynThunk: the
- * shim wraps engine arguments as DOM values (scalar-normalizing), calls
- * the thunk, and converts the DOM result back — each crossing mints a
+ * shim wraps engine arguments as dyn values (scalar-normalizing), calls
+ * the thunk, and converts the dyn result back — each crossing mints a
  * fresh engine function (identity is not preserved for re-crossings;
  * SEMANTICS.md). NULL with a pending exception on failure. Borrows d. */
 ScrJsval *scr_jsval_from_dyn(const ScrDyn *d);
 
-/* The jsval→DOM crossing (the IR's dynFromJsval): wraps an island value
+/* The jsval→dyn crossing (the IR's dynFromJsval): wraps an island value
  * as a SCR_DYN_JSVAL node, SCALAR-NORMALIZING first — engine numbers/
- * strings/booleans/null/undefined convert to the native DOM kinds (the
+ * strings/booleans/null/undefined convert to the native dyn kinds (the
  * strict exits cannot fail on engine-reported scalars), so JSVAL nodes
  * only ever hold engine objects/arrays/functions (and the symbol/bigint
- * edge). Installs the DOM's engine-routing ops on first use. Borrows
+ * edge). Installs the checked-dynamic tree's engine-routing ops on first use. Borrows
  * the cell (retains it into the node); +1 out; never throws. */
 ScrDyn *scr_dyn_from_jsval(ScrJsval *cell);
 
@@ -4431,7 +4431,7 @@ double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nar
  * Returns false after arming the pending throw. */
 bool scr_bytes_validate_off(const char *name, double value, double max);
 /* The checked-dynamic compare/equals validators (scr_bytes_io.c): Node's
- * argument ladder over DOM-boxed arguments — a non-bytes value throws
+ * argument ladder over dyn-boxed arguments — a non-bytes value throws
  * ERR_INVALID_ARG_TYPE with the API's own argument name ("buf1"/"buf2",
  * "otherBuffer", "target"), non-number offsets ERR_INVALID_ARG_TYPE
  * "of type number", out-of-range numbers the validateOffset RangeError;
@@ -4444,12 +4444,12 @@ double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
 /* new Buffer(number, encoding)'s string-arm type error (always throws;
  * borrowed). */
 ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
-/* fs._toUnixTimestamp over a DOM time value: numeric strings and finite
+/* fs._toUnixTimestamp over a dyn time value: numeric strings and finite
  * numbers coerce (negatives answer now/1000), the rest throw Node's
  * ERR_INVALID_ARG_TYPE. Borrowed. */
 double scr_fs_to_unix_timestamp(const ScrDyn *t);
 /* The fs argument-validation ladders (the fs.*Chk libCalls): Node-order
- * validation over DOM values with Node's exact typed errors; a pass
+ * validation over dyn values with Node's exact typed errors; a pass
  * meets the real operation where one exists (mkdtempSync, macOS
  * lchmodSync) or the compiler-rendered fence. All borrowed; the Chk
  * forms without results always leave an exception pending. */
@@ -4510,7 +4510,7 @@ ScrStr *scr_insp_buffer(ScrBytes *b);  /* <Buffer aa bb ...>, 50-byte cap */
  * depth when a code makes it composite. */
 ScrStr *scr_insp_error(ScrError *e, double recurse, double depth);
 /* The checked-dynamic tree: shape lives in the value, so the whole
- * traversal is here. dyn-boxed bytes render in the DOM's documented
+ * traversal is here. dyn-boxed bytes render in the checked-dynamic tree's documented
  * Uint8Array identity. */
 ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth);
 /* format's %s / rest-args twin: dyn strings pass verbatim. */
@@ -4571,7 +4571,7 @@ double scr_bytes_write_var(ScrBytes *b, double value, double offset, double byte
  * Buffer forms of scr_lib.c's utf8 pair, byte-exact and NUL-safe.
  * Failures THROW catchably (scr_fs_throw, Node-shaped messages). */
 ScrBytes *scr_fs_read_file_bytes(ScrStr *path); /* +1 */
-/* readFileSync's runtime-encoding form (scr_bytes_io.c's note): +1 DOM
+/* readFileSync's runtime-encoding form (scr_bytes_io.c's note): +1 dyn
  * value — a Buffer box for undefined/null, a string for utf8 — or NULL
  * with the exception pending. */
 ScrDyn *scr_fs_read_file_sync_dyn(ScrStr *path, const ScrDyn *enc);
@@ -4801,7 +4801,7 @@ void scr_net_conn_thunk_sock(ScrClosure *cb, ScrNetSocket *sock);
 void scr_net_install(void);
 /* Registers the netSocket handle-dispatch ops (SCR_DYNH_NET_SOCKET) —
  * emitted main() calls this alongside scr_net_install exactly when the
- * net unit is linked, so the always-linked DOM core never references
+ * net unit is linked, so the always-linked dyn core never references
  * this unit's entry points. */
 void scr_net_dyn_install(void);
 #ifdef SCR_RC_AUDIT
@@ -4896,7 +4896,7 @@ ScrNetServer *scr_tls_create_server(const char *cert, size_t cert_len, const cha
  * drop exactly like Node drops them). cert/key values are PEM strings,
  * Buffers, or one-element arrays of those; `ca` (client side)
  * concatenates array entries into one trust-anchor bundle. The *_dyn
- * creators walk a DOM options record (the checked-dynamic JS lane's
+ * creators walk a dyn options record (the checked-dynamic JS lane's
  * shape) and mint the same servers the literal path mints; NULL returns
  * carry a pending exception. scr_tls_pem_from_dyn is the literal path's
  * runtime-valued cert/key extraction (`what` names the fence). */
@@ -5323,7 +5323,7 @@ void scr_http2_goaway_thunk0(ScrClosure *cb, double code, double last);
 
 void scr_net_sock_set_native_established(ScrNetSocket *s, ScrNetNativeEventFn fn);
 
-/* Registers the h2 session/stream DOM handle ops (the emitted main()
+/* Registers the h2 session/stream dyn handle ops (the emitted main()
  * calls it when the unit is linked — the scr_net_dyn_install story). */
 void scr_http2_dyn_install(void);
 
@@ -5386,7 +5386,7 @@ void scr_dgram_bind(ScrDgramSocket *s, double port, ScrStr *host /*borrowed*/, S
 void scr_dgram_connect(ScrDgramSocket *s, double port, ScrStr *host /*borrowed*/, ScrClosure *cb /*moves, nullable*/);
 void scr_dgram_send_str(ScrDgramSocket *s, ScrStr *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
 void scr_dgram_send_bytes(ScrDgramSocket *s, ScrBytes *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
-/* The send argument-validation ladder over DOM arguments (Node's
+/* The send argument-validation ladder over dyn arguments (Node's
  * signature shuffle, slice bounds, list/type contracts, port/address
  * validation, and the connected-state errors); a fully-validated
  * unconnected single-payload send RUNS, the rest meet the fence. */
@@ -5550,14 +5550,14 @@ void scr_assert_neq_fail(const char *insp, size_t ilen, bool deep,
                          ScrStr *msg, bool has_msg);
 /* strictEqual/notStrictEqual/deepStrictEqual/notDeepStrictEqual where
  * either operand is a checked-dynamic value (the frontend boxes a static
- * side into the DOM first). Strict pair: SameValue over the DOM kinds —
+ * side into the checked-dynamic tree first). Strict pair: SameValue over the dyn kinds —
  * Object.is numbers, byte-equal strings, units by kind, node identity
  * for arrays/objects/bytes, BOXED-CLOSURE identity for functions. Deep
- * pair: the structural DOM walk (per-element arrays, key-set objects,
+ * pair: the structural dyn walk (per-element arrays, key-set objects,
  * brand-aware bytes via the buffer flavor bit, closure identity for
  * functions). Generated messages reproduce assertion_error.js — the
  * scalar simple/stacked forms byte-exactly, composite values rendered
- * compact:false/sorted through the DOM and diffed with the real myers
+ * compact:false/sorted through the checked-dynamic tree and diffed with the real myers
  * line printer (the design note atop scr_assert.c's dyn section lists
  * the divergences). Borrows everything; throws on the failing verdict. */
 void scr_assert_eq_dyn(ScrDyn *a, ScrDyn *b, bool negated, bool deep,
@@ -5566,7 +5566,7 @@ void scr_assert_eq_dyn(ScrDyn *a, ScrDyn *b, bool negated, bool deep,
  * promise fulfilled): "Missing expected exception|rejection" with Node's
  * details — ` (${expected.name})` when the expected class/shape carries a
  * name (has_ename), then `: message` or `.`. */
-/* Node's expectsError over an error-INSTANCE expected: the expected DOM
+/* Node's expectsError over an error-INSTANCE expected: the expected dyn
  * error's keys (minus the %error marker) each deep-compare against the
  * caught value's; mismatches throw the deep-equal AssertionError. */
 void scr_assert_expects_err_dyn(ScrDyn *actual, ScrDyn *expected, ScrStr *msg, bool has_msg);
@@ -5604,7 +5604,7 @@ void scr_assert_iferror_err(ScrError *err);
 void scr_assert_iferror_f64(double x);
 void scr_assert_iferror_str(ScrStr *s);
 void scr_assert_iferror_bool(bool b);
-/* The checked-dynamic argument: DOM-kind dispatch — units pass quietly,
+/* The checked-dynamic argument: dyn-kind dispatch — units pass quietly,
  * %error-marked objects throw with the error's message, everything else
  * with the inspection. */
 void scr_assert_iferror_dyn(const ScrDyn *v);

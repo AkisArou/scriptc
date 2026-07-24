@@ -1,10 +1,10 @@
 // @dynamic
-// The jsval→DOM crossing over a REAL package surface (the prettier
+// The jsval→dyn crossing over a REAL package surface (the prettier
 // plugins shape from the world-unification design): island values
 // flowing into 'unknown' slots wrap by reference — typeof, truthiness,
 // String(), and === route to the engine, the identity round trip
 // answers the same engine value back, and engine scalars normalize to
-// native DOM kinds at wrap time.
+// native dyn kinds at wrap time.
 import { plugins, obj, scalars } from "plugstub";
 
 // Row 1: typeof through the wrap — "object" (the retired fence box
@@ -26,7 +26,7 @@ function isSamePlugins(v: any): boolean {
 }
 console.log("round trip:", isSamePlugins(u));
 
-// Engine scalars normalize at the wrap: native DOM kinds all the way.
+// Engine scalars normalize at the wrap: native dyn kinds all the way.
 const n: unknown = scalars.n;
 const s: unknown = scalars.s;
 const b: unknown = scalars.b;

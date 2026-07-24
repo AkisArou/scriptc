@@ -177,7 +177,7 @@ export interface FnCtx {
    * channels the yield lowering types itself against. */
   generator?: { yieldT: IrType; nextT: IrType } | null;
   /** VARIADIC `arguments` form (rest-marked func type with no declared
-   * rest param): the synthetic trailing DOM-array param `arguments`
+   * rest param): the synthetic trailing dyn-array param `arguments`
    * reads resolve to. */
   argumentsLocal?: IrLocal | null;
   /** Declared return type — lets `return` detect record-shape mismatches
@@ -500,7 +500,7 @@ export function neverTaintedJsType(L: Lowerer, node: ts.Node, t: ts.Type): boole
   return walk(t, 4);
 }
 
-/** The DOM undefined value — what an uninitialized checked-dynamic
+/** The dyn undefined value — what an uninitialized checked-dynamic
  * binding holds (JS: declared bindings read `undefined` before any
  * assignment). A NULL dyn slot is a trap, never a value, so every dyn
  * binding that is READABLE before its first assignment must start here:
@@ -570,10 +570,10 @@ export function ladderFenceExpr(L: Lowerer, surface: string, node: ts.Node, hint
  * only unmappable pieces are `any` (`(value: any) => value is string` —
  * the arrow the binding holds lowers those params to dyn, so the binding
  * keeps its func-ness with the same per-piece fallback). The honest
- * static subset of `any` is a binding whose VALUES are DOM-representable:
+ * static subset of `any` is a binding whose VALUES are dyn-representable:
  * the binding is 'unknown' storage with the boundary conversions
  * coerceToExpected already applies (dynFrom into the slot, validated
- * dynCheck out) and per-site SC2011 fences for the operations the DOM
+ * dynCheck out) and per-site SC2011 fences for the operations the checked-dynamic tree
  * cannot carry JS-exactly (the island still lifts those). Every OTHER
  * unmappable TS type keeps its own diagnostic — annotations exist there,
  * and the fence names the real blocker. `--dynamic` builds never reach
@@ -596,8 +596,8 @@ export function dynFallbackType(L: Lowerer, node: ts.Node, t: ts.Type): IrType |
       ((elem.flags & ts.TypeFlags.Never) !== 0 || neverTaintedJsType(L, node, elem));
     const mappedElem = elem !== undefined && !elemTainted ? L.mapTypeOf(elem) : null;
     // A mappable element keeps the static array; an unmappable one makes
-    // the WHOLE value dyn (the DOM has real arrays — length/index/push
-    // read through the keyed-DOM paths; dyn-element STATIC arrays have no
+    // the WHOLE value dyn (the checked-dynamic tree has real arrays — length/index/push
+    // read through the keyed-dyn paths; dyn-element STATIC arrays have no
     // backend representation).
     if (mappedElem) return { kind: "array", elem: mappedElem };
   }
@@ -2548,7 +2548,7 @@ export class Lowerer {
     // The reverse — a TYPED value flowing into an 'unknown' slot
     // (`const u: unknown = 5`, an unknown-typed param/return) — IS tsc-clean
     // and rejected here: a typed value has no dynamic representation
-    // (constructing a DOM from static values is deliberately out this
+    // (constructing a dyn from static values is deliberately out this
     // round; only JSON.parse results are dyn).
     if (actual.kind === "dyn") {
       this.unsupported(
@@ -2679,8 +2679,8 @@ export class Lowerer {
       }
       // A CHECKED-DYNAMIC (dyn/'unknown') value entering the island (the
       // `isJson ? JSON.parse(text) : islandParser(text)` config ternary):
-      // the DOM tree deep-copies into engine values — data kinds only; a
-      // DOM carrying a boxed function/handle/promise throws the catchable
+      // the dyn tree deep-copies into engine values — data kinds only; a
+      // dyn carrying a boxed function/handle/promise throws the catchable
       // TypeError at runtime (trust-but-verify, like every boundary).
       if (expr.type.kind === "dyn") {
         return { kind: "jsMarshal", value: expr, type: JSVAL, loc: expr.loc };
@@ -2714,17 +2714,17 @@ export class Lowerer {
       return expr;
     }
     if (expr.type.kind === "jsval" && expected.kind !== "jsval") {
-      // The jsval→DOM crossing (the world unification's engine-handle
+      // The jsval→dyn crossing (the world unification's engine-handle
       // kind): an 'any'-typed engine value flowing into an 'unknown'/
-      // 'object'/JS-residue slot wraps BY REFERENCE as the DOM's island
-      // kind — engine scalars normalize to native DOM kinds at wrap time,
-      // typeof/truthiness/String()/=== route to the engine, un-armed DOM
+      // 'object'/JS-residue slot wraps BY REFERENCE as the checked-dynamic tree's island
+      // kind — engine scalars normalize to native dyn kinds at wrap time,
+      // typeof/truthiness/String()/=== route to the engine, un-armed dyn
       // walks fence loudly, and the value unwraps back identity-preserved
       // (scr_jsval_from_dyn). Monotone under evolution/widening: a value
       // wraps once at its first dyn edge and stays valid through every
       // subsequent dyn slot; narrowing never changes representation.
       // This wrap RETIRES the silent-wrong-answer fence-closure box for
-      // jsval members of DOM object literals (lowerDynObjectLiteral's
+      // jsval members of dyn object literals (lowerDynObjectLiteral's
       // coercion lands here first).
       if (expected.kind === "dyn") {
         return { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc };
@@ -2739,10 +2739,10 @@ export class Lowerer {
     }
     // A TYPED value flowing into an 'unknown' slot (`const u: unknown = 5`,
     // an unknown-typed param/return, a dyn-valued index slot): the
-    // static→DOM conversion — dynFrom, a DEEP COPY (the jsMarshal aliasing
+    // static→dyn conversion — dynFrom, a DEEP COPY (the jsMarshal aliasing
     // stance intoIndexValueSlot documents; SEMANTICS.md). Bare
-    // undefined/null literals store the DOM unit values. Types outside the
-    // DOM's domain (bytes, classes, Maps, ...) fall through to
+    // undefined/null literals store the dyn unit values. Types outside the
+    // dyn's domain (bytes, classes, Maps, ...) fall through to
     // requireExactShape's SC1101 fence.
     // A promise flowing into a VOID-promise slot (an inferred
     // Promise<never> return holding a `return Promise.reject(value)` the
@@ -2835,7 +2835,7 @@ export class Lowerer {
     // JS func-into-func mismatches ride the checked-dynamic function
     // boundary: box the value (dynFrom), adapt to the slot (dynCheck) —
     // the thunk delivers JS arity exactly (extras ignored, missing args
-    // the undefined DOM value), so `return _return` fits _mustCallInner's
+    // the undefined dyn value), so `return _return` fits _mustCallInner's
     // inferred (unknown) => unknown slot even though the wrapper declares
     // (). JS files only: TypeScript signatures keep the exact-shape
     // fences (a mismatch there is a compile-time story, not a boundary).
@@ -3144,7 +3144,7 @@ export class Lowerer {
    *   arr       — array into array whose element pair lifts (per-element
    *               copy loop, arrayWidthHelper)
    *   dynIn     — a typed value into an 'unknown' (dyn) slot — the same
-   *               static→DOM deep copy coerceToExpected applies top-level
+   *               static→dyn deep copy coerceToExpected applies top-level
    *   upcast    — a derived class instance into a base-typed slot (the
    *               prefix-layout pointer reinterpret, no copy)
    *   funcAdapt — a function into a slot whose signature differs only by
@@ -3153,7 +3153,7 @@ export class Lowerer {
    * Null when the pair isn't in the relation — callers keep their fences. */
   widthLiftPlan(src: IrType, dst: IrType): WidthLift | null {
     if (typeEquals(src, dst)) return { how: "copy" };
-    // An 'unknown' (dyn) DESTINATION slot: the static→DOM conversion —
+    // An 'unknown' (dyn) DESTINATION slot: the static→dyn conversion —
     // dynFrom, a DEEP COPY (`{ v: 5 }` into `{ v: unknown }`, `number[]`
     // into `unknown[]` — tsc's top type over the width family's copies).
     if (dst.kind === "dyn" && src.kind !== "dyn" && this.dynConvertible(src)) {
@@ -3388,7 +3388,7 @@ export class Lowerer {
           // A target field MISSING on the source: legal exactly when it is
           // optional-flavored (an undefined-armed union) — the unset field
           // IS the undefined arm, the same rule literal completion applies
-          // — or 'unknown' (a dyn slot holds the DOM undefined, exactly
+          // — or 'unknown' (a dyn slot holds the dyn undefined, exactly
           // the absent-property read: the options-record call shape
           // against `{ plugins: unknown, ... }`). Never for tuples: a
           // completed position would change .length and JSON where Node
@@ -3536,7 +3536,7 @@ export class Lowerer {
             fields: to.fields.map((f) => {
               const lift = plan.get(f.name)!;
               if ("absentDyn" in lift) {
-                // The unset 'unknown' field: the DOM undefined — exactly
+                // The unset 'unknown' field: the dyn undefined — exactly
                 // the absent-property read's answer.
                 return { name: f.name, value: dynUndefinedExpr(loc) };
               }
@@ -4095,7 +4095,7 @@ export class Lowerer {
   coercibleValue(src: IrType, dst: IrType): boolean {
     if (typeEquals(src, dst)) return true;
     // The island boundary joins the mechanical set: values that MARSHAL
-    // in (units, the checked-dynamic DOM copy, JSON-safe data, liftable
+    // in (units, the checked-dynamic deep copy, JSON-safe data, liftable
     // composites, marshalable closures — coerceToExpected's jsval-IN
     // block) and island handles whose exits VALIDATE (boundaryExitSafe) —
     // the `defaultFallback(cfg) { return { login, id, scopes } }` shape,
@@ -4175,7 +4175,7 @@ export class Lowerer {
     //   never-called mismatched callback is exact; divergence 38's stance
     //   extended to calls).
     // - voidRet "dyn"/"jsval": calling yields JS's undefined — the exact
-    //   undefined DOM/engine value after the call's effects.
+    //   undefined dyn/engine value after the call's effects.
     // - voidRet "strand": a void result where the slot promises a typed
     //   value — the call runs (a `never` thrower never comes back, so the
     //   trap is unreachable there), then the stranded TypeError.
@@ -4929,7 +4929,7 @@ export class Lowerer {
       return { kind: "call", callee: helper, args: [e], type: JSVAL, loc };
     }
     // Checked-dynamic values and marshalable closures ride jsMarshal
-    // directly (the DOM deep copy / the host-function wrap).
+    // directly (the checked-dynamic tree deep copy / the host-function wrap).
     if (e.type.kind === "dyn" || e.type.kind === "func") {
       return { kind: "jsMarshal", value: e, type: JSVAL, loc };
     }
@@ -5377,9 +5377,9 @@ export class Lowerer {
     }
     // An OBJECT LITERAL against a checked-dynamic slot in a JS file (the
     // getSupportInfo options argument — a dyn-ABI param): the value's
-    // world IS the DOM — build the DOM literal directly, before the
+    // world IS the checked-dynamic tree — build the dyn literal directly, before the
     // island gate could claim the checker's `any` context (an island
-    // build could never land in the slot: no engine→DOM crossing).
+    // build could never land in the slot: no engine→dyn crossing).
     if (expected?.kind === "dyn") {
       let x: ts.Expression = node;
       while (ts.isParenthesizedExpression(x)) x = x.expression;
@@ -5436,7 +5436,7 @@ export class Lowerer {
 
   /** A value flowing into an index-signature VALUE slot (an overflow
    * literal entry, a dynamic-keyed record write). dyn slots (`unknown`
-   * signatures — ModelPricing's) take a DOM conversion: dyn values pass
+   * signatures — ModelPricing's) take a dyn conversion: dyn values pass
    * through, JSON-safe static values convert with dynFrom (a deep copy —
    * the jsMarshal aliasing stance), everything else keeps the dyn-boundary
    * fence. Typed slots ride the ordinary coercion path (union slots wrap
@@ -5444,12 +5444,12 @@ export class Lowerer {
   intoIndexValueSlot(value: IrExpr, indexValue: IrType, node: ts.Node): IrExpr {
     if (indexValue.kind !== "dyn") return this.coerceInto(node, value, indexValue);
     if (value.type.kind === "dyn") return value;
-    // Bare `undefined`/`null` literals store the DOM unit values (JS keeps
+    // Bare `undefined`/`null` literals store the dyn unit values (JS keeps
     // the key; JSON.stringify drops an undefined-valued one, like Node).
     if (value.kind === "unitLit") {
       return { kind: "dynFrom", value, type: DYN, loc: value.loc };
     }
-    // An ISLAND ('any') value: the by-reference jsval→DOM wrap — the same
+    // An ISLAND ('any') value: the by-reference jsval→dyn wrap — the same
     // edge coerceToExpected converts (dyn slots accept engine values).
     if (value.type.kind === "jsval") {
       return { kind: "dynFromJsval", value, type: DYN, loc: value.loc };
@@ -5471,13 +5471,13 @@ export class Lowerer {
     return withUndefinedArmCanonical(t, this.unions);
   }
 
-  /** True when a static type converts to a dyn DOM value (the dynFrom
-   * walker's domain): JSON-safe, bytes<u8> (Uint8Array/Buffer — the DOM's
+  /** True when a static type converts to a dyn value (the dynFrom
+   * walker's domain): JSON-safe, bytes<u8> (Uint8Array/Buffer — the checked-dynamic tree's
    * bytes kind, payload copied; stdin chunks into unknown-typed helpers),
    * an undefined-armed union whose other arms are JSON-safe — the
-   * undefined arm becomes the undefined DOM singleton — or a BOXABLE
+   * undefined arm becomes the undefined dyn singleton — or a BOXABLE
    * function type (the checked-dynamic function boundary: the closure
-   * crosses as the DOM's callable kind, identity preserved). */
+   * crosses as the checked-dynamic tree's callable kind, identity preserved). */
   dynConvertible(t: IrType): boolean {
     return canConvertToDyn(t, (id) => this.shapes.get(id), (id) => this.unions.get(id));
   }
@@ -6062,7 +6062,7 @@ export class Lowerer {
           if (abi.kind === "dyn" || abi.kind === "jsval") {
             // A DYNAMIC-TIER pattern source (`function f({} = a)` with
             // `a: any` — jsval for island values, dyn for the checked-
-            // dynamic DOM): the slot holds its tier's undefined directly,
+            // dynamic dyn): the slot holds its tier's undefined directly,
             // so the default test is the runtime undefined test — then
             // the pattern destructures the picked value.
             const dflt = this.lowerExprExpecting(decl.initializer, abi);
@@ -6125,7 +6125,7 @@ export class Lowerer {
         if (abi.kind === "dyn" || abi.kind === "jsval") {
           // A DYNAMIC-TIER defaulted param (`function f(x = a)` with
           // `a: any` — jsval for island values, dyn for the checked-
-          // dynamic DOM): the slot holds its tier's undefined directly —
+          // dynamic dyn): the slot holds its tier's undefined directly —
           // the body local picks the default on the runtime test.
           const loc = locOf(decl);
           const slot = this.declareHiddenLocal(name, abi);
@@ -6310,7 +6310,7 @@ export class Lowerer {
       if (!origin) continue;
       // dyn captures ride an UNTRACED obj-box (scr_dyn_retain_v/release_v
       // — boxNewC): the mustCall wrapper closing over its implicit-any
-      // `fn` param. A DOM tree is pure data except the function kind,
+      // `fn` param. A dyn tree is pure data except the function kind,
       // whose closure edge the collector never sees — cycles through a
       // captured dyn are uncollectable (leak, never dangle: trial
       // deletion treats untraced edges as external roots). SEMANTICS.md.
@@ -6705,7 +6705,7 @@ export class Lowerer {
         // The CHECKED-DYNAMIC twin of the handle rescue (the runtime-world
         // local rule): an unmappable declared type over a dyn initializer
         // (`const first = plugins[0]` — the checker spells 'string |
-        // object' while the read is a DOM keyed read) keeps the binding
+        // object' while the read is a dyn keyed read) keeps the binding
         // dyn; typed use sites ride validated extractions and the routed
         // engine ops, exactly the JSON.parse-binding story.
         if (mapped === null && init.type.kind === "dyn") {

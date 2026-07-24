@@ -1,12 +1,12 @@
 /* scriptc's shipped declarations — the ALWAYS-SHIPPED CORE. Programs
  * compile against the REAL TypeScript standard library (lib.es2023, no
- * DOM, no @types): the checker sees the full standard surface, and the
+ * dyn, no @types): the checker sees the full standard surface, and the
  * LOWERER is the scope fence — any reached use of standard-library surface
  * without a lowering is a SC2020 diagnostic at its use site. This file
  * declares only what the es2023 lib does not:
  *
  * 1. scriptc's own primitives (comptime, __island_eval).
- * 2. setTimeout/clearTimeout and the Timeout handle (Node/DOM territory the
+ * 2. setTimeout/clearTimeout and the Timeout handle (Node/dyn territory the
  *    lib files don't cover; plain declarations, so with @types/node present
  *    they MERGE as overloads instead of colliding — the Timeout handle maps
  *    to the numeric timer id either way, and .unref()/.ref()/.hasRef() are

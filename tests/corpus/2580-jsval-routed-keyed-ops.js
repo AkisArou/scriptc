@@ -3,7 +3,7 @@
 // (SCR_DYN_JSVAL — lane dyn-routing-ops): o[k] runs in the ENGINE and the
 // result wraps back scalar-normalized; writes land on the REAL engine
 // object (aliasing preserved — the 'any'-world alias sees them); missing
-// members answer undefined (normalized to the native DOM kind), and a
+// members answer undefined (normalized to the native dyn kind), and a
 // read THROUGH that undefined throws Node's own TypeError, catchably.
 
 /** @returns {any} */
@@ -19,7 +19,7 @@ const eng = mint();
 
 /** @param {object} bag */
 function probe(bag) {
-  // Scalar members normalize at the read: native DOM kinds all the way.
+  // Scalar members normalize at the read: native dyn kinds all the way.
   console.log(bag.n, bag.s, typeof bag.n, typeof bag.s);
   // Composite members wrap and chain through further routed reads.
   console.log(bag.list.length, bag.nested.deep.leaf);

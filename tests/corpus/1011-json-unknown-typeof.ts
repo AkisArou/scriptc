@@ -1,4 +1,4 @@
-// typeof narrowing on `unknown` values: the test is a runtime DOM-kind
+// typeof narrowing on `unknown` values: the test is a runtime dyn-kind
 // check, the narrowed reads are validated scalar extractions. JSON.parse
 // is the unknown factory; an index-signature record's missing key is the
 // undefined case.

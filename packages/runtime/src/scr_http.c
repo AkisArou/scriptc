@@ -2774,7 +2774,7 @@ void scr_http_resp_thunk_res(ScrClosure *cb, ScrHttpReq *res) {
  *
  * The receiver surface behind `server.on('request', mustCall((req, res)
  * => ...))`: the mustCall wrapper makes the listener dyn, req/res box
- * into the DOM as HANDLE values, and member uses inside the listener
+ * into the checked-dynamic tree as HANDLE values, and member uses inside the listener
  * body dispatch HERE — onto the very entry points the static lowerings
  * use, with per-argument gates shaped like Node's (the libCall signature
  * table in validate.ts is the modeled surface; this dispatcher mirrors
@@ -2785,7 +2785,7 @@ void scr_http_resp_thunk_res(ScrClosure *cb, ScrHttpReq *res) {
  *   - a member the class HAS but this table does not model: a LOUD
  *     "not supported yet" Error — never a silent wrong answer;
  *   - anything else: Node's "<spelling> is not a function" for calls,
- *     the undefined singleton for reads (the DOM's own-property answer;
+ *     the undefined singleton for reads (the checked-dynamic tree's own-property answer;
  *     SEMANTICS.md documents the remainder).
  *
  * Ownership: invoke/get/set receive BORROWED handles/args and answer
@@ -3009,7 +3009,7 @@ static ScrDyn *scr_http_dynh_req_get(void *h, const char *key, size_t key_len) {
     double st = scr_http_req_status(r);
     /* Node's IncomingMessage constructor sets statusCode = null; only a
      * client response assigns a number (the static lane's typed surface
-     * spells this number|undefined — the DOM can afford Node's null). */
+     * spells this number|undefined — the checked-dynamic tree can afford Node's null). */
     return st < 0 ? scr_dyn_new_null() : scr_dyn_new_num(st);
   }
   if (strcmp(key, "statusMessage") == 0) {
@@ -3049,7 +3049,7 @@ static bool scr_http_dynh_req_set(void *h, const char *key, size_t key_len, cons
 
 /* ── ServerResponse (SCR_DYNH_HTTP_RES) ──────────────────────────────── */
 
-/* writeHead's header-object form over a DOM OBJ: flatten into the
+/* writeHead's header-object form over a dyn OBJ: flatten into the
  * [k0, v0, k1, v1, ...] pairs the static lowering feeds
  * scr_http_res_write_head_pairs (repeats append — array values expand to
  * consecutive same-name pairs). Numbers format through String(n). NULL =

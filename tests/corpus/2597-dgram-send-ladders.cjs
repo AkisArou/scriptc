@@ -1,5 +1,5 @@
 // dgram.Socket.send's argument-validation ladder: Node's signature
-// shuffle over DOM arguments — the offset/length slice's type and bounds
+// shuffle over dyn arguments — the offset/length slice's type and bounds
 // contracts (ERR_BUFFER_OUT_OF_BOUNDS, DataViews and subarrays included),
 // the buffer-list per-element contract with the LIST as the Received
 // tail, the unconnected port ladder (ERR_SOCKET_BAD_PORT with the

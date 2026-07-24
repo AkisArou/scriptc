@@ -1020,7 +1020,7 @@ void scr_dgram_install(void) {
 
 /* ── the send argument-validation ladder (checked-dynamic lane) ─────────
  * Node's Socket.prototype.send signature shuffle and validation order
- * over DOM arguments, byte-for-byte: the connected/unconnected split
+ * over dyn arguments, byte-for-byte: the connected/unconnected split
  * decides whether (a1, a2) are an offset/length slice or the port/address
  * pair; sliceBuffer validates the buffer's type and bounds
  * (ERR_BUFFER_OUT_OF_BOUNDS); list payloads validate per element with the

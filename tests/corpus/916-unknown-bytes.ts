@@ -1,4 +1,4 @@
-// Uint8Array/Buffer values crossing into `unknown`: the DOM's bytes kind —
+// Uint8Array/Buffer values crossing into `unknown`: the checked-dynamic tree's bytes kind —
 // conversion on the way in (a copy, the boundary stance), checked-cast
 // extraction on the way out (another copy), Node-exact String() (elements
 // joined) and JSON.stringify (the index-keyed object form). The stdin
@@ -33,7 +33,7 @@ const again = scratch.buf as Uint8Array;
 console.log(again[0] + again[1] + again[2]);
 
 // Buffer is bytes<u8> too. (String() of an unknown holding a BUFFER joins
-// the elements like a Uint8Array — Node decodes UTF-8 there; the DOM
+// the elements like a Uint8Array — Node decodes UTF-8 there; the checked-dynamic tree
 // cannot tell the two apart. SEMANTICS.md documents it; not asserted here
 // where Node is the oracle.)
 const buf = Buffer.from("hi");

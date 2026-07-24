@@ -181,7 +181,7 @@ export class LlWalkers {
         B.line(`call void @scr_jb_put_json_str(ptr %b, ptr %v)`);
         break;
       case "dyn":
-        // Overflow values under an `unknown` index signature: the DOM
+        // Overflow values under an `unknown` index signature: the checked-dynamic tree
         // serializes itself (runtime walker). Bare stringify of dyn stays
         // frontend-fenced; this writer is reachable only through overflow
         // entries.
@@ -372,7 +372,7 @@ export class LlWalkers {
       B.line(`${val} = call ptr @scr_map_get_str_ref(ptr ${ovf}, ptr ${k}) ; value (+1)`);
     }
     // Undefined-valued entries drop, exactly the optional-field rule: a
-    // dyn value whose DOM kind is SCR_DYN_UNDEF (i32 at offset 8, enum
+    // dyn value whose dyn kind is SCR_DYN_UNDEF (i32 at offset 8, enum
     // member 6 — scr_runtime.h's ScrDynKind), or a union holding its
     // undefined arm.
     let skipUndef: string | null = null;

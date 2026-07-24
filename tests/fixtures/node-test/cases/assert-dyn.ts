@@ -3,7 +3,7 @@
 // common assert form running where it matters: strictEqual(dynValue,
 // scalar) passes and fails with Node's exact AssertionError messages in
 // the failing section (the generated multi-line diff included), the
-// deep pair walks the DOM against static literals, and truthiness rides
+// deep pair walks the checked-dynamic tree against static literals, and truthiness rides
 // assert(dynValue).
 import assert from "node:assert";
 import { test } from "node:test";

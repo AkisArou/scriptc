@@ -57,27 +57,27 @@ assert-fences.ts:27:25 - error SC2020: 'assert.strictEqual of 'unknown' and '{ n
   26 | const unk: unknown = JSON.parse("{}");
   27 | assert.strictEqual(unk, { n: 1 }); // strict + composite static side: reference identity does not survive the unknown boundary
      |                         ^~~~~~~~
-  28 | assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the DOM copy cannot carry the brand
+  28 | assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the dyn copy cannot carry the brand
 
   hint: strictEqual on objects is reference equality, which does not survive the unknown boundary (values copy when they cross) — deepStrictEqual compares structure, or narrow the unknown side first
 
 assert-fences.ts:28:29 - error SC2020: 'assert.deepStrictEqual of 'unknown' and 'Uint8Array' values' is part of the standard library types but has no scriptc lowering yet
 
   27 | assert.strictEqual(unk, { n: 1 }); // strict + composite static side: reference identity does not survive the unknown boundary
-  28 | assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the DOM copy cannot carry the brand
+  28 | assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the dyn copy cannot carry the brand
      |                             ^~~~~~~~~~~~~~~~~~~
-  29 | assert.deepStrictEqual(unk, new Map<string, number>()); // not DOM-convertible
+  29 | assert.deepStrictEqual(unk, new Map<string, number>()); // not dyn-convertible
 
   hint: the unknown boundary cannot carry the Buffer-vs-Uint8Array brand Node compares — narrow the unknown side to a typed array and compare those
 
 assert-fences.ts:29:29 - error SC2020: 'assert.deepStrictEqual of 'unknown' and 'Map<string, number>' values' is part of the standard library types but has no scriptc lowering yet
 
-  28 | assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the DOM copy cannot carry the brand
-  29 | assert.deepStrictEqual(unk, new Map<string, number>()); // not DOM-convertible
+  28 | assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the dyn copy cannot carry the brand
+  29 | assert.deepStrictEqual(unk, new Map<string, number>()); // not dyn-convertible
      |                             ^~~~~~~~~~~~~~~~~~~~~~~~~
   30 | 
 
-  hint: the static side must convert into the checked-dynamic DOM (numbers, strings, booleans, null/undefined, boxable functions, or JSON-safe structures under the deep forms) — narrow the unknown side instead
+  hint: the static side must convert into the checked-dynamic tree (numbers, strings, booleans, null/undefined, boxable functions, or JSON-safe structures under the deep forms) — narrow the unknown side instead
 
 assert-fences.ts:31:1 - error SC2020: 'assert.deepStrictEqual of 'number[]' and 'string[]' values' is part of the standard library types but has no scriptc lowering yet
 

@@ -1073,7 +1073,7 @@ export function streamCbThunkFor(E: CEmitter, kind: "r" | "w" | "f" | "d" | "t" 
       kind === "e" ? false
       : (kind === "w" || kind === "t") ? pos === 2 : (kind === "f" || kind === "l") ? pos === 0 : pos === 1;
     // The JS lane's implicitly-any parameters: each position boxes into
-    // dyn by kind — the chunk as DOM bytes, the encoding as a string,
+    // dyn by kind — the chunk as dyn bytes, the encoding as a string,
     // the error as the boundary's {name, message} shape (null when
     // none), and the completion callback as a CALLABLE dyn whose glue
     // dispatches to the runtime's *_done entry (the closure's one cap

@@ -1,6 +1,6 @@
 // The top object types: `{}`, the lib's `Object`, `object` (NonPrimitive),
 // and a user's empty interface all admit every non-nullish value in tsc's
-// assignability, so they lower like `unknown` (the dyn DOM) instead of an
+// assignability, so they lower like `unknown` (the dyn) instead of an
 // exact empty record — assignments convert at the site, reads narrow back
 // out through the same typeof/checked-cast machinery unknown uses. The type
 // INFERRED from an empty object literal stays the empty record (it
@@ -44,7 +44,7 @@ function idTop(v: Object): Object {
 }
 console.log(typeof idTop("through"), typeof idTop(99));
 
-// The empty object literal still flows into a `{}` slot (record → DOM).
+// The empty object literal still flows into a `{}` slot (record → dyn).
 const empty: {} = {};
 console.log(JSON.stringify(empty));
 

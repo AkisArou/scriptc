@@ -1,6 +1,6 @@
 // The suite-harness keyed-write shape: an untyped module `let` holding an
 // object BUILT UP through runtime keys (`catchWarning[nameOrMap] = fn`),
-// closure values crossing into the DOM, and the dyn-keyed read calling
+// closure values crossing into the checked-dynamic tree, and the dyn-keyed read calling
 // them back (`catchWarning[warning.name](warning)`) — plus the map arm's
 // Object.keys walk writing through a loop variable key.
 'use strict';

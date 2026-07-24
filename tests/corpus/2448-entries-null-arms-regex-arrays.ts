@@ -88,7 +88,7 @@ console.log(popped === undefined ? "none" : popped.source, grown.length);
 
 // ── JSON.stringify over a dyn root holding undefined ─────────────────────
 // JSON.stringify(undefined) is the undefined VALUE; printing it spells the
-// word — both backends ride the same DOM walker (a nested-position writer
+// word — both backends ride the same dyn walker (a nested-position writer
 // would spell null; the root is special).
 const u: unknown = undefined;
 console.log(JSON.stringify(u));

@@ -775,7 +775,7 @@ export interface ClassMeta {
       t.kind === "jsval" ||
       // Checked-dynamic captures (the mustCall wrapper closing over its
       // implicit-any `fn` param): the box carries scr_dyn_retain_v/
-      // release_v and NO trace — a DOM tree is pure data except the
+      // release_v and NO trace — a dyn tree is pure data except the
       // function kind, whose closure edge stays invisible to the
       // collector (trial deletion treats it as an external root: cycles
       // through dyn never collect, nothing dangles — SEMANTICS.md).

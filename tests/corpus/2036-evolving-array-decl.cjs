@@ -1,6 +1,6 @@
 // The evolving-array declaration idiom (test/common's leakedGlobals
 // ledger): a JS `const leaked = []` types by its LATER pushes, so the
-// binding rides the checked-dynamic array — pushes land in the DOM,
+// binding rides the checked-dynamic array — pushes land in the checked-dynamic tree,
 // typed exits validate back out, and the function's evolved return type
 // agrees with what callers read.
 'use strict';

@@ -1,8 +1,8 @@
 // util.inspect over checked-dynamic values (unknown): the runtime walks
-// the dyn DOM itself — scalars, arrays (grid grouping included), objects
+// the dyn itself — scalars, arrays (grid grouping included), objects
 // with runtime-quoted keys, depth placeholders — and format's %s passes
 // dyn strings verbatim. Keys stay in insertion order with no
-// integer-like keys after string keys (the DOM's documented Object.keys
+// integer-like keys after string keys (the checked-dynamic tree's documented Object.keys
 // stance). Node is the oracle byte-for-byte.
 import { format, inspect } from "node:util";
 

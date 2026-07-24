@@ -1,10 +1,10 @@
 // `any` in function signatures: any-typed parameters box their arguments
-// into the DOM (deep copy), any-typed returns flow out as checked-dynamic
+// into the checked-dynamic tree (deep copy), any-typed returns flow out as checked-dynamic
 // values, overload implementations typed `any` serve concrete overload
 // signatures through validated exits, and functions STORED in any-typed
 // bindings call through the boxed thunk with JS arity.
 
-// any params take every DOM-representable argument.
+// any params take every dyn-representable argument.
 function show(x: any): string {
   return typeof x;
 }
@@ -56,7 +56,7 @@ function tail(a: number, b: any): string {
 console.log(tail(1, undefined));
 console.log(tail(2, "here"));
 
-// OPTIONAL any/unknown params: an omitted call passes the DOM undefined.
+// OPTIONAL any/unknown params: an omitted call passes the dyn undefined.
 function opt(bar?: any): string {
   return typeof bar;
 }

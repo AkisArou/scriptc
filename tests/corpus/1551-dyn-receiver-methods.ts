@@ -1,5 +1,5 @@
 // METHOD calls on dyn (JSON.parse-derived) receivers: validate the
-// receiver's DOM kind, extract, ride the static machinery — trust-but-verify
+// receiver's dyn kind, extract, ride the static machinery — trust-but-verify
 // extended to receivers. Wrong-kind receivers throw V8's own catchable
 // TypeErrors, message-exact for these forms.
 function baseName(raw: string): string {
@@ -34,7 +34,7 @@ console.log(cfg.host.trim().toLowerCase());
 const portList: string[] = cfg.ports.split("/");
 console.log(portList.join(","), portList.length);
 
-// `.filter` on dyn arrays: the predicate runs over the DOM elements, the
+// `.filter` on dyn arrays: the predicate runs over the dyn elements, the
 // survivors validated-extract into the element type the checker committed
 // the result to (the workspaces idiom, object form included).
 function globsOf(raw: string): string[] | null {
