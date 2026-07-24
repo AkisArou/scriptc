@@ -54,12 +54,12 @@ export const SUPPORTED_BUILTIN_MODULES = ["fs", "path", "path/posix", "path/win3
 
 /** Builtins Node itself serves ONLY under the node: prefix —
  * require("test") is MODULE_NOT_FOUND in Node, so the bare name stays a
- * user-package specifier and never canonicalizes to the builtin. "module"
- * joins by CAUTION, not Node's rule (Node serves bare "module"): an npm
- * package named "module" exists, and the supported surface here is only
- * the admit-then-fence-per-member story (createRequire's runtime fence),
- * so the bare spelling keeps resolving as a package name. */
-const PREFIX_ONLY_BUILTIN_MODULES: ReadonlySet<string> = new Set(["test", "module"]);
+ * user-package specifier and never canonicalizes to the builtin. Bare
+ * "module" is NOT in this set: Node serves the builtin for both spellings
+ * (a builtin always wins over a same-named npm package for the bare
+ * specifier — the npm package named "module" is unreachable in Node too),
+ * so both spellings key the same lowering tables here. */
+const PREFIX_ONLY_BUILTIN_MODULES: ReadonlySet<string> = new Set(["test"]);
 
 /** The builtin modules whose DEFAULT import binding lowers: node:assert's
  * module object IS a callable function (`import assert from "node:assert";
