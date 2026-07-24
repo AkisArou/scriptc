@@ -4023,8 +4023,18 @@ export type IrExpr =
    * message exactly). A function callee calls through the boxed thunk:
    * per-arg validation against the boxed signature (mismatches throw the
    * path-annotated TypeError), result converted back to dyn. Callee and
-   * args are borrowed; the result is owned (+1). MAY THROW. */
-  | { kind: "dynCall"; callee: IrExpr; calleeName: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
+   * args are borrowed; the result is owned (+1). MAY THROW.
+   *
+   * `spreads` (the runtime-arity form — `f(...args)`, the rest-forwarding
+   * idiom): entries name indices into `args` whose DOM values FLATTEN into
+   * the argument vector at the call — JS's spread over the DOM's iterable
+   * kinds (arrays element-by-element, strings by code point, bytes by
+   * byte; every other kind throws V8's exact spread-call TypeError,
+   * catchably — `what` is the spread expression's source spelling, which
+   * the nullish text spells), evaluated and flattened left-to-right (JS's
+   * ArgumentListEvaluation). The emitters build one fresh argument array
+   * and apply through it. */
+  | { kind: "dynCall"; callee: IrExpr; calleeName: string; args: IrExpr[]; spreads?: { arg: number; what: string }[]; type: IrType; loc: SrcLoc }
   /** Prototype-method DISPATCH on a dyn receiver — `recv.m(...)` where `m`
    * is a name a DOM-representable prototype declares (Array/String/
    * Function shared names: push, slice, join, forEach, map, apply, ...),
@@ -4411,6 +4421,15 @@ export type IrJsOp =
   | "truthy" | "not" | "typeof" | "toStr"
   | "getProp" | "setProp" | "getIdx" | "setIdx"
   | "callMethod" | "callFn"
+  /** Spread application on an island callee — `f(...pre, ...s)`, the
+   * rest-forwarding idiom (`(...args) => g(...args)` under --dynamic).
+   * Args are exactly (callee, pre, spread): `pre` is the engine array of
+   * leading fixed arguments (jsOp arrLit), `spread` the spread source;
+   * `name` carries the spread expression's source spelling (V8's nullish
+   * spread-call TypeError spells it). The prelude helper uses REAL spread
+   * syntax, so iterator protocols are the engine's own, with guards
+   * front-running V8's exact spread-call TypeError texts. May throw. */
+  | "callSpread"
   /** `new X(...)` where X is jsval-typed (package-declared classes):
    * JS_CallConstructor — args are the callee then the constructor
    * arguments, mirroring callFn. */
@@ -4465,6 +4484,7 @@ export function jsOpResultKind(op: IrJsOp): "jsval" | "bool" | "string" | "void"
     case "add": case "sub": case "mul": case "div": case "mod": case "pow":
     case "neg": case "plus":
     case "getProp": case "getIdx": case "callMethod": case "callFn":
+    case "callSpread":
     case "construct":
     case "globalGet":
     case "objLit": case "arrLit": case "defineGetter": case "tplStrings": case "objSpread":

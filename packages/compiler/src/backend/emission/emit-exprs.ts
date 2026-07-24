@@ -1620,6 +1620,31 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         // with the frame as usual. The callee's source spelling rides
         // along for Node's "<name> is not a function" TypeError.
         const callee = E.emitExpr(e.callee);
+        const what = cStringLiteral(Buffer.from(e.calleeName, "utf8"));
+        if (e.spreads !== undefined && e.spreads.length > 0) {
+          // The RUNTIME-ARITY form (`f(...args)`): one fresh DOM array
+          // collects the arguments left-to-right — plain args move in
+          // (push takes ownership), spread args FLATTEN (push_spread
+          // retains elements in and throws V8's spread-call TypeError for
+          // non-iterable DOM kinds, checked per spread — JS's
+          // ArgumentListEvaluation order) — then apply calls through the
+          // array's elements (borrowed, exactly scr_dyn_call).
+          const spreadAt = new Map(e.spreads.map((s) => [s.arg, s.what]));
+          const pack = E.newTemp(DYN, "scr_dyn_new_arr()");
+          e.args.forEach((a, i) => {
+            const v = E.emitExpr(a);
+            const spreadWhat = spreadAt.get(i);
+            if (spreadWhat !== undefined) {
+              const w = cStringLiteral(Buffer.from(spreadWhat, "utf8"));
+              E.line(`scr_dyn_arr_push_spread(${pack.name}, ${v.name}, ${w});`);
+              E.emitPendingCheck();
+            } else {
+              E.moveTemp(v);
+              E.line(`scr_dyn_arr_push(${pack.name}, ${v.name});`);
+            }
+          });
+          return E.fallibleTemp(e.type, `scr_dyn_apply(${callee.name}, ${pack.name}, ${what})`);
+        }
         const args = e.args.map((a) => E.emitExpr(a));
         let argsExpr = "NULL";
         if (args.length > 0) {
@@ -1627,7 +1652,6 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.line(`ScrDyn *${arr}[${args.length}] = { ${args.map((a) => a.name).join(", ")} };`);
           argsExpr = arr;
         }
-        const what = cStringLiteral(Buffer.from(e.calleeName, "utf8"));
         return E.fallibleTemp(
           e.type,
           `scr_dyn_call(${callee.name}, ${argsExpr}, ${args.length}, ${what})`,
@@ -6007,6 +6031,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const pack = argPack(args.slice(1).map((x) => x.name));
             return finishFallible(`scr_jsval_call(${a(0)}, ${args.length - 1}, ${pack})`);
           }
+          case "callSpread":
+            // Spread application (`f(...pre, ...s)`): the prelude helper's
+            // real spread syntax — iterator protocols are the engine's
+            // own, the guards front-run V8's spread-call TypeError texts
+            // (the name literal is the spread expression's spelling).
+            return finishFallible(`scr_jsval_call_spread(${a(0)}, ${a(1)}, ${a(2)}, ${nameSym()})`);
           case "construct": {
             // `new X(...)` on an island callee: JS_CallConstructor.
             const pack = argPack(args.slice(1).map((x) => x.name));

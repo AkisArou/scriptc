@@ -2706,6 +2706,14 @@ ScrDyn *scr_dyn_new_buffer_copy(const ScrBytes *b);
  * extraction (`u as Uint8Array`). */
 ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d);
 void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item);
+/* Spread completion for a runtime-arity argument list (`f(...xs)` in the
+ * checked-dynamic tier): flattens `src` into `arr` per JS's spread over the
+ * DOM's iterable kinds — arrays element-by-element (retained), strings by
+ * code POINT (the string iterator), bytes by byte — and throws V8's exact
+ * SPREAD-CALL TypeError for every other kind (pending; callers check):
+ * nullish sources spell the spread expression (`what`), everything else is
+ * the generic "Spread syntax requires ..." text. Borrows src. */
+void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what);
 void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value);
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets
  * the member (JS: later writes win, insertion order); undefined/null and
@@ -2792,6 +2800,10 @@ ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, con
  * boxed thunk (per-arg checks live there). `args` entries are BORROWED;
  * the result is owned (+1), or NULL with the exception pending. */
 ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const char *what);
+/* scr_dyn_call over a DOM ARRAY's elements (the spread-application form —
+ * `f(...args)` after the emitted argument array is built): argv IS the
+ * array's items. Borrows both; result owned (+1), or NULL pending. */
+ScrDyn *scr_dyn_apply(const ScrDyn *d, const ScrDyn *args, const char *what);
 
 /* Path spine for dynCheck error messages — a compile-time-shaped linked
  * list the emitted builders stack-allocate per recursion level: `key`
@@ -3720,6 +3732,13 @@ ScrJsval *scr_jsval_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJs
  * anything else calls with this = o (non-callables throw in the engine). */
 ScrJsval *scr_jsval_opt_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv);
 ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv);
+/* Spread application on an island callee — `f(...pre, ...spread)` through
+ * the prelude helper's REAL spread syntax (iterator protocols are the
+ * engine's own; the guards front-run V8's exact spread-call TypeError
+ * texts). `pre` is the engine array of leading fixed arguments; `what` the
+ * spread expression's source spelling (the nullish text spells it).
+ * Borrows everything; +1 out, or NULL with the exception bridged. */
+ScrJsval *scr_jsval_call_spread(ScrJsval *f, ScrJsval *pre, ScrJsval *spread, const ScrStr *what);
 /* `new X(...)` on an island callee (jsOp construct) — JS_CallConstructor.
  * Borrows everything; +1 out, or NULL with the exception bridged. */
 ScrJsval *scr_jsval_construct(ScrJsval *f, int argc, ScrJsval **argv);

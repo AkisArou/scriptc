@@ -3313,14 +3313,24 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // closure object, plain C call). Generic functions route through
     // monomorphization (the call targets a per-instantiation instance).
     if (ts.isIdentifier(expr.expression) && !L.isSelfReference(expr.expression)) {
+      // A JS spread argument the compile-time completion cannot take (a
+      // fixed position, a dynamic rest slot) sends the call down the
+      // VALUE path — the runtime-arity lane (lowerSpreadArgsCall) boxes
+      // the declaration's value and applies through a runtime-built
+      // argument list. Typed .ts spreads keep completeArgs' rest packing.
+      const jsSpreadArgs =
+        expr.arguments.some((a) => ts.isSpreadElement(a)) && isJsSourceFile(expr.getSourceFile());
       if (L.isTopLevelFnSymbol(expr.expression) && !L.peekLocal(expr.expression)) {
         // `import g = N.f; g()` — the alias's own source-order guards
         // (a no-op for every non-import= binding).
         fenceEarlyAliasUse(L, expr.expression, expr);
         const generic = L.genericFnOf(expr.expression);
-        if (generic) return L.lowerGenericCall(expr, generic);
-        const sig = L.fnSigOf(expr.expression);
-        if (sig) {
+        // An implicit-any JS function spread-forwarded into: per-site
+        // monomorphization has no slot for a runtime-length argument
+        // list — the value path's boxed thunk delivers JS arity instead.
+        if (generic && !(jsSpreadArgs && generic.implicitParams)) return L.lowerGenericCall(expr, generic);
+        const sig = generic ? null : L.fnSigOf(expr.expression);
+        if (sig && !(jsSpreadArgs && spreadNeedsRuntimeArity(sig.params, expr.arguments))) {
           L.noteEdge(sig.name);
           const args = L.completeArgs(expr.arguments, sig.params, loc, expr);
           return reconcileOverloadReturn(L, expr, { kind: "call", callee: sig.name, args, type: sig.returnType, loc });
@@ -3345,10 +3355,12 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       // the call monomorphizes against it exactly like a generic function
       // declaration and the binding is never read. Symbol identity does
       // the discrimination — a shadowing local has its own symbol, and
-      // registered bindings never declare locals or globals.
+      // registered bindings never declare locals or globals. Implicit-any
+      // JS bindings spread-forwarded into skip to the value path (the
+      // runtime-arity lane), like the declaration form above.
       {
         const generic = L.genericFnOf(expr.expression);
-        if (generic) return L.lowerGenericCall(expr, generic);
+        if (generic && !(jsSpreadArgs && generic.implicitParams)) return L.lowerGenericCall(expr, generic);
       }
     }
     // Expando member calls (`example.isFoo('test')` after `example.isFoo
@@ -3710,6 +3722,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // any-origin value). Spread arguments keep their fence.
     if (callee.type.kind === "dyn") {
       if (expr.arguments.some((a) => ts.isSpreadElement(a))) {
+        // The runtime-arity lane: a dyn callee is already boxed — the
+        // spread-marked dynCall applies through a fresh DOM argument
+        // array (lowerSpreadArgsCall). Sources outside it keep the fence.
+        const spreadServed = lowerSpreadArgsCall(L, expr, callee, loc);
+        if (spreadServed) return spreadServed;
         L.unsupported("SC1090", expr, "spread arguments in calls through 'unknown' values");
       }
       const args = expr.arguments.map((a) => L.lowerExprExpecting(a, DYN));
@@ -3722,6 +3739,42 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     }
     if (callee.type.kind !== "func") {
       L.badType(expr.expression, L.typeOf(expr.expression));
+    }
+    // A SPREAD argument on a func-typed callee — the rest-forwarding
+    // idiom (`(...args) => from(...args)`): the runtime-arity lane boxes
+    // or marshals the callee and applies through a runtime-built argument
+    // list (lowerSpreadArgsCall). Shapes outside its lanes fall through
+    // to the historical fences.
+    if (expr.arguments.some((a) => ts.isSpreadElement(a))) {
+      const spreadServed = lowerSpreadArgsCall(L, expr, callee, loc);
+      if (spreadServed) return spreadServed;
+    }
+    // An ISLAND-REST func value called directly (`f(1, 2)` where f is the
+    // --dynamic `(...args) =>` lambda): the type SPELLS its trailing
+    // engine-array param — complete the call exactly like completeArgs'
+    // island pack (fixed slots positionally, missing ones with the
+    // engine's undefined, the surplus marshaled into one fresh engine
+    // array). JS arity, no runtime machinery.
+    if (
+      callee.type.rest === true &&
+      callee.type.restAbi === "jsval" &&
+      callee.type.params.length >= 1 &&
+      callee.type.params[callee.type.params.length - 1]!.kind === "jsval" &&
+      !expr.arguments.some((a) => ts.isSpreadElement(a))
+    ) {
+      const fixed = callee.type.params.slice(0, -1);
+      const args: IrExpr[] = fixed.map((p, i) => {
+        const a = expr.arguments[i];
+        if (a) return L.lowerExprExpecting(a, p);
+        const absent = omittedArgFor(L, p, loc);
+        if (!absent) {
+          L.unsupported("SC1090", expr, "calls omitting a non-optional parameter of the callee's type");
+        }
+        return absent;
+      });
+      const restArgs = expr.arguments.slice(fixed.length).map((a) => L.lowerExprExpecting(a, JSVAL));
+      args.push({ kind: "jsOp", op: "arrLit", args: restArgs, type: JSVAL, loc });
+      return { kind: "callValue", callee, args, type: callee.type.ret, loc };
     }
     // A JS call with MORE arguments than the callee's lowered signature
     // (`cb(1, 'x')` where the mustCall wrapper's inferred type declared
@@ -3761,6 +3814,113 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       args.push(absent);
     }
     return { kind: "callValue", callee, args, type: callee.type.ret, loc };
+  }
+
+/** The RUNTIME-ARITY spread call — `f(...args)`, the rest-forwarding idiom
+   * (`const f = (...args) => from(...args)`): a spread whose length is a
+   * runtime fact has no home in the compile-time completion, so the call
+   * rides a dynamic boundary instead. Two lanes, picked by the spread
+   * source's tier:
+   *
+   * - CHECKED-DYNAMIC (dyn spread sources — a JS rest binding, a dyn
+   *   value): box the callee (dynFrom; a dyn callee is already boxed),
+   *   convert every argument into dyn, and emit the spread-marked dynCall
+   *   — the emitters build one fresh DOM argument array (spreads flatten
+   *   left-to-right, non-iterables throw V8's TypeError) and apply through
+   *   it; the boxed thunk delivers JS arity exactly. Result dyn, checked
+   *   per use like every any-origin value.
+   * - ISLAND (a jsval spread source — the --dynamic rest binding is the
+   *   engine's own arguments array): marshal the callee in and emit jsOp
+   *   callSpread — the prelude helper's REAL `f(...pre, ...s)`, so
+   *   iterator protocols and the not-iterable TypeError are the engine's
+   *   own. One trailing spread after the fixed arguments is the modeled
+   *   shape (exactly the forwarding idiom).
+   *
+   * Answers null when neither lane fits (typed .ts spreads keep
+   * completeArgs' rest packing and its fences). JS sources only — the
+   * same guard as the over-arity dynCall precedent. */
+  export function lowerSpreadArgsCall(L: Lowerer, expr: ts.CallExpression, callee: IrExpr, loc: SrcLoc): IrExpr | null {
+    if (!isJsSourceFile(expr.getSourceFile())) return null;
+    if (!expr.arguments.some((a) => ts.isSpreadElement(a))) return null;
+    if (callee.type.kind !== "dyn" && callee.type.kind !== "func" && callee.type.kind !== "jsval") return null;
+    const calleeName =
+      ts.isPropertyAccessExpression(expr.expression) || ts.isElementAccessExpression(expr.expression)
+        ? expr.expression.getText()
+        : ts.isIdentifier(expr.expression)
+          ? expr.expression.text
+          : "value";
+    // Lower every argument ONCE, in source order (the IR nests them in
+    // exactly this order, so runtime evaluation order is JS's).
+    const parts = expr.arguments.map((a) =>
+      ts.isSpreadElement(a)
+        ? { spreadOf: a.expression, node: null, v: L.lowerExpr(a.expression) }
+        : { spreadOf: null, node: a as ts.Expression, v: L.lowerExpr(a) },
+    );
+    const spreadParts = parts.filter((p) => p.spreadOf !== null);
+    const getR = (id: string) => L.shapes.get(id);
+    const getU = (id: string) => L.unions.get(id);
+    const anyJsvalSpread = spreadParts.some((p) => p.v.type.kind === "jsval");
+    if (
+      !anyJsvalSpread &&
+      (callee.type.kind === "dyn" || (callee.type.kind === "func" && canBoxFuncIntoDyn(callee.type, getR, getU))) &&
+      spreadParts.every((p) => p.v.type.kind === "dyn" || canConvertToDyn(p.v.type, getR, getU))
+    ) {
+      const args: IrExpr[] = [];
+      const spreads: { arg: number; what: string }[] = [];
+      for (const p of parts) {
+        if (p.spreadOf !== null) {
+          // The spelling rides along for V8's nullish spread-call
+          // TypeError ("v is not iterable (cannot read property ...)").
+          spreads.push({ arg: args.length, what: p.spreadOf.getText() });
+          args.push(L.coerceInto(p.spreadOf, p.v, DYN));
+        } else {
+          args.push(L.coerceInto(p.node!, p.v, DYN));
+        }
+      }
+      const boxed = callee.type.kind === "dyn" ? callee : L.coerceInto(expr.expression, callee, DYN);
+      return { kind: "dynCall", callee: boxed, calleeName, args, spreads, type: DYN, loc };
+    }
+    if (
+      spreadParts.length > 0 &&
+      spreadParts.every((p) => p.v.type.kind === "jsval") &&
+      (callee.type.kind === "jsval" || callee.type.kind === "func")
+    ) {
+      if (spreadParts.length !== 1 || parts[parts.length - 1]!.spreadOf === null) {
+        L.unsupported(
+          "SC1090",
+          expr,
+          "spread arguments before positional arguments in island calls (one trailing spread after the fixed arguments is the supported form)",
+        );
+      }
+      const f = L.coerceInto(expr.expression, callee, JSVAL);
+      const pre: IrExpr[] = parts
+        .slice(0, -1)
+        .map((p) => L.coerceInto(p.node!, p.v, JSVAL));
+      const preArr: IrExpr = { kind: "jsOp", op: "arrLit", args: pre, type: JSVAL, loc };
+      const last = parts[parts.length - 1]!;
+      // The spelling rides in `name` for V8's nullish spread-call
+      // TypeError ("v is not iterable (cannot read property ...)").
+      return { kind: "jsOp", op: "callSpread", name: last.spreadOf!.getText(), args: [f, preArr, last.v], type: JSVAL, loc };
+    }
+    // No lane fits (a spread source outside both tiers, a callee neither
+    // boxable nor marshalable, mixed dyn/jsval spreads): fence HERE — the
+    // arguments are already lowered, and falling back to the historical
+    // per-site fences would lower them a second time (duplicate lambda
+    // lifts, duplicated diagnostics).
+    L.unsupported("SC1090", expr, "spread arguments");
+  }
+
+/** True when a spread argument lands where the compile-time completion
+   * cannot take it — a FIXED parameter position, or a dynamic rest slot
+   * (dynRest/islandRest, whose packs are built per-argument): the shapes
+   * the runtime-arity lane (lowerSpreadArgsCall) serves. Typed `rest`
+   * slots keep completeArgs' same-element spread packing. */
+  export function spreadNeedsRuntimeArity(shapes: readonly ParamShape[], argNodes: readonly ts.Expression[]): boolean {
+    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "islandRest");
+    return argNodes.some(
+      (a, i) =>
+        ts.isSpreadElement(a) && (restAt < 0 || i < restAt || shapes[restAt]!.mode !== "rest"),
+    );
   }
 
 /** METHOD calls on dyn receivers (`pkg.name.replace(...)`, `rawName.split`,
@@ -4912,6 +5072,15 @@ const inliningPredicates = new Set<ts.Symbol>();
         first.loc.start,
       );
       const params: IrParam[] = funcType.params.map((t, i) => ({ localId: `%pf${i}`, name: `%pf${i}`, type: t }));
+      // A REST-MARKED value type hides one synthetic trailing DOM-array
+      // param in the lifted function (the boxed call thunk fills it) —
+      // the fence lambda must spell that slot too or the validator's
+      // closure-signature check trips (SC9001). Island rest types SPELL
+      // their trailing engine-array param, so funcType.params already
+      // covers those.
+      if (funcType.rest === true && funcType.restAbi !== "jsval") {
+        params.push({ localId: "%pfrest", name: "%pfrest", type: DYN });
+      }
       const lifted: IrFunction = {
         name: fnName,
         params,
