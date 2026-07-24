@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -6158,6 +6158,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "url":
             // A URL crossing IN: an engine URL instance built from href.
             return E.fallibleTemp(e.type, `scr_jsval_from_url(${v.name})`);
+          case "promise": {
+            // A STATIC promise crossing IN: a real engine thenable
+            // settled when the scriptc promise settles (the async-
+            // callback return bridge). from_promise takes ownership of a
+            // +1 — retain past the borrowed frame temp.
+            const tag = islandPromisePayloadTag(e.value.type.inner);
+            if (!tag) throw new Error("emitter bug: jsMarshal of a promise outside the bridge payload domain");
+            const tagC = {
+              void: "SCR_ISLP_VOID", f64: "SCR_ISLP_F64", bool: "SCR_ISLP_BOOL",
+              string: "SCR_ISLP_STR", jsval: "SCR_ISLP_JSVAL", jsvalArr: "SCR_ISLP_JSVAL_ARR",
+            }[tag];
+            return E.fallibleTemp(e.type, `scr_jsval_from_promise(scr_promise_retain(${v.name}), ${tagC})`);
+          }
           case "func": {
             // A closure entering the island as a host function (the
             // package-callback pattern). from_closure retains the closure;

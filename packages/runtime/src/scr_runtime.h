@@ -4040,6 +4040,11 @@ enum {
   SCR_ISLP_BOOL = 2,
   SCR_ISLP_STR = 3,
   SCR_ISLP_JSVAL = 4,
+  /* Promise<any[]> — the fulfillment is a native array of engine cells
+   * (the jsval-element-array spelling): it re-enters the engine as a
+   * fresh engine array whose ELEMENTS are the same engine values (the
+   * loadPlugins shape: identity crosses, the spine is a copy). */
+  SCR_ISLP_JSVAL_ARR = 5,
 };
 
 /* Wrap a scriptc promise as an ENGINE promise (async callbacks crossing

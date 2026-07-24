@@ -2006,11 +2006,13 @@ static void isl_prom_wrap_entry(ScrFiber *self, void *arg) {
   bool b = false;
   ScrStr *s = NULL;
   ScrJsval *j = NULL;
+  ScrArr *ja = NULL;
   switch (w->payload) {
   case SCR_ISLP_F64: f = scr_await_f64(w->p); break;
   case SCR_ISLP_BOOL: b = scr_await_bool(w->p); break;
   case SCR_ISLP_STR: s = scr_await_str(w->p); break;
   case SCR_ISLP_JSVAL: j = (ScrJsval *)scr_await_ref(w->p); break;
+  case SCR_ISLP_JSVAL_ARR: ja = (ScrArr *)scr_await_ref(w->p); break;
   default: scr_await_void(w->p); break;
   }
   bool rejected = scr_exc_pending();
@@ -2024,11 +2026,26 @@ static void isl_prom_wrap_entry(ScrFiber *self, void *arg) {
     case SCR_ISLP_BOOL: v = JS_NewBool(isl_ctx, b); break;
     case SCR_ISLP_STR: v = s ? JS_NewStringLen(isl_ctx, s->data, s->len) : JS_UNDEFINED; break;
     case SCR_ISLP_JSVAL: v = j ? JS_DupValue(isl_ctx, j->v) : JS_UNDEFINED; break;
+    case SCR_ISLP_JSVAL_ARR:
+      /* A native array of engine cells fulfills: a fresh engine array
+       * over the SAME engine values (identity crosses, spine a copy). */
+      if (ja) {
+        v = JS_NewArray(isl_ctx);
+        for (size_t i = 0; i < ja->len; i++) {
+          ScrJsval *cell = (ScrJsval *)scr_arr_get_ref(ja, (double)i); /* +1 */
+          JS_SetPropertyUint32(isl_ctx, v, (uint32_t)i, JS_DupValue(isl_ctx, cell->v));
+          scr_jsval_release(cell);
+        }
+      } else {
+        v = JS_UNDEFINED;
+      }
+      break;
     default: v = JS_UNDEFINED; break;
     }
   }
   if (s) scr_str_release(s);
   if (j) scr_jsval_release(j);
+  if (ja) scr_arr_release(ja);
   JSValue r = JS_Call(isl_ctx, rejected ? w->reject : w->resolve, JS_UNDEFINED, 1, &v);
   JS_FreeValue(isl_ctx, v);
   if (JS_IsException(r)) {

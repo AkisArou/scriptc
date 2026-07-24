@@ -5257,6 +5257,25 @@ export function canMarshalIntoIsland(
  * null and data ride the round trip into the union's dynCheck. The
  * package-API shape `result.headers` : `Record<string, string> |
  * undefined` is the motivating case. */
+/** The static-promise→engine bridge's payload domain: the fulfillment
+ * types a scriptc promise may deliver INTO the island as a real engine
+ * thenable (scr_jsval_from_promise — the async-callback return bridge,
+ * reused by promise VALUES crossing at jsvalIn edges and the island
+ * Promise.all arm). Null = outside the domain (the boundary fence). */
+export function islandPromisePayloadTag(
+  inner: IrType,
+): "void" | "f64" | "bool" | "string" | "jsval" | "jsvalArr" | null {
+  switch (inner.kind) {
+    case "void": return "void";
+    case "f64": return "f64";
+    case "bool": return "bool";
+    case "string": return "string";
+    case "jsval": return "jsval";
+    case "array": return inner.elem.kind === "jsval" ? "jsvalArr" : null;
+    default: return null;
+  }
+}
+
 export function canExitIslandToType(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,

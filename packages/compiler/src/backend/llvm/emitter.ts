@@ -72,7 +72,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -6285,6 +6285,24 @@ class LlEmitter {
       case "url":
         // A URL crossing IN: an engine URL instance built from href.
         return simple("scr_jsval_from_url", "ptr", true);
+      case "promise": {
+        // A STATIC promise crossing IN: a real engine thenable settled
+        // when the scriptc promise settles (the async-callback return
+        // bridge). from_promise takes ownership of a +1 — retain past
+        // the borrowed frame temp. The C emitter's rule, mirrored.
+        const tag = islandPromisePayloadTag(e.value.type.inner);
+        if (!tag) throw new Error("llvm emitter bug: jsMarshal of a promise outside the bridge payload domain");
+        const tagN = { void: 0, f64: 1, bool: 2, string: 3, jsval: 4, jsvalArr: 5 }[tag];
+        this.declare(`declare ptr @scr_promise_retain(ptr)`);
+        this.declare(`declare ptr @scr_jsval_from_promise(ptr, i32)`);
+        const pr = B.tmp();
+        B.line(`${pr} = call ptr @scr_promise_retain(ptr ${v.name})`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_jsval_from_promise(ptr ${pr}, i32 ${tagN})`);
+        const out = this.own({ name: t, type: e.type });
+        this.emitPendingCheck();
+        return out;
+      }
       case "func": {
         // A closure entering the island as a host function: from_closure
         // retains it; the engine's finalizer releases it at teardown. The

@@ -5,7 +5,7 @@
 import { builtinModules } from "node:module";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { dynUndefinedExpr, ladderFenceExpr, nodeThrowExpr, own } from "./lowerer.js";
+import { PoisonError, dynUndefinedExpr, ladderFenceExpr, nodeThrowExpr, own } from "./lowerer.js";
 import { canonicalBuiltinModule, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
 import {
   BuiltinModuleFn,
@@ -6113,6 +6113,39 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
             inner: first.inner.kind === "void" ? VOID : arrayOf(first.inner),
           };
           return { kind: "intrinsic", name: "promise.all", args: [entriesArr], type: resultT, loc };
+        }
+        // MIXED entries where some entry is already an ISLAND value (the
+        // withPlugins shape: Promise.all([loadBuiltinPlugins(),
+        // loadPlugins(plugins)]) with an 'any'-typed loader): the
+        // ENGINE's own Promise.all runs — island entries pass through,
+        // STATIC promises cross as real engine thenables (the reverse
+        // bridge, payload-domain gated), plain values marshal per the
+        // boundary — and the combined result stays an island value
+        // (awaiting it rides the island→static promise bridge; element
+        // reads are the routed keyed ops). All-static tuples keep the
+        // typed fence hint below. --dynamic only by construction: jsval
+        // entries exist only there.
+        if (elems.some((e) => e.type.kind === "jsval")) {
+          const diagsBefore = L.diags.length;
+          try {
+            const marshaled = argNode.elements.map((el, i) => L.jsvalIn(elems[i]!, el));
+            return {
+              kind: "jsOp",
+              op: "callMethod",
+              name: "all",
+              args: [
+                { kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc },
+                { kind: "jsOp", op: "arrLit", args: marshaled, type: JSVAL, loc },
+              ],
+              type: JSVAL,
+              loc,
+            };
+          } catch (err) {
+            // An entry outside every crossing domain: drop the boundary
+            // diagnostics and let the shape fence below name the fix.
+            if (!(err instanceof PoisonError)) throw err;
+            L.diags.splice(diagsBefore);
+          }
         }
         L.noLowering(
           "Promise.all over this argument shape",
