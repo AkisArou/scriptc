@@ -92,6 +92,7 @@ import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } fro
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction } from "./lower-calls.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
+import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
 import { builtinImportOf, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
 import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
 import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty } from "./lower-server.js";
@@ -829,6 +830,13 @@ export class Lowerer {
   /** Synthetic array-HOF loop functions (map/filter/forEach desugar),
    * interned per method + element/callback-result type: key → fn name. */
   readonly arrHofHelpers = new Map<string, string>();
+  /** Emit-override specializations (`%C.emit:<event>` — lower-emitter.ts's
+   * emit-overrides block): interned names, the drive-loop queue, and the
+   * currently-lowering specialization's context (the super-forward
+   * interception reads it). */
+  readonly emitSpecDone = new Set<string>();
+  readonly emitSpecQueue: EmitSpecRequest[] = [];
+  emitSpecCtx: EmitSpecCtx | null = null;
   /** Width-coercion helpers (%rec.width.N / %arr.width.N), interned per
    * (from, to) shape pair — see widthCoerce. */
   readonly widthHelpers = new Map<string, string>();
@@ -1644,10 +1652,12 @@ export class Lowerer {
       let ec = 0;
       let gc = 0;
       let gi = 0;
+      let es = 0;
       while (
         ec < this.exprClasses.length ||
         gc < this.genericClassInstances.length ||
-        gi < this.instantiationQueue.length
+        gi < this.instantiationQueue.length ||
+        es < this.emitSpecQueue.length
       ) {
         while (ec < this.exprClasses.length) {
           functions.push(...this.lowerClassMembers(this.exprClasses[ec++]!));
@@ -1663,6 +1673,17 @@ export class Lowerer {
           // like a signature-blocked function (lowerFunction's rule).
           try {
             functions.push(this.lowerGenericInstance(info, inst));
+          } catch (e) {
+            if (!(e instanceof PoisonError)) throw e;
+          }
+        }
+        // Emit-override specializations queued by the emit sites above (a
+        // body can queue more — the super-forward chain — and generic
+        // instances of its own; the joint fixpoint covers both).
+        while (es < this.emitSpecQueue.length) {
+          try {
+            const fn = lowerEmitOverrideSpec(this, this.emitSpecQueue[es++]!);
+            if (fn) functions.push(fn);
           } catch (e) {
             if (!(e instanceof PoisonError)) throw e;
           }
@@ -1974,10 +1995,12 @@ export class Lowerer {
     // the joint fixpoint).
     let instLowered = 0;
     let clsInstLowered = 0;
+    let specLowered = 0;
     const drainInstances = (): void => {
       while (
         instLowered < this.instantiationQueue.length ||
-        clsInstLowered < this.genericClassInstances.length
+        clsInstLowered < this.genericClassInstances.length ||
+        specLowered < this.emitSpecQueue.length
       ) {
         while (instLowered < this.instantiationQueue.length) {
           const { info, inst } = this.instantiationQueue[instLowered++]!;
@@ -1992,6 +2015,16 @@ export class Lowerer {
         }
         while (clsInstLowered < this.genericClassInstances.length) {
           this.lowerClassMembers(this.genericClassInstances[clsInstLowered++]!);
+        }
+        // Emit-override specialization bodies fire edges of their own
+        // (the super-forward chain, closures, generic calls) — lower them
+        // for discovery exactly like generic instances.
+        while (specLowered < this.emitSpecQueue.length) {
+          try {
+            lowerEmitOverrideSpec(this, this.emitSpecQueue[specLowered++]!);
+          } catch (e) {
+            if (!(e instanceof PoisonError)) throw e;
+          }
         }
       }
     };
