@@ -959,6 +959,12 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
     if (!sym || !L.isStdlibSymbol(sym)) return;
     const member = access.name.text;
     const recv = access.expression;
+    // A CHECKED-DYNAMIC receiver whose checker type is a concrete stdlib
+    // class mapped to dyn (the http Agent handle): its members dispatch
+    // at runtime through the DOM/handle machinery — the keyed-read claim
+    // below this fence answers, member-or-loud-ladder, so no compile
+    // fence belongs here.
+    if (L.mapTypeOf(L.typeOf(recv))?.kind === "dyn") return;
     // Name the container the way the source reads: the global's name when
     // the receiver IS a stdlib global (Math, process), the dotted path for
     // a member of one (process.stdout — its TYPE text would be the useless

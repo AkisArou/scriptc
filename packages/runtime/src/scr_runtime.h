@@ -4420,9 +4420,9 @@ void scr_net_sock_destroy(ScrNetSocket *s);
  * FIN-flushed destroy (destroySoon), TCP_NODELAY, the deferred write/
  * finish callbacks (write(chunk, cb) / end(cb) — sweep-fired), and the
  * counters/flags the compat surface reads. */
-void scr_net_sock_pause(ScrNetSocket *s);
-void scr_net_sock_resume(ScrNetSocket *s);
-void scr_net_sock_set_nodelay(ScrNetSocket *s, bool enable);
+ScrNetSocket *scr_net_sock_pause(ScrNetSocket *s);            /* +1: chaining */
+ScrNetSocket *scr_net_sock_resume(ScrNetSocket *s);           /* +1: chaining */
+ScrNetSocket *scr_net_sock_set_nodelay(ScrNetSocket *s, bool enable); /* +1: chaining */
 void scr_net_sock_destroy_soon(ScrNetSocket *s);
 void scr_net_sock_on_finish(ScrNetSocket *s, ScrClosure *cb /*moves*/);
 void scr_net_sock_on_write_flush(ScrNetSocket *s, ScrClosure *cb /*moves*/);

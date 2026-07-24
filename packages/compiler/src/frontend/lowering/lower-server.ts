@@ -1271,6 +1271,40 @@ function lowerNetSocketMethodCall(L: Lowerer, call: ts.CallExpression,
     const ms = L.lowerExprExpecting(args[0]!, F64);
     return { kind: "libCall", fn: "net.sockSetTimeout", args: [receiver, ms], type: VOID, loc };
   }
+  if (name === "pause" || name === "resume") {
+    // Flow control (the struct's flag comments in scr_net.c): pause holds
+    // reads off — kernel/TCP backpressure is the buffer; resume flows
+    // (and discards sans listeners, so 'end' is reachable). Both answer
+    // the socket, Node's chaining.
+    if (args.length !== 0) {
+      L.noLowering(`${name} with ${args.length} arguments`, call, `the form is ${name}()`);
+    }
+    const receiver = handleReceiver(L, access.expression, NETSOCKET_T);
+    const fn: IrLibFn = name === "pause" ? "net.sockPause" : "net.sockResume";
+    return { kind: "libCall", fn, args: [receiver], type: NETSOCKET_T, loc };
+  }
+  if (name === "setNoDelay") {
+    // TCP_NODELAY on the live fd; missing/undefined means true (Node).
+    // Answers the socket, Node's chaining.
+    if (args.length > 1) {
+      L.noLowering(`setNoDelay with ${args.length} arguments`, call, "the form is setNoDelay(noDelay?)");
+    }
+    const receiver = handleReceiver(L, access.expression, NETSOCKET_T);
+    const enable: IrExpr = args.length === 1
+      ? L.lowerExprExpecting(args[0]!, BOOL)
+      : boolLit(true, loc);
+    return { kind: "libCall", fn: "net.sockSetNoDelay", args: [receiver, enable], type: NETSOCKET_T, loc };
+  }
+  if (name === "destroySoon") {
+    // end() now, destroy once the FIN actually flushed — Node's
+    // 'finish'-then-destroy.
+    requireStatementPosition(L, call, "socket.destroySoon()");
+    if (args.length !== 0) {
+      L.noLowering(`destroySoon with ${args.length} arguments`, call, "the form is destroySoon()");
+    }
+    const receiver = handleReceiver(L, access.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockDestroySoon", args: [receiver], type: VOID, loc };
+  }
   if (name === "read") {
     // socket.read(n?) — the demux peek. Answers the interned
     // `Buffer | null` union: exactly n buffered bytes, or null (Node's
@@ -1356,6 +1390,12 @@ function lowerNetSocketMethodCall(L: Lowerer, call: ts.CallExpression,
         : event === "readable" ? "net.sockOnReadable"
         : "net.sockOnConnect";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
+    }
+    if (event === "finish") {
+      // Fires once when the FIN goes out — once either way (the event
+      // happens at most once per socket).
+      const { cb } = lowerCallbackArg(L, args[1]!, "finish listeners", 0, () => false, "use ()", []);
+      return { kind: "libCall", fn: "net.sockOnFinish", args: [receiver, cb], type: VOID, loc };
     }
     if (event === "secureConnect") {
       // The TLS client's post-handshake event: on a TLS socket the
@@ -1873,6 +1913,17 @@ export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpressio
     // proxy's "may I still answer 502" guard.
     const receiver = handleReceiver(L, expr.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "net.sockWritable", args: [receiver], type: BOOL, loc };
+  }
+  if (recvKind === "netSocket" && L.isStdlibMember(expr) && expr.name.text === "bytesWritten") {
+    // Every byte the write paths accepted (buffered included — Node
+    // counts those too; plaintext on TLS sockets).
+    const receiver = handleReceiver(L, expr.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockBytesWritten", args: [receiver], type: F64, loc };
+  }
+  if (recvKind === "netSocket" && L.isStdlibMember(expr) && expr.name.text === "readable") {
+    // true until the read half is done (peer FIN / destroy).
+    const receiver = handleReceiver(L, expr.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockReadable", args: [receiver], type: BOOL, loc };
   }
   if (recvKind === "netSocket" && L.isStdlibMember(expr) && expr.name.text === "remoteAddress") {
     // `string | undefined` — Node's read-time caching: a value read while

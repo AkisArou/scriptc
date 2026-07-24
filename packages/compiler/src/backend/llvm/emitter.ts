@@ -550,6 +550,12 @@ const LIB_FN_SYMS: Record<string, string> = {
   "net.sockSetEncoding": "scr_net_sock_set_encoding",
   "net.sockSetTimeout": "scr_net_sock_set_timeout",
   "net.sockUnshift": "scr_net_sock_unshift_bytes",
+  "net.sockPause": "scr_net_sock_pause",
+  "net.sockResume": "scr_net_sock_resume",
+  "net.sockSetNoDelay": "scr_net_sock_set_nodelay",
+  "net.sockDestroySoon": "scr_net_sock_destroy_soon",
+  "net.sockBytesWritten": "scr_net_sock_bytes_written",
+  "net.sockReadable": "scr_net_sock_readable",
   "net.sockPipeRes": "scr_http_sock_pipe_res",
   "net.serverEmitConnection": "scr_net_server_emit_connection",
   "net.getAutoSelTimeout": "scr_net_get_autosel_timeout",
@@ -10880,6 +10886,13 @@ class LlEmitter {
       this.moveTemp(args[1]!);
       this.declare(`declare void @scr_http_res_on_finish(ptr, ptr)`);
       B.line(`call void @scr_http_res_on_finish(ptr ${args[0]!.name}, ptr ${args[1]!.name})`);
+      return { name: "", type: e.type };
+    }
+    if (e.fn === "net.sockOnFinish") {
+      const args = e.args.map((a) => this.emitExpr(a));
+      this.moveTemp(args[1]!);
+      this.declare(`declare void @scr_net_sock_on_finish(ptr, ptr)`);
+      B.line(`call void @scr_net_sock_on_finish(ptr ${args[0]!.name}, ptr ${args[1]!.name})`);
       return { name: "", type: e.type };
     }
     if (e.fn === "island.castFail") {

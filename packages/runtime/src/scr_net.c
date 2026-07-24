@@ -1850,29 +1850,36 @@ void scr_net_sock_end_bytes(ScrNetSocket *s, ScrBytes *data /*borrowed*/) {
 
 /* socket.pause(): reads stay off — the kernel buffer (and TCP flow
  * control) holds arrived bytes, the honest pause. Delivery restarts on
- * resume(), always from the poller/sweep, never this stack. */
-void scr_net_sock_pause(ScrNetSocket *s) {
+ * resume(), always from the poller/sweep, never this stack. Answers the
+ * socket (+1) — Node's chaining. */
+ScrNetSocket *scr_net_sock_pause(ScrNetSocket *s) {
   s->user_paused = true;
   scr_net_sock_update_read(s);
+  return scr_net_sock_retain(s);
 }
 
 /* socket.resume(): flowing mode — a consumer even with no 'data'
  * listener (arrived bytes discard, so 'end' can be reached, Node's
  * resumed-but-unconsumed stream). Buffered bytes deliver from the next
- * sweep (flags_pending sees the flowing consumer), not this stack. */
-void scr_net_sock_resume(ScrNetSocket *s) {
+ * sweep (flags_pending sees the flowing consumer), not this stack.
+ * Answers the socket (+1) — Node's chaining. */
+ScrNetSocket *scr_net_sock_resume(ScrNetSocket *s) {
   s->user_paused = false;
   s->flowing = true;
   scr_net_sock_update_read(s);
+  return scr_net_sock_retain(s);
 }
 
 /* socket.setNoDelay(enable): TCP_NODELAY on the live fd (client dials
  * already set it — Node's default there is off, a documented divergence
- * in the dial path; this call makes the state explicit either way). */
-void scr_net_sock_set_nodelay(ScrNetSocket *s, bool enable) {
-  if (s->fd < 0) return;
-  int v = enable ? 1 : 0;
-  setsockopt(s->fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof v);
+ * in the dial path; this call makes the state explicit either way).
+ * Answers the socket (+1) — Node's chaining. */
+ScrNetSocket *scr_net_sock_set_nodelay(ScrNetSocket *s, bool enable) {
+  if (s->fd >= 0) {
+    int v = enable ? 1 : 0;
+    setsockopt(s->fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof v);
+  }
+  return scr_net_sock_retain(s);
 }
 
 /* socket.destroySoon(): end the write half now, destroy once the FIN is
@@ -2822,17 +2829,17 @@ static ScrDyn *scr_net_dynh_sock_invoke(void *h, ScrDyn *self, const char *metho
     return scr_dyn_retain(self);
   }
   if (strcmp(method, "pause") == 0) {
-    scr_net_sock_pause(s);
+    scr_net_sock_release(scr_net_sock_pause(s)); /* the chaining +1; self answers */
     return scr_dyn_retain(self);
   }
   if (strcmp(method, "resume") == 0) {
-    scr_net_sock_resume(s);
+    scr_net_sock_release(scr_net_sock_resume(s));
     return scr_dyn_retain(self);
   }
   if (strcmp(method, "setNoDelay") == 0) {
     /* setNoDelay([enable]) — missing/undefined means true, Node */
     bool enable = argc == 0 || args[0]->kind == SCR_DYN_UNDEF || scr_dyn_truthy(args[0]);
-    scr_net_sock_set_nodelay(s, enable);
+    scr_net_sock_release(scr_net_sock_set_nodelay(s, enable));
     return scr_dyn_retain(self);
   }
   if (strcmp(method, "destroySoon") == 0) {

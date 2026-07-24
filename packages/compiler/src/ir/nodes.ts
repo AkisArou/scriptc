@@ -2221,6 +2221,21 @@ export type IrLibFn =
   | "net.sockOnReadable"
   | "net.sockRead"
   | "net.sockUnshift"
+  /** Socket flow control and the compat surface: pause/resume (reads
+   * gate off/on — kernel backpressure holds paused bytes; resume flows
+   * and discards sans listeners) and setNoDelay answer the SOCKET (+1,
+   * Node's chaining); destroySoon ends now and destroys once the FIN
+   * flushed; bytesWritten counts accepted bytes; readable is true until
+   * the read half ends. */
+  | "net.sockPause"
+  | "net.sockResume"
+  | "net.sockSetNoDelay"
+  | "net.sockDestroySoon"
+  | "net.sockBytesWritten"
+  | "net.sockReadable"
+  /** socket.on('finish', cb) / end(cb): fires once when the FIN goes out
+   * (sweep-deferred, never the registering stack). */
+  | "net.sockOnFinish"
   | "net.serverEmitConnection"
   /** node:http, the CLIENT slice (http.request/http.get over the net
    * client machinery): request/requestCb take (host, port, path, method,
@@ -4844,6 +4859,7 @@ export const DYN_HANDLE_KINDS: ReadonlyMap<string, { tag: string; cls: string }>
   ["netServer", { tag: "SCR_DYNH_NET_SERVER", cls: "Server" }],
   ["http2Session", { tag: "SCR_DYNH_H2_SESSION", cls: "Http2Session" }],
   ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", cls: "Http2Stream" }],
+  ["httpClientReq", { tag: "SCR_DYNH_HTTP_CLIENT", cls: "ClientRequest" }],
 ]);
 
 /** A static type that CONVERTS into a dyn DOM value — the dynFrom domain:

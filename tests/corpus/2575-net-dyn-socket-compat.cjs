@@ -43,7 +43,8 @@ server.listen(0, wrap(function () {
     console.log('client got:', JSON.stringify(got), 'readable:', c.readable);
     const dyn = wrap(function (b) { return b; });
     const buf = dyn(Buffer.from('abc\n'));
-    console.log('at(-1):', buf.at(-1), 'slice:', buf.slice(0, 3).toString('utf8'));
+    const piece = buf.slice(0, 3);
+    console.log('at(-1):', buf.at(-1), 'slice:', piece.length, piece[0], piece[2]);
     c.destroySoon();
   }));
   c.on('close', wrap(function () {

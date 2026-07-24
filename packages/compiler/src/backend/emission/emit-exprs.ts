@@ -3095,6 +3095,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "net.sockDestroy":
             E.line(`scr_net_sock_destroy(${arg(0)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
+          case "net.sockPause":
+            return finish(`scr_net_sock_pause(${arg(0)})`);
+          case "net.sockResume":
+            return finish(`scr_net_sock_resume(${arg(0)})`);
+          case "net.sockSetNoDelay":
+            return finish(`scr_net_sock_set_nodelay(${arg(0)}, ${arg(1)})`);
+          case "net.sockDestroySoon":
+            E.line(`scr_net_sock_destroy_soon(${arg(0)});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          case "net.sockBytesWritten":
+            return finish(`scr_net_sock_bytes_written(${arg(0)})`);
+          case "net.sockReadable":
+            return finish(`scr_net_sock_readable(${arg(0)})`);
+          case "net.sockOnFinish": {
+            const cb = args[1]!;
+            E.moveTemp(cb);
+            E.line(`scr_net_sock_on_finish(${arg(0)}, ${cb.name});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          }
           case "net.sockPipe":
             E.line(`scr_net_sock_pipe(${arg(0)}, ${arg(1)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };

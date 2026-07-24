@@ -471,6 +471,13 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // placeholder the special case overrides).
   "net.sockRead": { argTypes: [NETSOCKET_T, F64], result: VOID },
   "net.sockUnshift": { argTypes: [NETSOCKET_T, BYTES_U8], result: VOID },
+  "net.sockPause": { argTypes: [NETSOCKET_T], result: NETSOCKET_T },
+  "net.sockResume": { argTypes: [NETSOCKET_T], result: NETSOCKET_T },
+  "net.sockSetNoDelay": { argTypes: [NETSOCKET_T, BOOL], result: NETSOCKET_T },
+  "net.sockDestroySoon": { argTypes: [NETSOCKET_T], result: VOID },
+  "net.sockBytesWritten": { argTypes: [NETSOCKET_T], result: F64 },
+  "net.sockReadable": { argTypes: [NETSOCKET_T], result: BOOL },
+  "net.sockOnFinish": { argTypes: [NETSOCKET_T, { kind: "func", params: [], ret: VOID }], result: VOID },
   "net.serverEmitConnection": { argTypes: [NETSERVER_T, NETSOCKET_T], result: VOID },
   // tls/https: cert/key/ca PEM arguments are strings OR Buffers (null =
   // both accepted; the emitter passes data+len either way).
@@ -1532,7 +1539,10 @@ function validateFunction(
             // Symbol identity IS pointer identity (the frontend's rule).
             e.left.type.kind === "symbol" ||
             e.left.type.kind === "bytes" ||
-            e.left.type.kind === "promise")
+            e.left.type.kind === "promise" ||
+            // Runtime handles are objects to === (one handle per socket/
+            // request — pointer identity is JS's object equality).
+            DYN_HANDLE_KINDS.has(e.left.type.kind))
         ) {
           // Reference identity: both operands must be the same ref type.
           if (!typeEquals(e.left.type, e.right.type)) {
