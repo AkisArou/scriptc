@@ -161,8 +161,20 @@ describe("library profile validation", () => {
       { ...good, exports: [{ ...good.exports[0], param: [] }] },
       "unknown field 'exports[0].param'",
     ));
-  test("unknown top-level fields are reserved surface, ignored", () => {
-    const r = loadLibraryProfile(writeProfile({ ...good, determinism: { deny: ["Math.random"] }, contract: {} }));
+  test("unknown root fields refuse — the strict root (anti-inert posture)", () => {
+    expectSc4001({ ...good, contract: {} }, "unknown field 'contract'");
+    expectSc4001({ ...good, exporst: [] }, "unknown field 'exporst'");
+  });
+  test("the ask-5 keys at the root refuse with a pointer to their determinism.* home", () => {
+    expectSc4001(
+      { ...good, fences: [{ id: "stdlib.math.random" }] },
+      "the ask-5 determinism surface lives under 'determinism.fences'",
+    );
+    expectSc4001({ ...good, teachings: { SC4005: "x" } }, "'determinism.teachings'");
+    expectSc4001({ ...good, remediations: { SC4012: "x" } }, "'determinism.remediations'");
+  });
+  test("unknown keys INSIDE determinism stay reserved surface, ignored", () => {
+    const r = loadLibraryProfile(writeProfile({ ...good, determinism: { deny: ["Math.random"] } }));
     expect(r.ok).toBe(true);
   });
   test("duplicate symbols", () =>
