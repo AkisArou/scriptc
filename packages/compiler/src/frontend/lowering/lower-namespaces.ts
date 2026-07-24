@@ -38,6 +38,7 @@
  * calls). */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
+import { boundIdentifiersOf } from "./lowerer.js";
 import type { FileParts } from "./lower-modules.js";
 import { locOf, resolveImport } from "../program.js";
 import { F64, IrExpr, IrStmt, IrType, STRING } from "../../ir/nodes.js";
@@ -370,19 +371,113 @@ export function ambientUndefVarRootOf(L: Lowerer, e: ts.Expression): ts.Identifi
     break;
   }
   if (!ts.isIdentifier(root)) return null;
-  const sym = L.resolveValueSymbol(root);
-  if (!sym) return null;
-  if (L.trapBindings.has(sym)) return root;
-  if (L.isStdlibSymbol(sym)) return null;
-  if (ambientUndefinedFnSymbolOf(L, root) !== null) return root;
-  const decls = L.checker.declarationsOf(sym);
-  if (decls.length === 0) return null;
-  for (const d of decls) {
-    if (!ts.isVariableDeclaration(d) || d.initializer !== undefined) return null;
-    if (d.getSourceFile().isDeclarationFile) return null; // lib/@types keep their own fences
-    if (!(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient)) return null;
+  // PROBE resolution: every caller asks "is this chain ambient-rooted?"
+  // and proceeds to its ordinary lowering on a null answer — so the
+  // question must not carry resolution's side effects. Bare
+  // resolveValueSymbol flushes the root's DEFERRED collection
+  // diagnostics onto the build (reached-only-by-the-probe declarations
+  // reported eagerly — collectGlobals runs this walk on every
+  // initializer) and throws the cross-block merged-namespace fence's
+  // PoisonError out of collection entirely. The collect-phase guard
+  // suppresses both; the ordinary lowering that follows a null answer
+  // re-resolves with full effects at its own site.
+  const wasCollecting = L.collecting;
+  L.collecting = true;
+  try {
+    const sym = L.resolveValueSymbol(root);
+    if (!sym) return null;
+    if (L.trapBindings.has(sym)) return root;
+    if (L.isStdlibSymbol(sym)) return null;
+    if (ambientUndefinedFnSymbolOf(L, root) !== null) return root;
+    const decls = L.checker.declarationsOf(sym);
+    if (decls.length === 0) return null;
+    for (const d of decls) {
+      if (!ts.isVariableDeclaration(d) || d.initializer !== undefined) return null;
+      if (d.getSourceFile().isDeclarationFile) return null; // lib/@types keep their own fences
+      if (!(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient)) return null;
+    }
+    return root;
+  } finally {
+    L.collecting = wasCollecting;
+  }
+}
+
+/** The declaration-classification form of ambientUndefVarRootOf: the root
+ * that makes `decl` a TRAP BINDING — its initializer provably throws the
+ * root's ReferenceError, so the binding never holds a value and needs no
+ * storage — with the storage question answered honestly: a binding the
+ * program WRITES anywhere keeps ordinary storage instead, because the
+ * no-storage stance would fence every write site ("assignment to 'x'
+ * (not a writable local or module global)") where the ordinary lowering
+ * compiles them (`declare const numLiteral: 0; let t1 = numLiteral;
+ * t1 = t1 + 42` — the literal-widening corpus shape). The writes still
+ * never RUN either way — module init unwinds at the declaration's throw,
+ * which the initializer READ lowers to through the ordinary chain walk
+ * (lower-exprs) — so runtime semantics are identical; only the binding's
+ * storage story changes. */
+export function trapDeclRootOf(L: Lowerer, decl: ts.VariableDeclaration): ts.Identifier | null {
+  if (decl.initializer === undefined) return null;
+  const root = ambientUndefVarRootOf(L, decl.initializer);
+  if (root === null) return null;
+  for (const nameNode of boundIdentifiersOf(decl.name)) {
+    const sym = L.checker.getSymbolAtLocation(nameNode);
+    if (sym && bindingEverWritten(L, sym, decl.getSourceFile())) return null;
   }
   return root;
+}
+
+/** True when any identifier resolving to `sym` sits in a WRITE position in
+ * `sf` (module-scope bindings cannot be written from other modules — ESM
+ * imported bindings are read-only): an assignment LHS (compound forms
+ * included), a destructuring-assignment element, ++/--, or a bare
+ * for-in/of cursor. Resolution is plain getSymbolAtLocation — a probe
+ * must not flush deferred diagnostics or fence. */
+function bindingEverWritten(L: Lowerer, sym: ts.Symbol, sf: ts.SourceFile): boolean {
+  const symText = sym.name;
+  const namesSym = (e: ts.Node): boolean =>
+    ts.isIdentifier(e) && e.text === symText && L.checker.getSymbolAtLocation(e) === sym;
+  const patternWrites = (target: ts.Node): boolean => {
+    if (namesSym(target)) return true;
+    let hit = false;
+    const walk = (m: ts.Node): void => {
+      if (hit) return;
+      if (namesSym(m)) hit = true;
+      else m.forEachChild(walk);
+    };
+    target.forEachChild(walk);
+    return hit;
+  };
+  let written = false;
+  const visit = (n: ts.Node): void => {
+    if (written) return;
+    if (ts.isBinaryExpression(n)) {
+      const k = n.operatorToken.kind;
+      if (k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment) {
+        let lhs: ts.Expression = n.left;
+        while (ts.isParenthesizedExpression(lhs)) lhs = lhs.expression;
+        if (namesSym(lhs)) written = true;
+        else if (ts.isArrayLiteralExpression(lhs) || ts.isObjectLiteralExpression(lhs)) {
+          if (patternWrites(lhs)) written = true;
+        }
+      }
+    } else if (
+      (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+      (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      let op: ts.Expression = n.operand as ts.Expression;
+      while (ts.isParenthesizedExpression(op)) op = op.expression;
+      if (namesSym(op)) written = true;
+    } else if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) {
+      let t: ts.Node = n.initializer;
+      while (ts.isParenthesizedExpression(t as ts.Expression)) t = (t as ts.ParenthesizedExpression).expression;
+      if (namesSym(t) || ((ts.isArrayLiteralExpression(t) || ts.isObjectLiteralExpression(t)) && patternWrites(t))) {
+        written = true;
+      }
+    }
+    n.forEachChild(visit);
+  };
+  sf.forEachChild(visit);
+  return written;
 }
 
 /** ambientUndefReadType's CONTEXTUAL fallback: when the use site's own
