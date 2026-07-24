@@ -5018,12 +5018,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2625-bytes-views.ts": {
-   "order": [
-    "<repo>/tests/corpus/2625-bytes-views.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/2604-cycle-classes-mutual/main.ts": {
    "order": [
     "<repo>/tests/corpus/2604-cycle-classes-mutual/group.ts",
@@ -5041,27 +5035,9 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2626-stream-event-names.ts": {
-   "order": [
-    "<repo>/tests/corpus/2626-stream-event-names.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/2606-dynamic-import-cycle/main.ts": {
    "order": [
     "<repo>/tests/corpus/2606-dynamic-import-cycle/main.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/2627-stream-ticks-are-nextticks.ts": {
-   "order": [
-    "<repo>/tests/corpus/2627-stream-ticks-are-nextticks.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/2628-stream-push-encodings.cjs": {
-   "order": [
-    "<repo>/tests/corpus/2628-stream-push-encodings.cjs"
    ],
    "diags": []
   },
@@ -5086,6 +5062,37 @@
   "<repo>/tests/corpus/2611-regex-named-groups-js.cjs": {
    "order": [
     "<repo>/tests/corpus/2611-regex-named-groups-js.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2613-for-init-uninitialized-let.ts": {
+   "order": [
+    "<repo>/tests/corpus/2613-for-init-uninitialized-let.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2614-trap-binding-later-writes.ts": {
+   "order": [
+    "<repo>/tests/corpus/2614-trap-binding-later-writes.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2615-nullish-field-record-binding.ts": {
+   "order": [
+    "<repo>/tests/corpus/2615-nullish-field-record-binding.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2616-js-collect-probe-defers.js": {
+   "order": [
+    "<repo>/tests/corpus/2616-js-collect-probe-defers.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2617-enum-static-field-import/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2617-enum-static-field-import/a.ts",
+    "<repo>/tests/corpus/2617-enum-static-field-import/main.ts"
    ],
    "diags": []
   },
@@ -5128,6 +5135,48 @@
   "<repo>/tests/corpus/2624-ee-override-js.cjs": {
    "order": [
     "<repo>/tests/corpus/2624-ee-override-js.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2625-bytes-views.ts": {
+   "order": [
+    "<repo>/tests/corpus/2625-bytes-views.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2626-stream-event-names.ts": {
+   "order": [
+    "<repo>/tests/corpus/2626-stream-event-names.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2627-stream-ticks-are-nextticks.ts": {
+   "order": [
+    "<repo>/tests/corpus/2627-stream-ticks-are-nextticks.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2628-stream-push-encodings.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2628-stream-push-encodings.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2629-stream-consumers.ts": {
+   "order": [
+    "<repo>/tests/corpus/2629-stream-consumers.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2630-stream-consumers-errors.ts": {
+   "order": [
+    "<repo>/tests/corpus/2630-stream-consumers-errors.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2631-create-require/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2631-create-require/main.ts"
    ],
    "diags": []
   },
@@ -6653,7 +6702,7 @@
       "end": 41
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     }
    ]
   },
@@ -6766,6 +6815,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/merged-namespace-collect-probe.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/merged-namespace-collect-probe.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/mixed-compare.ts": {
    "order": [
     "<repo>/tests/diagnostics/mixed-compare.ts"
@@ -6865,7 +6920,7 @@
       "end": 391
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -6876,7 +6931,7 @@
       "end": 424
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -6887,7 +6942,7 @@
       "end": 468
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -6898,7 +6953,7 @@
       "end": 511
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -6909,7 +6964,7 @@
       "end": 550
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -6920,7 +6975,7 @@
       "end": 600
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     }
    ]
   },
@@ -7030,7 +7085,7 @@
       "end": 476
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -7041,7 +7096,7 @@
       "end": 415
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
      "code": "SC1010",
@@ -7052,7 +7107,7 @@
       "end": 448
      },
      "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     }
    ]
   },
@@ -7161,48 +7216,6 @@
   "<repo>/tests/diagnostics/var-fences.ts": {
    "order": [
     "<repo>/tests/diagnostics/var-fences.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/argv-env.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/argv-env.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/fenced.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/fenced.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/import-fences.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/import-fences.ts"
-   ],
-   "diags": [
-    {
-     "code": "SC1010",
-     "message": "the 'v8' module (it observes V8 engine internals — heap statistics and snapshots, GC and CPU profiles, serialize/deserialize — and a compiled binary embeds no V8 engine to observe) is not supported yet",
-     "loc": {
-      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
-      "start": 422,
-      "end": 461
-     },
-     "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
-    }
-   ]
-  },
-  "<repo>/tests/fixtures/node-types/path-os.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/path-os.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/stream-capture.ts"
    ],
    "diags": []
   },
@@ -7333,6 +7346,12 @@
   "<repo>/tests/fixtures/npm/cases/class-construct/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/class-construct/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/create-require/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/create-require/main.ts"
    ],
    "diags": []
   },
@@ -7621,6 +7640,48 @@
      "hint": "set \"strictNullChecks\": true (or \"strict\": true) in the project tsconfig"
     }
    ]
+  },
+  "<repo>/tests/fixtures/node-types/argv-env.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/argv-env.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/fenced.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/fenced.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/import-fences.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/import-fences.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC1010",
+     "message": "the 'v8' module (it observes V8 engine internals — heap statistics and snapshots, GC and CPU profiles, serialize/deserialize — and a compiled binary embeds no V8 engine to observe) is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
+      "start": 422,
+      "end": 461
+     },
+     "milestone": "M4",
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+    }
+   ]
+  },
+  "<repo>/tests/fixtures/node-types/path-os.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/path-os.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/stream-capture.ts"
+   ],
+   "diags": []
   }
  }
 }
