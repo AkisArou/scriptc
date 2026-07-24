@@ -34,7 +34,9 @@
  * vocabulary — u64 is the stricter compile-time obligation over the same
  * wire spelling), refuses paths that resolve to no plain number slot,
  * and emits `integer_slots` as the resolved-decision list, in profile
- * declaration order. The list is an ATTESTATION (schema §5's invariant):
+ * declaration order, each entry recording the DECLARED class ({i64, u64}
+ * — the flattening is TypeRef-only). The list is an ATTESTATION (schema
+ * §5's invariant):
  * compileLibrary runs the integer-boundary inference before writing any
  * artifact, so a sidecar carrying an entry means every value that can
  * reach that slot proved whole-in-range. Undeclared numeric slots keep
@@ -129,7 +131,7 @@ export interface SidecarDoc {
     env_msgs: { env: string; msg: string }[];
   };
   abi: { prefix: string; exports: string[]; snapshot_format: number };
-  integer_slots: { slot: string; class: "i64" }[];
+  integer_slots: { slot: string; class: "i64" | "u64" }[];
   deterministic: boolean;
   async_free: boolean;
 }
@@ -378,7 +380,7 @@ class Projector {
     for (const [slot, cls] of this.intDeclared) {
       if (!this.intConsumed.has(slot)) {
         throw new SidecarError(
-          `the profile declares integer slot '${slot}' (${cls}), but the projected contract has no number slot at that path (paths: 'Type.field', 'Union.arm', '<msg>.arm', '<msg>.arm.numberField', 'helpers.<name>.params[i]', 'helpers.<name>.return')`,
+          `the profile declares integer slot '${slot}' (${cls}), but the projected contract has no number slot at that path (paths: 'Type.field', 'Union.arm', '<msg>.arm', '<msg>.arm.numberField', 'helpers.<name>.params[i]', 'helpers.<name>.return'; a profile export's integer class is declared on its 'exports' entry — the C signature itself attests it, never integer_slots)`,
           this.entryLoc,
         );
       }
@@ -977,16 +979,27 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
       },
       abi: { prefix: profile.prefix, exports, snapshot_format: config.snapshotFormat },
       // Ask 4's resolved integer-class decisions, one entry per declared
-      // slot in profile declaration order, every one spelled i64 (the
-      // frozen format-1 vocabulary; a u64 declaration is the stricter
-      // compile-time obligation over the same wire spelling). The V10
+      // slot in profile declaration order, each recording the DECLARED
+      // class ({i64, u64} — the integer_slots vocabulary; only the
+      // TypeRef/descriptor spellings above flatten to i64, the frozen
+      // format-1 type vocabulary, because unsigned-ness is a
+      // boundary-slot refinement, not a type-table concept). The V10
       // bijection with the i64-spelled slots above holds by construction
       // (intify is the only i64 speller and checkIntConsumed just proved
       // every declaration was spelled). The list is an ATTESTATION: the
       // compiler refuses the build before writing any artifact when an
       // integer-slot proof fails, so a sidecar carrying these entries
-      // means every listed slot's obligations were discharged (§5).
-      integer_slots: config.integerSlots.map((e) => ({ slot: e.slot, class: "i64" as const })),
+      // means every listed slot's obligations — including u64's
+      // non-negative range — were discharged (§5). Profile-export
+      // param/return classes are deliberately ABSENT: integer_slots is
+      // the document-side complement (its entries mirror the document's
+      // own i64-spelled slots — V10), while an export's class is
+      // declared on the profile's exports entry and attested by the
+      // artifact's own C signature (int64_t/uint64_t) under the same
+      // prove-or-refuse gate; repeating it here would duplicate a fact
+      // the ABI already states and break the V10 bijection (abi.exports
+      // is a symbol list carrying no TypeRefs).
+      integer_slots: config.integerSlots.map((e) => ({ slot: e.slot, class: e.cls })),
       deterministic: input.deterministic,
       // Structural in library mode: the SC4005 gate refused any graph
       // reaching async/timer/event-loop surface before emission, so a

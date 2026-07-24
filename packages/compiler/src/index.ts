@@ -962,8 +962,10 @@ function libraryIntSlotConfig(profile: LibraryProfile): IntSlotConfig {
  * slots map onto every interned IR shape whose field-name set matches
  * the projected record's — shapes intern structurally, so a same-shaped
  * second type shares the obligation (a sound over-approximation). A
- * record fact that matches no shape binds nothing: the program never
- * constructs the type, and the attestation holds vacuously. */
+ * record fact that matches no shape binds nothing: no compiled code
+ * constructs the type (the contract surface — init/update/subscriptions
+ * and every helper — is force-lowered whenever integer slots are
+ * declared, so this is genuine vacuity, not dead-stripping). */
 function mergeSidecarIntSlots(cfg: IntSlotConfig, facts: SidecarIntegerSlotFacts, mod: IrModule): IntSlotConfig {
   for (const h of facts.helpers) {
     const fn = mod.functions.find((f) => f.name === h.fnName);
@@ -1072,6 +1074,31 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       );
     }
     if (fe.preflight.length > 0) return fail(fe.preflight);
+    contractFacts = profile.sidecar !== null ? fe.entryContract() : null;
+    // Ask 4, contract-surface reachability: when the sidecar declares ANY
+    // integer slot, the designated init/update/subscriptions exports and
+    // every contract helper (model-first exported function) seed lowering
+    // too. They are attested surface — a declared record-field or msg-arm
+    // class obligates EVERY write those bodies perform, and a declared
+    // helper param is checked at their internal call sites — so the
+    // attestation must cover COMPILED bodies, never a dead-stripped
+    // vacuity (the bug this closes: a model-slot declaration whose only
+    // writers were dead-stripped attested without any proof).
+    const contractSurfaceRoots: string[] = [];
+    if (profile.sidecar !== null && profile.sidecar.integerSlots.length > 0) {
+      const sc = profile.sidecar;
+      const fnNames = new Set(contractFacts!.functions.filter((f) => !f.generic).map((f) => f.name));
+      for (const name of [sc.initExport, sc.updateExport, sc.subscriptionsExport]) {
+        if (fnNames.has(name)) contractSurfaceRoots.push(name);
+      }
+      for (const fn of contractFacts!.functions) {
+        if (fn.generic) continue;
+        const first = fn.params[0];
+        if (first !== undefined && first.shape !== null && first.shape.k === "ref" && first.shape.name === sc.model) {
+          contractSurfaceRoots.push(fn.name);
+        }
+      }
+    }
     try {
       lowered = fe.lower({
         dynamic: false,
@@ -1083,10 +1110,13 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         // must cover a COMPILED body, never a dead-stripped vacuity — the
         // sidecar advertises the slot's class, so the proof must exist.
         libRoots: [
-          ...profile.exports.map((e) => e.export),
-          ...(profile.sidecar?.integerSlots ?? [])
-            .map((s) => /^helpers\.([^.]+)\.(?:params\[\d+\]|return)$/.exec(s.slot)?.[1])
-            .filter((n): n is string => n !== undefined),
+          ...new Set([
+            ...profile.exports.map((e) => e.export),
+            ...(profile.sidecar?.integerSlots ?? [])
+              .map((s) => /^helpers\.([^.]+)\.(?:params\[\d+\]|return)$/.exec(s.slot)?.[1])
+              .filter((n): n is string => n !== undefined),
+            ...contractSurfaceRoots,
+          ]),
         ],
       });
     } catch (e) {
@@ -1095,7 +1125,6 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     }
     if (lowered.module === null) return fail(lowered.diagnostics);
     entryInfo = fe.entryExports();
-    contractFacts = profile.sidecar !== null ? fe.entryContract() : null;
     entryText = fe.entryText();
     sourceTexts = fe.sourceTexts();
   } finally {

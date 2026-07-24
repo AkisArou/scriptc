@@ -160,12 +160,14 @@ export interface LibrarySidecarConfig {
    * path grammar (`Msg.count`, `Point.x`, `helpers.clamp.params[0]`,
    * `helpers.clamp.return`). Each named slot must resolve to a NUMBER
    * slot of the projected contract (refused at sidecar build otherwise),
-   * is spelled i64 in the emitted document (the frozen format-1 TypeRef
-   * vocabulary has no u64 — a u64 declaration is the stricter
-   * compile-time obligation over the same wire spelling), joins
-   * `integer_slots`, and obligates every program-side value that can
-   * reach it to the prove-or-refuse check. Empty when the profile
-   * declares none. */
+   * is spelled i64 in the emitted document's TypeRef/descriptor (the
+   * frozen format-1 type vocabulary has no u64 — unsigned-ness is a
+   * boundary-slot refinement, not a type-table concept), joins
+   * `integer_slots` with its DECLARED class ({i64, u64} — the u64
+   * declaration is the stricter obligation, and the attestation records
+   * the class whose proof was discharged), and obligates every
+   * program-side value that can reach it to the prove-or-refuse check.
+   * Empty when the profile declares none. */
   integerSlots: { slot: string; cls: "i64" | "u64" }[];
 }
 

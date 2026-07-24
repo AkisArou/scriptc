@@ -524,8 +524,9 @@ describe("ask-4 sidecar-declared slots", () => {
       types: { structs: { name: string; fields: { name: string; type: { kind: string } }[] }[] };
       model_helpers: { name: string; returns: { kind: string } }[];
     };
-    // The resolved-decision list, profile declaration order, every entry
-    // spelled i64 (the frozen format-1 vocabulary).
+    // The resolved-decision list, profile declaration order, each entry
+    // recording its DECLARED class (all i64 here; the TypeRef spellings
+    // below are the frozen format-1 vocabulary).
     expect(doc.integer_slots).toEqual([
       { slot: "Msg.count", class: "i64" },
       { slot: "Model.total", class: "i64" },
@@ -538,6 +539,73 @@ describe("ask-4 sidecar-declared slots", () => {
     expect(doc.model_helpers.find((h) => h.name === "clampIdx")!.returns).toEqual({ kind: "i64" });
     // The document conforms end to end (V10's bijection included).
     expect(validateSidecar(doc)).toEqual([]);
+  });
+
+  test("a u64 declaration attests u64; the TypeRef still spells i64", async () => {
+    // The attestation-level class: integer_slots records the DECLARED
+    // class in its own {i64, u64} vocabulary, while the frozen format-1
+    // TypeRef keeps spelling i64 (unsigned-ness is a boundary-slot
+    // refinement, not a type-table concept). The regression pinned here:
+    // u64 declarations used to flatten to i64 in the attestation itself,
+    // misstating the discharged proof's domain.
+    const r = await buildCase("sidecar-u64-attest", SIDECAR_ENTRY, sidecarProfile([{ slot: "Model.total", class: "u64" }]));
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+    if (!r.ok) return;
+    const doc = JSON.parse(readFileSync(r.sidecarPath!, "utf8")) as {
+      integer_slots: { slot: string; class: string }[];
+      types: { structs: { name: string; fields: { name: string; type: { kind: string } }[] }[] };
+    };
+    expect(doc.integer_slots).toEqual([{ slot: "Model.total", class: "u64" }]);
+    expect(doc.types.structs.find((s) => s.name === "Model")!.fields.find((f) => f.name === "total")!.type).toEqual({ kind: "i64" });
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+
+  test("an unproven update write into a declared model field refuses by slot path", async () => {
+    // The model-slot prove-or-refuse gate: a declared Model field class
+    // obligates every write the contract surface performs — init and
+    // update are force-lowered so their record constructions enter the
+    // boundary check (the regression pinned here: dead-stripped
+    // init/update bodies let an unprovable write attest).
+    const broken = SIDECAR_ENTRY.replace(
+      "export function update(m: Model, msg: Msg): Model { return m; }",
+      "export function update(m: Model, msg: Msg): Model { return { total: m.total * 0.5, label: m.label }; }",
+    );
+    const r = await buildCase("sidecar-refuse-model-update", broken, sidecarProfile([{ slot: "Model.total", class: "i64" }]));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.total'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+    expect(r.diagnostics[0]!.hint).toBeTruthy();
+  });
+
+  test("an unbounded counter increment into a declared model field refuses range", async () => {
+    // The read side of the declared-slot contract: m.total reads back
+    // whole-in-class-range (every write was checked), so the unguarded
+    // increment fails RANGE — the counter may leave ±(2^53 − 1) — never a
+    // spurious NaN complaint. A clamped increment proves (next test).
+    const broken = SIDECAR_ENTRY.replace(
+      "export function update(m: Model, msg: Msg): Model { return m; }",
+      "export function update(m: Model, msg: Msg): Model { return { total: m.total + 1, label: m.label }; }",
+    );
+    const r = await buildCase("sidecar-refuse-model-counter", broken, sidecarProfile([{ slot: "Model.total", class: "i64" }]));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4023"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.total'");
+    expect(r.diagnostics[0]!.message).toContain("range failed");
+  });
+
+  test("guarded model-field writes prove and the build attests them", async () => {
+    const guarded = SIDECAR_ENTRY.replace(
+      "export function update(m: Model, msg: Msg): Model { return m; }",
+      "export function update(m: Model, msg: Msg): Model { return { total: (m.total + 1) % 1000000, label: m.label }; }",
+    );
+    const r = await buildCase("sidecar-prove-model", guarded, sidecarProfile([{ slot: "Model.total", class: "u64" }]));
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+    if (!r.ok) return;
+    const doc = JSON.parse(readFileSync(r.sidecarPath!, "utf8")) as { integer_slots: { slot: string; class: string }[] };
+    expect(doc.integer_slots).toEqual([{ slot: "Model.total", class: "u64" }]);
   });
 
   test("an unproven write into a declared msg arm refuses by slot path", async () => {
