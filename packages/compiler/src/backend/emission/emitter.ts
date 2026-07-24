@@ -478,9 +478,10 @@ export class CEmitter {
           return this.tracedUnions.has(t.unionId);
         // A map is cycle-capable exactly when its VALUE type is: a record/
         // object/union value can hold the map that owns it, while string/
-        // array/scalar values cannot point back (array elements are fenced
-        // to kinds that cannot reach a map). Terminates: map values cannot
-        // be maps, and the record/union cases read the fixpoint sets.
+        // array/scalar values cannot point back. Map-valued maps (an
+        // index-signature overflow over `Map<K, V>` values) recurse on the
+        // inner value. Terminates: IrTypes are finite trees, and the
+        // record/union cases read the fixpoint sets.
         case "map":
           return cycleCapable(t.value);
         // An array is cycle-capable exactly when its ELEMENT type is —

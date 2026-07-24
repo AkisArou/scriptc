@@ -3,10 +3,11 @@
 // record shapes — differential corpus), and STRING and NUMBER index
 // signatures over supported value types compile as hybrid shapes (declared
 // fields + an overflow map; number keys canonicalize to their JS string
-// spelling — differential corpus); what stays rejected:
+// spelling; function/Map/Set/nested-record values ride the same store —
+// differential corpus); what stays rejected:
 // - symbol-keyed index signatures (no lowering for symbol keys);
-// - index-signature value types outside the supported set (functions,
-//   Maps, promises — Map<string, V> is the container for those);
+// - index-signature value types with no representation at all (Dates and
+//   other lib API objects);
 // - utility types over LIB interfaces stay a type world, not data shapes.
 // (Dot access/writes to index-signature keys compile now — the overflow
 // path in dot spelling — and self-referential mapped types intern as
@@ -14,9 +15,9 @@
 const bySymbol: { [s: symbol]: string } = {};
 console.log(bySymbol);
 
-const fnBag: { [k: string]: () => void } = {};
-const boot = fnBag["boot"];
-boot();
+const dateBag: { [k: string]: Date } = {};
+const boot = dateBag["boot"];
+console.log(boot);
 
 const stamped: Readonly<Date> = new Date(0);
 console.log(stamped.getTime());

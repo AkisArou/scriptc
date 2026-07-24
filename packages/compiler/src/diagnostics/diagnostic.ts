@@ -372,18 +372,20 @@ export function genericSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiag
 
 /** An index-signature object type that STILL does not map: STRING and
  * NUMBER index signatures compile (declared fields + an overflow map for
- * undeclared keys, number keys canonicalized to their JS string spelling),
- * so reaching this means a symbol-keyed signature, dual signatures with
- * UNEQUAL value types, a value type outside the supported set (functions,
- * Maps, promises, ...), or a declared `unknown` field under the signature.
- * The message points at the working alternatives. */
+ * undeclared keys, number keys canonicalized to their JS string spelling)
+ * over the whole overflow-store value domain — data values, functions
+ * (the command-registry pattern), Maps/Sets, nested index-signature
+ * records, and 'unknown' — so reaching this means a symbol-keyed
+ * signature, dual signatures with UNEQUAL value types, or a value type
+ * with no representation at all (Dates, typed arrays beyond the domain,
+ * lib API objects). The message points at the working alternatives. */
 export function indexSignatureTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC2006",
-    message: `values of type '${typeText}' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, or 'unknown')`,
+    message: `values of type '${typeText}' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, functions, Maps, Sets, RegExps, Promises, or 'unknown')`,
     loc,
     milestone: "M2",
-    hint: "string- and number-keyed index signatures over the supported value types compile directly; richer value types want Map<string, V>, and symbol keys have no lowering",
+    hint: "string- and number-keyed index signatures over the supported value types compile directly; symbol keys and dual signatures with unequal value types have no lowering",
   };
 }
 
