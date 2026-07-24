@@ -2,11 +2,17 @@
  * crypto, child_process spawn/spawnSync and child/stats/spawn-result
  * methods), JSON.parse/stringify, process properties/methods and
  * process.env access, and console.log detection. */
+import { readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
+import { dirname, resolve } from "node:path";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { dynUndefinedExpr, ladderFenceExpr, nodeThrowExpr, own } from "./lowerer.js";
+import { PoisonError, dynUndefinedExpr, ladderFenceExpr, nodeThrowExpr, own } from "./lowerer.js";
 import { canonicalBuiltinModule, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
+import { isRelativeSpecifier } from "../shared.js";
+import { probeNodeRequireRefusal } from "../npm.js";
+import { isNpmStaticPackage } from "../npm-static.js";
+import { invalidJsonModuleDiag, requiresDynamicImportDiag } from "../../diagnostics/diagnostic.js";
 import {
   BuiltinModuleFn,
   builtinModuleFnOf,
@@ -148,14 +154,260 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
    * here (its own arm already resolves it). */
   export function builtinNamespaceDestructureModuleOf(L: Lowerer, decl: ts.VariableDeclaration): string | null {
     if (decl.name === undefined || !ts.isObjectBindingPattern(decl.name) || decl.initializer === undefined) return null;
-    if (!ts.isIdentifier(decl.initializer)) return null;
-    const module = L.builtinNamespaceModuleOf(decl.initializer);
+    // `const { join } = require("node:path")` through a createRequire
+    // binding: the call IS the namespace — same table keying.
+    let module: string | null = null;
+    const init = stripTypeCasts(decl.initializer);
+    if (ts.isCallExpression(init)) {
+      const cr = createRequireSpecOf(L, init);
+      module = cr !== null && cr.spec !== null ? canonicalBuiltinModule(cr.spec) : null;
+    } else if (ts.isIdentifier(init)) {
+      module = L.builtinNamespaceModuleOf(init);
+    }
     if (module === null) return null;
     for (const el of decl.name.elements) {
       if (el.dotDotDotToken || el.initializer !== undefined || el.name === undefined || !ts.isIdentifier(el.name)) return null;
       if (el.propertyName !== undefined && !ts.isIdentifier(el.propertyName)) return null;
     }
     return module;
+  }
+
+/* ── node:module — createRequire's static erasure ─────────────────────
+ * The config/version-reading pattern real CLIs ship:
+ *   import { createRequire } from "node:module";
+ *   const require = createRequire(import.meta.url);
+ *   const pkg = require("../package.json");
+ * A compiled program's module graph is fixed at build time, so the
+ * indirection ERASES where the required specifier is a static string
+ * literal naming something the compiler already handles: a builtin (the
+ * binding is a namespace import in const clothing), a relative .json
+ * document (the file bakes and parses like JSON.parse of its text), or
+ * an installed npm package (the island's require-condition entry under
+ * --dynamic). Dynamic specifiers and other targets fence by name. */
+
+/** Strips the type-only wrappers the require pattern rides in typed
+   * code (`require("node:os") as typeof import("node:os")` — the
+   * fallback declarations answer `unknown`, so the cast IS the idiom),
+   * plus parens, legacy assertions, and non-null suffixes. */
+  export function stripTypeCasts(e: ts.Expression): ts.Expression {
+    let cur = e;
+    while (
+      ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) ||
+      ts.isTypeAssertion(cur) || ts.isNonNullExpression(cur)
+    ) {
+      cur = cur.expression;
+    }
+    return cur;
+  }
+
+/** The `createRequire(<base>)` call over the node:module import binding
+   * with a supported base — import.meta.url, import.meta.filename, or
+   * __filename, every spelling of "this file" — or null. The base never
+   * LOWERS (import.meta has no value representation): it only names the
+   * file whose directory anchors the returned require's relative
+   * resolution, and every supported spelling names the call's own file. */
+  export function createRequireBaseCallOf(L: Lowerer, expr: ts.Expression): ts.CallExpression | null {
+    const e = stripTypeCasts(expr);
+    if (!ts.isCallExpression(e) || e.questionDotToken) return null;
+    if (!ts.isIdentifier(e.expression)) return null;
+    const bi = builtinImportOf(L, e.expression);
+    if (!bi || bi.module !== "module" || bi.member !== "createRequire") return null;
+    if (e.arguments.length !== 1) return null;
+    const base = stripTypeCasts(e.arguments[0]!);
+    if (ts.isIdentifier(base) && base.text === "__filename") return e;
+    if (
+      ts.isPropertyAccessExpression(base) &&
+      !base.questionDotToken &&
+      ts.isMetaProperty(base.expression) &&
+      base.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      (base.name.text === "url" || base.name.text === "filename")
+    ) {
+      return e;
+    }
+    return null;
+  }
+
+/** True for `const require = createRequire(import.meta.url)` — the
+   * binding is compile-time plumbing (each call through it resolves per
+   * site) with no storage and no code; both declaration walks skip by
+   * this test. A reassignable (let/var) binding never matches — callers
+   * gate on constness like the other alias decls. */
+  export function createRequireBindingDecl(L: Lowerer, nameNode: ts.Node, init: ts.Expression | undefined): boolean {
+    if (!ts.isIdentifier(nameNode) || init === undefined) return false;
+    return createRequireBaseCallOf(L, init) !== null;
+  }
+
+/** The declaring source file when `callee` denotes a createRequire-made
+   * require: a CONST binding over createRequire(import.meta.url) (the
+   * binding's own file anchors resolution) or the inline
+   * `createRequire(import.meta.url)(...)` spelling (the call's file).
+   * Null off the pattern, so call chains keep trying. */
+  export function createRequireCalleeFileOf(L: Lowerer, callee: ts.Expression): ts.SourceFile | null {
+    const e = stripTypeCasts(callee);
+    if (ts.isCallExpression(e)) {
+      return createRequireBaseCallOf(L, e) !== null ? e.getSourceFile() : null;
+    }
+    if (!ts.isIdentifier(e)) return null;
+    const symbol = L.checker.getSymbolAtLocation(e);
+    const decl = symbol ? L.checker.declarationsOf(symbol)[0] : undefined;
+    if (!decl || !ts.isVariableDeclaration(decl) || decl.initializer === undefined) return null;
+    if (!ts.isVariableDeclarationList(decl.parent) || (decl.parent.flags & ts.NodeFlags.Const) === 0) return null;
+    return createRequireBaseCallOf(L, decl.initializer) !== null ? decl.getSourceFile() : null;
+  }
+
+/** The static require of `R("spec")` through a createRequire binding:
+   * the literal specifier plus the file anchoring relative resolution.
+   * Null when the callee is not a createRequire-made require; a matching
+   * callee with a non-literal (or missing) specifier answers spec null,
+   * so the call lowering fences by name instead of falling through to
+   * the generic call paths. */
+  export function createRequireSpecOf(
+    L: Lowerer,
+    call: ts.CallExpression,
+  ): { spec: string | null; baseFile: ts.SourceFile } | null {
+    if (call.questionDotToken) return null;
+    const baseFile = createRequireCalleeFileOf(L, call.expression);
+    if (baseFile === null) return null;
+    if (call.arguments.length !== 1) return { spec: null, baseFile };
+    const a = call.arguments[0]!;
+    return { spec: ts.isStringLiteralLike(a) ? a.text : null, baseFile };
+  }
+
+/** True for `const fs = require("node:fs")` through a createRequire
+   * binding — a builtin namespace import in const clothing: alias
+   * plumbing with no storage (uses resolve through
+   * builtinNamespaceModuleOf's createRequire arm); both declaration
+   * walks skip by this test. */
+  export function createRequireNamespaceDecl(L: Lowerer, nameNode: ts.Node, init: ts.Expression | undefined): boolean {
+    if (!ts.isIdentifier(nameNode) || init === undefined) return false;
+    const call = stripTypeCasts(init);
+    if (!ts.isCallExpression(call)) return false;
+    const cr = createRequireSpecOf(L, call);
+    return cr !== null && cr.spec !== null && canonicalBuiltinModule(cr.spec) !== null;
+  }
+
+/** `require("spec")` through a createRequire binding — the erasure per
+   * target. Builtins are reached here only OUTSIDE the const-namespace-
+   * binding shape (that declaration erases; member uses resolve through
+   * the namespace tables) and fence toward it. A relative .json document
+   * bakes: the file's text validates as JSON at compile time and the
+   * call lowers to json.parse over the baked literal — JSON.parse's
+   * checked-dynamic `unknown` stance, and exactly Node's value (require
+   * of JSON IS JSON.parse of the file; the per-call re-parse forgoes
+   * Node's module-cache identity, unobservable without mutation). A bare
+   * specifier NOTHING installed resolves compiles to Node's catchable
+   * MODULE_NOT_FOUND throw (the optional-dependency try/require
+   * pattern); an installed package loads through the island's
+   * require-condition entry under --dynamic (collectCreateRequires
+   * embedded it) and reports the requires-dynamic diagnostic in a static
+   * build. Null when the callee is not a createRequire require. */
+  export function lowerCreateRequireCall(L: Lowerer, call: ts.CallExpression, loc: SrcLoc): IrExpr | null {
+    const cr = createRequireSpecOf(L, call);
+    if (cr === null) return null;
+    if (cr.spec === null) {
+      L.noLowering(
+        "createRequire's require with this argument shape",
+        call,
+        "the compiled module graph is fixed at build time — the one lowered form is require(\"<static string literal>\")",
+      );
+    }
+    const spec = cr.spec;
+    if (canonicalBuiltinModule(spec) !== null) {
+      L.unsupported(
+        "SC1090",
+        call,
+        `module namespace objects as values (bind it first: const m = require("${spec}"), then access members through the binding)`,
+      );
+    }
+    if (spec.startsWith("#")) {
+      L.noLowering(
+        `createRequire's require of the '${spec}' project import`,
+        call,
+        "imports-field specifiers have no require lowering yet — import the target statically",
+      );
+    }
+    if (isRelativeSpecifier(spec) || spec.startsWith("/")) {
+      if (!spec.endsWith(".json")) {
+        L.noLowering(
+          `createRequire's require of '${spec}'`,
+          call,
+          "relative requires lower for .json documents only — a program module is a static import",
+        );
+      }
+      const abs = spec.startsWith("/")
+        ? spec
+        : resolve(dirname(cr.baseFile.fileName), spec);
+      let text: string | null = null;
+      try {
+        text = readFileSync(abs, "utf8");
+      } catch {
+        /* the fence below speaks */
+      }
+      if (text === null) {
+        L.noLowering(
+          `createRequire's require of '${spec}' (no file at ${abs})`,
+          call,
+          "the required document resolves at build time — check the path against the requiring file",
+        );
+      }
+      try {
+        JSON.parse(text);
+      } catch (e) {
+        L.pushDiag(invalidJsonModuleDiag(abs, e instanceof Error ? e.message : String(e), loc));
+        throw new PoisonError();
+      }
+      return {
+        kind: "libCall",
+        fn: "json.parse",
+        args: [{ kind: "strLit", value: text, type: STRING, loc }],
+        type: DYN,
+        loc,
+      };
+    }
+    // Bare package specifiers. --npm-static opt-ins are program modules —
+    // their exports bind through static imports, not a require value.
+    const pkgName = spec.startsWith("@")
+      ? spec.split("/").slice(0, 2).join("/")
+      : spec.split("/")[0]!;
+    if (isNpmStaticPackage(pkgName)) {
+      L.noLowering(
+        `createRequire's require of the --npm-static package '${pkgName}'`,
+        call,
+        "the opted-in package compiles as program modules — import it statically",
+      );
+    }
+    const refusal = probeNodeRequireRefusal(cr.baseFile.fileName, spec);
+    if (refusal !== null) {
+      // Node's require-site MODULE_NOT_FOUND, catchable — the compiled
+      // expression IS that throw (the typed dummy is abandoned by the
+      // pending check's unwind).
+      return nodeThrowExpr(0, "MODULE_NOT_FOUND", refusal.message, DYN, loc);
+    }
+    if (!L.dynamic) {
+      L.pushDiag(requiresDynamicImportDiag(pkgName, loc));
+      throw new PoisonError();
+    }
+    const res = L.createRequireImports.get(`${cr.baseFile.fileName}\u0000${spec}`);
+    if (res === undefined) {
+      // Collection never saw the site (a shape this walk and that walk
+      // disagree on) — fence rather than mis-embed.
+      L.noLowering(`createRequire's require of '${spec}'`, call, undefined);
+    }
+    if (res === "") throw new PoisonError(); // reported at collection
+    // A CJS facade's default IS module.exports (Node's require answer);
+    // an ESM-resolved entry answers its namespace (Node's require(esm)).
+    const exportName = res.format === "esm" ? "*" : "default";
+    return {
+      kind: "libCall",
+      fn: "island.import",
+      args: [
+        { kind: "strLit", value: res.entryKey, type: STRING, loc },
+        { kind: "strLit", value: exportName, type: STRING, loc },
+        { kind: "strLit", value: spec, type: STRING, loc },
+      ],
+      type: JSVAL,
+      loc,
+    };
   }
 
 /** True when `node` denotes the http2.constants OBJECT — any of its

@@ -801,16 +801,38 @@ declare module "perf_hooks" {
  * performance.now() either way. */
 declare var performance: import("node:perf_hooks").Performance;
 
-/* node:module — the ADMIT-THEN-FENCE surface: the import compiles (the
- * module carries no evaluation), and every member keeps a per-site fence.
- * createRequire loads CommonJS from disk at runtime — a compiled
- * program's modules are fixed at build time, so the call's fence defers
- * to a runtime error in JS sources (the config-loader idiom is
- * reached only when a CJS config/plugin must load). Bare "module" stays a
- * package specifier (an npm package by that name exists); only the node:
- * spelling names the builtin. */
+/* node:module. createRequire's lowered shape is the version/config-
+ * reading pattern real CLIs ship: a const binding over
+ * createRequire(import.meta.url) (or __filename) whose require calls
+ * take STATIC string literals — the indirection erases at compile time.
+ * A builtin spec makes the binding a namespace import in const clothing;
+ * a relative .json document bakes and parses (JSON.parse's `unknown`
+ * stance — validate with a checked cast); an installed npm package loads
+ * through the island's require-condition entry under --dynamic; a bare
+ * name nothing installed resolves compiles to Node's catchable
+ * MODULE_NOT_FOUND throw (the optional-dependency try/require pattern).
+ * Dynamic specifiers fence: a compiled binary's module graph is fixed at
+ * build time. builtinModules is the baked Node v24 list (a fresh
+ * mutable array per read where Node ships one frozen singleton);
+ * isBuiltin and syncBuiltinESMExports fence per site. Bare "module"
+ * stays a package specifier (an npm package by that name exists); only
+ * the node: spelling names the builtin. */
 declare module "node:module" {
   export function createRequire(filename: string | URL): (id: string) => unknown;
+  export const builtinModules: string[];
+  export function isBuiltin(moduleName: string): boolean;
+  export function syncBuiltinESMExports(): void;
+}
+/* import.meta: module-loader metadata with no value representation —
+ * every read fences (SC1090) EXCEPT as createRequire's base, where it
+ * only NAMES the containing file (import.meta.url, import.meta.filename,
+ * and __filename all mean "this file" there). Declared so the pattern
+ * typechecks under the fallback surface; @types/node's own augmentation
+ * stands in when adopted. */
+interface ImportMeta {
+  url: string;
+  filename: string;
+  dirname: string;
 }
 
 /* The synchronous node:fs surface — utf8-only, no options objects, no
@@ -3150,4 +3172,24 @@ declare module "stream/promises" {
 declare module "node:stream/promises" {
   import streamPromises = require("stream/promises");
   export = streamPromises;
+}
+declare module "stream/consumers" {
+  /* The promise consumers over a readable: accumulate every chunk and
+   * settle — text (the utf8 decode), json (the text through JSON.parse:
+   * `unknown`, validated with a checked cast; malformed input rejects
+   * with the parse's SyntaxError), buffer (the concatenated bytes;
+   * string chunks contribute their utf8 bytes, Node's Blob rule).
+   * Stream errors reject; an early close rejects with
+   * ERR_STREAM_PREMATURE_CLOSE. arrayBuffer and blob fence per site:
+   * neither value has a representation in a compiled binary. */
+  function text(stream: unknown): Promise<string>;
+  function json(stream: unknown): Promise<unknown>;
+  function buffer(stream: unknown): Promise<Buffer>;
+  function arrayBuffer(stream: unknown): Promise<ArrayBuffer>;
+  function blob(stream: unknown): Promise<unknown>;
+  export { arrayBuffer, blob, buffer, json, text };
+}
+declare module "node:stream/consumers" {
+  import streamConsumers = require("stream/consumers");
+  export = streamConsumers;
 }

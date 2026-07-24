@@ -20,7 +20,7 @@ import type { ClassInfo, ClassIteratorInfo } from "./lower-classes.js";
 import { genericIfaceBindingKeepsClass } from "./lower-classes.js";
 import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from "./lower-stream.js";
 import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
-import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf } from "./lower-builtins.js";
+import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireCalleeFileOf, createRequireNamespaceDecl } from "./lower-builtins.js";
 import { lowerEnumDeclaration } from "./lower-enums.js";
 import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
@@ -2800,6 +2800,17 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // skipped its global by the same test).
     if (builtinMemberRequireDecl(decl.name, decl.initializer)) return null;
 
+    // `const require = createRequire(import.meta.url)` — compile-time
+    // plumbing: each call through the binding resolves per site
+    // (lowerCreateRequireCall); no storage, no code (collectGlobals
+    // skipped its global by the same test).
+    if (!isLet && createRequireBindingDecl(L, decl.name, decl.initializer)) return null;
+
+    // `const fs = require("node:fs")` through that binding — a builtin
+    // namespace import in const clothing: alias plumbing, no storage
+    // (builtinNamespaceModuleOf resolves member uses).
+    if (!isLet && createRequireNamespaceDecl(L, decl.name, decl.initializer)) return null;
+
     // `const { NGHTTP2_CANCEL } = http2.constants` — a destructure over
     // the baked constants table: alias plumbing, no storage (uses read
     // their literals via http2ConstantBindingOf; collectGlobals skipped
@@ -3881,7 +3892,14 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       ts.isExpressionStatement(stmtNode) &&
       ts.isSourceFile(stmtNode.parent) &&
       isJsSourceFile(stmtNode.parent);
-    if (requireSpecOf(expr) !== null && ts.isCallExpression(expr) && ts.isIdentifier(expr.expression)) {
+    if (
+      requireSpecOf(expr) !== null &&
+      ts.isCallExpression(expr) &&
+      ts.isIdentifier(expr.expression) &&
+      // A binding NAMED require made by createRequire is not the CJS
+      // global — the expression path owns it (lowerCreateRequireCall).
+      createRequireCalleeFileOf(L, expr.expression) === null
+    ) {
       const sf = expr.getSourceFile();
       // A bare require of a package NOTHING INSTALLED resolves, in ANY
       // CommonJS JS file (the export-assignment spellings tsgo marks

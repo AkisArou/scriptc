@@ -85,7 +85,7 @@ import {
   UnionRegistry,
   withUndefinedArm as withUndefinedArmCanonical,
 } from "../types.js";
-import { CompoundOp, IslandFnEntry, boundaryIntoIslandMsg, boundaryOutOfIslandMsg, BuiltinModuleFn, builtinConstLit, builtinModuleConstOf, builtinFenceHintOf, builtinModuleFnOf, stdlibMemberFence, isStdlibMember, isStdlibSymbol, isStdlibGlobal, stdlibGlobalMember, nodeTypesOnlySymbol } from "./surfaces.js";
+import { CompoundOp, IslandFnEntry, boundaryIntoIslandMsg, boundaryOutOfIslandMsg, BuiltinModuleFn, builtinConstLit, builtinModuleConstOf, builtinModulesArrayLit, builtinFenceHintOf, builtinModuleFnOf, stdlibMemberFence, isStdlibMember, isStdlibSymbol, isStdlibGlobal, stdlibGlobalMember, nodeTypesOnlySymbol } from "./surfaces.js";
 import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonImports, moduleArtifacts, collectGlobals, declSymbolOf, defaultExportSymbolOf, lowerFileInit, lowerDefaultExport, buildMain, appendDynamicImportModules } from "./lower-modules.js";
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
@@ -93,7 +93,7 @@ import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassign
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
-import { builtinImportOf, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
+import { builtinImportOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, stripTypeCasts, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
 import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
 import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty } from "./lower-server.js";
 import { lowerDgramDnsModuleCall, lowerDgramMethodCall } from "./lower-dgram.js";
@@ -959,6 +959,12 @@ export class Lowerer {
    * `fileName\u0000specifier` (collectDynamicImports fills it during npm
    * collection; lowerDynamicImportCall reads it per site). */
   readonly dynImports = new Map<string, DynamicImportResolution>();
+  /** createRequire-require resolutions of BARE npm specifiers, keyed
+   * `fileName\u0000specifier` (collectCreateRequires fills it during npm
+   * collection under --dynamic — the require-condition entry key plus its
+   * embedded format; lowerCreateRequireCall reads it per site; "" marks a
+   * failed resolution already reported at collection). */
+  readonly createRequireImports = new Map<string, { entryKey: string; format: "esm" | "cjs" | "json" } | "">();
   /** Module → the name of its synthesized namespace-BUILDER function
    * (lowerOwnModuleImport): every `import()` of the same program module
    * shares one builder. */
@@ -6727,7 +6733,12 @@ export class Lowerer {
       // out-of-block read would split the variable in two) — vars take the
       // standard path and its own fences.
       (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.BlockScoped) !== 0 &&
-      islandCandidate(decl.initializer)
+      islandCandidate(decl.initializer) &&
+      // createRequire's plumbing decls are COMPILE-TIME erasures (the
+      // require binding and its builtin-namespace bindings) — never
+      // island values; the standard path's skips own them.
+      !createRequireBindingDecl(this, decl.name, decl.initializer) &&
+      !createRequireNamespaceDecl(this, decl.name, decl.initializer)
     ) {
       const mapped = this.mapTypeOf(this.typeOf(decl.name));
       const handleOnly =
@@ -7256,10 +7267,19 @@ export class Lowerer {
       const decl = symbol ? this.checker.declarationsOf(symbol)[0] : undefined;
       if (!decl) return null;
       // The CommonJS twin: `const fs = require("fs")` binds the same
-      // namespace surface as `import * as fs from "node:fs"`.
+      // namespace surface as `import * as fs from "node:fs"` — and the
+      // createRequire spelling (`const fs = require("node:fs")` through a
+      // createRequire binding, the fallback-typed cast idiom stripped)
+      // binds it too.
       if (ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name) && decl.initializer) {
         const spec = requireSpecOf(decl.initializer);
-        return spec !== null ? canonicalBuiltinModule(spec) : null;
+        if (spec !== null) return canonicalBuiltinModule(spec);
+        const init = stripTypeCasts(decl.initializer);
+        if (ts.isCallExpression(init)) {
+          const cr = createRequireSpecOf(this, init);
+          if (cr !== null && cr.spec !== null) return canonicalBuiltinModule(cr.spec);
+        }
+        return null;
       }
       // A DESTRUCTURED sub-namespace binding — `const { promises } =
       // fs` / `= require('fs')`: the member is itself a supported module
@@ -7288,6 +7308,16 @@ export class Lowerer {
     {
       const spec = requireSpecOf(expr);
       if (spec !== null) return canonicalBuiltinModule(spec);
+    }
+    // The createRequire spelling of the same inline form:
+    // `require("node:path").join(...)` through a createRequire binding
+    // (the fallback-typed cast idiom strips: `(require("x") as T).m`).
+    {
+      const inner = stripTypeCasts(expr);
+      if (ts.isCallExpression(inner)) {
+        const cr = createRequireSpecOf(this, inner);
+        if (cr !== null && cr.spec !== null) return canonicalBuiltinModule(cr.spec);
+      }
     }
     if (ts.isIdentifier(expr)) {
       const symbol = this.checker.getSymbolAtLocation(expr);
@@ -7429,6 +7459,11 @@ export class Lowerer {
     }
     const c = builtinModuleConstOf(this, bi.module, bi.member);
     if (c !== undefined) return builtinConstLit(c, loc);
+    // module.builtinModules through a namespace binding — the baked
+    // Node v24 list, a fresh string[] per read.
+    if (bi.module === "module" && bi.member === "builtinModules") {
+      return builtinModulesArrayLit(loc);
+    }
     if (bi.member === "constants" && bi.module === "fs") {
       // A bare `fs.constants` read (not one of the baked bits above).
       this.noLowering(`fs.constants`, expr, "F_OK, R_OK, W_OK, and X_OK are the lowered constants");

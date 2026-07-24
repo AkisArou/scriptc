@@ -18,7 +18,7 @@
       "name": "package imports",
       "status": "unsupported",
       "code": "SC1010",
-      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
     },
     {
       "id": "diagnostic.sc1012",
@@ -835,7 +835,23 @@
       "name": "module.createRequire",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "createRequire loads CommonJS from disk at RUNTIME (the config/plugin-loading pattern) — a compiled program's modules are fixed at build time, so no lowering can exist; in JS sources the call defers to a runtime error naming this pattern"
+      "note": "the lowered shape is a const binding over createRequire(import.meta.url) (or __filename) whose require calls take STATIC string literals — builtins, relative .json documents, and installed npm packages (under --dynamic) resolve at build time; dynamic specifiers cannot exist in a compiled binary's fixed module graph"
+    },
+    {
+      "id": "node-builtin.module.isBuiltin",
+      "kind": "node-builtin",
+      "name": "module.isBuiltin",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "builtinModules.includes(name) answers the same question over the baked list (strip a node: prefix first; the prefix-only builtins appear with it, as node:test)"
+    },
+    {
+      "id": "node-builtin.module.syncBuiltinESMExports",
+      "kind": "node-builtin",
+      "name": "module.syncBuiltinESMExports",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "a compiled program has no live builtin ESM namespace bindings to synchronize — nothing a compiled surface can mutate makes the call observable; remove it"
     },
     {
       "id": "node-builtin.net",
@@ -1341,6 +1357,29 @@
       "name": "stream",
       "status": "static",
       "note": "recognized module (bare and node:-prefixed specifiers)"
+    },
+    {
+      "id": "node-builtin.stream.consumers",
+      "kind": "node-builtin",
+      "name": "stream/consumers",
+      "status": "static",
+      "note": "recognized module (bare and node:-prefixed specifiers)"
+    },
+    {
+      "id": "node-builtin.stream.consumers.arrayBuffer",
+      "kind": "node-builtin",
+      "name": "stream/consumers.arrayBuffer",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "no free-standing ArrayBuffer value exists here (typed arrays own their storage) — buffer(stream) collects the same bytes as a Buffer"
+    },
+    {
+      "id": "node-builtin.stream.consumers.blob",
+      "kind": "node-builtin",
+      "name": "stream/consumers.blob",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "Blob values have no representation in a compiled binary — buffer(stream) collects the same bytes as a Buffer, text(stream) the decoded text"
     },
     {
       "id": "node-builtin.stream.promises",

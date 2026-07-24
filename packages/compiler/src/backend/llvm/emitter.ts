@@ -631,6 +631,11 @@ const LIB_FN_SYMS: Record<string, string> = {
   // stream/promises' finished form (+1 promise; may-throw pending check;
   // the pipeline form needs the stream-array compound and emits below).
   "sp.finished": "scr_sp_finished",
+  // stream/consumers' promise consumers (+1 promises; may-throw pending
+  // check — the 'newListener' meta emit can run user code).
+  "sc.text": "scr_sc_text",
+  "sc.json": "scr_sc_json",
+  "sc.buffer": "scr_sc_buffer",
   "dc.channel": "scr_dc_channel",
   "dc.subscribe": "scr_dc_subscribe",
   "dc.unsubscribe": "scr_dc_unsubscribe",
@@ -746,6 +751,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "process.activeResources",
   "stream.finished", "stream.finishedDyn", "stream.pipeline", "stream.pipelineDyn",
   "sp.finished", "sp.pipeline",
+  "sc.text", "sc.json", "sc.buffer",
   "net.listen", "net.listenCb", "net.listenOpts", "net.listenOptsCb",
   "net.connect", "net.connectCb", "net.connectLookup", "net.connectAttempt",
   "fs.existsChk",
