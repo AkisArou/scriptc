@@ -4,9 +4,31 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.8
+## 0.0.9
 
 <!-- release:start -->
+
+### Features
+
+- **API misuse throws Node's exact errors**: argument-validation ladders on Buffer (`compare`/`equals`/constructors), URLSearchParams (WHATWG brand checks, arity, ToPrimitive coercion running user `toString`/`valueOf`), the max-listeners family, and range checks across bytes/fs — `ERR_INVALID_ARG_TYPE`, `ERR_OUT_OF_RANGE`, and `ERR_MISSING_ARGS` with Node's message texts, catchable and assertable.
+- **Strings destructure**: array patterns over strings split by code point (positions, holes, defaults, rest, nesting, for-of heads); destructured built-in globals (`const { subtle } = globalThis.crypto`) bind with Node-agreeing identity.
+- **Spread arguments land anywhere**: `f(...args)` outside typed rest slots builds the argument list with JavaScript's exact evaluation order on both backends, including under `--dynamic`, with V8's spread-TypeError texts for non-iterable sources.
+- **Record shapes widen further**: hybrid declared-plus-index-signature records width-coerce in both directions; index signatures carry function, Map, and Set values (the command-registry pattern); per-field lifts cover `unknown` destinations, upcasts, and function adapters.
+- **DataView setters, `Object.is`, and an exact Intl slice**: the full DataView setter family; fresh ArrayBuffers erase into zero-filled views; `Object.is` with the spec's SameValue; `new Intl.NumberFormat("en-US").format()` and `toLocaleString("en-US")` print byte-identically to Node without linking ICU.
+- **`stream/promises` compiles statically**, and out-of-scope modules (`v8`, `domain`, `node:sqlite`, Node's underscore-internals) refuse with reasons instead of a generic unsupported-module message.
+- **Bundler interop**: esbuild's `__toESM(require(...))` external-dependency wrapper compiles statically under `--npm-static`, with build-time `.default` semantics matching Node's interop rules; unrecognizable variants degrade to the embedded engine with the construct named.
+- **Library mode**: runtime-detected traps deliver the structured teaching encoding unconditionally (code, trapping symbol, optional profile remediation); bare npm specifiers compile statically when eligible or refuse with the failed bar named.
+
+### Fixes
+
+- The C code generator compiles with strict aliasing disabled: the refcounted object header is accessed through base- and derived-typed views by design, and optimizer type-based alias analysis could elide refcount updates, freeing objects still in use. The LLVM lane was unaffected.
+- `Promise.reject` with an untyped reason no longer crashes the LLVM code generator; rest-parameter arrows forwarding their rest via spread no longer trip an internal error.
+- Two readable-stream lifecycle bugs: the `emittedReadable` flag now clears at Node's moment, and absent-size reads clear pending state correctly.
+- String-typed `'data'` listeners (the `setEncoding` shape) received raw byte headers as string content on sockets, http requests, and http2 streams; they now decode UTF-8 correctly.
+
+<!-- release:end -->
+
+## 0.0.8
 
 ### Features
 
@@ -22,7 +44,6 @@ All notable changes to scriptc will be documented in this file.
 - Arrays that grow from an empty `any[]` no longer break compilation under `--dynamic` when they flow into typed array methods (`map`/`filter`/`forEach` and family).
 - A latent double-getter-call in destructuring defaults over accessor results is fixed.
 
-<!-- release:end -->
 
 ## 0.0.7
 
