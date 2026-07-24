@@ -4574,6 +4574,54 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2510-dyn-evolving-array-map.ts": {
+   "order": [
+    "<repo>/tests/corpus/2510-dyn-evolving-array-map.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2511-dyn-evolving-array-filter-foreach.ts": {
+   "order": [
+    "<repo>/tests/corpus/2511-dyn-evolving-array-filter-foreach.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2512-dyn-evolving-array-mixed-push.ts": {
+   "order": [
+    "<repo>/tests/corpus/2512-dyn-evolving-array-mixed-push.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2513-dyn-evolving-array-derived.ts": {
+   "order": [
+    "<repo>/tests/corpus/2513-dyn-evolving-array-derived.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2520-private-statics-class-name-calls.ts": {
+   "order": [
+    "<repo>/tests/corpus/2520-private-statics-class-name-calls.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2521-private-statics-class-expression.ts": {
+   "order": [
+    "<repo>/tests/corpus/2521-private-statics-class-expression.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2522-private-statics-decorated.ts": {
+   "order": [
+    "<repo>/tests/corpus/2522-private-statics-decorated.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2523-private-statics-aliased-class.ts": {
+   "order": [
+    "<repo>/tests/corpus/2523-private-statics-aliased-class.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2530-object-destructuring-decl.ts": {
    "order": [
     "<repo>/tests/corpus/2530-object-destructuring-decl.ts"
@@ -4679,6 +4727,24 @@
   "<repo>/tests/corpus/2555-generics-keyof-writes.ts": {
    "order": [
     "<repo>/tests/corpus/2555-generics-keyof-writes.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2556-string-destructuring-decl.ts": {
+   "order": [
+    "<repo>/tests/corpus/2556-string-destructuring-decl.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2557-string-destructuring-assign.ts": {
+   "order": [
+    "<repo>/tests/corpus/2557-string-destructuring-assign.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2558-builtin-global-destructuring.js": {
+   "order": [
+    "<repo>/tests/corpus/2558-builtin-global-destructuring.js"
    ],
    "diags": []
   },
@@ -6554,48 +6620,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/fixtures/node-types/argv-env.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/argv-env.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/fenced.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/fenced.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/import-fences.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/import-fences.ts"
-   ],
-   "diags": [
-    {
-     "code": "SC1010",
-     "message": "the 'v8' module is not supported yet",
-     "loc": {
-      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
-      "start": 422,
-      "end": 461
-     },
-     "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
-    }
-   ]
-  },
-  "<repo>/tests/fixtures/node-types/path-os.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/path-os.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/stream-capture.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts"
@@ -6993,6 +7017,48 @@
      "hint": "set \"strictNullChecks\": true (or \"strict\": true) in the project tsconfig"
     }
    ]
+  },
+  "<repo>/tests/fixtures/node-types/argv-env.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/argv-env.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/fenced.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/fenced.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/import-fences.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/import-fences.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC1010",
+     "message": "the 'v8' module is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
+      "start": 422,
+      "end": 461
+     },
+     "milestone": "M4",
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, readline, events, stream, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+    }
+   ]
+  },
+  "<repo>/tests/fixtures/node-types/path-os.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/path-os.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/stream-capture.ts"
+   ],
+   "diags": []
   }
  }
 }
