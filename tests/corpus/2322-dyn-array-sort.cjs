@@ -1,4 +1,4 @@
-// Array methods over VALUES living in the DOM under array-mapped checker
+// Array methods over VALUES living in the checked-dynamic tree under array-mapped checker
 // types — the record family's array sibling (corpus 2300's stance):
 // `.sort()` on a checked-dynamic array runs the REAL method through the
 // runtime receiver-kind dispatch (dynInvoke) — the spec's snapshot sort,
@@ -8,7 +8,7 @@
 // arg 0: expected array, got dyn).
 'use strict';
 
-// Object.keys of a DOM object answers a DOM array; .sort() orders it.
+// Object.keys of a dyn object answers a dyn array; .sort() orders it.
 const d = JSON.parse('{"beta":1,"alpha":2,"gamma":3}');
 console.log(Object.keys(d).sort().join(','));
 
@@ -45,7 +45,7 @@ try {
   console.log(e.name, e.message);
 }
 
-// The chained consumer shape: sort feeding join, and a sorted DOM array
+// The chained consumer shape: sort feeding join, and a sorted dyn array
 // validating into a typed slot.
 const keys = Object.keys(JSON.parse('{"z":0,"a":0,"m":0}')).sort();
 console.log(keys.join('|'), keys.length);

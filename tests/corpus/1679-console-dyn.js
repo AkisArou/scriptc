@@ -2,7 +2,7 @@
 // non-format argument — strings VERBATIM, everything else through inspect
 // at the rest-args depth 2. Scalar kinds byte-exact (-0 included), boxed
 // functions as [Function: name] / [Function (anonymous)], composites
-// through the dyn DOM walk with the 100-item truncation and the depth-2
+// through the dyn walk with the 100-item truncation and the depth-2
 // placeholders. console.log never throws.
 'use strict';
 let d = JSON.parse('{"a":1,"b":[1,2,{"c":"x"}],"s":"str"}');

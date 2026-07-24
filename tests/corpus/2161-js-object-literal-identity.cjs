@@ -1,4 +1,4 @@
-// JS file-scope object-literal consts live as ONE DOM object (identity is
+// JS file-scope object-literal consts live as ONE dyn object (identity is
 // the literal's contract): the same node flows into untyped callees,
 // their stamping is visible back through the binding, deep equality over
 // the stamped object self-compares, and strictEqual over two crossings

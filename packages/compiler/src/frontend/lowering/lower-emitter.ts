@@ -521,7 +521,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
   if (superRecv === undefined && L.checker.getConstructSignatures(L.typeOf(access.expression)).length > 0) {
     if (member === "setMaxListeners" && args.length === 1) {
       if (L.mapTypeOf(L.typeOf(args[0]!))?.kind !== "f64") {
-        // Node's runtime ladder over the DOM value ("setMaxListeners" is
+        // Node's runtime ladder over the dyn value ("setMaxListeners" is
         // the message's slot for the static form).
         const raw = L.lowerExpr(args[0]!);
         if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
@@ -550,7 +550,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       // emitter/EventTarget (the invalid-input probes): Node validates n
       // first, then throws ERR_INVALID_ARG_TYPE on the target. Claimed
       // when n is a pure read (identifier/literal — nothing to evaluate)
-      // and the target crosses into the DOM for the Received tail.
+      // and the target crosses into the checked-dynamic tree for the Received tail.
       if (args.length === 2 && !args.some(ts.isSpreadElement)) {
         const nT = L.mapTypeOf(L.typeOf(args[0]!));
         const tT = L.mapTypeOf(L.typeOf(args[1]!));

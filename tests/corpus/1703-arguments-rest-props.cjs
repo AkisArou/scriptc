@@ -7,7 +7,7 @@
 'use strict';
 
 // (Array.isArray(arguments) answers true here where Node says false —
-// the DOM carries a real array; SEMANTICS.md — so it stays unprobed.)
+// the checked-dynamic tree carries a real array; SEMANTICS.md — so it stays unprobed.)
 function collect() {
   return `n=${arguments.length} first=${arguments[0]}`;
 }
@@ -25,7 +25,7 @@ console.log(t('x', 1));
 console.log(t('x', 1, 2, 3));
 
 // Computed keys evaluate at runtime, in source order; later duplicate
-// keys win; `in` answers presence, ++ writes through the DOM.
+// keys win; `in` answers presence, ++ writes through the checked-dynamic tree.
 function build(field, n) {
   const rec = { [field]: n, actual: 0, [field + '2']: n * 2 };
   rec.actual++;

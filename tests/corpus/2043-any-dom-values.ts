@@ -1,9 +1,9 @@
-// `any` values as DOM data: keyed reads and writes on any-typed objects,
+// `any` values as dyn data: keyed reads and writes on any-typed objects,
 // arrays through any slots, JSON round trips, strict equality across the
-// DOM, casts in and out, and console rendering of composite values.
+// dyn, casts in and out, and console rendering of composite values.
 
 // Property writes and reads through an any-typed object (keyword keys
-// included — DOM member names have no identifier restriction).
+// included — dyn member names have no identifier restriction).
 const obj: any = {};
 obj.if = 1;
 obj.name = "n";
@@ -12,14 +12,14 @@ console.log(obj.missing === undefined);
 console.log(obj);
 
 // A FRESH record literal into an any slot: nothing aliases the literal,
-// so the DOM conversion is unobservable and writes land on the one value.
+// so the dyn conversion is unobservable and writes land on the one value.
 // (A NAMED record flowing into any is a deep copy where JS aliases — the
 // dynFrom stance, documented, pinned in dyncheck.test.ts, not here.)
 const copy: any = { a: 1 };
 copy.a = 2;
 console.log(copy.a);
 
-// Arrays through any: length and element reads ride the keyed DOM.
+// Arrays through any: length and element reads ride the keyed dyn.
 const arr: any = [3, 1, 2];
 console.log(arr.length, arr[0], arr[2]);
 console.log(arr);

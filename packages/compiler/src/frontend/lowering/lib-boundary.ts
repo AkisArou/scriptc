@@ -73,7 +73,7 @@ function coerceSlot(L: Lowerer, arg: IrExpr, want: IrType, what: string): IrExpr
   // a lying handle throws the catchable TypeError. Targets outside the
   // exit set keep the named fence.
   if (arg.type.kind === "jsval" && want.kind !== "jsval") {
-    // A jsval into a dyn slot: the by-reference jsval→DOM wrap — the same
+    // A jsval into a dyn slot: the by-reference jsval→dyn wrap — the same
     // edge coerceToExpected converts (dyn slots accept engine values;
     // world unification's engine-handle kind).
     if (want.kind === "dyn") {
@@ -198,10 +198,10 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
   if (kind === "jsOp") {
     // Engine-op arguments must be jsval. The producing sites marshal with
     // jsvalIn, but a checker-`any` expression can LOWER to another world
-    // (dyn.this, the DOM WeakSet placeholder, JS rest-args) — re-apply
+    // (dyn.this, the checked-dynamic tree WeakSet placeholder, JS rest-args) — re-apply
     // jsvalIn's rules here: units become the engine's own units, typed
     // values with an island representation marshal in, and dyn values (no
-    // DOM→engine bridge that preserves handles/functions) fence with
+    // dyn→engine bridge that preserves handles/functions) fence with
     // jsvalIn's own message.
     const e = rec as unknown as Extract<IrExpr, { kind: "jsOp" }>;
     e.args.forEach((a, i) => {
@@ -227,7 +227,7 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
   if (kind === "dynCall" || kind === "dynInvoke") {
     // Checked-dynamic call arguments must be dyn. Convertible typed values
     // take the ordinary dynFrom crossing; island values have NO bridge
-    // into the DOM (a jsval handle cannot ride the deep-copy), so they
+    // into the checked-dynamic tree (a jsval handle cannot ride the deep-copy), so they
     // fence — named, catchable at runtime in JS sources, never an ICE.
     const e = rec as unknown as Extract<IrExpr, { kind: "dynCall" | "dynInvoke" }>;
     if (kind === "dynInvoke") {
@@ -240,7 +240,7 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
       if (a.type.kind === "dyn") return;
       if (a.type.kind === "jsval") {
         // An island value in a checked-dynamic argument slot: the
-        // jsval→DOM crossing (by-reference wrap, scalars normalized) —
+        // jsval→dyn crossing (by-reference wrap, scalars normalized) —
         // the routed call converts it back by reference at the boundary.
         e.args[i] = { kind: "dynFromJsval", value: a, type: DYN, loc: a.loc };
         return;

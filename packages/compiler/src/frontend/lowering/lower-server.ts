@@ -195,7 +195,7 @@ function lowerCallbackArg(
     // hoisted `function onConn(socket)` — dyn params), or an
     // arguments-reading rest function: box it and adapt through the
     // dynCheck function boundary like the dyn flavor above — the event
-    // payloads box into the DOM (handles by reference) and the body's
+    // payloads box into the checked-dynamic tree (handles by reference) and the body's
     // member uses dispatch at runtime.
     const boxed: IrExpr = { kind: "dynFrom", value: cb, type: DYN, loc: locOf(node) };
     const toT = funcOf([...dynTuple], VOID);
@@ -343,7 +343,7 @@ function h2HeadersCallbackAdapter(
   // value or an arguments-reading rest function of dyn params): wrap it
   // in a dynCheck to the CANONICAL event signature, then build the header
   // record and invoke through that typed boundary (handles box by
-  // reference, the record boxes to a DOM object — the net server-callbacks
+  // reference, the record boxes to a dyn object — the net server-callbacks
   // precedent). The synthesized record IS the shape the adapter builds.
   const handleT = handleKind === "http2Stream" ? HTTP2STREAM_T : null;
   const isDynCb = cb.type.kind === "dyn" ||
@@ -1741,7 +1741,7 @@ function lowerH2SessionMethodCall(L: Lowerer, call: ts.CallExpression,
     return { kind: "libCall", fn: "http2.sessionDestroy", args: [receiver()], type: VOID, loc };
   }
   if (name === "settings") {
-    // session.settings(obj[, cb]): the settings record crosses as a DOM
+    // session.settings(obj[, cb]): the settings record crosses as a dyn
     // value (the checked-dynamic boundary — object literals box); the
     // callback fires on the peer's ACK ((err, settings, duration) in the
     // dyn flavor, zero-arg in the typed one).
@@ -1755,7 +1755,7 @@ function lowerH2SessionMethodCall(L: Lowerer, call: ts.CallExpression,
       const cbV = L.lowerExpr(args[1]!);
       if (cbV.type.kind === "dyn") {
         // The dyn callback keeps Node's exact (err, settings, duration)
-        // shape — the runtime fires it through the DOM.
+        // shape — the runtime fires it through the checked-dynamic tree.
         return { kind: "libCall", fn: "http2.sessionSettingsDynCb", args: [receiver(), settingsArg, cbV], type: VOID, loc };
       }
       const { cb } = lowerCallbackArg(L, args[1]!, "settings callbacks", 0, () => false, "use () — or a dynamic (mustCall-wrapped) callback for the (err, settings, duration) shape", []);
@@ -1769,7 +1769,7 @@ function lowerH2SessionMethodCall(L: Lowerer, call: ts.CallExpression,
     const evT = L.typeOf(args[0]!);
     const event = evT.isStringLiteralType() ? evT.value : null;
     if (event === "localSettings" || event === "remoteSettings") {
-      // The settings payload crosses as a DOM value: dyn (mustCall)
+      // The settings payload crosses as a dyn value: dyn (mustCall)
       // listeners fire with the settings record; zero-arg typed
       // listeners register plainly.
       const local = boolLit(event === "localSettings", loc);
@@ -2100,7 +2100,7 @@ export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpressio
     if (m === "socket") return { kind: "libCall", fn: "http2.sessionSocket", args: [recv()], type: NETSOCKET_T, loc };
     if (m === "pendingSettingsAck") return { kind: "libCall", fn: "http2.sessionPendingSettingsAck", args: [recv()], type: BOOL, loc };
     if (m === "localSettings" || m === "remoteSettings") {
-      // The settings record crosses as a DOM value (the d.ts types it
+      // The settings record crosses as a dyn value (the d.ts types it
       // `any`): member reads ride the checked-dynamic keyed read.
       return {
         kind: "libCall", fn: "http2.sessionSettingsGet",
@@ -2143,7 +2143,7 @@ function lowerRequestHandlerArg(L: Lowerer, node: ts.Expression): IrExpr {
     // A CHECKED-DYNAMIC handler (test/common's mustCall wrapper around
     // the (req, res) listener — the canonical suite shape): adapt
     // through the dynCheck function boundary. The adapter boxes req/res
-    // as DOM HANDLE values (SCR_DYN_HANDLE — reference identity) and
+    // as dyn HANDLE values (SCR_DYN_HANDLE — reference identity) and
     // calls the wrapper through the checked-dynamic machinery; member
     // uses inside the wrapped body dispatch back onto the same http
     // entry points at runtime.
@@ -2482,7 +2482,7 @@ function lowerTlsServerOptionsOrDyn(
   if (v.type.kind === "dyn") return { dyn: v };
   // A typed options RECORD binding (`const options = { key, cert, ... };
   // createServer(options)` — the Node-suite spelling): box it into the
-  // DOM and hand the whole record to the runtime walk (the divergence-66
+  // dyn and hand the whole record to the runtime walk (the divergence-66
   // stance — members read at runtime, out-of-bounds ones throw the
   // catchable fence, undefined/undocumented ones drop). canConvertToDyn
   // now folds in the bytes-bearing option records the walker can box.
@@ -2549,7 +2549,7 @@ function lowerTlsConnectCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc): 
     }
   }
   // The options value rides whole to the runtime walk: dyn passes
-  // directly; a typed record that converts boxes into the DOM.
+  // directly; a typed record that converts boxes into the checked-dynamic tree.
   let opts: IrExpr;
   if (optsNode !== null) {
     const o = L.lowerExpr(optsNode);
@@ -2569,7 +2569,7 @@ function lowerTlsConnectCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc): 
       L.noLowering("tls.connect without a port or options", expr, FORMS_HINT);
     }
     // No options: Node's defaults (rejectUnauthorized: true) — the
-    // runtime walk reads an absent record (the DOM undefined).
+    // runtime walk reads an absent record (the dyn undefined).
     opts = {
       kind: "dynFrom",
       value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
@@ -3034,7 +3034,7 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
     return { kind: "libCall", fn: "http2.connect", args: [auth, reject, ca], type: HTTP2SESSION_T, loc };
   }
   if (bi.member === "getDefaultSettings") {
-    // The constant defaults record, as a DOM value (the d.ts types it
+    // The constant defaults record, as a dyn value (the d.ts types it
     // `any` — reads ride the checked-dynamic keyed read).
     return { kind: "libCall", fn: "http2.getDefaultSettings", args: [], type: DYN, loc };
   }

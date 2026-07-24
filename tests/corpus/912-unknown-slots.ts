@@ -40,7 +40,7 @@ const arr: unknown = [1, 2, 3];
 const nums = arr as number[];
 console.log(nums.length, nums[0] + nums[2]);
 
-// Optional-flavored unions convert: the undefined arm becomes the DOM
+// Optional-flavored unions convert: the undefined arm becomes the checked-dynamic tree
 // undefined; data arms convert as themselves.
 function fromOptional(s: string | undefined): unknown {
   return s;

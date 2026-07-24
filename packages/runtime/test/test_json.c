@@ -1,7 +1,7 @@
-/* Oracle test for scr_json.c (the dynamic-value DOM, the RFC 8259 parser,
+/* Oracle test for scr_json.c (the dynamic-value dyn, the RFC 8259 parser,
  * the dynCheck failure path, and the stringify output buffer). Run by
  * json.test.ts; built with ASan + the RC audit, so a clean exit also proves
- * the DOM's recursive ownership (parse failures mid-tree included) leaks
+ * the checked-dynamic tree's recursive ownership (parse failures mid-tree included) leaks
  * nothing and frees nothing twice.
  *
  * EXACT ERROR MESSAGES are asserted here, against OUR strings: compiled
@@ -35,7 +35,7 @@ static bool str_is(const ScrStr *s, const char *want) {
   return s && s->len == strlen(want) && memcmp(s->data, want, s->len) == 0;
 }
 
-/* Parse `text`, expect success, return the DOM (+1). */
+/* Parse `text`, expect success, return the checked-dynamic tree (+1). */
 static ScrDyn *parse_ok(const char *text, const char *name) {
   ScrStr *t = S(text);
   ScrDyn *d = scr_json_parse(t);

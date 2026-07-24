@@ -1,6 +1,6 @@
 /* JSON + dynamic values (see scr_runtime.h for the API contract).
  *
- * - The ScrDyn DOM is the runtime shape of `unknown`: refcounted, owning
+ * - The ScrDyn dyn is the runtime shape of `unknown`: refcounted, owning
  *   its children; releasing the root frees the tree recursively.
  * - scr_json_parse is a full RFC 8259 recursive-descent parser: null/
  *   true/false, numbers (strtod after a strict grammar check — doubles
@@ -270,7 +270,7 @@ void scr_jb_edge_idx(ScrJsonBuf *b, size_t i) {
 
 /* ── circular guard for the typed→dyn converters (sc_td_*) ────────────
  * A recursive-typed value crossing into a checked-dynamic slot DEEP-
- * COPIES into the DOM; a cyclic value has no finite copy. Node never
+ * COPIES into the checked-dynamic tree; a cyclic value has no finite copy. Node never
  * copies (an unknown-typed binding shares the reference), so there is no
  * Node-exact error to throw — the conversion TRAPS loudly instead
  * (SEMANTICS.md documents the divergence). The emitted converters over
@@ -300,7 +300,7 @@ void scr_dyn_from_leave(void) {
   if (g_td_nseen > 0) g_td_nseen--;
 }
 
-/* ── DOM lifecycle ─────────────────────────────────────────────────────
+/* ── dyn lifecycle ─────────────────────────────────────────────────────
  * Parse/release churn (a JSON round-trip loop allocates and frees every
  * node each iteration) runs on freelists instead of calloc/free: one list
  * per shape so arr/obj nodes keep their items/entries buffer across
@@ -431,7 +431,7 @@ void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item) {
 }
 
 /* Spread completion for a runtime-arity argument list (`f(...xs)` in the
- * checked-dynamic tier): JS's spread over the DOM's iterable kinds —
+ * checked-dynamic tier): JS's spread over the checked-dynamic tree's iterable kinds —
  * arrays element-by-element (retained), strings by code POINT (the string
  * iterator; astral chars arrive unsplit), bytes by byte; every other kind
  * throws V8's exact SPREAD-CALL TypeError (catchable, pending — callers
@@ -473,16 +473,24 @@ void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what) {
     return;
   }
   if (src->kind == SCR_DYN_JSVAL) {
-    /* An engine array IS iterable — the generic not-iterable TypeError
-     * would be a wrong claim. Loud fence (lane dyn-routing-ops). */
-    scr_dyn_isl_fence(src, "spread");
+    /* A wrapped engine value spreads through the ENGINE's own iterator
+     * protocol (the routed iter_drain — Symbol.iterator implementations,
+     * generators, Maps step exactly as Node runs them); a non-iterable
+     * throws V8's spread-call text from the guard, an iterating throw
+     * bridges with the engine's message. */
+    ScrDyn *pack = scr_dyn_jsval_ops()->iter_drain(src->v.jsval.cell, true, NULL);
+    if (!pack) return; /* pending */
+    for (size_t i = 0; i < pack->v.arr.len; i++) {
+      scr_dyn_arr_push(arr, scr_dyn_retain(pack->v.arr.items[i]));
+    }
+    scr_dyn_release(pack);
     return;
   }
   static const char msg[] = "Spread syntax requires ...iterable[Symbol.iterator] to be a function";
   scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
 }
 
-/* Destructuring pack over a DOM source (`const [a, b] = d`, a destructured
+/* Destructuring pack over a dyn source (`const [a, b] = d`, a destructured
  * dyn callback param): the spread walk's iterable kinds collect into a
  * FRESH array — arrays element-by-element (retained), strings by code
  * point, bytes by byte — and every other kind throws V8's DESTRUCTURING
@@ -499,12 +507,14 @@ ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
     scr_dyn_arr_push_spread(out, src, ""); /* iterable kinds never consult `what` */
     return out;
   }
-  /* An engine-held value may well BE iterable — claiming "not iterable"
-   * would be a wrong answer. The routing lane owns iteration; until it
-   * arms this, the island fence names the operation loudly. */
+  /* A wrapped engine value packs through the ENGINE's own iterator
+   * protocol (the routed iter_drain): elements wrap back scalar-
+   * normalized; a non-iterable throws the destructuring kind wording
+   * from the engine-side guard, an iterating throw bridges with the
+   * engine's message. The compile-time spelling is not threaded through
+   * (the engine's wording names the value's own kind). */
   if (src->kind == SCR_DYN_JSVAL) {
-    scr_dyn_isl_fence(src, "destructuring");
-    return NULL;
+    return scr_dyn_jsval_ops()->iter_drain(src->v.jsval.cell, false, msg);
   }
   if (msg != NULL && msg->len > 0) {
     scr_throw_error(SCR_ERR_TYPE, scr_str_new(msg->data, msg->len));
@@ -529,6 +539,19 @@ ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
   scr_jb_puts(&b, " is not iterable (cannot read property Symbol(Symbol.iterator))");
   scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
   return NULL;
+}
+
+/* The for-of-over-dyn pack accessors: the emitted index loop drives them
+ * over a scr_dyn_iter_pack result (ARR by construction — the defensive
+ * arms cover nothing reachable from that lowering). Never throw. */
+double scr_dyn_arr_len(const ScrDyn *d) {
+  return d->kind == SCR_DYN_ARR ? (double)d->v.arr.len : 0;
+}
+ScrDyn *scr_dyn_arr_at(const ScrDyn *d, double i) {
+  if (d->kind != SCR_DYN_ARR || i < 0 || i >= (double)d->v.arr.len) {
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  return scr_dyn_retain(d->v.arr.items[(size_t)i]);
 }
 
 /* Takes ownership of key (malloc'd) and value. Duplicate keys: the LATER
@@ -557,7 +580,7 @@ static void scr_dyn_obj_put(ScrDyn *obj, char *key, size_t key_len, ScrDyn *valu
   e->value = value;
 }
 
-/* ── DOM construction (compiler-emitted converters & overflow reads) ───── */
+/* ── dyn construction (compiler-emitted converters & overflow reads) ───── */
 
 /* THE undefined value: one immortal node (rc == SIZE_MAX skips every
  * retain/release and the freelists never see it). */
@@ -622,7 +645,7 @@ ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d) {
 static bool scr_dyn_chunk_utf8;
 void scr_dyn_chunk_enc(bool utf8) { scr_dyn_chunk_utf8 = utf8; }
 
-/* One 'data' payload as the DOM value the current window dictates:
+/* One 'data' payload as the dyn value the current window dictates:
  * a Buffer-flavored bytes box, or a string inside a setEncoding window. */
 ScrDyn *scr_dyn_new_chunk(const ScrBytes *b) {
   if (scr_dyn_chunk_utf8) {
@@ -634,7 +657,7 @@ ScrDyn *scr_dyn_new_chunk(const ScrBytes *b) {
   return scr_dyn_new_buffer_copy(b);
 }
 
-/* A boxed static function value (the compiler's static→DOM converters).
+/* A boxed static function value (the compiler's static→dyn converters).
  * Ownership of the closure MOVES in; sig/name are static literals. */
 ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, const char *sig, const char *name) {
   ScrDyn *d = scr_dyn_alloc(SCR_DYN_FUNC);
@@ -654,7 +677,7 @@ ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, con
 ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const char *what) {
   if (d->kind == SCR_DYN_JSVAL) {
     /* An ENGINE callee: the call routes through scr_jsval_call with the
-     * uniform argument conversion (wrapped cells by reference, DOM data
+     * uniform argument conversion (wrapped cells by reference, dyn data
      * deep-copied, FUNC boxes through the host shim); a non-callable
      * engine value throws the ENGINE's own TypeError, bridged catchably.
      * `what` is unused — the engine's message names the failure. */
@@ -672,14 +695,14 @@ ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const ch
   return d->v.fn.thunk(d->v.fn.clo, args, argc);
 }
 
-/* scr_dyn_call over a DOM ARRAY's elements — the spread-application form
+/* scr_dyn_call over a dyn ARRAY's elements — the spread-application form
  * (`f(...args)` after the emitted argument array is built). Borrows both;
  * result owned (+1), or NULL with the exception pending. */
 ScrDyn *scr_dyn_apply(const ScrDyn *d, const ScrDyn *args, const char *what) {
   return scr_dyn_call(d, args->v.arr.items, args->v.arr.len, what);
 }
 
-/* ── native handles in the DOM (SCR_DYN_HANDLE) ───────────────────────
+/* ── native handles in the checked-dynamic tree (SCR_DYN_HANDLE) ───────────────────────
  * Per-tag ops stamped by the owning units at main() (scr_http_dyn_install
  * / scr_net_dyn_install — the scr_net_install hook story), so this
  * always-linked core never references gated units. A missing tag at use
@@ -710,10 +733,10 @@ const ScrDynHandleOps *scr_dyn_handle_ops_of(const ScrDyn *d) {
   return scr_dyn_handle_ops(d->v.handle.tag);
 }
 
-/* errors.js's determineSpecificType over a DOM value — the "Received
+/* errors.js's determineSpecificType over a dyn value — the "Received
  * ..." tail of Node's ERR_INVALID_ARG_TYPE messages. Renders into buf
  * when the shape needs a payload; returns the text either way. Lives
- * beside the DOM core (not the gated handle unit) because the always-
+ * beside the dyn core (not the gated handle unit) because the always-
  * linked argument validators (bytes, fs) render through it too. */
 const char *scr_dyn_specific_type(const ScrDyn *cb, char *detail, size_t cap) {
   const char *d = detail;
@@ -886,7 +909,7 @@ ScrDyn *scr_dyn_alloc_promise(void (*release_fn)(ScrPromise *p)) {
   return scr_dyn_alloc(SCR_DYN_PROMISE);
 }
 
-/* ── island values in the DOM (SCR_DYN_JSVAL) ─────────────────────────
+/* ── island values in the checked-dynamic tree (SCR_DYN_JSVAL) ─────────────────────────
  * The gated constructor (scr_dyn_from_jsval, scr_island.c) builds through
  * this allocator view and installs the engine-routing ops — the
  * scr_dyn_alloc_promise story: a dynamic-free link never references
@@ -973,7 +996,7 @@ ScrDyn *scr_dyn_handle_key_get(const ScrDyn *d, const ScrStr *k) {
     scr_dyn_release(r);
     return NULL;
   }
-  /* Unmodeled names answer undefined — the DOM's own-property stance
+  /* Unmodeled names answer undefined — the checked-dynamic tree's own-property stance
    * (real-but-unmodeled members fence loudly inside ops->get instead;
    * SEMANTICS.md documents the remainder). */
   return r ? r : scr_dyn_retain(scr_dyn_undefined());
@@ -1066,7 +1089,7 @@ void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value
   scr_dyn_obj_put(obj, copy, key_len, value);
 }
 
-/* ToBoolean over a DOM value (`v || dflt`, `if (v)` on a dyn operand):
+/* ToBoolean over a dyn value (`v || dflt`, `if (v)` on a dyn operand):
  * bool by value; number falsy exactly for 0, -0, and NaN; string falsy
  * exactly when empty; obj/arr/bytes/func always true; undefined and null
  * always false — JS-exact for every kind. Borrowed; never throws. */
@@ -1089,13 +1112,13 @@ bool scr_dyn_truthy(const ScrDyn *d) {
   }
 }
 
-/* Bare `typeof v` on a dyn value: the DOM kind's JS answer (+1 string).
+/* Bare `typeof v` on a dyn value: the dyn kind's JS answer (+1 string).
  * null answers "object" — JS's oldest wart, preserved. */
 ScrStr *scr_dyn_typeof(const ScrDyn *d) {
   const char *s;
   /* An island value answers the ENGINE's typeof — "object" for the
    * wrapped objects/arrays, "function" for engine functions (row 1 of
-   * the jsval→DOM op table; scalars normalized away at wrap time). */
+   * the jsval→dyn op table; scalars normalized away at wrap time). */
   if (d->kind == SCR_DYN_JSVAL) return scr_dyn_jsval_ops()->type_of(d->v.jsval.cell);
   switch (d->kind) {
   case SCR_DYN_UNDEF: s = "undefined"; break;
@@ -1114,9 +1137,9 @@ ScrStr *scr_dyn_typeof(const ScrDyn *d) {
   return scr_str_new(s, strlen(s));
 }
 
-/* ── JSON.stringify over a DOM value (util.format's %j) ───────────────
+/* ── JSON.stringify over a dyn value (util.format's %j) ───────────────
  * The RUNTIME walk the type-directed serializers deliberately avoid for
- * static values — a dyn value has no static type, so the DOM's own kinds
+ * static values — a dyn value has no static type, so the checked-dynamic tree's own kinds
  * drive it, JS-exactly: insertion-ordered objects with undefined/function
  * members OMITTED, arrays rendering those as null, Buffer's toJSON shape
  * ({"type":"Buffer","data":[...]}), shortest-roundtrip numbers, escaped
@@ -1191,7 +1214,7 @@ static bool scr_dyn_json_write(ScrJsonBuf *b, const ScrDyn *d) {
   case SCR_DYN_JSVAL: {
     /* The ENGINE's own JSON.stringify text splices in (toJSON protocols,
      * cycle TypeErrors — the engine's, bridged catchably). An engine
-     * FUNCTION is absent under stringify, like the DOM's FUNC kind. */
+     * FUNCTION is absent under stringify, like the checked-dynamic tree's FUNC kind. */
     if (scr_dyn_isl_typeof_is(d, "function")) return false;
     ScrStr *j = scr_dyn_jsval_ops()->to_json(d->v.jsval.cell);
     if (!j) return true; /* pending exception; caller checks */
@@ -1226,11 +1249,11 @@ ScrStr *scr_dyn_format_j(const ScrDyn *d) {
   return scr_jb_finish(&b);
 }
 
-/* An %Error instance as a DOM object ({name, message[, code]}) — the
+/* An %Error instance as a dyn object ({name, message[, code]}) — the
  * checked-dynamic boundary's error shape (the exception-snapshot
  * convention emit-walkers uses). Borrows e; +1 result.
  *
- * IDENTITY-CACHED: one error instance boxes to ONE DOM node, however many
+ * IDENTITY-CACHED: one error instance boxes to ONE dyn node, however many
  * times it crosses (Node passes the error OBJECT through, so `found.error
  * === thrown` and re-crossings compare reference-equal — the tracing
  * suite's shape). The cache retains both sides for the process (like the
@@ -1262,7 +1285,7 @@ ScrDyn *scr_dyn_from_error(const ScrError *e) {
     if (scr_errdyn_cache[i].err == e) return scr_dyn_retain(scr_errdyn_cache[i].dyn);
   }
   ScrDyn *d = scr_dyn_new_obj();
-  scr_dyn_obj_set(d, "%error", 6, scr_dyn_new_bool(true)); /* the DOM's error marker */
+  scr_dyn_obj_set(d, "%error", 6, scr_dyn_new_bool(true)); /* the checked-dynamic tree's error marker */
   scr_dyn_obj_set(d, "name", 4, scr_dyn_new_str(e->name));
   scr_dyn_obj_set(d, "message", 7, scr_dyn_new_str(e->message));
   if (e->code) scr_dyn_obj_set(d, "code", 4, scr_dyn_new_str(e->code));
@@ -1293,13 +1316,13 @@ ScrDyn *scr_dyn_from_error(const ScrError *e) {
 
 /* The %Error EXTRACTION (dynCheck of `u as Error` / an instanceof-Error
  * narrow, and the dyn-boxed thunk's Error-typed parameters): the REVERSE
- * of scr_dyn_from_error, riding the same identity cache — a DOM error
+ * of scr_dyn_from_error, riding the same identity cache — a dyn error
  * that came from a runtime ScrError answers THAT instance (+1), so an
  * error crossing out and back compares reference-equal (the tracing
  * suite's shape); an alien %error object rebuilds a runtime error from
  * its name/message/code (the vtable kind resolves from the name so a
  * later `instanceof TypeError` still answers) and ENTERS the cache, so
- * its next boxing answers the same DOM node. The DOM node is borrowed. */
+ * its next boxing answers the same dyn node. The dyn node is borrowed. */
 ScrError *scr_error_from_dyn(const ScrDyn *d) {
   ScrError *hit = scr_errdyn_err_of(d);
   if (hit) return hit;
@@ -1355,7 +1378,7 @@ void scr_errdyn_put(ScrError *e, ScrDyn *d) {
  * dyn method surface — a stream's 'data'/for-await chunk is the common
  * receiver): bytes decode per the encoding (Node's Buffer.toString,
  * utf8 default), strings answer themselves, numbers/booleans format
- * JS-exactly, arrays join their DOM elements with ',' (recursively via
+ * JS-exactly, arrays join their dyn elements with ',' (recursively via
  * JS's Array.prototype.toString), plain objects answer
  * "[object Object]", and undefined/null throw Node's TypeError. Borrows
  * both; +1 result. */
@@ -1417,7 +1440,7 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
     return scr_str_new(f, sizeof f - 1);
   }
   case SCR_DYN_JSVAL: {
-    /* The engine's own ToString (row 2 of the jsval→DOM op table): the
+    /* The engine's own ToString (row 2 of the jsval→dyn op table): the
      * real prototype chain runs — user toString included, its throw
      * bridging. A bridged failure follows this function's existing
      * throw shape (pending exception + the empty-string dummy). */
@@ -1453,7 +1476,7 @@ ScrStr *scr_dyn_to_string_method(const ScrDyn *d, const ScrStr *enc, const ScrSt
   return scr_dyn_to_string(d, enc);
 }
 
-/* JS String() over the DOM kind — the WebIDL ToString the web globals
+/* JS String() over the dyn kind — the WebIDL ToString the web globals
  * (atob/btoa, DOMException's name resolution) run on their arguments:
  * the unit kinds RENDER ("null"/"undefined") where the .toString() twin
  * above throws Node's property-read TypeError; every other kind matches
@@ -1464,7 +1487,7 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d) {
   return scr_dyn_to_string(d, NULL);
 }
 
-/* JS ToString over a DOM value WITH the object protocol (the WHATWG
+/* JS ToString over a dyn value WITH the object protocol (the WHATWG
  * USVString conversions — URLSearchParams names/values): an OBJ whose
  * own 'toString' member is callable is invoked with zero arguments (its
  * throw propagates, catchably); a non-primitive answer falls through to
@@ -1510,10 +1533,10 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
     return;
   }
   if (recv->kind == SCR_DYN_ARR) {
-    /* An INDEX write on a DOM array (`args[i] = v` — the variadic-rest
+    /* An INDEX write on a dyn array (`args[i] = v` — the variadic-rest
      * rebuild): a canonical numeric key sets/extends the element, holes
      * padding with undefined exactly like JS length growth. Non-index
-     * keys keep the throw below (DOM arrays carry no expando table). */
+     * keys keep the throw below (dyn arrays carry no expando table). */
     size_t idx = 0;
     int is_index = key->len > 0 && !(key->len > 1 && key->data[0] == '0');
     for (size_t i = 0; is_index && i < key->len; i++) {
@@ -1573,7 +1596,7 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
   scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
 }
 
-/* Node's JSON.stringify over a DOM: object members holding undefined DROP,
+/* Node's JSON.stringify over a dyn: object members holding undefined DROP,
  * array slots holding undefined print null. A bare undefined never arrives
  * (the record serializer drops the entry first); print null defensively. */
 void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
@@ -1594,7 +1617,7 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
     return;
   case SCR_DYN_BYTES: {
     /* Node's JSON.stringify over a typed array: the index-keyed object
-     * form — {"0":1,"1":2}. u8 payloads only reach the DOM today. */
+     * form — {"0":1,"1":2}. u8 payloads only reach the checked-dynamic tree today. */
     scr_jb_putc(b, '{');
     for (size_t i = 0; i < d->v.bytes->len; i++) {
       if (i > 0) scr_jb_putc(b, ',');
@@ -1633,7 +1656,7 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
   case SCR_DYN_JSVAL: {
     /* The ENGINE's own JSON.stringify text splices in (toJSON protocols,
      * cycle TypeErrors — all the engine's, bridged catchably). An engine
-     * FUNCTION serializes like the DOM's FUNC kind (dropped from objects
+     * FUNCTION serializes like the checked-dynamic tree's FUNC kind (dropped from objects
      * by the member loop below; null defensively elsewhere). */
     if (scr_dyn_isl_typeof_is(d, "function")) {
       scr_jb_puts(b, "null");
@@ -2232,9 +2255,9 @@ ScrDyn *scr_json_parse(ScrStr *text) {
 void *scr_dyn_retain_v(void *d) { return scr_dyn_retain((ScrDyn *)d); }
 void scr_dyn_release_v(void *d) { scr_dyn_release((ScrDyn *)d); }
 
-/* JS === over two DOM values: scalars by value (NaN false, ±0 equal via
+/* JS === over two dyn values: scalars by value (NaN false, ±0 equal via
  * C ==; strings bytewise), units by kind, everything reference-shaped by
- * node IDENTITY (the DOM's object identity). Never throws. */
+ * node IDENTITY (the checked-dynamic tree's object identity). Never throws. */
 bool scr_dyn_strict_eq(const ScrDyn *a, const ScrDyn *b) {
   if (a->kind != b->kind) return false;
   switch (a->kind) {
@@ -2261,7 +2284,7 @@ bool scr_dyn_strict_eq(const ScrDyn *a, const ScrDyn *b) {
     /* Identity is the ENGINE VALUE, not the box or even the cell: two
      * wraps of one engine value compare ===-equal (the engine's own
      * strict equality answers). Mixed kinds already answered false above
-     * — a DOM copy is a different object, which is Node's answer too. */
+     * — a dyn copy is a different object, which is Node's answer too. */
     return a == b || scr_dyn_jsval_ops()->strict_eq(a->v.jsval.cell, b->v.jsval.cell);
   default: return a == b;
   }
@@ -2290,10 +2313,10 @@ ScrDyn *scr_dyn_fn_get(const ScrDyn *d, const char *key, size_t key_len) {
   return NULL;
 }
 
-/* ── structuredClone over the DOM ─────────────────────────────────────
+/* ── structuredClone over the checked-dynamic tree ─────────────────────────────────────
  * The JSON-safe subset plus bytes, deep. Functions and handle kinds
  * throw the spec's catchable DataCloneError; cycles throw the scriptc
- * fence (the DOM cannot represent them — Node clones cycles; documented
+ * fence (the checked-dynamic tree cannot represent them — Node clones cycles; documented
  * divergence). Option validation throws Node's exact TypeErrors and is
  * shared with scr_domex_clone. */
 
@@ -2353,7 +2376,7 @@ static ScrDyn *scr_sc_clone(const ScrDyn *v, const ScrScParent *up) {
     for (const ScrScParent *p = up; p != NULL; p = p->up) {
       if (p->node == v) {
         static const char msg[] =
-            "structuredClone of cyclic values (the runtime's DOM cannot represent cycles) is not supported yet";
+            "structuredClone of cyclic values (the checked-dynamic tree cannot represent cycles) is not supported yet";
         scr_throw_error_msg(SCR_ERR_ERROR, msg, sizeof msg - 1);
         return NULL;
       }
@@ -2392,7 +2415,7 @@ static ScrDyn *scr_sc_clone(const ScrDyn *v, const ScrScParent *up) {
   case SCR_DYN_FUNC:
   case SCR_DYN_HANDLE:
   default: {
-    /* Node renders the value's source text; the DOM has none — the
+    /* Node renders the value's source text; the checked-dynamic tree has none — the
      * String() rendering stands in ("function () { [native code] } could
      * not be cloned."). */
     ScrStr *what = scr_dyn_string_coerce(v);
@@ -2434,7 +2457,7 @@ ScrDyn *scr_structured_clone_missing(void) {
 
 bool scr_dyn_err_instanceof(const ScrDyn *d, double kind) {
   /* A JSVAL node never came from a runtime ScrError, so the cache miss
-   * below answers false — the documented contract ("a DOM value that
+   * below answers false — the documented contract ("a dyn value that
    * never came from an error answers false"). An ENGINE TypeError held
    * in 'unknown' thus answers false where Node answers true: covered by
    * lane dom-jsval-long-tail (needs the engine's class instanceof). */
@@ -2448,7 +2471,7 @@ bool scr_dyn_err_instanceof(const ScrDyn *d, double kind) {
   return false;
 }
 
-/* ── Object.keys/values/entries over the DOM ──────────────────────────
+/* ── Object.keys/values/entries over the checked-dynamic tree ──────────────────────────
  * JS own-key order: array-index keys ascending first, then the rest in
  * insertion order. entries answers [key, value] pairs; values RETAIN
  * the member nodes (reference semantics, like JS). Strings/arrays/bytes
@@ -2471,7 +2494,7 @@ static bool scr_dyn_key_is_index(const char *key, size_t len, double *out) {
 
 typedef enum { SCR_OBJWALK_KEYS, SCR_OBJWALK_VALUES, SCR_OBJWALK_ENTRIES } ScrObjWalk;
 
-/* A fresh key string boxed into the DOM: scr_dyn_new_str RETAINS its
+/* A fresh key string boxed into the checked-dynamic tree: scr_dyn_new_str RETAINS its
  * argument, so the local +1 drops right after. */
 static ScrDyn *scr_dyn_objwalk_key(const char *key, size_t key_len) {
   ScrStr *k = scr_str_new(key, key_len);
@@ -2507,15 +2530,15 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
   }
   if (v->kind == SCR_DYN_JSVAL) {
     /* The ENGINE walks its own object (own-key order, getters running,
-     * Object.entries' pairs) and the results come back as a NATIVE DOM
-     * array — keys are DOM strings, values wrap per element. */
+     * Object.entries' pairs) and the results come back as a NATIVE dyn
+     * array — keys are dyn strings, values wrap per element. */
     return scr_dyn_jsval_ops()->obj_walk(v->v.jsval.cell, (int)mode);
   }
   ScrDyn *out = scr_dyn_new_arr();
   if (v->kind == SCR_DYN_OBJ) {
     size_t n = v->v.obj.len;
     /* Two passes: array-index keys ascending, then the rest in insertion
-     * order (JS's own-key order). Index keys are rare in DOM objects —
+     * order (JS's own-key order). Index keys are rare in dyn objects —
      * the ascending pass is a simple selection scan. */
     bool *is_index = malloc(n ? n * sizeof *is_index : 1);
     double *idx = malloc(n ? n * sizeof *idx : 1);
@@ -2525,7 +2548,7 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
     size_t index_count = 0;
     for (size_t i = 0; i < n; i++) {
       const ScrDynEntry *e = &v->v.obj.entries[i];
-      /* Reserved '%'-prefixed members (the DOM's error marker) never
+      /* Reserved '%'-prefixed members (the checked-dynamic tree's error marker) never
        * appear in user objects — '%' cannot start a JS identifier-ish
        * JSON key from this runtime's own producers; skip defensively. */
       is_index[i] = scr_dyn_key_is_index(e->key, e->key_len, &idx[i]);
@@ -2576,7 +2599,7 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
     return out;
   }
   if (v->kind == SCR_DYN_STR) {
-    /* JS indexes strings by UTF-16 code units; the DOM stores UTF-8.
+    /* JS indexes strings by UTF-16 code units; the checked-dynamic tree stores UTF-8.
      * Code points walk one at a time — an astral code point stays WHOLE
      * (one entry where JS lists two lone surrogates; documented
      * approximation, the keys stay dense). */
@@ -2620,7 +2643,7 @@ ScrDyn *scr_dyn_obj_keys(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWAL
  * UTF-16 code unit, like Node's String exotic object); nullish sources
  * copy nothing (Node skips them) and the scalar/function/handle kinds
  * have no own enumerable string keys. Non-OBJ targets copy nothing (the
- * existing two-arg stance — a DOM array target has no property table). */
+ * existing two-arg stance — a dyn array target has no property table). */
 static void scr_dyn_assign_from(ScrDyn *target, const ScrDyn *src) {
   if (target->kind != SCR_DYN_OBJ) return;
   if (src->kind == SCR_DYN_UNDEF || src->kind == SCR_DYN_NULL) return;
@@ -2651,7 +2674,7 @@ static void scr_dyn_assign_from(ScrDyn *target, const ScrDyn *src) {
   scr_dyn_release(pairs);
 }
 
-/* Object.assign over DOM values: copies `src`'s own members onto `target`
+/* Object.assign over dyn values: copies `src`'s own members onto `target`
  * (last write wins) and answers the target retained (+1). Nullish
  * receivers throw Node's ToObject TypeError; nullish sources copy
  * nothing; index-keyed sources (arrays/strings/bytes) copy their index
@@ -2666,13 +2689,13 @@ ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
     /* An ENGINE target: the copy runs in the engine (Object.assign's own
      * semantics — setters fire, own-enumerable order); the source enters
      * per the uniform conversion (a wrapped source spreads by reference,
-     * DOM data as the usual member deep copy). */
+     * dyn data as the usual member deep copy). */
     if (!scr_dyn_jsval_ops()->assign(target->v.jsval.cell, src)) return NULL;
     return scr_dyn_retain(target);
   }
   if (src->kind == SCR_DYN_JSVAL) {
-    /* A wrapped SOURCE onto a DOM target: the engine lists its own
-     * [key, value] pairs (getters running) and each lands as a DOM
+    /* A wrapped SOURCE onto a dyn target: the engine lists its own
+     * [key, value] pairs (getters running) and each lands as a dyn
      * member — values wrap per element, scalars normalized. */
     if (target->kind == SCR_DYN_OBJ) {
       ScrDyn *entries = scr_dyn_jsval_ops()->obj_walk(src->v.jsval.cell, 2);
@@ -2692,7 +2715,7 @@ ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
 }
 
 /* Variadic Object.assign's argument pack (the `Object.assign({},
- * ...arr.map(f), tail)` shape): the compiler builds one fresh DOM array
+ * ...arr.map(f), tail)` shape): the compiler builds one fresh dyn array
  * of sources — plain arguments push borrowed (+1 in), spread arguments
  * flatten through the spread-call walk (scr_dyn_arr_push_spread's V8
  * TypeError texts, `what` spelling the spread expression for the nullish
@@ -2719,6 +2742,18 @@ void scr_dyn_pack_push_spread_iter(ScrDyn *pack, const ScrDyn *src) {
   if (src->kind == SCR_DYN_ARR || src->kind == SCR_DYN_BYTES ||
       src->kind == SCR_DYN_STR) {
     scr_dyn_arr_push_spread(pack, src, ""); /* iterable kinds never throw */
+    return;
+  }
+  if (src->kind == SCR_DYN_JSVAL) {
+    /* A wrapped engine value on the ITERATED path: the engine's own
+     * protocol drains (the kind wording on a non-iterable — the
+     * iterated path's value-describing texts, engine-side). */
+    ScrDyn *drained = scr_dyn_jsval_ops()->iter_drain(src->v.jsval.cell, false, NULL);
+    if (!drained) return; /* pending */
+    for (size_t i = 0; i < drained->v.arr.len; i++) {
+      scr_dyn_arr_push(pack, scr_dyn_retain(drained->v.arr.items[i]));
+    }
+    scr_dyn_release(drained);
     return;
   }
   ScrJsonBuf b;
@@ -2793,7 +2828,7 @@ ScrDyn *scr_dyn_obj_entries(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJ
 
 /* ── DOMException's dyn-touching half ─────────────────────────────────
  * Construction/cause/clone live HERE (not scr_error.c) so the error unit
- * stays linkable without the DOM (the runtime C-unit tests link
+ * stays linkable without the checked-dynamic tree (the runtime C-unit tests link
  * subsets). The cause teardown installs through scr_error.c's hook
  * before any cause can exist. */
 
@@ -2852,10 +2887,10 @@ ScrError *scr_domex_clone(ScrError *e, const ScrDyn *options) {
 }
 
 /* ── atob/btoa — the WHATWG base64 globals (Node globals since v16) ───
- * They live HERE (not scr_string.c) because the argument is a DOM value:
- * WebIDL ToString runs over the DOM kind (Node's atob(null) decodes the
+ * They live HERE (not scr_string.c) because the argument is a dyn value:
+ * WebIDL ToString runs over the dyn kind (Node's atob(null) decodes the
  * string "null"), and the string unit must stay linkable without the
- * DOM. atob is forgiving-base64 exactly — ASCII whitespace stripped, a
+ * dyn. atob is forgiving-base64 exactly — ASCII whitespace stripped, a
  * %4==0 input sheds up to two trailing '=', %4==1 refuses, leftover
  * bits discard — decoding to the latin1 code points as a UTF-8 string;
  * btoa refuses any code point over U+00FF. Malformed input throws the

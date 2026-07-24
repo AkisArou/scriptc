@@ -9,7 +9,7 @@
  * bookkeeping); scr_inspect.c owns everything the type cannot know —
  * scalar formatting (-0, the quoting ladder, string splitting), Buffer
  * hex, and the layout engine (frames, break-length, grid grouping).
- * Checked-dynamic values render ENTIRELY in the runtime (the dyn DOM
+ * Checked-dynamic values render ENTIRELY in the runtime (the dyn
  * carries its own shape); island `any` values render their scalar kinds
  * and throw catchably on composites (the runtime tag is all there is).
  *
@@ -154,7 +154,7 @@ function inspectSupport(L: Lowerer, t: IrType, visiting: Set<string>, out: { rec
       }
       if (shape.indexValue !== undefined) {
         // PURE index-signature shapes (Record<string, V> — no declared
-        // fields) render like the dyn DOM's objects: a runtime key walk
+        // fields) render like the dyn's objects: a runtime key walk
         // (recordOvfKeys), each key through insp.key's bare-or-quoted
         // ladder. Hybrids keep the fence — JS orders integer keys first
         // ACROSS the declared and overflow stores, an interleave the
@@ -1178,7 +1178,7 @@ export function lowerFormatCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc
         }
         // A checked-dynamic argument (`console.log('... actual %d.',
         // context.actual)` — test/common's exit report): VALIDATE it as a
-        // number (dynCheck) and format. A non-number DOM value throws the
+        // number (dynCheck) and format. A non-number dyn value throws the
         // catchable TypeError where Node would print its ToNumber (NaN
         // for objects) — loud, never a silent wrong answer (SEMANTICS.md).
         if (value.type.kind === "dyn") {
@@ -1223,7 +1223,7 @@ export function lowerFormatCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc
           return str("undefined", loc);
         }
         // A checked-dynamic argument (`console.error('headers: %j',
-        // headers)` — the suite's http logging idiom): the runtime DOM
+        // headers)` — the suite's http logging idiom): the runtime dyn
         // walk stringifies JS-exactly (root undefined/function prints
         // "undefined"; a handle in the tree throws the loud fence).
         if (value.type.kind === "dyn") {
@@ -1357,7 +1357,7 @@ export function lowerUtilModuleCall(
 
 /** util.getCallSites() in a JS source: compiled binaries keep no runtime
  * call stacks, so the honest STATIC answer is a fixed-shape placeholder —
- * a fresh DOM array of three call-site records whose scriptName is the
+ * a fresh dyn array of three call-site records whose scriptName is the
  * CALL SITE's own file (compile-time-knowable) and whose line/column are
  * 0 (SEMANTICS.md; the fields exist so consumers like test/common's
  * mustNotCall — `callSite.scriptName`:`callSite.lineNumber` in the

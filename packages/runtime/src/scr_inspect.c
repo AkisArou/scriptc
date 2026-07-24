@@ -700,7 +700,7 @@ ScrStr *scr_insp_error(ScrError *e, double recurse, double depth) {
   return out;
 }
 
-/* ── dyn values (the checked-dynamic JSON DOM) ───────────────────────── */
+/* ── dyn values (the checked-dynamic JSON dyn) ───────────────────────── */
 
 /* Property-name rendering: bare when the key matches Node's keyStrRegExp
  * (/^[a-zA-Z_][a-zA-Z_0-9]*$/, '__proto__' excepted), quoted otherwise. */
@@ -735,7 +735,7 @@ ScrStr *scr_insp_key(ScrStr *k) {
 /* The full inspect over a dyn tree — the one runtime type whose SHAPE
  * lives in the value, so the traversal lives here instead of a
  * synthesized helper. Same engine, same defaults. dyn-boxed bytes render
- * in the DOM's documented Uint8Array identity (SEMANTICS.md). */
+ * in the checked-dynamic tree's documented Uint8Array identity (SEMANTICS.md). */
 ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
   switch (d->kind) {
     case SCR_DYN_NULL:
@@ -837,7 +837,7 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
       return scr_str_new("", 0);
     }
     case SCR_DYN_JSVAL: {
-      /* An island value inside the DOM: Node prints the engine object's
+      /* An island value inside the checked-dynamic tree: Node prints the engine object's
        * property dump — fence loudly, naming the engine typeof (the
        * scr_insp_jsval wording for bare 'any' composites). */
       ScrStr *t = scr_dyn_typeof(d); /* routes to the engine; +1 */

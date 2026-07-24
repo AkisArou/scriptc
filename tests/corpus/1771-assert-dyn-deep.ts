@@ -1,8 +1,8 @@
 // assert.deepStrictEqual / notDeepStrictEqual over CHECKED-DYNAMIC
-// operands — the structural DOM walk: Object.is numbers, byte-equal
+// operands — the structural dyn walk: Object.is numbers, byte-equal
 // strings, per-element arrays, key-set objects, brand-aware bytes (the
 // Buffer flavor bit is the prototype Node compares first), closure
-// identity for functions. A static side crosses into the DOM when it is
+// identity for functions. A static side crosses into the checked-dynamic tree when it is
 // JSON-safe (records/arrays/scalars/units); the generated messages are
 // assertion_error.js's — compact:false sorted rendering, the real myers
 // line diff with 5 context lines, "..." collapsing and the
@@ -64,7 +64,7 @@ console.log(msgOf(() => assert.notDeepStrictEqual(dobj, dobj2)));
 console.log(msgOf(() => assert.notDeepStrictEqual(JSON.parse("5"), 5)));
 console.log(msgOf(() => assert.notDeepStrictEqual(darr, [1, 2], "custom ndse")));
 
-// A record field holding undefined: the DOM's undefined value renders
+// A record field holding undefined: the checked-dynamic tree's undefined value renders
 // and compares (key sets differ, exactly Node).
 interface MaybeB {
   a: number;
@@ -73,7 +73,7 @@ interface MaybeB {
 const plain: unknown = JSON.parse('{"a":1}');
 console.log(msgOf(() => assert.deepStrictEqual(plain, { a: 1, b: undefined } as MaybeB)));
 
-// Bytes inside the DOM: brand-aware content comparison (both sides
+// Bytes inside the checked-dynamic tree: brand-aware content comparison (both sides
 // crossed as unknown, so both carry the plain Uint8Array flavor).
 const ua: unknown = new Uint8Array([1, 2]);
 const ub: unknown = new Uint8Array([1, 2]);

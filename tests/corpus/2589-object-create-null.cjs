@@ -1,7 +1,7 @@
 // Object.create(null) — the null-prototype DICTIONARY (prettier's
 // index.cjs/groupModeMap idiom: create, then keyed assignment): a fresh
-// DOM object flagged prototype-free. Keyed reads/writes, Object.keys,
-// JSON, `in`, and Object.hasOwn are the DOM's usual own-member walks —
+// dyn object flagged prototype-free. Keyed reads/writes, Object.keys,
+// JSON, `in`, and Object.hasOwn are the checked-dynamic tree's usual own-member walks —
 // which ARE Node's null-proto answers (no prototype to consult) — while
 // the observations that SEE the prototype follow the flag: util.inspect
 // prefixes "[Object: null prototype]" (nested and beyond-depth forms

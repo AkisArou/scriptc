@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 const testDir = import.meta.dirname;
 const bin = join(testDir, "build", "test_json");
 
-// Built with ASan + the RC audit: a clean exit also proves the DOM's
+// Built with ASan + the RC audit: a clean exit also proves the checked-dynamic tree's
 // recursive ownership — including trees abandoned mid-parse by syntax
 // errors — leaks nothing and frees nothing twice.
 beforeAll(async () => {
@@ -36,13 +36,13 @@ beforeAll(async () => {
   ]);
 });
 
-// The C side parses/inspects DOMs as checks and routes each expected
+// The C side parses/inspects dyn values as checks and routes each expected
 // failure through scr_exc_print_uncaught. Parse failures are SyntaxError
 // INSTANCES (the depth cap a RangeError, dynCheck failures TypeErrors), so
 // every uncaught line renders "name: message" — e.name is Node-exact while
 // the V8-flavored message wording stays approximate (SEMANTICS.md): these
 // lines pin OUR rendering, not Node's.
-test("json runtime: parser, DOM, dynCheck failure path, stringify buffer", async () => {
+test("json runtime: parser, dyn, dynCheck failure path, stringify buffer", async () => {
   const { stdout, stderr } = await execFileAsync(bin);
   expect(stdout).toMatch(/^(\d+)\/\1 checks passed\n$/);
   expect(stderr).toBe(

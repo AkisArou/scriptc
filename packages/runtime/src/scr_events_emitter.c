@@ -466,7 +466,7 @@ ScrEmitter *scr_emitter_off_dyn(ScrEmitter *em, ScrStr *name, const ScrDyn *cb) 
  * the simple '-quoted spelling — listener mistakes are words, not escape
  * zoos). */
 void scr_emitter_check_listener(const ScrDyn *cb) {
-  /* The shared gate lives in the always-linked DOM core (scr_json.c) so
+  /* The shared gate lives in the always-linked dyn core (scr_json.c) so
    * the handle dispatchers' .on paths render the same shapes without
    * linking this unit. */
   scr_dyn_check_listener(cb, "listener");

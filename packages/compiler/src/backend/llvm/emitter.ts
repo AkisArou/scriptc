@@ -49,7 +49,7 @@
  * ReferenceError. main() gains the uncaught epilogue when the entry
  * function may throw.
  *
- * The dyn surface (phase 5): ScrDyn DOM values are in the tier — dyn.ts
+ * The dyn surface (phase 5): ScrDyn dyn values are in the tier — dyn.ts
  * ports emit-walkers.ts's dyn slice (match/check/toDyn walkers, the
  * String(unknown)/caught→dyn/keyed-read singletons, the checked-dynamic
  * function boundary's thunk/box/adapter triple) and the emitter lowers
@@ -72,7 +72,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -465,7 +465,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "sym.toString": "scr_sym_to_string",
   "error.toString": "scr_error_to_string",
   "class.name": "scr_classobj_name",
-  // The dyn (ScrDyn DOM) surface (scr_json.c / scr_dyn_invoke.c):
+  // The dyn (ScrDyn dyn) surface (scr_json.c / scr_dyn_invoke.c):
   // json.parse throws the catchable SyntaxError; keySet/toString/
   // defineProps throw Node's TypeErrors (all in the may-throw seed set —
   // the generic path emits the standard pending check). typeof and the
@@ -473,6 +473,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "json.parse": "scr_json_parse",
   "dyn.keySet": "scr_dyn_key_set",
   "dyn.iterPack": "scr_dyn_iter_pack",
+  "dyn.arrLen": "scr_dyn_arr_len",
+  "dyn.arrAt": "scr_dyn_arr_at",
   "dyn.defineProps": "scr_dyn_define_props",
   "dyn.typeof": "scr_dyn_typeof",
   "dyn.toString": "scr_dyn_to_string_method",
@@ -660,7 +662,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "dc.tcTraceCallback": "scr_dc_tc_trace_callback",
   "dc.tcTracePromise": "scr_dc_tc_trace_promise",
   // AsyncLocalStorage (scr_async_dyn.c): store ids are doubles, values
-  // ride the DOM; run/exitRun dispatch user callbacks (may-throw).
+  // ride the checked-dynamic tree; run/exitRun dispatch user callbacks (may-throw).
   // The dc bind-store trio shares the als id space.
   "als.new": "scr_als_new",
   "als.get": "scr_als_get",
@@ -672,7 +674,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "dc.chanUnbindStore": "scr_dc_chan_unbind_store",
   "dc.chanRunStores": "scr_dc_chan_run_stores",
   // process warning/rejection events (scr_lib.c / scr_async_dyn.c):
-  // DOM listeners are borrowed (the runtime retains its copy);
+  // dyn listeners are borrowed (the runtime retains its copy);
   // onUnhandledRejection marks the loop live (the loop-end report
   // dispatches the listeners).
   "process.onWarning": "scr_process_on_warning",
@@ -693,7 +695,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "regexp.escape": "scr_regexp_escape",
   // The dyn Object walks (throw on nullish receivers), structuredClone
   // (option/DataClone/cycle errors), and new RegExp's eager compile
-  // (catchable SyntaxError) — all may-throw generics over the DOM.
+  // (catchable SyntaxError) — all may-throw generics over the checked-dynamic tree.
   "dyn.objKeys": "scr_dyn_obj_keys",
   "dyn.hasOwn": "scr_dyn_has_own",
   "dyn.assign": "scr_dyn_assign",
@@ -851,7 +853,7 @@ class LlEmitter {
    * rewriter, union ToString/join) — interned per typeKey/unionId, defs
    * flushed with the shape helpers. */
   private readonly walkers = new LlWalkers(this);
-  /** The dyn (ScrDyn DOM) helper registry — dyn.ts's interned ports of
+  /** The dyn (ScrDyn dyn) helper registry — dyn.ts's interned ports of
    * emit-walkers.ts's dyn slice. */
   private readonly dyn = new LlDyn(this);
   /** External declarations, in first-use order. */
@@ -2381,7 +2383,7 @@ class LlEmitter {
         return t;
       }
       case "dyn": {
-        // ToBoolean over the DOM kind (scr_dyn_truthy — JS-exact for
+        // ToBoolean over the dyn kind (scr_dyn_truthy — JS-exact for
         // every kind; borrowed, never throws): `v || dflt` and condition
         // descent on checked-dynamic values.
         this.declare(`declare zeroext i1 @scr_dyn_truthy(ptr)`);
@@ -4049,7 +4051,7 @@ class LlEmitter {
           return this.own({ name: t, type: e.type });
         }
         if (v.type.kind === "dyn") {
-          // String(unknown): dispatch over the DOM kind (dyn.ts's sc_ds —
+          // String(unknown): dispatch over the dyn kind (dyn.ts's sc_ds —
           // Node's String() incl. arrays-join and "[object Object]").
           const helper = this.dyn.dynToStrHelper();
           const t = B.tmp();
@@ -4338,7 +4340,7 @@ class LlEmitter {
         this.unionTagSwitch(u.name, def, (arm) => {
           if (isUnitType(arm)) {
             if (e.type.kind === "dyn") {
-              // A dyn-typed chain: the unit path is the undefined DOM
+              // A dyn-typed chain: the unit path is the undefined dyn
               // value — dyn represents undefined directly.
               this.declare(`declare ptr @scr_dyn_undefined()`);
               this.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
@@ -4635,9 +4637,9 @@ class LlEmitter {
         // the frame's release is a no-op) and the body reads it through
         // chainRecv.
         if (e.receiver.type.kind === "dyn") {
-          // A dyn (DOM) receiver — the `rawName?.match(re)` step: the
+          // A dyn (dyn) receiver — the `rawName?.match(re)` step: the
           // nullish test reads the node's kind tag; the unit path is the
-          // undefined DOM singleton (dyn results) or nothing (void
+          // undefined dyn singleton (dyn results) or nothing (void
           // bodies), the body runs over the bound receiver otherwise.
           const r = this.emitExpr(e.receiver);
           const kd = this.dynKind(r.name);
@@ -4786,7 +4788,7 @@ class LlEmitter {
         }
         if (e.type.kind === "dyn") {
           // A dyn-typed chain (`pricing?.[key]` over an unknown-valued
-          // index signature): the unit path is the undefined DOM value —
+          // index signature): the unit path is the undefined dyn value —
           // dyn represents undefined directly, no union wrapper exists.
           const slotD = B.slot();
           B.entryAllocas.push(`${slotD} = alloca ptr`);
@@ -5205,14 +5207,14 @@ class LlEmitter {
       }
       case "jsonStringify": {
         // Type-directed serialization: the STATIC type picks an emitted
-        // serializer (interned per typeKey) — no DOM, no runtime dispatch.
+        // serializer (interned per typeKey) — no dyn, no runtime dispatch.
         // The value temp is BORROWED (released with this statement's
         // frame); the result string is owned (+1). Never throws — except
         // the dyn root below.
         const v = this.emitExpr(e.value);
         let compact: { name: string; type: IrType };
         if (e.value.type.kind === "dyn") {
-          // A dyn root: the runtime's DOM walker (scr_dyn_format_j — the
+          // A dyn root: the runtime's dyn walker (scr_dyn_format_j — the
           // C backend's dispatch exactly): number/string/bool/null/array/
           // object exact, dropped members omitted, and a dropped ROOT
           // becomes the TEXT "undefined" (JSON.stringify(undefined) is
@@ -5366,7 +5368,7 @@ class LlEmitter {
           if (e.arg === null) {
             if (genT.nextT.kind === "dyn") {
               // Valueless resume on a dyn channel: JS's undefined — the
-              // DOM singleton rides the IN slot (+1 moves in).
+              // dyn singleton rides the IN slot (+1 moves in).
               this.declare(`declare ptr @scr_dyn_undefined()`);
               this.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
               this.declare(`declare void @scr_dyn_release_v(ptr)`);
@@ -5804,10 +5806,10 @@ class LlEmitter {
         return { name: "", type: e.type };
       }
       case "dynFrom": {
-        // Static value → fresh DOM tree (+1) through the interned per-type
+        // Static value → fresh dyn tree (+1) through the interned per-type
         // converter; the operand stays borrowed (frame-released as usual).
         // Bare unit literals (an `undefined`/`null` stored under an
-        // `unknown` index signature) are the DOM unit values directly.
+        // `unknown` index signature) are the dyn unit values directly.
         if (e.value.kind === "unitLit") {
           const t = B.tmp();
           if (e.value.unit === "undefined") {
@@ -5824,7 +5826,7 @@ class LlEmitter {
         }
         const v = this.emitExpr(e.value);
         if (v.type.kind === "func") {
-          // A closure boxes as the DOM's function kind: retained closure +
+          // A closure boxes as the checked-dynamic tree's function kind: retained closure +
           // the per-signature call thunk + the interned signature key. The
           // best-effort name rides along (null when the lowering had none).
           const name =
@@ -5841,8 +5843,8 @@ class LlEmitter {
         return this.own({ name: t, type: e.type });
       }
       case "dynFromJsval": {
-        // Island value → DOM: the by-reference wrap (scr_dyn_from_jsval
-        // retains the cell in; engine scalars normalize to native DOM
+        // Island value → dyn: the by-reference wrap (scr_dyn_from_jsval
+        // retains the cell in; engine scalars normalize to native dyn
         // kinds at wrap time). Operand borrowed, result +1, never throws.
         const v = this.emitExpr(e.value);
         this.declare(`declare ptr @scr_dyn_from_jsval(ptr)`);
@@ -5861,7 +5863,7 @@ class LlEmitter {
         return this.own({ name: t, type: e.type });
       }
       case "dynCheck": {
-        // The dynamic boundary: validate the DOM against the target type
+        // The dynamic boundary: validate the checked-dynamic tree against the target type
         // and BUILD the typed value (+1) — or throw the catchable
         // path-annotated TypeError. The dyn temp is BORROWED; the result
         // joins the frame BEFORE the pending check so an unwind releases
@@ -5882,11 +5884,11 @@ class LlEmitter {
         // spelling rides along for Node's "<name> is not a function".
         const callee = this.emitExpr(e.callee);
         if (e.spreads !== undefined && e.spreads.length > 0) {
-          // The RUNTIME-ARITY form (`f(...args)`): one fresh DOM array
+          // The RUNTIME-ARITY form (`f(...args)`): one fresh dyn array
           // collects the arguments left-to-right — plain args move in
           // (push takes ownership), spread args FLATTEN (push_spread
           // retains elements in and throws V8's spread-call TypeError for
-          // non-iterable DOM kinds, checked per spread — JS's
+          // non-iterable dyn kinds, checked per spread — JS's
           // ArgumentListEvaluation order) — then apply calls through the
           // array's elements (borrowed, exactly scr_dyn_call).
           this.declare(`declare ptr @scr_dyn_new_arr()`);
@@ -5960,7 +5962,7 @@ class LlEmitter {
         return out;
       }
       case "dynArrLit": {
-        // A DOM array built element-by-element: ownership of each dyn
+        // A dyn array built element-by-element: ownership of each dyn
         // element MOVES into the array (scr_dyn_arr_push's contract).
         this.declare(`declare ptr @scr_dyn_new_arr()`);
         this.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
@@ -5975,7 +5977,7 @@ class LlEmitter {
         return out;
       }
       case "dynObjLit": {
-        // A DOM object built member-by-member: key then value, source
+        // A dyn object built member-by-member: key then value, source
         // order. scr_dyn_key_set BORROWS all three (the member retains the
         // value in); the receiver is a fresh OBJ, so the non-object throw
         // paths are unreachable here.
@@ -5992,7 +5994,7 @@ class LlEmitter {
         return out;
       }
       case "dynKeyGet": {
-        // Keyed read on the DOM through the one interned helper — the
+        // Keyed read on the checked-dynamic tree through the one interned helper — the
         // non-optional form throws JS's TypeError on an undefined/null
         // receiver, and HANDLE receivers can throw the loud unmodeled-
         // property ladder on EITHER form; the result is owned (+1).
@@ -6075,7 +6077,7 @@ class LlEmitter {
         const [d, s, st] = e.left.type.kind === "dyn" ? [l, r, e.right.type] : [r, l, e.left.type];
         let test: string;
         if (st.kind === "dyn") {
-          // dyn vs dyn: whole-DOM strict equality.
+          // dyn vs dyn: whole-dyn strict equality.
           this.declare(`declare zeroext i1 @scr_dyn_strict_eq(ptr, ptr)`);
           test = B.tmp();
           B.line(`${test} = call zeroext i1 @scr_dyn_strict_eq(ptr ${l.name}, ptr ${r.name})`);
@@ -6124,7 +6126,7 @@ class LlEmitter {
         return { name: neg, type: e.type };
       }
       case "dynTest": {
-        // A pure kind compare on the DOM node — borrowed; only the truthy
+        // A pure kind compare on the dyn node — borrowed; only the truthy
         // form also reads a scalar payload (the runtime's ToBoolean).
         const d = this.emitExpr(e.value);
         let test: string;
@@ -6133,7 +6135,7 @@ class LlEmitter {
           test = B.tmp();
           B.line(`${test} = call zeroext i1 @scr_dyn_truthy(ptr ${d.name})`);
         } else if (e.test === "error") {
-          // `u instanceof Error`: the DOM's error encoding — an object
+          // `u instanceof Error`: the checked-dynamic tree's error encoding — an object
           // carrying the reserved "%error" marker key — or a real engine
           // Error held by reference (the isl helper answers false for
           // every non-JSVAL kind, so the call is unconditional).
@@ -6196,7 +6198,7 @@ class LlEmitter {
             // engine's own typeof.
             test = orIsl(oneOf([DK.OBJ, DK.ARR, DK.BYTES, DK.HANDLE, DK.PROMISE, DK.NULL]), "scr_dyn_isl_typeof_is", this.cstr("object"));
           } else if (e.test === "array") {
-            // Array.isArray: the DOM's array kind, or the engine's own
+            // Array.isArray: the checked-dynamic tree's array kind, or the engine's own
             // answer for an engine-held value.
             test = orIsl(oneOf([DK.ARR]), "scr_dyn_isl_is_array");
           } else if (e.test === "function") {
@@ -6219,7 +6221,7 @@ class LlEmitter {
         return { name: neg, type: e.type };
       }
       case "dynDestrCheck": {
-        // RequireObjectCoercible with V8's destructuring TypeError. DOM
+        // RequireObjectCoercible with V8's destructuring TypeError. dyn
         // values check in the runtime helper and pass through unchanged
         // (same temp, same ownership); island values check in the engine
         // (a fresh +1 cell for the same value comes back).
@@ -6240,7 +6242,7 @@ class LlEmitter {
       }
       case "dynIterN": {
         // GetIterator + first-N steps as a fresh array (V8's exact
-        // not-iterable TypeError on non-iterables): the DOM helper for
+        // not-iterable TypeError on non-iterables): the dyn helper for
         // dyn operands, the engine's real iterator protocol for island
         // ones.
         const v = this.emitExpr(e.value);
@@ -6273,7 +6275,9 @@ class LlEmitter {
         const payload =
           e.type.kind === "promise" && e.type.inner.kind === "void"
             ? 0 // SCR_ISLP_VOID
-            : 4; // SCR_ISLP_JSVAL
+            : e.type.kind === "promise" && e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"
+              ? 5 // SCR_ISLP_JSVAL_ARR: the Array.isArray-gated by-reference exit at settle
+              : 4; // SCR_ISLP_JSVAL
         this.declare(`declare ptr @scr_jsval_bridge_promise(ptr, i32)`);
         const t = B.tmp();
         B.line(`${t} = call ptr @scr_jsval_bridge_promise(ptr ${v.name}, i32 ${payload})`);
@@ -6322,7 +6326,7 @@ class LlEmitter {
       case "string":
         return simple("scr_jsval_from_str", "ptr", false);
       case "dyn":
-        // A CHECKED-DYNAMIC (DOM) value entering the island: deep copy,
+        // A CHECKED-DYNAMIC (dyn) value entering the island: deep copy,
         // data kinds only — boxed functions/handles/promises throw the
         // catchable TypeError in the runtime, and a wrapped island value
         // unwraps to the SAME engine value (the identity round trip).
@@ -6334,6 +6338,24 @@ class LlEmitter {
       case "url":
         // A URL crossing IN: an engine URL instance built from href.
         return simple("scr_jsval_from_url", "ptr", true);
+      case "promise": {
+        // A STATIC promise crossing IN: a real engine thenable settled
+        // when the scriptc promise settles (the async-callback return
+        // bridge). from_promise takes ownership of a +1 — retain past
+        // the borrowed frame temp. The C emitter's rule, mirrored.
+        const tag = islandPromisePayloadTag(e.value.type.inner);
+        if (!tag) throw new Error("llvm emitter bug: jsMarshal of a promise outside the bridge payload domain");
+        const tagN = { void: 0, f64: 1, bool: 2, string: 3, jsval: 4, jsvalArr: 5 }[tag];
+        this.declare(`declare ptr @scr_promise_retain(ptr)`);
+        this.declare(`declare ptr @scr_jsval_from_promise(ptr, i32)`);
+        const pr = B.tmp();
+        B.line(`${pr} = call ptr @scr_promise_retain(ptr ${v.name})`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_jsval_from_promise(ptr ${pr}, i32 ${tagN})`);
+        const out = this.own({ name: t, type: e.type });
+        this.emitPendingCheck();
+        return out;
+      }
       case "func": {
         // A closure entering the island as a host function: from_closure
         // retains it; the engine's finalizer releases it at teardown. The
@@ -6656,6 +6678,17 @@ class LlEmitter {
         return out;
       }
       default: {
+        // `any[]`-declared slot: Array.isArray-gated, elements BY
+        // REFERENCE (identity crosses; the spine is a snapshot copy).
+        // JSON-safe element types keep the round trip below.
+        if (e.type.kind === "array" && e.type.elem.kind === "jsval") {
+          this.declare(`declare ptr @scr_jsval_exit_jsval_arr(ptr)`);
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_jsval_exit_jsval_arr(ptr ${v.name})`);
+          const out = this.own({ name: t, type: e.type });
+          this.emitPendingCheck();
+          return out;
+        }
         // An undefined-armed union target: the engine's undefined takes
         // the undefined arm FIRST (JSON cannot spell it); then null and
         // data ride the round trip into the union's dynCheck like any
@@ -6692,11 +6725,30 @@ class LlEmitter {
           B.br(lj);
           B.startBlock(ld);
           this.frames.push([]);
-          const t = roundTrip();
-          this.own({ name: t, type: e.type });
-          this.emitPendingCheck();
-          this.moveTemp({ name: t, type: e.type });
-          B.line(`store ptr ${t}, ptr ${slot}`);
+          const unionDef = this.unionsById.get(e.type.unionId);
+          const dataArms = unionDef ? unionDef.arms.flatMap((a, i) => (isUnitType(a) ? [] : [{ a, i }])) : [];
+          const jsvalArr = dataArms.length === 1 && dataArms[0]!.a.kind === "array" && dataArms[0]!.a.elem.kind === "jsval" ? dataArms[0]! : null;
+          let t: string;
+          if (jsvalArr) {
+            // The `any[] | undefined` defaulted-parameter spelling: the
+            // engine array exits BY REFERENCE into the data arm.
+            this.declare(`declare ptr @scr_jsval_exit_jsval_arr(ptr)`);
+            this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
+            this.declare(`declare ptr @scr_arr_retain_v(ptr)`);
+            this.declare(`declare void @scr_arr_release_v(ptr)`);
+            const arr = B.tmp();
+            B.line(`${arr} = call ptr @scr_jsval_exit_jsval_arr(ptr ${v.name})`);
+            this.emitPendingCheck();
+            t = B.tmp();
+            B.line(`${t} = call ptr @scr_union_new_ref(i32 ${jsvalArr.i}, ptr ${arr}, ptr @scr_arr_retain_v, ptr @scr_arr_release_v, ptr null)`);
+            B.line(`store ptr ${t}, ptr ${slot}`);
+          } else {
+            t = roundTrip();
+            this.own({ name: t, type: e.type });
+            this.emitPendingCheck();
+            this.moveTemp({ name: t, type: e.type });
+            B.line(`store ptr ${t}, ptr ${slot}`);
+          }
           this.releaseFrame(this.frames.pop()!);
           B.br(lj);
           B.startBlock(lj);
@@ -7001,7 +7053,7 @@ class LlEmitter {
           );
           break;
         case "dyn":
-          // A checked-dynamic (+1 DOM) result: deep copy into the engine
+          // A checked-dynamic (+1 dyn) result: deep copy into the engine
           // (the jsMarshal dyn rule); NULL is the throw-path dummy.
           this.declare(`declare ptr @scr_jsval_from_dyn(ptr)`);
           this.declare(`declare void @scr_dyn_release(ptr)`);
@@ -7062,7 +7114,7 @@ class LlEmitter {
     return sym;
   }
 
-  /** Loads a DOM node's kind tag (i32 at +8) — the dyn expression tests'
+  /** Loads a dyn node's kind tag (i32 at +8) — the dyn expression tests'
    * shared read. */
   private dynKind(d: string): string {
     const B = this.B;
@@ -9287,7 +9339,7 @@ class LlEmitter {
       // A dyn JOIN (the C helper's `surface` dyn arm): declared hits
       // convert through the per-type toDyn walker (borrowed read → fresh
       // +1 tree), a dyn-valued overflow hit passes through (+1 from the
-      // map get), and a miss is JS's undefined — the DOM singleton.
+      // map get), and a miss is JS's undefined — the dyn singleton.
       this.declare(`declare zeroext i1 @scr_str_eq(ptr, ptr)`);
       for (const f of overflowOnly ? [] : shape.fields) {
         const lit = this.internLiteral(f.name);
@@ -9363,7 +9415,7 @@ class LlEmitter {
         B.br(join);
         B.startBlock(ln);
       }
-      // The miss path: JS's undefined — the DOM singleton, retained.
+      // The miss path: JS's undefined — the dyn singleton, retained.
       this.declare(`declare ptr @scr_dyn_undefined()`);
       this.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
       const u = B.tmp();

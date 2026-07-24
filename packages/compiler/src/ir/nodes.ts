@@ -199,7 +199,7 @@ export type IrType =
   /** Heap, refcounted closure. `rest` marks a VARIADIC JS function (a
    * `...args` rest parameter, or a zero-param function body reading
    * `arguments` — test/common's mustCall wrapper): the lifted function
-   * takes one extra trailing `ScrDyn *` param — a DOM ARRAY carrying the
+   * takes one extra trailing `ScrDyn *` param — a dyn ARRAY carrying the
    * call's arguments from index params.length on — which the dyn call
    * thunk builds per call. `params` stays the DECLARED (non-rest) list
    * (fn.length semantics). Rest-marked values are only ever CALLED
@@ -236,10 +236,10 @@ export type IrType =
   | { kind: "union"; unionId: string }
   /** A dynamic value — the type of `unknown` (JSON.parse results and
    * unknown-typed locals/params/returns). Runtime representation is a
-   * refcounted JSON DOM tree (ScrDyn). Deliberately NARROW: a dyn value can
+   * refcounted JSON dyn tree (ScrDyn). Deliberately NARROW: a dyn value can
    * be stored in locals/globals, passed as a param/call arg, returned,
    * validated with a checked cast (`dynCheck`), CALLED (`dynCall` — the
-   * DOM's function kind, boxed closures with per-call argument checks),
+   * dyn's function kind, boxed closures with per-call argument checks),
    * and captured by closures (an untraced obj-box: cycles through dyn are
    * never collected, SEMANTICS.md); it can NOT ride record/class fields,
    * array elements, union arms, or the exception cell, and every other
@@ -663,7 +663,7 @@ export function isRefCounted(t: IrType): boolean {
     // A generator object is a refcounted handle over its paused fiber and
     // typed channel slots (ScrGen — lean allocation, no cycle header).
     t.kind === "generator" ||
-    // A dyn value is a refcounted JSON DOM tree (ScrDyn).
+    // A dyn value is a refcounted JSON dyn tree (ScrDyn).
     t.kind === "dyn" ||
     // An island value is a refcounted cell owning one engine value.
     t.kind === "jsval" ||
@@ -964,7 +964,7 @@ export interface IrRecordShape {
    * order of the first ts.Type interned to this shape) — metadata, NOT
    * part of the interned identity: a later structurally-equal type with a
    * different member order shares the shape and the first one's order.
-   * JSON.stringify, Object.keys/values/entries, record→DOM conversion,
+   * JSON.stringify, Object.keys/values/entries, record→dyn conversion,
    * and util.inspect all emit this order; JS's per-object insertion order
    * matches it whenever objects are constructed in declaration order
    * (SEMANTICS.md 36 documents the divergence when they are not).
@@ -1576,7 +1576,7 @@ export type IrLibFn =
    * --dynamic only. */
   | "island.castFail"
   | "json.parse"
-  /** Keyed WRITE on a dyn DOM value — `h.onDone = cb` / `h["k"] = v` on a
+  /** Keyed WRITE on a dyn value — `h.onDone = cb` / `h["k"] = v` on a
    * checked-dynamic object (args: receiver, key string, value — all
    * borrowed; the runtime copies the key and retains the value in). An
    * OBJ receiver sets the member (later writes win, insertion order
@@ -1588,27 +1588,34 @@ export type IrLibFn =
    * SEMANTICS.md notes the sloppy divergence: loud, never silent). Void
    * result; in the may-throw seed set. */
   | "dyn.keySet"
-  /** Destructuring pack over a dyn DOM source — `const [a, b] = d`, a
+  /** Destructuring pack over a dyn source — `const [a, b] = d`, a
    * destructured dyn callback param (args: the source and the STATIC
    * TypeError spelling, "" when the source has none — both borrowed;
-   * result: a fresh DOM array, +1). Iterable kinds collect like spread
+   * result: a fresh dyn array, +1). Iterable kinds collect like spread
    * (arrays element-by-element, strings by code point, bytes by byte);
    * every other kind throws V8's destructuring TypeError — the spelling
    * verbatim when non-empty, else the runtime kind wording ("number 5 is
    * not iterable (cannot read property Symbol(Symbol.iterator))"). In the
    * may-throw seed set. */
   | "dyn.iterPack"
-  /** Object.defineProperties over DOM values (args: target, descriptors —
+  /** The for-of-over-dyn pack accessors — the emitted index loop drives
+   * them over a dyn.iterPack result (ARR by construction). arrLen: the
+   * ARR length as f64 (0 for non-ARR kinds; arg borrowed). arrAt: the
+   * element at index (+1; the undefined singleton past the end). Neither
+   * throws. */
+  | "dyn.arrLen"
+  | "dyn.arrAt"
+  /** Object.defineProperties over dyn values (args: target, descriptors —
    * both borrowed dyn; result: the target, +1 — JS's return value).
    * Value descriptors become plain own properties on OBJ and FUNC targets
-   * (writable/enumerable/configurable accepted and IGNORED — DOM
+   * (writable/enumerable/configurable accepted and IGNORED — dyn
    * properties are plain data properties, SEMANTICS.md); get/set
    * descriptors and non-object targets/descriptors throw catchably
    * (Node's TypeError texts; accessors the loud unsupported Error). In
    * the may-throw seed set. */
   | "dyn.defineProps"
   /** Bare `typeof v` on a dyn value AS A STRING (arg: the dyn value,
-   * borrowed; result: an owned string) — the DOM kind's JS answer:
+   * borrowed; result: an owned string) — the dyn kind's JS answer:
    * undefined→"undefined", null/object/array/bytes→"object" (JS's oldest
    * wart preserved), boolean/number/string by kind, function→"function".
    * Never throws. */
@@ -1782,8 +1789,8 @@ export type IrLibFn =
    * unescaped — total like the component encoder. Borrow; result +1. */
   | "str.encodeUri"
   /** The WHATWG base64 globals (scr_string.c), Node-global since v16.
-   * Arguments are borrowed DOM values — WebIDL ToString runs in the
-   * runtime over the DOM kind (String(null) is "null": the html spec's
+   * Arguments are borrowed dyn values — WebIDL ToString runs in the
+   * runtime over the dyn kind (String(null) is "null": the html spec's
    * coercion, which Node's atob(null) exercises). str.atob decodes
    * forgiving-base64 (ASCII whitespace stripped, %4==0 strips up to two
    * '=', %4==1 refuses, leftover bits discarded) into the latin1 code
@@ -1901,7 +1908,7 @@ export type IrLibFn =
    * arm tolerated — @types/node's Dict), verified structurally by the
    * frontend (lowerQuerystringParseCall); the emitters construct the
    * record and hand its overflow map to scr_qs_parse_into with the two
-   * union tags. qs.stringify takes (obj, sep, eq) with obj a DOM value
+   * union tags. qs.stringify takes (obj, sep, eq) with obj a dyn value
    * (the frontend dynFroms the typed record; JS-world dyn values pass
    * through) — Node's encodeStringified rules run in the runtime, so
    * arrays expand to repeated keys and null/undefined/nested objects are
@@ -2154,7 +2161,7 @@ export type IrLibFn =
   | "dgram.connectCb"
   | "dgram.sendStr"
   | "dgram.sendBytes"
-  /** The send argument-validation ladder over DOM arguments (Node's
+  /** The send argument-validation ladder over dyn arguments (Node's
    * signature shuffle: slice bounds, list/type contracts, port/address
    * validation, connected-state errors) — a fully-validated unconnected
    * single-payload send RUNS; callback/list/connected forms meet the
@@ -2631,12 +2638,12 @@ export type IrLibFn =
    * always throws Node's ERR_INVALID_ARG_TYPE ("The \"string\" argument
    * must be of type string. Received ..."). Borrowed dyn; may-throw. */
   | "buffer.newStringFail"
-  /** fs._toUnixTimestamp(time) over a DOM value: numeric strings and
+  /** fs._toUnixTimestamp(time) over a dyn value: numeric strings and
    * finite numbers coerce (negatives answer now/1000, Node's shape);
    * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
   | "fs.toUnixTimestamp"
   /** The fs argument-validation ladders (checked-dynamic lane): each Chk
-   * replicates its API's Node-order validation over DOM values (Node's
+   * replicates its API's Node-order validation over dyn values (Node's
    * exact typed errors — ERR_INVALID_ARG_TYPE/VALUE, ERR_OUT_OF_RANGE),
    * and a full pass meets the trailing compiler-rendered SC2020 fence
    * string — so the ALWAYS-THROW forms take the error.nodeThrow
@@ -2657,7 +2664,7 @@ export type IrLibFn =
   | "fs.streamOptsChk"
   /** The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
    * rendered Received tail: args [argname, "of type ..." clause, the
-   * offending DOM value]. ALWAYS THROWS; polymorphic result (the
+   * offending dyn value]. ALWAYS THROWS; polymorphic result (the
    * error.nodeThrow pattern). May-throw seed. */
   | "error.argTypeThrow"
   /** The property flavor of argTypeThrow ("The \"options.x\" property
@@ -2665,7 +2672,7 @@ export type IrLibFn =
    * THROWS; polymorphic result. May-throw seed. */
   | "error.propTypeThrow"
   /** The checked-dynamic max-listeners ladders: setMaxChk is the
-   * instance form over a DOM n (non-numbers ERR_INVALID_ARG_TYPE,
+   * instance form over a dyn n (non-numbers ERR_INVALID_ARG_TYPE,
    * negatives/NaN ERR_OUT_OF_RANGE; +1 receiver back — chaining);
    * setDefaultMaxChk is the static/property form, its second argument
    * naming the message slot ("setMaxListeners" for the static call,
@@ -2734,7 +2741,7 @@ export type IrLibFn =
   /** The ambient receiver — JS `this` in a plain (non-method) function
    * body: the innermost binding the current firing/dispatch window
    * pushed (Node's listener receiver, a dyn OBJ method's object, an
-   * apply/call thisArg), or the undefined DOM singleton with none bound
+   * apply/call thisArg), or the undefined dyn singleton with none bound
    * (the strict-mode plain-call answer, the old constant). Zero args →
    * dyn (+1). Never throws. */
   | "dyn.this"
@@ -2955,7 +2962,7 @@ export type IrLibFn =
    * the replaced expression's own (never materialized — the
    * global.undefRead pattern). May-throw seed. */
   | "error.nodeThrow"
-  /** JS ToString over a DOM value WITH the object protocol (a user
+  /** JS ToString over a dyn value WITH the object protocol (a user
    * toString/valueOf member is CALLED and its throw propagates;
    * exhaustion throws "Cannot convert object to primitive value"; units
    * render "null"/"undefined") — the WHATWG USVString conversions
@@ -2976,19 +2983,19 @@ export type IrLibFn =
   | "error.ctor"
   | "error.toString"
   /** `new DOMException(message?, nameOrOptions?)` (scr_error.c): both args
-   * are borrowed DOM values (the lowering passes the DOM undefined for an
+   * are borrowed dyn values (the lowering passes the dyn undefined for an
    * absent argument, so WebIDL's optionality lives in one place). The
    * runtime ToStrings the message ("" for absent/undefined), resolves the
    * name — absent/undefined → "Error", a non-null object → ToString of its
    * `name` member plus the `cause` own-property record, anything else →
    * ToString — and stamps the legacy code from the WebIDL name table (0
-   * off-table). Result is an owned (+1) %DOMException. Never throws (DOM
+   * off-table). Result is an owned (+1) %DOMException. Never throws (dyn
    * ToString is total). */
   | "error.newDom"
   /** DOMException's own read surface (scr_error.c; %DOMException receivers
    * only — borrowed). domCode: the legacy numeric code. domHasCause: the
    * options form's own-property record (`'cause' in e`). domCause: the
-   * cause value, +1 (the DOM undefined when absent — matching Node's
+   * cause value, +1 (the dyn undefined when absent — matching Node's
    * undefined read). None throws. */
   | "error.domCode"
   | "error.domHasCause"
@@ -2996,25 +3003,25 @@ export type IrLibFn =
   /** structuredClone of a %DOMException receiver (scr_error.c): WebIDL
    * serialization — name/message copy, the legacy code re-derives, cause
    * does not serialize. args are the borrowed receiver and the borrowed
-   * options DOM value (the DOM undefined when absent — the shared
+   * options dyn value (the dyn undefined when absent — the shared
    * validation throws Node's exact option errors; any non-empty transfer
    * list throws DataCloneError, nothing static is transferable). Result
    * +1 %DOMException. */
   | "error.domClone"
   /** `d instanceof TypeError` (and the other BUILTIN error classes) on a
    * checked-dynamic value (scr_json.c): the from_error cache holds the
-   * DOM↔error identity edge, so the test resolves the runtime error and
+   * dyn↔error identity edge, so the test resolves the runtime error and
    * asks its vtable's stamped preorder interval — exact for every error
-   * that crossed the boundary. A DOM object that never came from an
+   * that crossed the boundary. A dyn object that never came from an
    * error (a hand-built {%error} literal) answers false: subclass
    * identity is unknowable there (the root keeps dynTest's marker
    * answer). args are the borrowed dyn and the SCR_ERR_* kind literal.
    * Never throws. */
   | "dyn.errInstanceof"
   /** Object.keys/values/entries over a CHECKED-DYNAMIC receiver
-   * (scr_json.c): the runtime walks the DOM node's own members in JS
+   * (scr_json.c): the runtime walks the dyn node's own members in JS
    * own-key order (array-index keys ascending first, then insertion
-   * order) and answers a DOM array (entries: an array of [key, value]
+   * order) and answers a dyn array (entries: an array of [key, value]
    * pairs; values RETAIN the member nodes — reference semantics, like
    * JS). Strings/arrays/bytes answer their index keys; other scalars an
    * empty array; null/undefined throw Node's catchable TypeError
@@ -3024,7 +3031,7 @@ export type IrLibFn =
   | "dyn.assign"
   /** Variadic Object.assign over CHECKED-DYNAMIC targets (`Object.assign(
    * {}, ...arr.map(f), tail)` — the option-table merge): the lowering
-   * builds one fresh DOM pack of sources (packPush retains a plain source
+   * builds one fresh dyn pack of sources (packPush retains a plain source
    * in; packPushSpread flattens a spread source through the spread-call
    * walk — V8's exact TypeError texts, the string arg spelling the spread
    * expression for the nullish form), so every source evaluates and
@@ -3042,8 +3049,8 @@ export type IrLibFn =
    * Symbol(Symbol.iterator))"). The frontend picks by position. */
   | "dyn.packPushSpreadIter"
   | "dyn.assignAll"
-  /** `Object.create(null)` (scr_json.c): a fresh NULL-PROTOTYPE DOM
-   * dictionary. The DOM's OBJ dispatch is already own-member-only —
+  /** `Object.create(null)` (scr_json.c): a fresh NULL-PROTOTYPE dyn
+   * dictionary. The checked-dynamic tree's OBJ dispatch is already own-member-only —
    * Node's null-proto answer — so the flag's whole job is the observations
    * that SEE the prototype: inspect's "[Object: null prototype]" prefix
    * and deepStrictEqual's prototype gate. Never throws. Static builds
@@ -3051,12 +3058,12 @@ export type IrLibFn =
   | "dyn.objCreateNullProto"
   | "dyn.objValues"
   | "dyn.objEntries"
-  /** structuredClone over the DOM (scr_json.c): the JSON-safe subset plus
+  /** structuredClone over the checked-dynamic tree (scr_json.c): the JSON-safe subset plus
    * bytes (a fresh copy — a Buffer clones as a plain Uint8Array, like
    * Node), deep. Functions and handle kinds throw the spec's catchable
-   * DataCloneError; CYCLES throw the scriptc fence (the DOM cannot
+   * DataCloneError; CYCLES throw the scriptc fence (the checked-dynamic tree cannot
    * represent them — Node clones cycles; documented divergence). The
-   * options DOM value validates with Node's exact errors (dictionary
+   * options dyn value validates with Node's exact errors (dictionary
    * conversion, the transfer-sequence member; any non-empty transfer
    * list throws DataCloneError). dyn.cloneMissing is the zero-argument
    * call: always throws Node's TypeError [ERR_MISSING_ARGS] with Node's
@@ -3076,7 +3083,7 @@ export type IrLibFn =
   /** structuredClone with a NON-EMPTY transfer array of static values:
    * nothing static is transferable, so the call always throws Node's
    * catchable DataCloneError ("Found invalid value in transferList.") —
-   * lowered directly (the list's values need no DOM representation to
+   * lowered directly (the list's values need no dyn representation to
    * fail). */
   | "dyn.cloneTransferFail"
   /** node:events EventEmitter (scr_events_emitter.c, link-gated by
@@ -3307,10 +3314,10 @@ export type IrLibFn =
    * (a, b, negated, deep, msg, hasMsg) — the whole quartet over
    * checked-dynamic operands (both slots dyn; the frontend boxes a
    * static side with dynFrom first): SameValue for the strict pair over
-   * the DOM kinds (boxed-closure identity for functions), the structural
-   * DOM walk for the deep pair, with assertion_error.js's messages —
+   * the dyn kinds (boxed-closure identity for functions), the structural
+   * dyn walk for the deep pair, with assertion_error.js's messages —
    * scalar forms byte-exact, composites rendered compact:false/sorted
-   * through the DOM and diffed with the real myers line printer.
+   * through the checked-dynamic tree and diffed with the real myers line printer.
    *
    * The assert.throws(fn, {name/code/message}) shape check
    * (expectedException over the static error surface): shapeBegin
@@ -3355,7 +3362,7 @@ export type IrLibFn =
   | "assert.regexErrTest"
   | "assert.unwantedRejection"
   /** Node's expectsError over an error-INSTANCE expected (assert.throws/
-   * rejects second argument): walk the expected DOM error's keys (name,
+   * rejects second argument): walk the expected dyn error's keys (name,
    * message, code — the %error marker skipped) and deep-compare each
    * against the caught value's; a mismatch throws the deep-equal
    * AssertionError (scr_assert.c). MAY THROW by design. */
@@ -3374,7 +3381,7 @@ export type IrLibFn =
    * ladder + line splitting; insp.regex: /source/flags; insp.buffer:
    * <Buffer aa ..>). insp.error renders the STACKLESS [Name: message]
    * form with the code slot as its one property. insp.dyn walks the
-   * checked-dynamic DOM entirely in the runtime (its shape lives in the
+   * checked-dynamic tree entirely in the runtime (its shape lives in the
    * value); insp.dynS is format's %s twin (dyn strings pass verbatim).
    * insp.jsval ([value, recurse, depth], --dynamic only) renders the
    * island scalars and THROWS a catchable TypeError on composites (the
@@ -3382,7 +3389,7 @@ export type IrLibFn =
    * engine from the compiler-synthesized per-type traversal helpers
    * (%util.insp.N — the deepStrictEqual precedent). */
   | "insp.f64"
-  /** util.format %j over a checked-dynamic argument: the runtime DOM
+  /** util.format %j over a checked-dynamic argument: the runtime dyn
    * walk (JS-exact stringify; root undefined/function prints
    * "undefined"; a handle in the tree throws the loud fence). */
   | "insp.jsonDyn"
@@ -3449,7 +3456,7 @@ export type IrLibFn =
   /** node:diagnostics_channel (scr_dc.c, linked when any dc.* appears —
    * the zlib gating precedent): a process-global name→channel registry;
    * channel values are f64 handles (types.ts maps Channel to F64, the
-   * readline.Interface pattern). Subscribers are DOM function values —
+   * readline.Interface pattern). Subscribers are dyn function values —
    * identity-compared by unsubscribe, called (message, name) by publish
    * over a SNAPSHOT of the list (a subscriber unsubscribing itself
    * mid-publish still lets its siblings fire, Node's behavior). dc.publish
@@ -3468,23 +3475,23 @@ export type IrLibFn =
   | "dc.chanName"
   /** TracingChannel (dc.tracingChannel): a registry entry of the five
    * event channels, an f64 handle like Channel (types.ts). tcSubscribe/
-   * tcUnsubscribe walk a DOM handlers object's five event keys (truthy
+   * tcUnsubscribe walk a dyn handlers object's five event keys (truthy
    * non-function slots throw the per-channel ERR_INVALID_ARG_TYPE);
    * tcTraceSync/tcTraceCallback/tcTracePromise run Node's publish choreography in C over
-   * DOM values (fn, ctx, thisArg, args-array) with thisArg bound as the
+   * dyn values (fn, ctx, thisArg, args-array) with thisArg bound as the
    * ambient receiver — the traced call's throw and any subscriber throw
    * both propagate (MAY THROW). tcTraceCallback wraps args[position] in a
    * native error/result + asyncStart/asyncEnd publisher and throws Node's
    * TypeError when that slot is not callable. tracingChannelOf is the
    * five-Channel collection form of the constructor. */
-  /** setImmediate as a first-class DOM value (scr_async.c): a minted dyn
+  /** setImmediate as a first-class dyn value (scr_async.c): a minted dyn
    * callable scheduling args[0](args[1..]) on the immediate queue — the
    * Node-suite traceCallback shape (`traceCallback(setImmediate, ...)`).
    * Calling it validates the callback (the dyn call machinery); minting
    * never throws. */
   | "timers.setImmediateFnValue"
   /** `new Promise(setImmediate)` (the Node-suite early-exit shape): a
-   * fresh promise an immediate fulfills with the undefined DOM value —
+   * fresh promise an immediate fulfills with the undefined dyn value —
    * the executor IS setImmediate, so resolve rides the immediate queue
    * (scr_async.c). Never throws. */
   | "timers.immediatePromise"
@@ -3506,11 +3513,11 @@ export type IrLibFn =
   /** AsyncLocalStorage (node:async_hooks — scr_async.c): stores are f64
    * handles; contexts are immutable fiber-carried snapshots (spawned
    * fibers inherit the spawner's — Node's init-time capture). run/exit
-   * enter (or clear) the store, call the DOM function with forwarded
+   * enter (or clear) the store, call the dyn function with forwarded
    * arguments, and restore (the finally); getStore answers the current
-   * DOM value or undefined; enterWith installs with no restore point.
+   * dyn value or undefined; enterWith installs with no restore point.
    * run/exit MAY THROW (the callback's own throws propagate). */
-  /** `await v` over a checked-dynamic VALUE (scr_async.c): a DOM promise
+  /** `await v` over a checked-dynamic VALUE (scr_async.c): a dyn promise
    * adopts (rejections re-throw — MAY THROW), anything else takes JS's
    * one-microtask non-thenable await and answers itself. Only emitted
    * inside async bodies (the frontend's isAsync gate). */
@@ -3533,15 +3540,15 @@ export type IrLibFn =
   | "dc.chanBindStore"
   | "dc.chanUnbindStore"
   | "dc.chanRunStores"
-  /** process warnings (scr_lib.c): onWarning/offWarning register DOM
+  /** process warnings (scr_lib.c): onWarning/offWarning register dyn
    * listeners; emitWarning applies Node's full argument grammar over the
-   * call's DOM argument vector (ERR_INVALID_ARG_TYPE TypeErrors — MAY
+   * call's dyn argument vector (ERR_INVALID_ARG_TYPE TypeErrors — MAY
    * THROW; a listener throw propagates too) and always prints Node's
    * stderr report. Emission is synchronous (SEMANTICS.md). */
   | "process.onWarning"
   | "process.offWarning"
   | "process.emitWarning"
-  /** process.on('unhandledRejection', fn): registers a DOM listener the
+  /** process.on('unhandledRejection', fn): registers a dyn listener the
    * loop-end report dispatches per never-observed rejection — (reason,
    * promise) — instead of printing and exiting 1 (scr_async.c). Throws
    * Node's ERR_INVALID_ARG_TYPE on a non-function. */
@@ -4242,49 +4249,49 @@ export type IrExpr =
    * struct slot), then the overflow map on index-signature shapes. `type`
    * is the CHECKER's type for the access: the index signature's value type
    * (dyn for `unknown`; with noUncheckedIndexedAccess, its
-   * `V | undefined` union). A MISSING key produces: the undefined DOM
+   * `V | undefined` union). A MISSING key produces: the undefined dyn
    * singleton when `type` is dyn; the undefined arm when `type` is an
    * undefined-armed union; otherwise a TRAP — the checker claimed V and no
    * undefined is representable (the array OOB policy; on declared-only
    * shapes tsc's keyof check makes the trap unreachable without an `as`
    * smuggle). Declared-field values surface as `type`: V-typed fields read
-   * directly, dyn results build a DOM COPY of the field value (the dynFrom
+   * directly, dyn results build a dyn COPY of the field value (the dynFrom
    * conversion — deep for composites, documented), union results wrap.
    * The key and object are borrowed; refcounted results are owned (+1).
    * `overflowOnly` (set when the key is a LITERAL that names no declared
    * field): the read touches only the overflow map — declared fields need
    * not surface as `type`, and the emitted helper skips the string-switch. */
   | { kind: "recordKeyGet"; obj: IrExpr; shapeId: string; key: IrExpr; overflowOnly?: true; type: IrType; loc: SrcLoc }
-  /** Static value → dyn DOM conversion (`type` is always dyn): the operand
+  /** Static value → dyn conversion (`type` is always dyn): the operand
    * (a JSON-safe type — f64/string/bool/record/array/union, validated)
-   * converts to a fresh DOM tree, DEEP-COPYING composites (the jsMarshal
+   * converts to a fresh dyn tree, DEEP-COPYING composites (the jsMarshal
    * aliasing stance; a dyn value can never alias static storage). An
-   * undefined-armed union's undefined arm becomes the undefined DOM
+   * undefined-armed union's undefined arm becomes the undefined dyn
    * singleton. A FUNCTION operand (canBoxFuncIntoDyn — the mustCall shape:
    * a typed closure flowing into an untyped JS helper's implicit-any
-   * param) BOXES instead of copying: the DOM's function kind carries the
+   * param) BOXES instead of copying: the checked-dynamic tree's function kind carries the
    * retained closure, a compiled per-signature call thunk (per-argument
    * dynCheck into the declared param types, result dynFrom'd back — JS
-   * arity: extras ignored, missing args are the undefined DOM value and
+   * arity: extras ignored, missing args are the undefined dyn value and
    * must satisfy the param's type or the thunk throws the catchable
    * TypeError), the interned signature key (dynCheck's exact-unwrap fast
    * path), and `fnName` — the best-effort static spelling for inspect
    * ([Function: name]) and Node-shaped call errors. The operand is
    * borrowed; the result is owned (+1). Never throws. */
   | { kind: "dynFrom"; value: IrExpr; fnName?: string; type: IrType; loc: SrcLoc }
-  /** Island value → dyn DOM conversion (`type` is always dyn; the operand
-   * is always jsval): the jsval→DOM crossing — an 'any'-typed engine
+  /** Island value → dyn conversion (`type` is always dyn; the operand
+   * is always jsval): the jsval→dyn crossing — an 'any'-typed engine
    * value flowing into an 'unknown'/'object'/JS-residue slot wraps BY
-   * REFERENCE as the DOM's SCR_DYN_JSVAL kind (scr_dyn_from_jsval).
+   * REFERENCE as the checked-dynamic tree's SCR_DYN_JSVAL kind (scr_dyn_from_jsval).
    * Engine scalars (number/string/boolean/null/undefined) normalize to
-   * the native DOM kinds at wrap time, so wrapped nodes only ever hold
+   * the native dyn kinds at wrap time, so wrapped nodes only ever hold
    * engine objects/arrays/functions; typeof/truthiness/String()/=== on
-   * the wrapped node route to the engine, un-armed DOM walks fence
+   * the wrapped node route to the engine, un-armed dyn walks fence
    * loudly, and scr_jsval_from_dyn unwraps the SAME engine value back
    * (identity round trip). The operand is borrowed; the result is owned
    * (+1). Never throws. */
   | { kind: "dynFromJsval"; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** CALLING a dyn DOM value — `fn(a, b)` where fn is checked-dynamic (an
+  /** CALLING a dyn value — `fn(a, b)` where fn is checked-dynamic (an
    * implicit-any JS binding, a dyn record member, a dynKeyGet result).
    * Arguments are ALREADY dyn-typed (typed values box through dynFrom at
    * the call's coercion — function args included); `type` is always dyn.
@@ -4299,8 +4306,8 @@ export type IrExpr =
    * args are borrowed; the result is owned (+1). MAY THROW.
    *
    * `spreads` (the runtime-arity form — `f(...args)`, the rest-forwarding
-   * idiom): entries name indices into `args` whose DOM values FLATTEN into
-   * the argument vector at the call — JS's spread over the DOM's iterable
+   * idiom): entries name indices into `args` whose dyn values FLATTEN into
+   * the argument vector at the call — JS's spread over the checked-dynamic tree's iterable
    * kinds (arrays element-by-element, strings by code point, bytes by
    * byte; every other kind throws V8's exact spread-call TypeError,
    * catchably — `what` is the spread expression's source spelling, which
@@ -4309,7 +4316,7 @@ export type IrExpr =
    * and apply through it. */
   | { kind: "dynCall"; callee: IrExpr; calleeName: string; args: IrExpr[]; spreads?: { arg: number; what: string }[]; type: IrType; loc: SrcLoc }
   /** Prototype-method DISPATCH on a dyn receiver — `recv.m(...)` where `m`
-   * is a name a DOM-representable prototype declares (Array/String/
+   * is a name a dyn-representable prototype declares (Array/String/
    * Function shared names: push, slice, join, forEach, map, apply, ...),
    * so a stored-member read would silently mis-answer real methods. The
    * runtime (scr_dyn_invoke) dispatches on the receiver's KIND:
@@ -4322,11 +4329,11 @@ export type IrExpr =
    * `calleeName` is the source spelling for the error texts. Receiver and
    * args are borrowed; the result is owned (+1). MAY THROW. */
   | { kind: "dynInvoke"; recv: IrExpr; method: string; calleeName: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
-  /** A DOM ARRAY built element-by-element (JS mixed-element literals —
+  /** A dyn ARRAY built element-by-element (JS mixed-element literals —
    * `['pwd', []]` — and evolving `[]` declarations): each element is
    * already a dyn value; the result owns them. Never throws. */
   | { kind: "dynArrLit"; elems: IrExpr[]; type: IrType; loc: SrcLoc }
-  /** A DOM OBJECT built member-by-member. With no `fields` it is the empty
+  /** A dyn OBJECT built member-by-member. With no `fields` it is the empty
    * object (the JS stand-in for opaque container values — `new WeakMap()`
    * in harness code: the value exists for identity; every reached METHOD
    * use meets its own fence). With `fields` it is a JS object literal whose
@@ -4337,39 +4344,39 @@ export type IrExpr =
    * JS's ToPropertyKey on the string side), each value is already dyn, and
    * entries evaluate key-then-value in SOURCE order (JS's object-literal
    * evaluation order; later duplicate keys win, insertion order preserved —
-   * the DOM's own set semantics). Keys and values are borrowed (the member
+   * the checked-dynamic tree's own set semantics). Keys and values are borrowed (the member
    * retains the value in). Never throws itself. */
   | { kind: "dynObjLit"; fields?: { key: IrExpr; value: IrExpr }[]; type: IrType; loc: SrcLoc }
-  /** Runtime kind test on a dyn DOM value — the narrowing tests tsc's
+  /** Runtime kind test on a dyn value — the narrowing tests tsc's
    * control flow understands on `unknown`: `typeof v === "string" |
    * "number" | "boolean" | "undefined"` and the unit comparisons `v ===
    * undefined` / `v === null` (`"nullish"` is the LOOSE `v == null` pair —
    * undefined or null in one test), and `v instanceof Uint8Array`
-   * (`"bytes"` — the DOM's bytes kind; Node's Buffer IS a Uint8Array
+   * (`"bytes"` — the checked-dynamic tree's bytes kind; Node's Buffer IS a Uint8Array
    * subclass and both worlds answer true for it, SEMANTICS.md 45), plus
    * the two object-family tests: `"object"` is `typeof v === "object"`
-   * exactly (true for the DOM's object, array, bytes, AND null kinds —
+   * exactly (true for the checked-dynamic tree's object, array, bytes, AND null kinds —
    * JS's oldest wart preserved), `"array"` is `Array.isArray(v)` (the
-   * array kind alone), and `"truthy"` is ToBoolean over the whole DOM
+   * array kind alone), and `"truthy"` is ToBoolean over the whole dyn
    * (`if (v)` on unknown): undefined/null false, bool by value, number
    * falsy exactly for 0, -0, and NaN, string falsy exactly when empty,
    * object/array/bytes always true — JS-exact for every kind. A pure
-   * kind-tag compare against the DOM node's kind (truthy also reads the
+   * kind-tag compare against the dyn node's kind (truthy also reads the
    * scalar payload); the operand is
    * borrowed, nothing allocates, never throws. Result is bool. Narrowed
    * READS afterwards bridge through `dynCheck` extraction
    * (trust-but-VERIFY: unlike unionNarrow, a read reached with a lying
    * kind throws instead of misreading the payload). `"error"` is
-   * `v instanceof Error` on an unknown value: true exactly for the DOM's
+   * `v instanceof Error` on an unknown value: true exactly for the checked-dynamic tree's
    * error encoding — an object carrying the reserved "%error" key, the
    * shape caughtToDyn builds for Error payloads (SEMANTICS.md 67) — so a
    * caught Error passed through an unknown slot answers true like Node;
    * dynCheck against %Error extracts it. `"function"` is `typeof v ===
-   * "function"` — true exactly for the DOM's function kind (boxed
+   * "function"` — true exactly for the checked-dynamic tree's function kind (boxed
    * closures); function values are truthy and answer FALSE to the
    * `"object"` test, JS-exact. */
   | { kind: "dynTest"; test: "string" | "number" | "boolean" | "undefined" | "null" | "nullish" | "bytes" | "object" | "array" | "truthy" | "error" | "function"; negated?: true; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** Keyed read on a dyn DOM value — `pkg.name` / `pkg["k"]` / the
+  /** Keyed read on a dyn value — `pkg.name` / `pkg["k"]` / the
    * `pkg?.scripts` chain step on a JSON.parse result. `key` is
    * string-typed (a strLit for the dot form); `type` is always dyn. An
    * OBJ receiver answers the member (+1) or the undefined singleton (the
@@ -4384,25 +4391,25 @@ export type IrExpr =
    * JS's short-circuit. Receiver and key are borrowed; the result is
    * owned (+1). */
   | { kind: "dynKeyGet"; key: IrExpr; optional?: true; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** `"k" in pkg` on a dyn DOM receiver (literal keys only): OBJ answers
+  /** `"k" in pkg` on a dyn receiver (literal keys only): OBJ answers
    * own-member presence (a member holding the undefined value still
-   * answers true — the DOM stores presence, unlike the record form's
+   * answers true — the checked-dynamic tree stores presence, unlike the record form's
    * SEMANTICS.md 55 stance), ARR answers true for "length" and canonical
    * in-range indices, everything else answers false (tsc admits `in`
    * only on object-typed operands, so unit receivers — where JS throws —
    * are checker-unreachable and answer false). Borrowed operand, no
    * allocation, never throws. Result is bool. */
   | { kind: "dynHasKey"; key: string; negated?: true; value: IrExpr; type: IrType; loc: SrcLoc }
-  /** Strict equality between a dyn DOM value and a SCALAR-typed value
+  /** Strict equality between a dyn value and a SCALAR-typed value
    * (`v !== ""`, `v === 5` — one side `unknown`, the other f64/string/
    * bool): a guarded kind test plus payload compare — true exactly when
-   * the DOM holds that scalar kind AND the payloads are strictly equal
+   * the checked-dynamic tree holds that scalar kind AND the payloads are strictly equal
    * (C == for numbers: NaN false, ±0 equal — JS-exact; bytewise for
    * strings). `left`/`right` keep SOURCE order (evaluation order is
    * JS's); at least one side is dyn-typed — BOTH-dyn compares run the
-   * runtime's whole-DOM strict equality (scr_dyn_strict_eq: scalars by
+   * runtime's whole-dyn strict equality (scr_dyn_strict_eq: scalars by
    * value, units by kind, reference kinds by node identity — JS-exact
-   * within the DOM's aliasing story). Both operands are borrowed,
+   * within the checked-dynamic tree's aliasing story). Both operands are borrowed,
    * nothing allocates, never throws. Result is bool. */
   | { kind: "dynScalarEq"; left: IrExpr; right: IrExpr; negated?: true; type: IrType; loc: SrcLoc }
   /** Statements inside an expression: `stmts` run in order, then `result`
@@ -4420,16 +4427,16 @@ export type IrExpr =
    * 'FIRSTPROP' of 'SPELLING' …" when `firstProp` is set (V8 names the
    * pattern's first property) — and yields the value unchanged otherwise.
    * `spelling` is the RHS's compile-time source spelling. Value and type
-   * are dyn (the DOM helper) or jsval (the island's prelude guard —
+   * are dyn (the dyn helper) or jsval (the island's prelude guard —
    * engine-thrown, catchable like every boundary throw). */
   | { kind: "dynDestrCheck"; value: IrExpr; spelling: string; firstProp?: string; type: IrType; loc: SrcLoc }
   /** GetIterator + the first `count` steps, as array destructuring sees
-   * it. Over a DOM value: arrays step by index, strings by code point,
+   * it. Over a dyn value: arrays step by index, strings by code point,
    * Buffers by byte; everything else throws V8's exact "<desc> is not
    * iterable (cannot read property Symbol(Symbol.iterator))" TypeError.
    * Over an island (jsval) value the engine runs the REAL iterator
    * protocol (user iterables included, IteratorClose per spec) behind the
-   * same V8 message for non-iterables. The result is a FRESH array (DOM
+   * same V8 message for non-iterables. The result is a FRESH array (dyn
    * or engine, matching the operand) of exactly `count` elements
    * (undefined-padded past the end) — the empty pattern passes count 0
    * and uses only the validation. Value is borrowed; the result is owned
@@ -4483,16 +4490,16 @@ export type IrExpr =
    * may-throw seeds like dynCheck. */
   | { kind: "caughtCheck"; value: IrExpr; className: string; type: IrType; loc: SrcLoc }
   /** A catch binding flowing into an `unknown` slot (`options.onError?.(e)`
-   * — the caught snapshot converting to a dyn DOM value, the typed→unknown
+   * — the caught snapshot converting to a dyn value, the typed→unknown
    * deep-copy stance extended to exception payloads, SEMANTICS.md 67).
    * Runtime dispatch on the snapshot's kind: string/number/boolean payloads
-   * become the exact DOM scalars; an Error-family OBJ payload becomes the
-   * DOM's error encoding — an object with the reserved "%error" marker key
+   * become the exact dyn scalars; an Error-family OBJ payload becomes the
+   * dyn's error encoding — an object with the reserved "%error" marker key
    * plus "name"/"message" (and "code" when stamped), so `instanceof Error`
    * (dynTest "error"), the %Error dynCheck extraction, and String() answer
    * like Node; every other payload (records, arrays, closures, unions,
    * non-Error hierarchy objects — type-erased at runtime) becomes an EMPTY
-   * DOM object: truthy, typeof "object", fields unreadable — the
+   * dyn object: truthy, typeof "object", fields unreadable — the
    * "[object Object]" approximation, documented. `value` is a caught-typed
    * varRef (borrowed); `type` is dyn; the result is a fresh tree (+1),
    * never aliasing the payload. Never throws. */
@@ -4619,7 +4626,7 @@ export type IrExpr =
    * BORROWED; the result string is owned (+1). Never throws. */
   | { kind: "jsonStringify"; value: IrExpr; type: IrType; loc: SrcLoc }
   /** The dynamic-boundary check — a CHECKED cast `dynValue as T`: validate
-   * the dyn value's JSON DOM against `type` (a non-dyn, JSON-representable
+   * the dyn value's JSON dyn against `type` (a non-dyn, JSON-representable
    * IR type) and BUILD the typed value (+1), or THROW a catchable
    * TypeError-flavored, path-annotated string ("TypeError: expected number
    * at $.items[2].price, got string") through the exception cell. Semantics:
@@ -4629,7 +4636,7 @@ export type IrExpr =
    * missing key for an undefined-armed union field — an optional field —
    * builds the interned undefined arm instead); arrays check every element;
    * unions try arms in canonical order and the first FULL match wins (no
-   * match → throw; an undefined arm matches no DOM value); JSON null matches
+   * match → throw; an undefined arm matches no dyn value); JSON null matches
    * exactly the nullT arm of a union target (bare null targets cannot
    * exist). MAY THROW:
    * backends' may-throw analyses must treat it like a `throw` statement.
@@ -4857,7 +4864,7 @@ function isJsonSafeAt(
         return false;
       }
       // Overflow values sit in record-key position too: dyn is JSON-safe
-      // HERE (the DOM serializes itself; undefined-valued entries drop
+      // HERE (the checked-dynamic tree serializes itself; undefined-valued entries drop
       // like any undefined-valued key), everything else follows the
       // record-field rule.
       if (shape.indexValue && shape.indexValue.kind !== "dyn") {
@@ -5027,10 +5034,10 @@ export function islandCallbackRet(
   const tag = tagOf(t);
   if (tag) return { async: false, tag };
   // A CHECKED-DYNAMIC result (a JS getter/callback whose inferred return
-  // degraded — the doc-printer root-indent getter): the DOM value deep-
+  // degraded — the doc-printer root-indent getter): the dyn value deep-
   // copies into the engine on return, exactly the jsMarshal dyn rule
   // (data kinds only; boxed functions/handles throw the catchable
-  // TypeError). Sync only — no engine-promise tag exists for DOM values.
+  // TypeError). Sync only — no engine-promise tag exists for dyn values.
   if (t.kind === "dyn") return { async: false, tag: "dyn" };
   return isJsonSafeType(t, getRecord, getUnion) ? { async: false, tag: "json" } : null;
 }
@@ -5072,7 +5079,7 @@ export function canMarshalTypedFuncIntoIsland(
 /* ── the checked-dynamic FUNCTION boundary ──────────────────────────────
  * The STATIC twin of the island's typed-function marshaling
  * (canMarshalTypedFuncIntoIsland): closures cross the dyn boundary as a
- * callable DOM kind carrying the closure + a compiled per-signature call
+ * callable dyn kind carrying the closure + a compiled per-signature call
  * thunk. Two directions, two predicates, mutually recursive with the
  * conversion domains (function types cannot ride records/unions — jsonSafe
  * excludes them — so the recursion terminates):
@@ -5099,7 +5106,7 @@ export function canMarshalTypedFuncIntoIsland(
  */
 
 /** The runtime HANDLE kinds that cross the checked-dynamic boundary as
- * the DOM's HANDLE kind (SCR_DYN_HANDLE): boxed by REFERENCE (identity —
+ * the checked-dynamic tree's HANDLE kind (SCR_DYN_HANDLE): boxed by REFERENCE (identity —
  * stateful I/O objects never copy), unboxed by tag check, members
  * dispatched at runtime onto the same entry points the static lowerings
  * use. The set is deliberately the handles whose member surfaces have
@@ -5117,7 +5124,7 @@ export const DYN_HANDLE_KINDS: ReadonlyMap<string, { tag: string; cls: string }>
   ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", cls: "Http2Stream" }],
 ]);
 
-/** A static type that CONVERTS into a dyn DOM value — the dynFrom domain:
+/** A static type that CONVERTS into a dyn value — the dynFrom domain:
  * JSON-safe data, bytes<u8> (payload copied), undefined-armed unions of
  * JSON-safe arms, boxable function types, and the runtime HANDLE kinds
  * (boxed by reference — DYN_HANDLE_KINDS). */
@@ -5127,22 +5134,22 @@ export function canConvertToDyn(
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
   if (isJsonSafeType(t, getRecord, getUnion)) return true;
-  // bytes<u8> is a DOM kind the walker boxes ANYWHERE (payload copied),
+  // bytes<u8> is a dyn kind the walker boxes ANYWHERE (payload copied),
   // including nested in records/arrays/unions — the tls/https options
   // record's cert/key/ca Buffers. isJsonSafeType rejects nested bytes
   // (no JSON-exact round trip), but dynFrom needs only that the walker
-  // can build the DOM value, which it can — so canConvertToDyn folds the
+  // can build the dyn value, which it can — so canConvertToDyn folds the
   // bytes-bearing composites in beyond the JSON-safe core.
   if (canBoxBytesComposite(t, getRecord, getUnion)) return true;
   if (t.kind === "bytes" && t.elem === "u8") return true;
-  // %Error converts as the DOM's error encoding ({%error, name, message,
+  // %Error converts as the checked-dynamic tree's error encoding ({%error, name, message,
   // code?} — the caughtToDyn shape, scr_dyn_from_error): the dyn 'error'
   // listener boundary (a mustCall-wrapped handler receiving the payload).
   if (t.kind === "object" && t.className === "%Error") return true;
   if (t.kind === "func") return canBoxFuncIntoDyn(t, getRecord, getUnion);
   if (DYN_HANDLE_KINDS.has(t.kind)) return true;
   // Promises box by REFERENCE (SCR_DYN_PROMISE): promise<dyn> carries its
-  // ScrPromise directly (the payload is already a DOM value), any other
+  // ScrPromise directly (the payload is already a dyn value), any other
   // convertible-or-void inner boxes an ADAPTER promise whose emitted
   // settle callback converts the payload (rejections copy raw — reasons
   // are dynamically tagged). The dc tracePromise boundary and dyn-boxed
@@ -5235,7 +5242,7 @@ export function canDynCheckTo(
   return false;
 }
 
-/** A closure type that can BOX into the DOM's function kind (dynFrom):
+/** A closure type that can BOX into the checked-dynamic tree's function kind (dynFrom):
  * every param dyn or dynCheckable (the thunk validates dyn arguments into
  * them), return void, dyn, or dyn-convertible (the thunk converts it
  * back). */
@@ -5247,7 +5254,7 @@ export function canBoxFuncIntoDyn(
   return (
     t.kind === "func" &&
     // A jsval (island) param converts through scr_jsval_from_dyn in the
-    // thunk (wrapped cells unwrap by reference, DOM data deep-copies) —
+    // thunk (wrapped cells unwrap by reference, dyn data deep-copies) —
     // the checker-'any' callback params of the routed-dispatch lane
     // (`bag.list.map((x) => ...)` with x typed any).
     t.params.every((p) => p.kind === "dyn" || p.kind === "jsval" || canDynCheckTo(p, getRecord, getUnion)) &&
@@ -5298,6 +5305,25 @@ export function canMarshalIntoIsland(
  * null and data ride the round trip into the union's dynCheck. The
  * package-API shape `result.headers` : `Record<string, string> |
  * undefined` is the motivating case. */
+/** The static-promise→engine bridge's payload domain: the fulfillment
+ * types a scriptc promise may deliver INTO the island as a real engine
+ * thenable (scr_jsval_from_promise — the async-callback return bridge,
+ * reused by promise VALUES crossing at jsvalIn edges and the island
+ * Promise.all arm). Null = outside the domain (the boundary fence). */
+export function islandPromisePayloadTag(
+  inner: IrType,
+): "void" | "f64" | "bool" | "string" | "jsval" | "jsvalArr" | null {
+  switch (inner.kind) {
+    case "void": return "void";
+    case "f64": return "f64";
+    case "bool": return "bool";
+    case "string": return "string";
+    case "jsval": return "jsval";
+    case "array": return inner.elem.kind === "jsval" ? "jsvalArr" : null;
+    default: return null;
+  }
+}
+
 export function canExitIslandToType(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
@@ -5307,13 +5333,19 @@ export function canExitIslandToType(
   // Uint8Array exits with a validated kind check + copy (engine Buffers
   // pass — they ARE Uint8Arrays); other element widths stay out.
   if (t.kind === "bytes" && t.elem === "u8") return true;
+  // `any[]`-declared slots (the jsval-element-array spelling): the engine
+  // array exits Array.isArray-gated, elements BY REFERENCE (identity
+  // crosses; the withPlugins `loadPlugins(plugins)` boundary).
+  if (t.kind === "array" && t.elem.kind === "jsval") return true;
   if (t.kind === "union") {
     const def = getUnion(t.unionId);
-    return (
-      !!def &&
-      def.arms.some((a) => a.kind === "undefinedT") &&
-      def.arms.every((a) => isUnitType(a) || isJsonSafeType(a, getRecord, getUnion))
-    );
+    if (!def || !def.arms.some((a) => a.kind === "undefinedT")) return false;
+    if (def.arms.every((a) => isUnitType(a) || isJsonSafeType(a, getRecord, getUnion))) return true;
+    // `any[] | undefined` (the defaulted-parameter spelling): exactly one
+    // jsval-element-array data arm beside units — the engine's undefined
+    // takes the undefined arm, everything else the array exit.
+    const dataArms = def.arms.filter((a) => !isUnitType(a));
+    return dataArms.length === 1 && dataArms[0]!.kind === "array" && dataArms[0]!.elem.kind === "jsval";
   }
   return false;
 }
@@ -5629,7 +5661,7 @@ export function moduleUsesDynInvoke(mod: IrModule): boolean {
  * precedent — inspect-free binaries keep the historical command line and
  * size class). Same walk shape as moduleUsesZlib. */
 /** True when the module needs scr_async_dyn.c — the checked-dynamic
- * async surfaces (DOM-promise then/catch/finally reactions, await of a
+ * async surfaces (dyn-promise then/catch/finally reactions, await of a
  * dyn value, `new Promise(setImmediate)`, AsyncLocalStorage, the
  * unhandledRejection/warning process events). Also pulled by the
  * dynInvoke and dc gates (their TUs call into this one) — cc.ts. Same
@@ -5653,7 +5685,7 @@ export function moduleUsesDynAsync(mod: IrModule): boolean {
       found = true;
       return;
     }
-    // A DYN-typed await reads through scr_await_dyn (the DOM-crossing
+    // A DYN-typed await reads through scr_await_dyn (the checked-dynamic tree-crossing
     // await lives in the gated TU) — promise<dyn> receivers' awaits and
     // the lifted then/catch helpers alike.
     if (node.kind === "awaitExpr" && node.type !== undefined && node.type.kind === "dyn") {
@@ -6056,7 +6088,7 @@ const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   ["als.", "AsyncLocalStorage"],
   ["urj.", "unhandled-rejection tracking"],
   ["dc.", "the diagnostics_channel surface"],
-  // NOT the whole "dyn." family: the checked-dynamic DOM (ScrDyn) is
+  // NOT the whole "dyn." family: the checked-dynamic tree (ScrDyn) is
   // static-tier surface hosted by always-linked units; only defineProps
   // drags the prototype-dispatch unit (scr_dyn_invoke.c → scr_async_dyn.c).
   ["dyn.defineProps", "checked-dynamic prototype dispatch"],
@@ -6299,7 +6331,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "readable.nextChunk",
   "readable.nextChunkDyn",
   // The checked-dynamic chunk forms throw Node's ERR_INVALID_ARG_TYPE
-  // chunk TypeError on a non-string/Buffer DOM kind.
+  // chunk TypeError on a non-string/Buffer dyn kind.
   "net.sockWriteDyn",
   "net.sockEndDyn",
   "http.resWriteDyn",
@@ -6457,7 +6489,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // throws Node's catchable SyntaxError at construction.
   "regex.new",
   "dyn.keySet",
-  // the destructuring pack throws V8's TypeError on non-iterable DOM kinds
+  // the destructuring pack throws V8's TypeError on non-iterable dyn kinds
   "dyn.iterPack",
   "dyn.toString",
   "dyn.defineProps",

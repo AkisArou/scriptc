@@ -262,9 +262,9 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         // A JS variable INITIALIZER whose BINDING registered as a
         // checked-dynamic module global (the typedef-annotated
         // doc-builder consts whose JSDoc types degraded — DYN slots):
-        // the island build could never land (no engine→DOM crossing
+        // the island build could never land (no engine→dyn crossing
         // exists), so the literal takes its own world's path instead —
-        // the DOM literal, or a static record the slot converts.
+        // the dyn literal, or a static record the slot converts.
         if (
           isJsSourceFile(expr.getSourceFile()) &&
           ts.isVariableDeclaration(expr.parent) &&
@@ -280,7 +280,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         // reference degraded to checker-`any` — the tsgo multi-file
         // value-as-type residue) is not an npm slot: when the literal's
         // OWN type maps statically, it builds that way — the binding's
-        // checked-dynamic slot takes the DOM conversion. Genuinely
+        // checked-dynamic slot takes the dyn conversion. Genuinely
         // island slots (npm .d.ts provenance, plain `any`) keep the
         // native build.
         if (ctxTs !== undefined && (ctxTs.flags & ts.TypeFlags.Any) === 0) {
@@ -316,13 +316,22 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         const argsWith: IrExpr[] = [];
         const getters: { name: string; fn: IrExpr; loc: SrcLoc }[] = [];
         let spread: { cond: IrExpr; whenTrue: boolean } | null = null;
-        // A MEMBER a JS file cannot lower or marshal (a generic function
-        // as a value, a signature with checked-dynamic parameters — the
-        // doc-builder public aggregate's degraded pieces): defer like a
-        // statement fence — the slot holds a host closure that THROWS the
-        // captured diagnostic when invoked, so building the aggregate
-        // compiles and only a CALL through the island stops the run.
-        const islandMemberFence = (diagsBefore: number, err: unknown, valueNode: ts.Node): IrExpr => {
+        // A MEMBER a JS file cannot lower or marshal: defer like a
+        // statement fence, shaped by what the member IS. A FUNCTION-shaped
+        // member (a generic function as a value, a signature with
+        // checked-dynamic parameters — the doc-builder public aggregate's
+        // degraded pieces) becomes a host closure that THROWS the captured
+        // diagnostic when invoked — building the aggregate compiles and
+        // only a CALL through the island stops the run. A DATA-shaped
+        // member must NOT become a callable (the retired fence box's
+        // silent wrong answers: typeof said "function", downstream errors
+        // blamed the wrong thing — the withPlugins `plugins:` slot), so it
+        // defines through the engine's getter machinery instead: READING
+        // the member throws the diagnostic — the honest granularity, since
+        // using the value is exactly what cannot be answered. `getterName`
+        // null keeps the closure shape (function-shaped members, and the
+        // conditional-spread arms where getters cannot combine).
+        const islandMemberFence = (diagsBefore: number, err: unknown, valueNode: ts.Node, getterName: string | null = null): IrExpr | null => {
           if (
             !(err instanceof PoisonError) ||
             !isJsSourceFile(expr.getSourceFile()) ||
@@ -357,7 +366,28 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             loc: locOf(valueNode),
           });
           const fence: IrExpr = { kind: "closure", fnName, captures: [], type: funcOf([], VOID), loc: locOf(valueNode) };
+          if (getterName !== null) {
+            getters.push({ name: getterName, fn: L.jsvalIn(fence, valueNode), loc: locOf(valueNode) });
+            return null;
+          }
           return L.jsvalIn(fence, valueNode);
+        };
+        // The member's SHAPE decides the fence's granularity: syntactic
+        // functions and checker-callable values keep the call-time
+        // closure; everything else (call results, awaits, data reads —
+        // the withPlugins `plugins:` shape) fences at the READ.
+        const funcShapedMember = (p: ts.ObjectLiteralElementLike): boolean => {
+          if (ts.isMethodDeclaration(p)) return true;
+          const src: ts.Node | null = ts.isPropertyAssignment(p)
+            ? p.initializer
+            : ts.isShorthandPropertyAssignment(p)
+              ? p.name
+              : null;
+          if (!src || !ts.isExpression(src)) return true; // unknown form: keep the closure shape
+          let inner: ts.Expression = src;
+          while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+          if (ts.isArrowFunction(inner) || ts.isFunctionExpression(inner)) return true;
+          return L.checker.getCallSignatures(L.typeOf(src)).length > 0;
         };
         const pushProp = (
           name: ts.Identifier | ts.StringLiteral,
@@ -370,7 +400,14 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           try {
             marshaled = L.jsvalIn(value, valueNode);
           } catch (err) {
-            marshaled = islandMemberFence(diagsBefore, err, valueNode);
+            // A value that LOWERED but cannot cross (a promise, a class
+            // instance): func-typed values keep the call-time closure;
+            // data-shaped values fence at the read (the getter), unless a
+            // conditional spread owns the literal (getters cannot combine).
+            const asGetter = value.type.kind !== "func" && spread === null;
+            const fence = islandMemberFence(diagsBefore, err, valueNode, asGetter ? name.text : null);
+            if (fence === null) return; // registered as a fence getter — no data property
+            marshaled = fence;
           }
           for (const args of into) {
             args.push({
@@ -469,7 +506,11 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
                   ? (L.rejectThisInObjectMethod(prop.body), L.lowerLambda(prop))
                   : null;
           } catch (err) {
-            value = islandMemberFence(valueDiagsBefore, err, prop);
+            const nameText =
+              name && (ts.isIdentifier(name) || ts.isStringLiteral(name)) ? name.text : null;
+            const asGetter = nameText !== null && spread === null && !funcShapedMember(prop);
+            value = islandMemberFence(valueDiagsBefore, err, prop, asGetter ? nameText : null);
+            if (value === null) continue; // registered as a fence getter — no data property
           }
           if (value && name && (ts.isIdentifier(name) || ts.isStringLiteral(name))) {
             pushProp(name, value, prop, [argsWithout, argsWith]);
@@ -569,7 +610,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       }
       // A checker-narrowed dyn read arrives as a VALIDATED extraction
       // (maybeNarrow's dynCheck bridge). typeof needs no extraction — the
-      // DOM kind table answers the question directly, and answers it even
+      // dyn kind table answers the question directly, and answers it even
       // where the flow type lied (the extraction would throw instead) —
       // so unwrap back to the dyn value and take the dyn.typeof path.
       if (operand.kind === "dynCheck" && operand.value.type.kind === "dyn") {
@@ -614,7 +655,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       if (operand.type.kind === "dyn") {
         // Bare typeof on a dyn value: the runtime's kind→string table
         // (null answers "object", boxed closures "function" — JS-exact
-        // for every DOM kind; "bigint"/"symbol" have no producers).
+        // for every dyn kind; "bigint"/"symbol" have no producers).
         return { kind: "libCall", fn: "dyn.typeof", args: [operand], type: STRING, loc };
       }
       L.unsupported("SC1090", expr, "typeof expressions on statically-typed values");
@@ -624,7 +665,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         return { kind: "selfRef", type: L.ctx.selfType!, loc };
       }
       // `arguments` in a variadic JS function (the rest-marked form): the
-      // synthetic trailing DOM-array param — lambdaSignature marked the
+      // synthetic trailing dyn-array param — lambdaSignature marked the
       // type and lowerLambda declared the local.
       if (expr.text === "arguments" && L.ctx.argumentsLocal) {
         return { kind: "varRef", localId: L.ctx.argumentsLocal.id, type: DYN, loc };
@@ -702,7 +743,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         // optional/default/rest declarations pass the value fence first.
         L.noteEdge(sig.name);
         // dynRest slots stay out of the VALUE type's param list (fn.length
-        // semantics); the rest marker carries the trailing DOM-array ABI.
+        // semantics); the rest marker carries the trailing dyn-array ABI.
         const funcType: IrType = {
           kind: "func",
           params: sig.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
@@ -1105,7 +1146,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       if (value.type.kind !== "promise") {
         // A CHECKED-DYNAMIC operand (`await v` where v rode an untyped
         // binding — a destructured helper's return, a dyn call result):
-        // the runtime decides — a DOM promise adopts (rejections
+        // the runtime decides — a dyn promise adopts (rejections
         // re-throw), anything else takes JS's one-hop non-thenable await
         // and answers itself. Thenable adoption stays unmodeled
         // (SEMANTICS.md).
@@ -1254,9 +1295,9 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // bound handle).
       if (L.isIslandExpr(expr.expression)) {
         const receiver = L.lowerExpr(expr.expression);
-        // The checker said 'any' but the VALUE lives in the DOM (`this`
+        // The checker said 'any' but the VALUE lives in the checked-dynamic tree (`this`
         // in a plain JS function — dyn.this — or a checked-dynamic local
-        // behind an any-typed spelling): the property read is the DOM's
+        // behind an any-typed spelling): the property read is the checked-dynamic tree's
         // own keyed read, dyn results and dyn chains exactly like every
         // checked-dynamic member access (a nullish receiver throws V8's
         // catchable TypeError, exactly Node). Never a jsOp over a dyn —
@@ -1551,14 +1592,14 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // .length` where the binding is an evolving any[] living as a
       // checked-dynamic global): the stdlib member fence below would blame
       // the unmappable checker type (`any[].length`), but the VALUE is a
-      // DOM node — lower the receiver first and read through the DOM keyed
+      // dyn node — lower the receiver first and read through the dyn keyed
       // read (ARR answers length; everything else JS's own-property
       // answer). Mapped receivers keep the fence-first order: their
       // members' gaps are real surface gaps ([1,2].entries), not
       // representation artifacts. `.length` on a receiver whose checker
       // ARRAY type lowers to the checked-dynamic representation —
       // `unknown[]`, the collapsed `(string | object)[]`, and the `any[]`
-      // an Array.isArray guard narrows a collapsed union to — is the DOM
+      // an Array.isArray guard narrows a collapsed union to — is the checked-dynamic tree
       // array's OWN length (a keyed read the ARR kind answers exactly),
       // never an `Array.prototype` surface gap; both source languages.
       // Prototype-method VALUE reads (`ps.map` unparenthesized) keep the
@@ -1569,7 +1610,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         (isJsSourceFile(expr.getSourceFile()) &&
           (L.mapTypeOf(L.typeOf(expr.expression)) === null ||
             // A never-tainted receiver type maps (never rides as f64) but
-            // its VALUE lowered checked-dynamic — same DOM read.
+            // its VALUE lowered checked-dynamic — same dyn read.
             neverTaintedJsType(L, expr.expression, L.typeOf(expr.expression)))) ||
         (expr.name.text === "length" &&
           (L.checkerAnyArray(expr.expression) ||
@@ -1699,7 +1740,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // the property and the receiver's type instead of "property access".
       const recvLowered = L.lowerExpr(expr.expression);
       // A dyn receiver — JSON.parse's `any`, or `unknown` the checker
-      // narrowed to `object` — reads through the DOM keyed read: member
+      // narrowed to `object` — reads through the dyn keyed read: member
       // or undefined (JS's own-property answer), throwing JS's TypeError
       // on undefined/null receivers unless an earlier `?.` guards the
       // chain. Scalar-narrowed occurrences bridge via maybeNarrow's
@@ -1968,11 +2009,11 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // === "string" ? pkg.name : null` — the lowering world types the
       // unknown-receiver read `any`, which a static build cannot hold):
       // dyn represents null and undefined directly, so the ternary stays
-      // dyn — a unit arm converts to the DOM unit value (the dynFrom form
+      // dyn — a unit arm converts to the dyn unit value (the dynFrom form
       // the index-signature lowerings already use). A FRESH literal arm
       // (`... ? pkg.scripts : {}` — the default-object idiom) converts the
       // same way when it is JSON-safe: nothing else aliases a literal, so
-      // the DOM copy is unobservable.
+      // the dyn copy is unobservable.
       const dynish = (e: IrExpr): boolean =>
         e.type.kind === "dyn" ||
         e.kind === "unitLit" ||
@@ -2065,13 +2106,13 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       ) {
         return { kind: "dynCheck", value: expr, type: narrowed, loc: expr.loc };
       }
-      // An `instanceof Uint8Array` narrow: the DOM's bytes kind, extracted
+      // An `instanceof Uint8Array` narrow: the checked-dynamic tree's bytes kind, extracted
       // with the same validated copy the checked cast uses (a Buffer that
       // crossed in rides the kind too — it IS a Uint8Array in Node).
       if (narrowed?.kind === "bytes" && narrowed.elem === "u8") {
         return { kind: "dynCheck", value: expr, type: narrowed, loc: expr.loc };
       }
-      // An `instanceof Error` narrow: the DOM's error encoding rebuilds a
+      // An `instanceof Error` narrow: the checked-dynamic tree's error encoding rebuilds a
       // fresh %Error (name/message/code from the marker object — a COPY,
       // the unknown boundary's stance; SEMANTICS.md 67), validated like
       // every dyn extraction.
@@ -2250,7 +2291,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       return { kind: "boolLit", value: !negated, type: BOOL, loc };
     }
     if (other.type.kind === "dyn") {
-      // `v != null` on unknown: one DOM kind test covers both units.
+      // `v != null` on unknown: one dyn kind test covers both units.
       return {
         kind: "dynTest",
         test: "nullish",
@@ -2406,7 +2447,7 @@ export function pureReemittable(e: IrExpr): boolean {
       // runtime kind (scr_dyn_is_nullish — UNDEF/NULL take the default;
       // a wrapped island value routes to the engine's test, defensively:
       // the wrap constructor scalar-normalizes engine null/undefined
-      // away). Both sides live in the DOM — the right converts through
+      // away). Both sides live in the checked-dynamic tree — the right converts through
       // the usual boundary and evaluates lazily in its branch; a default
       // with no dyn representation keeps the fence.
       const right = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
@@ -2694,7 +2735,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         }
         // NUMBER-typed indices (`entries?.[0]`): the property key is
         // ToString(i), exactly JS — the canonical number text answers
-        // array indices in the DOM helper, anything else (fractions,
+        // array indices in the dyn helper, anything else (fractions,
         // negatives, NaN) reads as an absent key.
         if (key.type.kind === "f64") {
           const skey: IrExpr = { kind: "toString", operand: key, type: STRING, loc: key.loc };
@@ -2702,12 +2743,12 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         }
       }
       // The METHOD-call step (`rawName?.match(re)` on a dyn value): a
-      // nullish receiver short-circuits to the undefined DOM singleton
+      // nullish receiver short-circuits to the undefined dyn singleton
       // (dyn represents undefined directly); anything else runs the
       // VALIDATED dynamic dispatch — the same one the truthy-guarded
       // spelling (`v ? v.match(...) : null`) compiles to, Node-shaped
       // TypeError on a kind mismatch included. The dispatch's static
-      // result converts back into the DOM (the chain's checker type is
+      // result converts back into the checked-dynamic tree (the chain's checker type is
       // the error-any world's `any`, so dyn IS its representation).
       if (
         ts.isCallExpression(expr) &&
@@ -2900,7 +2941,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     }
     // A dyn body (`pricing?.[key]` — an unknown-valued index-signature
     // read) stays dyn: `unknown | undefined` IS unknown, and dyn represents
-    // undefined directly (the unit path yields the undefined DOM value).
+    // undefined directly (the unit path yields the undefined dyn value).
     if (body.type.kind === "dyn") {
       return { kind: "optChain", id, receiver, body, type: DYN, loc };
     }
@@ -2961,8 +3002,8 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       return { kind: "toBool", operand: e, type: BOOL, loc: e.loc };
     }
     if (e.type.kind === "dyn") {
-      // ToBoolean over the DOM (`if (pkg)` on a JSON.parse result): every
-      // DOM kind has a JS-exact answer — the truthy dynTest reads the kind
+      // ToBoolean over the checked-dynamic tree (`if (pkg)` on a JSON.parse result): every
+      // dyn kind has a JS-exact answer — the truthy dynTest reads the kind
       // tag (plus the scalar payload for number/string).
       return { kind: "dynTest", test: "truthy", value: e, type: BOOL, loc: e.loc };
     }
@@ -2989,7 +3030,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
   }
 
 /** Truthiness needs a ToBoolean per arm: dyn/caught arms have none (a
-   * dynamic ToBoolean over the DOM / the snapshot box) — fence those
+   * dynamic ToBoolean over the checked-dynamic tree / the snapshot box) — fence those
    * unions; every other arm kind is answerable (units false, scalars and
    * strings by value, refs true, jsval by the engine). */
   export function requireTruthyUnion(L: Lowerer, unionId: string, node: ts.Expression): void {
@@ -3024,7 +3065,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     if (L.chainBlocked(expr)) return null;
     // A never-tainted JS receiver type lowered checked-dynamic
     // (neverTaintedJsType — `cmd.length` on `const cmd = ['pwd', []]`):
-    // stand down so the DOM keyed read below the chain answers, instead
+    // stand down so the dyn keyed read below the chain answers, instead
     // of an array libCall over a dyn receiver hitting the boundary fence.
     let kind = neverTaintedJsType(L, expr.expression, L.typeOf(expr.expression))
       ? undefined
@@ -3323,8 +3364,8 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         return { kind: "jsExit", value: read, type: F64, loc: locOf(expr) };
       }
       // A CHECKED-DYNAMIC value behind an array-typed checker spelling
-      // (`Object.keys(u).length` — the dyn walk answers a DOM array while
-      // tsc spells string[]): the runtime-world dispatch — a DOM keyed
+      // (`Object.keys(u).length` — the dyn walk answers a dyn array while
+      // tsc spells string[]): the runtime-world dispatch — a dyn keyed
       // read validated into the declared number (a lying length throws
       // the catchable TypeError, the dynCheck stance).
       if (receiver.type.kind === "dyn") {
@@ -3370,7 +3411,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     // A JS literal whose OWN inferred type is never-tainted
     // (neverTaintedJsType — the evolving `const gb = []`, the mixed
     // command tuple `['pwd', []]`) carries no element information: route
-    // it to the DOM fallback below rather than letting never's f64
+    // it to the checked-dynamic tree fallback below rather than letting never's f64
     // representation build a static number array (a later dyn push would
     // throw "expected number at $, got string"; the tuple's union arm
     // would re-tag as number[] and fence). A REAL slot still wins:
@@ -3511,14 +3552,14 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     if (!mapped || mapped.kind !== "array") {
       // The JS declaration fallback, literal-side: an element type with no
       // static home (a string | string[] mixed command tuple, an evolving
-      // []) builds as a DOM ARRAY — one dyn value whose elements each
+      // []) builds as a dyn ARRAY — one dyn value whose elements each
       // convert through the usual boundary (dynFrom's JSON-safe domain);
       // an element that cannot convert fences per element. length/index
-      // reads and dynamic consumers ride the keyed-DOM paths. TS literals
+      // reads and dynamic consumers ride the keyed-dyn paths. TS literals
       // take the same build when the slot ITSELF is checked-dynamic — an
       // `unknown[]` annotation or a collapsed `(string | object)[]` maps
       // to DYN wholesale now (mapType's dyn-element array rule), so the
-      // literal IS the DOM array.
+      // literal IS the dyn array.
       if (isJsSourceFile(expr.getSourceFile()) || mapped?.kind === "dyn") {
         const elems = expr.elements.map((el): IrExpr => {
           if (ts.isSpreadElement(el)) {
@@ -3800,12 +3841,12 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
   }
 
 /** The runtime-keyed JS object literal (a computed key that doesn't fold):
-   * builds a DOM object member-by-member. Keys evaluate before their values,
+   * builds a dyn object member-by-member. Keys evaluate before their values,
    * properties in source order — JS's object-literal evaluation exactly.
    * Identifier/string keys are compile-time strings; numeric keys take
    * their canonical number string (`{ 0x10: v }` stores "16" — JS's
    * ToPropertyKey); computed keys evaluate and pass through ToString (the
-   * DOM's String() for dyn operands — `{ [field]: v }` where field is a
+   * dyn's String() for dyn operands — `{ [field]: v }` where field is a
    * checked-dynamic param). Values convert through the usual dyn boundary
    * (dynFrom's domain, functions box); a value with no dyn representation
    * fences per property. Spreads, accessors, and methods stay fenced —
@@ -3909,7 +3950,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
             `holding '${L.fmt(v.type)}' values in a runtime-keyed (computed-key) object literal`,
           );
         } catch (err) {
-          // A member value the DOM cannot hold — a func whose signature
+          // A member value the checked-dynamic tree cannot hold — a func whose signature
           // cannot box, an island ('any') handle, a record carrying func
           // fields (the export aggregate's typed utilities and npm-handle
           // members): the same call-time fence deferral as an unlowerable
@@ -3993,7 +4034,7 @@ function fenceClosureProbe(
     return null;
   }
   // The trap's ABI: the field's func slot when one exists; otherwise (the
-  // DOM-object literal path — the value boxes into dyn) the all-dyn
+  // dyn-object literal path — the value boxes into dyn) the all-dyn
   // signature of the lambda's own arity, which canBoxFuncIntoDyn always
   // admits.
   const fieldType: IrType & { kind: "func" } =
@@ -4121,7 +4162,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     const loc = locOf(expr);
     // The RUNTIME-KEYED literal (JS): a computed key that doesn't fold to a
     // compile-time string means the literal's shape is not a compile-time
-    // fact — no record shape can hold it. The whole literal builds as a DOM
+    // fact — no record shape can hold it. The whole literal builds as a dyn
     // object instead (`{ [field]: criteria, actual: 0, ... }` —
     // test/common's _mustCallInner context), where keys are runtime string
     // values. TypeScript keeps the record world and its fence: this shape
@@ -4373,13 +4414,13 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const shapeId = L.shapes.intern(fields.map((f) => ({ name: f.name, type: f.value.type })));
       return { kind: "recordLit", fields, type: { kind: "record", shapeId }, loc };
     }
-    // The JS declaration fallback, literal-side (the DOM-array rule's
+    // The JS declaration fallback, literal-side (the checked-dynamic tree-array rule's
     // object form): a literal whose shape has no static home — an
     // unmappable contextual type over unmappable own fields (the
     // PropertyDescriptorMap argument of Object.defineProperties, nested
-    // descriptor records with `any` values) — builds as a DOM OBJECT:
+    // descriptor records with `any` values) — builds as a dyn OBJECT:
     // each field converts through the usual dyn boundary, and dynamic
-    // consumers ride the keyed-DOM paths. TypeScript keeps the fence.
+    // consumers ride the keyed-dyn paths. TypeScript keeps the fence.
     if ((!mapped || mapped.kind === "dyn") && isJsSourceFile(expr.getSourceFile())) {
       return lowerDynObjectLiteral(L, expr);
     }
@@ -4718,8 +4759,8 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           const recArm = recArms[0]! as IrType & { kind: "record" };
           const recTag = def.arms.indexOf(recArm);
           // A checked-dynamic VALUE under the union-mapped checker type
-          // (a JS DOM-holding binding): the present/absent desugar tests
-          // union tags a DOM box does not carry — fence honestly instead
+          // (a JS dyn-holding binding): the present/absent desugar tests
+          // union tags a dyn box does not carry — fence honestly instead
           // of the validator's ICE.
           const probedSrc = srcLowered ?? probeLower(L, srcNode);
           if (probedSrc?.type.kind === "dyn") {
@@ -4919,11 +4960,11 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             throw new PoisonError();
           }
           const obj = srcLowered ?? L.lowerExpr(srcNode);
-          // A record-mapped CHECKER type whose VALUE lives in the DOM (a
+          // A record-mapped CHECKER type whose VALUE lives in the checked-dynamic tree (a
           // JS file-scope object-literal global): read each field from
-          // the DOM (dynKeyGet) and VALIDATE it into the source shape's
+          // the checked-dynamic tree (dynKeyGet) and VALIDATE it into the source shape's
           // field type (dynCheck) — the checked-dynamic member-read
-          // discipline. A missing key answers the DOM undefined, exactly
+          // discipline. A missing key answers the dyn undefined, exactly
           // the undefined-armed optional's absent case; a mismatched
           // runtime value throws the catchable TypeError, never a silent
           // wrong copy. Runtime-ADDED keys drop — width subtyping in
@@ -4934,7 +4975,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
               L.unsupported(
                 "SC1100",
                 prop,
-                `object spread of a checked-dynamic source whose field '${f.name}' ('${L.fmt(f.type)}') cannot validate out of the DOM (copy the fields explicitly)`,
+                `object spread of a checked-dynamic source whose field '${f.name}' ('${L.fmt(f.type)}') cannot validate out of the checked-dynamic tree (copy the fields explicitly)`,
               );
             }
             value = {
@@ -5079,7 +5120,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         // lowering: a union field with one array-family arm builds the
         // literal AS that arm (lowerExprExpecting's IR-directed rule —
         // the option-table `default: [{ value: [] }]` shape), where the
-        // bare lowering would take the JS DOM fallback and fence.
+        // bare lowering would take the JS dyn fallback and fence.
         let init: ts.Expression = prop.initializer;
         while (ts.isParenthesizedExpression(init)) init = init.expression;
         value =
@@ -5122,7 +5163,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       }
       if (!fieldType) {
         // Overflow entry: the value flows into the index signature's value
-        // slot — dyn slots take a DOM conversion (dynFrom), typed slots the
+        // slot — dyn slots take a dyn conversion (dynFrom), typed slots the
         // ordinary coercion path. Later duplicates override (map semantics
         // are last-write-wins already; a duplicate literal key is a tsc
         // error anyway).
@@ -5169,7 +5210,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const provided = new Set(fields.filter((f) => !f.overflow).map((f) => f.name));
       for (const f of shape.fields) {
         if (provided.has(f.name)) continue;
-        // 'unknown' fields complete with the DOM undefined — the absent
+        // 'unknown' fields complete with the dyn undefined — the absent
         // property reads as undefined in Node, and a dyn slot holds
         // exactly that (the options-record call shape against
         // `{ plugins: unknown, ... }` — a JS caller the checker admits).
@@ -5580,7 +5621,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // A never-tainted JS receiver type (neverTaintedJsType — `cmd[1]` on
     // `const cmd = ['pwd', []]`, whose binding lowered checked-dynamic)
     // dispatches as unmapped so the dyn-receiver branch below reads
-    // through the DOM instead of dynChecking into never's f64 residue.
+    // through the checked-dynamic tree instead of dynChecking into never's f64 residue.
     const receiverIr = neverTaintedJsType(L, expr.expression, L.typeOf(expr.expression))
       ? null
       : L.mapTypeOf(L.typeOf(expr.expression));
@@ -5588,7 +5629,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
       // receiver whose value LOWERED checked-dynamic (`bag.list[0]` where
       // bag.list is a routed keyed read off a wrapped island value) takes
-      // the DOM keyed read below — the routed JSVAL arm reads the real
+      // the dyn keyed read below — the routed JSVAL arm reads the real
       // engine element; a jsval-lowered receiver keeps the island read.
       const recv = L.lowerExpr(expr.expression);
       if (recv.type.kind !== "dyn") return islandElementRead(L, expr, recv);
@@ -5670,7 +5711,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       }
     }
     // `pkg["k"]` / `scripts[name]` / `scopeMatch[1]` on a dyn receiver (a
-    // JSON.parse result): the DOM keyed read, exactly the dot form.
+    // JSON.parse result): the dyn keyed read, exactly the dot form.
     // NUMBER-typed indices convert through ToString first — JS property
     // keys are strings, and the canonical number text answers array
     // indices in the helper (fractions, negatives, and NaN read as
@@ -5794,7 +5835,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     if (arr.type.kind === "jsval") return islandElementRead(L, expr, arr);
     // The checker sees an array but the VALUE lowered checked-dynamic (a
     // jsdoc-typed default export from a .js module — signature 14): the
-    // read rides the dynCheck boundary when the array shape is one the DOM
+    // read rides the dynCheck boundary when the array shape is one the checked-dynamic tree
     // can validate, and fences by name when it is not — an arrayGet over a
     // dyn receiver is never emitted (the validator ICE).
     if (arr.type.kind === "dyn") {
@@ -5881,7 +5922,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
    * the index signature's value type (dyn for `unknown`), or its
    * undefined-armed union under noUncheckedIndexedAccess. Every declared
    * field must be able to SURFACE as that type (equal, an arm of it, or —
-   * for dyn results — JSON-safe for the DOM conversion); shapes mixing in
+   * for dyn results — JSON-safe for the dyn conversion); shapes mixing in
    * fields outside that stay fenced. Declared-only shapes support reads
    * whose key type proves membership (tsc's keyof check): all fields must
    * share the result type, and a smuggled miss traps. */
@@ -5900,9 +5941,9 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // The receiver lowers FIRST (both branches below read it, and JS
     // evaluates the receiver before the key).
     const obj = L.lowerExpr(expr.expression);
-    // A record-mapped CHECKER type over a VALUE living in the DOM (a JS
+    // A record-mapped CHECKER type over a VALUE living in the checked-dynamic tree (a JS
     // file-scope object-literal global): the checked-dynamic keyed read —
-    // dynKeyGet against the runtime keys (a missing key answers the DOM
+    // dynKeyGet against the runtime keys (a missing key answers the checked-dynamic tree
     // undefined, exactly JS); consumers validate (dynCheck) where a
     // static type is required, the member-read discipline.
     if (obj.type.kind === "dyn") {
@@ -6020,8 +6061,8 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
 
   /** Can every value a dynamic key can reach (declared fields + the
    * overflow) surface as the read's result type? dyn results need
-   * DOM-convertible fields (JSON-safe, with the undefined arm allowed at
-   * the top — an optional field's undefined becomes the undefined DOM
+   * dyn-convertible fields (JSON-safe, with the undefined arm allowed at
+   * the top — an optional field's undefined becomes the undefined dyn
    * value, exactly what the missing-key path produces); typed results need
    * each field to be the type itself or one of its arms, and the overflow
    * value to be the type or wrappable into it. */
@@ -6095,7 +6136,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     if (receiverIr?.kind === "jsval") {
       const obj = L.lowerExpr(target.expression);
       // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
-      // receiver whose value LOWERED checked-dynamic takes the DOM keyed
+      // receiver whose value LOWERED checked-dynamic takes the dyn keyed
       // write — the routed JSVAL arm lands it on the real engine object.
       if (obj.type.kind === "dyn") {
         const loc = locOf(expr);
@@ -6123,12 +6164,12 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       return { kind: "exprStmt", expr: { kind: "jsOp", op: "setIdx", args: [obj, key, value], type: VOID, loc }, loc };
     }
     // A checked-dynamic receiver TYPE (`unknown[]` and the collapsed
-    // `(string | object)[]` map to DYN wholesale now): the DOM keyed
+    // `(string | object)[]` map to DYN wholesale now): the dyn keyed
     // write — dyn.keySet. Number keys canonicalize through the JS-exact
     // formatter; ARR receivers take canonical index keys as element
     // set/extend (undefined-hole padding, JS's length growth exactly),
     // OBJ receivers set the member, and the runtime throws Node's
-    // TypeErrors on every other kind. Values convert into the DOM;
+    // TypeErrors on every other kind. Values convert into the checked-dynamic tree;
     // unconvertible ones fence per site (the dynFrom stance).
     if (receiverIr?.kind === "dyn") {
       const obj = L.lowerExpr(target.expression);
@@ -6144,7 +6185,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           L.unsupported(
             "SC1101",
             expr.right,
-            `storing '${L.fmt(value.type)}' values in a checked-dynamic array (the value cannot convert into the DOM)`,
+            `storing '${L.fmt(value.type)}' values in a checked-dynamic array (the value cannot convert into the checked-dynamic tree)`,
           );
         }
         return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
@@ -6185,11 +6226,11 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           const loc = locOf(expr);
           return { kind: "exprStmt", expr: { kind: "jsOp", op: "setIdx", args: [obj, key, value], type: VOID, loc }, loc };
         }
-        // A record-mapped CHECKER type over a VALUE living in the DOM (a
+        // A record-mapped CHECKER type over a VALUE living in the checked-dynamic tree (a
         // JS file-scope object-literal global): the checked-dynamic keyed
         // write — dyn.keySet (later writes win, insertion order; Node's
         // TypeErrors on non-object receivers), the value converting into
-        // the DOM. Literal and runtime keys alike: the DOM's key set is
+        // the checked-dynamic tree. Literal and runtime keys alike: the checked-dynamic tree's key set is
         // open, so no declared-field collision analysis applies.
         if (obj.type.kind === "dyn") {
           const loc = locOf(expr);
@@ -6207,7 +6248,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             L.unsupported(
               "SC1101",
               expr.right,
-              `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the DOM)`,
+              `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the checked-dynamic tree)`,
             );
           }
           return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
@@ -6303,7 +6344,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         // A LITERAL key naming no declared field is a pure overflow insert
         // — no collision to validate. Runtime keys must be able to collide
         // with every declared field: dyn slots validate through the
-        // dynCheck walker (fields must be DOM-convertible — the same
+        // dynCheck walker (fields must be dyn-convertible — the same
         // convertibility the read needs); typed slots write through
         // directly, so every field must BE the index-value type.
         const overflowOnly = litKey !== null;
@@ -6347,7 +6388,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // `result[key] = value`): dyn.keySet, exactly the record-mapped dyn
     // arm above — later writes win in insertion order, number keys
     // canonicalize through the JS-exact formatter (ToPropertyKey's string
-    // side), index keys on DOM arrays set/extend elements, and non-object
+    // side), index keys on dyn arrays set/extend elements, and non-object
     // receivers throw Node's TypeErrors at runtime. An UNMAPPED checker
     // type (static `any` — mapTypeOf answers null without --dynamic)
     // probes the receiver's own lowered world: a dyn value takes the same
@@ -6373,7 +6414,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           L.unsupported(
             "SC1101",
             expr.right,
-            `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the DOM)`,
+            `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the checked-dynamic tree)`,
           );
         }
         return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
@@ -6408,7 +6449,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
 export function ensureString(L: Lowerer, e: IrExpr, node: ts.Node): IrExpr {
     if (e.type.kind === "string") return e;
     if (e.type.kind === "dyn") {
-      // String(u) / `${u}`: a runtime dispatch over the DOM kind — Node's
+      // String(u) / `${u}`: a runtime dispatch over the dyn kind — Node's
       // String() exactly (undefined/null texts, JS number formatting,
       // strings verbatim, arrays via join, objects as "[object Object]").
       return { kind: "toString", operand: e, type: STRING, loc: e.loc };
@@ -6550,7 +6591,7 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
    *   documented divergence: a lying cast throws instead of corrupting
    *   memory);
    * - dyn → anything else (closures, class instances, void) is rejected:
-   *   those types cannot be found inside a JSON DOM. */
+   *   those types cannot be found inside a JSON dyn. */
   /** `e as T` and the old-style assertion `<T>e` — one node shape (both
    * carry `.type` and `.expression`), one lowering. */
   export function lowerAsExpression(L: Lowerer, expr: ts.AsExpression | ts.TypeAssertion): IrExpr {
@@ -6656,7 +6697,7 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
     if (target.kind === "dyn") return inner; // `as unknown`: erasure
     if (target.kind === "void" || !L.jsonSafe(target)) {
       // Bare undefined-armed targets pass when every OTHER arm is
-      // JSON-safe: the DOM holds a first-class undefined value now
+      // JSON-safe: the checked-dynamic tree holds a first-class undefined value now
       // (index-signature overflow reads produce it for missing keys), and
       // the undefined arm matches exactly it — `p[key] as string |
       // undefined` is the missing-key idiom. Parsed JSON still never
@@ -6665,7 +6706,7 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
       if (target.kind === "union" && L.dynConvertible(target)) {
         return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
       }
-      // Uint8Array targets: the DOM carries a bytes kind now (converted
+      // Uint8Array targets: the checked-dynamic tree carries a bytes kind now (converted
       // stdin chunks) — the extraction validates the kind and copies out.
       if (target.kind === "bytes" && target.elem === "u8") {
         return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
@@ -6690,7 +6731,7 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
       // — the errno-probing idiom): there is nothing to validate (every
       // field is unknown, exactly what the dyn value already answers) and
       // nothing to build — the cast is pure typing, so it ERASES and the
-      // reads ride the DOM keyed read.
+      // reads ride the dyn keyed read.
       if (target.kind === "record") {
         const shape = L.shapes.get(target.shapeId);
         if (
@@ -6869,7 +6910,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       }
       // `events.defaultMaxListeners = v` — the module-property write
       // Node validates (validateNumber(n, 'defaultMaxListeners', 0)):
-      // the value crosses into the DOM and the runtime ladder throws
+      // the value crosses into the checked-dynamic tree and the runtime ladder throws
       // ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE with Node's exact slot
       // name; valid numbers apply. The expression's value is the RHS
       // (JS's assignment yield).
@@ -7055,8 +7096,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       }
       if (left.type.kind === "dyn" || right.type.kind === "dyn") {
         // A checked-dynamic operand (`fn.name || '<anonymous>'` —
-        // test/common's _mustCallInner): both sides live in the DOM and
-        // the deciding test is ToBoolean over the DOM kind
+        // test/common's _mustCallInner): both sides live in the checked-dynamic tree and
+        // the deciding test is ToBoolean over the dyn kind
         // (scr_dyn_truthy) — JS value semantics exactly, result dyn. The
         // non-dyn side converts through the usual boundary; a value with
         // no dyn representation keeps the fence.
@@ -7207,7 +7248,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     const right = L.lowerExpr(expr.right);
     if (left.type.kind === "dyn" || right.type.kind === "dyn") {
       // The narrowing unit comparisons ARE answerable on unknown: `v ===
-      // undefined` / `v !== null` test the DOM node's kind directly, and
+      // undefined` / `v !== null` test the dyn node's kind directly, and
       // tsc's control flow narrows the branches (reads then bridge through
       // maybeNarrow's validated extraction).
       if (
@@ -7229,7 +7270,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         }
         // dyn vs SCALAR strict equality (`value !== ""`, `u === 5` — the
         // normalizePricing filter): a guarded kind test + payload compare,
-        // JS-exact (strict equality never coerces; a non-matching DOM kind
+        // JS-exact (strict equality never coerces; a non-matching dyn kind
         // answers false). dyn vs dyn keeps the fence below.
         const dynSide = left.type.kind === "dyn" ? left : right;
         const scalarSide = dynSide === left ? right : left;
@@ -7237,7 +7278,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           dynSide.type.kind === "dyn" &&
           (scalarSide.type.kind === "f64" || scalarSide.type.kind === "string" || scalarSide.type.kind === "bool" ||
             // dyn vs dyn (`context.actual !== context.exact` —
-            // test/common's exit accounting): the runtime's whole-DOM
+            // test/common's exit accounting): the runtime's whole-dyn
             // strict equality — scalars by value, units by kind,
             // reference kinds by node identity (scr_dyn_strict_eq).
             scalarSide.type.kind === "dyn")
@@ -7293,7 +7334,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           }
           if (other.type.kind === "string") {
             // String-context `+`: JS's answer is String(unknown) — the
-            // JS-exact DOM walker (numbers format, arrays join, objects
+            // JS-exact dyn walker (numbers format, arrays join, objects
             // print [object Object], handles the same) — never a checked
             // cast: `'status ' + res.statusCode` concatenates like Node.
             const strOf = (e: IrExpr): IrExpr =>
@@ -7314,7 +7355,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         L.anyOpFence(`the '${ts.tokenToString(op) ?? ts.SyntaxKind[op]}' operator`, expr);
       }
       // tsc allows ===/!== on unknown (arithmetic/comparisons it rejects
-      // itself); a dynamic equality would need a DOM walk — validate first.
+      // itself); a dynamic equality would need a dyn walk — validate first.
       L.unsupported("SC1100", expr, "operators on 'unknown' values");
     }
     // Operators over 'any' execute in the island with JS-exact semantics
@@ -7818,7 +7859,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
   }
 
 /** `typeof v === "lit"` / `typeof v !== "lit"` where v is `unknown`-typed
-   * (dyn): the runtime kind test over the DOM node's tag. Only the kinds a
+   * (dyn): the runtime kind test over the dyn node's tag. Only the kinds a
    * later read can bridge narrow ("string"/"number"/"boolean") plus
    * "undefined" (no payload to read); "object"/"function" tests keep the
    * fence — an object-narrowed `unknown` read has no lowering anyway (a
@@ -7899,7 +7940,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           loc,
         };
       }
-      // `typeof v === "object"`: the DOM answers exactly (object, array,
+      // `typeof v === "object"`: the dyn answers exactly (object, array,
       // bytes, and null kinds — JS's oldest wart preserved). tsc narrows
       // the branch to `object | null`; reads past the narrow take the
       // checked-cast path per site.
@@ -7913,7 +7954,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           loc,
         };
       }
-      // `typeof v === "function"`: a REAL runtime test since the DOM's
+      // `typeof v === "function"`: a REAL runtime test since the checked-dynamic tree's
       // function kind exists (boxed closures — the mustCall guard
       // `if (typeof fn !== 'function') throw` answers honestly).
       if (b.text === "function") {
@@ -8073,7 +8114,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * over a hierarchy class, `typeof` over a primitive), the read bridges
    * with a kind-unchecked `caughtNarrow` extraction (trust-the-checker,
    * exactly like unionNarrow). Every OTHER read is the narrowness fence:
-   * the binding's payload is a typed exception snapshot, not a dyn DOM, so
+   * the binding's payload is a typed exception snapshot, not a dyn, so
    * un-narrowed uses have nothing sound to lower to. */
   export function caughtRead(L: Lowerer, node: ts.Identifier, local: IrLocal, loc: SrcLoc): IrExpr {
     const ref: IrExpr = { kind: "varRef", localId: local.id, type: CAUGHT, loc };
@@ -8091,10 +8132,10 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       }
     }
     // An UN-narrowed use — the occurrence still types `unknown` — converts
-    // to a dyn DOM value (`options.onError?.(error)` — the caught snapshot
+    // to a dyn value (`options.onError?.(error)` — the caught snapshot
     // flowing into an unknown slot): the typed→unknown deep-copy stance
     // extended to exception payloads. Error payloads keep their
-    // observability (instanceof Error / .message / String() — the DOM's
+    // observability (instanceof Error / .message / String() — the checked-dynamic tree's
     // error encoding); other object payloads are type-erased at runtime and
     // convert to the "[object Object]" approximation — SEMANTICS.md 67.
     if (narrowed?.kind === "dyn") {
@@ -8197,14 +8238,14 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       L.builtinStreamInfoOf(rhsMemberSymbol) ??
       undefined;
     if (!target) {
-      // `u instanceof Uint8Array` on an `unknown` value: the DOM carries a
+      // `u instanceof Uint8Array` on an `unknown` value: the checked-dynamic tree carries a
       // bytes kind — one runtime tag test, and tsc's narrowing types the
       // true branch (reads bridge through maybeNarrow's validated
       // extraction, like the typeof tests). Node's Buffer IS a Uint8Array
       // subclass and rides the same bytes kind, so both worlds answer true
       // for Buffer payloads — Node-exact (the bytes kind's other
       // divergences are SEMANTICS.md 45). Catch bindings stay out (their
-      // payload is a typed snapshot, not a DOM).
+      // payload is a typed snapshot, not a dyn).
       if (
         ts.isIdentifier(expr.right) &&
         L.isStdlibGlobal(expr.right, "Uint8Array") &&
@@ -8318,7 +8359,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       };
     }
     const left = L.lowerExpr(expr.left);
-    // `u instanceof Error` on an `unknown` value: the DOM's error encoding
+    // `u instanceof Error` on an `unknown` value: the checked-dynamic tree's error encoding
     // (the shape caughtToDyn builds for Error payloads — the reserved
     // "%error" marker) answers the test, so a caught Error passed through
     // an unknown slot narrows like Node (`error instanceof Error ?
@@ -8331,7 +8372,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       return { kind: "dynTest", test: "error", value: left, type: BOOL, loc };
     }
     // `u instanceof TypeError` (and the other BUILTIN error classes) on a
-    // dyn value: the from_error cache holds the DOM↔error identity edge,
+    // dyn value: the from_error cache holds the checked-dynamic tree↔error identity edge,
     // so the runtime resolves the encoding back to its error and asks the
     // vtable's stamped interval — exact for every error that crossed the
     // boundary (a hand-built {%error} literal answers false: subclass
@@ -8660,7 +8701,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       }
     }
     // A dyn receiver (`"portless" in pkg` after the `typeof pkg ===
-    // "object"` guard): own-member presence on the DOM — tsc admits `in`
+    // "object"` guard): own-member presence on the checked-dynamic tree — tsc admits `in`
     // only on object-typed operands, so unit receivers are unreachable.
     if (recv.type.kind === "dyn") {
       return { kind: "dynHasKey", key, value: recv, type: BOOL, loc };
@@ -9422,8 +9463,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     // fallback's discipline.
     // A checker-union receiver whose VALUE lowered checked-dynamic (a
     // never-tainted JS chain — `cmd[1].length` on `const cmd = ['pwd',
-    // []]`, where the element read stayed a DOM node): read through the
-    // DOM keyed read like the unmappable-receiver path below the chain.
+    // []]`, where the element read stayed a dyn node): read through the
+    // dyn keyed read like the unmappable-receiver path below the chain.
     if (value.type.kind === "dyn") {
       const key: IrExpr = { kind: "strLit", value: expr.name.text, type: STRING, loc: locOf(expr.name) };
       return { kind: "dynKeyGet", key, value, type: DYN, loc: locOf(expr) };
@@ -9785,9 +9826,9 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * tsc-clean (the property types as the setter's param), but Node yields
    * undefined, which these property types cannot represent. */
   export function fieldGetExpr(L: Lowerer, target: FieldTarget, loc: SrcLoc, blame: ts.Node): IrExpr {
-    // A record-shaped CHECKER target whose receiver VALUE lives in the DOM
+    // A record-shaped CHECKER target whose receiver VALUE lives in the checked-dynamic tree
     // (a JS file-scope object-literal global): the checked-dynamic keyed
-    // read — dynKeyGet (a missing key answers the DOM undefined, exactly
+    // read — dynKeyGet (a missing key answers the dyn undefined, exactly
     // JS); consumers validate (dynCheck) where a static type is required.
     if (
       (target.container === "record" || target.container === "recordOvf") &&
@@ -9879,10 +9920,10 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * call). A write to a getter-only property never gets here in a clean
    * program (tsc's TS2540 is the fence); the rejection is the backstop. */
   export function fieldSetStmt(L: Lowerer, target: FieldTarget, value: IrExpr, loc: SrcLoc, blame: ts.Node): IrStmt {
-    // A record-shaped CHECKER target whose receiver VALUE lives in the DOM:
+    // A record-shaped CHECKER target whose receiver VALUE lives in the checked-dynamic tree:
     // the checked-dynamic keyed write — dyn.keySet (later writes win,
     // insertion order; Node's TypeErrors on non-object receivers), the
-    // value converting into the DOM.
+    // value converting into the checked-dynamic tree.
     if (
       (target.container === "record" || target.container === "recordOvf") &&
       target.obj.type.kind === "dyn"
@@ -9892,7 +9933,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         L.unsupported(
           "SC1101",
           blame,
-          `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the DOM)`,
+          `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the checked-dynamic tree)`,
         );
       }
       return {
@@ -9984,7 +10025,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     const type = ctxT ? L.mapTypeOf(ctxT) : null;
     const reasonNode = call.arguments[0]!;
     // A CHECKED-DYNAMIC reason (`Promise.reject(value)` where value rode
-    // an untyped binding — the tracingChannel suite's shape): the DOM
+    // an untyped binding — the tracingChannel suite's shape): the checked-dynamic tree
     // value IS the rejection payload (the thrown-dyn representation, so
     // identity survives to catch/unhandledRejection observers), and the
     // result is promise<dyn> when no context names a concrete one.
@@ -10142,7 +10183,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         const concat: IrExpr = {
           kind: "strConcat",
           // String-context read: JS's String(unknown) over the field —
-          // the JS-exact DOM walker, never a checked cast.
+          // the JS-exact dyn walker, never a checked cast.
           left: { kind: "toString", operand: read, type: STRING, loc },
           right: rhs,
           type: STRING,

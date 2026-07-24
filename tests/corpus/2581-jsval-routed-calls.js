@@ -3,8 +3,8 @@
 // 'unknown' (lane dyn-routing-ops): a dyn callee holding an engine
 // function routes through scr_jsval_call; method dispatch on a wrapped
 // receiver runs the ENGINE's own prototypes (Array.prototype.map/filter/
-// flatMap/forEach — JS-exact), with DOM callbacks crossing through the
-// ONE generic host-function shim (engine args wrap as DOM values, the
+// flatMap/forEach — JS-exact), with dyn callbacks crossing through the
+// ONE generic host-function shim (engine args wrap as dyn values, the
 // thunk runs, the result converts back); non-function callees throw
 // Node's own catchable TypeError with the callee spelled.
 
@@ -53,7 +53,7 @@ function probe(bag) {
     console.log("caught2:", String(e));
   }
 
-  // A DOM value passed into an engine call deep-copies (the boundary's
+  // A dyn value passed into an engine call deep-copies (the boundary's
   // data stance) — the engine reads the copy's members.
   const pick = bag.tag;
   console.log(pick(String(bag.n)));

@@ -36,7 +36,7 @@ class Unbound {
 console.log(new Unbound().grab()());
 
 // Brand checks need a receiver whose representation can HOLD a branded
-// instance: 'unknown' values live in the DOM, which never carries class
+// instance: 'unknown' values live in the checked-dynamic tree, which never carries class
 // instances — the fence points at narrowing.
 class BrandUnknown {
   #v = 3;

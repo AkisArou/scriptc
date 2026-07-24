@@ -2,9 +2,9 @@
 // (inference starts at never[]) — never's f64 representation (the
 // uninhabited stance) must not capture it, or a later dyn push
 // ("expected number at $, got string") dynChecks strings into a number
-// array. The empty literal routes to the JS DOM-array fallback instead:
+// array. The empty literal routes to the JS dyn-array fallback instead:
 // pushes of dyn values (JSON.parse results), strings, and numbers all
-// land, and length/index/join read back through the keyed-DOM paths.
+// land, and length/index/join read back through the keyed-dyn paths.
 'use strict';
 
 function viaDyn() {
@@ -35,7 +35,7 @@ viaAnnotated();
 
 // The mixed command tuple (test/common's pwdCommand shape): the inner
 // empty literal taints the OUTER literal's own type with never[]
-// ((string | never[])[]) — the whole value rides the DOM fallback
+// ((string | never[])[]) — the whole value rides the checked-dynamic tree fallback
 // instead of building a static (number[] | string)[] that fences at the
 // union re-tag.
 function viaMixedTuple() {
@@ -44,7 +44,7 @@ function viaMixedTuple() {
 }
 viaMixedTuple();
 
-// The ternary form (the pwdCommand spelling): the DOM arm coerces into
+// The ternary form (the pwdCommand spelling): the dyn arm coerces into
 // the ternary's union slot and the whole binding stays usable.
 function viaTernary(win) {
   const cmd = win ? ['cmd.exe', ['/d', '/c', 'cd']] : ['pwd', []];

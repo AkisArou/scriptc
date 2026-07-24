@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -92,6 +92,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "json.parse": { argTypes: [STRING], result: DYN },
   "dyn.keySet": { argTypes: [DYN, STRING, DYN], result: VOID },
   "dyn.iterPack": { argTypes: [DYN, STRING], result: DYN },
+  "dyn.arrLen": { argTypes: [DYN], result: F64 },
+  "dyn.arrAt": { argTypes: [DYN, F64], result: DYN },
   "dyn.toString": { argTypes: [DYN, STRING, STRING], result: STRING },
   "dyn.defineProps": { argTypes: [DYN, DYN], result: DYN },
   "dyn.typeof": { argTypes: [DYN], result: STRING },
@@ -202,7 +204,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "num.fromString": { argTypes: [STRING], result: F64 },
   "num.isNaN": { argTypes: [F64], result: BOOL },
   "str.encodeUriComponent": { argTypes: [STRING], result: STRING },
-  // The base64 globals: the argument is a DOM value (WebIDL ToString
+  // The base64 globals: the argument is a dyn value (WebIDL ToString
   // runs in the runtime); the zero-argument form always throws.
   "str.atob": { argTypes: [DYN], result: STRING },
   "str.btoa": { argTypes: [DYN], result: STRING },
@@ -259,7 +261,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // node:querystring. qs.parse's result is the call site's ParsedUrlQuery
   // dictionary record (VOID is the networkInterfaces sentinel — the
   // libCall case checks the structure); qs.stringify's object argument
-  // is a DOM value (the frontend dynFroms typed records).
+  // is a dyn value (the frontend dynFroms typed records).
   "qs.parse": { argTypes: [STRING, STRING, STRING, F64], result: VOID },
   "qs.stringify": { argTypes: [DYN, STRING, STRING], result: STRING },
   "qs.escape": { argTypes: [STRING], result: STRING },
@@ -676,7 +678,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "buffer.isEncoding": { argTypes: [STRING], result: BOOL },
   "buffer.concatLen": { argTypes: [arrayOf(BYTES_U8), F64], result: BYTES_U8 },
   // The checked-dynamic compare/equals validators (Node's argument
-  // ladders over DOM-boxed invalid-input probes).
+  // ladders over dyn-boxed invalid-input probes).
   "buffer.compareChk": { argTypes: [DYN, DYN], result: F64 },
   "bytes.equalsChk": { argTypes: [BYTES_U8, DYN], result: BOOL },
   "bytes.compareChk": { argTypes: [BYTES_U8, DYN, DYN, DYN, DYN, DYN], result: F64 },
@@ -755,7 +757,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // Receiver (any error-hierarchy object) and the program-dependent
   // `string | undefined` result are checked in the libCall case.
   "error.code": { argTypes: [null], result: VOID },
-  // DOMException: construction takes the two DOM args (WebIDL's
+  // DOMException: construction takes the two dyn args (WebIDL's
   // resolution runs in the runtime); the %DOMException result is a
   // program-dependent object type, checked in the libCall case. The
   // read surface takes the %DOMException receiver (a null slot — the
@@ -906,7 +908,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // Symbol strict equality (pointer identity; scr_symbol.c).
   "assert.eqSym": { argTypes: [{ kind: "symbol" }, { kind: "symbol" }, BOOL, BOOL, STRING, BOOL], result: VOID },
   // The equality quartet over checked-dynamic operands (the frontend
-  // boxes a static side into the DOM first).
+  // boxes a static side into the checked-dynamic tree first).
   "assert.eqDyn": { argTypes: [DYN, DYN, BOOL, BOOL, STRING, BOOL], result: VOID },
   // The throws(fn, {shape}) accumulator: begin/slot calls never throw;
   // shapeEnd throws the Comparison diff. The error slot is the
@@ -1221,7 +1223,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       // Unit kinds (undefinedT/nullT) exist only as union arms — a BARE
       // unit field is as malformed as a void one. dyn fields are VALID
       // (`[string, unknown]` entries tuples, `{ v: unknown }` records):
-      // the slot holds a DOM value with the overflow map's plumbing.
+      // the slot holds a dyn value with the overflow map's plumbing.
       if (
         f.type.kind === "void" || f.type.kind === "jsval" ||
         isUnitType(f.type)
@@ -1767,10 +1769,10 @@ function validateFunction(
           }
           break;
         }
-        // A dyn (DOM) chain (`rawName?.match(re)` on a JSON.parse result):
+        // A dyn (dyn) chain (`rawName?.match(re)` on a JSON.parse result):
         // the nullish test reads the node's kind tag; the body is the
         // validated dynamic dispatch, its result converted back into the
-        // DOM (dynFrom) — so body and result are dyn, or void for
+        // dyn (dynFrom) — so body and result are dyn, or void for
         // statement-position chains.
         if (e.receiver.type.kind === "dyn") {
           if (activeChains.has(e.id)) err(`optChain id "${e.id}" shadows an active chain`, e.loc);
@@ -1813,7 +1815,7 @@ function validateFunction(
           break;
         }
         expectType(e.body, e.type, "optChain body");
-        // dyn results carry the unit path as the undefined DOM value; every
+        // dyn results carry the unit path as the undefined dyn value; every
         // other value result needs an undefined arm to land on.
         if (e.type.kind !== "dyn") {
           const rdef = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
@@ -1844,7 +1846,7 @@ function validateFunction(
         }
         // The CHECKED-DYNAMIC form: the runtime kind decides (the
         // emitters' scr_dyn_is_nullish arm) — left, right, and result
-        // all live in the DOM.
+        // all live in the checked-dynamic tree.
         if (e.left.type.kind === "dyn") {
           if (e.type.kind !== "dyn") err("dyn nullish must answer dyn", e.loc);
           break;
@@ -2427,7 +2429,7 @@ function validateFunction(
           }
         });
         // Result func type must match the target's signature. A VARIADIC
-        // (rest-marked) type hides one synthetic trailing DOM-array param
+        // (rest-marked) type hides one synthetic trailing dyn-array param
         // in the lifted function (the thunk fills it) — the type's
         // declared params plus that one must match.
         if (e.type.kind === "func") {
@@ -2786,7 +2788,7 @@ function validateFunction(
         expectType(e.obj, { kind: "record", shapeId: e.shapeId }, "recordKeyGet receiver");
         expectType(e.key, STRING, "recordKeyGet key");
         // Every reachable value must SURFACE as the result type: identity,
-        // an arm of a union result, or (dyn results) a DOM conversion —
+        // an arm of a union result, or (dyn results) a dyn conversion —
         // the frontend's recordKeyResultOk mirror. overflowOnly reads (a
         // literal key naming no declared field) skip the declared check
         // and require the overflow to exist.
@@ -2826,7 +2828,7 @@ function validateFunction(
       case "dynFrom": {
         if (e.type.kind !== "dyn") err(`dynFrom must be dyn-typed, got ${e.type.kind}`, e.loc);
         // A bare unit literal is legal exactly here (like unionWrap): the
-        // DOM has first-class undefined/null values.
+        // dyn has first-class undefined/null values.
         if (e.value.kind === "unitLit") {
           const want = e.value.unit === "undefined" ? "undefinedT" : "nullT";
           if (e.value.type.kind !== want) {
@@ -2835,19 +2837,19 @@ function validateFunction(
           break;
         }
         checkExpr(e.value);
-        // Domain: JSON-safe, bytes<u8> (the DOM's bytes kind — payload
+        // Domain: JSON-safe, bytes<u8> (the checked-dynamic tree's bytes kind — payload
         // copied), an undefined-armed union of JSON-safe arms (the
-        // undefined arm becomes the undefined DOM value), or a BOXABLE
-        // function type (the DOM's function kind — canConvertToDyn folds
+        // undefined arm becomes the undefined dyn value), or a BOXABLE
+        // function type (the checked-dynamic tree's function kind — canConvertToDyn folds
         // all four in).
         const vt = e.value.type;
         if (!canConvertToDyn(vt, (id) => records.get(id), (id) => unions.get(id))) {
-          err(`dynFrom of non-DOM-convertible type ${vt.kind}`, e.loc);
+          err(`dynFrom of non-dyn-convertible type ${vt.kind}`, e.loc);
         }
         break;
       }
       case "dynFromJsval": {
-        // The jsval→DOM crossing: exactly a jsval operand into a dyn
+        // The jsval→dyn crossing: exactly a jsval operand into a dyn
         // result (the by-reference island wrap; scalars normalize at
         // runtime).
         checkExpr(e.value);
@@ -3003,7 +3005,7 @@ function validateFunction(
         break;
       }
       case "caughtToDyn": {
-        // The caught snapshot converting to a dyn DOM value (an unknown
+        // The caught snapshot converting to a dyn value (an unknown
         // slot): operand caught, result dyn — the runtime dispatch handles
         // every payload kind, so nothing else constrains it.
         checkExpr(e.value);
@@ -4242,7 +4244,7 @@ function validateFunction(
         }
         // The value's STATIC type drives the emitted serializer — it must be
         // JSON-safe (the frontend rejects the rest with a specific message).
-        // A dyn ROOT is the one non-static shape allowed: the runtime's DOM
+        // A dyn ROOT is the one non-static shape allowed: the runtime's dyn
         // walker serializes it (scr_dyn_format_j), no emitted serializer.
         if (
           e.value.type.kind !== "dyn" &&
@@ -4257,9 +4259,9 @@ function validateFunction(
         expectType(e.value, DYN, "dynCheck operand");
         // The target drives the emitted validator/builder: non-dyn,
         // non-void, JSON-representable (closures/class instances can never
-        // be found inside a JSON DOM — the frontend rejects those casts).
+        // be found inside a JSON dyn — the frontend rejects those casts).
         // Bare undefined-armed unions of JSON-safe arms are additionally
-        // valid: the DOM holds a first-class undefined value (overflow
+        // valid: the checked-dynamic tree holds a first-class undefined value (overflow
         // reads), which matches exactly the undefined arm.
         const jsonOk = (t: IrType): boolean =>
           isJsonSafeType(t, (id) => records.get(id), (id) => unions.get(id));
@@ -4267,17 +4269,17 @@ function validateFunction(
           e.type.kind === "union" &&
           (unions.get(e.type.unionId)?.arms.every((a) => a.kind === "undefinedT" || jsonOk(a)) ??
             false);
-        // bytes<u8> targets extract the DOM's bytes kind (a copy).
+        // bytes<u8> targets extract the checked-dynamic tree's bytes kind (a copy).
         const bytesOk = e.type.kind === "bytes" && e.type.elem === "u8";
-        // The %Error root extracts the DOM's error encoding (the "%error"
+        // The %Error root extracts the checked-dynamic tree's error encoding (the "%error"
         // marker object caughtToDyn builds) as a fresh runtime error.
         const errorOk = e.type.kind === "object" && e.type.className === "%Error";
-        // ADAPTABLE function targets unwrap or wrap the DOM's function
+        // ADAPTABLE function targets unwrap or wrap the checked-dynamic tree's function
         // kind (the checked-dynamic function boundary, nodes.ts).
         const funcOk =
           e.type.kind === "func" &&
           canAdaptDynFuncTo(e.type, (id) => records.get(id), (id) => unions.get(id));
-        // Runtime HANDLE targets unwrap the DOM's handle kind by tag (a
+        // Runtime HANDLE targets unwrap the checked-dynamic tree's handle kind by tag (a
         // retained reference, no copy — DYN_HANDLE_KINDS).
         const handleOk = DYN_HANDLE_KINDS.has(e.type.kind);
         if (!jsonOk(e.type) && !undefArmedOk && !bytesOk && !errorOk && !funcOk && !handleOk) {
@@ -4489,7 +4491,11 @@ function validateFunction(
         if (
           src.kind !== "bytes" &&
           src.kind !== "url" &&
-          src.kind !== "dyn" && // DOM values deep-copy in (data kinds; the runtime throws on boxes)
+          src.kind !== "dyn" && // dyn values deep-copy in (data kinds; the runtime throws on boxes)
+          // A STATIC promise crosses as a real engine thenable when its
+          // fulfillment is in the reverse bridge's payload domain
+          // (scr_jsval_from_promise — the async-callback return bridge).
+          !(src.kind === "promise" && islandPromisePayloadTag(src.inner) !== null) &&
           !canMarshalIntoIsland(src, (id) => records.get(id), (id) => unions.get(id)) &&
           !canMarshalTypedFuncIntoIsland(src, (id) => records.get(id), (id) => unions.get(id))
         ) {
@@ -4547,13 +4553,17 @@ function validateFunction(
       case "jsBridgePromise": {
         checkExpr(e.value);
         expectType(e.value, JSVAL, "jsBridgePromise operand");
-        // The settled engine value crosses as a HANDLE (or not at all):
-        // the bridge never converts payloads — typed uses exit later.
+        // The settled engine value crosses as a HANDLE (or not at all) —
+        // plus the ONE converting payload: an `any[]`-declared
+        // fulfillment exits Array.isArray-gated by reference AT THE
+        // SETTLE (SCR_ISLP_JSVAL_ARR); every other typed use exits later.
         if (
           e.type.kind !== "promise" ||
-          (e.type.inner.kind !== "jsval" && e.type.inner.kind !== "void")
+          (e.type.inner.kind !== "jsval" &&
+            e.type.inner.kind !== "void" &&
+            !(e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"))
         ) {
-          err("jsBridgePromise must be a promise of jsval or void", e.loc);
+          err("jsBridgePromise must be a promise of jsval, void, or jsval-element array", e.loc);
         }
         break;
       }
@@ -4832,8 +4842,8 @@ function validateFunction(
         break;
       case "throw":
         checkExpr(s.value);
-        // dyn throws are allowed: the DOM node rides the REF cell arm by
-        // reference (the JS-lane `throw err` of a DOM argument).
+        // dyn throws are allowed: the dyn node rides the REF cell arm by
+        // reference (the JS-lane `throw err` of a dyn argument).
         if (s.value.type.kind === "void" || s.value.type.kind === "caught") {
           err(`throw of a ${s.value.type.kind} value`, s.loc);
         }

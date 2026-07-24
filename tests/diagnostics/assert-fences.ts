@@ -25,8 +25,8 @@ assert.strictEqual(maybe, "x"); // union operand — narrow first
 
 const unk: unknown = JSON.parse("{}");
 assert.strictEqual(unk, { n: 1 }); // strict + composite static side: reference identity does not survive the unknown boundary
-assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the DOM copy cannot carry the brand
-assert.deepStrictEqual(unk, new Map<string, number>()); // not DOM-convertible
+assert.deepStrictEqual(unk, new Uint8Array([1])); // bytes static side: the dyn copy cannot carry the brand
+assert.deepStrictEqual(unk, new Map<string, number>()); // not dyn-convertible
 
 assert.deepStrictEqual([1, 2], ["a", "b"]); // different static types
 assert.deepStrictEqual([new Uint8Array([1])], [new Uint8Array([1])]); // NESTED typed arrays fence (no brand in the element type)

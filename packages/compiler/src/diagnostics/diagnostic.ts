@@ -569,7 +569,7 @@ export function blockedBindingUseDiag(name: string, loc: SrcLoc): ScrDiagnostic 
 
 /** An OPERATION on an `any`-typed value with no static lowering, in a
  * static build. The honest static subset of `any` compiles (bindings ride
- * the checked-dynamic DOM — declarations, assignments, reads, equality,
+ * the checked-dynamic tree — declarations, assignments, reads, equality,
  * typeof, truthiness, templates, calls through boxed functions), but the
  * operations that need JS's full coercion/mutation semantics (operators,
  * expando writes, computed member names, iteration) execute only in the

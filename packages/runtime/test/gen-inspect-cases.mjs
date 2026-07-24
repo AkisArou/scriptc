@@ -74,8 +74,8 @@ const jsonCases = [
   JSON.stringify(Array.from({ length: 12 }, () => "0123456789012345678901234567890123456789")),
   // objects: keys, quoting, nesting, depth placeholders
   "{}", '{"a":1}', '{"a":1,"b":"two","c":true}',
-  // NOTE: integer-like keys come FIRST so the DOM's insertion order and
-  // JS's integer-keys-first property order agree (the dyn DOM keeps
+  // NOTE: integer-like keys come FIRST so the checked-dynamic tree's insertion order and
+  // JS's integer-keys-first property order agree (the dyn keeps
   // insertion order — the runtime's documented Object.keys stance).
   '{"0":2,"a-b":1,"__proto__":3,"k l":4,"ok_1":5}',
   '{"a":{"b":{"c":{}}}}', '{"a":{"b":{"c":{"d":1}}}}',

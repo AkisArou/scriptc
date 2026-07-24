@@ -5,7 +5,7 @@
 // LIVE to the prototype, assignments shadow without touching it,
 // prototype mutations AFTER creation show through the created object,
 // and JSON.stringify serializes own keys only. null and engine-held
-// prototypes route (checked-dynamic DOM prototypes keep a named fence —
+// prototypes route (checked-dynamic tree prototypes keep a named fence —
 // their boundary marshal is a deep copy, which live delegation would
 // contradict). Node is the oracle byte-for-byte.
 "use strict";

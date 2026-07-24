@@ -1,6 +1,6 @@
 // THE canonical suite shape behind the http wide sweep: an untyped JS
 // wrapper (test/common's mustCall silhouette) makes the 'request'
-// listener checked-dynamic, so req/res BOX into the DOM as native
+// listener checked-dynamic, so req/res BOX into the checked-dynamic tree as native
 // HANDLE values (SCR_DYN_HANDLE — reference identity, no copy) and
 // every member use inside the body dispatches at runtime onto the same
 // http entry points the static lowerings use: req.method/url/headers

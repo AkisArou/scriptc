@@ -1,5 +1,5 @@
 // node:querystring.stringify — Node's encodeStringified value rules
-// (scr_qs.c over the DOM crossing): strings escape with the querystring
+// (scr_qs.c over the dyn crossing): strings escape with the querystring
 // set (spaces are %20, never '+'), finite numbers render shortest-
 // roundtrip then escape ('1e+21' → '1e%2B21'), non-finite numbers and
 // null/undefined are empty VALUES (key and eq still emitted), booleans

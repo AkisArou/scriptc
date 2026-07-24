@@ -13,7 +13,7 @@
  *   (packages/runtime/test/test_json.c), not here.
  *
  * SCRIPTC_SAN=1 builds these with ASan + the RC audit, turning every failure
- * path (partially-built records/arrays released mid-validation, DOMs
+ * path (partially-built records/arrays released mid-validation, dyn values
  * unwinding through catch) into a leak/double-free test.
  */
 import { execFile } from "node:child_process";
@@ -342,7 +342,7 @@ console.log("kept:", p.input !== undefined ? p.input : "gone");
 
   test("overflow churn through failed collisions stays clean", async () => {
     // Meaningful mostly under SCRIPTC_SAN=1: every iteration hands ownership
-    // of a fresh DOM value to the write helper, which must release it on
+    // of a fresh dyn value to the write helper, which must release it on
     // the validation-failure path.
     const r = await compileAndRun(
       "index-write-rc",
@@ -583,9 +583,9 @@ console.log("recovered");
     expect(r.stdout).toBe("assigned 2\nnever: boom\nrecovered\n");
   });
 
-  test("a NAMED record into an `any` slot is a deep copy — DOM writes never alias the original", async () => {
+  test("a NAMED record into an `any` slot is a deep copy — dyn writes never alias the original", async () => {
     // dynFrom's aliasing stance (documented for 'unknown' slots) applies
-    // to any-typed storage identically: JS would alias, the DOM copies.
+    // to any-typed storage identically: JS would alias, the dyn copies.
     const r = await compileAndRun(
       "any-record-copy",
       `const base = { a: 1 };
@@ -598,7 +598,7 @@ console.log(base.a, boxed.a);
     expect(r.stdout).toBe("1 2\n");
   });
 
-  test("an uninitialized `any` binding is the DOM undefined, not a trap", async () => {
+  test("an uninitialized `any` binding is the dyn undefined, not a trap", async () => {
     // The undefined-init rule: dyn slots are never NULL. (Node-agreeing
     // reads are corpus-tested — 2040; this pins the non-trap guarantee on
     // the module-global path with a captured reader.)
@@ -720,12 +720,12 @@ console.log("unreachable", req.url);
     );
   });
 
-  /* ── the jsval→DOM crossing's honesty ladder (SCR_DYN_JSVAL) ────────
+  /* ── the jsval→dyn crossing's honesty ladder (SCR_DYN_JSVAL) ────────
    * The armed rows (typeof/truthiness/String()/===, the narrowing tests,
    * the identity round trip; the routed-ops lane's keyed read/write,
    * calls, method dispatch, Object statics, JSON.stringify) are
    * corpus-tested differentially (2578, 2579, 2582-2585, npm
-   * jsval-into-dyn). These pin the LOUD fences of every DOM walk still
+   * jsval-into-dyn). These pin the LOUD fences of every dyn walk still
    * un-armed over an island-held value — the retired fence box answered
    * typeof "function" and .length 0 SILENTLY here; a wrong answer is
    * never acceptable, a named refusal is. All --dynamic. */
@@ -880,25 +880,37 @@ console.log("unreachable");
     );
   });
 
-  test("destructuring an island-held unknown keeps the loud dyn-source fence (never 'not iterable')", async () => {
-    // The JS lane's destructuring-over-dyn compile fence runs as the
-    // statement's runtime fence BEFORE the source's world is knowable —
-    // the loud path today; the dynIterN runtime arm behind it fences
-    // island values by name if a future lowering reaches it.
+  test("destructuring and for-of over an island-held unknown drain the engine's own iterator", async () => {
+    // The iteration arm (lane dom-jsval-long-tail): dyn.iterPack's JSVAL
+    // arm drains the ENGINE's iterator protocol — the wrapped engine
+    // array destructures and iterates with Node's answers, and a
+    // non-iterable engine value throws V8's for-of spelling instead of
+    // the retired island fence.
     const r = await compileAndRun(
       "jsval-iterate",
       `/** @returns {any} */
-function mint() { return [10, 20]; }
+function mint() { return { list: [10, 20], num: 7 }; }
 const eng = mint();
-/** @param {object} list */
-function firstOf(list) { const [first] = list; return first; }
-firstOf(eng);
+/** @param {object} bag */
+function walk(bag) {
+  const [first] = bag.list;
+  console.log(\`first \${first}\`);
+  let sum = 0;
+  for (const x of bag.list) sum += x;
+  console.log(\`sum \${sum}\`);
+  try {
+    for (const x of bag.num) console.log(x);
+  } catch (err) {
+    console.log(\`caught: \${err.message}\`);
+  }
+}
+walk(eng);
 `,
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("destructuring on an island value held in 'unknown' is not supported yet");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("first 10\nsum 30\ncaught: bag.num is not iterable\n");
   });
 
   test("a keyed write through an island-held unknown lands on the real engine object", async () => {

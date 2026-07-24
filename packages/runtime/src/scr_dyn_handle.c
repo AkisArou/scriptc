@@ -1,10 +1,10 @@
 /* The checked-dynamic HANDLE support unit — everything the handle
  * dispatchers (scr_http.c / scr_net.c) and the emitter unit's dyn
- * registrations share BEYOND the DOM core: the listener gate over the
+ * registrations share BEYOND the dyn core: the listener gate over the
  * ERR_INVALID_ARG_TYPE throwers (the throwers themselves live in
- * scr_json.c beside the DOM core — the always-linked bytes/fs argument
+ * scr_json.c beside the dyn core — the always-linked bytes/fs argument
  * validators call them too), and the runtime-built listener adapter
- * closures whose fire thunks box event tuples back into the DOM. Split
+ * closures whose fire thunks box event tuples back into the checked-dynamic tree. Split
  * out of scr_json.c so handle-free binaries keep their exact size
  * class: cc.ts compiles this unit exactly when a user of it links (the
  * net or emitter gate — http implies net).
@@ -24,7 +24,7 @@ void scr_dyn_check_listener(const ScrDyn *cb, const char *argname) {
 
 /* ── runtime-built listener closures (the handle dispatchers' .on paths) ─
  * One capture: a box holding the retained dyn FUNCTION value. The fire
- * thunks box the event tuple back into the DOM and call through the
+ * thunks box the event tuple back into the checked-dynamic tree and call through the
  * checked-dynamic machinery (scr_dyn_call — per-arg validation lives in
  * the boxed thunk). A throw from the listener stays pending, exactly like
  * a compiler-emitted listener body. */
@@ -56,7 +56,7 @@ void scr_dyn_listener_fire_data(ScrClosure *cb, ScrBytes *chunk) {
 
 void scr_dyn_listener_fire_err(ScrClosure *cb, ScrStr *msg) {
   ScrDyn *fn = scr_dyn_listener_peek(cb);
-  /* The DOM's error encoding (caughtToDyn's shape) — what a dyn 'error'
+  /* The checked-dynamic tree's error encoding (caughtToDyn's shape) — what a dyn 'error'
    * listener body can instanceof-test and read .message from. */
   ScrDyn *arg = scr_dyn_new_obj();
   scr_dyn_obj_set(arg, "%error", 6, scr_dyn_new_bool(true));

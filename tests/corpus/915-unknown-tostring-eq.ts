@@ -1,5 +1,5 @@
 // String(unknown) and dyn-vs-scalar strict equality: Node's String() over
-// every DOM kind (arrays join, objects print "[object Object]"), and
+// every dyn kind (arrays join, objects print "[object Object]"), and
 // ===/!== between an `unknown` value and a number/string/boolean — a kind
 // test plus payload compare, strict-equality-exact (no coercions, NaN
 // unequal to itself).

@@ -153,16 +153,16 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // carries scr_assert.c (the regex link switch has always pulled it),
     // so the assert.throws shape machinery — the Comparison diff renderer
     // and the throws/rejects helpers — re-based it by a page, and the
-    // dyn-assert machinery (the compact:false DOM renderer plus the real
+    // dyn-assert machinery (the compact:false dyn renderer plus the real
     // myers line-diff printer) re-based it by another; the primitive-
     // prototype formatters (toExponential/toFixed0, Date.UTC, String.raw)
     // re-based the static class by one more; the ambient-receiver stack,
-    // the %j DOM stringify walk, and the runtime-encoding readFileSync
+    // the %j dyn stringify walk, and the runtime-encoding readFileSync
     // form (all in always-linked TUs) tipped the regex class one more
     // page.
     // The static class forks per platform (see island.test.ts's twin):
     // Linux measured 322,528 at the same commit where Mach-O sits at
-    // 312,024. The globals lane (DOMException, structuredClone + the DOM
+    // 312,024. The globals lane (DOMException, structuredClone + the checked-dynamic tree
     // object walks, atob/btoa, queueMicrotask — all in always-linked
     // TUs) re-based both arms by ~2 pages (Mach-O measured 333,544).
     // StringToNumber (Number(aString) — ~1.3KB in the always-linked
@@ -175,7 +175,7 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // clang 15, ELF section alignment, glibc static bits, and the lane's
     // link shim appending -lm plus an arc4random_buf compat object),
     // where the Mach-O calibration sits BELOW the class. The
-    // server-callbacks additions (ambient-receiver stack, %j DOM
+    // server-callbacks additions (ambient-receiver stack, %j dyn
     // stringify walk, runtime-encoding readFileSync — always-linked TUs)
     // re-based BOTH arms by a page. The fences are unchanged on both
     // platforms: regex linkage is a ~110KB jump above the static class

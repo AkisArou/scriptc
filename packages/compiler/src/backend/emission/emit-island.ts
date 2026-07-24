@@ -266,7 +266,7 @@ export function emitNpmEmbedding(E: CEmitter, out: string[]): void {
           break;
         case "dyn":
           body.push(
-            // A checked-dynamic (+1 DOM) result: deep copy into the
+            // A checked-dynamic (+1 dyn) result: deep copy into the
             // engine (the jsMarshal dyn rule — data kinds only; boxed
             // functions/handles leave the exception pending and the NULL
             // dummy bridges).

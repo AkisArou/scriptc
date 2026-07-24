@@ -771,14 +771,14 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // and the signature branches map never returns to VOID first), and
   // construction sites cannot exist (nothing has type never to feed them).
   if (flags & ts.TypeFlags.Never) return F64;
-  // `unknown` is a VALUE with a runtime representation (the dyn JSON DOM —
+  // `unknown` is a VALUE with a runtime representation (the dyn JSON dyn —
   // JSON.parse results and unknown-typed locals/params/returns).
   if (flags & ts.TypeFlags.Unknown) return DYN;
   // `object` (the NonPrimitive intrinsic) is a TOP type over non-primitive
   // values — tsc admits every record, array, function, or class instance
   // into an `object` slot, so no exact record shape can hold it. It lowers
-  // like `unknown` (the dyn DOM): assignments convert at the site (sources
-  // outside the DOM fence there, same as unknown), reads narrow back out
+  // like `unknown` (the dyn): assignments convert at the site (sources
+  // outside the checked-dynamic tree fence there, same as unknown), reads narrow back out
   // through the same checked casts. Member accesses tsc allows on `object`
   // (the Object.prototype surface) fence at their use sites.
   if (flags & ts.TypeFlags.NonPrimitive) return DYN;
@@ -920,11 +920,11 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     }
     // A dyn ELEMENT makes the WHOLE array the checked-dynamic value:
     // `unknown[]`, `object[]`, and the collapsed `(string | object)[]`
-    // (the plugins-slot shape) — the DOM has real arrays, so length/
-    // index/push/iteration ride the keyed-DOM paths, while a dyn-element
+    // (the plugins-slot shape) — the checked-dynamic tree has real arrays, so length/
+    // index/push/iteration ride the keyed-dyn paths, while a dyn-element
     // STATIC array has no backend representation (ScrArr has no dyn
     // element kind). This is dynFallbackType's JS stance promoted into
-    // the mapping itself; construction sites build dynArrLit (the DOM
+    // the mapping itself; construction sites build dynArrLit (the checked-dynamic tree
     // array literal) and typed sources convert per element at the slot.
     if (elem.kind === "dyn") return DYN;
     // ChildProcess[] (the running-apps list) and Server[] (the [...set]
@@ -981,7 +981,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       if (et?.kind === "void" && isUnitOnlyTsType(args[i]!)) et = unitOnlyUnion(unions);
       // dyn ELEMENTS map now — `[string, unknown]`, the Object.entries
       // tuple over an `unknown`-valued index signature (the pricing-table
-      // normalizer shape): the slot has the overflow map's RC/JSON/DOM
+      // normalizer shape): the slot has the overflow map's RC/JSON/dyn
       // plumbing, values arrive dyn or convert via dynFrom.
       if (!et || et.kind === "void") return null;
       // A jsval MEMBER absorbs the tuple (bare jsval fields have no shape
@@ -1166,7 +1166,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   }
   // The lib's `Object` interface is a TOP type: tsc admits every
   // non-nullish value into an `Object` slot (`const x: Object = "s"`), so
-  // it lowers like `unknown` (the dyn DOM) — the same rule as `object` and
+  // it lowers like `unknown` (the dyn) — the same rule as `object` and
   // the empty object type, provenance-checked so a user's own `interface
   // Object` still maps as a record. Its Object.prototype member surface
   // (`x.toString()`) fences at each use site, never silently.
@@ -2323,7 +2323,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       // The `string | object`-family COLLAPSE (world unification lane 3):
       // a union with an 'object'/'unknown'/`{}`-flavored arm (dyn) beside
       // arms the checked-dynamic representation FAITHFULLY holds maps to
-      // DYN WHOLESALE — the DOM's scalar kinds ARE the scalar arms (===,
+      // DYN WHOLESALE — the checked-dynamic tree's scalar kinds ARE the scalar arms (===,
       // typeof, switch dispatch all exact), typeof/Array.isArray/unit
       // narrowing on dyn already dispatches natively (dynTest +
       // maybeNarrow's validated scalar extraction), and engine-valued
@@ -2331,7 +2331,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       // tag is ever needed and the component fence retires at these
       // sites. The domain is dynSubsumableUnionArm's: scalars, units, dyn
       // itself, and records/arrays inside the dynFrom conversion domain
-      // (those enter as DOM data — the deep-copy stance, so identity and
+      // (those enter as dyn data — the deep-copy stance, so identity and
       // mutation coupling with the source value end at the slot;
       // SEMANTICS.md). Arms with real typed representations whose
       // semantics would DEGRADE under the collapse — class instances,
@@ -3056,9 +3056,9 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
     // intrinsic), `interface Empty {}` — is tsc's TOP type over non-nullish
     // values: every number, string, record, array, function, or class
     // instance is assignable into the slot, so the exact-record stance
-    // cannot hold it. It lowers like `unknown` (the dyn DOM), the same rule
+    // cannot hold it. It lowers like `unknown` (the dyn), the same rule
     // as `object` and the lib's `Object`: assignments convert at the site
-    // (sources outside the DOM fence there, exactly as unknown does), reads
+    // (sources outside the checked-dynamic tree fence there, exactly as unknown does), reads
     // narrow back out through the same checked casts. The type INFERRED
     // from an empty object literal (`const o = {}`) stays the empty record
     // — it describes a value the program built, not an annotation that
@@ -3162,7 +3162,7 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
       // omits the undefined arm exactly like an omitted optional.
       if (pt?.kind === "void" && isUnitOnlyTsType(fieldTs)) pt = unitOnlyUnion(ctx.unions);
       // dyn FIELDS map now (`{ v: unknown }`, `[string, unknown]` tuples):
-      // the slot carries a DOM value exactly like an `unknown`-valued
+      // the slot carries a dyn value exactly like an `unknown`-valued
       // overflow entry — same RC adapters, same dynFrom conversion on the
       // way in, same checked casts on the way out. (JSON.stringify of a
       // dyn-field-bearing shape keeps its fence: jsonSafe stays false.)
@@ -3220,10 +3220,10 @@ const STDLIB_CONTAINERS: Record<string, { role: (i: number) => string }> = {
 /** The `string | object`-family collapse domain (mapTypeInner's union
  * rule): arms the checked-dynamic representation holds FAITHFULLY, so a
  * union carrying a dyn arm beside only these maps to DYN wholesale.
- * Scalars and units are the DOM's own kinds (value-exact ===/typeof);
+ * Scalars and units are the checked-dynamic tree's own kinds (value-exact ===/typeof);
  * records and arrays qualify exactly when the dynFrom conversion can
  * build them (canConvertToDyn — JSON-safe data plus bytes-bearing
- * composites), entering as DOM data under the documented deep-copy
+ * composites), entering as dyn data under the documented deep-copy
  * stance. Everything else — class instances, Maps/Sets, functions
  * (closure identity and `x === String` narrowing live in the typed union
  * machinery), promises, regexes, generators, handles, nested unions —

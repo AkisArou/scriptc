@@ -391,7 +391,7 @@ console.log(greet("world"), 6 * 7);
     // glibc static bits + the sandbox link shim) while Mach-O stays at
     // 312,024 — a page-scale cushion on each arm; an accidentally-linked
     // engine is a ~620KB jump, not a page. The globals lane (DOMException,
-    // structuredClone + the DOM object walks, atob/btoa, queueMicrotask —
+    // structuredClone + the dyn object walks, atob/btoa, queueMicrotask —
     // always-linked TUs) re-based both arms by ~2 pages (Mach-O measured
     // 333,544). StringToNumber (Number(aString) — ~1.3KB in the
     // always-linked string TU) tipped the Mach-O arm one more page from

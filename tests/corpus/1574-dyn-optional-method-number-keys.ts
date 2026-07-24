@@ -2,7 +2,7 @@
 // scope-extraction shape): `rawName?.match(re)` on a JSON.parse-derived
 // value short-circuits nullish receivers to undefined and runs the
 // validated dynamic dispatch otherwise; `scopeMatch[1]` converts the
-// number key through ToString and reads the DOM array.
+// number key through ToString and reads the dyn array.
 function parseName(raw: string): { scope: string | null; name: string | null } {
   const pkg = JSON.parse(raw);
   const rawName = typeof pkg.name === "string" ? pkg.name : null;
@@ -38,7 +38,7 @@ try {
   console.log("mismatch:", e instanceof TypeError);
 }
 
-// Number-keyed DOM reads: array elements by canonical index, out-of-range
+// Number-keyed dyn reads: array elements by canonical index, out-of-range
 // and non-canonical keys read as absent, and string receivers answer
 // their UTF-16 code unit like JS.
 const doc = JSON.parse('{"tags": ["x", "y"], "title": "abc"}');

@@ -4,7 +4,7 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, isUnitType } from "../../ir/nodes.js";
+import { F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
@@ -98,9 +98,9 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
       return { kind: "jsOp", op: e.type.kind === "undefinedT" ? "undefLit" : "nullLit", args: [], type: JSVAL, loc: e.loc };
     }
     if (e.type.kind === "dyn") {
-      // A CHECKED-DYNAMIC value entering the island: the DOM tree
+      // A CHECKED-DYNAMIC value entering the island: the dyn tree
       // deep-copies into engine values — exactly coerceToExpected's
-      // jsval-IN rule (data kinds only; a DOM carrying a boxed
+      // jsval-IN rule (data kinds only; a dyn carrying a boxed
       // function/handle throws the catchable TypeError at runtime).
       return { kind: "jsMarshal", value: e, type: JSVAL, loc: e.loc };
     }
@@ -143,6 +143,15 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
         if (fence) return fence;
         throw err;
       }
+    }
+    // A STATIC promise crossing INTO the island: a real engine thenable
+    // settled when the scriptc promise settles (the async-callback return
+    // bridge, scr_jsval_from_promise) — the loadBuiltinPlugins cache
+    // shape and the island Promise.all arm's static entries. Only
+    // fulfillments in the bridge's payload domain cross; the rest keep
+    // the boundary fence below with the promise type named.
+    if (e.type.kind === "promise" && islandPromisePayloadTag(e.type.inner) !== null) {
+      return { kind: "jsMarshal", value: e, type: JSVAL, loc: e.loc };
     }
     if (e.type.kind !== "func" && !L.boundarySafe(e.type)) {
       // A RegExp crossing INTO the island (`z.string().regex(/^a+$/)` —

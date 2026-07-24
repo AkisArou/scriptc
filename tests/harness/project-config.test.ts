@@ -127,7 +127,7 @@ test("json-any: any-typed JSON.parse reads pass preflight (the project's own tsc
   expect(coverage.preflightFailed).toBe(false);
   // The build still fails — at LOWERING, with the honest fence for the
   // string reject (a bound reject called with an Error is the supported
-  // surface and lowers). The unknown READS lower now (the DOM keyed read,
+  // surface and lowers). The unknown READS lower now (the dyn keyed read,
   // corpus 1544) — no SC1100 remains. Never a SC0001.
   const result = await compile(entry, {
     outPath: join(outDir, "main"),

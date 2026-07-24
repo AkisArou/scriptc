@@ -1,7 +1,7 @@
 // JS catch variables under useUnknownInCatchVariables: a JS catch clause
 // cannot annotate its variable, so the "'e' is of type 'unknown'" demand
 // joins the JS relaxation — the value stays unknown and rides the
-// checked-dynamic DOM at its uses (member reads, String()), the suite's
+// checked-dynamic tree at its uses (member reads, String()), the suite's
 // dominant catch shape (assert error-path tests).
 'use strict';
 

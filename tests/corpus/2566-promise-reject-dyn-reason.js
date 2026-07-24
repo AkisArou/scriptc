@@ -1,6 +1,6 @@
 // Promise.reject with a CHECKED-DYNAMIC reason (`Promise.reject(value)`
 // where value rode an untyped JS param — the tracingChannel promise
-// suite's shape): the DOM value IS the rejection payload on both
+// suite's shape): the dyn value IS the rejection payload on both
 // backends. Every reason kind rides the thrown-dyn representation into
 // catch/await observers, settled-state choreography intact (the .catch
 // callbacks run as microtasks after the synchronous tail). The LLVM tier

@@ -376,7 +376,7 @@ function followOptionsArg(L: Lowerer, arg: ts.Expression | undefined): ts.Expres
  * values as they are), then dynCheck'd into the all-dyn full Node tuple.
  * The emitted option thunk recognizes the THISLESS shape (its first
  * param is not the stream) and boxes each position by kind — the chunk
- * as DOM bytes, the error via the boundary's encoding, the completion
+ * as dyn bytes, the error via the boundary's encoding, the completion
  * callback as a callable dyn whose glue reports to the runtime's *_done.
  * DIVERGENCE (SEMANTICS.md): Node binds `this` to the stream when it
  * calls option callbacks; a value adapted through the dyn boundary is
@@ -1420,7 +1420,7 @@ export function lowerStreamMethodCall(L: Lowerer, call: ts.CallExpression,
     if (t?.kind === "string") return "string";
     if (t?.kind === "nullT") return "null";
     if (t?.kind === "dyn") {
-      // The JS lane's any-typed chunk: the runtime dispatches by DOM tag
+      // The JS lane's any-typed chunk: the runtime dispatches by dyn tag
       // (bytes / string / null; anything else is the write TypeError).
       return "dyn";
     }

@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -198,7 +198,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.emitExpr(e.result);
       }
       case "dynDestrCheck": {
-        // RequireObjectCoercible with V8's destructuring TypeError. DOM
+        // RequireObjectCoercible with V8's destructuring TypeError. dyn
         // values check in the runtime helper and pass through unchanged
         // (same temp, same ownership); island values check in the engine
         // (a fresh +1 cell for the same value comes back).
@@ -215,7 +215,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       }
       case "dynIterN": {
         // GetIterator + first-N steps as a fresh array (V8's exact
-        // not-iterable TypeError on non-iterables): the DOM helper for
+        // not-iterable TypeError on non-iterables): the dyn helper for
         // dyn operands, the engine's real iterator protocol for island
         // ones.
         const v = E.emitExpr(e.value);
@@ -306,11 +306,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.currentFrame().push({ name, type: e.type });
           return { name, type: e.type };
         }
-        // A dyn (DOM) receiver — the `rawName?.match(re)` step: the nullish
+        // A dyn (dyn) receiver — the `rawName?.match(re)` step: the nullish
         // test reads the node's kind tag; the unit path is the undefined
-        // DOM singleton (dyn results) or nothing (void bodies), the body
+        // dyn singleton (dyn results) or nothing (void bodies), the body
         // runs over the bound receiver otherwise (the validated dynamic
-        // dispatch, its result converted back into the DOM by the
+        // dispatch, its result converted back into the checked-dynamic tree by the
         // frontend's dynFrom wrap).
         if (e.receiver.type.kind === "dyn") {
           const r = E.emitExpr(e.receiver);
@@ -382,7 +382,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return { name: "", type: e.type };
         }
         // A dyn-typed chain (`pricing?.[key]` over an unknown-valued index
-        // signature): the unit path is the undefined DOM value — dyn
+        // signature): the unit path is the undefined dyn value — dyn
         // represents undefined directly, no union wrapper exists.
         if (e.type.kind === "dyn") {
           const name = `sc_t${E.tempCounter++}`;
@@ -572,7 +572,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return E.newTemp(e.type, `scr_caught_to_string(${v.name})`);
         }
         if (v.type.kind === "dyn") {
-          // String(unknown): dispatch over the DOM kind (dynToStrHelper —
+          // String(unknown): dispatch over the dyn kind (dynToStrHelper —
           // Node's String() incl. arrays-join and "[object Object]").
           return E.newTemp(e.type, `${E.dynToStrHelper()}(${v.name})`);
         }
@@ -1640,10 +1640,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, `scr_map_keys_js_order(${obj.name}->${OVERFLOW_MEMBER})`);
       }
       case "dynFrom": {
-        // Static value → fresh DOM tree (+1) through the interned per-type
+        // Static value → fresh dyn tree (+1) through the interned per-type
         // converter; the operand stays borrowed (frame-released as usual).
         // Bare unit literals (an `undefined`/`null` stored under an
-        // `unknown` index signature) are the DOM unit values directly.
+        // `unknown` index signature) are the dyn unit values directly.
         if (e.value.kind === "unitLit") {
           return E.newTemp(
             e.type,
@@ -1654,7 +1654,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         }
         const v = E.emitExpr(e.value);
         if (v.type.kind === "func") {
-          // A closure boxes as the DOM's function kind: retained closure +
+          // A closure boxes as the checked-dynamic tree's function kind: retained closure +
           // the per-signature call thunk + the interned signature key. The
           // best-effort name rides along for inspect/error rendering (NULL
           // when the lowering had none).
@@ -1667,8 +1667,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, `${E.toDynHelper(v.type)}(${v.name})`);
       }
       case "dynFromJsval": {
-        // Island value → DOM: the by-reference wrap (scr_dyn_from_jsval
-        // retains the cell in; engine scalars normalize to native DOM
+        // Island value → dyn: the by-reference wrap (scr_dyn_from_jsval
+        // retains the cell in; engine scalars normalize to native dyn
         // kinds at wrap time). Operand borrowed, result +1, never throws.
         const v = E.emitExpr(e.value);
         return E.newTemp(e.type, `scr_dyn_from_jsval(${v.name})`);
@@ -1682,11 +1682,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const callee = E.emitExpr(e.callee);
         const what = cStringLiteral(Buffer.from(e.calleeName, "utf8"));
         if (e.spreads !== undefined && e.spreads.length > 0) {
-          // The RUNTIME-ARITY form (`f(...args)`): one fresh DOM array
+          // The RUNTIME-ARITY form (`f(...args)`): one fresh dyn array
           // collects the arguments left-to-right — plain args move in
           // (push takes ownership), spread args FLATTEN (push_spread
           // retains elements in and throws V8's spread-call TypeError for
-          // non-iterable DOM kinds, checked per spread — JS's
+          // non-iterable dyn kinds, checked per spread — JS's
           // ArgumentListEvaluation order) — then apply calls through the
           // array's elements (borrowed, exactly scr_dyn_call).
           const spreadAt = new Map(e.spreads.map((s) => [s.arg, s.what]));
@@ -1737,7 +1737,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         );
       }
       case "dynArrLit": {
-        // A DOM array built element-by-element: ownership of each dyn
+        // A dyn array built element-by-element: ownership of each dyn
         // element MOVES into the array (scr_dyn_arr_push's contract).
         const arr = E.newTemp(e.type, "scr_dyn_new_arr()");
         for (const el of e.elems) {
@@ -1748,7 +1748,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return arr;
       }
       case "dynObjLit": {
-        // A DOM object built member-by-member: key then value, source
+        // A dyn object built member-by-member: key then value, source
         // order (JS's literal evaluation). scr_dyn_key_set BORROWS all
         // three (the member retains the value in), so key/value temps
         // release with the frame as usual; the receiver is a fresh OBJ,
@@ -1937,7 +1937,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, `${u.name}->tag ${e.negated ? "!=" : "=="} ${e.tag}`);
       }
       case "dynKeyGet": {
-        // Keyed read on the DOM through the one interned helper — the
+        // Keyed read on the checked-dynamic tree through the one interned helper — the
         // non-optional form throws JS's TypeError on an undefined/null
         // receiver, and HANDLE receivers can throw the loud unmodeled-
         // property ladder on EITHER form, so both ride a fallible temp;
@@ -1976,7 +1976,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const [d, s, st] = e.left.type.kind === "dyn" ? [l, r, e.right.type] : [r, l, e.left.type];
         const test =
           st.kind === "dyn"
-            ? // dyn vs dyn: whole-DOM strict equality (scalars by value,
+            ? // dyn vs dyn: whole-dyn strict equality (scalars by value,
               // units by kind, reference kinds by node identity).
               `scr_dyn_strict_eq(${l.name}, ${r.name})`
             : st.kind === "string"
@@ -1987,7 +1987,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, e.negated ? `!${test}` : test);
       }
       case "dynTest": {
-        // A pure kind compare on the DOM node — borrowed; only the truthy
+        // A pure kind compare on the dyn node — borrowed; only the truthy
         // form also reads a scalar payload. ISLAND-held nodes (the jsval
         // kind — engine objects/arrays/functions only, scalars normalize
         // at wrap time) route the tests that depend on the engine's
@@ -2004,20 +2004,20 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 // engine's own typeof.
                 `(${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE || ${d.name}->kind == SCR_DYN_NULL || scr_dyn_isl_typeof_is(${d.name}, "object"))`
               : e.test === "truthy"
-                ? // ToBoolean over the DOM: bool by value; number falsy for
+                ? // ToBoolean over the checked-dynamic tree: bool by value; number falsy for
                   // 0, -0 (== 0 in C), and NaN (self-inequality); string
                   // falsy when empty; obj/arr/bytes/func/handle always true;
                   // JSVAL through the runtime's routed arm (the bigint 0n
                   // edge); the remaining kinds (undefined, null) always false.
                   `(${d.name}->kind == SCR_DYN_BOOL ? ${d.name}->v.b : ${d.name}->kind == SCR_DYN_NUM ? (${d.name}->v.num == ${d.name}->v.num && ${d.name}->v.num != 0) : ${d.name}->kind == SCR_DYN_STR ? ${d.name}->v.str->len != 0 : ${d.name}->kind == SCR_DYN_JSVAL ? scr_dyn_truthy(${d.name}) : (${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_FUNC || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE))`
                 : e.test === "error"
-                  ? // `u instanceof Error`: the DOM's error encoding — an
+                  ? // `u instanceof Error`: the checked-dynamic tree's error encoding — an
                     // object carrying the reserved "%error" marker key
                     // (built by caughtToDyn for Error payloads) — or a real
                     // engine Error held by reference.
                     `((${d.name}->kind == SCR_DYN_OBJ && scr_dyn_obj_get(${d.name}, "%error", 6) != NULL) || scr_dyn_isl_is_error(${d.name}))`
                   : e.test === "array"
-                    ? // Array.isArray: the DOM's array kind, or the engine's
+                    ? // Array.isArray: the checked-dynamic tree's array kind, or the engine's
                       // own answer for an engine-held value.
                       `(${d.name}->kind == SCR_DYN_ARR || scr_dyn_isl_is_array(${d.name}))`
                     : e.test === "function"
@@ -2081,7 +2081,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         throw new Error(`emitter bug: caughtNarrow to ${e.type.kind}`);
       }
       case "caughtToDyn": {
-        // The caught snapshot converting to a dyn DOM value (an unknown
+        // The caught snapshot converting to a dyn value (an unknown
         // slot) — the interned runtime-kind dispatch. Box borrowed; the
         // result is a fresh tree (+1). Never throws.
         const c = E.emitExpr(e.value);
@@ -2140,7 +2140,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const rc = vAdapters(t);
           if (t.kind === "dyn") {
             // The thrown-dyn representation (REF + dyn adapters): catch
-            // bindings and the unhandled dispatch see the DOM value
+            // bindings and the unhandled dispatch see the dyn value
             // itself — identity preserved.
             E.line(
               `scr_throw_ref(${reason.name}, &${rc.retain}, &${rc.release}, NULL);${E.srcComment(e.loc)}`,
@@ -2279,11 +2279,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // abandons (releases are NULL-tolerant).
             return finish(`(scr_jsval_cast_fail(${arg(0)}, ${arg(1)}), NULL)`);
           case "json.parse":
-            // Borrows the text; returns +1 on a fresh DOM, or throws a
+            // Borrows the text; returns +1 on a fresh dyn, or throws a
             // catchable SyntaxError-shaped string (may-throw seed set).
             return finish(`scr_json_parse(${arg(0)})`);
           case "dyn.defineProps":
-            // Object.defineProperties over DOM values: both borrowed,
+            // Object.defineProperties over dyn values: both borrowed,
             // result the target (+1); throws catchably (may-throw seed).
             return finish(`scr_dyn_define_props(${arg(0)}, ${arg(1)})`);
           case "dyn.keySet":
@@ -2292,12 +2292,20 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // non-object receivers (may-throw seed set).
             return finish(`scr_dyn_key_set(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "dyn.iterPack":
-            // Destructuring pack over a dyn source: both borrowed, fresh
-            // array +1; throws V8's destructuring TypeError on
-            // non-iterable DOM kinds (may-throw seed set).
+            // Destructuring/for-of pack over a dyn source: both borrowed,
+            // fresh array +1; throws V8's not-iterable TypeError on
+            // non-iterable dyn kinds and drains wrapped engine values
+            // through the engine's protocol (may-throw seed set).
             return finish(`scr_dyn_iter_pack(${arg(0)}, ${arg(1)})`);
+          case "dyn.arrLen":
+            // The for-of pack's length (borrowed; never throws).
+            return finish(`scr_dyn_arr_len(${arg(0)})`);
+          case "dyn.arrAt":
+            // The for-of pack's element at index (+1; never throws — the
+            // undefined singleton past the end).
+            return finish(`scr_dyn_arr_at(${arg(0)}, ${arg(1)})`);
           case "dyn.typeof":
-            // Bare typeof on a dyn value: the DOM kind's JS answer (+1).
+            // Bare typeof on a dyn value: the dyn kind's JS answer (+1).
             return finish(`scr_dyn_typeof(${arg(0)})`);
           case "dyn.toString":
             // Receiver-kind-dispatched toString (+1); throws Node's
@@ -2577,7 +2585,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           // borrows, +1 result, never throws.
           case "regexp.escape":
             return finish(`scr_regexp_escape(${arg(0)})`);
-          // The WHATWG base64 globals (scr_string.c): DOM arg borrowed
+          // The WHATWG base64 globals (scr_string.c): dyn arg borrowed
           // (WebIDL ToString in the runtime), +1 string result; malformed
           // input throws the catchable DOMException InvalidCharacterError
           // (may-throw seed set). The zero-argument form always throws
@@ -4888,7 +4896,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // Borrowed receiver; +1 "name: message" (Node's toString rules).
             return finish(`scr_error_to_string(${arg(0)})`);
           case "error.newDom":
-            // new DOMException(message?, nameOrOptions?) — both DOM args
+            // new DOMException(message?, nameOrOptions?) — both dyn args
             // borrowed (WebIDL resolution runs in the runtime); +1
             // %DOMException. Never throws.
             return finish(`scr_domex_new(${arg(0)}, ${arg(1)})`);
@@ -4899,7 +4907,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // `'cause' in e` — the options form's own-property record.
             return finish(`scr_domex_has_cause(${arg(0)})`);
           case "error.domCause":
-            // +1 cause DOM value (the DOM undefined when absent).
+            // +1 cause dyn value (the dyn undefined when absent).
             return finish(`scr_domex_cause(${arg(0)})`);
           case "error.domClone":
             // WebIDL serialization: name/message copy, code re-derives.
@@ -4909,7 +4917,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "dyn.objKeys":
             return finish(`scr_dyn_obj_keys(${arg(0)})`);
           case "dyn.assign":
-            // Object.assign over DOM values: own members copy, the target
+            // Object.assign over dyn values: own members copy, the target
             // returns (+1); non-object receivers throw like Node.
             return finish(`scr_dyn_assign(${arg(0)}, ${arg(1)})`);
           case "dyn.packPush":
@@ -4934,7 +4942,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // (+1). Never throws.
             return finish(`scr_dyn_new_obj_null_proto()`);
           case "dyn.hasOwn":
-            // Object.hasOwn over a DOM receiver (throws on nullish, like
+            // Object.hasOwn over a dyn receiver (throws on nullish, like
             // Node's ToObject).
             return finish(`scr_dyn_has_own(${arg(0)}, ${arg(1)})`);
           case "dyn.objValues":
@@ -4942,11 +4950,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "dyn.objEntries":
             return finish(`scr_dyn_obj_entries(${arg(0)})`);
           case "dyn.errInstanceof":
-            // The from_error cache resolves the DOM value to its runtime
+            // The from_error cache resolves the dyn value to its runtime
             // error; the class's stamped interval answers. Never throws.
             return finish(`scr_dyn_err_instanceof(${arg(0)}, ${arg(1)})`);
           case "dyn.structuredClone":
-            // Deep DOM clone (+1); option/DataClone/cycle errors throw
+            // Deep dyn clone (+1); option/DataClone/cycle errors throw
             // (may-throw seed set). Both args borrowed.
             return finish(`scr_structured_clone(${arg(0)}, ${arg(1)})`);
           case "dyn.cloneMissing":
@@ -5517,7 +5525,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_assert_eq_sym(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`);
           case "assert.eqDyn":
             // The quartet over checked-dynamic operands: SameValue /
-            // DOM-walk deep equality, assertion_error.js messages.
+            // dyn-walk deep equality, assertion_error.js messages.
             return finish(`scr_assert_eq_dyn(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`);
           case "assert.deepResult":
             return finish(`scr_assert_deep_result(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`);
@@ -5786,14 +5794,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       }
       case "jsonStringify": {
         // Type-directed serialization: the STATIC type picks an emitted
-        // serializer (interned per type) — no DOM, no runtime dispatch. The
+        // serializer (interned per type) — no dyn, no runtime dispatch. The
         // value temp is BORROWED (released with this statement's frame);
         // the result string is owned (+1). Throws only over CYCLE-CAPABLE
         // types (recursive records — the circular-structure TypeError) and
         // dyn roots; everything else keeps the throw-free path.
         const v = E.emitExpr(e.value);
-        // A dyn root: the runtime's DOM walker (scr_dyn_format_j — the %j
-        // serializer IS JSON.stringify over the DOM: number/string/bool/
+        // A dyn root: the runtime's dyn walker (scr_dyn_format_j — the %j
+        // serializer IS JSON.stringify over the checked-dynamic tree: number/string/bool/
         // null/array/object exact, dropped members omitted, a dropped ROOT
         // becomes the text "undefined", a runtime handle inside the tree
         // throws) — fallible, so the pending-exception check runs.
@@ -5827,7 +5835,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         );
       }
       case "dynCheck": {
-        // The dynamic boundary: validate the DOM against the target type
+        // The dynamic boundary: validate the checked-dynamic tree against the target type
         // and BUILD the typed value (+1) — or throw a catchable
         // TypeError-shaped, path-annotated string. The dyn temp is BORROWED;
         // the result joins the frame BEFORE the pending check so an unwind
@@ -5963,7 +5971,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return { name: "", type: e.type };
           }
           case "dyn":
-            // The DOM-crossing await: void fulfillments (a boxed
+            // The checked-dynamic tree-crossing await: void fulfillments (a boxed
             // promise<void> that skipped its adapter) answer the
             // undefined VALUE, never NULL.
             read = `scr_await_dyn(${pr.name})`;
@@ -6177,7 +6185,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "string":
             return E.newTemp(e.type, `scr_jsval_from_str(${v.name})`);
           case "dyn":
-            // A CHECKED-DYNAMIC (DOM) value entering the island: deep
+            // A CHECKED-DYNAMIC (dyn) value entering the island: deep
             // copy, data kinds only — boxed functions/handles/promises
             // throw the catchable TypeError in the runtime.
             return E.fallibleTemp(e.type, `scr_jsval_from_dyn(${v.name})`);
@@ -6188,6 +6196,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "url":
             // A URL crossing IN: an engine URL instance built from href.
             return E.fallibleTemp(e.type, `scr_jsval_from_url(${v.name})`);
+          case "promise": {
+            // A STATIC promise crossing IN: a real engine thenable
+            // settled when the scriptc promise settles (the async-
+            // callback return bridge). from_promise takes ownership of a
+            // +1 — retain past the borrowed frame temp.
+            const tag = islandPromisePayloadTag(e.value.type.inner);
+            if (!tag) throw new Error("emitter bug: jsMarshal of a promise outside the bridge payload domain");
+            const tagC = {
+              void: "SCR_ISLP_VOID", f64: "SCR_ISLP_F64", bool: "SCR_ISLP_BOOL",
+              string: "SCR_ISLP_STR", jsval: "SCR_ISLP_JSVAL", jsvalArr: "SCR_ISLP_JSVAL_ARR",
+            }[tag];
+            return E.fallibleTemp(e.type, `scr_jsval_from_promise(scr_promise_retain(${v.name}), ${tagC})`);
+          }
           case "func": {
             // A closure entering the island as a host function (the
             // package-callback pattern). from_closure retains the closure;
@@ -6363,10 +6384,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // emits u8 targets (canExitIslandToType).
             return E.fallibleTemp(e.type, `scr_jsval_exit_bytes(${v.name})`);
           default: {
+            // `any[]`-declared slot: the engine array exits Array.isArray-
+            // gated, elements BY REFERENCE (identity crosses; the spine is
+            // a snapshot copy). JSON-safe element types keep the round
+            // trip below.
+            if (e.type.kind === "array" && e.type.elem.kind === "jsval") {
+              return E.fallibleTemp(e.type, `scr_jsval_exit_jsval_arr(${v.name})`);
+            }
             // An undefined-armed union target: the engine's undefined takes
             // the undefined arm FIRST — JSON cannot spell it (to_json would
             // refuse the exit) — then null and data ride the round trip
-            // into the union's dynCheck like any composite.
+            // into the union's dynCheck like any composite (or, for the
+            // `any[] | undefined` defaulted-parameter spelling, the
+            // jsval-element array exit wrapped into the data arm).
             const undefTag = e.type.kind === "union" ? E.undefinedArmTag(e.type) : -1;
             if (e.type.kind === "union" && undefTag >= 0) {
               const name = `sc_t${E.tempCounter++}`;
@@ -6378,11 +6408,22 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               E.line(`} else {`);
               E.indent++;
               E.frames.push([]);
-              const json = E.fallibleTemp(STRING, `scr_jsval_to_json(${v.name})`);
-              const dom = E.fallibleTemp(DYN, `scr_json_parse(${json.name})`);
-              const out = E.fallibleTemp(e.type, `${E.dynCheckHelper(e.type)}(${dom.name}, NULL)`);
-              E.moveTemp(out);
-              E.line(`${name} = ${out.name};`);
+              const unionDef = E.unionsById.get(e.type.unionId);
+              const dataArms = unionDef ? unionDef.arms.flatMap((a, i) => (isUnitType(a) ? [] : [{ a, i }])) : [];
+              const jsvalArr = dataArms.length === 1 && dataArms[0]!.a.kind === "array" && dataArms[0]!.a.elem.kind === "jsval" ? dataArms[0]! : null;
+              if (jsvalArr) {
+                // The `any[] | undefined` defaulted-parameter spelling:
+                // the engine array exits BY REFERENCE into the data arm.
+                const arr = E.fallibleTemp(jsvalArr.a, `scr_jsval_exit_jsval_arr(${v.name})`);
+                E.moveTemp(arr);
+                E.line(`${name} = scr_union_new_ref(${jsvalArr.i}, ${arr.name}, &scr_arr_retain_v, &scr_arr_release_v, NULL);`);
+              } else {
+                const json = E.fallibleTemp(STRING, `scr_jsval_to_json(${v.name})`);
+                const dom = E.fallibleTemp(DYN, `scr_json_parse(${json.name})`);
+                const out = E.fallibleTemp(e.type, `${E.dynCheckHelper(e.type)}(${dom.name}, NULL)`);
+                E.moveTemp(out);
+                E.line(`${name} = ${out.name};`);
+              }
               E.releaseFrame(E.frames.pop()!);
               E.indent--;
               E.line(`}`);
@@ -6405,7 +6446,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const payload =
           e.type.kind === "promise" && e.type.inner.kind === "void"
             ? "SCR_ISLP_VOID"
-            : "SCR_ISLP_JSVAL";
+            : e.type.kind === "promise" && e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"
+              ? "SCR_ISLP_JSVAL_ARR" // `any[]` fulfillment: the Array.isArray-gated by-reference exit at settle
+              : "SCR_ISLP_JSVAL";
         return E.fallibleTemp(e.type, `scr_jsval_bridge_promise(${v.name}, ${payload})`);
       }
       default: {

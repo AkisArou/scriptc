@@ -1,4 +1,4 @@
-// ToBoolean over the dyn DOM: truthy/falsy tests on 'unknown' values are
+// ToBoolean over the dyn: truthy/falsy tests on 'unknown' values are
 // JS-exact for every kind — null/undefined false, numbers falsy for 0/-0/NaN,
 // strings falsy when empty, objects/arrays always true.
 for (const t of ["null", "0", "-0", "0.5", '"0"', "true", "false", '""', '"x"', "{}", "[]", '{"a":1}', "[0]"]) {

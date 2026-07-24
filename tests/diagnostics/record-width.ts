@@ -27,7 +27,7 @@ const dstM: DstM = srcM;
 console.log(dstM);
 
 // A source field that cannot enter the target's value slot (a Map has no
-// DOM conversion into an 'unknown' signature slot).
+// dyn conversion into an 'unknown' signature slot).
 type WithMap = { m: Map<string, number>; n: number };
 const withMap: WithMap = { m: new Map(), n: 1 };
 const bag: Record<string, unknown> = withMap;

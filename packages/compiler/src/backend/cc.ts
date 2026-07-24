@@ -95,12 +95,12 @@ export interface CcOptions {
   dynInvoke?: boolean;
   /** The program uses the diagnostics_channel surface (index.ts detects
    * dc.* libCalls on the IR): compiles scr_dc.c — pure data structure
-   * over the DOM (no loop hooks, no install), cross-compiles everywhere.
+   * over the checked-dynamic tree (no loop hooks, no install), cross-compiles everywhere.
    * Channel-free binaries keep their exact size class. */
   dc?: boolean;
   /** The program uses the checked-dynamic async surfaces
    * (moduleUsesDynAsync on the IR, or the dynInvoke/dc gates — their TUs
-   * call into this one): compiles scr_async_dyn.c — DOM-promise
+   * call into this one): compiles scr_async_dyn.c — dyn-promise
    * reactions, AsyncLocalStorage, the unhandledRejection/warning
    * process events. */
   dynAsync?: boolean;

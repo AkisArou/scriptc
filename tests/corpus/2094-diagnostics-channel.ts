@@ -33,7 +33,7 @@ console.log(ch.hasSubscribers);
 ch.publish("nobody");
 console.log(seen.join(","));
 
-// Object messages cross as DOM values; the subscriber reads them back.
+// Object messages cross as dyn values; the subscriber reads them back.
 const obj = dc.channel("corpus:two");
 obj.subscribe((message: unknown, name: string): void => {
   const m = message as { foo: string; n: number };

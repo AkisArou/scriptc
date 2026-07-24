@@ -1,5 +1,5 @@
 // The honest static subset of `any`: unannotated and any-typed BINDINGS
-// ride the checked-dynamic DOM. Declarations (initialized and not),
+// ride the checked-dynamic tree. Declarations (initialized and not),
 // hoisting, assignment round trips, reads, typeof, truthiness, equality,
 // templates, and console rendering — all Node-exact without the engine.
 
@@ -20,7 +20,7 @@ console.log(e.length);
 e = true;
 console.log(!e);
 
-// Assignments of every DOM-representable kind, read back through the slot.
+// Assignments of every dyn-representable kind, read back through the slot.
 let slot: any;
 slot = 42;
 console.log(slot, typeof slot);
@@ -41,7 +41,7 @@ let dst: any;
 dst = src;
 console.log(dst, dst === src);
 
-// Truthiness over the DOM kinds.
+// Truthiness over the dyn kinds.
 let t: any;
 t = 0;
 console.log(t ? "truthy" : "falsy");

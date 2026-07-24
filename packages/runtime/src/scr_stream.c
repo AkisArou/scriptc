@@ -786,7 +786,7 @@ static void scr_stream_resume_kick(ScrStream *s) {
  * parameters implicitly-any: the compiler-emitted invoke thunks box the
  * chunk/encoding/error into dyn, and the COMPLETION callback arrives as
  * a callable dyn function whose glue lands here — arguments arrive as
- * borrowed DOM values: the error is null/undefined (none), an
+ * borrowed dyn values: the error is null/undefined (none), an
  * error-shaped object ({message}), or a string; transform/flush data is
  * bytes, a string, or absent. clo->caps[0] boxes the retained stream. */
 
@@ -870,7 +870,7 @@ ScrDyn *scr_stream_done_dyn_l(ScrClosure *clo, ScrDyn *const *args, size_t argc)
 }
 
 /* Checked-dynamic chunks (the JS lane's push/write of any-typed values):
- * dispatch by DOM tag — bytes copy out, strings convert utf8, null takes
+ * dispatch by dyn tag — bytes copy out, strings convert utf8, null takes
  * the null path (EOF for push; ERR_STREAM_NULL_VALUES for write), and
  * anything else throws the write TypeError (Node would throw
  * ERR_INVALID_ARG_TYPE — approximated by the same shape). Borrow d. */
@@ -1531,7 +1531,7 @@ void scr_stream_set_flush(ScrStream *s, ScrClosure *cb /*moves*/, ScrStreamPlain
  * keys are ignored exactly like Node), and callback slots holding
  * callable values (Node's `typeof === 'function'` guard — anything else
  * leaves the slot to the prototype/fallback) bind as closures whose one
- * cap boxes the dyn callable; the invs below build the DOM arguments the
+ * cap boxes the dyn callable; the invs below build the dyn arguments the
  * way the compiler-emitted dyn thunks do (chunk as Buffer-flavored bytes,
  * encoding 'buffer', the error via the boundary encoding, the completion
  * callback as a callable dyn over the *_done glue). Options that Node's
@@ -3038,7 +3038,7 @@ static void scr_stream_run_tick(ScrStreamTick *t) {
         /* Fully closed: nothing calls the option callbacks again (Node's
          * contract), so drop them here — this breaks the reference cycle
          * a callback capturing its own stream forms, including the dyn-
-         * options closures whose stream edge rides through a DOM function
+         * options closures whose stream edge rides through a dyn function
          * value the cycle collector cannot traverse. */
               if (st->r.read_cb) { scr_closure_release(st->r.read_cb); st->r.read_cb = NULL; }
         if (st->w.write_cb) { scr_closure_release(st->w.write_cb); st->w.write_cb = NULL; }

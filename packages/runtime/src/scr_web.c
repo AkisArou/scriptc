@@ -791,7 +791,7 @@ static const char web_prelude[] =
     "    [Symbol.iterator]() { return this.entries(); }\n"
     "  }\n"
     "\n"
-    /* Event + EventTarget + CustomEvent — the DOM event plumbing Node
+    /* Event + EventTarget + CustomEvent — the dyn event plumbing Node
      * exposes as globals since v15. Synchronous dispatch on one target
      * (no tree, no phases — composedPath answers []), once/capture-shaped
      * options accepted, handleEvent objects honored, dispatchEvent

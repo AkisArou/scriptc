@@ -5,7 +5,7 @@
 // templates, templates of literals, parenthesized/as-const forms, and
 // the folded key landing in a DECLARED optional field. Runtime-valued
 // keys on typed records stay fenced (checked-dynamic JS routes them to
-// the runtime-keyed DOM literal instead — not this program's world).
+// the runtime-keyed dyn literal instead — not this program's world).
 const MARKER = "app_marker";
 const PREFIX = "x" as const;
 const o1 = { [MARKER]: 1, plain: 2 };

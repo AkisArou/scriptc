@@ -76,7 +76,7 @@ console.log("chains:", hitChain !== undefined ? hitChain : "none", missChain ===
 p["ghost"] = undefined;
 console.log("ghost:", (p["ghost"] as string | undefined) === undefined);
 
-// Records/arrays as overflow values under `unknown`: deep DOM conversion.
+// Records/arrays as overflow values under `unknown`: deep dyn conversion.
 interface Meta {
   tags: string[];
   [key: string]: unknown;

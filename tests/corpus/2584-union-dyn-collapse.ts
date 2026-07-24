@@ -2,8 +2,8 @@
 // (scalars, units, JSON-safe records/arrays, plus the 'object'/'unknown'-
 // flavored arm itself) — map to the checked-dynamic representation
 // WHOLESALE: no per-arm tags, typeof/Array.isArray/unit guards dispatch
-// natively on the DOM kind, scalar narrowings validate back out through
-// dynCheck, and record/array arms ride as DOM data (the dynFrom deep-copy
+// natively on the dyn kind, scalar narrowings validate back out through
+// dynCheck, and record/array arms ride as dyn data (the dynFrom deep-copy
 // stance; SEMANTICS.md). Arms with real typed representations (classes,
 // Maps/Sets, functions, promises) stay OUT of the collapse and keep their
 // existing union homes and fences.
@@ -33,12 +33,12 @@ const named: Plugin = "babel";
 const inline: Plugin = { languages: ["js"], options: { semi: true } };
 console.log(typeof named, typeof inline);
 if (typeof named === "string") console.log("name:", named);
-// The record arm rides as DOM data: JSON keeps its full width.
+// The record arm rides as dyn data: JSON keeps its full width.
 console.log(JSON.stringify(inline));
 
 // `plugins[0]` — element reads on the collapsed array type: the whole
-// array is one DOM value now (a dyn element has no static array slot),
-// so length and index reads are DOM keyed reads.
+// array is one dyn value now (a dyn element has no static array slot),
+// so length and index reads are dyn keyed reads.
 const plugins: (string | object)[] = ["p1", { parser: "babel" }];
 console.log(plugins.length, typeof plugins[0], typeof plugins[1]);
 const first = plugins[0];
@@ -62,7 +62,7 @@ for (const def of table) {
   console.log(def.name, classify(def.default));
 }
 
-// Scalar arms keep value semantics through the DOM: === by value,
+// Scalar arms keep value semantics through the checked-dynamic tree: === by value,
 // String() JS-exact, checked casts extract.
 const s1: Plugin = "hello";
 const s2: Plugin = "hello";

@@ -632,7 +632,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
    * utimes family runs on its time arguments: finite numbers pass
    * (negatives answer now/1000, Node's shape), numeric STRINGS coerce
    * through ToNumber's loose-equality gate, everything else throws
-   * Node's exact ERR_INVALID_ARG_TYPE. The argument crosses as a DOM
+   * Node's exact ERR_INVALID_ARG_TYPE. The argument crosses as a dyn
    * value so the runtime renders the Received tail. Null when this is
    * not that call (the table fence stays for other shapes). */
   export function lowerFsToUnixTimestampCall(L: Lowerer, expr: ts.CallExpression,
@@ -651,7 +651,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
   /** The fs validation-ladder spoke (checked-dynamic lane, JS sources
    * only — TypeScript keeps its compile fences): implemented-namespace
    * calls whose misuse Node rejects with typed errors lower to fs.*Chk
-   * libCalls that replicate the validation ladder over DOM values and
+   * libCalls that replicate the validation ladder over dyn values and
    * throw Node's exact ERR_INVALID_ARG_TYPE / ERR_INVALID_ARG_VALUE /
    * ERR_OUT_OF_RANGE — the honest tail (the real operation where one
    * exists, the compiler-rendered SC2020 fence otherwise) runs only
@@ -664,7 +664,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (!isJsSourceFile(expr.getSourceFile())) return null;
     const args = expr.arguments;
     if (args.some(ts.isSpreadElement)) return null;
-    // Every ladder argument crosses as a DOM value; an argument that
+    // Every ladder argument crosses as a dyn value; an argument that
     // cannot leaves the historical fence in place.
     const dynArg = (node: ts.Expression | undefined): IrExpr | null => {
       if (!node) return dynUndefinedExpr(loc);
@@ -699,7 +699,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         // false THROUGH it, and the answer is asynchronous.
         // A provably-non-file `new URL('<literal>')` path (the suite's
         // https://foo probe): Node answers false through the callback
-        // synchronously — the DOM has no URL kind, so the path slot
+        // synchronously — the checked-dynamic tree has no URL kind, so the path slot
         // carries the unvalidatable token instead (construction of a
         // parseable literal is effect-free; file: URLs keep the fence —
         // they would need the real path conversion).
@@ -820,7 +820,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     }
     // node:querystring — parse/stringify are entirely special-cased (the
     // sep/eq/options completions, parse's call-site-shaped dictionary
-    // result, stringify's DOM-crossing object argument); decode/encode
+    // result, stringify's dyn-crossing object argument); decode/encode
     // are Node's own aliases of the pair (`const decode = parse` in the
     // module source) and take the same lowerings. escape/unescape ride
     // the generic table tail below.
@@ -866,7 +866,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
     }
     // node:diagnostics_channel — the module-level pub/sub surface. The
-    // subscriber arguments box into the DOM (dyn) so JS harness wrappers
+    // subscriber arguments box into the checked-dynamic tree (dyn) so JS harness wrappers
     // (test/common's mustCall — a rest-args function value) and typed
     // closures both cross; publish and the Channel methods lower in
     // lowerDcChannelMethodCall over the f64 channel handle.
@@ -2753,7 +2753,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     return L.lowerExprExpecting(node, STRING);
   }
 
-  /** A diagnostics_channel subscriber as a DOM value: dyn callables pass
+  /** A diagnostics_channel subscriber as a dyn value: dyn callables pass
    * through (test/common's mustCall wrapper — an untyped JS function
    * value), boxable typed closures ride dynFrom. Identity is preserved
    * either way, so unsubscribe(fn) finds the subscribe(fn) entry. */
@@ -2779,16 +2779,16 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     L.unsupported(
       "SC1090",
       node,
-      `channel subscribers of type '${L.fmt(cb.type)}' (subscribers cross as DOM functions — parameters must be dyn-representable)`,
+      `channel subscribers of type '${L.fmt(cb.type)}' (subscribers cross as dyn functions — parameters must be dyn-representable)`,
     );
   }
 
-  /** A published message as a DOM value: dyn passes through, everything
+  /** A published message as a dyn value: dyn passes through, everything
    * in the dynFrom domain (JSON-safe data, bytes, %Error, boxable
    * functions, handle kinds) boxes; the rest fences with the domain named. */
   function dcMessageArg(L: Lowerer, node: ts.Expression): IrExpr {
     // An explicit `undefined` argument (tracePromise(fn, ctx, undefined,
-    // ...args) — Node's own no-this spelling) is the undefined DOM value,
+    // ...args) — Node's own no-this spelling) is the undefined dyn value,
     // exactly what an omitted slot defaults to.
     if (ts.isIdentifier(node) && node.text === "undefined") {
       return dynUndefinedExpr(locOf(node));
@@ -2801,7 +2801,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     L.unsupported(
       "SC1090",
       node,
-      `publishing '${L.fmt(msg.type)}' messages (messages cross as DOM values — JSON-safe data, Uint8Array, errors, and functions)`,
+      `publishing '${L.fmt(msg.type)}' messages (messages cross as dyn values — JSON-safe data, Uint8Array, errors, and functions)`,
     );
   }
 
@@ -2845,7 +2845,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     // bindStore(store[, transform]) / unbindStore(store) / runStores(data,
     // fn[, thisArg[, ...args]]): the AsyncLocalStorage integration — the
     // store argument is the ALS f64 handle; the transform crosses as a
-    // DOM function (absent = identity, the undefined DOM value); runStores
+    // dyn function (absent = identity, the undefined dyn value); runStores
     // enters the bound stores, publishes inside them, and forwards
     // this/arguments to fn exactly like the trace calls.
     if ((name === "bindStore" || name === "unbindStore") &&
@@ -2901,7 +2901,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
 
   /** Method calls on AsyncLocalStorage receivers: run(store, fn, ...args),
    * exit(fn, ...args), getStore(), enterWith(store), disable() — over the
-   * f64 store handle (als.* libCalls; values cross as DOM values). Null
+   * f64 store handle (als.* libCalls; values cross as dyn values). Null
    * for non-ALS receivers. */
   export function lowerAlsMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
@@ -2976,8 +2976,8 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
 
   const DC_TRACE_EVENTS = ["start", "end", "asyncStart", "asyncEnd", "error"] as const;
 
-  /** A TracingChannel handlers object as a DOM value: dyn passes through;
-   * an INLINE object literal of plain event-name properties builds the DOM
+  /** A TracingChannel handlers object as a dyn value: dyn passes through;
+   * an INLINE object literal of plain event-name properties builds the checked-dynamic tree
    * object member-by-member (each value through the message conversion —
    * closures box by identity, so unsubscribe still matches), covering the
    * `{ start: () => {} }` spelling whose record type (function members)
@@ -3008,7 +3008,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     return dcMessageArg(L, node);
   }
 
-  /** A trace-call argument list's tail as ONE DOM array (dynArrLit over
+  /** A trace-call argument list's tail as ONE dyn array (dynArrLit over
    * per-element conversions). Spread arguments fence — the built array
    * must mirror the call site's argument vector exactly. */
   function dcTraceArgsArr(L: Lowerer, args: readonly ts.Expression[], loc: SrcLoc): IrExpr {
@@ -3026,9 +3026,9 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
   }
 
   /** Method calls on TracingChannel receivers: subscribe/unsubscribe over
-   * a DOM handlers object, traceSync/traceCallback through the runtime's
+   * a dyn handlers object, traceSync/traceCallback through the runtime's
    * publish choreography (dc.tcTraceSync/dc.tcTraceCallback — fn, context,
-   * thisArg, and the argument vector all cross as DOM values; context
+   * thisArg, and the argument vector all cross as dyn values; context
    * defaults to a fresh `{}` and thisArg to undefined, Node's defaults),
    * and tracePromise through the reaction-fiber choreography
    * (dc.tcTracePromise — the result is the reaction promise, typed
@@ -3336,7 +3336,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
 
 /** `JSON.parse(text)` / `JSON.stringify(value)`.
    * - parse → a may-throw `libCall` producing a dyn value (the runtime JSON
-   *   DOM); malformed input throws a catchable SyntaxError-shaped string.
+   *   dyn); malformed input throws a catchable SyntaxError-shaped string.
    *   The divergence override types the one-argument form `unknown`; the
    *   lib's reviver form typechecks (returning `any`) and is fenced here.
    * - stringify → the type-DIRECTED `jsonStringify` node: the lib
@@ -3396,8 +3396,8 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
       // A dyn ROOT (`JSON.stringify(u)` over unknown / `{}` / `Object` /
       // `object` slots, the JSON.parse round-trip) serializes with the
-      // runtime's DOM walker instead of a type-directed serializer — the
-      // DOM is JSON-representable by construction (non-JSON values fenced
+      // runtime's dyn walker instead of a type-directed serializer — the
+      // dyn is JSON-representable by construction (non-JSON values fenced
       // at their conversion INTO the slot). Two edges, both documented:
       // a root the stringify drops (runtime undefined) produces the TEXT
       // "undefined" where Node produces the undefined VALUE (tsc's own lib
@@ -3772,7 +3772,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     // One name/value slot, WHATWG USVString rules: statically-string
     // arguments lower directly; a symbol can never convert (V8's
     // TypeError, statically decided); everything else crosses into the
-    // DOM and coerces at runtime with the object protocol (a user
+    // dyn and coerces at runtime with the object protocol (a user
     // toString/valueOf runs and its throw propagates).
     const strArg = (i: number): IrExpr => {
       const node = args[i]!;
@@ -3783,7 +3783,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
       let v: IrExpr;
       if (ts.isObjectLiteralExpression(node)) {
-        // Object literals take the DOM literal path directly (method
+        // Object literals take the dyn literal path directly (method
         // members box as dyn functions — the typed record fence never
         // applies to the coercion probes).
         v = lowerDynObjectLiteral(L, node);
@@ -3793,7 +3793,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         else if (raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
           v = { kind: "dynFrom", value: raw, type: DYN, loc: raw.loc };
         } else if (raw.type.kind === "record") {
-          // A RECORD-represented value that cannot cross into the DOM (a
+          // A RECORD-represented value that cannot cross into the checked-dynamic tree (a
           // func-carrying shape — the throwing-toString probes): run
           // ToPrimitive's string hint STATICALLY. A zero-parameter
           // toString func member is called (its throw propagates); a
@@ -3810,7 +3810,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
             tsMember.type.params.length === 0 &&
             L.dynConvertible(tsMember.type)
           ) {
-            // Box just the toString member into a fresh DOM carrier and
+            // Box just the toString member into a fresh dyn carrier and
             // run the protocol at runtime — the boxed call propagates its
             // throw, string answers convert, and a bare (void) return is
             // ToString(undefined), all through one path.
@@ -3828,14 +3828,14 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
             L.noLowering(
               `URLSearchParams.${name} with a '${L.fmt(raw.type)}' argument`,
               node,
-              "string arguments are the lowered shape (other values coerce through the DOM — narrow unions first)",
+              "string arguments are the lowered shape (other values coerce through the checked-dynamic tree — narrow unions first)",
             );
           }
         } else {
           L.noLowering(
             `URLSearchParams.${name} with a '${L.fmt(raw.type)}' argument`,
             node,
-            "string arguments are the lowered shape (other values coerce through the DOM — narrow unions first)",
+            "string arguments are the lowered shape (other values coerce through the checked-dynamic tree — narrow unions first)",
           );
         }
       }
@@ -5139,7 +5139,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
   }
 
   /** querystring.stringify / querystring.encode: the object crosses as a
-   * DOM value (dynFrom — JSON-safe records and, in JS sources, dyn values
+   * dyn value (dynFrom — JSON-safe records and, in JS sources, dyn values
    * directly) and Node's encodeStringified rules run in the runtime
    * (scr_qs_stringify), so arrays expand to repeated keys and
    * null/undefined values are empty. The default encoder is the one
@@ -5492,7 +5492,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       // (test-event-emitter-special-event-names.js's process.on).
       const SIGNALS: Record<string, number | undefined> = { SIGINT: 2, SIGTERM: 15 };
       const signo = event !== null ? own(SIGNALS, event) : undefined;
-      // 'unhandledRejection': the listener crosses as a DOM function and
+      // 'unhandledRejection': the listener crosses as a dyn function and
       // the loop-end report dispatches it (reason, promise) per
       // never-observed rejection instead of printing and exiting 1
       // (scr_async.c; the end-of-turn timing is a SEMANTICS.md
@@ -5508,7 +5508,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         const cb = dcSubscriberArg(L, call.arguments[1]!);
         return { kind: "libCall", fn: "process.onUnhandledRejection", args: [cb], type: VOID, loc };
       }
-      // 'warning': the listener crosses as a DOM function; emitWarning
+      // 'warning': the listener crosses as a dyn function; emitWarning
       // and the runtime deprecation sites dispatch synchronously
       // (SEMANTICS.md). off/removeListener remove by closure identity.
       if (event === "warning" && (member === "on" || isOff)) {
@@ -5609,7 +5609,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
       return { kind: "libCall", fn: "process.onExit", args: [cb, onceArg], type: VOID, loc };
     }
-    // process.emitWarning(...): the argument vector crosses as ONE DOM
+    // process.emitWarning(...): the argument vector crosses as ONE dyn
     // array and the runtime applies Node's full grammar (string or Error
     // warning; type/ctor/options second; code/ctor third — wrong kinds
     // throw ERR_INVALID_ARG_TYPE). A single SPREAD of a checked-dynamic
@@ -6366,6 +6366,39 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
           };
           return { kind: "intrinsic", name: "promise.all", args: [entriesArr], type: resultT, loc };
         }
+        // MIXED entries where some entry is already an ISLAND value (the
+        // withPlugins shape: Promise.all([loadBuiltinPlugins(),
+        // loadPlugins(plugins)]) with an 'any'-typed loader): the
+        // ENGINE's own Promise.all runs — island entries pass through,
+        // STATIC promises cross as real engine thenables (the reverse
+        // bridge, payload-domain gated), plain values marshal per the
+        // boundary — and the combined result stays an island value
+        // (awaiting it rides the island→static promise bridge; element
+        // reads are the routed keyed ops). All-static tuples keep the
+        // typed fence hint below. --dynamic only by construction: jsval
+        // entries exist only there.
+        if (elems.some((e) => e.type.kind === "jsval")) {
+          const diagsBefore = L.diags.length;
+          try {
+            const marshaled = argNode.elements.map((el, i) => L.jsvalIn(elems[i]!, el));
+            return {
+              kind: "jsOp",
+              op: "callMethod",
+              name: "all",
+              args: [
+                { kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc },
+                { kind: "jsOp", op: "arrLit", args: marshaled, type: JSVAL, loc },
+              ],
+              type: JSVAL,
+              loc,
+            };
+          } catch (err) {
+            // An entry outside every crossing domain: drop the boundary
+            // diagnostics and let the shape fence below name the fix.
+            if (!(err instanceof PoisonError)) throw err;
+            L.diags.splice(diagsBefore);
+          }
+        }
         L.noLowering(
           "Promise.all over this argument shape",
           argNode,
@@ -6373,6 +6406,32 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
         );
       }
       const entries = L.lowerExpr(argNode);
+      // A NON-literal island argument (`Promise.all(plugins.map((p) =>
+      // loadPlugin(p)))` — the loadPlugins shape, where the checker
+      // spells `any[]`): the ENGINE's own Promise.all runs over the
+      // marshaled array (an 'any' value passes through; an `any[]` value
+      // lifts per element by reference), the result staying an island
+      // value the static side awaits through the island→static bridge.
+      if (
+        entries.type.kind === "jsval" ||
+        (entries.type.kind === "array" && entries.type.elem.kind === "jsval")
+      ) {
+        const diagsBefore = L.diags.length;
+        try {
+          const arg = L.jsvalIn(entries, argNode);
+          return {
+            kind: "jsOp",
+            op: "callMethod",
+            name: "all",
+            args: [{ kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc }, arg],
+            type: JSVAL,
+            loc,
+          };
+        } catch (err) {
+          if (!(err instanceof PoisonError)) throw err;
+          L.diags.splice(diagsBefore);
+        }
+      }
       if (entries.type.kind !== "array" || entries.type.elem.kind !== "promise") {
         // The heterogeneous-literal case: the checker's tuple overload
         // types the literal as a TUPLE of promises (a tuple-flagged record

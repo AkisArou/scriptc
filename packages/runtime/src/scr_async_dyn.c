@@ -1,7 +1,7 @@
 /* Checked-dynamic ASYNC surfaces (gated — cc.ts links this TU only when
  * the IR carries the crossing libCalls or dyn dispatch: the scr_dc.c
  * size-class precedent). Everything here rides scr_async.c's public
- * machinery: the DOM-promise reaction helpers (.then/.catch/.finally
+ * machinery: the checked-dynamic tree-promise reaction helpers (.then/.catch/.finally
  * over SCR_DYN_PROMISE, await of a checked-dynamic value, the
  * `new Promise(setImmediate)` constructor), the AsyncLocalStorage API
  * over the fiber-carried snapshots (the always-linked core keeps only
@@ -128,7 +128,7 @@ void scr_als_disable(double id) {
 }
 
 /* run(store, fn, ...args) / exit(fn, ...args): enter (or clear), call the
- * DOM function with the forwarded arguments, restore — the finally, so a
+ * dyn function with the forwarded arguments, restore — the finally, so a
  * throw still restores before propagating. Result +1 or NULL pending. */
 static ScrDyn *scr_als_call_in(ScrAlsCtx *prev, ScrDyn *fn, ScrDyn *args) {
   size_t argc = args->kind == SCR_DYN_ARR ? args->v.arr.len : 0;
@@ -197,8 +197,8 @@ static bool scr_urj_dispatch(ScrPromise *p) {
 
 /* `new Promise(setImmediate)` (the Node-suite early-exit shape): the
  * executor IS setImmediate, so resolve rides the immediate queue — a
- * fresh promise an armed immediate fulfills with the undefined DOM value
- * (the executor's resolve receives no argument; the DOM payload keeps
+ * fresh promise an armed immediate fulfills with the undefined dyn value
+ * (the executor's resolve receives no argument; the dyn payload keeps
  * promise<dyn> awaiters honest and void awaiters ignore it). +1. */
 static void scr_imm_promise_thunk(ScrClosure *self) {
   ScrPromise *p = (ScrPromise *)scr_box_get_ref(self->caps[0]);
@@ -216,12 +216,12 @@ ScrPromise *scr_immediate_promise(void) {
   return p;
 }
 
-/* ── .then/.catch/.finally over DOM promises (scr_dyn_invoke's promise
+/* ── .then/.catch/.finally over dyn promises (scr_dyn_invoke's promise
  * arm and the dc tracePromise reactions) ──────────────────────────────
  * One reaction fiber per registration: it awaits src (the settled-await
  * microtask hop keeps JS's ordering — reactions never run synchronously
- * inside settle), runs the DOM handler, and settles dst. A handler
- * returning a DOM promise is ADOPTED (awaited in a loop, like JS's
+ * inside settle), runs the checked-dynamic tree handler, and settles dst. A handler
+ * returning a dyn promise is ADOPTED (awaited in a loop, like JS's
  * resolve). Non-callable handlers pass the settlement through (JS's
  * PromisePrototypeThen over non-function reactions). The fiber's own
  * promise is dropped unobserved — the entry consumes every exception
@@ -258,7 +258,7 @@ static void scr_dyn_then_entry(ScrFiber *self, void *ap) {
         scr_promise_fulfill_ref(a->dst, scr_dyn_retain(v), scr_dyn_retain_v, scr_dyn_release_v, NULL);
       }
     } else {
-      /* Adopt DOM-promise results (JS's resolve walk). */
+      /* Adopt dyn-promise results (JS's resolve walk). */
       while (r != NULL && r->kind == SCR_DYN_PROMISE) {
         ScrDyn *inner = scr_await_dyn(r->v.promise);
         scr_dyn_release(r);
@@ -301,7 +301,7 @@ ScrDyn *scr_dyn_promise_then(ScrPromise *src, ScrDyn *onf, ScrDyn *onr, ScrDyn *
   scr_promise_release(waiter); /* the entry never rejects; nobody awaits it */
   return boxed;
 }
-/* `await v` where v is a CHECKED-DYNAMIC value: a DOM promise adopts
+/* `await v` where v is a CHECKED-DYNAMIC value: a dyn promise adopts
  * (the boxed promise awaits — rejections re-throw); every other kind is
  * JS's await-of-a-non-thenable — one microtask hop, the value itself
  * (+1). Thenable ADOPTION (a plain object carrying a then method) is not
@@ -314,14 +314,14 @@ ScrDyn *scr_await_dyn_value(ScrDyn *v) {
 
 /* ── process warnings (emitWarning + the 'warning' event) ─────────────
  * Gated with the rest of this TU (a deprecation-emitting unit's gate
- * must imply the dynAsync link). Listeners are DOM functions; emission
+ * must imply the dynAsync link). Listeners are dyn functions; emission
  * is SYNCHRONOUS at the
  * call (Node defers a tick through nextTick — the MaxListenersExceeded
  * precedent, SEMANTICS.md 138) and the default stderr report always
  * prints (Node's own bootstrap listener; a compiled binary has no
- * --no-warnings). The warning VALUE is the DOM error encoding built over
+ * --no-warnings). The warning VALUE is the dyn error encoding built over
  * an ScrError (identity-cached, so a listener comparing two deliveries
- * of one warning sees one object); a string `detail` joins the DOM node
+ * of one warning sees one object); a string `detail` joins the dyn node
  * and the report's second line, exactly Node. */
 static ScrDyn **scr_warn_listeners = NULL;
 static size_t scr_nwarn = 0, scr_warn_cap = 0;
@@ -366,7 +366,7 @@ void scr_process_off_warning(ScrDyn *fn) {
   }
 }
 
-/* Dispatch + the default stderr report over a built warning DOM node.
+/* Dispatch + the default stderr report over a built warning dyn node.
  * Borrowed. A listener throw propagates (the dc publish stance). */
 static void scr_warning_dispatch(ScrDyn *w) {
   for (size_t i = 0; i < scr_nwarn; i++) {
@@ -415,7 +415,7 @@ static void scr_warn_bad_arg(const char *arg, const char *want) {
   scr_throw_error_msg_code(SCR_ERR_TYPE, buf, (size_t)n, "ERR_INVALID_ARG_TYPE");
 }
 
-/* process.emitWarning(...) — Node's full argument grammar over DOM
+/* process.emitWarning(...) — Node's full argument grammar over dyn
  * values: (warning: string | Error), then for string warnings a type
  * string / ctor function / options object ({type, code, detail}) second
  * and a code string / ctor function third. Wrong kinds throw Node's
@@ -487,11 +487,11 @@ void scr_process_emit_warning(ScrDyn *args) {
 
 
 
-/* A caught-exception snapshot as a DOM value — identity-preserving for
- * DOM payloads (a dyn-thrown value is retained, not copied), the
+/* A caught-exception snapshot as a dyn value — identity-preserving for
+ * dyn payloads (a dyn-thrown value is retained, not copied), the
  * identity-cached %error encoding above for Error-family objects,
  * scalars by value, the type-erased empty object for the rest
- * (SEMANTICS.md 67). Shared by the dc trace choreography, the DOM
+ * (SEMANTICS.md 67). Shared by the dc trace choreography, the checked-dynamic tree
  * promise reactions, and the unhandled-rejection dispatch. Borrows the
  * box; result +1. */
 ScrDyn *scr_caught_to_dyn(const ScrCaught *c) {
@@ -510,8 +510,8 @@ ScrDyn *scr_caught_to_dyn(const ScrCaught *c) {
   }
 }
 
-/* Await a DOM-CROSSING promise (SCR_DYN_PROMISE's boundary contract —
- * dyn or void fulfillment): the payload as a DOM value (+1; a void
+/* Await a dyn-CROSSING promise (SCR_DYN_PROMISE's boundary contract —
+ * dyn or void fulfillment): the payload as a dyn value (+1; a void
  * fulfillment answers the undefined value, and the defensive scalar arms
  * cover payload kinds a direct box could theoretically carry), or NULL
  * with the rejection re-thrown into the awaiter. */
@@ -528,7 +528,7 @@ ScrDyn *scr_await_dyn(ScrPromise *p) {
   }
   case SCR_EXC_REF: {
     void *v = scr_promise_payload_ref(p);
-    if (v) return (ScrDyn *)v; /* the DOM contract: a retained dyn */
+    if (v) return (ScrDyn *)v; /* the dyn contract: a retained dyn */
     return scr_dyn_retain(scr_dyn_undefined());
   }
   default:
@@ -536,7 +536,7 @@ ScrDyn *scr_await_dyn(ScrPromise *p) {
   }
 }
 
-/* The rejection reason as a DOM value — the scr_caught_to_dyn stances
+/* The rejection reason as a dyn value — the scr_caught_to_dyn stances
  * over a promise's payload slot (identity-preserving for dyn-thrown
  * values and %Error instances). */
 ScrDyn *scr_promise_reason_dyn(const ScrPromise *p) {
@@ -573,10 +573,10 @@ ScrDyn *scr_promise_reason_dyn(const ScrPromise *p) {
   }
 }
 
-/* ── promises in the DOM (SCR_DYN_PROMISE) ────────────────────────────
+/* ── promises in the checked-dynamic tree (SCR_DYN_PROMISE) ────────────────────────────
  * Reference boxes over the fiber machinery's ScrPromise (scr_runtime.h's
  * design note). The boundary contract — a boxed promise settles with a
- * DOM payload — is the CALLERS' to keep: the compiler's converters box
+ * dyn payload — is the CALLERS' to keep: the compiler's converters box
  * promise<dyn> directly and every other inner type through the adapting
  * constructor below. */
 
@@ -588,7 +588,7 @@ ScrDyn *scr_dyn_new_promise(ScrPromise *p) {
 
 /* The typed-inner box: a fresh destination promise parked on `src`
  * through the Promise.race cb-waiter machinery — `adapt` (emitted,
- * per-inner-type) converts the fulfillment payload into a DOM value and
+ * per-inner-type) converts the fulfillment payload into a dyn value and
  * fulfills the destination; rejections copy raw inside the machinery and
  * count as HANDLED on src (the box is the tracked promise, like a JS
  * .then chain). Already-settled sources adapt inline. Borrows src; +1. */

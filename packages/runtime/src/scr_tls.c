@@ -984,7 +984,7 @@ ScrHttpClientReq *scr_https_request(ScrStr *host /*borrowed*/, double port,
 }
 
 /* ── RUNTIME options records (the divergence-66 stance) ────────────────
- * A non-literal options value — the checked-dynamic JS lane's DOM record
+ * A non-literal options value — the checked-dynamic JS lane's dyn record
  * — reads its members at RUNTIME. Members the literal path lowers take
  * the same lowering; members whose literal forms are compile fences
  * become runtime gates that THROW the catchable fence instead of
@@ -1002,7 +1002,7 @@ static void scr_tls_opt_fence(const char *api, const char *key, const char *hint
   scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
 }
 
-/* JS truthiness over the DOM kinds — Node reads requestCert /
+/* JS truthiness over the dyn kinds — Node reads requestCert /
  * rejectUnauthorized through `if (options.x)`. */
 static bool scr_tls_dyn_truthy(const ScrDyn *v) {
   switch (v->kind) {
@@ -1219,7 +1219,7 @@ static bool scr_tls_opts_validate(const ScrDyn *opts) {
 }
 
 /* The server-options walk. Fills the cert/key out-params (+1 each) from a
- * DOM options record; false = exception pending (partial results released). */
+ * dyn options record; false = exception pending (partial results released). */
 static bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
                                    ScrBytes **key_out) {
   *cert_out = NULL;

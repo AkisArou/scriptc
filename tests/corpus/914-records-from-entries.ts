@@ -43,7 +43,7 @@ src["y"] = "2";
 const round = Object.fromEntries(Object.entries(src));
 console.log(JSON.stringify(round) === JSON.stringify(src));
 
-// Unknown-valued fromEntries with composite values (deep DOM values ride
+// Unknown-valued fromEntries with composite values (deep dyn values ride
 // the tuples into the overflow intact).
 const mixed: [string, unknown][] = Object.entries(
   JSON.parse('{"list":[1,2],"obj":{"k":"v"},"s":"t"}') as Record<string, unknown>

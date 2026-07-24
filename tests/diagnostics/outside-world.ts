@@ -1,5 +1,5 @@
 // What remains OUTSIDE the type world: the standard library is es2023 only
-// — no DOM, no @types/node — so host globals still fail typechecking with
+// — no dyn, no @types/node — so host globals still fail typechecking with
 // "Cannot find name" (SC0001 passthrough), exactly the old fence. (Node
 // APIs the runtime does implement — process, node:fs, setTimeout, console —
 // are shipped declarations, and the fallback also declares the globals real

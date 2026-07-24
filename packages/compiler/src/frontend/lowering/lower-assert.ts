@@ -228,7 +228,7 @@ function lowerAssertEqual(
   const emptyArrayLit = (n: ts.Expression): boolean =>
     ts.isArrayLiteralExpression(n) && n.elements.length === 0;
   const emptyOf = (t: IrType): IrExpr => ({ kind: "arrayLit", elems: [], type: t, loc });
-  // A dyn other side adopts number[] — the DOM array a boxed empty
+  // A dyn other side adopts number[] — the dyn array a boxed empty
   // literal builds is elementless, so any elem type serves.
   const adoptedEmpty = (other: IrType): IrExpr | null =>
     other.kind === "array" ? emptyOf(other) : other.kind === "dyn" ? emptyOf({ kind: "array", elem: F64 }) : null;
@@ -244,11 +244,11 @@ function lowerAssertEqual(
   const { msg, hasMsg } = lowerMessageArg(L, expr.arguments[2], loc);
   const flag = (value: boolean): IrExpr => ({ kind: "boolLit", value, type: BOOL, loc });
   // CHECKED-DYNAMIC operands (dyn-vs-dyn, dyn-vs-static): both sides
-  // cross into the DOM and one runtime entry answers the whole quartet —
+  // cross into the checked-dynamic tree and one runtime entry answers the whole quartet —
   // SameValue for the strict pair (boxed-closure identity for
-  // functions), the structural DOM walk for the deep pair, with
+  // functions), the structural dyn walk for the deep pair, with
   // assertion_error.js's generated messages (scalar forms byte-exact;
-  // composites render compact:false/sorted through the DOM). The static
+  // composites render compact:false/sorted through the checked-dynamic tree). The static
   // side boxes only when the conversion is HONEST for the operator:
   // scalars and unit literals always; boxable functions (the closure
   // crosses by identity); JSON-safe composites under the deep pair only.
@@ -256,7 +256,7 @@ function lowerAssertEqual(
   // boundary COPIES, so a strict compare against a static composite
   // would answer false where Node can answer true (the value's own
   // earlier crossing) — a miscompare, never lowered. Bytes fence both
-  // ways (the DOM copy cannot carry the Buffer/Uint8Array brand the
+  // ways (the dyn copy cannot carry the Buffer/Uint8Array brand the
   // checker type knows); class instances and everything non-convertible
   // keep the fence too.
   if (a.type.kind === "dyn" || b.type.kind === "dyn") {
@@ -274,9 +274,9 @@ function lowerAssertEqual(
         // the ambient-receiver suite shape. The runtime's deep arm
         // answers same-handle only (its documented stance).
         DYN_HANDLE_KINDS.has(k) ||
-        // %Error crosses as the DOM's error encoding ({%error, name,
+        // %Error crosses as the checked-dynamic tree's error encoding ({%error, name,
         // message, code?}) through scr_dyn_from_error's IDENTITY CACHE —
-        // one error instance is ONE DOM node however it crosses. Strict
+        // one error instance is ONE dyn node however it crosses. Strict
         // compares are therefore honest reference equality (a trace
         // context's stamped .error, a caught dyn, and the static error's
         // own boxing are the same node exactly when Node's objects are the
@@ -291,7 +291,7 @@ function lowerAssertEqual(
             ? "strictEqual on objects is reference equality, which does not survive the unknown boundary (values copy when they cross) — deepStrictEqual compares structure, or narrow the unknown side first"
             : k === "bytes"
               ? "the unknown boundary cannot carry the Buffer-vs-Uint8Array brand Node compares — narrow the unknown side to a typed array and compare those"
-              : "the static side must convert into the checked-dynamic DOM (numbers, strings, booleans, null/undefined, boxable functions, or JSON-safe structures under the deep forms) — narrow the unknown side instead";
+              : "the static side must convert into the checked-dynamic tree (numbers, strings, booleans, null/undefined, boxable functions, or JSON-safe structures under the deep forms) — narrow the unknown side instead";
         L.noLowering(`${surface} of 'unknown' and '${L.fmt(e.type)}' values`, node, hint);
       }
       // A boxed closure takes its best-effort JS name from the source
@@ -493,7 +493,7 @@ type ThrowsExpected =
   | { form: "shape"; keys: ThrowsShapeKey[] }
   // An error-INSTANCE expected (Node compares name, message, and the
   // expected's own enumerable keys with isDeepStrictEqual): the value
-  // crosses as a DOM error and the runtime runs the per-key walk
+  // crosses as a dyn error and the runtime runs the per-key walk
   // (assert.expectsErrDyn). Carried as DYN — a checked-dynamic value
   // passes through, a static %Error boxes (the identity-cached crossing).
   | { form: "errValue"; value: IrExpr };
@@ -608,7 +608,7 @@ function classifyThrowsExpected(
     return { form: "shape", keys: [...byId.values()] };
   }
   // An error INSTANCE (`assert.rejects(p, expectedError)` — the
-  // tracingChannel suite's shape): the value crosses as a DOM error and
+  // tracingChannel suite's shape): the value crosses as a dyn error and
   // the runtime compares per Node's expectsError key walk. A
   // checked-dynamic expected rides directly; a static %Error boxes.
   if (expectedT?.kind === "dyn") {
@@ -625,7 +625,7 @@ function classifyThrowsExpected(
   // assert.throws(fn, oor)` — the suite's shared expectation records): the
   // same runtime key walk as an error instance — Node's expectsError reads
   // the expected's own keys only, so a convertible record crosses as its
-  // DOM object. Records carrying regex members are not convertible and
+  // dyn object. Records carrying regex members are not convertible and
   // keep the fence (the runtime walk would deep-compare, not test).
   if (expectedT?.kind === "record" && L.dynConvertible(expectedT)) {
     const value = L.lowerExpr(node);
@@ -975,7 +975,7 @@ function assertThrowsHelper(
         break;
       case "errValue":
         // Node's expectsError over an error-instance expected: the
-        // caught value crosses as a DOM value (identity-preserving) and
+        // caught value crosses as a dyn value (identity-preserving) and
         // the runtime walks the expected's keys — a mismatch throws the
         // deep-equal AssertionError.
         catchBody = [
@@ -1127,7 +1127,7 @@ function lowerAssertIfError(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc): I
   if (direct !== null) return { kind: "libCall", fn: direct, args: [v], type: VOID, loc };
   // A checked-dynamic argument (test/common's mustSucceed wrapper — the
   // callback's err parameter is untyped): the runtime dispatches over the
-  // DOM kind — units pass quietly, %error-marked objects throw with the
+  // dyn kind — units pass quietly, %error-marked objects throw with the
   // error's message, everything else with the inspection.
   if (v.type.kind === "dyn") {
     return { kind: "libCall", fn: "assert.ifErrorDyn", args: [v], type: VOID, loc };
