@@ -4965,6 +4965,13 @@ const BUF_ENCODINGS: Record<string, string | undefined> = {
   "ucs-2": "utf16le",
 };
 
+/** A literal encoding's canonical name, or undefined for a spelling Node
+ * does not know — the ladder callers (stream options) turn unknown
+ * literals into Node's runtime ERR_UNKNOWN_ENCODING throw. */
+export function knownBufEncoding(name: string): string | undefined {
+  return own(BUF_ENCODINGS, name);
+}
+
 /** The literal encoding argument of a Buffer surface, normalized — or a
  * fence when it isn't a literal alias Node knows. */
 export function bufEncoding(L: Lowerer, what: string, encNode: ts.Expression): string {

@@ -104,6 +104,10 @@ struct ScrStreamState {
     bool encoded;       /* string-chunk mode (decoder active) */
     ScrStr *enc;        /* owned canonical encoding name, or NULL */
     double dec_pending; /* scr_strdec packed pending state */
+    /* The defaultEncoding option's push-side effect: how push(string)
+     * DECODES string chunks into bytes (Node's Buffer.from(chunk,
+     * state.defaultEncoding)). Owned canonical name; NULL = utf8. */
+    ScrStr *push_enc;
     /* Readable.from mode: entries are whole OBJECTS (each counts 1
      * toward length/hwm and delivers undivided — Node's objectMode
      * accounting for the from() surface; hwm is 1). */
@@ -224,6 +228,7 @@ static void scr_stream_state_drop(ScrStreamState *st, bool gc) {
   for (size_t i = 0; i < st->r.n; i++) scr_stream_entry_release(st, st->r.buf[i]);
   free(st->r.buf);
   if (st->r.enc) scr_str_release(st->r.enc);
+  if (st->r.push_enc) scr_str_release(st->r.push_enc);
   if (!gc && st->r.next_waiter) scr_promise_release(st->r.next_waiter);
   if (!gc) {
     if (st->r.read_cb) scr_closure_release(st->r.read_cb);
@@ -2228,11 +2233,39 @@ bool scr_stream_push(ScrStream *s, ScrBytes *chunk) {
 }
 
 bool scr_stream_push_str(ScrStream *s, ScrStr *str) {
-  ScrBytes *b = scr_bytes_new(SCR_BYTES_U8, (double)str->len);
-  memcpy(b->data, str->data, str->len);
+  ScrStr *enc = s->st->has_r ? s->st->r.push_enc : NULL;
+  ScrBytes *b;
+  if (enc != NULL) {
+    /* Node: Buffer.from(chunk, state.defaultEncoding). */
+    b = scr_bytes_from_str(str, enc);
+  } else {
+    b = scr_bytes_new(SCR_BYTES_U8, (double)str->len);
+    memcpy(b->data, str->data, str->len);
+  }
   bool ret = scr_stream_add_chunk(s, b, false);
   scr_bytes_release(b);
   return ret;
+}
+
+/* push(chunk, encoding) with an explicit non-utf8 literal: the per-call
+ * encoding overrides the stream's default. Borrows both strings. */
+bool scr_stream_push_str_enc(ScrStream *s, ScrStr *str, ScrStr *enc) {
+  ScrBytes *b = scr_bytes_from_str(str, enc);
+  bool ret = scr_stream_add_chunk(s, b, false);
+  scr_bytes_release(b);
+  return ret;
+}
+
+/* The defaultEncoding option's push side (canonical literal, frontend-
+ * folded; never "utf8" — that stays the NULL fast path). Answers the
+ * receiver +1, the setEncoding chaining shape. */
+ScrStream *scr_stream_set_push_encoding(ScrStream *s, ScrStr *enc) {
+  ScrStreamState *st = s->st;
+  if (st->has_r) {
+    if (st->r.push_enc) scr_str_release(st->r.push_enc);
+    st->r.push_enc = scr_str_retain(enc);
+  }
+  return scr_stream_retain(s);
 }
 
 bool scr_stream_push_null(ScrStream *s) {

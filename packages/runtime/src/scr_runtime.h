@@ -1566,6 +1566,13 @@ ScrDyn *scr_stream_done_dyn_l(ScrClosure *clo, ScrDyn *const *args, size_t argc)
  * utf8, Node's decodeStrings default); push answers the below-hwm bool. */
 bool scr_stream_push(ScrStream *s, ScrBytes *chunk);
 bool scr_stream_push_str(ScrStream *s, ScrStr *str);
+/* push(chunk, enc): the per-call literal encoding (canonical); overrides
+ * the stream's defaultEncoding. Borrows both. */
+bool scr_stream_push_str_enc(ScrStream *s, ScrStr *str, ScrStr *enc);
+/* The defaultEncoding option's push side: how push(string) decodes chunks
+ * (Buffer.from(chunk, enc)). Canonical literal, never "utf8". Receiver
+ * answers +1 (the setEncoding chaining shape). */
+ScrStream *scr_stream_set_push_encoding(ScrStream *s, ScrStr *enc);
 bool scr_stream_push_null(ScrStream *s);
 void scr_stream_unshift(ScrStream *s, ScrBytes *chunk);
 void scr_stream_unshift_str(ScrStream *s, ScrStr *str);

@@ -5276,6 +5276,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "readable.pushStr":
             E.usesTimers = true;
             return finish(`scr_stream_push_str((ScrStream *)${arg(0)}, ${arg(1)})`);
+          case "readable.pushStrEnc":
+            // push(chunk, enc) with a literal non-utf8 encoding.
+            E.usesTimers = true;
+            return finish(`scr_stream_push_str_enc((ScrStream *)${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "readable.pushEncoding":
+            // The defaultEncoding option's push side (chaining, +1).
+            E.usesTimers = true;
+            return finish(`(${cType(e.type).trim()})scr_stream_set_push_encoding((ScrStream *)${arg(0)}, ${arg(1)})`);
           case "readable.pushNull":
             E.usesTimers = true;
             return finish(`scr_stream_push_null((ScrStream *)${arg(0)})`);

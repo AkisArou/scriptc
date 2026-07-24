@@ -528,6 +528,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   // generic pending check; loop liveness rides USES_TIMERS_LIB_FNS.
   "readable.push": "scr_stream_push",
   "readable.pushStr": "scr_stream_push_str",
+  "readable.pushStrEnc": "scr_stream_push_str_enc",
+  "readable.pushEncoding": "scr_stream_set_push_encoding",
   "readable.pushNull": "scr_stream_push_null",
   "readable.pushDyn": "scr_stream_push_dyn",
   "readable.unshift": "scr_stream_unshift",
@@ -731,7 +733,8 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "readable.init", "writable.init", "duplex.init", "transform.init", "passthrough.init",
   "readable.newDyn", "writable.newDyn", "duplex.newDyn", "transform.newDyn", "passthrough.newDyn",
   "readable.initDyn", "writable.initDyn", "duplex.initDyn", "transform.initDyn", "passthrough.initDyn",
-  "readable.push", "readable.pushStr", "readable.pushNull", "readable.pushU", "readable.pushDyn",
+  "readable.push", "readable.pushStr", "readable.pushStrEnc", "readable.pushEncoding",
+  "readable.pushNull", "readable.pushU", "readable.pushDyn",
   "readable.unshift", "readable.unshiftStr", "readable.read", "readable.setEncoding",
   "readable.nextChunk", "readable.nextChunkDyn", "readable.fromArr", "readable.resume",
   "readable.pipe", "readable.unpipe",

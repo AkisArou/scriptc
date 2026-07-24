@@ -861,6 +861,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "readable.read": { argTypes: [null, F64], result: VOID },
   "readable.pause": { argTypes: [null], result: VOID },
   "readable.setEncoding": { argTypes: [null, STRING], result: VOID },
+  "readable.pushStrEnc": { argTypes: [null, STRING, STRING], result: BOOL },
+  "readable.pushEncoding": { argTypes: [null, STRING], result: VOID },
   "readable.nextChunk": { argTypes: [null], result: VOID },
   "readable.nextChunkDyn": { argTypes: [null], result: VOID },
   "readable.fromArr": { argTypes: [null, BOOL], result: VOID },
@@ -4095,7 +4097,7 @@ function validateFunction(
           }
           if (e.fn === "readable.pause" || e.fn === "readable.resume" ||
               e.fn === "readable.unpipe" || e.fn === "writable.end" ||
-              e.fn === "readable.setEncoding" ||
+              e.fn === "readable.setEncoding" || e.fn === "readable.pushEncoding" ||
               e.fn === "stream.destroy" || e.fn === "stream.destroyErr") {
             if (!typeEquals(e.type, e.args[0]!.type)) {
               err(`libCall ${e.fn} must return its receiver's type (the chaining 'this')`, e.loc);

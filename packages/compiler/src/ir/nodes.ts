@@ -3198,6 +3198,11 @@ export type IrLibFn =
   | "readable.pause"
   | "readable.resume"
   | "readable.setEncoding"
+  /** push(chunk, enc) with a literal non-utf8 encoding, and the
+   * defaultEncoding option's push side (how push(string) decodes —
+   * Buffer.from(chunk, enc)); both carry the CANONICAL literal. */
+  | "readable.pushStrEnc"
+  | "readable.pushEncoding"
   /** for-await over a readable (the desugared loop's per-pass promise):
    * +1 promise of the next chunk — buffered content, the EOF sentinel
    * (empty Buffer / dyn undefined), or a rejection with the stream's
@@ -6301,6 +6306,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "passthrough.initDyn",
   "readable.push",
   "readable.pushStr",
+  "readable.pushStrEnc",
   "readable.pushNull",
   "readable.pushU",
   "readable.pushDyn",
