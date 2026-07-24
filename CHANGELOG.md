@@ -4,9 +4,28 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.9
+## 0.0.10
 
 <!-- release:start -->
+
+### Features
+
+- **Engine-held values flow through dynamic code**: values born in the embedded engine now cross into `unknown`/`object`-typed slots and back — `typeof`, strict equality, `String()`, keyed reads and writes, calls, and method dispatch route through the engine (its own prototypes run, JS-exact), with reference-preserving identity on the round trip. Unions like `string | object` compile wholesale into the checked-dynamic representation, and nullish coalescing and optional chains work on every dynamic value. Operations not yet routed fail loudly by name — the boundary's silent wrong answers (`typeof` misreporting, phantom `.length`) are gone.
+- **`Object.create(null)`, array `entries()`/`keys()`, and variadic `Object.assign`**: real null-prototype dictionaries with Node's inspect/`toString`/comparison behavior (the dynamic tier delegates to the engine's own `Object.create` for live prototypes); live index-walking pair iterators; `Object.assign(target, ...sources)` with JavaScript's exact evaluation order and V8's position-dependent error texts.
+- **Erased ambient declarations behave like Node**: chains rooted in `declare`d values compile and throw the catchable `ReferenceError` Node produces at first touch; never-read unmappable bindings vanish; nullish-cast bindings answer Node's exact `TypeError` on member access; assertion-shaped generic signatures monomorphize per call.
+- **Misuse of fs, net, dgram, tls, and stream APIs throws Node's validation ladders**: argument checks run in Node's order with `ERR_*` codes and message-exact texts; `fs.exists` is genuinely async (including its no-error-argument wart), and `mkdtempSync` and `lchmod` are real.
+- **Keyed writes land on dynamic receivers** (`bag[key] = value` on objects built up dynamically, with `ToPropertyKey`-exact key handling), and array destructuring walks dynamic sources with V8's exact non-iterable error wordings.
+- **Library mode: profiles deny surfaces by manifest id** — a `fences` array refuses fenced surfaces reached by the compiled graph, with the profile's guidance attached as a visibly-attributed note; teachings generalize to any refusal; fence evaluation reads the same dead-stripped graph as the determinism attestation, so full fences imply a deterministic attestation by construction.
+
+### Fixes
+
+- Mixed engine-vs-native `deepStrictEqual` comparisons fence loudly instead of fabricating a failure result.
+- The LLVM code generator marshals dynamic values in `jsMarshal` positions identically to the C backend (a latent gap).
+- Concurrent plain and sanitized test-suite runs no longer race each other's scratch directories (a test-infrastructure fix).
+
+<!-- release:end -->
+
+## 0.0.9
 
 ### Features
 
@@ -26,7 +45,6 @@ All notable changes to scriptc will be documented in this file.
 - Two readable-stream lifecycle bugs: the `emittedReadable` flag now clears at Node's moment, and absent-size reads clear pending state correctly.
 - String-typed `'data'` listeners (the `setEncoding` shape) received raw byte headers as string content on sockets, http requests, and http2 streams; they now decode UTF-8 correctly.
 
-<!-- release:end -->
 
 ## 0.0.8
 
