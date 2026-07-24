@@ -1462,6 +1462,13 @@ export class Lowerer {
    * their external dependencies by name). Null for everything else
    * (builtins load nothing; the rest kept its preflight fence). */
   requireInitStmt(spec: string, node: ts.Node): IrStmt | null {
+    // Relative requires resolve within the program; a BARE require can be
+    // a program-module edge too when it names an opted-in --npm-static
+    // package (one package requiring another — the resolution answered
+    // its shipped JS, the file is in the module order, and the reads
+    // alias its globals). Without the guarded %init call at this position
+    // those globals stay uninitialized: the dep's module body would never
+    // run.
     const dep = isRelativeSpecifier(spec)
       ? resolveImport(this.program, node.getSourceFile(), spec)
       : npmStaticDepSf7(this.program, node.getSourceFile(), spec);
