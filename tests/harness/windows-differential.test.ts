@@ -288,8 +288,11 @@ async function runWindowsNode(file: string): Promise<RunResult> {
   const transform = wantsTransformTypes(file)
     ? "--experimental-transform-types --disable-warning=ExperimentalWarning "
     : "";
+  const nodep = directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l))
+    ? "--no-deprecation "
+    : "";
   return runOnBox(
-    `node ${transform}--import ./comptime-shim.mjs --import ./island-shim.mjs ${entry}`,
+    `node ${transform}${nodep}--import ./comptime-shim.mjs --import ./island-shim.mjs ${entry}`,
   );
 }
 

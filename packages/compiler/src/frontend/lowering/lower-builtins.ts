@@ -5,7 +5,7 @@
 import { builtinModules } from "node:module";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { dynUndefinedExpr, own } from "./lowerer.js";
+import { dynUndefinedExpr, nodeThrowExpr, own } from "./lowerer.js";
 import { canonicalBuiltinModule, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
 import {
   BuiltinModuleFn,
@@ -20,7 +20,7 @@ import {
   fenceOrDropOptionKey,
   isChildSurfaceMember,
 } from "./surfaces.js";
-import { conditionalSpreadOf } from "./lower-exprs.js";
+import { conditionalSpreadOf, lowerDynObjectLiteral } from "./lower-exprs.js";
 import { HTTP2_CONSTANTS } from "./http2-constants.js";
 import { timerStyleCallback } from "./lower-calls.js";
 import { registerHttpClientFnBinding } from "./lower-server.js";
@@ -376,6 +376,26 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
    * arguments into a single array-literal argument; `defaults` complete
    * omitted trailing arguments. fs.readFileSync keeps its historical
    * per-site checks (the encoding must be the literal "utf8"). */
+  /** fs._toUnixTimestamp — the (underscore-stable) seconds coercion the
+   * utimes family runs on its time arguments: finite numbers pass
+   * (negatives answer now/1000, Node's shape), numeric STRINGS coerce
+   * through ToNumber's loose-equality gate, everything else throws
+   * Node's exact ERR_INVALID_ARG_TYPE. The argument crosses as a DOM
+   * value so the runtime renders the Received tail. Null when this is
+   * not that call (the table fence stays for other shapes). */
+  export function lowerFsToUnixTimestampCall(L: Lowerer, expr: ts.CallExpression,
+    bi: { module: string; member: string },
+    loc: SrcLoc,): IrExpr | null {
+    if (bi.module !== "fs" || bi.member !== "_toUnixTimestamp") return null;
+    if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) return null;
+    const raw = L.lowerExpr(expr.arguments[0]!);
+    if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+      const arg: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+      return { kind: "libCall", fn: "fs.toUnixTimestamp", args: [arg], type: F64, loc };
+    }
+    return null;
+  }
+
   export function lowerBuiltinModuleCall(L: Lowerer, expr: ts.CallExpression,
     bi: { module: string; member: string },
     fn: BuiltinModuleFn,
@@ -3340,7 +3360,100 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     const name = access.name.text;
     const loc = locOf(call);
     const args = call.arguments;
-    const strArg = (i: number): IrExpr => L.lowerExprExpecting(args[i]!, STRING);
+    // The WHATWG arity ladder: too few arguments throw Node's
+    // ERR_MISSING_ARGS before any conversion (the invalid-input probes'
+    // `params.get()`). Claimed for effect-free receivers only — the
+    // throw replaces the whole call, so an effectful receiver expression
+    // keeps the fence below.
+    const required: Record<string, [number, string] | undefined> = {
+      get: [1, 'The "name" argument must be specified'],
+      getAll: [1, 'The "name" argument must be specified'],
+      has: [1, 'The "name" argument must be specified'],
+      delete: [1, 'The "name" argument must be specified'],
+      append: [2, 'The "name" and "value" arguments must be specified'],
+      set: [2, 'The "name" and "value" arguments must be specified'],
+    };
+    const req = own(required, name);
+    if (req && args.length < req[0] && ts.isIdentifier(access.expression)) {
+      // The present-but-short forms still convert nothing in Node — the
+      // arity check runs first; present arguments are identifierish
+      // probes ('a') whose evaluation is pure in every suite shape, and
+      // effectful ones would land here too (statement-coarsening, the
+      // runtimeFence precedent).
+      return nodeThrowExpr(1, "ERR_MISSING_ARGS", req[1], L.mapTypeOf(L.typeOf(call)) ?? VOID, loc);
+    }
+    // One name/value slot, WHATWG USVString rules: statically-string
+    // arguments lower directly; a symbol can never convert (V8's
+    // TypeError, statically decided); everything else crosses into the
+    // DOM and coerces at runtime with the object protocol (a user
+    // toString/valueOf runs and its throw propagates).
+    const strArg = (i: number): IrExpr => {
+      const node = args[i]!;
+      const t = L.mapTypeOf(L.typeOf(node));
+      if (t?.kind === "string") return L.lowerExprExpecting(node, STRING);
+      if (t?.kind === "symbol") {
+        return nodeThrowExpr(1, "", "Cannot convert a Symbol value to a string", STRING, loc);
+      }
+      let v: IrExpr;
+      if (ts.isObjectLiteralExpression(node)) {
+        // Object literals take the DOM literal path directly (method
+        // members box as dyn functions — the typed record fence never
+        // applies to the coercion probes).
+        v = lowerDynObjectLiteral(L, node);
+      } else {
+        const raw = L.lowerExpr(node);
+        if (raw.type.kind === "dyn") v = raw;
+        else if (raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+          v = { kind: "dynFrom", value: raw, type: DYN, loc: raw.loc };
+        } else if (raw.type.kind === "record") {
+          // A RECORD-represented value that cannot cross into the DOM (a
+          // func-carrying shape — the throwing-toString probes): run
+          // ToPrimitive's string hint STATICALLY. A zero-parameter
+          // toString func member is called (its throw propagates); a
+          // string answer is the conversion, and a void/never-typed one
+          // (the always-throwing probe shape, or a bare undefined return)
+          // stringifies as ToString(undefined). Other shapes keep the
+          // fence — honesty over coverage.
+          const shape = L.shapes.get(raw.type.shapeId);
+          const tsMember = shape?.fields.find((f) => f.name === "toString");
+          if (
+            shape &&
+            tsMember &&
+            tsMember.type.kind === "func" &&
+            tsMember.type.params.length === 0 &&
+            L.dynConvertible(tsMember.type)
+          ) {
+            // Box just the toString member into a fresh DOM carrier and
+            // run the protocol at runtime — the boxed call propagates its
+            // throw, string answers convert, and a bare (void) return is
+            // ToString(undefined), all through one path.
+            const member: IrExpr = { kind: "recordGet", obj: raw, shapeId: raw.type.shapeId, field: "toString", type: tsMember.type, loc };
+            v = {
+              kind: "dynObjLit",
+              fields: [{
+                key: { kind: "strLit", value: "toString", type: STRING, loc },
+                value: { kind: "dynFrom", value: member, type: DYN, loc },
+              }],
+              type: DYN,
+              loc,
+            };
+          } else {
+            L.noLowering(
+              `URLSearchParams.${name} with a '${L.fmt(raw.type)}' argument`,
+              node,
+              "string arguments are the lowered shape (other values coerce through the DOM — narrow unions first)",
+            );
+          }
+        } else {
+          L.noLowering(
+            `URLSearchParams.${name} with a '${L.fmt(raw.type)}' argument`,
+            node,
+            "string arguments are the lowered shape (other values coerce through the DOM — narrow unions first)",
+          );
+        }
+      }
+      return { kind: "libCall", fn: "dyn.toStringCoerce", args: [v], type: STRING, loc };
+    };
     // has/delete's OPTIONAL value argument: absent, or an explicitly
     // undefined-typed expression (Node treats explicit undefined as the
     // name-only form). A `string | undefined` union has two behaviors in

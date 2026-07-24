@@ -635,6 +635,76 @@ const ScrDynHandleOps *scr_dyn_handle_ops_of(const ScrDyn *d) {
   return scr_dyn_handle_ops(d->v.handle.tag);
 }
 
+/* errors.js's determineSpecificType over a DOM value — the "Received
+ * ..." tail of Node's ERR_INVALID_ARG_TYPE messages. Renders into buf
+ * when the shape needs a payload; returns the text either way. Lives
+ * beside the DOM core (not the gated handle unit) because the always-
+ * linked argument validators (bytes, fs) render through it too. */
+const char *scr_dyn_specific_type(const ScrDyn *cb, char *detail, size_t cap) {
+  const char *d = detail;
+  switch (cb->kind) {
+  case SCR_DYN_NULL: d = "null"; break;
+  case SCR_DYN_UNDEF: d = "undefined"; break;
+  case SCR_DYN_OBJ: d = "an instance of Object"; break;
+  case SCR_DYN_ARR: d = "an instance of Array"; break;
+  case SCR_DYN_BYTES: d = "an instance of Uint8Array"; break;
+  case SCR_DYN_FUNC: d = "function"; break; /* callers usually return before this */
+  case SCR_DYN_HANDLE:
+    snprintf(detail, cap, "an instance of %s", scr_dyn_handle_cls(cb));
+    break;
+  case SCR_DYN_PROMISE: d = "an instance of Promise"; break;
+  case SCR_DYN_BOOL:
+    snprintf(detail, cap, "type boolean (%s)", cb->v.b ? "true" : "false");
+    break;
+  case SCR_DYN_NUM: {
+    char num[32];
+    size_t n = scr_f64_to_str(cb->v.num, num);
+    snprintf(detail, cap, "type number (%.*s)", (int)n, num);
+    break;
+  }
+  case SCR_DYN_STR: {
+    const ScrStr *sv = cb->v.str;
+    char insp[32];
+    size_t n = 0;
+    insp[n++] = '\'';
+    for (size_t i = 0; i < sv->len && n < 28; i++) insp[n++] = sv->data[i];
+    if (sv->len + 2 > 28) {
+      n = 25;
+      memcpy(insp + n, "...", 3);
+      n += 3;
+    } else {
+      insp[n++] = '\'';
+    }
+    snprintf(detail, cap, "type string (%.*s)", (int)n, insp);
+    break;
+  }
+  default: d = "an instance of Object"; break;
+  }
+  return d;
+}
+
+/* Node's ERR_INVALID_ARG_TYPE thrower ("The \"chunk\" argument must be
+ * of type string or an instance of Buffer or Uint8Array. Received type
+ * number (5)") — the handle dispatchers' and argument validators'
+ * per-arg gates. `expected` is the full "of type ..."/"an instance of
+ * ..." clause. */
+/* The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
+ * rendered Received tail (error.argTypeThrow — the always-throwing
+ * lowered arms whose offending value is not a literal). Borrows all
+ * three; always throws catchably. */
+void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got) {
+  scr_dyn_arg_type_fail(argname->data, expected->data, got);
+}
+
+void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got) {
+  char detail[64];
+  const char *d = scr_dyn_specific_type(got, detail, sizeof detail);
+  char msg[224];
+  int len = snprintf(msg, sizeof msg,
+                     "The \"%s\" argument must be %s. Received %s", argname, expected, d);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_TYPE");
+}
+
 static void scr_dyn_handle_release(void *h, ScrDynHandleTag tag) {
   scr_dyn_handle_ops(tag)->release(h);
 }
@@ -1117,6 +1187,39 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d) {
   if (d->kind == SCR_DYN_NULL) return scr_str_new("null", 4);
   if (d->kind == SCR_DYN_UNDEF) return scr_str_new("undefined", 9);
   return scr_dyn_to_string(d, NULL);
+}
+
+/* JS ToString over a DOM value WITH the object protocol (the WHATWG
+ * USVString conversions — URLSearchParams names/values): an OBJ whose
+ * own 'toString' member is callable is invoked with zero arguments (its
+ * throw propagates, catchably); a non-primitive answer falls through to
+ * 'valueOf' (ToPrimitive's string hint); exhaustion is the spec's
+ * "Cannot convert object to primitive value" TypeError. Every other
+ * kind matches scr_dyn_string_coerce (units RENDER — ToString(null) is
+ * "null"). Borrows; +1, or NULL with the exception pending. */
+ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
+  if (d->kind == SCR_DYN_OBJ) {
+    static const char *const hint[2] = { "toString", "valueOf" };
+    for (int i = 0; i < 2; i++) {
+      ScrDyn *m = scr_dyn_obj_get(d, hint[i], strlen(hint[i])); /* borrowed */
+      if (!m || m->kind != SCR_DYN_FUNC) continue;
+      ScrDyn *r = scr_dyn_call(m, NULL, 0, hint[i]);
+      if (!r) return NULL; /* the method threw — pending */
+      if (r->kind == SCR_DYN_OBJ || r->kind == SCR_DYN_ARR ||
+          r->kind == SCR_DYN_FUNC || r->kind == SCR_DYN_HANDLE ||
+          r->kind == SCR_DYN_PROMISE) {
+        scr_dyn_release(r); /* non-primitive answer: try the next method */
+        continue;
+      }
+      ScrStr *s = scr_dyn_string_coerce(r);
+      scr_dyn_release(r);
+      return s;
+    }
+    static const char msg[] = "Cannot convert object to primitive value";
+    scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+    return NULL;
+  }
+  return scr_dyn_string_coerce(d);
 }
 
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets

@@ -155,11 +155,16 @@ function nodeOracleFile(file: string): string {
   return path;
 }
 
+function wantsNoDeprecation(file: string): boolean {
+  return directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l));
+}
+
 function nodeOracleArgs(file: string): string[] {
   const transform = wantsTransformTypes(file)
     ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
     : [];
-  return [...transform, "--import", comptimeShim, "--import", islandShim, nodeOracleFile(file)];
+  const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
+  return [...transform, ...nodep, "--import", comptimeShim, "--import", islandShim, nodeOracleFile(file)];
 }
 
 function programInputs(file: string): string[] {

@@ -478,6 +478,9 @@ void scr_undef_global_read(ScrStr *name);
 void scr_error_set_code(ScrError *e, const char *code);
 ScrStr *scr_error_code(ScrError *e);
 void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
+/* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
+ * error of `kind`, `code` stamped when non-empty. Borrows both. */
+void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
 
 /* ── string methods ─────────────────────────────────────────────────
  * ECMA-262 observable semantics (UTF-16 code units) computed over the
@@ -2766,6 +2769,10 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc);
 /* JS String() over the DOM kind (units render "null"/"undefined" where
  * scr_dyn_to_string throws) — the web globals' WebIDL ToString. +1. */
 ScrStr *scr_dyn_string_coerce(const ScrDyn *d);
+/* JS ToString WITH the object protocol (user toString/valueOf members
+ * called, their throws propagating) — the WHATWG USVString conversions.
+ * Borrows; +1 or NULL with the exception pending. */
+ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d);
 
 /* `d instanceof TypeError` (and the other builtin error classes) on a
  * checked-dynamic value: the from_error cache resolves the DOM encoding
@@ -2980,6 +2987,9 @@ void scr_dyn_check_listener(const ScrDyn *cb, const char *argname);
  * generic ERR_INVALID_ARG_TYPE thrower over it (`expected` is the whole
  * "of type ..." clause). The handle dispatchers' per-arg gates. */
 const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
+/* ERR_INVALID_ARG_TYPE with the runtime-rendered Received tail (the
+ * error.argTypeThrow libCall). Borrows all three; always throws. */
+void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
 void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
 /* Listener-closure builders for the handle dispatchers' .on(...) paths:
  * a runtime-built ScrClosure whose capture is the boxed dyn listener and
@@ -4203,6 +4213,32 @@ bool scr_bytes_is_encoding(const ScrStr *s);
 bool scr_bytes_equals(const ScrBytes *a, const ScrBytes *b);
 double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nargs,
                          double ts, double te, double ss, double se);
+/* Node's validateOffset ladder (buffer.js): non-integers (±Infinity and
+ * NaN included) throw the 'an integer' ERR_OUT_OF_RANGE RangeError, the
+ * rest the '>= 0 && <= max' render; max < 0 drops the upper bound.
+ * Returns false after arming the pending throw. */
+bool scr_bytes_validate_off(const char *name, double value, double max);
+/* The checked-dynamic compare/equals validators (scr_bytes_io.c): Node's
+ * argument ladder over DOM-boxed arguments — a non-bytes value throws
+ * ERR_INVALID_ARG_TYPE with the API's own argument name ("buf1"/"buf2",
+ * "otherBuffer", "target"), non-number offsets ERR_INVALID_ARG_TYPE
+ * "of type number", out-of-range numbers the validateOffset RangeError;
+ * an undefined offset takes its Node default. All arguments BORROWED. */
+double scr_buffer_compare_chk(const ScrDyn *a, const ScrDyn *b);
+bool scr_bytes_equals_chk(const ScrBytes *recv, const ScrDyn *other);
+double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
+                             const ScrDyn *ts, const ScrDyn *te,
+                             const ScrDyn *ss, const ScrDyn *se);
+/* new Buffer(number, encoding)'s string-arm type error (always throws;
+ * borrowed). */
+ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
+/* fs._toUnixTimestamp over a DOM time value: numeric strings and finite
+ * numbers coerce (negatives answer now/1000), the rest throw Node's
+ * ERR_INVALID_ARG_TYPE. Borrowed. */
+double scr_fs_to_unix_timestamp(const ScrDyn *t);
+/* The checked-dynamic max-listeners ladders (scr_events_emitter.c). */
+ScrEmitter *scr_emitter_set_max_chk(ScrEmitter *em, const ScrDyn *n);
+void scr_emitter_set_default_max_chk(const ScrDyn *n, const ScrStr *name);
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd);
 double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd);
 ScrBytes *scr_bytes_fill(ScrBytes *b, const ScrBytes *pattern, double nargs, double offset, double end);

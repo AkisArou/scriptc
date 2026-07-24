@@ -4178,6 +4178,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_http2_stream_pending(${arg(0)})`);
           case "http2.streamSession":
             return finish(`scr_http2_stream_session(${arg(0)})`);
+          case "dyn.toStringCoerce":
+            // +1 string or NULL with the exception pending (user
+            // toString/valueOf throws propagate). Borrows the dyn.
+            return finish(`scr_dyn_string_coerce_js(${arg(0)})`);
+          case "error.nodeThrow":
+            // The compiler-resolved Node-parity throw (always throws —
+            // the typed dummy is abandoned by the pending check's
+            // unwind; releases are NULL-tolerant). Borrows both strings.
+            return finish(
+              `(scr_throw_node_coded(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
           case "global.undefRead":
             // A declare-d const nothing defines: Node's catchable
             // ReferenceError at the access (always throws — the typed
@@ -4321,6 +4332,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_bytes_byte_length_str(${arg(0)}, ${arg(1)})`);
           case "buffer.isEncoding":
             return finish(`scr_bytes_is_encoding(${arg(0)})`);
+          // The checked-dynamic compare/equals validators
+          // (scr_bytes_io.c): Node's argument ladders throw catchably
+          // (may-throw seed set); all dyn args borrowed.
+          case "buffer.compareChk":
+            return finish(`scr_buffer_compare_chk(${arg(0)}, ${arg(1)})`);
+          case "bytes.equalsChk":
+            return finish(`scr_bytes_equals_chk(${arg(0)}, ${arg(1)})`);
+          case "bytes.compareChk":
+            return finish(`scr_bytes_compare_chk(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`);
+          case "buffer.newStringFail":
+            return finish(`scr_buffer_new_string_fail(${arg(0)})`);
+          case "fs.toUnixTimestamp":
+            return finish(`scr_fs_to_unix_timestamp(${arg(0)})`);
+          case "error.argTypeThrow":
+            // Always throws with the runtime-rendered Received tail (the
+            // error.nodeThrow dummy pattern). Borrows all three.
+            return finish(
+              `(scr_throw_arg_type(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
           // The fs Buffer forms (scr_bytes_io.c): the sync pair throws
           // like the utf8 forms (may-throw seed set); the promise form
           // rejects instead.
@@ -4887,10 +4917,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               `(${cType(e.type).trim()})scr_emitter_set_max((ScrEmitter *)${arg(0)}, ${arg(1)})`,
             );
+          case "emitter.setMaxChk":
+            // The checked-dynamic ladder (may throw); +1 receiver back.
+            return finish(
+              `(${cType(e.type).trim()})scr_emitter_set_max_chk((ScrEmitter *)${arg(0)}, ${arg(1)})`,
+            );
           case "emitter.getMax":
             return finish(`scr_emitter_get_max((ScrEmitter *)${arg(0)})`);
           case "emitter.setDefaultMax":
             return finish(`scr_emitter_set_default_max(${arg(0)})`);
+          case "emitter.setDefaultMaxChk":
+            return finish(`scr_emitter_set_default_max_chk(${arg(0)}, ${arg(1)})`);
           case "emitter.getDefaultMax":
             return finish(`scr_emitter_get_default_max()`);
           // node:stream (scr_stream.c — linked exactly when these appear,

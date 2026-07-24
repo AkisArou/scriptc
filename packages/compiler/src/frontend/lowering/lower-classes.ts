@@ -5,12 +5,13 @@
  * hierarchy registration. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { BOOL, DYN, F64, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
+import { BOOL, DYN, F64, bytesOf, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { MAX_GENERIC_INSTANCES, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { cjsClassExprWholeExportOf, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeTypesPath, locOf } from "../program.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 import { bufEncoding, lowerMapSeedArrayNew } from "./lower-containers.js";
+import { pureReemittable } from "./lower-exprs.js";
 import { lowerSearchParamsNew } from "./lower-builtins.js";
 import { requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { STREAM_API_MEMBERS, STREAM_PROP_MEMBERS, UNDERSCORE_METHODS, lowerStreamNew, lowerStreamSuperCall, streamCtorShape } from "./lower-stream.js";
@@ -5320,6 +5321,33 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       // families carry pointed hints: each states WHY no honest static
       // lowering exists (or what to use instead).
       if (L.isStdlibSymbol(symbol ?? undefined)) {
+        // The deprecated `new Buffer(string, encoding?)` ctor's string arm
+        // with a NON-STRING first argument and a string second: Node
+        // throws ERR_INVALID_ARG_TYPE synchronously (and DEP0005 never
+        // fires on this throwing path, so the compiled silence matches).
+        // Every other new Buffer form keeps the fence below — the
+        // constructing forms would owe the deprecation warning.
+        if (
+          expr.expression.text === "Buffer" &&
+          expr.arguments?.length === 2 &&
+          !expr.arguments.some(ts.isSpreadElement) &&
+          L.mapTypeOf(L.typeOf(expr.arguments[0]!))?.kind !== "string" &&
+          L.mapTypeOf(L.typeOf(expr.arguments[1]!))?.kind === "string"
+        ) {
+          const first = L.lowerExpr(expr.arguments[0]!);
+          if (first.kind === "unitLit" || first.type.kind === "dyn" || L.dynConvertible(first.type)) {
+            const got: IrExpr =
+              first.type.kind === "dyn" ? first : { kind: "dynFrom", value: first, type: DYN, loc };
+            // The encoding argument still evaluates in Node before the
+            // throw only via the ctor body's later reads — it does NOT
+            // observe it before throwing, so dropping it is exact for
+            // effect-free operands; effectful ones keep the fence.
+            const enc = L.lowerExpr(expr.arguments[1]!);
+            if (enc.kind === "strLit" || pureReemittable(enc)) {
+              return { kind: "libCall", fn: "buffer.newStringFail", args: [got], type: bytesOf("u8"), loc };
+            }
+          }
+        }
         const ctorHints: Record<string, string | undefined> = {
           RegExp: "use a regex literal (/pattern/flags) — constructed regexes have no lowering",
           String: "boxed wrapper objects have no lowering — use the string primitive (the box is only distinguishable via typeof/identity, which nothing here can honor)",

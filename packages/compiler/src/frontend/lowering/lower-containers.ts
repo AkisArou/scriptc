@@ -6,12 +6,12 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrBytesElem, IrBytesIntrinsicMethod, IrExpr, IrFunction, IrLocal, IrMapIntrinsicMethod, IrParam, IrRecordShape, IrSetIntrinsicMethod, IrStmt, IrType, JSVAL, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, bytesOf, funcOf, isRefCounted, isSupportedIndexValue, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { ARRAY_METHODS, MAP_METHODS, SET_COMBINE_METHODS, SET_METHODS, STR_METHODS } from "./surfaces.js";
-import { isRequireMainFilename, probeLower, pureReemittable } from "./lower-exprs.js";
+import { isRequireMainFilename, lowerDynObjectLiteral, probeLower, pureReemittable } from "./lower-exprs.js";
 import { forOfVarTarget, lowerDestructuringAssign } from "./lower-stmts.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { DYN_DISPATCH_METHODS, islandPrimitiveExit } from "./lower-calls.js";
 import { typeKey } from "../types.js";
-import { own, WidthLift } from "./lowerer.js";
+import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
 
 /** Ambient array method calls. `push`/`pop`/`indexOf`/`includes`/`join`
    * lower to arrIntrinsic; the HOF family — `map`/`filter`/`forEach`/
@@ -4843,18 +4843,61 @@ function lowerBufferInstanceMethod(L: Lowerer, call: ts.CallExpression,
     return v;
   };
 
+  // The checked-dynamic crossing for a compare/equals argument slot: dyn
+  // passes through, convertible statics (the invalid-input probes'
+  // literals) wrap in dynFrom, `undefined` literals ride the same wrap.
+  // Fences (never returns) when the value cannot cross — an island jsval.
+  const chkArg = (i: number): IrExpr => {
+    // Object literals take the DOM literal path directly (method members
+    // box as dyn functions — the typed record fence never applies).
+    if (ts.isObjectLiteralExpression(args[i]!)) {
+      return lowerDynObjectLiteral(L, args[i] as ts.ObjectLiteralExpression);
+    }
+    const v = L.lowerExpr(args[i]!);
+    if (v.type.kind === "dyn") return v;
+    if (v.kind === "unitLit" || L.dynConvertible(v.type)) {
+      return { kind: "dynFrom", value: v, type: DYN, loc: v.loc };
+    }
+    L.noLowering(
+      `.${name} of '${L.fmt(v.type)}' values`,
+      args[i]!,
+      "a Buffer/Uint8Array argument is the lowered shape (narrow unions first)",
+    );
+  };
+  const argIrKind = (i: number): IrType | null => L.mapTypeOf(L.typeOf(args[i]!));
+
   if (name === "equals") {
     if (nArgs !== 1) L.noLowering(`.equals with ${nArgs} arguments`, call);
-    const other = u8Arg(0);
+    if (argIrKind(0)?.kind === "bytes") {
+      const other = u8Arg(0);
+      const receiver = L.lowerExpr(access.expression);
+      return { kind: "bytesIntrinsic", method: "equals", receiver, args: [other], type: BOOL, loc };
+    }
+    // Not statically bytes (the invalid-input probes, untyped JS
+    // helpers): Node's "otherBuffer" argument ladder runs at runtime.
     const receiver = L.lowerExpr(access.expression);
-    return { kind: "bytesIntrinsic", method: "equals", receiver, args: [other], type: BOOL, loc };
+    return { kind: "libCall", fn: "bytes.equalsChk", args: [receiver, chkArg(0)], type: BOOL, loc };
   }
   if (name === "compare") {
-    if (nArgs < 1 || nArgs > 5) L.noLowering(`.compare with ${nArgs} arguments`, call);
-    const target = u8Arg(0);
-    const idx = call.arguments.slice(1).map((a) => L.lowerExprExpecting(a, F64));
+    if (nArgs > 5) L.noLowering(`.compare with ${nArgs} arguments`, call);
+    const fast =
+      nArgs >= 1 &&
+      argIrKind(0)?.kind === "bytes" &&
+      call.arguments.slice(1).every((a) => L.mapTypeOf(L.typeOf(a))?.kind === "f64");
+    if (fast) {
+      const target = u8Arg(0);
+      const idx = call.arguments.slice(1).map((a) => L.lowerExprExpecting(a, F64));
+      const receiver = L.lowerExpr(access.expression);
+      return { kind: "bytesIntrinsic", method: "compareBuf", receiver, args: [target, ...idx], type: F64, loc };
+    }
+    // An absent/ill-typed target or offset (`a.compare()`, string
+    // offsets, explicit undefined): Node's target/targetStart/targetEnd/
+    // sourceStart/sourceEnd ladder runs at runtime; absent slots pass
+    // the undefined dyn (Node defaults apply there).
     const receiver = L.lowerExpr(access.expression);
-    return { kind: "bytesIntrinsic", method: "compareBuf", receiver, args: [target, ...idx], type: F64, loc };
+    const slots: IrExpr[] = [];
+    for (let i = 0; i < 5; i++) slots.push(i < nArgs ? chkArg(i) : dynUndefinedExpr(loc));
+    return { kind: "libCall", fn: "bytes.compareChk", args: [receiver, ...slots], type: F64, loc };
   }
   if (name === "indexOf" || name === "lastIndexOf" || name === "includes") {
     if (nArgs < 1 || nArgs > 3) L.noLowering(`.${name} with ${nArgs} arguments`, call);
@@ -5109,18 +5152,25 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
       if (args.length !== 2 || args.some(ts.isSpreadElement)) {
         L.noLowering(`Buffer.compare with ${args.length} arguments`, call);
       }
-      const sides = args.map((a) => {
-        const v = L.lowerExpr(a);
-        if (!(v.type.kind === "bytes" && v.type.elem === "u8")) {
-          L.noLowering(
-            `Buffer.compare of '${L.fmt(v.type)}' values`,
-            a,
-            "Buffer/Uint8Array values compare (narrow unions first)",
-          );
+      const sides = args.map((a) => L.lowerExpr(a));
+      if (sides.every((v) => v.type.kind === "bytes" && v.type.elem === "u8")) {
+        return { kind: "bytesIntrinsic", method: "compareBuf", receiver: sides[0]!, args: [sides[1]!], type: F64, loc };
+      }
+      // A side that is not statically bytes (the invalid-input probes,
+      // untyped JS helpers): Node's "buf1"/"buf2" argument ladder runs
+      // at runtime — a well-typed dyn still compares.
+      const dyns = sides.map((v, i) => {
+        if (v.type.kind === "dyn") return v;
+        if (v.kind === "unitLit" || L.dynConvertible(v.type)) {
+          return { kind: "dynFrom", value: v, type: DYN, loc: v.loc } as IrExpr;
         }
-        return v;
+        L.noLowering(
+          `Buffer.compare of '${L.fmt(v.type)}' values`,
+          args[i]!,
+          "Buffer/Uint8Array values compare (narrow unions first)",
+        );
       });
-      return { kind: "bytesIntrinsic", method: "compareBuf", receiver: sides[0]!, args: [sides[1]!], type: F64, loc };
+      return { kind: "libCall", fn: "buffer.compareChk", args: dyns, type: F64, loc };
     }
     if (member === "isBuffer") {
       // The type-predicate narrowing test. Lowered where it DECIDES

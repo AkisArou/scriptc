@@ -314,6 +314,14 @@ const LIB_FN_SYMS: Record<string, string> = {
   "buffer.concatLen": "scr_bytes_concat_len",
   "buffer.byteLenStr": "scr_bytes_byte_length_str",
   "buffer.isEncoding": "scr_bytes_is_encoding",
+  // The checked-dynamic compare/equals validators (scr_bytes_io.c):
+  // Node's argument ladders throw catchably (MAY_THROW_LIB_FNS).
+  "dyn.toStringCoerce": "scr_dyn_string_coerce_js",
+  "buffer.compareChk": "scr_buffer_compare_chk",
+  "bytes.equalsChk": "scr_bytes_equals_chk",
+  "bytes.compareChk": "scr_bytes_compare_chk",
+  "buffer.newStringFail": "scr_buffer_new_string_fail",
+  "fs.toUnixTimestamp": "scr_fs_to_unix_timestamp",
   "fs.readFileSyncBuf": "scr_fs_read_file_bytes",
   "fs.readFileSyncBytes": "scr_fs_read_file_bytes",
   "fs.writeFileSyncBytes": "scr_fs_write_file_bytes",
@@ -503,6 +511,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "emitter.names": "scr_emitter_event_names",
   "emitter.listeners": "scr_emitter_listeners",
   "emitter.setMax": "scr_emitter_set_max",
+  "emitter.setMaxChk": "scr_emitter_set_max_chk",
+  "emitter.setDefaultMaxChk": "scr_emitter_set_default_max_chk",
   "emitter.getMax": "scr_emitter_get_max",
   "emitter.setDefaultMax": "scr_emitter_set_default_max",
   "emitter.getDefaultMax": "scr_emitter_get_default_max",
@@ -9375,6 +9385,42 @@ class LlEmitter {
     // Loop liveness first (one table for generic and special shapes).
     if (USES_TIMERS_LIB_FNS.has(e.fn)) this.usesTimers = true;
     // The handful with non-generic shapes first.
+    if (e.fn === "error.argTypeThrow") {
+      // Always throws with the runtime-rendered Received tail (the
+      // error.nodeThrow dummy pattern). Borrows all three.
+      const an = this.emitExpr(e.args[0]!);
+      const ex = this.emitExpr(e.args[1]!);
+      const got = this.emitExpr(e.args[2]!);
+      this.declare(`declare void @scr_throw_arg_type(ptr, ptr, ptr)`);
+      B.line(`call void @scr_throw_arg_type(ptr ${an.name}, ptr ${ex.name}, ptr ${got.name})`);
+      const ty = this.llType(e.type);
+      if (ty === "void") {
+        this.emitPendingCheck();
+        return { name: "", type: e.type };
+      }
+      const dummy = ty === "double" ? f64Lit(0) : ty === "i1" ? "false" : "null";
+      const out = this.own({ name: dummy, type: e.type });
+      this.emitPendingCheck();
+      return out;
+    }
+    if (e.fn === "error.nodeThrow") {
+      // The compiler-resolved Node-parity throw (always throws — the
+      // typed dummy is abandoned by the pending check's unwind).
+      const kind = this.emitExpr(e.args[0]!);
+      const code = this.emitExpr(e.args[1]!);
+      const msg = this.emitExpr(e.args[2]!);
+      this.declare(`declare void @scr_throw_node_coded(double, ptr, ptr)`);
+      B.line(`call void @scr_throw_node_coded(double ${kind.name}, ptr ${code.name}, ptr ${msg.name})`);
+      const ty = this.llType(e.type);
+      if (ty === "void") {
+        this.emitPendingCheck();
+        return { name: "", type: e.type };
+      }
+      const dummy = ty === "double" ? f64Lit(0) : ty === "i1" ? "false" : "null";
+      const out = this.own({ name: dummy, type: e.type });
+      this.emitPendingCheck();
+      return out;
+    }
     if (e.fn === "global.undefRead") {
       // A declare-d const nothing defines: Node's catchable
       // ReferenceError at the access (always throws — the typed dummy is

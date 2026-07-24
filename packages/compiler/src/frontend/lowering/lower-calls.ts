@@ -8,7 +8,7 @@ import { lowerGenMethodCall } from "./lower-generators.js";
 import { BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
-import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx } from "./lowerer.js";
+import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
 import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
@@ -3049,6 +3049,8 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // and getDefaultHighWaterMark the same way.
         const streamServed = lowerStreamModuleCall(L, expr, bi, loc);
         if (streamServed) return streamServed;
+        const fsTs = L.lowerFsToUnixTimestampCall(expr, bi, loc);
+        if (fsTs) return fsTs;
         const builtinFn = builtinModuleFnOf(L, bi.module, bi.member);
         if (!builtinFn) {
           // Typed by @types/node (the fallback declarations only declare
@@ -3565,6 +3567,9 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // island path (bytes never cross the boundary).
         L.lowerBytesMethodCall(expr, expr.expression) ??
         L.lowerBufferStaticCall(expr, expr.expression) ??
+        // URL.revokeObjectURL's zero-argument contract (the one-argument
+        // form keeps the fence — createObjectURL does too).
+        lowerUrlStaticCall(L, expr, expr.expression) ??
         // Readable.from — the stream classes' one static (before the
         // stdlib chokepoint claims the member).
         lowerStreamStaticCall(L, expr, expr.expression) ??
@@ -7522,10 +7527,63 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
    * direct `call` of the instance with the receiver unevaluated. Claims
    * every call whose member is generic-callable — lowering it or fencing
    * with a named message. */
+  /** URL.revokeObjectURL() with NO argument: Node's ERR_MISSING_ARGS
+   * throws before the registry lookup, so the zero-argument contract is
+   * exact without any blob machinery. The one-argument form (Node's
+   * silent no-op for unregistered ids) and createObjectURL keep their
+   * fences — a compiled program has no blob registry to consult. */
+  function lowerUrlStaticCall(L: Lowerer, call: ts.CallExpression, callee: ts.Expression): IrExpr | null {
+    if (!ts.isPropertyAccessExpression(callee) || callee.questionDotToken !== undefined) return null;
+    if (!ts.isIdentifier(callee.expression) || callee.expression.text !== "URL") return null;
+    if (callee.name.text !== "revokeObjectURL" || call.arguments.length !== 0) return null;
+    const sym = L.resolveValueSymbol(callee.expression);
+    if (!sym || !L.isStdlibSymbol(sym)) return null;
+    return nodeThrowExpr(1, "ERR_MISSING_ARGS", 'The "url" argument must be specified', VOID, locOf(call));
+  }
+
+  const SP_BRAND_METHODS = new Set([
+    "append", "delete", "get", "getAll", "has", "set", "sort",
+    "forEach", "keys", "values", "entries", "toString",
+  ]);
+
   export function lowerObjLitGenericMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (L.chainBlocked(access, call)) return null;
     const name = access.name.text;
+    // URLSearchParams method values through Function.prototype.call/apply
+    // with a receiver that is provably NOT a URLSearchParams (the suite's
+    // `params.append.call(undefined)` probes): the WHATWG brand check
+    // throws ERR_INVALID_THIS before any argument conversion — the whole
+    // call IS that throw. A receiver that IS searchParams-typed, or one
+    // whose runtime kind is unknowable (dyn/'any'), keeps the fence.
+    if (
+      (name === "call" || name === "apply") &&
+      ts.isPropertyAccessExpression(access.expression) &&
+      L.mapTypeOf(L.typeOf(access.expression.expression))?.kind === "searchParams" &&
+      SP_BRAND_METHODS.has(access.expression.name.text) &&
+      L.isStdlibMember(access.expression)
+    ) {
+      const thisArg = call.arguments[0];
+      const thisT = thisArg ? L.mapTypeOf(L.typeOf(thisArg)) : { kind: "undefinedT" as const };
+      const provablyNot =
+        thisT !== null &&
+        thisT.kind !== "searchParams" &&
+        thisT.kind !== "dyn" &&
+        thisT.kind !== "jsval" &&
+        (!thisArg || ts.isIdentifier(thisArg) || ts.isLiteralExpression(thisArg) ||
+          thisArg.kind === ts.SyntaxKind.UndefinedKeyword ||
+          thisArg.kind === ts.SyntaxKind.NullKeyword ||
+          isUnitType(thisT));
+      if (provablyNot) {
+        return nodeThrowExpr(
+          1,
+          "ERR_INVALID_THIS",
+          'Value of "this" must be of type URLSearchParams',
+          L.mapTypeOf(L.typeOf(call)) ?? VOID,
+          locOf(call),
+        );
+      }
+    }
     const recvT = L.typeOf(access.expression);
     const propSym = L.checker.getPropertyOfType(recvT, name);
     if (!propSym) return null;

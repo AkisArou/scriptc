@@ -221,6 +221,9 @@ async function runLinuxNode(file: string): Promise<RunResult> {
     ...(wantsTransformTypes(file)
       ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
       : []),
+    ...(directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l))
+      ? ["--no-deprecation"]
+      : []),
     "--import", inContainer(join(repoRoot, "tests/harness/comptime-shim.mjs")),
     "--import", inContainer(join(repoRoot, "tests/harness/island-shim.mjs")),
     inContainer(nodeOracleFile(file)),

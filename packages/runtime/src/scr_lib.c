@@ -1647,7 +1647,7 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length) 
     mlen = snprintf(msg, sizeof msg,
                     "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
                     numbuf);
-    scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
     return 0;
   }
   size_t off = (size_t)offset;
@@ -1656,7 +1656,7 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length) 
     mlen = snprintf(msg, sizeof msg,
                     "The value of \"length\" is out of range. It must be <= %zu. Received %s",
                     bytelen - off, numbuf);
-    scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
     return 0;
   }
   size_t want = (size_t)length;
@@ -2528,7 +2528,7 @@ ScrStr *scr_crypto_random_string(double n, ScrStr *enc) {
     int mlen = snprintf(msg, sizeof msg,
                         "The value of \"size\" is out of range. It must be >= 0 && <= 2147483647. Received %.*s",
                         (int)numlen, num);
-    scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
     return NULL;
   }
   size_t size = (size_t)n;

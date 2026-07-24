@@ -237,6 +237,21 @@ void scr_throw_error_msg_code(int kind, const char *message, size_t len,
                  scr_error_traced ? &scr_error_trace : NULL);
 }
 
+/* A compiler-resolved Node-parity throw (the always-throwing lowered
+ * arms: ERR_INVALID_THIS receivers, ERR_MISSING_ARGS ladders, the
+ * symbol-to-string TypeError): builds the builtin error of `kind` with
+ * `code` stamped when non-empty. Borrows both strings; always throws
+ * (catchably — call sites are compiler-emitted pending checks). */
+void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg) {
+  ScrError *e = scr_error_new((int)kind, (ScrStr *)msg); /* borrowed in */
+  if (code->len > 0) {
+    scr_str_release(e->code); /* NULL-safe */
+    e->code = scr_str_retain((ScrStr *)code);
+  }
+  scr_throw_obj(e, &scr_error_retain_v, &scr_error_release_v,
+                 scr_error_traced ? &scr_error_trace : NULL);
+}
+
 /* A read of a `declare`d const nothing defines (the bundler-define
  * pattern — __VERSION__): Node running the source throws ReferenceError
  * "<name> is not defined" at the access. Borrows `name`; always throws

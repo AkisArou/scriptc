@@ -123,13 +123,22 @@ function nodeOracleFile(file: string): string {
   return path;
 }
 
+/** `// @no-deprecation` in the directive head: the Node oracle runs with
+ * --no-deprecation — for programs exercising deprecated-API ERROR paths
+ * (new Buffer's ctor ladder) whose DEP warnings carry a pid and can never
+ * byte-compare; the compiled runtime emits no process warnings at all. */
+function wantsNoDeprecation(file: string): boolean {
+  return directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l));
+}
+
 /** The Node oracle's argv for a corpus entry (shims + the per-program
  * transform flag). */
 function nodeOracleArgs(file: string): string[] {
   const transform = wantsTransformTypes(file)
     ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
     : [];
-  return [...transform, "--import", comptimeShim, "--import", islandShim, nodeOracleFile(file)];
+  const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
+  return [...transform, ...nodep, "--import", comptimeShim, "--import", islandShim, nodeOracleFile(file)];
 }
 
 /** Runs a binary, tolerating an expected nonzero exit (execFile rejects on

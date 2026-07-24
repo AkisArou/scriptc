@@ -127,22 +127,13 @@ assert-fences.ts:44:48 - error SC2020: 'assert.throws with an empty expected obj
   43 | assert.throws(() => { throw new Error("x"); }, { errno: -2 }); // properties outside the static error surface
   44 | assert.throws(() => { throw new Error("x"); }, {}); // Node rejects the empty shape
      |                                                ^~
-  45 | const shapeValue = { name: "TypeError" };
+  45 | // (a convertible record VARIABLE as the expected shape lowers now — the
 
   hint: Node rejects this (the error 'may not be an empty object') — name at least one of name/message/code
 
-assert-fences.ts:46:48 - error SC2020: 'assert.throws with this expected-error shape' is part of the standard library types but has no scriptc lowering yet
-
-  45 | const shapeValue = { name: "TypeError" };
-  46 | assert.throws(() => { throw new Error("x"); }, shapeValue); // non-literal expected objects
-     |                                                ^~~~~~~~~~
-  47 | void assert.doesNotReject(async () => {}, { name: "TypeError" }); // Node's own TypeError (function or RegExp only)
-
-  hint: an error CLASS (Error/TypeError/... or a class extending them), an error instance, a message string, a regular expression, or an object literal over name/message/code are the lowered forms
-
 assert-fences.ts:47:43 - error SC2020: 'assert.doesNotReject with an object-shape expectation' is part of the standard library types but has no scriptc lowering yet
 
-  46 | assert.throws(() => { throw new Error("x"); }, shapeValue); // non-literal expected objects
+  46 | // errValue key walk; corpus 2556 pins it)
   47 | void assert.doesNotReject(async () => {}, { name: "TypeError" }); // Node's own TypeError (function or RegExp only)
      |                                           ^~~~~~~~~~~~~~~~~~~~~
   48 | assert.ifError(new Map<string, number>()); // no honest ifError rendering for this type

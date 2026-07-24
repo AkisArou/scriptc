@@ -507,6 +507,21 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
   // everything else fences by its static name.
   if (L.checker.getConstructSignatures(L.typeOf(access.expression)).length > 0) {
     if (member === "setMaxListeners" && args.length === 1) {
+      if (L.mapTypeOf(L.typeOf(args[0]!))?.kind !== "f64") {
+        // Node's runtime ladder over the DOM value ("setMaxListeners" is
+        // the message's slot for the static form).
+        const raw = L.lowerExpr(args[0]!);
+        if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+          const n: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+          return {
+            kind: "libCall",
+            fn: "emitter.setDefaultMaxChk",
+            args: [n, { kind: "strLit", value: "setMaxListeners", type: STRING, loc }],
+            type: VOID,
+            loc,
+          };
+        }
+      }
       const n = L.lowerExprExpecting(args[0]!, F64);
       if (n.type.kind !== "f64") {
         L.noLowering(
@@ -518,6 +533,36 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       return { kind: "libCall", fn: "emitter.setDefaultMax", args: [n], type: VOID, loc };
     }
     if (member === "setMaxListeners") {
+      // The per-target form with a target that is provably NOT an
+      // emitter/EventTarget (the invalid-input probes): Node validates n
+      // first, then throws ERR_INVALID_ARG_TYPE on the target. Claimed
+      // when n is a pure read (identifier/literal — nothing to evaluate)
+      // and the target crosses into the DOM for the Received tail.
+      if (args.length === 2 && !args.some(ts.isSpreadElement)) {
+        const nT = L.mapTypeOf(L.typeOf(args[0]!));
+        const tT = L.mapTypeOf(L.typeOf(args[1]!));
+        const nPure = ts.isIdentifier(args[0]!) || ts.isLiteralExpression(args[0]!);
+        const targetNotEmitter =
+          tT !== null && tT.kind !== "dyn" && tT.kind !== "jsval" &&
+          !(tT.kind === "object");
+        if (nT?.kind === "f64" && nPure && targetNotEmitter) {
+          const raw = L.lowerExpr(args[1]!);
+          if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+            const got: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+            return {
+              kind: "libCall",
+              fn: "error.argTypeThrow",
+              args: [
+                { kind: "strLit", value: "eventTargets", type: STRING, loc },
+                { kind: "strLit", value: "an instance of EventEmitter or EventTarget", type: STRING, loc },
+                got,
+              ],
+              type: VOID,
+              loc,
+            };
+          }
+        }
+      }
       L.noLowering(
         `EventEmitter.setMaxListeners with ${args.length} arguments`,
         call,
@@ -774,6 +819,16 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
   if (member === "setMaxListeners") {
     if (args.length !== 1) L.noLowering(`setMaxListeners with ${args.length} arguments`, call);
     const receiver = L.lowerExpr(access.expression);
+    if (L.mapTypeOf(L.typeOf(args[0]!))?.kind !== "f64") {
+      // The invalid-input probes (string n, dyn helpers): Node's ladder
+      // runs at runtime — ERR_INVALID_ARG_TYPE for non-numbers,
+      // ERR_OUT_OF_RANGE below zero, and a well-typed dyn still applies.
+      const raw = L.lowerExpr(args[0]!);
+      if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+        const n: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+        return { kind: "libCall", fn: "emitter.setMaxChk", args: [receiver, n], type: receiver.type, loc };
+      }
+    }
     const n = L.lowerExprExpecting(args[0]!, F64);
     return { kind: "libCall", fn: "emitter.setMax", args: [receiver, n], type: receiver.type, loc };
   }

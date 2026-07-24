@@ -2549,6 +2549,40 @@ export type IrLibFn =
    * zero-padded to the total. THROWS Node's 'length' RangeError on a
    * negative/non-integer total (may-throw seed). */
   | "buffer.concatLen"
+  /** The checked-dynamic compare/equals validators (scr_bytes_io.c) —
+   * the lowered form when an argument is NOT statically bytes<u8> (the
+   * invalid-input probes; a dyn from an untyped JS helper): Node's own
+   * argument ladders run at runtime — ERR_INVALID_ARG_TYPE with the
+   * API's argument name ("buf1"/"buf2", "otherBuffer", "target"; offsets
+   * "of type number"), validateOffset's ERR_OUT_OF_RANGE for bad
+   * numbers, undefined offsets taking their Node defaults — and a
+   * well-typed value still computes the real answer. All args borrowed
+   * dyn; compareChk's four offset slots pass the undefined dyn when
+   * syntactically absent. May-throw seeds. */
+  | "buffer.compareChk"
+  | "bytes.equalsChk"
+  | "bytes.compareChk"
+  /** The deprecated `new Buffer(number, 'enc')` string-arm rejection:
+   * always throws Node's ERR_INVALID_ARG_TYPE ("The \"string\" argument
+   * must be of type string. Received ..."). Borrowed dyn; may-throw. */
+  | "buffer.newStringFail"
+  /** fs._toUnixTimestamp(time) over a DOM value: numeric strings and
+   * finite numbers coerce (negatives answer now/1000, Node's shape);
+   * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
+  | "fs.toUnixTimestamp"
+  /** The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
+   * rendered Received tail: args [argname, "of type ..." clause, the
+   * offending DOM value]. ALWAYS THROWS; polymorphic result (the
+   * error.nodeThrow pattern). May-throw seed. */
+  | "error.argTypeThrow"
+  /** The checked-dynamic max-listeners ladders: setMaxChk is the
+   * instance form over a DOM n (non-numbers ERR_INVALID_ARG_TYPE,
+   * negatives/NaN ERR_OUT_OF_RANGE; +1 receiver back — chaining);
+   * setDefaultMaxChk is the static/property form, its second argument
+   * naming the message slot ("setMaxListeners" for the static call,
+   * "defaultMaxListeners" for the module-property assignment). */
+  | "emitter.setMaxChk"
+  | "emitter.setDefaultMaxChk"
   /** The Buffer forms of the fs quartet: readFileSync(path) with NO
    * encoding → bytes<u8> (+1), writeFileSync(path, bytes), and the
    * fs/promises readFile(path) no-encoding form (an already-settled
@@ -2824,6 +2858,20 @@ export type IrLibFn =
    * field to stamp. error.toString: borrowed `%Error`-typed receiver, +1
    * string in Node's "name: message" shape. None of the three throws. */
   | "error.new"
+  /** The compiler-resolved Node-parity throw for always-throwing lowered
+   * arms (ERR_INVALID_THIS receivers, ERR_MISSING_ARGS arity ladders,
+   * the symbol-to-string TypeError): args are [error-kind f64 (the
+   * SCR_ERR_* index: 0 Error, 1 TypeError, 2 RangeError), code (empty =
+   * no code slot), message]. ALWAYS THROWS catchably; the result type is
+   * the replaced expression's own (never materialized — the
+   * global.undefRead pattern). May-throw seed. */
+  | "error.nodeThrow"
+  /** JS ToString over a DOM value WITH the object protocol (a user
+   * toString/valueOf member is CALLED and its throw propagates;
+   * exhaustion throws "Cannot convert object to primitive value"; units
+   * render "null"/"undefined") — the WHATWG USVString conversions
+   * (URLSearchParams names/values). Borrowed dyn; +1 string. May-throw. */
+  | "dyn.toStringCoerce"
   /** A read of a `declare`d const NOTHING defines (the bundler-define
    * pattern — __VERSION__): always throws the catchable ReferenceError
    * Node raises at the access ("<name> is not defined"). args[0] is the
@@ -6160,6 +6208,10 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // A read of a declare-d const nothing defines: always throws Node's
   // catchable ReferenceError.
   "global.undefRead",
+  // The compiler-resolved Node-parity throw: always throws, catchably.
+  "error.nodeThrow",
+  // USVString coercion runs user toString/valueOf — throws propagate.
+  "dyn.toStringCoerce",
   "child.kill",
   // The caller's lookup runs synchronously inside the connect call — a
   // throw there propagates like Node's.
@@ -6241,6 +6293,16 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.randomBytesToString",
   "crypto.randomBytes",
   "buffer.concatLen",
+  // The checked-dynamic compare/equals validators: Node's argument
+  // ladders throw ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE catchably.
+  "buffer.compareChk",
+  "bytes.equalsChk",
+  "bytes.compareChk",
+  "buffer.newStringFail",
+  "fs.toUnixTimestamp",
+  "error.argTypeThrow",
+  "emitter.setMaxChk",
+  "emitter.setDefaultMaxChk",
   "fs.readFileSyncBytes",
   "fs.writeFileSyncBytes",
   "zlib.inflateSync",

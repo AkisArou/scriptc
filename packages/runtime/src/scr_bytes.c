@@ -929,16 +929,19 @@ ScrBytes *scr_bytes_from_arr(ScrBytesElem elem, const ScrArr *arr) {
 
 static size_t scr_bytes_received(double v, char out[48]); /* the numeric section below */
 
-/* validateOffset(name, 0, max): non-integers are 'an integer', the rest
- * '>= 0 && <= max' (Node spells '&&' here, unlike the read/write
- * families' 'and'). max < 0 means copy's no-upper-bound '>= 0' render. */
-static bool scr_bytes_validate_off(const char *name, double value, double max) {
-  if (floor(value) == value && value >= 0 && (max < 0 || value <= max)) return true;
+/* validateOffset(name, 0, max): non-integers are 'an integer' (Number.
+ * isInteger — ±Infinity render 'an integer' too), the rest '>= 0 && <=
+ * max' (Node spells '&&' here, unlike the read/write families' 'and').
+ * max < 0 means copy's no-upper-bound '>= 0' render. Exported: the
+ * checked-dynamic compare/equals validators (scr_bytes_io.c) run the
+ * same ladder after their own type gate. */
+bool scr_bytes_validate_off(const char *name, double value, double max) {
+  if (isfinite(value) && floor(value) == value && value >= 0 && (max < 0 || value <= max)) return true;
   char recv[48];
   scr_bytes_received(value, recv);
   char msg[160];
   int mlen;
-  if (floor(value) != value) {
+  if (floor(value) != value || !isfinite(value)) {
     mlen = snprintf(msg, sizeof msg,
                     "The value of \"%s\" is out of range. It must be an integer. Received %s",
                     name, recv);
@@ -952,7 +955,7 @@ static bool scr_bytes_validate_off(const char *name, double value, double max) {
                     "The value of \"%s\" is out of range. It must be >= 0 && <= %s. Received %s",
                     name, maxb, recv);
   }
-  scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+  scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
   return false;
 }
 
@@ -1037,7 +1040,7 @@ static ScrBytes *scr_bytes_fill_core(ScrBytes *b, const uint8_t *pat, size_t pat
                                      bool zero_ok, double nargs, double offset, double end) {
   if (patn == 0 && !zero_ok) {
     static const char msg[] = "The argument 'value' is invalid. Received <Buffer >";
-    scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+    scr_throw_error_msg_code(SCR_ERR_TYPE, msg, sizeof msg - 1, "ERR_INVALID_ARG_VALUE");
     return NULL;
   }
   size_t n = (size_t)nargs;
@@ -1108,7 +1111,7 @@ ScrBytes *scr_bytes_swap(ScrBytes *b, double width) {
   if (b->len % w != 0) {
     char msg[64];
     int mlen = snprintf(msg, sizeof msg, "Buffer size must be a multiple of %zu-bits", w * 8);
-    scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_INVALID_BUFFER_SIZE");
     return NULL;
   }
   for (size_t g = 0; g < b->len; g += w) {
@@ -1287,7 +1290,7 @@ static void scr_bytes_bounds_error(double value, double length, const char *type
                     type ? type : "offset", recv);
   } else if (length < 0) {
     static const char oob[] = "Attempt to access memory outside buffer bounds";
-    scr_throw_error_msg(SCR_ERR_RANGE, oob, sizeof oob - 1);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, oob, sizeof oob - 1, "ERR_BUFFER_OUT_OF_BOUNDS");
     return;
   } else {
     char lenbuf[32];
@@ -1296,7 +1299,7 @@ static void scr_bytes_bounds_error(double value, double length, const char *type
                     "The value of \"%s\" is out of range. It must be >= %d and <= %s. Received %s",
                     type ? type : "offset", type ? 1 : 0, lenbuf, recv);
   }
-  scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+  scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
 }
 
 /* The shared offset gate: width bytes at offset must lie inside b. */
@@ -1340,7 +1343,7 @@ static bool scr_bytes_check_int(const ScrBytes *b, double value, double offset,
                       "The value of \"value\" is out of range. It must be >= %s and <= %s. Received %s",
                       minb, maxb, recv);
     }
-    scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)mlen);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
     return false;
   }
   return scr_bytes_rw_check(b, offset, width);

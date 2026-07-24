@@ -4730,9 +4730,21 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2570-buffer-arg-validation.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2570-buffer-arg-validation.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2556-width-hybrid-shapes.ts": {
    "order": [
     "<repo>/tests/corpus/2556-width-hybrid-shapes.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2571-searchparams-arg-validation.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2571-searchparams-arg-validation.cjs"
    ],
    "diags": []
   },
@@ -4748,6 +4760,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2572-readable-emitted-readable-flag.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2572-readable-emitted-readable-flag.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2573-fs-url-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2573-fs-url-arg-ladders.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2559-index-signature-container-values.ts": {
    "order": [
     "<repo>/tests/corpus/2559-index-signature-container-values.ts"
@@ -4757,6 +4781,12 @@
   "<repo>/tests/corpus/2560-arraybuffer-dataview-set.ts": {
    "order": [
     "<repo>/tests/corpus/2560-arraybuffer-dataview-set.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2574-emitter-max-listeners-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2574-emitter-max-listeners-ladders.cjs"
    ],
    "diags": []
   },
@@ -6825,6 +6855,48 @@
    ],
    "diags": []
   },
+  "<repo>/tests/fixtures/node-types/argv-env.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/argv-env.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/fenced.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/fenced.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/import-fences.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/import-fences.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC1010",
+     "message": "the 'v8' module (it observes V8 engine internals — heap statistics and snapshots, GC and CPU profiles, serialize/deserialize — and a compiled binary embeds no V8 engine to observe) is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
+      "start": 422,
+      "end": 461
+     },
+     "milestone": "M4",
+     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+    }
+   ]
+  },
+  "<repo>/tests/fixtures/node-types/path-os.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/path-os.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/stream-capture.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/2465-getter-table/main.ts"
@@ -7234,48 +7306,6 @@
      "hint": "set \"strictNullChecks\": true (or \"strict\": true) in the project tsconfig"
     }
    ]
-  },
-  "<repo>/tests/fixtures/node-types/argv-env.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/argv-env.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/fenced.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/fenced.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/import-fences.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/import-fences.ts"
-   ],
-   "diags": [
-    {
-     "code": "SC1010",
-     "message": "the 'v8' module (it observes V8 engine internals — heap statistics and snapshots, GC and CPU profiles, serialize/deserialize — and a compiled binary embeds no V8 engine to observe) is not supported yet",
-     "loc": {
-      "file": "<repo>/tests/fixtures/node-types/import-fences.ts",
-      "start": 422,
-      "end": 461
-     },
-     "milestone": "M4",
-     "hint": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
-    }
-   ]
-  },
-  "<repo>/tests/fixtures/node-types/path-os.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/path-os.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/fixtures/node-types/stream-capture.ts": {
-   "order": [
-    "<repo>/tests/fixtures/node-types/stream-capture.ts"
-   ],
-   "diags": []
   }
  }
 }

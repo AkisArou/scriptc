@@ -667,6 +667,16 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "buffer.byteLenStr": { argTypes: [STRING, STRING], result: F64 },
   "buffer.isEncoding": { argTypes: [STRING], result: BOOL },
   "buffer.concatLen": { argTypes: [arrayOf(BYTES_U8), F64], result: BYTES_U8 },
+  // The checked-dynamic compare/equals validators (Node's argument
+  // ladders over DOM-boxed invalid-input probes).
+  "buffer.compareChk": { argTypes: [DYN, DYN], result: F64 },
+  "bytes.equalsChk": { argTypes: [BYTES_U8, DYN], result: BOOL },
+  "bytes.compareChk": { argTypes: [BYTES_U8, DYN, DYN, DYN, DYN, DYN], result: F64 },
+  "buffer.newStringFail": { argTypes: [DYN], result: BYTES_U8 },
+  "fs.toUnixTimestamp": { argTypes: [DYN], result: F64 },
+  "error.argTypeThrow": { argTypes: [STRING, STRING, DYN], result: VOID },
+  "emitter.setMaxChk": { argTypes: [null, DYN], result: VOID },
+  "emitter.setDefaultMaxChk": { argTypes: [DYN, STRING], result: VOID },
   "fs.readFileSyncBytes": { argTypes: [STRING], result: BYTES_U8 },
   "fs.writeFileSyncBytes": { argTypes: [STRING, BYTES_U8], result: VOID },
   "fsp.readFileBytes": { argTypes: [STRING], result: { kind: "promise", inner: BYTES_U8 } },
@@ -712,6 +722,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // error.new's result and the receiver slots are builtin-error classes —
   // program-dependent object types, checked in the libCall case.
   "error.new": { argTypes: [STRING], result: VOID },
+  "error.nodeThrow": { argTypes: [F64, STRING, STRING], result: VOID },
+  "dyn.toStringCoerce": { argTypes: [DYN], result: STRING },
   // Always throws; the result is the READ's declared type (a typed dummy
   // the unwind abandons) — the libCall case skips the result check.
   "global.undefRead": { argTypes: [STRING], result: VOID },
@@ -3850,6 +3862,11 @@ function validateFunction(
           // of the undefined global mapped to (never materialized).
           break;
         }
+        if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow") {
+          // Always throws — the result type is the replaced expression's
+          // own (never materialized; the global.undefRead pattern).
+          break;
+        }
         if (e.fn === "error.new") {
           // Which builtin the runtime constructs is named by the result type.
           if (!isBuiltinErrorObject(e.type)) {
@@ -4064,6 +4081,7 @@ function validateFunction(
           break;
         }
         if (e.fn.startsWith("emitter.") && e.fn !== "emitter.setDefaultMax" &&
+            e.fn !== "emitter.setDefaultMaxChk" &&
             e.fn !== "emitter.getDefaultMax" && e.fn !== "emitter.checkListener") {
           // Receiver: an emitter-hierarchy object (the %EventEmitter class
           // itself, or a class whose base chain reaches it). emitter.new
@@ -4091,7 +4109,8 @@ function validateFunction(
           if (e.fn === "emitter.on" || e.fn === "emitter.off" ||
               e.fn === "emitter.onDyn" || e.fn === "emitter.offDyn" ||
               e.fn === "emitter.onData" || e.fn === "emitter.onDataDyn" ||
-              e.fn === "emitter.removeAll" || e.fn === "emitter.setMax") {
+              e.fn === "emitter.removeAll" || e.fn === "emitter.setMax" ||
+              e.fn === "emitter.setMaxChk") {
             if (!typeEquals(e.type, e.args[0]!.type)) {
               err(`libCall ${e.fn} must return its receiver's type (the chaining 'this')`, e.loc);
             }
