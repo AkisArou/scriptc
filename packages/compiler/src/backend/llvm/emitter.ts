@@ -608,6 +608,9 @@ const LIB_FN_SYMS: Record<string, string> = {
   // generic shapes; the throwing members ride the pending check.
   "tp.setTimeout": "scr_tp_set_timeout",
   "tp.setImmediate": "scr_tp_set_immediate",
+  // stream/promises' finished form (+1 promise; may-throw pending check;
+  // the pipeline form needs the stream-array compound and emits below).
+  "sp.finished": "scr_sp_finished",
   "dc.channel": "scr_dc_channel",
   "dc.subscribe": "scr_dc_subscribe",
   "dc.unsubscribe": "scr_dc_unsubscribe",
@@ -713,6 +716,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "stream.setTransform", "stream.setFlush",
   "process.activeResources",
   "stream.finished", "stream.finishedDyn", "stream.pipeline", "stream.pipelineDyn",
+  "sp.finished", "sp.pipeline",
   "net.listen", "net.listenCb", "net.listenOpts", "net.listenOptsCb",
   "net.connect", "net.connectCb", "net.connectLookup",
   "http.createServer", "http.createServerEmpty",
@@ -10427,6 +10431,27 @@ class LlEmitter {
         this.declare(`declare ptr @scr_stream_finished(ptr, ptr, ptr)`);
         B.line(`${t} = call ptr @scr_stream_finished(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr @${thunk})`);
       }
+      const out = this.own({ name: t, type: e.type });
+      this.emitPendingCheck();
+      return out;
+    }
+    if (e.fn === "sp.pipeline") {
+      // pipeline(count, s1..sn) settling a void promise: the stream list
+      // rides the callback form's stack array, no callback slot.
+      const countArg = e.args[0]!;
+      if (countArg.kind !== "numLit") throw new Error(`llvm emitter bug: ${e.fn} count not a literal`);
+      const n = countArg.value;
+      const args = e.args.map((a) => this.emitExpr(a));
+      const arr = B.slot();
+      B.entryAllocas.push(`${arr} = alloca [${n} x ptr]`);
+      for (let i = 0; i < n; i++) {
+        const p = B.tmp();
+        B.line(`${p} = getelementptr inbounds [${n} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+        B.line(`store ptr ${args[1 + i]!.name}, ptr ${p}`);
+      }
+      const t = B.tmp();
+      this.declare(`declare ptr @scr_sp_pipeline(double, ptr)`);
+      B.line(`${t} = call ptr @scr_sp_pipeline(double ${f64Lit(n)}, ptr ${arr})`);
       const out = this.own({ name: t, type: e.type });
       this.emitPendingCheck();
       return out;

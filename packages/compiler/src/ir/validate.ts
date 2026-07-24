@@ -797,6 +797,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "stream.finishedDyn": { argTypes: [null, DYN], result: VOID },
   "stream.pipeline": { argTypes: [F64], result: VOID },
   "stream.pipelineDyn": { argTypes: [F64], result: VOID },
+  "sp.finished": { argTypes: [null], result: { kind: "promise", inner: VOID } },
+  "sp.pipeline": { argTypes: [F64], result: { kind: "promise", inner: VOID } },
   "readable.newDyn": { argTypes: [DYN], result: VOID },
   "writable.newDyn": { argTypes: [DYN], result: VOID },
   "duplex.newDyn": { argTypes: [DYN], result: VOID },
@@ -3165,6 +3167,7 @@ function validateFunction(
           e.fn === "duplex.initDyn" || e.fn === "transform.initDyn" ||
           e.fn === "passthrough.initDyn" ||
           e.fn === "stream.pipeline" || e.fn === "stream.pipelineDyn" ||
+          e.fn === "sp.pipeline" ||
           e.fn === "writable.write" ||
           e.fn === "writable.writeStr" || e.fn === "writable.writeU" ||
           e.fn === "writable.end" ||

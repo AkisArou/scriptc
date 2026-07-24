@@ -2148,6 +2148,49 @@ ScrStream *scr_stream_pipeline(double n_d, ScrStream **streams /*borrowed*/,
   return scr_stream_retain(streams[n - 1]);
 }
 
+/* ── node:stream/promises ─────────────────────────────────────────────
+ * The promise forms ride the callback machinery above with a settling
+ * watcher: caps[0] boxes the pending promise; the terminal status
+ * fulfills (NULL) or rejects (the error moves through the exception
+ * cell, the reject-pending pattern). */
+
+static void scr_sp_settle_inv(ScrClosure *cb, ScrStream *s, ScrError *err) {
+  (void)s;
+  ScrPromise *p = scr_box_get_ref(cb->caps[0]); /* +1 */
+  if (err != NULL) {
+    scr_throw_obj(scr_error_retain(err), &scr_error_retain_v, &scr_error_release_v,
+                  scr_error_trace_arg());
+    scr_promise_reject_pending(p);
+  } else {
+    scr_promise_fulfill_void(p);
+  }
+  scr_promise_release(p);
+}
+
+static ScrClosure *scr_sp_watcher(ScrPromise *p /*borrowed*/) {
+  ScrClosure *w = scr_closure_new((void *)&scr_sp_settle_inv, 1);
+  w->caps[0] = scr_box_new_obj(scr_promise_retain_v, scr_promise_release_v, scr_promise_trace_v);
+  scr_box_set_ref(w->caps[0], scr_promise_retain(p));
+  return w;
+}
+
+ScrPromise *scr_sp_finished(ScrStream *s) {
+  ScrPromise *p = scr_promise_new();
+  /* The cleanup closure is the callback form's return value; the promise
+   * form exposes no unhook, so it drops here (the watcher stays parked —
+   * scr_stream_finished retained it into the stream's list). */
+  ScrClosure *cleanup = scr_stream_finished(s, scr_sp_watcher(p), &scr_sp_settle_inv);
+  scr_closure_release(cleanup);
+  return p;
+}
+
+ScrPromise *scr_sp_pipeline(double n, ScrStream **streams) {
+  ScrPromise *p = scr_promise_new();
+  ScrStream *dst = scr_stream_pipeline(n, streams, scr_sp_watcher(p), &scr_sp_settle_inv);
+  scr_stream_release(dst);
+  return p;
+}
+
 /* ── the readable surface ─────────────────────────────────────────────── */
 
 bool scr_stream_push(ScrStream *s, ScrBytes *chunk) {

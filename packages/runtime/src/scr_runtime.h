@@ -1552,6 +1552,13 @@ bool scr_stream_push_dyn(ScrStream *s, const ScrDyn *d);       /* borrows d; tag
 bool scr_stream_write_dyn(ScrStream *s, const ScrDyn *d, ScrClosure *cb); /* cb moves */
 ScrPromise *scr_stream_next_chunk(ScrStream *s);
 ScrPromise *scr_stream_next_chunk_dyn(ScrStream *s);
+/* node:stream/promises — the promise forms over the finished/pipeline
+ * machinery above: a pending void promise the terminal watcher settles
+ * (fulfilled on a clean finish, rejected with the finish status
+ * otherwise — the stream's error or ERR_STREAM_PREMATURE_CLOSE).
+ * Streams borrowed; +1 promises. */
+ScrPromise *scr_sp_finished(ScrStream *s);
+ScrPromise *scr_sp_pipeline(double n, ScrStream **streams);
 /* Readable.from(array): +1 fully-seeded object-entry stream (one WHOLE
  * chunk per element — strings or Buffers per the flag; hwm 1, already
  * EOF'd). Borrows arr. */

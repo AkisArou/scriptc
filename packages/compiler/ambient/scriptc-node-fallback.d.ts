@@ -3135,3 +3135,16 @@ declare module "node:stream" {
   import stream = require("stream");
   export = stream;
 }
+declare module "stream/promises" {
+  /* The promise forms of finished/pipeline: a void promise the stream's
+   * terminal point settles (rejected with the error, or
+   * ERR_STREAM_PREMATURE_CLOSE on an early close). Stream arguments are
+   * the lowered surface — iterables/generators/functions fence per site. */
+  function pipeline(...streams: unknown[]): Promise<void>;
+  function finished(stream: unknown): Promise<void>;
+  export { pipeline, finished };
+}
+declare module "node:stream/promises" {
+  import streamPromises = require("stream/promises");
+  export = streamPromises;
+}

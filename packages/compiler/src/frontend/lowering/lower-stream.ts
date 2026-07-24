@@ -1132,12 +1132,38 @@ function lowerEosCallback(
 export function lowerStreamModuleCall(L: Lowerer, call: ts.CallExpression,
   bi: { module: string; member: string }, loc: SrcLoc): IrExpr | null {
   if (bi.module === "stream/promises") {
-    if (bi.member === "finished" || bi.member === "pipeline") {
-      L.noLowering(
-        `stream/promises.${bi.member}`,
-        call,
-        `the callback form of ${bi.member} from 'stream' is lowered; the promise form is not yet`,
-      );
+    const args = call.arguments;
+    // finished(stream) → a pending void promise the terminal watcher
+    // settles (rejected with the stream's error, or
+    // ERR_STREAM_PREMATURE_CLOSE — the callback form's status, boxed
+    // through the promise instead). The options argument has no lowering.
+    if (bi.member === "finished") {
+      if (args.length !== 1) {
+        L.noLowering(
+          `stream/promises.finished with ${args.length} arguments`,
+          call,
+          args.length === 2 ? "the options argument has no lowering yet — the one-argument form is supported" : "the supported form is finished(stream)",
+        );
+      }
+      const recv = lowerStreamArg(L, args[0]!, "finished");
+      return { kind: "libCall", fn: "sp.finished", args: [recv], type: { kind: "promise", inner: VOID }, loc };
+    }
+    // pipeline(...streams) → the callback pipeline's chaining/destroyer
+    // semantics with the settlement on a promise. Stream stages only
+    // (lowerStreamArg's fence); Node's promise resolves undefined for
+    // stream destinations, so the result is a void promise.
+    if (bi.member === "pipeline") {
+      if (args.length < 2) {
+        L.noLowering(`stream/promises.pipeline with ${args.length} arguments`, call, "the supported form is pipeline(source, ...streams)");
+      }
+      const streams = args.map((a) => lowerStreamArg(L, a, "pipeline"));
+      return {
+        kind: "libCall",
+        fn: "sp.pipeline",
+        args: [f64Lit(streams.length, loc), ...streams],
+        type: { kind: "promise", inner: VOID },
+        loc,
+      };
     }
     return null;
   }

@@ -4959,6 +4959,21 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `(${cType(e.type).trim()})scr_stream_pipeline(${n}, (ScrStream *[]){ ${list} }, ${cb.name}, &${thunk})`,
             );
           }
+          case "sp.finished":
+            // The stream/promises form: a +1 pending promise the terminal
+            // watcher settles — no callback, no cleanup exposure.
+            E.usesTimers = true;
+            return finish(`scr_sp_finished((ScrStream *)${arg(0)})`);
+          case "sp.pipeline": {
+            // pipeline(count, s1..sn) settling a void promise; the stream
+            // list rides the callback form's compound literal.
+            E.usesTimers = true;
+            const countArg = e.args[0]!;
+            if (countArg.kind !== "numLit") throw new Error(`emitter bug: ${fn} count not a literal`);
+            const n = countArg.value;
+            const list = Array.from({ length: n }, (_, i) => `(ScrStream *)${arg(1 + i)}`).join(", ");
+            return finish(`scr_sp_pipeline(${n}, (ScrStream *[]){ ${list} })`);
+          }
           case "readable.newDyn":
           case "writable.newDyn":
           case "duplex.newDyn":
