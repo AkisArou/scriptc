@@ -7583,9 +7583,14 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     if (cached !== undefined) return cached;
     L.nullishBindings.set(sym, null); // cycle guard: self-referential probes answer non-qualifying
     const decl = L.checker.valueDeclarationOf(sym);
+    // Statement-position declarators only: a for-loop head (`for (let x =
+    // null as any; ...)`) declares a LOCAL with per-iteration semantics —
+    // lowerVarDeclList's contract requires a lowered statement for it, so
+    // the no-storage family never claims it.
     if (
       !decl || !ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name) ||
-      decl.getSourceFile().isDeclarationFile || decl.initializer === undefined
+      decl.getSourceFile().isDeclarationFile || decl.initializer === undefined ||
+      !ts.isVariableStatement(decl.parent.parent)
     ) {
       return null;
     }
@@ -7738,6 +7743,12 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     if (!sym) return false;
     if (L.deadBindings.has(sym)) return true;
     if (!ts.isIdentifier(decl.name)) return false;
+    // Statement-position declarators only: a for-loop head (`for (let x;
+    // false;) {}`) declares a LOCAL with per-iteration semantics —
+    // lowerVarDeclList's contract requires a lowered statement for it, so
+    // the no-storage family never claims it (catch bindings sit outside a
+    // variable statement too and stay out the same way).
+    if (!ts.isVariableStatement(decl.parent.parent)) return false;
     const sf = decl.getSourceFile();
     if (sf.isDeclarationFile || isJsSourceFile(sf)) return false;
     if (decl.initializer !== undefined && !sideEffectFreeValueExpr(L, decl.initializer)) return false;

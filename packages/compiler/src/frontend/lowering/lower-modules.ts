@@ -1001,40 +1001,64 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // probes below would otherwise claim the call-initializer shape
         // and put its fences on the build.
         if (provenanceElidedConstDecl(L, decl)) continue;
-        // A TRAP declaration at file scope — the initializer's chain roots
-        // at an ambient-undefined name (`declare const t: Type<string>;
-        // export const out = t.pipe(...)`): Node throws the root's
-        // ReferenceError evaluating the initializer, so no value ever
-        // exists and no reference can ever run. No global registers; the
-        // binding enters trapBindings (registered HERE, before any body
-        // lowers, so hoisted-function references resolve the trap), and
-        // the statement lowering emits the throw at its position.
-        if (decl.initializer !== undefined && ambientUndefVarRootOf(L, decl.initializer) !== null) {
-          for (const nameNode of boundIdentifiersOf(decl.name)) {
-            const sym = L.checker.getSymbolAtLocation(nameNode);
-            if (sym) L.trapBindings.add(sym);
+        // The trap/nullish/dead classification probes below resolve
+        // symbols INSIDE the initializer, and resolution can fence (the
+        // cross-block merged-namespace SC1090, resolveValueSymbol →
+        // fenceCrossBlockNsRef): a fence mid-probe means the probe cannot
+        // classify the declaration, not that collection dies — the
+        // diagnostic is recorded, the binding falls through to ordinary
+        // registration, and the statement lowering re-fences at its own
+        // site (pushDiag dedupes), exactly the per-probe recovery the
+        // alias/generic-fn registrations below already use.
+        const classifyDiagsBefore = L.diags.length;
+        const classified = (() => {
+          try {
+            // A TRAP declaration at file scope — the initializer's chain roots
+            // at an ambient-undefined name (`declare const t: Type<string>;
+            // export const out = t.pipe(...)`): Node throws the root's
+            // ReferenceError evaluating the initializer, so no value ever
+            // exists and no reference can ever run. No global registers; the
+            // binding enters trapBindings (registered HERE, before any body
+            // lowers, so hoisted-function references resolve the trap), and
+            // the statement lowering emits the throw at its position.
+            if (decl.initializer !== undefined && ambientUndefVarRootOf(L, decl.initializer) !== null) {
+              for (const nameNode of boundIdentifiersOf(decl.name)) {
+                const sym = L.checker.getSymbolAtLocation(nameNode);
+                if (sym) L.trapBindings.add(sym);
+              }
+              return true;
+            }
+            // A NULLISH generic binding at file scope (`export const Mixin:
+            // MixinHelperFunc = null as any`): no storage — reads know the
+            // value (lower-exprs/lower-calls claim them); the statement
+            // lowering emits nothing by the same test.
+            if (
+              ts.isIdentifier(decl.name) &&
+              nullishGenericBindingUnitOf(L, L.checker.getSymbolAtLocation(decl.name) ?? null) !== null
+            ) {
+              return true;
+            }
+            // A DEAD unmappable binding at file scope (`var xs2: typeof
+            // Array;` — never read anywhere): no global, no statement, no
+            // type fence for a value the program never consumes.
+            if (
+              ts.isIdentifier(decl.name) &&
+              deadUnmappableBinding(L, L.checker.getSymbolAtLocation(decl.name) ?? null, decl)
+            ) {
+              return true;
+            }
+          } catch (e) {
+            if (!(e instanceof PoisonError)) throw e;
+            // A probe fenced mid-classification: JS files defer the
+            // recorded diagnostics to runtime fences like every other
+            // collection failure; TS keeps the eager report (the
+            // statement lowering re-fences at its own site — pushDiag
+            // dedupes).
+            deferJsCollectionDiags(L, sf, classifyDiagsBefore);
           }
-          continue;
-        }
-        // A NULLISH generic binding at file scope (`export const Mixin:
-        // MixinHelperFunc = null as any`): no storage — reads know the
-        // value (lower-exprs/lower-calls claim them); the statement
-        // lowering emits nothing by the same test.
-        if (
-          ts.isIdentifier(decl.name) &&
-          nullishGenericBindingUnitOf(L, L.checker.getSymbolAtLocation(decl.name) ?? null) !== null
-        ) {
-          continue;
-        }
-        // A DEAD unmappable binding at file scope (`var xs2: typeof
-        // Array;` — never read anywhere): no global, no statement, no
-        // type fence for a value the program never consumes.
-        if (
-          ts.isIdentifier(decl.name) &&
-          deadUnmappableBinding(L, L.checker.getSymbolAtLocation(decl.name) ?? null, decl)
-        ) {
-          continue;
-        }
+          return false;
+        })();
+        if (classified) continue;
         // `const f = <T>(x: T) => x` at file scope: a generic function
         // value binding — no global exists (the binding is never read;
         // calls and pinned references monomorphize against the
