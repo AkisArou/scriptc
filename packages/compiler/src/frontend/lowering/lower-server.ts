@@ -14,6 +14,7 @@ import { ladderFenceExpr, nodeThrowExpr } from "./lowerer.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { arrayOf, BOOL, BYTES_U8, canBoxFuncIntoDyn, canConvertToDyn, DYN, DYN_HANDLE_KINDS, F64, funcOf, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, IrExpr, IrLibFn, IrStmt, IrType, NETSERVER_T, NETSOCKET_T, NULL_T, SECURECTX_T, STRING, UNDEFINED_T, SrcLoc, typeKey, VOID } from "../../ir/nodes.js";
 import {
+  AGENT_DOCUMENTED_OPTIONS,
   builtinFenceHintOf,
   builtinModuleFnOf,
   fenceOrDropOptionKey,
@@ -1453,6 +1454,40 @@ function lowerNetSocketMethodCall(L: Lowerer, call: ts.CallExpression,
     const ms = L.lowerExprExpecting(args[0]!, F64);
     return { kind: "libCall", fn: "net.sockSetTimeout", args: [receiver, ms], type: VOID, loc };
   }
+  if (name === "pause" || name === "resume") {
+    // Flow control (the struct's flag comments in scr_net.c): pause holds
+    // reads off — kernel/TCP backpressure is the buffer; resume flows
+    // (and discards sans listeners, so 'end' is reachable). Both answer
+    // the socket, Node's chaining.
+    if (args.length !== 0) {
+      L.noLowering(`${name} with ${args.length} arguments`, call, `the form is ${name}()`);
+    }
+    const receiver = handleReceiver(L, access.expression, NETSOCKET_T);
+    const fn: IrLibFn = name === "pause" ? "net.sockPause" : "net.sockResume";
+    return { kind: "libCall", fn, args: [receiver], type: NETSOCKET_T, loc };
+  }
+  if (name === "setNoDelay") {
+    // TCP_NODELAY on the live fd; missing/undefined means true (Node).
+    // Answers the socket, Node's chaining.
+    if (args.length > 1) {
+      L.noLowering(`setNoDelay with ${args.length} arguments`, call, "the form is setNoDelay(noDelay?)");
+    }
+    const receiver = handleReceiver(L, access.expression, NETSOCKET_T);
+    const enable: IrExpr = args.length === 1
+      ? L.lowerExprExpecting(args[0]!, BOOL)
+      : boolLit(true, loc);
+    return { kind: "libCall", fn: "net.sockSetNoDelay", args: [receiver, enable], type: NETSOCKET_T, loc };
+  }
+  if (name === "destroySoon") {
+    // end() now, destroy once the FIN actually flushed — Node's
+    // 'finish'-then-destroy.
+    requireStatementPosition(L, call, "socket.destroySoon()");
+    if (args.length !== 0) {
+      L.noLowering(`destroySoon with ${args.length} arguments`, call, "the form is destroySoon()");
+    }
+    const receiver = handleReceiver(L, access.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockDestroySoon", args: [receiver], type: VOID, loc };
+  }
   if (name === "read") {
     // socket.read(n?) — the demux peek. Answers the interned
     // `Buffer | null` union: exactly n buffered bytes, or null (Node's
@@ -1538,6 +1573,12 @@ function lowerNetSocketMethodCall(L: Lowerer, call: ts.CallExpression,
         : event === "readable" ? "net.sockOnReadable"
         : "net.sockOnConnect";
       return { kind: "libCall", fn, args: [receiver, cb, once], type: VOID, loc };
+    }
+    if (event === "finish") {
+      // Fires once when the FIN goes out — once either way (the event
+      // happens at most once per socket).
+      const { cb } = lowerCallbackArg(L, args[1]!, "finish listeners", 0, () => false, "use ()", []);
+      return { kind: "libCall", fn: "net.sockOnFinish", args: [receiver, cb], type: VOID, loc };
     }
     if (event === "secureConnect") {
       // The TLS client's post-handshake event: on a TLS socket the
@@ -2056,6 +2097,17 @@ export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpressio
     const receiver = handleReceiver(L, expr.expression, NETSOCKET_T);
     return { kind: "libCall", fn: "net.sockWritable", args: [receiver], type: BOOL, loc };
   }
+  if (recvKind === "netSocket" && L.isStdlibMember(expr) && expr.name.text === "bytesWritten") {
+    // Every byte the write paths accepted (buffered included — Node
+    // counts those too; plaintext on TLS sockets).
+    const receiver = handleReceiver(L, expr.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockBytesWritten", args: [receiver], type: F64, loc };
+  }
+  if (recvKind === "netSocket" && L.isStdlibMember(expr) && expr.name.text === "readable") {
+    // true until the read half is done (peer FIN / destroy).
+    const receiver = handleReceiver(L, expr.expression, NETSOCKET_T);
+    return { kind: "libCall", fn: "net.sockReadable", args: [receiver], type: BOOL, loc };
+  }
   if (recvKind === "netSocket" && L.isStdlibMember(expr) && expr.name.text === "remoteAddress") {
     // `string | undefined` — Node's read-time caching: a value read while
     // connected survives destroy; never-read sockets answer undefined
@@ -2311,6 +2363,126 @@ function lowerHttpCreateServerForms(L: Lowerer, expr: ts.CallExpression | ts.New
  * createServer (Node's Server class IS the factory's product); called
  * from lowerNew ahead of the stdlib-constructor fence. Null when the
  * callee is not the http module's Server. */
+/** `new http.Agent(opts?)` / `new https.Agent(opts?)` (property access or
+ * named import): the Agent lowers to a checked-dynamic HANDLE —
+ * getName/destroy and the sockets/requests/freeSockets counters dispatch
+ * through the DOM handle ops, and the request path threads it (the
+ * requestAgent rows). Options parse at the LITERAL construction site:
+ * keepAlive (a boolean value — TRUE throws the runtime's named pooling
+ * fence: this client dials one connection per request), keepAliveMsecs /
+ * maxSockets / maxFreeSockets / timeout / port as numbers, scheduling
+ * DROPS (no free pool exists, so selection order cannot observe), other
+ * documented keys fence by name, and undocumented keys drop like Node
+ * drops them. Null when the callee isn't the http/https Agent. */
+export function lowerHttpAgentNew(L: Lowerer, expr: ts.NewExpression): IrExpr | null {
+  const callee = expr.expression;
+  const bi =
+    ts.isPropertyAccessExpression(callee) && callee.name.text === "Agent"
+      ? L.builtinMemberOf(callee)
+      : ts.isIdentifier(callee)
+        ? L.builtinImportOf(callee)
+        : null;
+  if (!bi || bi.member !== "Agent" || (bi.module !== "http" && bi.module !== "https")) return null;
+  const loc = locOf(expr);
+  const api = `new ${bi.module}.Agent`;
+  const numLit = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
+  const boolAt = (value: boolean): IrExpr => ({ kind: "boolLit", value, type: BOOL, loc });
+  let keepAlive: IrExpr = boolAt(false);
+  let kaMsecs: IrExpr = numLit(-1);
+  let maxSockets: IrExpr = numLit(-1);
+  let maxFree: IrExpr = numLit(-1);
+  let timeout: IrExpr = numLit(-1);
+  let port: IrExpr = numLit(-1);
+  const args = expr.arguments ?? [];
+  if (args.length > 1) {
+    L.noLowering(`${api} with ${args.length} arguments`, expr, "the supported form is new Agent(options?)");
+  }
+  if (args.length === 1) {
+    const optsNode = stripParensAndCasts(args[0]!);
+    if (!ts.isObjectLiteralExpression(optsNode)) {
+      L.noLowering(
+        `${api} with a non-literal options value`,
+        args[0]!,
+        "spell the options as an object literal at the construction site",
+      );
+    }
+    for (const prop of optsNode.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        L.noLowering(`${api} with an options spread`, prop, "write each option inline");
+      }
+      let initializer: ts.Expression | null;
+      if (ts.isPropertyAssignment(prop) &&
+          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+        initializer = prop.initializer;
+      } else if (ts.isShorthandPropertyAssignment(prop)) {
+        initializer = null;
+      } else {
+        L.noLowering(
+          `${api} options with computed keys`,
+          prop,
+          "each option must be a plain `name: value` (or shorthand) entry with a literal key",
+        );
+      }
+      const key = (prop.name as ts.Identifier | ts.StringLiteral).text;
+      const lowerVal = (want: "bool" | "f64"): IrExpr => {
+        const v = initializer !== null
+          ? L.lowerExpr(initializer)
+          : L.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        if (v.type.kind === "dyn") {
+          return { kind: "dynCheck", value: v, type: want === "bool" ? BOOL : F64, loc: locOf(prop) };
+        }
+        if (v.type.kind !== want) {
+          L.noLowering(
+            `a ${api} '${key}' option of '${L.fmt(v.type)}' values`,
+            prop,
+            want === "bool" ? "the option value must be a boolean" : "the option value must be a number",
+          );
+        }
+        return v;
+      };
+      switch (key) {
+        case "keepAlive":
+          keepAlive = lowerVal("bool");
+          break;
+        case "keepAliveMsecs":
+          kaMsecs = lowerVal("f64");
+          break;
+        case "maxSockets":
+          maxSockets = lowerVal("f64");
+          break;
+        case "maxFreeSockets":
+          maxFree = lowerVal("f64");
+          break;
+        case "timeout":
+          timeout = lowerVal("f64");
+          break;
+        case "port":
+          // Node merges agent options under portless request options —
+          // the settable defaultPort carries this one.
+          port = lowerVal("f64");
+          break;
+        case "scheduling":
+          // Free-socket selection order: no free pool exists here (no
+          // keep-alive reuse), so the choice cannot observe — dropped.
+          if (initializer !== null) L.lowerExpr(initializer); // evaluate, like Node
+          break;
+        default:
+          fenceOrDropOptionKey(
+            L, prop, key, api, AGENT_DOCUMENTED_OPTIONS,
+            "keepAlive, keepAliveMsecs, maxSockets, maxFreeSockets, timeout, port, and scheduling are the supported options",
+          );
+      }
+    }
+  }
+  return {
+    kind: "libCall",
+    fn: "http.agentNew",
+    args: [boolAt(bi.module === "https"), keepAlive, kaMsecs, maxSockets, maxFree, timeout, port],
+    type: DYN,
+    loc,
+  };
+}
+
 export function lowerHttpServerNew(L: Lowerer, expr: ts.NewExpression): IrExpr | null {
   const callee = expr.expression;
   const isHttpServer =
@@ -3347,6 +3519,8 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
   let connCb: IrExpr | null = null;
   /** agent: false — inject Connection: close into the request head. */
   let agentClose: ts.Node | null = null;
+  /** agent: <Agent value> — the requestAgent rows thread the handle. */
+  let agentVal: IrExpr | null = null;
   for (const prop of optsNode.properties) {
     // Shorthand entries ({ port } for { port: port }) are the natural
     // spelling at these call sites — the shorthand's VALUE lowering
@@ -3522,8 +3696,11 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
         // model, so it LOWERS (the header injects below). null/undefined
         // pick the default agent, whose keep-alive request header the
         // compiled client already sends (socket REUSE stays the
-        // documented divergence either way). Agent instances configure
-        // pooling the runtime does not have — fence.
+        // documented divergence either way). An Agent VALUE (the lowered
+        // `new http.Agent(...)` handle — a checked-dynamic value) threads
+        // through the requestAgent rows: getName-keyed maxSockets
+        // accounting over one-dial-per-request connections; a runtime
+        // non-Agent value is Node's ERR_INVALID_ARG_TYPE.
         const e = initializer !== null ? stripParensAndCasts(initializer) : null;
         if (e !== null && e.kind === ts.SyntaxKind.FalseKeyword) {
           agentClose = prop;
@@ -3534,13 +3711,18 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
              (ts.isIdentifier(e) && e.text === "undefined"))) {
           break; // the default agent: what the agent-free call compiles
         }
-        L.noLowering(
-          `a ${member} 'agent' option carrying an Agent value`,
-          prop,
-          "compiled clients dial one connection per request and close it with the response — " +
-            "agent: false (lowered: sends Connection: close) and agent: null/undefined (the default) " +
-            "compile; pooling Agent instances have no lowering",
-        );
+        const v = initializer !== null
+          ? L.lowerExpr(initializer)
+          : L.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+        if (v.type.kind !== "dyn") {
+          L.noLowering(
+            `a ${member} 'agent' option of '${L.fmt(v.type)}' values`,
+            prop,
+            "the agent is the checked-dynamic Agent handle new http.Agent(...) answers " +
+              "(or false / null / undefined)",
+          );
+        }
+        agentVal = v;
         break;
       }
       default:
@@ -3590,11 +3772,28 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
       "the dialer supplies the socket — set the Host header via headers: { host: ... } instead",
     );
   }
+  if (agentVal !== null && connCb !== null) {
+    L.noLowering(
+      `${member} mixing an agent value with createConnection`,
+      optsNode,
+      "both own the dial — pass one or the other",
+    );
+  }
+  if (agentVal !== null && binding !== null) {
+    L.noLowering(
+      `${member} through a module-function binding with an agent value`,
+      optsNode,
+      "call http.request/https.request directly when passing an Agent",
+    );
+  }
   host ??= strLit("localhost");
   // The binding mode's default port follows the runtime dial: 443 on the
   // TLS arm, 80 on the plain one — exactly each client's own default.
+  // With an AGENT the sentinel -1 says "no port option": the runtime
+  // consults the agent's (settable) defaultPort first, Node's merge.
   port ??= binding !== null
     ? { kind: "ternary", cond: secureExpr(), then: numLit(443), else_: numLit(80), type: F64, loc }
+    : agentVal !== null ? numLit(-1)
     : numLit(secure === true ? 443 : 80);
   path ??= strLit("/");
   method ??= strLit("GET");
@@ -3620,9 +3819,12 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
     ca ??= strLit(""); /* none: /etc/ssl/cert.pem stands in for Node's roots */
     base.push(reject, ca);
   }
+  if (agentVal !== null) base.push(agentVal);
   if (binding !== null) base.unshift(secureExpr());
   if (args.length === 1) {
-    const fn: IrLibFn = binding !== null ? "https.requestFn" : secure === true ? "https.request" : "http.request";
+    const fn: IrLibFn = binding !== null ? "https.requestFn"
+      : secure === true ? (agentVal !== null ? "https.requestAgent" : "https.request")
+      : agentVal !== null ? "http.requestAgent" : "http.request";
     return { kind: "libCall", fn, args: base, type: HTTPCLIENTREQ_T, loc };
   }
   const { cb } = lowerCallbackArg(
@@ -3631,7 +3833,9 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
     "use (res) or ()",
     [HTTPREQ_T],
   );
-  const fn: IrLibFn = binding !== null ? "https.requestFnCb" : secure === true ? "https.requestCb" : "http.requestCb";
+  const fn: IrLibFn = binding !== null ? "https.requestFnCb"
+    : secure === true ? (agentVal !== null ? "https.requestAgentCb" : "https.requestCb")
+    : agentVal !== null ? "http.requestAgentCb" : "http.requestCb";
   return { kind: "libCall", fn, args: [...base, cb], type: HTTPCLIENTREQ_T, loc };
 }
 

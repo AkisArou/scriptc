@@ -1605,6 +1605,11 @@ export type IrLibFn =
    * throws. */
   | "dyn.arrLen"
   | "dyn.arrAt"
+  /** `key in v` with a RUNTIME (string) key on a checked-dynamic
+   * receiver (args: value dyn, key string; result bool): OBJ answers
+   * own-member presence, ARR answers 'length'/a valid index — exactly
+   * the compile-time dynHasKey fold, per value. Never throws. */
+  | "dyn.hasKey"
   /** Object.defineProperties over dyn values (args: target, descriptors —
    * both borrowed dyn; result: the target, +1 — JS's return value).
    * Value descriptors become plain own properties on OBJ and FUNC targets
@@ -2347,6 +2352,21 @@ export type IrLibFn =
   | "net.sockOnReadable"
   | "net.sockRead"
   | "net.sockUnshift"
+  /** Socket flow control and the compat surface: pause/resume (reads
+   * gate off/on — kernel backpressure holds paused bytes; resume flows
+   * and discards sans listeners) and setNoDelay answer the SOCKET (+1,
+   * Node's chaining); destroySoon ends now and destroys once the FIN
+   * flushed; bytesWritten counts accepted bytes; readable is true until
+   * the read half ends. */
+  | "net.sockPause"
+  | "net.sockResume"
+  | "net.sockSetNoDelay"
+  | "net.sockDestroySoon"
+  | "net.sockBytesWritten"
+  | "net.sockReadable"
+  /** socket.on('finish', cb) / end(cb): fires once when the FIN goes out
+   * (sweep-deferred, never the registering stack). */
+  | "net.sockOnFinish"
   | "net.serverEmitConnection"
   /** node:http, the CLIENT slice (http.request/http.get over the net
    * client machinery): request/requestCb take (host, port, path, method,
@@ -2365,6 +2385,27 @@ export type IrLibFn =
    * Content-Length exactly like Node. */
   | "http.request"
   | "http.requestCb"
+  /** new http.Agent(opts) / new https.Agent(opts): (secure, keepAlive,
+   * keepAliveMsecs, maxSockets, maxFreeSockets, timeoutMs, port) — the
+   * numeric options arrive < 0 for "unset" (Infinity/256/none; port
+   * seeds the settable defaultPort, Node's option merge). Returns the
+   * Agent as a checked-dynamic HANDLE (getName/destroy and the
+   * sockets/requests/freeSockets counters dispatch through the DOM
+   * handle ops). keepAlive: true THROWS the named construction fence —
+   * socket POOLING is not modeled (one dial per request); maxSockets
+   * accounting is real: over-limit requests defer their dial and queue.
+   * MAY THROW. */
+  | "http.agentNew"
+  /** The agent-threaded request rows: the http.request/https.request
+   * shape with a trailing `agent` dyn argument (an Agent handle, false —
+   * the one-shot Connection: close dial — or null/undefined for the
+   * default path). port < 0 means "no port option": the agent's settable
+   * defaultPort, then the scheme's. MAY THROW (a non-Agent value is
+   * Node's ERR_INVALID_ARG_TYPE). */
+  | "http.requestAgent"
+  | "http.requestAgentCb"
+  | "https.requestAgent"
+  | "https.requestAgentCb"
   /** The createConnection form (the proxy's own dialer): args are
    * (connCb, path, method, timeout, headers, autoEnd[, cb]) — connCb is
    * a `() => net.Socket` closure the runtime invokes ONCE, synchronously
@@ -5122,6 +5163,7 @@ export const DYN_HANDLE_KINDS: ReadonlyMap<string, { tag: string; cls: string }>
   ["netServer", { tag: "SCR_DYNH_NET_SERVER", cls: "Server" }],
   ["http2Session", { tag: "SCR_DYNH_H2_SESSION", cls: "Http2Session" }],
   ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", cls: "Http2Stream" }],
+  ["httpClientReq", { tag: "SCR_DYNH_HTTP_CLIENT", cls: "ClientRequest" }],
 ]);
 
 /** A static type that CONVERTS into a dyn value — the dynFrom domain:
@@ -6444,6 +6486,14 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "http.requestCb",
   "http.requestConn",
   "http.requestConnCb",
+  // The agent rows add the runtime agent-value gates (a non-Agent value
+  // is Node's ERR_INVALID_ARG_TYPE); agentNew's keepAlive: true throws
+  // the named pooling fence.
+  "http.agentNew",
+  "http.requestAgent",
+  "http.requestAgentCb",
+  "https.requestAgent",
+  "https.requestAgentCb",
   "https.request",
   "https.requestCb",
   "https.requestFn",

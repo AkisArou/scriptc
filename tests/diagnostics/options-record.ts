@@ -10,9 +10,10 @@ import * as fs from "node:fs";
 import * as dns from "node:dns";
 import * as readline from "node:readline";
 
-// A pooling Agent instance cannot be honored — pointed fence at the
-// construction AND at the option.
-const agent = new http.Agent({ keepAlive: true });
+// The Agent lowers to a checked-dynamic handle now — but only from a
+// LITERAL options object; a runtime options value cannot be walked.
+const agentOpts: http.AgentOptions = { maxSockets: 1 };
+const agent = new http.Agent(agentOpts);
 http.get({ port: 80, agent }, () => {});
 
 // agent: false needs a LITERAL headers object to inject Connection: close

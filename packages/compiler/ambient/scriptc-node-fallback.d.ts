@@ -1735,9 +1735,23 @@ declare module "net" {
     readonly destroyed: boolean;
     /* the write half is open: no end() yet, no FIN sent, fd alive. */
     readonly writable: boolean;
+    /* true until the read half is done (peer FIN / destroy). */
+    readonly readable: boolean;
+    /* every byte the write paths accepted (buffered included — Node
+     * counts those too; plaintext on TLS sockets). */
+    readonly bytesWritten: number;
     write(data: string | Uint8Array): void;
     end(data?: string | Uint8Array): void;
     destroy(): void;
+    /* Flow control: pause holds reads off (kernel/TCP backpressure is
+     * the buffer); resume flows — and discards without listeners, so
+     * 'end' stays reachable. Both chain, Node's shape. */
+    pause(): Socket;
+    resume(): Socket;
+    /* TCP_NODELAY on the live fd; missing means true. Chains. */
+    setNoDelay(noDelay?: boolean): Socket;
+    /* end() now, destroy once the FIN actually flushed. */
+    destroySoon(): void;
     /* setEncoding('utf8'): 'data' delivers strings — the IncomingMessage
      * twin's contract. */
     setEncoding(encoding: string): void;
@@ -1755,16 +1769,16 @@ declare module "net" {
      * registration never fires — Node's exact split. 'session' fires
      * once with the serialized session (the received-ticket event). */
     on(event: "data", listener: (chunk: Buffer) => void): void;
-    on(event: "end" | "close" | "connect" | "timeout" | "readable" | "secureConnect", listener: () => void): void;
+    on(event: "end" | "close" | "connect" | "timeout" | "readable" | "finish" | "secureConnect", listener: () => void): void;
     on(event: "error", listener: (err: Error) => void): void;
     on(event: "session", listener: (session: Buffer) => void): void;
     /* addListener IS on (Node aliases them) — the suite spells both. */
     addListener(event: "data", listener: (chunk: Buffer) => void): void;
-    addListener(event: "end" | "close" | "connect" | "timeout" | "readable" | "secureConnect", listener: () => void): void;
+    addListener(event: "end" | "close" | "connect" | "timeout" | "readable" | "finish" | "secureConnect", listener: () => void): void;
     addListener(event: "error", listener: (err: Error) => void): void;
     addListener(event: "session", listener: (session: Buffer) => void): void;
     once(event: "data", listener: (chunk: Buffer) => void): void;
-    once(event: "end" | "close" | "connect" | "timeout" | "readable" | "secureConnect", listener: () => void): void;
+    once(event: "end" | "close" | "connect" | "timeout" | "readable" | "finish" | "secureConnect", listener: () => void): void;
     once(event: "error", listener: (err: Error) => void): void;
     once(event: "session", listener: (session: Buffer) => void): void;
   }
@@ -1949,9 +1963,10 @@ declare module "http" {
     /* The caller's own dialer (the proxy's loopback dial): invoked once,
      * synchronously; its socket carries the exchange. */
     createConnection?: () => Socket;
-    /* agent: false is lowered (a one-shot dial with Connection: close —
-     * exactly the compiled client's model); null/undefined are the
-     * default; Agent INSTANCES fence at the call site (no pooling). */
+    /* agent: false is a one-shot dial with Connection: close — exactly
+     * the compiled client's model; null/undefined are the default; an
+     * Agent VALUE threads through (getName-keyed maxSockets accounting
+     * over one-dial-per-request connections). */
     agent?: Agent | boolean | null;
     /* The options-record stance: Node ignores an options record's
      * unknown keys, so every key typechecks here — the option WALK in
@@ -1959,10 +1974,13 @@ declare module "http" {
      * undocumented keys exactly like Node). */
     [option: string]: unknown;
   }
-  /* Declared surface without a lowering: the compiled client dials one
-   * connection per exchange and closes it with the response (the
-   * agent: false shape), so pooling Agents cannot be honored —
-   * constructing one fences at the site. */
+  /* The Agent lowers to a checked-dynamic HANDLE: option parsing at the
+   * literal construction site, getName, destroy, the sockets/requests/
+   * freeSockets snapshots, and REAL maxSockets accounting (over-limit
+   * requests defer their dial and queue). keepAlive: true throws the
+   * named pooling fence — this client dials one connection per request
+   * and closes it with the response, so freeSockets is always
+   * empty. */
   export interface AgentOptions {
     keepAlive?: boolean;
     keepAliveMsecs?: number;
@@ -1971,16 +1989,26 @@ declare module "http" {
     maxTotalSockets?: number;
     scheduling?: string;
     timeout?: number;
+    port?: number;
     [option: string]: unknown;
   }
   export class Agent {
     constructor(options?: AgentOptions);
     destroy(): void;
+    /* Node's exact key shape: host:port:localAddress[:family][:socketPath]. */
+    getName(options?: { host?: string; port?: number; localAddress?: string; family?: number; socketPath?: string; [option: string]: unknown }): string;
     maxSockets: number;
     maxFreeSockets: number;
-    readonly sockets: { [key: string]: unknown };
-    readonly freeSockets: { [key: string]: unknown };
-    readonly requests: { [key: string]: unknown };
+    keepAliveMsecs: number;
+    readonly keepAlive: boolean;
+    readonly protocol: string;
+    /* Settable — a portless request through this agent dials it (Node's
+     * option merge). */
+    defaultPort: number;
+    readonly totalSocketCount: number;
+    readonly sockets: { [key: string]: unknown[] };
+    readonly freeSockets: { [key: string]: unknown[] };
+    readonly requests: { [key: string]: unknown[] };
   }
   export const globalAgent: Agent;
   export interface ClientRequest {

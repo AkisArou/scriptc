@@ -2681,6 +2681,8 @@ typedef enum {
   SCR_DYNH_NET_SERVER, /* ScrNetServer — net.Server (http.Server rides the same handle) */
   SCR_DYNH_H2_SESSION, /* ScrH2Session — Http2Session (client & server) */
   SCR_DYNH_H2_STREAM,  /* ScrH2Stream — Http2Stream (client & server) */
+  SCR_DYNH_HTTP_CLIENT, /* ScrHttpClientReq — http.ClientRequest */
+  SCR_DYNH_HTTP_AGENT,  /* ScrHttpAgent — http.Agent / https.Agent */
   SCR_DYNH_COUNT,
 } ScrDynHandleTag;
 
@@ -2861,6 +2863,9 @@ void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value
  * non-object kinds throw Node's catchable TypeErrors (strict-mode
  * wording). All three operands BORROWED (the value is retained in). */
 void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value);
+/* `key in v` with a runtime key — the dynHasKey fold per value (OBJ own
+ * members, ARR length/valid indices, false elsewhere). Never throws. */
+bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key);
 /* Bare `typeof v` on a dyn value: the dyn kind's JS answer (+1 string;
  * null answers "object"). Never throws. */
 ScrStr *scr_dyn_typeof(const ScrDyn *d);
@@ -4819,6 +4824,22 @@ void scr_net_sock_end_bytes(ScrNetSocket *s, ScrBytes *data /*borrowed*/);
 void scr_net_sock_write_dynv(ScrNetSocket *s, const ScrDyn *d /*borrowed*/);
 void scr_net_sock_end_dynv(ScrNetSocket *s, const ScrDyn *d /*borrowed*/);
 void scr_net_sock_destroy(ScrNetSocket *s);
+/* Flow control (pause/resume — see the struct's flag comments), the
+ * FIN-flushed destroy (destroySoon), TCP_NODELAY, the deferred write/
+ * finish callbacks (write(chunk, cb) / end(cb) — sweep-fired), and the
+ * counters/flags the compat surface reads. */
+ScrNetSocket *scr_net_sock_pause(ScrNetSocket *s);            /* +1: chaining */
+ScrNetSocket *scr_net_sock_resume(ScrNetSocket *s);           /* +1: chaining */
+ScrNetSocket *scr_net_sock_set_nodelay(ScrNetSocket *s, bool enable); /* +1: chaining */
+void scr_net_sock_destroy_soon(ScrNetSocket *s);
+void scr_net_sock_on_finish(ScrNetSocket *s, ScrClosure *cb /*moves*/);
+void scr_net_sock_on_write_flush(ScrNetSocket *s, ScrClosure *cb /*moves*/);
+double scr_net_sock_bytes_written(ScrNetSocket *s);
+bool scr_net_sock_readable(ScrNetSocket *s);
+/* The deferred dial (the http agent's maxSockets queue): the socket
+ * registers "connecting" and buffers writes; dial_start runs the dial. */
+ScrNetSocket *scr_net_connect_deferred(double port, ScrStr *host /*borrowed, nullable*/); /* +1 */
+void scr_net_sock_dial_start(ScrNetSocket *s);
 void scr_net_sock_set_timeout(ScrNetSocket *s, double ms);
 void scr_net_sock_on_timeout(ScrNetSocket *s, ScrClosure *cb /*moves*/, bool once);
 ScrStr *scr_net_sock_remote_address(ScrNetSocket *s); /* +1 or NULL (undefined arm) */
@@ -5180,6 +5201,23 @@ void scr_http_upgrade_thunk3(ScrClosure *cb, ScrHttpReq *req, ScrNetSocket *sock
 double scr_http_req_status(ScrHttpReq *r); /* < 0 = the undefined arm (server request) */
 ScrNetSocket *scr_http_req_socket(ScrHttpReq *r); /* +1 */
 void scr_http_req_resume(ScrHttpReq *r);
+/* pause()/resume() hold and drain 'data'/'end' delivery (the parser keeps
+ * consuming; the drain rides the emit queue); setTimeout delegates to the
+ * socket's idle timer; the flags back req.destroyed/req.readable. */
+void scr_http_req_pause(ScrHttpReq *r);
+void scr_http_req_set_timeout(ScrHttpReq *r, double ms, ScrClosure *cb /*moves, nullable*/);
+bool scr_http_req_destroyed_flag(ScrHttpReq *r);
+bool scr_http_req_readable(ScrHttpReq *r);
+/* flushHeaders/cork/uncork/writableCorked, the res.req backref, the
+ * socket-delegated setTimeout, and write(chunk, cb)'s deferred callback. */
+void scr_http_res_flush_headers(ScrHttpRes *r);
+void scr_http_res_cork(ScrHttpRes *r);
+void scr_http_res_uncork(ScrHttpRes *r);
+double scr_http_res_writable_corked(ScrHttpRes *r);
+bool scr_http_res_destroyed_flag(ScrHttpRes *r);
+void scr_http_res_set_req(ScrHttpRes *r, ScrHttpReq *req /*borrowed, nullable*/);
+void scr_http_res_set_timeout(ScrHttpRes *r, double ms, ScrClosure *cb /*moves, nullable*/);
+void scr_http_res_on_write_flush(ScrHttpRes *r, ScrClosure *cb /*moves*/);
 /* req.setEncoding(enc) — the socket twin's contract; may throw. */
 void scr_http_req_set_encoding(ScrHttpReq *r, ScrStr *enc /*borrowed*/);
 void scr_http_req_destroy(ScrHttpReq *r);
@@ -5244,6 +5282,30 @@ ScrHttpClientReq *scr_http_request_ex(ScrStr *host /*borrowed*/, double port,
 ScrHttpClientReq *scr_http_request_url(ScrStr *url /*borrowed*/, ScrStr *method /*borrowed*/,
                                         bool auto_end, ScrClosure *cb /*moves, nullable*/,
                                         ScrHttpRespFn fn); /* +1 */
+/* ── the http Agent (new http.Agent(opts) — option surface, getName, and
+ * the maxSockets queue over one-dial-per-request connections; keep-alive
+ * POOLING is not modeled: keepAlive: true fences at construction).
+ * agent_new answers the SCR_DYNH_HTTP_AGENT handle (+1 dyn) or throws.
+ * max_sockets/max_free arrive < 0 for "unset" (Infinity / 256);
+ * timeout_ms < 0 = no idle timer. request_agent_ex threads the agent dyn
+ * (undefined/null = the default path; false = one-shot with Connection:
+ * close; an Agent handle = queue accounting); port < 0 means "no port
+ * option" — the agent's (settable) defaultPort, then the scheme's. */
+ScrDyn *scr_http_agent_new(bool secure, bool keep_alive, double ka_msecs,
+                            double max_sockets, double max_free, double timeout_ms,
+                            double port /* < 0 = unset: the option-merge default */); /* +1 */
+ScrHttpClientReq *scr_http_request_agent_ex(ScrStr *host /*borrowed*/, double port,
+                                             ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
+                                             double timeout_ms, ScrArr *header_pairs /*borrowed*/,
+                                             bool auto_end, const ScrDyn *agent /*borrowed*/,
+                                             ScrClosure *cb /*moves, nullable*/,
+                                             ScrHttpRespFn fn, int default_port,
+                                             void (*wrap)(ScrNetSocket *, void *), void *wrap_ctx); /* +1 */
+ScrHttpClientReq *scr_http_request_agent(ScrStr *host /*borrowed*/, double port,
+                                          ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
+                                          double timeout_ms, ScrArr *header_pairs /*borrowed*/,
+                                          bool auto_end, const ScrDyn *agent /*borrowed*/,
+                                          ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn); /* +1 */
 #ifdef SCR_RC_AUDIT
 long scr_http_live_count(void);
 #endif
@@ -5394,6 +5456,14 @@ ScrHttpClientReq *scr_https_request(ScrStr *host /*borrowed*/, double port,
                                      bool auto_end, bool reject_unauthorized,
                                      const char *ca /*borrowed, len 0 = none*/, size_t ca_len,
                                      ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn); /* +1 */
+/* The agent-threaded twin (the scr_http_request_agent story over TLS). */
+ScrHttpClientReq *scr_https_request_agent(ScrStr *host /*borrowed*/, double port,
+                                           ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
+                                           double timeout_ms, ScrArr *header_pairs /*borrowed*/,
+                                           bool auto_end, bool reject_unauthorized,
+                                           const char *ca /*borrowed, len 0 = none*/, size_t ca_len,
+                                           const struct ScrDyn *agent /*borrowed*/,
+                                           ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn); /* +1 */
 /* The fetch unit's https leg (defined in scr_tls.c): a client transport
  * context (SNI/verify against the URL hostname — the DIALED address may
  * be a resolved IP) plus the wrap hook scr_http_request_ex installs on

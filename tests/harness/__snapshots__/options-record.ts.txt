@@ -1,132 +1,125 @@
-options-record.ts:15:7 - error SC2020: 'Agent' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:15:7 - error SC2020: 'AgentOptions' is part of the standard library types but has no scriptc lowering yet
 
-  14 | // construction AND at the option.
-  15 | const agent = new http.Agent({ keepAlive: true });
-     |       ^~~~~
-  16 | http.get({ port: 80, agent }, () => {});
+  14 | // LITERAL options object; a runtime options value cannot be walked.
+  15 | const agentOpts: http.AgentOptions = { maxSockets: 1 };
+     |       ^~~~~~~~~
+  16 | const agent = new http.Agent(agentOpts);
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-options-record.ts:15:15 - error SC1090: constructing an http Agent (compiled clients dial one connection per request and close it with the response — pass agent: false for Node's one-shot semantics, or omit the option) is not supported yet
+options-record.ts:16:30 - error SC2020: 'new http.Agent with a non-literal options value' is part of the standard library types but has no scriptc lowering yet
 
-  14 | // construction AND at the option.
-  15 | const agent = new http.Agent({ keepAlive: true });
-     |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  16 | http.get({ port: 80, agent }, () => {});
+  15 | const agentOpts: http.AgentOptions = { maxSockets: 1 };
+  16 | const agent = new http.Agent(agentOpts);
+     |                              ^~~~~~~~~
+  17 | http.get({ port: 80, agent }, () => {});
 
-options-record.ts:16:22 - error SC2020: 'a get 'agent' option carrying an Agent value' is part of the standard library types but has no scriptc lowering yet
+  hint: spell the options as an object literal at the construction site
 
-  15 | const agent = new http.Agent({ keepAlive: true });
-  16 | http.get({ port: 80, agent }, () => {});
-     |                      ^~~~~
-  17 | 
+options-record.ts:22:22 - error SC2020: 'get with agent: false and a non-literal headers record' is part of the standard library types but has no scriptc lowering yet
 
-  hint: compiled clients dial one connection per request and close it with the response — agent: false (lowered: sends Connection: close) and agent: null/undefined (the default) compile; pooling Agent instances have no lowering
-
-options-record.ts:21:22 - error SC2020: 'get with agent: false and a non-literal headers record' is part of the standard library types but has no scriptc lowering yet
-
-  20 | const dynHeaders: Record<string, string> = { "x-a": "1" };
-  21 | http.get({ port: 80, agent: false, headers: dynHeaders }, () => {});
+  21 | const dynHeaders: Record<string, string> = { "x-a": "1" };
+  22 | http.get({ port: 80, agent: false, headers: dynHeaders }, () => {});
      |                      ^~~~~~~~~~~~
-  22 | 
+  23 |
 
   hint: agent: false lowers by injecting Connection: close into a LITERAL headers object — add connection: "close" to the record instead, or write the headers inline
 
-options-record.ts:24:22 - error SC2020: 'get option 'socketPath'' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:25:22 - error SC2020: 'get option 'socketPath'' is part of the standard library types but has no scriptc lowering yet
 
-  23 | // Documented client options with no lowering fence by name.
-  24 | http.get({ port: 80, socketPath: "/tmp/sock.s" }, () => {});
+  24 | // Documented client options with no lowering fence by name.
+  25 | http.get({ port: 80, socketPath: "/tmp/sock.s" }, () => {});
      |                      ^~~~~~~~~~~~~~~~~~~~~~~~~
-  25 | http.get({ port: 80, localAddress: "127.0.0.1" }, () => {});
+  26 | http.get({ port: 80, localAddress: "127.0.0.1" }, () => {});
 
   hint: hostname/host, port, path, method, timeout, headers, and agent are the supported options
 
-options-record.ts:25:22 - error SC2020: 'get option 'localAddress'' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:26:22 - error SC2020: 'get option 'localAddress'' is part of the standard library types but has no scriptc lowering yet
 
-  24 | http.get({ port: 80, socketPath: "/tmp/sock.s" }, () => {});
-  25 | http.get({ port: 80, localAddress: "127.0.0.1" }, () => {});
+  25 | http.get({ port: 80, socketPath: "/tmp/sock.s" }, () => {});
+  26 | http.get({ port: 80, localAddress: "127.0.0.1" }, () => {});
      |                      ^~~~~~~~~~~~~~~~~~~~~~~~~
-  26 | 
+  27 |
 
   hint: hostname/host, port, path, method, timeout, headers, and agent are the supported options
 
-options-record.ts:33:22 - error SC2020: 'the undocumented get option 'zorp' with an effectful value' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:34:22 - error SC2020: 'the undocumented get option 'zorp' with an effectful value' is part of the standard library types but has no scriptc lowering yet
 
-  32 | }
-  33 | http.get({ port: 80, zorp: effect() }, () => {});
+  33 | }
+  34 | http.get({ port: 80, zorp: effect() }, () => {});
      |                      ^~~~~~~~~~~~~~
-  34 | 
+  35 |
 
   hint: Node ignores undocumented option keys and so does this compiler, but Node still evaluates the value — hoist it (const v = ...) or drop the entry
 
-options-record.ts:36:41 - error SC2020: 'tls.createServer option 'ciphers'' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:37:41 - error SC2020: 'tls.createServer option 'ciphers'' is part of the standard library types but has no scriptc lowering yet
 
-  35 | // Documented TLS server options with no lowering fence by name.
-  36 | tls.createServer({ cert: "c", key: "k", ciphers: "TLS_AES_128_GCM_SHA256" }, () => {});
+  36 | // Documented TLS server options with no lowering fence by name.
+  37 | tls.createServer({ cert: "c", key: "k", ciphers: "TLS_AES_128_GCM_SHA256" }, () => {});
      |                                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  37 | tls.createServer({ cert: "c", key: "k", ticketKeys: new Uint8Array(48) }, () => {});
+  38 | tls.createServer({ cert: "c", key: "k", ticketKeys: new Uint8Array(48) }, () => {});
 
   hint: cert and key (PEM strings or Buffers) are the supported options
 
-options-record.ts:37:41 - error SC2020: 'tls.createServer option 'ticketKeys'' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:38:41 - error SC2020: 'tls.createServer option 'ticketKeys'' is part of the standard library types but has no scriptc lowering yet
 
-  36 | tls.createServer({ cert: "c", key: "k", ciphers: "TLS_AES_128_GCM_SHA256" }, () => {});
-  37 | tls.createServer({ cert: "c", key: "k", ticketKeys: new Uint8Array(48) }, () => {});
+  37 | tls.createServer({ cert: "c", key: "k", ciphers: "TLS_AES_128_GCM_SHA256" }, () => {});
+  38 | tls.createServer({ cert: "c", key: "k", ticketKeys: new Uint8Array(48) }, () => {});
      |                                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  38 | 
+  39 |
 
   hint: cert and key (PEM strings or Buffers) are the supported options
 
-options-record.ts:41:20 - error SC2020: 'fs.watch with the recursive option' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:42:20 - error SC2020: 'fs.watch with the recursive option' is part of the standard library types but has no scriptc lowering yet
 
-  40 | // stated defaults are accepted (corpus 1751).
-  41 | fs.watch("/tmp", { recursive: true }, () => {});
+  41 | // stated defaults are accepted (corpus 1751).
+  42 | fs.watch("/tmp", { recursive: true }, () => {});
      |                    ^~~~~~~~~~~~~~~
-  42 | fs.watch("/tmp", { persistent: false }, () => {});
+  43 | fs.watch("/tmp", { persistent: false }, () => {});
 
   hint: recursive watching has no lowering yet — kqueue watches the one opened path; watch each path
 
-options-record.ts:42:20 - error SC2020: 'fs.watch with persistent disabled' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:43:20 - error SC2020: 'fs.watch with persistent disabled' is part of the standard library types but has no scriptc lowering yet
 
-  41 | fs.watch("/tmp", { recursive: true }, () => {});
-  42 | fs.watch("/tmp", { persistent: false }, () => {});
+  42 | fs.watch("/tmp", { recursive: true }, () => {});
+  43 | fs.watch("/tmp", { persistent: false }, () => {});
      |                    ^~~~~~~~~~~~~~~~~
-  43 | 
+  44 |
 
   hint: an open watcher keeps the loop alive until close() — that IS the lowering; persistent: false (a watcher the process does not wait for) has no lowering
 
-options-record.ts:45:38 - error SC2020: 'lookup option 'hints'' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:46:38 - error SC2020: 'lookup option 'hints'' is part of the standard library types but has no scriptc lowering yet
 
-  44 | // dns.lookup: hints/all are documented knobs with no lowering.
-  45 | dns.lookup("localhost", { family: 4, hints: 32 }, () => {});
+  45 | // dns.lookup: hints/all are documented knobs with no lowering.
+  46 | dns.lookup("localhost", { family: 4, hints: 32 }, () => {});
      |                                      ^~~~~~~~~
-  46 | dns.lookup("localhost", { family: 4, all: true }, () => {});
+  47 | dns.lookup("localhost", { family: 4, all: true }, () => {});
 
   hint: family: 4 is the supported option
 
-options-record.ts:46:38 - error SC2020: 'lookup option 'all'' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:47:38 - error SC2020: 'lookup option 'all'' is part of the standard library types but has no scriptc lowering yet
 
-  45 | dns.lookup("localhost", { family: 4, hints: 32 }, () => {});
-  46 | dns.lookup("localhost", { family: 4, all: true }, () => {});
+  46 | dns.lookup("localhost", { family: 4, hints: 32 }, () => {});
+  47 | dns.lookup("localhost", { family: 4, all: true }, () => {});
      |                                      ^~~~~~~~~
-  47 | 
+  48 |
 
   hint: the all-addresses callback shape has no lowering — the lowered callback is (err, address, family) over one IPv4 answer
 
-options-record.ts:50:85 - error SC2020: 'createInterface with a finite crlfDelay' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:51:85 - error SC2020: 'createInterface with a finite crlfDelay' is part of the standard library types but has no scriptc lowering yet
 
-  49 | // needs an interactive terminal.
-  50 | readline.createInterface({ input: process.stdin, output: process.stdout, crlfDelay: 100 });
+  50 | // needs an interactive terminal.
+  51 | readline.createInterface({ input: process.stdin, output: process.stdout, crlfDelay: 100 });
      |                                                                                     ^~~
-  51 | readline.createInterface({ input: process.stdin, output: process.stdout, completer: (l: string) => [[l], l] });
+  52 | readline.createInterface({ input: process.stdin, output: process.stdout, completer: (l: string) => [[l], l] });
 
   hint: the lowered splitter always joins \r\n across chunks (Node's crlfDelay: Infinity) — Infinity is the accepted value
 
-options-record.ts:51:74 - error SC2020: 'createInterface with a completer' is part of the standard library types but has no scriptc lowering yet
+options-record.ts:52:74 - error SC2020: 'createInterface with a completer' is part of the standard library types but has no scriptc lowering yet
 
-  50 | readline.createInterface({ input: process.stdin, output: process.stdout, crlfDelay: 100 });
-  51 | readline.createInterface({ input: process.stdin, output: process.stdout, completer: (l: string) => [[l], l] });
+  51 | readline.createInterface({ input: process.stdin, output: process.stdout, crlfDelay: 100 });
+  52 | readline.createInterface({ input: process.stdin, output: process.stdout, completer: (l: string) => [[l], l] });
      |                                                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  52 | 
+  53 |
 
   hint: tab completion needs an interactive terminal — the lowered interface reads piped lines (terminal: false)

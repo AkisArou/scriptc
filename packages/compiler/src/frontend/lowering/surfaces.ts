@@ -172,6 +172,16 @@ export const HTTP_SERVER_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   "requireHostHeader", "uniqueHeaders",
 ]);
 
+/** new http.Agent(options)'s documented keys (Node v24 — the Agent
+ * constructor table plus the socket.connect() options it forwards into
+ * each dial). The lowered set is keepAlive/keepAliveMsecs/maxSockets/
+ * maxFreeSockets/timeout/port (+ scheduling, dropped: no free pool
+ * exists); the rest fence by name and unknown keys drop like Node. */
+export const AGENT_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
+  "family", "hints", "host", "keepAliveInitialDelay", "localAddress",
+  "localPort", "lookup", "maxTotalSockets", "noDelay", "path",
+]);
+
 /** https.request adds tls.connect's client-side TLS knobs. */
 export const HTTPS_CLIENT_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   ...HTTP_CLIENT_DOCUMENTED_OPTIONS,
@@ -1205,6 +1215,12 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
     if (!sym || !L.isStdlibSymbol(sym)) return;
     const member = access.name.text;
     const recv = access.expression;
+    // A CHECKED-DYNAMIC receiver whose checker type is a concrete stdlib
+    // class mapped to dyn (the http Agent handle): its members dispatch
+    // at runtime through the DOM/handle machinery — the keyed-read claim
+    // below this fence answers, member-or-refusal ladder, so no compile
+    // fence belongs here.
+    if (L.mapTypeOf(L.typeOf(recv))?.kind === "dyn") return;
     // Name the container the way the source reads: the global's name when
     // the receiver IS a stdlib global (Math, process), the dotted path for
     // a member of one (process.stdout — its TYPE text would be the useless

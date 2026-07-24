@@ -640,18 +640,20 @@ server.listen(0, '127.0.0.1', wrap(function() {
 `;
 
   test("a real-but-unmodeled member on a dyn handle throws the loud ladder", async () => {
+    // writeContinue stays unmodeled (cork/uncork/flushHeaders graduated
+    // to real dispatches — the ladder's exemplar moves with the surface).
     const r = await compileAndRun(
       "handle-unmodeled-member",
       serverPreamble +
         `server.on('request', wrap(function(req, res) {
-  res.cork();
+  res.writeContinue();
 }));
 ` + listenAndHit,
       "cjs",
     );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain(
-      "'ServerResponse.prototype.cork' on a dynamic value is not supported yet",
+      "'ServerResponse.prototype.writeContinue' on a dynamic value is not supported yet",
     );
   });
 

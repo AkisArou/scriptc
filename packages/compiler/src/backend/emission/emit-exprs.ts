@@ -2286,6 +2286,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // Object.defineProperties over dyn values: both borrowed,
             // result the target (+1); throws catchably (may-throw seed).
             return finish(`scr_dyn_define_props(${arg(0)}, ${arg(1)})`);
+          case "dyn.hasKey":
+            // `k in v` with a runtime key: the DOM presence answer (both
+            // borrowed, no allocation, never throws).
+            return finish(`scr_dyn_has_key(${arg(0)}, ${arg(1)})`);
           case "dyn.keySet":
             // Keyed write on a dyn receiver: all three borrowed (the
             // member retains the value in); throws Node's TypeErrors on
@@ -3231,6 +3235,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "net.sockDestroy":
             E.line(`scr_net_sock_destroy(${arg(0)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
+          case "net.sockPause":
+            return finish(`scr_net_sock_pause(${arg(0)})`);
+          case "net.sockResume":
+            return finish(`scr_net_sock_resume(${arg(0)})`);
+          case "net.sockSetNoDelay":
+            return finish(`scr_net_sock_set_nodelay(${arg(0)}, ${arg(1)})`);
+          case "net.sockDestroySoon":
+            E.line(`scr_net_sock_destroy_soon(${arg(0)});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          case "net.sockBytesWritten":
+            return finish(`scr_net_sock_bytes_written(${arg(0)})`);
+          case "net.sockReadable":
+            return finish(`scr_net_sock_readable(${arg(0)})`);
+          case "net.sockOnFinish": {
+            const cb = args[1]!;
+            E.moveTemp(cb);
+            E.line(`scr_net_sock_on_finish(${arg(0)}, ${cb.name});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          }
           case "net.sockPipe":
             E.line(`scr_net_sock_pipe(${arg(0)}, ${arg(1)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
@@ -3781,6 +3804,28 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `scr_http_request(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}, ${arg(6)}, ${cbExpr}, ${adapter})`,
             );
           }
+          case "http.agentNew":
+            E.usesTimers = true; // queued dials hold the loop open
+            return finish(
+              `scr_http_agent_new(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}, ${arg(6)})`,
+            );
+          case "http.requestAgent":
+          case "http.requestAgentCb": {
+            E.usesTimers = true;
+            let cbExpr = "NULL";
+            let adapter = "NULL";
+            if (e.fn === "http.requestAgentCb") {
+              const cbT = e.args[8]!.type;
+              if (cbT.kind !== "func") throw new Error("emitter bug: http.requestAgentCb callback not a func");
+              const cb = args[8]!;
+              E.moveTemp(cb);
+              cbExpr = cb.name;
+              adapter = cbT.params.length === 0 ? "&scr_http_resp_thunk0" : "&scr_http_resp_thunk_res";
+            }
+            return finish(
+              `scr_http_request_agent(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}, ${arg(6)}, ${arg(7)}, ${cbExpr}, ${adapter})`,
+            );
+          }
           case "http.requestUrl":
           case "http.requestUrlCb": {
             E.usesTimers = true; // an in-flight request holds the loop open
@@ -4315,6 +4360,23 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             }
             return finish(
               `scr_https_request(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}, ${arg(6)}, ${arg(7)}, (const char *)${arg(8)}->data, ${arg(8)}->len, ${cbExpr}, ${adapter})`,
+            );
+          }
+          case "https.requestAgent":
+          case "https.requestAgentCb": {
+            E.usesTimers = true; // an in-flight request holds the loop open
+            let cbExpr = "NULL";
+            let adapter = "NULL";
+            if (e.fn === "https.requestAgentCb") {
+              const cbT = e.args[10]!.type;
+              if (cbT.kind !== "func") throw new Error("emitter bug: https.requestAgentCb callback not a func");
+              const cb = args[10]!;
+              E.moveTemp(cb);
+              cbExpr = cb.name;
+              adapter = cbT.params.length === 0 ? "&scr_http_resp_thunk0" : "&scr_http_resp_thunk_res";
+            }
+            return finish(
+              `scr_https_request_agent(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}, ${arg(6)}, ${arg(7)}, (const char *)${arg(8)}->data, ${arg(8)}->len, ${arg(9)}, ${cbExpr}, ${adapter})`,
             );
           }
           case "https.requestFn":

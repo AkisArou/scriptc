@@ -983,6 +983,18 @@ ScrHttpClientReq *scr_https_request(ScrStr *host /*borrowed*/, double port,
                               fn, 443, &scr_tls_cli_wrap, cli);
 }
 
+ScrHttpClientReq *scr_https_request_agent(ScrStr *host /*borrowed*/, double port,
+                                           ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
+                                           double timeout_ms, ScrArr *header_pairs /*borrowed*/,
+                                           bool auto_end, bool reject_unauthorized,
+                                           const char *ca /*borrowed, len 0 = none*/, size_t ca_len,
+                                           const ScrDyn *agent /*borrowed*/,
+                                           ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn) {
+  ScrTlsCli *cli = scr_tls_cli_new(host, reject_unauthorized, ca, ca_len);
+  return scr_http_request_agent_ex(host, port, path, method, timeout_ms, header_pairs, auto_end,
+                                    agent, cb, fn, 443, &scr_tls_cli_wrap, cli);
+}
+
 /* ── RUNTIME options records (the divergence-66 stance) ────────────────
  * A non-literal options value — the checked-dynamic JS lane's dyn record
  * — reads its members at RUNTIME. Members the literal path lowers take

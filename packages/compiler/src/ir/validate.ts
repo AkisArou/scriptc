@@ -94,6 +94,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "dyn.iterPack": { argTypes: [DYN, STRING], result: DYN },
   "dyn.arrLen": { argTypes: [DYN], result: F64 },
   "dyn.arrAt": { argTypes: [DYN, F64], result: DYN },
+  "dyn.hasKey": { argTypes: [DYN, STRING], result: BOOL },
   "dyn.toString": { argTypes: [DYN, STRING, STRING], result: STRING },
   "dyn.defineProps": { argTypes: [DYN, DYN], result: DYN },
   "dyn.typeof": { argTypes: [DYN], result: STRING },
@@ -469,6 +470,9 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // program-dependent (checked below); header pairs arrive flat.
   "http.request": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL], result: HTTPCLIENTREQ_T },
   "http.requestCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, null], result: HTTPCLIENTREQ_T },
+  "http.agentNew": { argTypes: [BOOL, BOOL, F64, F64, F64, F64, F64], result: DYN },
+  "http.requestAgent": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, DYN], result: HTTPCLIENTREQ_T },
+  "http.requestAgentCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, DYN, null], result: HTTPCLIENTREQ_T },
   "http.requestUrl": { argTypes: [STRING, STRING, BOOL], result: HTTPCLIENTREQ_T },
   "http.requestUrlCb": { argTypes: [STRING, STRING, BOOL, null], result: HTTPCLIENTREQ_T },
   "net.sockOnReadable": { argTypes: [NETSOCKET_T, null, BOOL], result: VOID },
@@ -477,6 +481,13 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // placeholder the special case overrides).
   "net.sockRead": { argTypes: [NETSOCKET_T, F64], result: VOID },
   "net.sockUnshift": { argTypes: [NETSOCKET_T, BYTES_U8], result: VOID },
+  "net.sockPause": { argTypes: [NETSOCKET_T], result: NETSOCKET_T },
+  "net.sockResume": { argTypes: [NETSOCKET_T], result: NETSOCKET_T },
+  "net.sockSetNoDelay": { argTypes: [NETSOCKET_T, BOOL], result: NETSOCKET_T },
+  "net.sockDestroySoon": { argTypes: [NETSOCKET_T], result: VOID },
+  "net.sockBytesWritten": { argTypes: [NETSOCKET_T], result: F64 },
+  "net.sockReadable": { argTypes: [NETSOCKET_T], result: BOOL },
+  "net.sockOnFinish": { argTypes: [NETSOCKET_T, { kind: "func", params: [], ret: VOID }], result: VOID },
   "net.serverEmitConnection": { argTypes: [NETSERVER_T, NETSOCKET_T], result: VOID },
   // tls/https: cert/key/ca PEM arguments are strings OR Buffers (null =
   // both accepted; the emitter passes data+len either way).
@@ -591,6 +602,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "http.requestConnCb": { argTypes: [null, STRING, STRING, F64, arrayOf(STRING), BOOL, null], result: HTTPCLIENTREQ_T },
   "https.request": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null], result: HTTPCLIENTREQ_T },
   "https.requestCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, null], result: HTTPCLIENTREQ_T },
+  "https.requestAgent": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, DYN], result: HTTPCLIENTREQ_T },
+  "https.requestAgentCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, DYN, null], result: HTTPCLIENTREQ_T },
   // The requestFn binding's runtime-secure rows: https.request's shape
   // with the leading `secure` bool.
   "https.requestFn": { argTypes: [BOOL, STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null], result: HTTPCLIENTREQ_T },
@@ -1574,7 +1587,10 @@ function validateFunction(
             // Symbol identity IS pointer identity (the frontend's rule).
             e.left.type.kind === "symbol" ||
             e.left.type.kind === "bytes" ||
-            e.left.type.kind === "promise")
+            e.left.type.kind === "promise" ||
+            // Runtime handles are objects to === (one handle per socket/
+            // request — pointer identity is JS's object equality).
+            DYN_HANDLE_KINDS.has(e.left.type.kind))
         ) {
           // Reference identity: both operands must be the same ref type.
           if (!typeEquals(e.left.type, e.right.type)) {
@@ -3410,9 +3426,15 @@ function validateFunction(
           }
           break;
         }
-        if (e.fn === "http.requestCb" || e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse") {
+        if (e.fn === "http.requestCb" || e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse" ||
+            e.fn === "http.requestAgentCb" || e.fn === "https.requestAgentCb") {
           // The response listener: void, no params or exactly (res: httpReq).
-          const cbT = e.args[e.fn === "http.requestCb" ? 7 : e.fn === "http.requestUrlCb" ? 3 : 1]?.type;
+          const cbT = e.args[
+            e.fn === "http.requestCb" ? 7
+            : e.fn === "http.requestUrlCb" ? 3
+            : e.fn === "http.requestAgentCb" ? 8
+            : e.fn === "https.requestAgentCb" ? 10
+            : 1]?.type;
           let ok = cbT?.kind === "func" && cbT.ret.kind === "void" && cbT.params.length <= 1;
           if (ok && cbT?.kind === "func" && cbT.params.length === 1) {
             ok = cbT.params[0]!.kind === "httpReq";

@@ -1680,6 +1680,23 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   ) {
     return { kind: "object", className: "%Error" };
   }
+  // http.Agent / https.Agent — the Agent VALUE is a checked-dynamic
+  // handle (new http.Agent lowers to the DOM handle whose members
+  // dispatch through the handle ops), so the TYPE maps to dyn: a typed
+  // binding, parameter, or field carrying an Agent stays usable instead
+  // of fencing at the declaration. Module-checked like the rest (https'
+  // Agent extends http's; both live in their ambient modules).
+  if (
+    psym?.name === "Agent" &&
+    checker.declarationsOf(psym).some(
+      (d) =>
+        (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
+        ctx.isStdlibFile(d.getSourceFile()) &&
+        (isDeclaredInAmbientModule(d, "http") || isDeclaredInAmbientModule(d, "https")),
+    )
+  ) {
+    return { kind: "dyn" };
+  }
   // http.IncomingMessage / http.ServerResponse — module-checked like
   // net.Server (the names repeat nowhere today, but provenance stays the
   // rule).

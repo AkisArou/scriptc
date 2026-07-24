@@ -1527,6 +1527,27 @@ ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
  * ignore silently — the loud choice, SEMANTICS.md). Receiver, key, and
  * value are all BORROWED (the member retains the value in). */
 static const char *scr_dyn_kind_name(const ScrDyn *d);
+/* `key in v` with a RUNTIME key (the compile-time dynHasKey fold, per
+ * value): OBJ answers own-member presence, ARR answers 'length' or a
+ * valid dense index, every other kind false (tsc admits `in` only on
+ * object-typed operands). Borrows both; never throws. */
+bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key) {
+  if (v->kind == SCR_DYN_OBJ) return scr_dyn_obj_get(v, key->data, key->len) != NULL;
+  if (v->kind == SCR_DYN_ARR) {
+    if (key->len == 6 && memcmp(key->data, "length", 6) == 0) return true;
+    if (key->len == 0 || key->len > 15) return false;
+    size_t idx = 0;
+    for (size_t i = 0; i < key->len; i++) {
+      char c = key->data[i];
+      if (c < '0' || c > '9') return false;
+      if (i > 0 && idx == 0) return false; /* a leading zero is no canonical index */
+      idx = idx * 10 + (size_t)(c - '0');
+    }
+    return idx < v->v.arr.len;
+  }
+  return false;
+}
+
 void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
   if (recv->kind == SCR_DYN_OBJ) {
     scr_dyn_obj_set(recv, key->data, key->len, scr_dyn_retain(value));

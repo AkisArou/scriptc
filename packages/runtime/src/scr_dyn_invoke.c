@@ -671,9 +671,33 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
     return NULL;
   }
 
-  if (recv->kind == SCR_DYN_BYTES && dyn_bytes_proto_real(method)) {
-    dyn_throw_unsupported("Uint8Array", method);
-    return NULL;
+  if (recv->kind == SCR_DYN_BYTES) {
+    ScrBytes *bytes = recv->v.bytes;
+    size_t blen = bytes->len;
+    if (dyn_name_is(method, "at")) {
+      double iD = dyn_index_arg(args, argc, 0, 0, what);
+      if (scr_exc_pending()) return NULL;
+      double idx = iD < 0 ? (double)blen + iD : iD;
+      if (idx < 0 || idx >= (double)blen) return scr_dyn_retain(scr_dyn_undefined());
+      return scr_dyn_new_num((double)bytes->data[(size_t)idx]);
+    }
+    if (dyn_name_is(method, "slice") || dyn_name_is(method, "subarray")) {
+      /* Both COPY (no views in this runtime — the static lane's
+       * documented divergence for subarray/Buffer.slice); the result
+       * keeps the receiver's Buffer flavor. */
+      double startD = dyn_index_arg(args, argc, 0, 0, what);
+      if (scr_exc_pending()) return NULL;
+      double endD = dyn_index_arg(args, argc, 1, (double)blen, what);
+      if (scr_exc_pending()) return NULL;
+      ScrBytes *out = scr_bytes_slice(bytes, startD, endD);
+      ScrDyn *d = recv->buffer ? scr_dyn_new_buffer_copy(out) : scr_dyn_new_bytes_copy(out);
+      scr_bytes_release(out);
+      return d;
+    }
+    if (dyn_bytes_proto_real(method)) {
+      dyn_throw_unsupported("Uint8Array", method);
+      return NULL;
+    }
   }
 
   /* NUM/BOOL/BYTES-remainder: the name is no method of this kind — JS's
