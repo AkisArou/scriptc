@@ -513,6 +513,26 @@ export function dynUndefinedExpr(loc: SrcLoc): IrExpr {
   };
 }
 
+/** An always-throwing Node-parity error expression (the error.nodeThrow
+ * libCall — the lowered form of arms Node rejects unconditionally:
+ * ERR_INVALID_THIS receivers, ERR_MISSING_ARGS arity ladders, the
+ * symbol-to-string TypeError). kind 0 Error / 1 TypeError / 2 RangeError;
+ * an empty code means no code slot. `type` is the replaced expression's
+ * own (never materialized — the global.undefRead pattern). */
+export function nodeThrowExpr(kind: 0 | 1 | 2, code: string, message: string, type: IrType, loc: SrcLoc): IrExpr {
+  return {
+    kind: "libCall",
+    fn: "error.nodeThrow",
+    args: [
+      { kind: "numLit", value: kind, type: F64, loc },
+      { kind: "strLit", value: code, type: STRING, loc },
+      { kind: "strLit", value: message, type: STRING, loc },
+    ],
+    type,
+    loc,
+  };
+}
+
 /** The checked-dynamic declaration fallback for unmappable binding types
  * (see irTypeOf), two gates over one story:
  *

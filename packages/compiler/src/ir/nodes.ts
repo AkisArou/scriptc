@@ -2792,6 +2792,20 @@ export type IrLibFn =
    * field to stamp. error.toString: borrowed `%Error`-typed receiver, +1
    * string in Node's "name: message" shape. None of the three throws. */
   | "error.new"
+  /** The compiler-resolved Node-parity throw for always-throwing lowered
+   * arms (ERR_INVALID_THIS receivers, ERR_MISSING_ARGS arity ladders,
+   * the symbol-to-string TypeError): args are [error-kind f64 (the
+   * SCR_ERR_* index: 0 Error, 1 TypeError, 2 RangeError), code (empty =
+   * no code slot), message]. ALWAYS THROWS catchably; the result type is
+   * the replaced expression's own (never materialized — the
+   * global.undefRead pattern). May-throw seed. */
+  | "error.nodeThrow"
+  /** JS ToString over a DOM value WITH the object protocol (a user
+   * toString/valueOf member is CALLED and its throw propagates;
+   * exhaustion throws "Cannot convert object to primitive value"; units
+   * render "null"/"undefined") — the WHATWG USVString conversions
+   * (URLSearchParams names/values). Borrowed dyn; +1 string. May-throw. */
+  | "dyn.toStringCoerce"
   /** A read of a `declare`d const NOTHING defines (the bundler-define
    * pattern — __VERSION__): always throws the catchable ReferenceError
    * Node raises at the access ("<name> is not defined"). args[0] is the
@@ -6094,6 +6108,10 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // A read of a declare-d const nothing defines: always throws Node's
   // catchable ReferenceError.
   "global.undefRead",
+  // The compiler-resolved Node-parity throw: always throws, catchably.
+  "error.nodeThrow",
+  // USVString coercion runs user toString/valueOf — throws propagate.
+  "dyn.toStringCoerce",
   "child.kill",
   // The caller's lookup runs synchronously inside the connect call — a
   // throw there propagates like Node's.

@@ -716,6 +716,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // error.new's result and the receiver slots are builtin-error classes —
   // program-dependent object types, checked in the libCall case.
   "error.new": { argTypes: [STRING], result: VOID },
+  "error.nodeThrow": { argTypes: [F64, STRING, STRING], result: VOID },
+  "dyn.toStringCoerce": { argTypes: [DYN], result: STRING },
   // Always throws; the result is the READ's declared type (a typed dummy
   // the unwind abandons) — the libCall case skips the result check.
   "global.undefRead": { argTypes: [STRING], result: VOID },
@@ -3826,6 +3828,11 @@ function validateFunction(
         if (e.fn === "global.undefRead") {
           // Always throws — the result type is whatever the declared type
           // of the undefined global mapped to (never materialized).
+          break;
+        }
+        if (e.fn === "error.nodeThrow") {
+          // Always throws — the result type is the replaced expression's
+          // own (never materialized; the global.undefRead pattern).
           break;
         }
         if (e.fn === "error.new") {

@@ -4127,6 +4127,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_http2_stream_pending(${arg(0)})`);
           case "http2.streamSession":
             return finish(`scr_http2_stream_session(${arg(0)})`);
+          case "dyn.toStringCoerce":
+            // +1 string or NULL with the exception pending (user
+            // toString/valueOf throws propagate). Borrows the dyn.
+            return finish(`scr_dyn_string_coerce_js(${arg(0)})`);
+          case "error.nodeThrow":
+            // The compiler-resolved Node-parity throw (always throws —
+            // the typed dummy is abandoned by the pending check's
+            // unwind; releases are NULL-tolerant). Borrows both strings.
+            return finish(
+              `(scr_throw_node_coded(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
           case "global.undefRead":
             // A declare-d const nothing defines: Node's catchable
             // ReferenceError at the access (always throws — the typed

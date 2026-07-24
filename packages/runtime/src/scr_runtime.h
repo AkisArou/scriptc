@@ -478,6 +478,9 @@ void scr_undef_global_read(ScrStr *name);
 void scr_error_set_code(ScrError *e, const char *code);
 ScrStr *scr_error_code(ScrError *e);
 void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
+/* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
+ * error of `kind`, `code` stamped when non-empty. Borrows both. */
+void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
 
 /* ── string methods ─────────────────────────────────────────────────
  * ECMA-262 observable semantics (UTF-16 code units) computed over the
@@ -2751,6 +2754,10 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc);
 /* JS String() over the DOM kind (units render "null"/"undefined" where
  * scr_dyn_to_string throws) — the web globals' WebIDL ToString. +1. */
 ScrStr *scr_dyn_string_coerce(const ScrDyn *d);
+/* JS ToString WITH the object protocol (user toString/valueOf members
+ * called, their throws propagating) — the WHATWG USVString conversions.
+ * Borrows; +1 or NULL with the exception pending. */
+ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d);
 
 /* `d instanceof TypeError` (and the other builtin error classes) on a
  * checked-dynamic value: the from_error cache resolves the DOM encoding

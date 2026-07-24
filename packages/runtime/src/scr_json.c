@@ -1128,6 +1128,39 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d) {
   return scr_dyn_to_string(d, NULL);
 }
 
+/* JS ToString over a DOM value WITH the object protocol (the WHATWG
+ * USVString conversions — URLSearchParams names/values): an OBJ whose
+ * own 'toString' member is callable is invoked with zero arguments (its
+ * throw propagates, catchably); a non-primitive answer falls through to
+ * 'valueOf' (ToPrimitive's string hint); exhaustion is the spec's
+ * "Cannot convert object to primitive value" TypeError. Every other
+ * kind matches scr_dyn_string_coerce (units RENDER — ToString(null) is
+ * "null"). Borrows; +1, or NULL with the exception pending. */
+ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
+  if (d->kind == SCR_DYN_OBJ) {
+    static const char *const hint[2] = { "toString", "valueOf" };
+    for (int i = 0; i < 2; i++) {
+      ScrDyn *m = scr_dyn_obj_get(d, hint[i], strlen(hint[i])); /* borrowed */
+      if (!m || m->kind != SCR_DYN_FUNC) continue;
+      ScrDyn *r = scr_dyn_call(m, NULL, 0, hint[i]);
+      if (!r) return NULL; /* the method threw — pending */
+      if (r->kind == SCR_DYN_OBJ || r->kind == SCR_DYN_ARR ||
+          r->kind == SCR_DYN_FUNC || r->kind == SCR_DYN_HANDLE ||
+          r->kind == SCR_DYN_PROMISE) {
+        scr_dyn_release(r); /* non-primitive answer: try the next method */
+        continue;
+      }
+      ScrStr *s = scr_dyn_string_coerce(r);
+      scr_dyn_release(r);
+      return s;
+    }
+    static const char msg[] = "Cannot convert object to primitive value";
+    scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+    return NULL;
+  }
+  return scr_dyn_string_coerce(d);
+}
+
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets
  * the member (later writes win, insertion order — JS); undefined/null
  * throws Node's "Cannot set properties of ..."; every other kind throws
