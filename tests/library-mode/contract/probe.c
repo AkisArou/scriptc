@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 extern uint64_t kc_build_id(void);
 extern uint32_t kc_abi_version(void);
@@ -25,7 +26,18 @@ static void sink(void *ctx, const uint8_t *msg, size_t len, uint64_t addr) {
   (void)ctx;
   (void)addr;
   sink_calls++;
-  printf("sink[%d]: %.*s", sink_calls, (int)len, (const char *)msg);
+  /* Runtime traps arrive as structured trap-teaching messages; this
+   * fixture pins identity behavior, not the encoding (the K-suite owns
+   * that), so print field 0 — the human text — the spec's plain-text
+   * display rule. */
+  const uint8_t *text = msg;
+  size_t text_len = len;
+  if (len > 0 && msg[0] == 0x01) {
+    text = msg + 1;
+    const uint8_t *sep = memchr(text, 0x1f, len - 1);
+    text_len = sep != NULL ? (size_t)(sep - text) : len - 1;
+  }
+  printf("sink[%d]: %.*s", sink_calls, (int)text_len, (const char *)text);
   longjmp(trap_jmp, 1);
 }
 

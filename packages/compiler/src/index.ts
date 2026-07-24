@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
@@ -789,6 +789,25 @@ function resolveLibrarySection(
     }
   }
   if (diagnostics.length > 0) return { diagnostics };
+  // The runtime detected-trap overlay rows: one per family code the profile
+  // declares teaching or remediation text for, in the registry family's
+  // order. Both backends emit exactly these rows as the program TU's
+  // overlay table, so the funnel-assembled sink message is
+  // emission-invariant by construction. (SC4012 stays compile-time
+  // assembled into the wrapper's message above and never reaches the
+  // funnel's assembly path.)
+  const trapOverlays: IrLibSection["trapOverlays"] = [];
+  for (const code of LIB_RUNTIME_TRAP_CODES) {
+    const teaching = profileTeaching(profile, code);
+    const remediation = profileRemediation(profile, code);
+    if (teaching !== undefined || remediation !== undefined) {
+      trapOverlays.push({
+        code,
+        ...(teaching !== undefined ? { teaching } : {}),
+        ...(remediation !== undefined ? { remediation } : {}),
+      });
+    }
+  }
   return {
     lib: {
       profileName: profile.name,
@@ -798,6 +817,7 @@ function resolveLibrarySection(
       collectSymbol: profile.collectSymbol,
       resultResetSymbol: profile.resultResetSymbol,
       exports,
+      trapOverlays,
     },
   };
 }

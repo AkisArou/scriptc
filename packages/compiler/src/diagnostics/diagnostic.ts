@@ -23,8 +23,11 @@
  *            declarations feeding a tabled type (SC4010), conditional/
  *            mapped types producing a tabled type (SC4011), the
  *            inbound-bytes host-contract runtime trap (SC4012 — a
- *            structured trap-teaching code, not a refusal); SC4008
- *            reserved for ask-5 determinism denials
+ *            structured trap-teaching code, not a refusal), and the
+ *            runtime detected-trap family SC4013–SC4019 (RUNTIME codes
+ *            like SC4012, classified by the library trap funnel —
+ *            LIB_RUNTIME_TRAP_CODES below); SC4008 reserved for ask-5
+ *            determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -800,6 +803,44 @@ export function libSidecarComputedDiag(name: string, which: "conditional" | "map
  * sink, alongside the trapping export's C symbol and the profile's teaching
  * and remediation text for this code when the profile supplies them. */
 export const LIB_INBOUND_BYTES_TRAP_CODE = "SC4012";
+
+/** SC4013–SC4019 — the library-mode runtime detected-trap family. RUNTIME
+ * codes like SC4012, never compile-time refusals: every trap the runtime
+ * DETECTS in library mode reaches the panic sink as a structured
+ * trap-teaching message (library/trap-teaching.ts's encoding), assembled by
+ * the library trap funnel (scr_library.c) with the baseline human line
+ * unchanged as field 0, one of these codes, and the trapping entry's
+ * symbol; a profile may overlay teaching/remediation text per code through
+ * the program TU's overlay table. The kinds are the runtime's ACTUAL trap
+ * sites, classified by the funnel over the sites' message conventions:
+ *
+ *   SC4013  escaped exception at an entry (the "Uncaught ..." renderer,
+ *           scr_library_check_exc — declared entries do not throw)
+ *   SC4014  range trap ("scriptc: RangeError: ...": array/typed-array
+ *           index out of bounds, pop() on empty, invalid count value)
+ *   SC4015  type trap ("scriptc: TypeError: ...": a keyed read miss on a
+ *           result type that cannot say undefined)
+ *   SC4016  syntax trap ("scriptc: SyntaxError: ...": invalid regular
+ *           expression at runtime construction)
+ *   SC4017  out of memory ("scriptc: out of memory")
+ *   SC4018  internal invariant failure ("scriptc: internal error: ...")
+ *   SC4019  other detected trap (the family's residual: environment
+ *           failures like getcwd/os lookups, unsupported regex
+ *           operations, circular-structure conversion, the RC audit)
+ *
+ * There is no arithmetic/div-by-zero kind: JS division never traps, so the
+ * runtime has no such site. The list here is the compile-time face of the
+ * family (profile overlay filtering); the funnel's classification table in
+ * scr_library.c is the runtime face — keep the two in step. */
+export const LIB_RUNTIME_TRAP_CODES = [
+  "SC4013",
+  "SC4014",
+  "SC4015",
+  "SC4016",
+  "SC4017",
+  "SC4018",
+  "SC4019",
+] as const;
 
 export function iceDiag(message: string, loc: SrcLoc): ScrDiagnostic {
   return {

@@ -739,6 +739,17 @@ export interface IrLibExport {
   inboundBytesTrap?: string;
 }
 
+/** One runtime-trap overlay row: the profile's teaching (replaces the
+ * baseline human line as field 0) and/or remediation (the optional fourth
+ * field) for one runtime detected-trap code. At least one of the two is
+ * present, or the row is not emitted. Text is profile-validated free of
+ * the encoding's reserved bytes (SC4001). */
+export interface IrLibTrapOverlay {
+  code: string;
+  teaching?: string;
+  remediation?: string;
+}
+
 export interface IrLibSection {
   /** The profile's identity string (artifact header comments only). */
   profileName: string;
@@ -753,6 +764,15 @@ export interface IrLibSection {
    * posture (every entry prologue resets the arena). */
   resultResetSymbol: string | null;
   exports: IrLibExport[];
+  /** Profile-declared teaching/remediation overlays for the runtime
+   * detected-trap code family (SC4013–SC4019, diagnostics registry): both
+   * backends emit these as the program TU's overlay table
+   * (scr_library_trap_overlays — flat code/teaching/remediation triples)
+   * that the library trap funnel consults when it assembles a detected
+   * trap's structured sink message. Only declared codes appear, in the
+   * registry family's order, so the two emissions' data is identical by
+   * construction. */
+  trapOverlays: IrLibTrapOverlay[];
   /** The ask-2 identity getters (present exactly when the profile
    * declares a sidecar): pure data returns emitted with NO entry
    * prologue — exempt from the poisoned guard and every runtime touch

@@ -40,7 +40,19 @@ void scr_library_set_sink(ScrLibSinkFn fn, void *ctx) {
  * conforming survival pattern), then deliver exactly once, then abort:
  * before registration, or if the sink returns (the ruled host-contract
  * violation). The address is the funnel frame's return address — the trap
- * site — 0 where the toolchain cannot supply one. */
+ * site — 0 where the toolchain cannot supply one.
+ *
+ * Delivery shape (the ratified structured trap-teaching encoding): a
+ * message that already begins with the 0x01 marker — a facade-authored
+ * structured throw riding the verbatim rule, or the wrapper's compile-
+ * time-assembled SC4012 contract trap — is delivered byte-for-byte. Every
+ * OTHER message is a trap the runtime DETECTED, and the funnel assembles
+ * it here into 0x01 text 0x1F code 0x1F symbol [0x1F remediation]: the
+ * baseline human line becomes field 0 unchanged (so plain-text hosts read
+ * exactly what they always read), the code classifies the trap kind, the
+ * symbol is the entry the trapping call came through (recorded by the
+ * entry prologue below), and the remediation is the profile's for that
+ * code when the program TU's overlay table declares one. */
 
 #if defined(__GNUC__) || defined(__clang__)
 #define SCR_TRAP_ADDR() ((uint64_t)(uintptr_t)__builtin_return_address(0))
@@ -48,8 +60,95 @@ void scr_library_set_sink(ScrLibSinkFn fn, void *ctx) {
 #define SCR_TRAP_ADDR() ((uint64_t)0)
 #endif
 
+/* The current-entry slot: every generated entry's prologue records its
+ * external symbol before dispatching into core code. A single static slot
+ * is sound — exactly one core is live per process (the one-live-core rule),
+ * entries never nest, and a trap can only fire while an entry is on the
+ * stack. NULL (never entered) renders as the empty symbol field. */
+static const char *scr_library_entry_symbol = NULL;
+
+/* Detected-trap classification: the runtime's trap sites self-classify
+ * through their message conventions (the exact bytes the executable lane
+ * prints), so the kind → code mapping keys on those prefixes. The codes are
+ * the compiler registry's runtime family (diagnostics/diagnostic.ts —
+ * documented beside SC4012); SC4019 is the family's residual for detected
+ * traps outside the named kinds (environment failures, unsupported
+ * operations, the RC audit). */
+static const struct {
+  const char *prefix;
+  const char *code;
+} scr_library_trap_kinds[] = {
+  {"Uncaught ", "SC4013"},                  /* escaped exception at an entry */
+  {"scriptc: RangeError: ", "SC4014"},      /* range trap */
+  {"scriptc: TypeError: ", "SC4015"},       /* type trap */
+  {"scriptc: SyntaxError: ", "SC4016"},     /* syntax trap (regex compile) */
+  {"scriptc: out of memory", "SC4017"},     /* allocation failure */
+  {"scriptc: internal error: ", "SC4018"},  /* internal invariant failure */
+};
+
+static const char *scr_library_trap_code(const char *msg, size_t len) {
+  for (size_t i = 0; i < sizeof scr_library_trap_kinds / sizeof scr_library_trap_kinds[0]; i++) {
+    size_t plen = strlen(scr_library_trap_kinds[i].prefix);
+    if (len >= plen && memcmp(msg, scr_library_trap_kinds[i].prefix, plen) == 0) {
+      return scr_library_trap_kinds[i].code;
+    }
+  }
+  return "SC4019"; /* other detected trap */
+}
+
 static _Noreturn void scr_library_trap_deliver(const char *msg, size_t len, uint64_t addr) {
   scr_library_poisoned = true;
+  if (!(len > 0 && (uint8_t)msg[0] == 0x01)) {
+    /* A detected trap: assemble the structured message. Static buffer —
+     * no malloc on the failure path; text truncates before structure ever
+     * would (codes and symbols are short; an oversized remediation drops
+     * whole, never split). */
+    static char buf[2048];
+    const char *code = scr_library_trap_code(msg, len);
+    const char *text = msg;
+    size_t text_len = len;
+    const char *rem = NULL;
+    for (size_t i = 0; i < scr_library_trap_overlays_len; i++) {
+      const char *const *t = &scr_library_trap_overlays[3 * i];
+      if (strcmp(t[0], code) == 0) {
+        if (t[1] != NULL) {
+          text = t[1];
+          text_len = strlen(t[1]);
+        }
+        rem = t[2];
+        break;
+      }
+    }
+    const char *sym = scr_library_entry_symbol != NULL ? scr_library_entry_symbol : "";
+    size_t tail = 2 + strlen(code) + strlen(sym);
+    if (rem != NULL) {
+      if (tail + 1 + strlen(rem) > sizeof buf - 1) rem = NULL; /* drop whole, keep structure */
+      else tail += 1 + strlen(rem);
+    }
+    size_t n = 0;
+    buf[n++] = '\x01';
+    size_t cap = sizeof buf - 1 - tail;
+    if (text_len > cap) text_len = cap;
+    for (size_t i = 0; i < text_len; i++) {
+      /* The encoding reserves 0x01/0x1F; runtime messages never contain
+       * them, but an escaped exception's rendered text embeds user bytes. */
+      char c = text[i];
+      buf[n++] = (c == '\x01' || c == '\x1f') ? ' ' : c;
+    }
+    buf[n++] = '\x1f';
+    memcpy(buf + n, code, strlen(code));
+    n += strlen(code);
+    buf[n++] = '\x1f';
+    memcpy(buf + n, sym, strlen(sym));
+    n += strlen(sym);
+    if (rem != NULL) {
+      buf[n++] = '\x1f';
+      memcpy(buf + n, rem, strlen(rem));
+      n += strlen(rem);
+    }
+    msg = buf;
+    len = n;
+  }
   if (scr_library_sink != NULL) {
     scr_library_sink(scr_library_sink_ctx, (const uint8_t *)msg, len, addr);
   }
@@ -80,7 +179,11 @@ __attribute__((noinline)) _Noreturn void scr_trap_fmt(const char *fmt, ...) {
 
 /* ── entry prologues ──────────────────────────────────────────────────── */
 
-void scr_library_entry(bool reset_arena) {
+void scr_library_entry(bool reset_arena, const char *entry_symbol) {
+  /* Record the entry symbol FIRST so even a poisoned-abort's core dump
+   * names the entry; a trap anywhere below (the arena reset's OOM
+   * included) then reports the right symbol. */
+  scr_library_entry_symbol = entry_symbol;
   /* A poisoned library's entries abort deterministically — never through the
    * sink again (it received its exactly-once message when the trap fired),
    * never into a heap whose invariants already failed. */

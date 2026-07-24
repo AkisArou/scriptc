@@ -1,4 +1,4 @@
-/* K11 probe — the structured trap-teaching encoding, mode-selected by
+/* K11/K12 probe — the structured trap-teaching encoding, mode-selected by
  * argv[1]:
  *   structured    — the inbound-bytes host-contract trap arrives as ONE
  *                   structured message; the spec's parse rule (split the
@@ -9,10 +9,15 @@
  *                   escaped-exception channel byte-for-byte: no
  *                   "Uncaught " prefix, no added newline
  *   verbatim-str  — the same rule over a bare thrown string
- *   baseline-trap — a runtime trap's message keeps a printable first
- *                   byte (the guarantee the 0x01 marker rests on)
- *   baseline-throw— an ordinary escaped throw keeps the baseline
- *                   "Uncaught ..." shape, first byte printable
+ *   runtime-trap  — a RUNTIME-detected trap (the range trap) arrives
+ *                   structured; this profile declares SC4014 teaching and
+ *                   remediation, so both overlay the message
+ *   runtime-throw — an ordinary escaped throw arrives structured with the
+ *                   baseline "Uncaught ..." line as its text, the escaped-
+ *                   exception code, the trapping entry's symbol, and NO
+ *                   remediation field (nothing declared for SC4013)
+ * Every mode also pins that the human text leads the buffer with a
+ * printable byte — the plain-text degradation the marker rests on.
  */
 #include <setjmp.h>
 #include <stdint.h>
@@ -24,8 +29,8 @@ extern void kv_set_panic_sink(void (*fn)(void *, const uint8_t *, size_t, uint64
 extern double kv_wrap(const uint8_t *p, size_t len);
 extern double kv_teach(void);
 extern double kv_teach_str(void);
-extern double kv_boom_baseline(double i);
-extern double kv_fail_baseline(void);
+extern double kv_boom_runtime(double i);
+extern double kv_fail_runtime(void);
 
 static jmp_buf trap_jmp;
 static int sink_calls = 0;
@@ -51,7 +56,7 @@ static void show(const uint8_t *msg, size_t len) {
     if (sep == NULL) break;
     p = sep + 1;
   }
-  printf("fields=%d\n", fields);
+  printf("fields=%d text_printable=%d\n", fields, len > 1 && msg[1] >= 0x20);
 }
 
 static void sink(void *ctx, const uint8_t *msg, size_t len, uint64_t addr) {
@@ -77,10 +82,10 @@ int main(int argc, char **argv) {
       kv_teach();
     } else if (strcmp(mode, "verbatim-str") == 0) {
       kv_teach_str();
-    } else if (strcmp(mode, "baseline-trap") == 0) {
-      kv_boom_baseline(9);
-    } else if (strcmp(mode, "baseline-throw") == 0) {
-      kv_fail_baseline();
+    } else if (strcmp(mode, "runtime-trap") == 0) {
+      kv_boom_runtime(9);
+    } else if (strcmp(mode, "runtime-throw") == 0) {
+      kv_fail_runtime();
     } else {
       fprintf(stderr, "unknown mode %s\n", mode);
       return 2;
