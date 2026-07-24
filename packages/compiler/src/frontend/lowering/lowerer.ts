@@ -394,8 +394,25 @@ export function lowerToIr(
   const dynamic = options.dynamic ?? false;
   const targetPlatform = options.targetPlatform ?? process.platform;
   const startupCrash = options.startupCrash ?? null;
+  // --dynamic: modules reachable only through dynamic import() of the
+  // program's own files join the compiled graph here, ONCE, before any
+  // pass constructs (nothing calls their %init at startup — the import()
+  // site's namespace builder does, on the engine microtask, Node's
+  // evaluation point for them). Inadmissible static cycles inside the
+  // added subgraph are minted here and handed to the EMIT pass: the
+  // discovery pass's diagnostics are discarded by design, and after this
+  // extension of the shared array no later pass re-walks the subgraph.
+  const dynamicCycleDiags: ScrDiagnostic[] = [];
+  if (dynamic) {
+    appendDynamicImportModules(program, moduleOrder, (cycle, reason) => {
+      dynamicCycleDiags.push(
+        unsupportedDiag("SC1016", { file: entry.fileName, start: 0, end: 0 }, `circular imports (${cycle}; ${reason})`),
+      );
+    });
+  }
   const reachable = new Lowerer(program, entry, moduleOrder, dynamic, { targetPlatform }).discover(options.libRoots);
   const emit = new Lowerer(program, entry, moduleOrder, dynamic, { reachable, targetPlatform, startupCrash });
+  for (const d of dynamicCycleDiags) emit.pushDiag(d);
   const result = emit.run();
   if (options.coverage !== true) return result;
   const remainder = new Lowerer(program, entry, moduleOrder, dynamic, {
@@ -1137,18 +1154,12 @@ export class Lowerer {
       // lowering, long after the constructor completes.
       isProgramFile: (sf) => this.fileTag.has(sf),
     };
-    // --dynamic: modules reachable only through dynamic import() of the
-    // program's own files join the compiled graph (nothing calls their
-    // %init at startup — the import() site's namespace builder does, on
-    // the engine microtask, which is Node's evaluation point for them).
-    // Mutates the SHARED moduleOrder array; idempotent across passes.
-    if (dynamic) {
-      appendDynamicImportModules(program, this.moduleOrder, (cycle) => {
-        this.pushDiag(
-          unsupportedDiag("SC1016", { file: entry.fileName, start: 0, end: 0 }, `circular imports (${cycle})`),
-        );
-      });
-    }
+    // --dynamic: modules reachable only through dynamic import() joined
+    // moduleOrder BEFORE any pass constructed — lowerToIr runs
+    // appendDynamicImportModules once on the shared array (a per-pass run
+    // here minted cycle refusals into the DISCOVERY pass, whose
+    // diagnostics are discarded by design, and the extended order left
+    // nothing for the emit pass to re-detect).
     this.moduleOrder.forEach((sf, i) => {
       this.fileTag.set(sf, sf === entry ? "" : `%m${i}.`);
     });

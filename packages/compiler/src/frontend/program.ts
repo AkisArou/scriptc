@@ -687,9 +687,8 @@ function nsBindingUsesAreBareStatements7(
  * to close one. `stmt` is the importing/re-exporting statement; absent
  * for require() edges, which are never admitted (their CJS home fails the
  * cluster check anyway). */
-interface ModuleEdge7 {
+export interface CycleEdge {
   dep: ts.SourceFile;
-  backAdmissible: () => boolean;
   stmt?: ts.ImportDeclaration | ts.ExportDeclaration;
 }
 
@@ -995,6 +994,117 @@ function backEdgeUseOffence7(
     if (offence !== null) return offence;
   }
   return null;
+}
+
+/** The benign-cycle admission engine over one import graph, shared by
+ * preflight's static-module walk and the --dynamic subgraph walk
+ * (appendDynamicImportModules). Given a BACK edge (importer → e.dep with
+ * e.dep already mid-initialization in a depth-first walk), answers null
+ * to ADMIT the cycle — the guarded %init calls reproduce Node's cache-hit
+ * order and nothing can observe the partial initialization — or the
+ * human-readable reason it keeps the SC1016 fence. Two admission chances:
+ *  - the CHEAP PER-EDGE rule: the closing statement binds nothing (a
+ *    side-effect import) or binds only namespace objects whose every use
+ *    is a bare expression statement — no read crosses the edge at all;
+ *  - the DECLARATION-ONLY INIT WINDOW rule (the admission block above):
+ *    every cluster member is an ES module with an inert top level, and
+ *    the closing edge's bindings are used only in deferred positions.
+ * Tarjan SCCs (lazy, rooted at each queried importer) and cluster
+ * verdicts are memoized across calls, so `edgesOf` must answer the same
+ * edges for the same file every time. */
+export function makeCycleAdmission(
+  program: ts.Program,
+  edgesOf: (sf: ts.SourceFile) => readonly CycleEdge[],
+): (importer: ts.SourceFile, e: CycleEdge) => string | null {
+  // Tarjan over the same edges the order walk uses (self-edges skipped —
+  // Node's self-reference rule makes those benign before admission is
+  // ever asked). State persists across lazily-added roots: a later
+  // strongconnect over an unvisited root composes with earlier runs
+  // exactly like the classic all-roots loop.
+  const sccOf = new Map<ts.SourceFile, ts.SourceFile[]>();
+  const index = new Map<ts.SourceFile, number>();
+  const low = new Map<ts.SourceFile, number>();
+  const onStack = new Set<ts.SourceFile>();
+  const tstack: ts.SourceFile[] = [];
+  let next = 0;
+  const strongconnect = (v: ts.SourceFile): void => {
+    index.set(v, next);
+    low.set(v, next);
+    next++;
+    tstack.push(v);
+    onStack.add(v);
+    for (const e of edgesOf(v)) {
+      const w = e.dep;
+      if (w === v) continue;
+      if (!index.has(w)) {
+        strongconnect(w);
+        low.set(v, Math.min(low.get(v)!, low.get(w)!));
+      } else if (onStack.has(w)) {
+        low.set(v, Math.min(low.get(v)!, index.get(w)!));
+      }
+    }
+    if (low.get(v) === index.get(v)) {
+      const comp: ts.SourceFile[] = [];
+      for (;;) {
+        const w = tstack.pop()!;
+        onStack.delete(w);
+        comp.push(w);
+        if (w === v) break;
+      }
+      for (const w of comp) sccOf.set(w, comp);
+    }
+  };
+  const lineOf = (node: ts.Node): string => {
+    const nsf = node.getSourceFile();
+    return `${nsf.fileName}:${ts.getLineAndCharacterOfPosition(nsf, node.getStart(nsf)).line + 1}`;
+  };
+  // Cluster verdict memo (keyed by the component array identity): the
+  // reason the cluster's cycles stay fenced, or null when its every
+  // member passes the inert-top-level bar.
+  const sccVerdict = new Map<ts.SourceFile[], string | null>();
+  return (importer: ts.SourceFile, e: CycleEdge): string | null => {
+    if (e.stmt === undefined) return "the cycle closes through a require() edge";
+    // Cheap per-edge admission: nothing readable binds through the edge.
+    if (ts.isImportDeclaration(e.stmt)) {
+      const clause = e.stmt.importClause;
+      if (
+        clause === undefined ||
+        (clause.name === undefined &&
+          (clause.namedBindings === undefined ||
+            (ts.isNamespaceImport(clause.namedBindings) &&
+              nsBindingUsesAreBareStatements7(program, importer, clause.namedBindings.name))))
+      ) {
+        return null;
+      }
+    }
+    if (!index.has(importer)) strongconnect(importer);
+    const comp = sccOf.get(e.dep);
+    if (comp === undefined || comp.length < 2 || !comp.includes(importer)) {
+      return "the cycle's module cluster could not be analyzed";
+    }
+    if (!sccVerdict.has(comp)) {
+      let reason: string | null = null;
+      for (const m of comp) {
+        if (isCjsJsFile7(m)) {
+          reason = `${m.fileName} is a CommonJS module — admission covers ES-module cycles only`;
+          break;
+        }
+        const off = nonInertTopLevel7(program, m);
+        if (off !== null) {
+          reason = `top-level code at ${lineOf(off)} can run user code during the cycle's init window — only declaration-only module bodies are admitted`;
+          break;
+        }
+      }
+      sccVerdict.set(comp, reason);
+    }
+    const clusterReason = sccVerdict.get(comp)!;
+    if (clusterReason !== null) return clusterReason;
+    const use = backEdgeUseOffence7(program, importer, e.stmt);
+    if (use !== null) {
+      return `the cycle-crossing binding '${use.name}' is read at ${lineOf(use.node)}, outside any function body — a read during the init window observes the partially-initialized module (Node's TDZ ReferenceError / stale var), which is not modeled`;
+    }
+    return null;
+  };
 }
 
 /** Resolves an import specifier from `from` to a source file of the
@@ -1394,22 +1504,21 @@ function preflight7(load: LoadResult): {
     });
   };
 
-  // Module edges, each carrying its BACK-EDGE admissibility: an edge that
-  // closes a cycle is admissible when nothing can OBSERVE the partially-
-  // initialized module through it — the importing statement binds nothing
-  // (side-effect import) or binds only NAMESPACE objects (initialized at
-  // link, never TDZ) whose every use is a bare expression statement (the
-  // no-op lowering; no member is ever read). Node evaluates such cycles
+  // Module edges. An edge that closes a cycle is judged by the shared
+  // admission engine (makeCycleAdmission): admissible when nothing can
+  // OBSERVE the partially-initialized module through it — the importing
+  // statement binds nothing (side-effect import) or binds only NAMESPACE
+  // objects (initialized at link, never TDZ) whose every use is a bare
+  // expression statement (the no-op lowering; no member is ever read),
+  // or the cycle passes the declaration-only init window analysis (the
+  // benign-cycle admission block above). Node evaluates such cycles
   // benignly (the revisited module is a cache hit, and no binding read
   // can hit TDZ or a stale slot), so the guarded %init calls reproduce
-  // its order exactly. Named/default bindings and `export ... from`
-  // re-exports get the SECOND admission chance when they close a cycle —
-  // the declaration-only init window analysis (see the benign-cycle
-  // admission block above): cycles that fail it keep the SC1016 fence,
+  // its order exactly. Cycles that fail both keep the SC1016 fence,
   // because a read through them mid-cycle observes TDZ (let/const) or
   // undefined (var) in Node — runtime evaluation-order semantics the
   // static story does not model.
-  const edges = new Map<ts.SourceFile, ModuleEdge7[]>();
+  const edges = new Map<ts.SourceFile, CycleEdge[]>();
   // Import edges Node's RESOLUTION refuses before any module evaluates —
   // recorded in source order per file (interleaved with the resolved deps
   // via `pos`) so the Node-order walk below can answer which refusal Node
@@ -1424,7 +1533,7 @@ function preflight7(load: LoadResult): {
   const refusals = new Map<ts.SourceFile, RefusalCandidate[]>();
   const depPositions = new Map<ts.SourceFile, { dep: ts.SourceFile; pos: number }[]>();
   for (const sf of userFiles) {
-    const deps: ModuleEdge7[] = [];
+    const deps: CycleEdge[] = [];
     edges.set(sf, deps);
     refusals.set(sf, []);
     depPositions.set(sf, []);
@@ -1504,7 +1613,7 @@ function preflight7(load: LoadResult): {
           }
         }
         if (reDep && !reDep.fileName.endsWith(".json")) {
-          deps.push({ dep: reDep, backAdmissible: () => false, stmt });
+          deps.push({ dep: reDep, stmt });
           depPositions.get(sf)!.push({ dep: reDep, pos: stmt.getStart(sf) });
         }
         continue;
@@ -1733,21 +1842,7 @@ function preflight7(load: LoadResult): {
         }
       }
       if (dep && !isJson) {
-        // Back-edge admissibility (see the edges declaration): no clause,
-        // or namespace-only bindings whose uses are all bare statements.
-        // Lazy — the file scan only runs if this edge ever closes a cycle.
-        const importClause = clause;
-        const importSf = sf;
-        deps.push({
-          dep,
-          backAdmissible: () =>
-            importClause === undefined ||
-            (importClause.name === undefined &&
-              (importClause.namedBindings === undefined ||
-                (ts.isNamespaceImport(importClause.namedBindings) &&
-                  nsBindingUsesAreBareStatements7(program, importSf, importClause.namedBindings.name)))),
-          stmt,
-        });
+        deps.push({ dep, stmt });
         depPositions.get(sf)!.push({ dep, pos: stmt.getStart(sf) });
       }
     }
@@ -1832,7 +1927,7 @@ function preflight7(load: LoadResult): {
             );
             continue;
           }
-          if (dep) deps.push({ dep, backAdmissible: () => false });
+          if (dep) deps.push({ dep });
         }
       }
       if (!ts.isExternalModule(sf)) {
@@ -1845,7 +1940,7 @@ function preflight7(load: LoadResult): {
             const npmReq = !spec.startsWith("#") ? resolveNpmImport7(sf.fileName, spec) : null;
             if (npmReq !== null && isNpmStaticPackage(npmReq.packageName)) {
               const nDep = npmStaticProgramDep(program, npmReq.packageName, npmReq.typesFile);
-              if (nDep !== null) deps.push({ dep: nDep, backAdmissible: () => false });
+              if (nDep !== null) deps.push({ dep: nDep });
               continue;
             }
             if (canonicalBuiltinModule(spec) === null && !processModuleAliasRequire7(spec, null)) {
@@ -1862,7 +1957,7 @@ function preflight7(load: LoadResult): {
             diags.push(unsupportedDiag("SC1012", loc, "require() of JSON modules"));
             continue;
           }
-          if (dep) deps.push({ dep, backAdmissible: () => false });
+          if (dep) deps.push({ dep });
         }
       }
     }
@@ -1878,95 +1973,15 @@ function preflight7(load: LoadResult): {
   //    the importing module itself — Node's self-reference rule): the
   //    imported bindings alias the module's OWN top-level bindings with
   //    identical timing, evaluation happens once — always benign;
-  //  - a longer cycle whose closing edge is backAdmissible (see the edges
-  //    declaration: nothing binds, or only namespace objects bound to
-  //    bare-statement uses — no read can hit TDZ or a stale slot);
-  //  - a cycle passing the DECLARATION-ONLY INIT WINDOW analysis (the
-  //    benign-cycle admission block): every module of the cycle's
+  //  - a back edge the shared admission engine (makeCycleAdmission)
+  //    clears: the cheap per-edge rule (nothing binds, or only namespace
+  //    objects bound to bare-statement uses — no read can hit TDZ or a
+  //    stale slot) or the DECLARATION-ONLY INIT WINDOW analysis (the
+  //    benign-cycle admission block: every module of the cycle's
   //    strongly-connected component has an inert top level and the
   //    closing edge's bindings are used only in deferred positions, so no
-  //    read can execute before every member initialized.
-
-  // The cycle cluster (SCC) memo: computed once, on the first back edge
-  // the cheap per-edge rule does not admit. Tarjan over the same edges
-  // the order walk uses (self-edges skipped — Node's self-reference rule
-  // handles those above).
-  let sccOf: Map<ts.SourceFile, ts.SourceFile[]> | null = null;
-  const computeSccs = (): Map<ts.SourceFile, ts.SourceFile[]> => {
-    const out = new Map<ts.SourceFile, ts.SourceFile[]>();
-    const index = new Map<ts.SourceFile, number>();
-    const low = new Map<ts.SourceFile, number>();
-    const onStack = new Set<ts.SourceFile>();
-    const tstack: ts.SourceFile[] = [];
-    let next = 0;
-    const strongconnect = (v: ts.SourceFile): void => {
-      index.set(v, next);
-      low.set(v, next);
-      next++;
-      tstack.push(v);
-      onStack.add(v);
-      for (const e of edges.get(v) ?? []) {
-        const w = e.dep;
-        if (w === v) continue;
-        if (!index.has(w)) {
-          strongconnect(w);
-          low.set(v, Math.min(low.get(v)!, low.get(w)!));
-        } else if (onStack.has(w)) {
-          low.set(v, Math.min(low.get(v)!, index.get(w)!));
-        }
-      }
-      if (low.get(v) === index.get(v)) {
-        const comp: ts.SourceFile[] = [];
-        for (;;) {
-          const w = tstack.pop()!;
-          onStack.delete(w);
-          comp.push(w);
-          if (w === v) break;
-        }
-        for (const w of comp) out.set(w, comp);
-      }
-    };
-    for (const sf of edges.keys()) if (!index.has(sf)) strongconnect(sf);
-    return out;
-  };
-  const lineOf = (node: ts.Node): string => {
-    const nsf = node.getSourceFile();
-    return `${nsf.fileName}:${ts.getLineAndCharacterOfPosition(nsf, node.getStart(nsf)).line + 1}`;
-  };
-  // Cluster verdict memo (keyed by the component array identity): the
-  // reason the cluster's cycles stay fenced, or null when its every
-  // member passes the inert-top-level bar.
-  const sccVerdict = new Map<ts.SourceFile[], string | null>();
-  const cycleAdmissionReason = (importer: ts.SourceFile, e: ModuleEdge7): string | null => {
-    if (e.stmt === undefined) return "the cycle closes through a require() edge";
-    sccOf ??= computeSccs();
-    const comp = sccOf.get(e.dep);
-    if (comp === undefined || comp.length < 2 || !comp.includes(importer)) {
-      return "the cycle's module cluster could not be analyzed";
-    }
-    if (!sccVerdict.has(comp)) {
-      let reason: string | null = null;
-      for (const m of comp) {
-        if (isCjsJsFile7(m)) {
-          reason = `${m.fileName} is a CommonJS module — admission covers ES-module cycles only`;
-          break;
-        }
-        const off = nonInertTopLevel7(program, m);
-        if (off !== null) {
-          reason = `top-level code at ${lineOf(off)} can run user code during the cycle's init window — only declaration-only module bodies are admitted`;
-          break;
-        }
-      }
-      sccVerdict.set(comp, reason);
-    }
-    const clusterReason = sccVerdict.get(comp)!;
-    if (clusterReason !== null) return clusterReason;
-    const use = backEdgeUseOffence7(program, importer, e.stmt);
-    if (use !== null) {
-      return `the cycle-crossing binding '${use.name}' is read at ${lineOf(use.node)}, outside any function body — a read during the init window observes the partially-initialized module (Node's TDZ ReferenceError / stale var), which is not modeled`;
-    }
-    return null;
-  };
+  //    read can execute before every member initialized).
+  const cycleAdmissionReason = makeCycleAdmission(program, (sf) => edges.get(sf) ?? []);
   const order: ts.SourceFile[] = [];
   const state = new Map<ts.SourceFile, "visiting" | "done">();
   const stack: string[] = [];
@@ -1982,19 +1997,17 @@ function preflight7(load: LoadResult): {
         // already evaluating) — benign exactly when nothing can observe
         // the partial initialization through this edge's bindings, by the
         // cheap per-edge rule or the declaration-only init window rule.
-        if (!e.backAdmissible()) {
-          const reason = cycleAdmissionReason(sf, e);
-          if (reason !== null) {
-            const cycleStart = stack.indexOf(e.dep.fileName);
-            const cycle = [...stack.slice(cycleStart), e.dep.fileName].join(" → ");
-            diags.push(
-              unsupportedDiag(
-                "SC1016",
-                { file: e.dep.fileName, start: 0, end: 0 },
-                `circular imports (${cycle}; ${reason})`,
-              ),
-            );
-          }
+        const reason = cycleAdmissionReason(sf, e);
+        if (reason !== null) {
+          const cycleStart = stack.indexOf(e.dep.fileName);
+          const cycle = [...stack.slice(cycleStart), e.dep.fileName].join(" → ");
+          diags.push(
+            unsupportedDiag(
+              "SC1016",
+              { file: e.dep.fileName, start: 0, end: 0 },
+              `circular imports (${cycle}; ${reason})`,
+            ),
+          );
         }
         continue;
       }

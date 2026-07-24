@@ -8,7 +8,8 @@ import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
 import { NpmGraphBuilder, packageNameOfPath, probeNodeImportRefusal } from "../npm.js";
 import { isNpmStaticPackage } from "../npm-static.js";
 import { isJsSourceFileName, isRelativeSpecifier } from "../shared.js";
-import { cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
+import { cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, makeCycleAdmission, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
+import type { CycleEdge } from "../program.js";
 import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } from "../../diagnostics/diagnostic.js";
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, arrayOf, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
@@ -114,31 +115,49 @@ export interface FileParts {
    * still evaluates exactly when Node evaluates it: the import() site's
    * namespace builder calls the guarded init on the engine microtask.
    * Fixpoint: an added module's own import() sites are scanned too. Static
-   * cycles inside the added subgraph get preflight's SC1016 via `onCycle`
-   * (preflight only walked the entry's static graph, so it never saw
-   * these). Idempotent — re-running on an already-extended order adds
-   * nothing (both lowering passes share one array). */
+   * cycles inside the added subgraph ride preflight's own admission engine
+   * (makeCycleAdmission — preflight only walked the entry's static graph,
+   * so it never judged these): benign back edges are Node cache hits the
+   * run-once init guards reproduce, and inadmissible ones get preflight's
+   * SC1016 with the same narrowed reason via `onCycle`. Idempotent —
+   * re-running on an already-extended order adds nothing (both lowering
+   * passes share one array). */
   export function appendDynamicImportModules(
     program: ts.Program,
     order: ts.SourceFile[],
-    onCycle: (cycle: string) => void,
+    onCycle: (cycle: string, reason: string) => void,
   ): void {
     if (order.length === 0) return; // no preflight order — sites keep their fences
     const state = new Map<ts.SourceFile, "visiting" | "done">();
     for (const sf of order) state.set(sf, "done");
     const added: ts.SourceFile[] = [];
     const stack: string[] = [];
+    const staticEdgesOf = (sf: ts.SourceFile): CycleEdge[] =>
+      orderedImportsOf(program, sf).flatMap(({ stmt, dep }) =>
+        dep !== null && dep !== sf
+          ? [{ dep, stmt: stmt as ts.ImportDeclaration | ts.ExportDeclaration }]
+          : [],
+      );
+    const cycleAdmissionReason = makeCycleAdmission(program, staticEdgesOf);
     const visit = (sf: ts.SourceFile): void => {
-      const s = state.get(sf);
-      if (s === "done") return;
-      if (s === "visiting") {
-        const cycleStart = stack.indexOf(sf.fileName);
-        onCycle([...stack.slice(cycleStart), sf.fileName].join(" → "));
-        return;
-      }
+      if (state.get(sf) !== undefined) return;
       state.set(sf, "visiting");
       stack.push(sf.fileName);
-      for (const { dep } of orderedImportsOf(program, sf)) if (dep && dep !== sf) visit(dep);
+      for (const e of staticEdgesOf(sf)) {
+        const s = state.get(e.dep);
+        if (s === "done") continue;
+        if (s === "visiting") {
+          // A back edge: Node answers it from the cache. Same admission
+          // question as preflight's static walk, same fence when refused.
+          const reason = cycleAdmissionReason(sf, e);
+          if (reason !== null) {
+            const cycleStart = stack.indexOf(e.dep.fileName);
+            onCycle([...stack.slice(cycleStart), e.dep.fileName].join(" → "), reason);
+          }
+          continue;
+        }
+        visit(e.dep);
+      }
       stack.pop();
       state.set(sf, "done");
       added.push(sf);
