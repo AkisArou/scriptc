@@ -62,6 +62,10 @@ RE(re_adotb_s, "a.b", "s");
 RE(re_astral, "\xF0\x9F\x98\x80", "");        /* non-/u astral: CESU-8 path */
 RE(re_astral_u, "\xF0\x9F\x98\x80", "u");
 RE(re_split_group, "(,)", "g");
+RE(re_named, "(?<y>\\d{4})-(?<m>\\d{2})", "");
+RE(re_named_opt, "(?<a>a)(?<b>b)?", "");
+RE(re_named_dup, "(?<x>\\d+)px|(?<x>\\d+)em", "g");
+RE(re_backref, "(?<q>['\"]).*?\\k<q>", "");
 
 static ScrStr *S(const char *s) { return scr_str_new(s, strlen(s)); }
 
@@ -169,6 +173,52 @@ static void test_replace_all(void) {
   scr_str_release(s);
 }
 
+/* $<name> in GetSubstitution (the named arm) + \k<name> execution. */
+static void test_named_groups(void) {
+  ScrStr *s = S("2024-07");
+  ScrStr *rep = S("$<m>/$<y>");
+  expect_str(scr_regex_replace(s, &re_named, rep), "07/2024",
+             "replace: $<name> substitutes the named captures");
+  scr_str_release(rep);
+
+  rep = S("[$<y>][$<nope>]");
+  expect_str(scr_regex_replace(s, &re_named, rep), "[2024][]",
+             "replace: a nonexistent $<name> substitutes empty");
+  scr_str_release(rep);
+
+  rep = S("[$<y]");
+  expect_str(scr_regex_replace(s, &re_named, rep), "[$<y]",
+             "replace: an unterminated $<name stays literal");
+  scr_str_release(rep);
+  scr_str_release(s);
+
+  s = S("a");
+  rep = S("[$<x>]");
+  expect_str(scr_regex_replace(s, &re_a_first, rep), "[$<x>]",
+             "replace: $<name> stays literal when the pattern has no named groups");
+  scr_str_release(rep);
+
+  rep = S("<$<a>|$<b>>");
+  expect_str(scr_regex_replace(s, &re_named_opt, rep), "<a|>",
+             "replace: a nonparticipating named group substitutes empty");
+  scr_str_release(rep);
+  scr_str_release(s);
+
+  s = S("14px 9em");
+  rep = S("[$<x>]");
+  expect_str(scr_regex_replace_all(s, &re_named_dup, rep), "[14] [9]",
+             "replace: ES2025 duplicate names resolve to the participating alternative");
+  scr_str_release(rep);
+  scr_str_release(s);
+
+  s = S("say \"hi\" ok");
+  check(scr_regex_test(&re_backref, s), "test: \\k<name> backreference matches");
+  scr_str_release(s);
+  s = S("say 'hi ok");
+  check(!scr_regex_test(&re_backref, s), "test: \\k<name> backreference misses the unclosed quote");
+  scr_str_release(s);
+}
+
 static void expect_split(ScrStr *s, ScrRegex *re, const char *const *want,
                          size_t want_len, const char *what) {
   ScrArr *a = scr_regex_split(s, re);
@@ -235,6 +285,7 @@ int main(int argc, char **argv) {
   test_source_flags();
   test_replace();
   test_replace_all();
+  test_named_groups();
   test_split();
 
 #ifdef SCR_RC_AUDIT

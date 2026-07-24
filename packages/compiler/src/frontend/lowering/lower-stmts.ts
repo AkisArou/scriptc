@@ -22,7 +22,7 @@ import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from
 import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf } from "./lower-builtins.js";
 import { lowerEnumDeclaration } from "./lower-enums.js";
-import { abstractPropertyDeclOf, aliasTypeofNarrows, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
+import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
@@ -1094,6 +1094,44 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         init = { kind: "unionNarrow", unionId: init.type.unionId, tag, value: uref, type: arm, loc };
       }
     }
+    // `const { groups } = re.exec(s)!` / `const { groups: { year } } = m`
+    // — every pattern element binds `groups` off a MATCH SLICE whose
+    // regex is statically known: the slice has no record shape of its
+    // own, so the groups projection (lowerGroupsProjection — the same
+    // record `m.groups` reads produce) wraps one level in a synthesized
+    // `{ groups: ... }` record and the ordinary record destructure below
+    // serves the pattern — aliases and nested patterns included. Only
+    // named-group regexes take the wrap: a group-less regex destructures
+    // `groups: undefined` in Node (a nested pattern then throws), which
+    // the fence reports honestly instead.
+    if (
+      ts.isObjectBindingPattern(decl.name) &&
+      decl.name.elements.length > 0 &&
+      isMatchSliceType(L, init.type) &&
+      decl.name.elements.every((el) => {
+        if (el.dotDotDotToken !== undefined || el.name === undefined) return false;
+        const prop = el.propertyName;
+        if (prop === undefined) return ts.isIdentifier(el.name) && el.name.text === "groups";
+        return (ts.isIdentifier(prop) || ts.isStringLiteral(prop)) && prop.text === "groups";
+      })
+    ) {
+      const groups = matchResultNamedGroupsOf(L, decl.initializer!);
+      if (groups !== null && groups.length > 0) {
+        const proj = lowerGroupsProjection(L, init, groups, loc);
+        const outerShape = L.shapes.intern(
+          [{ name: "groups", type: proj.type }],
+          false,
+          undefined,
+          ["groups"],
+        );
+        init = {
+          kind: "recordLit",
+          fields: [{ name: "groups", value: proj }],
+          type: { kind: "record", shapeId: outerShape },
+          loc,
+        };
+      }
+    }
     const tmp = L.declareHiddenLocal("%destr", init.type);
     out.push({ kind: "varDecl", localId: tmp.id, init, loc });
     // V8's destructuring TypeError spells STATIC sources: an identifier
@@ -1632,6 +1670,28 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         continue;
       }
       const fieldType = shape.fields.find((f) => f.name === propName)?.type;
+      if (!fieldType && shape.indexValue !== undefined && !shape.tuple) {
+        // An UNDECLARED key of an INDEX-SIGNATURE shape (`const { m, n, p }
+        // = ....groups` over `{ [key: string]: string }` — the groups
+        // record, `Record<string, T>` tables generally): the overflow-map
+        // read, exactly the dot access's recordKeyGet — a missing key
+        // traps when the value type carries no undefined arm (the checker
+        // claimed V), or binds the undefined arm (where a default applies
+        // like any field's).
+        const loc = locOf(el);
+        let value: IrExpr = {
+          kind: "recordKeyGet",
+          obj: srcRef(),
+          shapeId: srcType.shapeId,
+          key: { kind: "strLit", value: propName, type: STRING, loc },
+          overflowOnly: true,
+          type: shape.indexValue,
+          loc,
+        };
+        if (el.initializer) value = applyBindingDefault(L, el, value);
+        L.bindPatternTarget(el.name, value, isLet, out);
+        continue;
+      }
       if (!fieldType) {
         // The pattern names a field the source SHAPE does not carry —
         // `for (let {x = 1} of [{}])` (signature 08): tsc types the binding

@@ -484,13 +484,20 @@ ScrArr *scr_regex_match_all_into(ScrStr *s, ScrRegex *re, ScrArr *indices) {
  * replacements are frontend-fenced): $$, $&, $` and $', $1..$99 (two digits
  * win when in range — the refined ES2019 rule quickjs implements), with
  * out-of-range references left literal and unmatched groups substituting
- * empty. $<name> stays literal: named capture groups are frontend-fenced,
- * so namedCaptures is always undefined here (the spec's literal case).
- * The template is scanned byte-wise: every '$' directive is ASCII, and
- * UTF-8 continuation bytes can never alias it. */
+ * empty. $<name> resolves against the pattern's named capture groups
+ * (lre_get_groupnames — one NUL-terminated name per capture, "" for
+ * unnamed): the first PARTICIPATING capture with that name substitutes
+ * (ES2025 duplicates live in distinct alternatives, so at most one
+ * participates); a nonexistent or nonparticipating name substitutes
+ * empty (the spec's Get→undefined→"" path, Node-exact). When the pattern
+ * has NO named groups, namedCaptures is undefined and '$<' stays literal
+ * — also Node's unterminated-'$<name' answer either way. The template is
+ * scanned byte-wise: every '$' directive is ASCII, and UTF-8 continuation
+ * bytes can never alias it. */
 static void scr_put_substitution(ScrJsonBuf *b, const uint16_t *u, int len,
                                   int start, int end, uint8_t **capture,
-                                  int capture_count, const ScrStr *rep) {
+                                  int capture_count, const char *groupnames,
+                                  const ScrStr *rep) {
   const uint8_t *ubase = (const uint8_t *)u;
   size_t i = 0;
   while (i < rep->len) {
@@ -534,6 +541,31 @@ static void scr_put_substitution(ScrJsonBuf *b, const uint16_t *u, int len,
         scr_jb_putc(b, '$');
         i++;
       }
+    } else if (c1 == '<' && groupnames != NULL) {
+      /* $<name>: scan for '>'; absent, the '$' is literal (the rest
+       * re-scans verbatim — GetSubstitution's not-found answer). */
+      size_t gt = i + 2;
+      while (gt < rep->len && rep->data[gt] != '>') gt++;
+      if (gt >= rep->len) {
+        scr_jb_putc(b, '$');
+        i++;
+        continue;
+      }
+      const char *name = rep->data + i + 2;
+      size_t name_len = gt - (i + 2);
+      const char *p = groupnames; /* capture_count-1 entries: name NUL scope */
+      for (int k = 1; k < capture_count; k++) {
+        size_t glen = strlen(p);
+        if (glen == name_len && memcmp(p, name, name_len) == 0) {
+          const uint8_t *cs = capture[2 * k], *ce = capture[2 * k + 1];
+          if (cs && ce) {
+            scr_jb_put_utf16(b, u, (int)((cs - ubase) >> 1), (int)((ce - ubase) >> 1));
+            break; /* at most one duplicate participates */
+          }
+        }
+        p += glen + LRE_GROUP_NAME_TRAILER_LEN;
+      }
+      i = gt + 1;
     } else {
       scr_jb_putc(b, '$');
       i++;
@@ -550,6 +582,7 @@ static ScrStr *scr_replace_impl(ScrStr *s, ScrRegex *re, ScrStr *rep) {
   bool global = (re_flags & LRE_FLAG_GLOBAL) != 0;
   bool unicode = (re_flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS)) != 0;
   int capture_count = lre_get_capture_count(bc);
+  const char *groupnames = lre_get_groupnames(bc);
   int len;
   uint16_t *u = scr_to_utf16(s, &len);
   uint8_t **capture = scr_capture_alloc(bc);
@@ -562,7 +595,7 @@ static ScrStr *scr_replace_impl(ScrStr *s, ScrRegex *re, ScrStr *rep) {
     int start = (int)((capture[0] - ubase) >> 1);
     int end = (int)((capture[1] - ubase) >> 1);
     scr_jb_put_utf16(&b, u, next, start);
-    scr_put_substitution(&b, u, len, start, end, capture, capture_count, rep);
+    scr_put_substitution(&b, u, len, start, end, capture, capture_count, groupnames, rep);
     next = end;
     if (!global) break;
     pos = end == start ? scr_advance(u, len, end, unicode) : end;

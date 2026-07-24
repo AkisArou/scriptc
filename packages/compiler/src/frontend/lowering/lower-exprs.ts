@@ -1276,6 +1276,14 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         }
         return read;
       }
+      // `m.groups` on a match result whose regex is statically known:
+      // the compile-time record projection over the honest slice (or
+      // Node's undefined when the pattern has no named groups) — see
+      // lowerMatchGroupsRead.
+      {
+        const g = lowerMatchGroupsRead(L, expr);
+        if (g !== null) return g;
+      }
       // `m.index` on a for-of-over-matchAll binding reads the companion-
       // index array at this iteration's cursor — always a number: every
       // drained row matched, so the lib's `.index` is never undefined
@@ -1683,6 +1691,37 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           { kind: "dynKeyGet", key, ...(opt ? { optional: true as const } : {}), value: recvLowered, type: DYN, loc },
           expr,
         );
+      }
+      // The lowered receiver is a RECORD the checker spelled wider —
+      // `s.match(re).groups.key` in a JS file: the checker says
+      // `{ [key: string]: string } | undefined`, but the groups
+      // projection already answered the record arm (its null trap
+      // included). Declared fields read directly; an index-signature
+      // shape serves undeclared keys through the overflow read, exactly
+      // the dot-access rule on checker-spelled hybrids.
+      if (recvLowered.type.kind === "record") {
+        const recvShape = L.shapes.get(recvLowered.type.shapeId);
+        const field = recvShape?.fields.find((f) => f.name === expr.name.text);
+        if (field) {
+          return L.maybeNarrow(
+            { kind: "recordGet", obj: recvLowered, shapeId: recvLowered.type.shapeId, field: field.name, type: field.type, loc },
+            expr,
+          );
+        }
+        if (recvShape?.indexValue !== undefined && !recvShape.tuple) {
+          return L.maybeNarrow(
+            {
+              kind: "recordKeyGet",
+              obj: recvLowered,
+              shapeId: recvLowered.type.shapeId,
+              key: { kind: "strLit", value: expr.name.text, type: STRING, loc: locOf(expr.name) },
+              overflowOnly: true,
+              type: recvShape.indexValue,
+              loc,
+            },
+            expr,
+          );
+        }
       }
       // An ABSTRACT property through an abstract-typed receiver: the
       // declaration is erased at runtime — Node defines no field for it,
@@ -8820,11 +8859,14 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
 
 /** A regex literal `/ab+c/gi` → regexLit (interned per (pattern, flags)
    * by the backend). The TS parser has already syntax-checked the literal;
-   * what remains here are the slice fences: the flag alphabet (d and v are
-   * declared-valid TS flags outside this slice) and named capture groups
-   * (their results are unreachable without exec/match). The engine
-   * validates the pattern itself lazily at first use (SEMANTICS.md
-   * documents the divergence from Node's parse-time SyntaxError). */
+   * what remains here is the flag-alphabet fence (d and v are
+   * declared-valid TS flags outside this slice). Named capture groups
+   * `(?<name>...)` and `\k<name>` backreferences compile — libregexp
+   * executes them natively, replace templates resolve `$<name>` at
+   * runtime, and `.groups` reads desugar at their access sites
+   * (matchResultNamedGroupsOf). The engine validates the pattern itself
+   * lazily at first use (SEMANTICS.md documents the divergence from
+   * Node's parse-time SyntaxError). */
   export function lowerRegexLiteral(L: Lowerer, expr: ts.RegularExpressionLiteral): IrExpr {
     const text = expr.text;
     const lastSlash = text.lastIndexOf("/");
@@ -8843,11 +8885,415 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         );
       }
     }
-    // (?<name>...) — named groups; (?<= / (?<! are lookbehinds and fine.
-    if (/\(\?<(?![=!])/.test(pattern)) {
-      L.unsupported("SC1120", expr, "named capture groups in regex patterns");
-    }
     return { kind: "regexLit", pattern, flags, type: REGEX, loc: locOf(expr) };
+  }
+
+/** The pattern's named capture groups, in source order: each `(?<name>`
+   * with its 1-based capture index (numbered and named groups share the
+   * numbering — the index IS the match slice's element position). Null
+   * when the scan can't answer confidently (an unterminated construct, a
+   * `\u`-escaped group name) — callers fence rather than guess. Duplicate
+   * names (ES2025 — valid across alternatives) appear once per
+   * declaration; consumers pick the participating occurrence. The scan
+   * only needs to track escapes, character classes, and `(` kinds; tsc
+   * has already syntax-checked the literal, so a malformed pattern here
+   * answers null and the engine's lazy compile reports it. */
+  export function namedCaptureGroupsOfPattern(pattern: string): { name: string; index: number }[] | null {
+    const groups: { name: string; index: number }[] = [];
+    let captureIndex = 0;
+    let inClass = false;
+    let i = 0;
+    while (i < pattern.length) {
+      const c = pattern[i]!;
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
+      if (inClass) {
+        if (c === "]") inClass = false;
+        i++;
+        continue;
+      }
+      if (c === "[") {
+        inClass = true;
+        i++;
+        continue;
+      }
+      if (c !== "(") {
+        i++;
+        continue;
+      }
+      if (pattern[i + 1] !== "?") {
+        captureIndex++;
+        i++;
+        continue;
+      }
+      // (?<name> captures; (?<= and (?<! are lookbehinds; every other
+      // (?… form — (?:, (?=, (?!, modifier groups (?i: — is non-capturing.
+      if (pattern[i + 2] === "<" && pattern[i + 3] !== "=" && pattern[i + 3] !== "!") {
+        const gt = pattern.indexOf(">", i + 3);
+        if (gt < 0) return null;
+        const name = pattern.slice(i + 3, gt);
+        if (name.includes("\\")) return null; // \u-escaped names: bytecode spells them decoded
+        captureIndex++;
+        groups.push({ name, index: captureIndex });
+        i = gt + 1;
+        continue;
+      }
+      i += 2;
+    }
+    return groups;
+  }
+
+/** The statically-known regex PATTERN behind an expression: a regex
+   * literal, a const local initialized with one (the crypto.js
+   * `const regexp = /(?<m>\d+)/` shape), or `new RegExp("...")` over a
+   * string literal (the cooked text IS the pattern). Null when the regex
+   * only exists at runtime — .groups consumers fence there. */
+  export function staticRegexPatternOf(L: Lowerer, e: ts.Expression): string | null {
+    let expr = e;
+    for (;;) {
+      if (ts.isParenthesizedExpression(expr) || ts.isNonNullExpression(expr)) {
+        expr = expr.expression;
+        continue;
+      }
+      break;
+    }
+    if (ts.isRegularExpressionLiteral(expr)) {
+      const text = expr.text;
+      return text.slice(1, text.lastIndexOf("/"));
+    }
+    if (
+      ts.isNewExpression(expr) &&
+      ts.isIdentifier(expr.expression) &&
+      expr.expression.text === "RegExp" &&
+      L.isStdlibGlobal(expr.expression, "RegExp") &&
+      expr.arguments !== undefined &&
+      expr.arguments.length >= 1 &&
+      (ts.isStringLiteral(expr.arguments[0]!) || ts.isNoSubstitutionTemplateLiteral(expr.arguments[0]!))
+    ) {
+      return (expr.arguments[0] as ts.StringLiteral | ts.NoSubstitutionTemplateLiteral).text;
+    }
+    if (ts.isIdentifier(expr)) {
+      const init = constInitializerOf(L, expr);
+      if (init !== null) return staticRegexPatternOf(L, init);
+    }
+    return null;
+  }
+
+/** The initializer behind a CONST identifier binding (a plain
+   * VariableDeclaration under a const list) — the one-hop provenance step
+   * the regex traces walk. Null for let/var (reassignable), params,
+   * destructured bindings, and unresolvable names. */
+  function constInitializerOf(L: Lowerer, ident: ts.Identifier): ts.Expression | null {
+    const sym = L.resolveValueSymbol(ident);
+    const decl = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+    if (decl === undefined || !ts.isVariableDeclaration(decl) || decl.initializer === undefined) return null;
+    if (!ts.isVariableDeclarationList(decl.parent) || (decl.parent.flags & ts.NodeFlags.Const) === 0) return null;
+    return decl.initializer;
+  }
+
+/** The named-group table of the regex that PRODUCED a match-result
+   * expression — the `.groups` desugar's provenance question. Traces
+   * (through parens, `!`, and const bindings):
+   *   - `re.exec(s)` / `s.match(re)`   → re's static pattern
+   *   - a matchAll ROW: `rows[i]`, the for-of binding over a direct
+   *     `s.matchAll(re)` or a stored const drain → re's static pattern
+   * Answers null when the producing regex isn't statically known (the
+   * caller keeps its fence), or the groups list (possibly empty — a
+   * traced regex WITHOUT named groups is the Node-undefined case). */
+  export function matchResultNamedGroupsOf(L: Lowerer, e: ts.Expression): { name: string; index: number }[] | null {
+    const reExpr = matchProducerRegexOf(L, e);
+    if (reExpr === null) return null;
+    const pattern = staticRegexPatternOf(L, reExpr);
+    if (pattern === null) return null;
+    return namedCaptureGroupsOfPattern(pattern);
+  }
+
+/** The regex EXPRESSION whose match produced `e` (see
+   * matchResultNamedGroupsOf for the traced shapes). */
+  function matchProducerRegexOf(L: Lowerer, e: ts.Expression): ts.Expression | null {
+    let expr = e;
+    for (;;) {
+      if (ts.isParenthesizedExpression(expr) || ts.isNonNullExpression(expr)) {
+        expr = expr.expression;
+        continue;
+      }
+      break;
+    }
+    // The direct producers: re.exec(s) / s.match(re) — the receiver's
+    // mapped type pins the STDLIB operation (a regex for exec, a string
+    // or its nullable spelling for match — the claim lower-containers
+    // makes), so a user method that happens to be named `match` with a
+    // regex argument never traces.
+    if (ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression)) {
+      const name = expr.expression.name.text;
+      const recvT = L.mapTypeOf(L.typeOf(expr.expression.expression));
+      if (name === "exec" && expr.arguments.length === 1 && recvT?.kind === "regex") {
+        return expr.expression.expression;
+      }
+      if (name === "match" && expr.arguments.length === 1 &&
+          (recvT?.kind === "string" || (recvT !== null && recvT !== undefined && nullableStringType(L, recvT))) &&
+          L.mapTypeOf(L.typeOf(expr.arguments[0]!))?.kind === "regex") {
+        return expr.arguments[0]!;
+      }
+    }
+    // A matchAll ROW by element access: rows[i] with rows tracing to the
+    // drain call — or the direct s.matchAll(re)[i] spelling.
+    if (ts.isElementAccessExpression(expr)) {
+      return matchAllRegexOf(L, expr.expression);
+    }
+    if (ts.isIdentifier(expr)) {
+      // The for-of binding over a matchAll drain: `for (const m of
+      // s.matchAll(re))` (or over a stored const rows).
+      const sym = L.resolveValueSymbol(expr);
+      const decl = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+      if (
+        decl !== undefined && ts.isVariableDeclaration(decl) &&
+        ts.isVariableDeclarationList(decl.parent) && ts.isForOfStatement(decl.parent.parent)
+      ) {
+        return matchAllRegexOf(L, decl.parent.parent.expression);
+      }
+      // A stored const match result: `const m = re.exec(s)`.
+      const init = constInitializerOf(L, expr);
+      if (init !== null) return matchProducerRegexOf(L, init);
+    }
+    return null;
+  }
+
+/** The regex argument of a (possibly const-stored) `s.matchAll(re)`. */
+  function matchAllRegexOf(L: Lowerer, e: ts.Expression): ts.Expression | null {
+    let expr = e;
+    for (;;) {
+      if (ts.isParenthesizedExpression(expr) || ts.isNonNullExpression(expr)) {
+        expr = expr.expression;
+        continue;
+      }
+      break;
+    }
+    if (
+      ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) &&
+      expr.expression.name.text === "matchAll" && expr.arguments.length === 1 &&
+      L.mapTypeOf(L.typeOf(expr.expression.expression))?.kind === "string" &&
+      L.mapTypeOf(L.typeOf(expr.arguments[0]!))?.kind === "regex"
+    ) {
+      return expr.arguments[0]!;
+    }
+    // The eager-spread spelling: `[...s.matchAll(re)]`.
+    if (ts.isArrayLiteralExpression(expr) && expr.elements.length === 1) {
+      const only = expr.elements[0]!;
+      if (ts.isSpreadElement(only)) return matchAllRegexOf(L, only.expression);
+    }
+    if (ts.isIdentifier(expr)) {
+      const init = constInitializerOf(L, expr);
+      if (init !== null) return matchAllRegexOf(L, init);
+    }
+    return null;
+  }
+
+/** `m.groups` on a match result whose producing regex is statically
+   * known: the honest slice already HOLDS every named group's value at
+   * its capture index, so the groups object is a compile-time record
+   * projection — `{ year: m[1], month: m[2] }` — built by one interned
+   * helper per (shape, index list, receiver type). Node's exact shape
+   * decisions:
+   *   - no named groups → `undefined` (the identifier-receiver shapes —
+   *     a call receiver would lose its own null trap, so those keep the
+   *     member fence);
+   *   - a nullable receiver (the JS `s.match(re).groups` idiom) throws
+   *     Node's exact TypeError on the unit arms;
+   *   - every declared name is a key (nonparticipating groups hold "" —
+   *     divergence 51's rule, exactly the slice elements they project);
+   *   - ES2025 duplicate names (distinct alternatives) project the first
+   *     participating occurrence: at most one participates, and a
+   *     participating-empty "" falls through to slots that are "" anyway;
+   *   - key order is group declaration order (declaredOrder), Node's own.
+   * The record has no prototype — Node's groups object is null-prototype,
+   * observable only through util.inspect's "[Object: null prototype]"
+   * prefix (the Object.groupBy stance, ledgered). Null when the receiver
+   * isn't a match slice or the regex isn't traceable — the caller's
+   * member fence (with the groups hint) names the gap. */
+  export function lowerMatchGroupsRead(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
+    if (expr.name.text !== "groups" || expr.questionDotToken !== undefined) return null;
+    const loc = locOf(expr);
+    const strArr = arrayOf(STRING);
+    const recvT = L.mapTypeOf(L.typeOf(expr.expression));
+    if (!recvT || !isMatchSliceType(L, recvT) || !L.isStdlibMember(expr)) return null;
+    const groups = matchResultNamedGroupsOf(L, expr.expression);
+    if (groups === null) return null;
+    if (groups.length === 0) {
+      // Node: a match result of a group-less regex answers undefined —
+      // the unit literal, exactly the `undefined` identifier's lowering.
+      // Identifier receivers only (evaluation-free): a CALL receiver's
+      // exec/match must still run and null-trap, which a folded unit
+      // cannot carry — those keep the fence.
+      let r: ts.Expression = expr.expression;
+      while (ts.isParenthesizedExpression(r) || ts.isNonNullExpression(r)) r = r.expression;
+      if (ts.isIdentifier(r) && typeEquals(recvT, strArr)) {
+        return { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc };
+      }
+      return null;
+    }
+    const recv = L.lowerExpr(expr.expression);
+    if (!isMatchSliceType(L, recv.type)) return null;
+    return lowerGroupsProjection(L, recv, groups, loc);
+  }
+
+/** True when the IR type is a string-or-units union — the Dict<string>
+   * member spelling (`process.versions.openssl`), match's nullable
+   * receiver claim. */
+  function nullableStringType(L: Lowerer, t: IrType): boolean {
+    if (t.kind !== "union") return false;
+    const arms = L.unions.get(t.unionId)?.arms ?? [];
+    return arms.some((a) => a.kind === "string") && arms.every((a) => a.kind === "string" || isUnitType(a));
+  }
+
+/** True when the IR type is the honest match slice — `string[]`, or a
+   * union of it with unit arms only (`string[] | null`). The groups
+   * projection's receiver gate, shared with the destructure interception. */
+  export function isMatchSliceType(L: Lowerer, t: IrType): boolean {
+    if (typeEquals(t, arrayOf(STRING))) return true;
+    return t.kind === "union" && matchSliceUnionArms(L, t.unionId) !== null;
+  }
+
+/** The union-arm layout of a nullable match slice (`string[] | null`,
+   * matchAll's checker spellings with undefined arms included): the
+   * string[] arm's tag plus each unit arm's tag and spelling. Null when
+   * the union holds anything else. */
+  function matchSliceUnionArms(
+    L: Lowerer,
+    unionId: string,
+  ): { arrTag: number; units: { tag: number; unit: "null" | "undefined" }[] } | null {
+    const def = L.unions.get(unionId);
+    if (!def) return null;
+    const strArr = arrayOf(STRING);
+    const arrTag = def.arms.findIndex((a) => typeEquals(a, strArr));
+    if (arrTag < 0) return null;
+    const units: { tag: number; unit: "null" | "undefined" }[] = [];
+    for (let i = 0; i < def.arms.length; i++) {
+      if (i === arrTag) continue;
+      const a = def.arms[i]!;
+      if (!isUnitType(a)) return null;
+      units.push({ tag: i, unit: a.kind === "nullT" ? "null" : "undefined" });
+    }
+    return { arrTag, units };
+  }
+
+/** The groups-record projection call: the result is the CHECKER'S OWN
+   * shape — `{ [key: string]: string }`, the hybrid index-signature
+   * record with no declared fields — holding one OVERFLOW entry per
+   * group name in declaration order, so every downstream consumer
+   * (recordKeyGet reads, Object.keys, JSON, the `| undefined` union
+   * wrap) meets exactly the type tsc reported. One lifted helper per
+   * (index list, receiver representation) builds it; see
+   * lowerMatchGroupsRead for the semantics the body encodes. */
+  export function lowerGroupsProjection(
+    L: Lowerer,
+    recv: IrExpr,
+    groups: { name: string; index: number }[],
+    loc: SrcLoc,
+  ): IrExpr {
+    // Name → its capture indices, in declaration order (duplicates keep
+    // every occurrence — the projection picks the participating one).
+    const order: string[] = [];
+    const indicesByName = new Map<string, number[]>();
+    for (const g of groups) {
+      const got = indicesByName.get(g.name);
+      if (got) {
+        got.push(g.index);
+      } else {
+        indicesByName.set(g.name, [g.index]);
+        order.push(g.name);
+      }
+    }
+    const shapeId = L.shapes.intern([], false, STRING);
+    const recordT: IrType = { kind: "record", shapeId };
+    const recvKey = recv.type.kind === "union" ? recv.type.unionId : "arr";
+    const key = `regexgroups:${shapeId}:${groups.map((g) => `${g.name}=${g.index}`).join(",")}:${recvKey}`;
+    let helper = L.widthHelpers.get(key);
+    if (!helper) {
+      helper = `%regex.groups.${L.widthHelpers.size}`;
+      L.widthHelpers.set(key, helper);
+      const body: IrStmt[] = [];
+      const locals: IrLocal[] = [{ id: "m.0", name: "m", type: recv.type, mutable: true }];
+      let mRef: IrExpr = { kind: "varRef", localId: "m.0", type: recv.type, loc };
+      if (recv.type.kind === "union") {
+        // Node's exact TypeError per unit arm, then the checked narrow.
+        const arms = matchSliceUnionArms(L, recv.type.unionId)!;
+        for (const u of arms.units) {
+          body.push({
+            kind: "if",
+            cond: { kind: "unionIsTag", unionId: recv.type.unionId, tag: u.tag, negated: false, value: mRef, type: BOOL, loc },
+            then: [
+              {
+                kind: "throw",
+                value: {
+                  kind: "libCall",
+                  fn: "error.new",
+                  args: [
+                    { kind: "strLit", value: `Cannot read properties of ${u.unit} (reading 'groups')`, type: STRING, loc },
+                  ],
+                  type: { kind: "object", className: "%TypeError" },
+                  loc,
+                },
+                loc,
+              },
+            ],
+            else_: null,
+            loc,
+          });
+        }
+        const narrowed: IrExpr = { kind: "unionNarrow", unionId: recv.type.unionId, tag: arms.arrTag, value: mRef, type: arrayOf(STRING), loc };
+        locals.push({ id: "arr.0", name: "arr", type: arrayOf(STRING), mutable: false });
+        body.push({ kind: "varDecl", localId: "arr.0", init: narrowed, loc });
+        mRef = { kind: "varRef", localId: "arr.0", type: arrayOf(STRING), loc };
+      }
+      const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
+      const elem = (index: number): IrExpr => ({ kind: "arrayGet", arr: mRef, index: num(index), type: STRING, loc });
+      const values = new Map<string, IrExpr>();
+      order.forEach((name, i) => {
+        const idxs = indicesByName.get(name)!;
+        if (idxs.length === 1) {
+          values.set(name, elem(idxs[0]!));
+          return;
+        }
+        // Duplicates: the first non-"" occurrence (at most one
+        // participates; all-"" answers "" like any nonparticipating slot).
+        const id = `g${i}.0`;
+        locals.push({ id, name: `g${i}`, type: STRING, mutable: true });
+        body.push({ kind: "varDecl", localId: id, init: elem(idxs[0]!), loc });
+        const gRef: IrExpr = { kind: "varRef", localId: id, type: STRING, loc };
+        for (const idx of idxs.slice(1)) {
+          body.push({
+            kind: "if",
+            cond: { kind: "strEq", negated: false, left: gRef, right: { kind: "strLit", value: "", type: STRING, loc }, type: BOOL, loc },
+            then: [{ kind: "assign", localId: id, value: elem(idx), loc }],
+            else_: null,
+            loc,
+          });
+        }
+        values.set(name, gRef);
+      });
+      body.push({
+        kind: "return",
+        value: {
+          kind: "recordLit",
+          fields: order.map((name) => ({ name, value: values.get(name)!, overflow: true as const })),
+          type: recordT,
+          loc,
+        },
+        loc,
+      });
+      L.liftedFns.push({
+        name: helper,
+        params: [{ localId: "m.0", name: "m", type: recv.type }],
+        returnType: recordT,
+        locals,
+        body,
+        loc,
+      });
+    }
+    return { kind: "call", callee: helper, args: [recv], type: recordT, loc };
   }
 
 /** Field read `obj.f` on class-instance and record receivers, through the

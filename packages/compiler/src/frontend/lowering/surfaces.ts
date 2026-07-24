@@ -993,6 +993,16 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         "'.index' is supported on the const binding of a for-of over a DIRECT matchAll call " +
         "(for (const m of s.matchAll(re)) { ... m.index ... }); stored rows are honest " +
         "string[] slices without it";
+    } else if (
+      recvIr?.kind === "array" &&
+      member === "groups" &&
+      (container === "RegExpExecArray" || container === "RegExpMatchArray")
+    ) {
+      hint =
+        "'.groups' lowers when the match's regex is STATICALLY known — a regex literal, or a " +
+        "const initialized with one (the group-name table is built at compile time) — and the " +
+        "read is not an optional-chain step: narrow the match instead (if (m) { m.groups } or " +
+        "m!.groups)";
     } else if (recvIr?.kind === "array" && member === "flat") {
       hint =
         "flat has no lowering (flatMap does) — flatten into an accumulator instead: " +

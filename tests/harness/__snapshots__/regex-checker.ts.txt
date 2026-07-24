@@ -5,4 +5,4 @@ regex-checker.ts:5:31 - error SC1120: function replacement values (replacements 
     |                               ^~~~~~~~~~~~~~~~
   6 | 
 
-  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .source/.flags, and string replace/replaceAll/split with string replacement templates
+  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $<name> templates, \k<name>), .source/.flags, and string replace/replaceAll/split with string replacement templates
