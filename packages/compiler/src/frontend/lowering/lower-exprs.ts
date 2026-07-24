@@ -6251,6 +6251,43 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         };
       }
     }
+    // Keyed write `d[k] = v` on a CHECKED-DYNAMIC receiver (a JS `any`
+    // dictionary — the Object.create(null) memo-table idiom writes
+    // `result[key] = value`): dyn.keySet, exactly the record-mapped dyn
+    // arm above — later writes win in insertion order, number keys
+    // canonicalize through the JS-exact formatter (ToPropertyKey's string
+    // side), index keys on DOM arrays set/extend elements, and non-object
+    // receivers throw Node's TypeErrors at runtime. An UNMAPPED checker
+    // type (static `any` — mapTypeOf answers null without --dynamic)
+    // probes the receiver's own lowered world: a dyn value takes the same
+    // write, anything else falls through to the fences.
+    if (receiverIr?.kind === "dyn" || receiverIr === null) {
+      const obj = receiverIr !== null ? L.lowerExpr(target.expression) : probeLower(L, target.expression);
+      if (obj !== null && obj.type.kind === "dyn") {
+        const loc = locOf(expr);
+        const litKey = recordKeyLiteralText(target.argumentExpression);
+        let key: IrExpr =
+          litKey !== null
+            ? { kind: "strLit", value: litKey, type: STRING, loc: locOf(target.argumentExpression) }
+            : L.lowerExpr(target.argumentExpression);
+        if (key.type.kind === "f64") key = L.ensureString(key, target.argumentExpression);
+        if (key.type.kind === "bool" || key.type.kind === "dyn") {
+          key = { kind: "toString", operand: key, type: STRING, loc: locOf(target.argumentExpression) };
+        }
+        if (key.type.kind !== "string") {
+          L.unsupported("SC1090", target.argumentExpression, "indexing checked-dynamic values with non-string or non-number keys");
+        }
+        const value = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
+        if (value.type.kind !== "dyn") {
+          L.unsupported(
+            "SC1101",
+            expr.right,
+            `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the DOM)`,
+          );
+        }
+        return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
+      }
+    }
     if (receiverIr?.kind !== "array") {
       L.unsupported("SC1090", target, "assignment to non-array elements");
     }

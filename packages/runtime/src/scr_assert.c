@@ -507,6 +507,7 @@ static bool scr_assert_dyn_deep_eq(const ScrDyn *a, const ScrDyn *b) {
       return true;
     }
     case SCR_DYN_OBJ: {
+      if (a->null_proto != b->null_proto) return false; /* the prototype gate */
       if (a->v.obj.len != b->v.obj.len) return false;
       for (size_t i = 0; i < a->v.obj.len; i++) {
         const ScrDynEntry *ent = &a->v.obj.entries[i];
@@ -684,14 +685,17 @@ static void scr_assert_cf_value(ScrAssertBuf *b, const ScrDyn *d, size_t indent,
       return;
     }
     case SCR_DYN_OBJ: {
+      /* The null-proto dictionary renders with Node's prefix in the
+       * failure diff too (assertion_error.js inspects both sides). */
       if (d->v.obj.len == 0) {
-        ab_cstr(b, "{}");
+        ab_cstr(b, d->null_proto ? "[Object: null prototype] {}" : "{}");
         return;
       }
       if (depth == 0) {
-        ab_cstr(b, "[Object]");
+        ab_cstr(b, d->null_proto ? "[Object: null prototype]" : "[Object]");
         return;
       }
+      if (d->null_proto) ab_cstr(b, "[Object: null prototype] ");
       /* Render every entry, then sort the RENDERED texts (Node's
        * sorted:true sorts formatted entries, quotes included). */
       ScrCfEntry *ents = malloc(d->v.obj.len * sizeof *ents);

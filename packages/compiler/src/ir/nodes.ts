@@ -2933,6 +2933,33 @@ export type IrLibFn =
   | "dyn.objKeys"
   | "dyn.hasOwn"
   | "dyn.assign"
+  /** Variadic Object.assign over CHECKED-DYNAMIC targets (`Object.assign(
+   * {}, ...arr.map(f), tail)` — the option-table merge): the lowering
+   * builds one fresh DOM pack of sources (packPush retains a plain source
+   * in; packPushSpread flattens a spread source through the spread-call
+   * walk — V8's exact TypeError texts, the string arg spelling the spread
+   * expression for the nullish form), so every source evaluates and
+   * flattens BEFORE any copying (JS's ArgumentListEvaluation), then
+   * assignAll copies each pack element's own enumerable keys onto the
+   * target left to right and answers the TARGET (+1) — identity, like JS.
+   * assignAll throws Node's ToObject TypeError on a nullish target. */
+  | "dyn.packPush"
+  | "dyn.packPushSpread"
+  /** The iterated-path spread twin: V8 spells the optimized apply-path
+   * texts (packPushSpread's — the expression named for nullish sources)
+   * only for the SINGLE LAST argument's spread; any other spread position
+   * drives the real iterator protocol, whose failure describes the VALUE
+   * ("object null is not iterable (cannot read property
+   * Symbol(Symbol.iterator))"). The frontend picks by position. */
+  | "dyn.packPushSpreadIter"
+  | "dyn.assignAll"
+  /** `Object.create(null)` (scr_json.c): a fresh NULL-PROTOTYPE DOM
+   * dictionary. The DOM's OBJ dispatch is already own-member-only —
+   * Node's null-proto answer — so the flag's whole job is the observations
+   * that SEE the prototype: inspect's "[Object: null prototype]" prefix
+   * and deepStrictEqual's prototype gate. Never throws. Static builds
+   * only; --dynamic routes Object.create through the engine instead. */
+  | "dyn.objCreateNullProto"
   | "dyn.objValues"
   | "dyn.objEntries"
   /** structuredClone over the DOM (scr_json.c): the JSON-safe subset plus
@@ -6277,6 +6304,11 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.objKeys",
   "dyn.hasOwn",
   "dyn.assign",
+  // variadic Object.assign: spread flattening throws V8's spread-call
+  // TypeErrors; the final copy throws ToObject on a nullish target
+  "dyn.packPushSpread",
+  "dyn.packPushSpreadIter",
+  "dyn.assignAll",
   "dyn.objValues",
   "dyn.objEntries",
   "error.domClone",

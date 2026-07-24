@@ -2687,6 +2687,16 @@ struct ScrDyn {
    * coercion and toString() decode utf8, where a plain Uint8Array joins
    * its elements ("1,2,3"). Everything else ignores it. */
   bool buffer;
+  /* SCR_DYN_OBJ flavor: true for Object.create(null)'s dictionary — an
+   * object with NO prototype. Method dispatch needs nothing (the DOM's
+   * OBJ dispatch is already own-member-only, which IS Node's null-proto
+   * answer); util.inspect prefixes "[Object: null prototype]", and
+   * deepStrictEqual separates it from plain objects (Node compares
+   * prototypes — the bytes `buffer` gate's stance). Keyed reads/writes,
+   * Object.keys/entries/assign, JSON, and typeof are flag-blind, and
+   * fresh copies (structuredClone) DROP the flag — Node's serialization
+   * answers a plain object too. */
+  bool null_proto;
   union {
     bool b;
     double num;
@@ -2747,8 +2757,24 @@ ScrDyn *scr_dyn_obj_keys(const ScrDyn *v);
  * TypeError; every other kind answers false. */
 bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key);
 /* Object.assign over DOM values (+1 target back; ToObject TypeError on a
- * nullish target). */
+ * nullish target). Sources copy their own enumerable keys exactly as
+ * Object.keys lists them: OBJ members, ARR/STR/BYTES index keys; nullish
+ * and scalar/function/handle sources copy nothing. */
 ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src);
+/* Variadic Object.assign (the spread-source form): the compiler packs
+ * every source into one fresh DOM array — pack_push retains a plain
+ * source in (BORROWED), pack_push_spread flattens a spread source through
+ * the spread-call walk (V8's exact TypeError texts, `what` spelling the
+ * spread expression; MAY THROW pending) — then assign_all copies each
+ * pack element's own members onto the target left to right and answers
+ * the target retained (+1; ToObject TypeError on a nullish target). */
+void scr_dyn_pack_push(ScrDyn *pack, ScrDyn *v);
+void scr_dyn_pack_push_spread(ScrDyn *pack, const ScrDyn *src, const ScrStr *what);
+/* The iterated-path twin — a spread that is NOT the single last argument
+ * takes V8's iterator-protocol failure texts, which describe the VALUE
+ * ("object null", "number 5", ...) instead of spelling the expression. */
+void scr_dyn_pack_push_spread_iter(ScrDyn *pack, const ScrDyn *src);
+ScrDyn *scr_dyn_assign_all(ScrDyn *target, const ScrDyn *sources);
 ScrDyn *scr_dyn_obj_values(const ScrDyn *v);
 ScrDyn *scr_dyn_obj_entries(const ScrDyn *v);
 
@@ -2766,6 +2792,9 @@ ScrDyn *scr_dyn_new_num(double n);
 ScrDyn *scr_dyn_new_str(ScrStr *s);
 ScrDyn *scr_dyn_new_arr(void);
 ScrDyn *scr_dyn_new_obj(void);
+/* Object.create(null): the fresh null-prototype dictionary (see the
+ * null_proto flavor flag above). */
+ScrDyn *scr_dyn_new_obj_null_proto(void);
 /* Wraps a fresh COPY of the u8 payload (the static→dyn boundary copies —
  * DataView-backed sources copy their aliased window). Borrows b. */
 ScrDyn *scr_dyn_new_bytes_copy(const ScrBytes *b);
@@ -2797,6 +2826,10 @@ ScrStr *scr_dyn_typeof(const ScrDyn *d);
  * enc — utf8 default; strings/numbers/booleans/arrays/objects answer
  * JS-exactly; undefined/null throw the catchable TypeError). Borrows; +1. */
 ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc);
+/* The method-call spelling `d.toString(enc?)`: identical, except a
+ * null-prototype dictionary throws "<what> is not a function" — its
+ * prototype chain has no toString (Node's answer). */
+ScrStr *scr_dyn_to_string_method(const ScrDyn *d, const ScrStr *enc, const ScrStr *what);
 /* JS String() over the DOM kind (units render "null"/"undefined" where
  * scr_dyn_to_string throws) — the web globals' WebIDL ToString. +1. */
 ScrStr *scr_dyn_string_coerce(const ScrDyn *d);

@@ -4031,10 +4031,17 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       const enc = call.arguments[0]
         ? bufEncoding(L, "toString", call.arguments[0])
         : "utf8";
+      // The source spelling rides along for the ONE receiver whose
+      // prototype lacks toString: a null-prototype dictionary throws
+      // Node's "<spelling> is not a function" at runtime.
       return {
         kind: "libCall",
         fn: "dyn.toString",
-        args: [recv, { kind: "strLit", value: enc, type: STRING, loc: locOf(call) }],
+        args: [
+          recv,
+          { kind: "strLit", value: enc, type: STRING, loc: locOf(call) },
+          { kind: "strLit", value: access.getText(), type: STRING, loc: locOf(call) },
+        ],
         type: STRING,
         loc: locOf(call),
       };
@@ -6599,6 +6606,68 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
         "the operands must share one comparable kind (numbers, strings, booleans, units, one union shape, or one reference type)",
       );
     }
+    // Object.create — the null-prototype DICTIONARY (`Object.create(null)`
+    // then keyed assignment, the memo-table idiom prettier's index/
+    // group-mode maps spell) and, under --dynamic, the engine's own
+    // Object.create for engine-held prototypes. Everything else is a
+    // NAMED fence: the compiled representations have no prototype chain,
+    // and the own-copy stand-in would answer WRONG observably — Node's
+    // Object.keys/inspect/JSON of the created object list NO own keys,
+    // and mutating the prototype afterwards is visible through the
+    // created object (live delegation), which no copy can honor.
+    if (member === "create") {
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        L.noLowering("Object.create with spread arguments", call);
+      }
+      if (call.arguments.length >= 2) {
+        L.noLowering(
+          "Object.create with a properties-descriptor argument",
+          call,
+          "create first, then assign: const o = Object.create(null); o.k = v",
+        );
+      }
+      if (call.arguments.length !== 1) {
+        L.noLowering(`Object.create with ${call.arguments.length} arguments`, call);
+      }
+      const loc = locOf(call);
+      let protoNode: ts.Expression = call.arguments[0]!;
+      while (ts.isParenthesizedExpression(protoNode)) protoNode = protoNode.expression;
+      const nullProto = protoNode.kind === ts.SyntaxKind.NullKeyword;
+      if (L.dynamic) {
+        // The checker types the result `any` — an ENGINE value under
+        // --dynamic — and the engine's own Object.create answers with
+        // REAL prototype semantics: reads delegate LIVE, writes shadow,
+        // and inspect renders Node's exact shapes ("[Object: null
+        // prototype]" included). null and engine-held (jsval) prototypes
+        // route; checked-dynamic (DOM) prototypes keep the named fence —
+        // their marshal into the engine is a DEEP COPY, so a later
+        // prototype mutation would be invisible through the created
+        // object where Node delegates live.
+        const objectGlobal = (): IrExpr => ({ kind: "jsOp", op: "globalGet", name: "Object", args: [], type: JSVAL, loc });
+        if (nullProto) {
+          const nullIn: IrExpr = { kind: "jsOp", op: "nullLit", args: [], type: JSVAL, loc };
+          return { kind: "jsOp", op: "callMethod", name: "create", args: [objectGlobal(), nullIn], type: JSVAL, loc };
+        }
+        const proto = L.lowerExpr(protoNode);
+        if (proto.type.kind === "jsval") {
+          return { kind: "jsOp", op: "callMethod", name: "create", args: [objectGlobal(), proto], type: JSVAL, loc };
+        }
+        L.noLowering(
+          `Object.create over '${L.fmt(proto.type)}' prototypes`,
+          call,
+          "prototype reads delegate LIVE in Node (mutating the prototype shows through the created object), which the boundary's deep copy cannot honor — only null and engine-held ('any') prototypes lower",
+        );
+      }
+      if (nullProto) {
+        return { kind: "libCall", fn: "dyn.objCreateNullProto", args: [], type: DYN, loc };
+      }
+      const proto = L.lowerExpr(protoNode);
+      L.noLowering(
+        `Object.create over '${L.fmt(proto.type)}' prototypes`,
+        call,
+        "the compiled representations have no prototype chain, and an own-copy would answer wrong observably (Node lists NO own keys on the created object, and prototype mutations show through it live) — only Object.create(null) lowers",
+      );
+    }
     // `Object.assign(fn, { props })` whose RESULT type maps to the hybrid
     // (function-with-properties) record: the chalk-shape CONSTRUCTOR.
     if (member === "assign") {
@@ -6670,6 +6739,90 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
             if (target.type.kind === "record" && source.type.kind === "record") {
               const helper = recordAssignHelper(L, target.type.shapeId, source.type.shapeId, loc);
               return { kind: "call", callee: helper, args: [target, source], type: target.type, loc };
+            }
+          }
+        }
+      }
+      // `Object.assign(target, ...sources)` over a CHECKED-DYNAMIC target
+      // — the n-ary/spread form (`Object.assign({}, ...plugins.map(p =>
+      // p.options), coreOptions)`, support.js's option-table merge). The
+      // sources pack into one fresh DOM array FIRST — plain sources
+      // retain in, spread sources flatten through the spread-call walk
+      // (V8's exact TypeError texts, the source spelling carried for the
+      // nullish form) — so every source evaluates and flattens before any
+      // copying (JS's ArgumentListEvaluation: a throwing spread leaves
+      // the target untouched), then one runtime walk copies each source's
+      // own enumerable keys left to right and answers the TARGET
+      // (identity, like JS). Each source must enter the dyn world (dyn
+      // already, or dynFrom's JSON-safe conversion — a STATIC array
+      // spread copies in at the boundary, the documented aliasing
+      // stance); anything else keeps the fence. Targets: dyn values, a
+      // FRESH object-literal target (`Object.assign({}, ...)` — no alias
+      // exists, so building it as a DOM object instead of a record is
+      // unobservable), or a nullish unit (Node's ToObject TypeError
+      // throws at the call, catchably); aliased record targets keep the
+      // fence — their identity could not survive the conversion.
+      if (call.arguments.length >= 1 && !ts.isSpreadElement(call.arguments[0]!)) {
+        let targetNode: ts.Expression = call.arguments[0]!;
+        while (ts.isParenthesizedExpression(targetNode)) targetNode = targetNode.expression;
+        const freshLiteralTarget = ts.isObjectLiteralExpression(targetNode);
+        const tProbe = freshLiteralTarget ? null : probeLower(L, call.arguments[0]!);
+        const tKind = tProbe?.type.kind;
+        if (freshLiteralTarget || tKind === "dyn" || tKind === "nullT" || tKind === "undefinedT") {
+          const loc = locOf(call);
+          const target = L.lowerExprExpecting(call.arguments[0]!, DYN);
+          if (target.type.kind === "dyn") {
+            const t = L.declareHiddenLocal("%oat", DYN);
+            const p = L.declareHiddenLocal("%oap", DYN);
+            const tRef = (): IrExpr => ({ kind: "varRef", localId: t.id, type: DYN, loc });
+            const pRef = (): IrExpr => ({ kind: "varRef", localId: p.id, type: DYN, loc });
+            const stmts: IrStmt[] = [
+              { kind: "varDecl", localId: t.id, init: target, loc },
+              { kind: "varDecl", localId: p.id, init: { kind: "dynArrLit", elems: [], type: DYN, loc }, loc },
+            ];
+            // V8 spells the optimized apply-path texts (the expression
+            // named for a nullish source) only when the spread is the
+            // SINGLE LAST argument; every other spread position drives
+            // the real iterator protocol, whose failure describes the
+            // value — the two runtime variants, picked here by position.
+            const sources = call.arguments.slice(1);
+            const spreadCount = sources.filter((a) => ts.isSpreadElement(a)).length;
+            let ok = true;
+            for (let i = 0; i < sources.length; i++) {
+              const argNode = sources[i]!;
+              const spread = ts.isSpreadElement(argNode);
+              const srcNode = spread ? argNode.expression : argNode;
+              const src = L.coerceToExpected(L.lowerExpr(srcNode), DYN);
+              if (src.type.kind !== "dyn") {
+                ok = false;
+                break;
+              }
+              const argLoc = locOf(argNode);
+              const optimized = spreadCount === 1 && i === sources.length - 1;
+              stmts.push({
+                kind: "exprStmt",
+                expr: spread
+                  ? optimized
+                    ? {
+                        kind: "libCall",
+                        fn: "dyn.packPushSpread",
+                        args: [pRef(), src, { kind: "strLit", value: srcNode.getText(), type: STRING, loc: argLoc }],
+                        type: VOID,
+                        loc: argLoc,
+                      }
+                    : { kind: "libCall", fn: "dyn.packPushSpreadIter", args: [pRef(), src], type: VOID, loc: argLoc }
+                  : { kind: "libCall", fn: "dyn.packPush", args: [pRef(), src], type: VOID, loc: argLoc },
+                loc: argLoc,
+              });
+            }
+            if (ok) {
+              return {
+                kind: "seqExpr",
+                stmts,
+                result: { kind: "libCall", fn: "dyn.assignAll", args: [tRef(), pRef()], type: DYN, loc },
+                type: DYN,
+                loc,
+              };
             }
           }
         }

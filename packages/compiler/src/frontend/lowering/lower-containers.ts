@@ -2850,19 +2850,23 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
     if (call.questionDotToken || access.questionDotToken) return null;
     const terminal = access.name.text;
     if (!ITER_TERMINALS.has(terminal)) return null;
-    // Walk receiver: stage* ← values() ← array-typed source.
+    // Walk receiver: stage* ← values()/entries() ← array-typed source
+    // (entries seeds the chain with [index, element] pairs — the
+    // checker's own tuple type).
     const stages: { name: string; argNode: ts.Expression }[] = [];
     let cur: ts.Expression = access.expression;
     let source: ts.Expression | null = null;
+    let srcProj: "values" | "entries" = "values";
     for (;;) {
       if (!ts.isCallExpression(cur) || !ts.isPropertyAccessExpression(cur.expression)) return null;
       if (cur.questionDotToken || cur.expression.questionDotToken) return null;
       const name = cur.expression.name.text;
-      if (name === "values" && cur.arguments.length === 0) {
+      if ((name === "values" || name === "entries") && cur.arguments.length === 0) {
         const recvIr = L.mapTypeOf(L.typeOf(cur.expression.expression));
         if (recvIr?.kind !== "array") return null;
         if (!L.isStdlibMember(cur.expression)) return null;
         source = cur.expression.expression;
+        srcProj = name;
         break;
       }
       if (!ITER_STAGES.has(name) || cur.arguments.length !== 1 || ts.isSpreadElement(cur.arguments[0]!)) return null;
@@ -2880,7 +2884,12 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
     // order): the source array, each stage argument, the terminal's.
     const items = L.lowerExpr(source);
     if (items.type.kind !== "array") return null;
-    let elem: IrType = items.type.elem;
+    // The entries() seed: the interned [number, T] tuple — the same shape
+    // the checker's own [number, T] maps to, so stage callbacks typed
+    // against the lib's pairs intern equal.
+    let elem: IrType = srcProj === "entries"
+      ? { kind: "record", shapeId: L.shapes.intern([{ name: "0", type: F64 }, { name: "1", type: items.type.elem }], true) }
+      : items.type.elem;
     type StageIr =
       | { kind: "map" | "filter" | "flatMap"; fn: IrExpr & { type: IrType & { kind: "func" } }; out: IrType }
       | { kind: "take" | "drop"; budget: IrExpr };
@@ -2980,12 +2989,12 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
       );
     }
     const stageKeys = stageIrs.map((s) => (s.kind === "take" || s.kind === "drop" ? s.kind : `${s.kind}:${typeKey((s as { fn: IrExpr }).fn.type)}`));
-    const key = `iter:${typeKey(items.type)}:${stageKeys.join(",")}:${terminal}:${termArgs.map((a) => typeKey(a.type)).join(",")}`;
+    const key = `iter:${srcProj}:${typeKey(items.type)}:${stageKeys.join(",")}:${terminal}:${termArgs.map((a) => typeKey(a.type)).join(",")}`;
     let helper = L.arrHofHelpers.get(key);
     if (!helper) {
       helper = `%iter.${terminal}.${L.arrHofHelpers.size}`;
       L.arrHofHelpers.set(key, helper);
-      L.liftedFns.push(buildIterChainFn(L, helper, items.type, stageIrs, terminal, termArgs.map((a) => a.type), resultT, loc));
+      L.liftedFns.push(buildIterChainFn(L, helper, items.type, srcProj, stageIrs, terminal, termArgs.map((a) => a.type), resultT, loc));
     }
     const budgetOrFn = stageIrs.map((s) => (s.kind === "take" || s.kind === "drop" ? s.budget : (s as { fn: IrExpr }).fn));
     return { kind: "call", callee: helper, args: [items, ...budgetOrFn, ...termArgs], type: resultT, loc };
@@ -3073,6 +3082,7 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
    * nothing at all through a take(0). */
   function buildIterChainFn(L: Lowerer, name: string,
     itemsT: IrType & { kind: "array" },
+    srcProj: "values" | "entries",
     stages: { kind: string; fn?: IrExpr & { type: IrType & { kind: "func" } } }[],
     terminal: string,
     termArgTs: IrType[],
@@ -3100,7 +3110,12 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     const setDone: IrStmt = { kind: "assign", localId: doneId, value: boolLit(true), loc };
     // Parameters in call order: per-stage budget/callback, then terminal's.
     interface StageSlot { kind: string; paramId: string; fnT?: (IrType & { kind: "func" }) | undefined; cntId?: string | undefined; elem: IrType }
-    let elem: IrType = itemsT.elem;
+    // The entries() seed builds each pass's [index, element] pair — the
+    // same interned tuple the caller computed its stage types against.
+    const seedT: IrType = srcProj === "entries"
+      ? { kind: "record", shapeId: L.shapes.intern([{ name: "0", type: F64 }, { name: "1", type: itemsT.elem }], true) }
+      : itemsT.elem;
+    let elem: IrType = seedT;
     const slots: StageSlot[] = [];
     for (const s of stages) {
       if (s.kind === "take" || s.kind === "drop") {
@@ -3324,7 +3339,19 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       }
     }
     const iId = addLocal("i", F64, true);
-    const vId = addLocal("v", itemsT.elem, false);
+    const vId = addLocal("v", seedT, false);
+    const elemRead = (): IrExpr => ({ kind: "arrayGet", arr: ref("items.0", itemsT), index: ref(iId, F64), type: itemsT.elem, loc });
+    const seedInit: IrExpr = srcProj === "entries"
+      ? {
+          kind: "recordLit",
+          fields: [
+            { name: "0", value: ref(iId, F64) },
+            { name: "1", value: elemRead() },
+          ],
+          type: seedT,
+          loc,
+        }
+      : elemRead();
     const loop: IrStmt = {
       kind: "for",
       init: { kind: "varDecl", localId: iId, init: num(0), loc },
@@ -3338,8 +3365,8 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       },
       update: { kind: "assign", localId: iId, value: { kind: "bin", op: "+", left: ref(iId, F64), right: num(1), type: F64, loc }, loc },
       body: [
-        { kind: "varDecl", localId: vId, init: { kind: "arrayGet", arr: ref("items.0", itemsT), index: ref(iId, F64), type: itemsT.elem, loc }, loc },
-        ...emit(ref(vId, itemsT.elem)),
+        { kind: "varDecl", localId: vId, init: seedInit, loc },
+        ...emit(ref(vId, seedT)),
       ],
       loc,
     };
@@ -3693,6 +3720,158 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       return {
         kind: "block",
         body: [{ kind: "varDecl", localId: sp.id, init: iterable, loc }, loop],
+        loc,
+      };
+    } finally {
+      L.scopes.pop();
+    }
+  }
+
+/** for-of over an ARRAY's keys()/entries() projections consumed directly
+   * by the head (`for (const [index, line] of lines.entries())` — the
+   * dominant formatter idiom): the LIVE index walk — the length re-reads
+   * every pass, exactly the array iterator's contract (elements appended
+   * mid-walk are visited; a shrink ends the loop early) — yielding the
+   * index (`keys`, a number) or the [index, element] pair (`entries`).
+   * `values` never lands here: lowerForOf's receiver unwrap owns it. A
+   * `[i, v]` head of plain identifiers binds straight from the reads (the
+   * tuple never materializes); identifier heads and the remaining
+   * patterns bind through the checker's own element type — the interned
+   * [number, T] tuple record. Stored iterator OBJECTS keep their fence
+   * (only the direct for-of position unwraps). */
+  export function lowerForOfArrayIter(L: Lowerer, stmt: ts.ForOfStatement,
+    iterable: IrExpr & { type: IrType & { kind: "array" } },
+    proj: "keys" | "entries",): IrStmt {
+    const loc = locOf(stmt);
+    const arrT = iterable.type;
+    const elemT = arrT.elem;
+    const yieldsPair = proj === "entries";
+    if (!ts.isVariableDeclarationList(stmt.initializer)) {
+      L.unsupported(
+        "SC1090",
+        stmt.initializer,
+        "for-of over a pre-declared variable (declare the loop variable in the loop: for (const x of ...))",
+      );
+    }
+    const list = stmt.initializer;
+    if ((list.flags & ts.NodeFlags.Using) !== 0) {
+      L.unsupported("SC1090", list, "'using' declarations (dispose-at-scope-exit semantics)");
+    }
+    const isVar = (list.flags & ts.NodeFlags.BlockScoped) === 0;
+    const isLet = (list.flags & ts.NodeFlags.Let) !== 0 || isVar;
+    const decl = list.declarations[0]!; // the grammar allows exactly one
+    L.scopes.push(new Map());
+    try {
+      const arr = L.declareHiddenLocal("%arof", arrT);
+      const i = L.declareHiddenLocal("%iterof", F64);
+      i.mutable = true;
+      const ref = (localId: string, type: IrType): IrExpr => ({ kind: "varRef", localId, type, loc });
+      const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
+      const keyRead = (): IrExpr => ref(i.id, F64);
+      const valRead = (): IrExpr => ({ kind: "arrayGet", arr: ref(arr.id, arrT), index: ref(i.id, F64), type: elemT, loc });
+
+      const binds: IrStmt[] = [];
+      const isPlainIdent = (el: ts.ArrayBindingElement): el is ts.BindingElement & { name: ts.Identifier } =>
+        ts.isBindingElement(el) && el.name !== undefined && ts.isIdentifier(el.name) && !el.initializer && !el.dotDotDotToken;
+      if (
+        yieldsPair &&
+        !isVar && // var pattern names assign hoisted slots — the generic desugar below owns them
+        ts.isArrayBindingPattern(decl.name) &&
+        decl.name.elements.length >= 1 && decl.name.elements.length <= 2 &&
+        decl.name.elements.every(isPlainIdent)
+      ) {
+        // `for (const [i, v] of xs.entries())` — bind straight from the
+        // reads; the tuple never exists. `[i]` alone reads only the index.
+        const els = decl.name.elements as readonly (ts.BindingElement & { name: ts.Identifier })[];
+        const kLocal = L.declareLocal(els[0]!.name, els[0]!.name.text, F64, isLet);
+        binds.push({ kind: "varDecl", localId: kLocal.id, init: keyRead(), loc });
+        if (els[1]) {
+          const vLocal = L.declareLocal(els[1].name, els[1].name.text, elemT, isLet);
+          binds.push({ kind: "varDecl", localId: vLocal.id, init: valRead(), loc });
+        }
+      } else {
+        // Identifier heads and the remaining patterns bind through the
+        // checker's own element type — [number, T] for pair yields,
+        // number otherwise — the Map desugar's exact shape.
+        const declT = L.mapTypeOf(L.checker.getTypeAtLocation(decl.name));
+        if (yieldsPair) {
+          const shape = declT?.kind === "record" ? L.shapes.get(declT.shapeId) : null;
+          if (
+            declT?.kind !== "record" || !shape?.tuple || shape.fields.length !== 2 ||
+            shape.fields.find((f) => f.name === "0")?.type.kind !== "f64" ||
+            !typeEquals(shape.fields.find((f) => f.name === "1")?.type ?? F64, elemT)
+          ) {
+            L.badType(decl.name, L.checker.getTypeAtLocation(decl.name)); // defensive: the lib declares [number, T]
+          }
+        } else if (declT?.kind !== "f64") {
+          L.badType(decl.name, L.checker.getTypeAtLocation(decl.name)); // defensive: the lib declares number
+        }
+        const elemInit: IrExpr = yieldsPair
+          ? {
+              kind: "recordLit",
+              fields: [
+                { name: "0", value: keyRead() },
+                { name: "1", value: valRead() },
+              ],
+              type: declT!,
+              loc,
+            }
+          : keyRead();
+        if (ts.isIdentifier(decl.name)) {
+          const varTarget = forOfVarTarget(L, decl);
+          if (varTarget) {
+            // `for (var x of ...)`: one function-scoped binding, assigned
+            // per pass — closures made in the loop share it, and the value
+            // persists after the loop (both Node-exact for var).
+            const tmp = L.declareHiddenLocal("%vof", declT!);
+            binds.push({ kind: "varDecl", localId: tmp.id, init: elemInit, loc });
+            binds.push({
+              kind: "assign",
+              localId: varTarget.id,
+              value: L.coerceInto(decl.name, { kind: "varRef", localId: tmp.id, type: declT!, loc }, varTarget.type),
+              loc,
+            });
+          } else {
+            const local = L.declareLocal(decl.name, decl.name.text, declT!, isLet);
+            binds.push({ kind: "varDecl", localId: local.id, init: elemInit, loc });
+          }
+        } else {
+          const tmp = L.declareHiddenLocal("%destr", declT!);
+          binds.push({ kind: "varDecl", localId: tmp.id, init: elemInit, loc });
+          L.lowerBindingPattern(
+            decl.name,
+            () => ({ kind: "varRef", localId: tmp.id, type: declT!, loc }),
+            declT!,
+            isLet,
+            binds,
+          );
+        }
+      }
+
+      const body = L.inCtl("loop", () => L.lowerScopedBlock(stmt.statement));
+      const loop: IrStmt = {
+        kind: "for",
+        init: { kind: "varDecl", localId: i.id, init: num(0), loc },
+        cond: {
+          kind: "bin",
+          op: "<",
+          left: ref(i.id, F64),
+          right: { kind: "arrIntrinsic", method: "length", receiver: ref(arr.id, arrT), args: [], type: F64, loc },
+          type: BOOL,
+          loc,
+        },
+        update: {
+          kind: "assign",
+          localId: i.id,
+          value: { kind: "bin", op: "+", left: ref(i.id, F64), right: num(1), type: F64, loc },
+          loc,
+        },
+        body: [...binds, ...body],
+        loc,
+      };
+      return {
+        kind: "block",
+        body: [{ kind: "varDecl", localId: arr.id, init: iterable, loc }, loop],
         loc,
       };
     } finally {

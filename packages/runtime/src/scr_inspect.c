@@ -775,8 +775,18 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
       return out;
     }
     case SCR_DYN_OBJ: {
-      if (d->v.obj.len == 0) return scr_str_new("{}", 2);
-      if (recurse > depth) return scr_str_new("[Object]", 8);
+      /* Object.create(null)'s dictionary: Node prefixes the rendering
+       * with "[Object: null prototype]" (formatValue's constructor-less
+       * base), the empty form included, and the beyond-depth answer IS
+       * the bare marker (where a plain object says [Object]). */
+      if (d->v.obj.len == 0) {
+        return d->null_proto ? scr_str_new("[Object: null prototype] {}", 27)
+                             : scr_str_new("{}", 2);
+      }
+      if (recurse > depth) {
+        return d->null_proto ? scr_str_new("[Object: null prototype]", 24)
+                             : scr_str_new("[Object]", 8);
+      }
       scr_insp_begin(recurse + 1);
       for (size_t i = 0; i < d->v.obj.len; i++) {
         ScrDynEntry *ent = &d->v.obj.entries[i];
@@ -790,7 +800,8 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
         scr_insp_entry(entry, false);
         scr_str_release(entry);
       }
-      ScrStr *base = scr_str_new("", 0);
+      ScrStr *base = d->null_proto ? scr_str_new("[Object: null prototype]", 24)
+                                   : scr_str_new("", 0);
       ScrStr *b0 = scr_str_new("{", 1);
       ScrStr *b1 = scr_str_new("}", 1);
       ScrStr *out = scr_insp_end(base, b0, b1, recurse + 1, false, false);
