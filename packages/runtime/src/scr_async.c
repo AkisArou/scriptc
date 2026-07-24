@@ -591,7 +591,8 @@ ScrArr *scr_active_resources(void) {
  * left queued on the uncaught paths) never run — the teardown releases
  * them, like Node dropping the queue at exit. */
 typedef struct ScrNtick {
-  ScrClosure *cb; /* owned */
+  ScrClosure *cb;    /* owned; NULL for a raw C-hook entry */
+  void (*raw)(void); /* the hook when cb == NULL (stream tick markers) */
   struct ScrNtick *next;
 } ScrNtick;
 
@@ -612,11 +613,25 @@ void scr_next_tick(ScrClosure *cb /*moves*/) {
   scr_nt_tail = t;
 }
 
+/* A RAW C-hook tick: the stream unit enqueues one marker per deferred
+ * stream emission so those emissions interleave with user nextTicks in
+ * true FIFO order — in Node they ARE nextTicks (resume_, emitReadable_,
+ * endReadableNT, ...). The hook dispatches exactly one stream tick;
+ * teardown just drops markers (the stream queue owns its entries). */
+void scr_next_tick_raw(void (*fn)(void)) {
+  ScrNtick *t = calloc(1, sizeof *t);
+  if (!t) scr_oom();
+  t->raw = fn;
+  if (scr_nt_tail) scr_nt_tail->next = t;
+  else scr_nt_head = t;
+  scr_nt_tail = t;
+}
+
 void scr_nticks_teardown(void) {
   while (scr_nt_head != NULL) {
     ScrNtick *t = scr_nt_head;
     scr_nt_head = t->next;
-    scr_closure_release(t->cb);
+    if (t->cb) scr_closure_release(t->cb);
     free(t);
   }
   scr_nt_tail = NULL;
@@ -1677,9 +1692,14 @@ void scr_loop_run(void) {
         scr_nt_head = t->next;
         if (scr_nt_head == NULL) scr_nt_tail = NULL;
         ScrClosure *cb = t->cb;
+        void (*raw)(void) = t->raw;
         free(t);
-        ((void (*)(ScrClosure *))cb->fn)(cb);
-        scr_closure_release(cb);
+        if (cb) {
+          ((void (*)(ScrClosure *))cb->fn)(cb);
+          scr_closure_release(cb);
+        } else {
+          raw(); /* one stream tick, FIFO with the user ticks around it */
+        }
         if (scr_exc_pending()) return;
       }
     }

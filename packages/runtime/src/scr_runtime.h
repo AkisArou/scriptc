@@ -3491,6 +3491,11 @@ bool scr_immediate_has_ref(double handle);
  * teardown (they must never run yet must not leak). cb ownership moves
  * in. */
 void scr_next_tick(ScrClosure *cb);
+/* A raw C-hook entry on the SAME queue: the stream unit enqueues one
+ * marker per deferred stream emission, so stream ticks and user
+ * nextTicks run in true FIFO order (in Node they are the same queue).
+ * Teardown drops markers without running them. */
+void scr_next_tick_raw(void (*fn)(void));
 void scr_nticks_teardown(void);
 /* ── the events unit (scr_events.c — OPTIONAL, link-gated) ────────────
  * Process signal/exit events and the piped-stdin surface. The unit links

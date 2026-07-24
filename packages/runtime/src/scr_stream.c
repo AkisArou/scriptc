@@ -13,11 +13,12 @@
  * nothing.
  *
  * EVENT TIMING. Node schedules most stream emissions on process.nextTick;
- * here those deferrals ride a FIFO tick queue drained at the top of every
- * loop turn (scr_loop_set_stream — the station before events/net/timers,
- * the closest to nextTick; ticks scheduled from user code on the main
- * stack run when the loop starts, i.e. after all synchronous code — the
- * nextTick shape). The implemented orderings follow lib/internal/streams:
+ * here each deferral enqueues on the stream tick FIFO AND posts a raw
+ * marker on the USER nextTick queue (scr_next_tick_raw), so stream
+ * emissions and user nextTicks run in true FIFO enqueue order — Node's,
+ * where they are the same queue. The scr_loop_set_stream station remains
+ * as the drain of anything a marker never reached (and the uncaught-throw
+ * cleanup). The implemented orderings follow lib/internal/streams:
  *   - on('data') starts flowing on a TICK (resume_): synchronous code
  *     after the registration runs before the first 'data'.
  *   - push() while flowing with an empty buffer emits 'data'
@@ -350,6 +351,8 @@ typedef struct ScrStreamTick {
 static ScrStreamTick *scr_st_head = NULL;
 static ScrStreamTick *scr_st_tail = NULL;
 
+static void scr_stream_dispatch_one(void);
+
 static void scr_st_tick(ScrStream *s, ScrStreamTickOp op, ScrError *err /*moves*/,
                         ScrClosure *cb /*moves*/) {
   ScrStreamTick *t = calloc(1, sizeof *t);
@@ -361,6 +364,13 @@ static void scr_st_tick(ScrStream *s, ScrStreamTickOp op, ScrError *err /*moves*
   if (scr_st_tail) scr_st_tail->next = t;
   else scr_st_head = t;
   scr_st_tail = t;
+  /* One marker per tick on the USER nextTick queue: stream emissions are
+   * process.nextTicks in Node (resume_, emitReadable_, endReadableNT,
+   * afterWrite, ...), so they must interleave with user nextTicks in
+   * enqueue order — a `push(); on('data'); process.nextTick(assert)`
+   * sequence sees its data before the assert runs. The station dispatch
+   * below stays as the drain of anything a marker never reached. */
+  scr_next_tick_raw(&scr_stream_dispatch_one);
 }
 
 static bool scr_stream_ticks_pending(void) { return scr_st_head != NULL; }
@@ -2907,6 +2917,25 @@ static void scr_stream_run_tick(ScrStreamTick *t) {
       break;
     }
   }
+}
+
+static void scr_stream_dispatch(void);
+
+/* One tick-marker's dispatch: the queue's FIFO head (markers and entries
+ * are enqueued 1:1 in the same order). After an uncaught throw the
+ * remaining entries drop through the station's exc branch below, keeping
+ * the RC audit clean. */
+static void scr_stream_dispatch_one(void) {
+  ScrStreamTick *t = scr_st_head;
+  if (t == NULL || scr_exc_pending()) return;
+  scr_st_head = t->next;
+  if (scr_st_head == NULL) scr_st_tail = NULL;
+  scr_stream_run_tick(t);
+  scr_stream_release(t->s);
+  if (t->err) scr_error_release(t->err);
+  if (t->cb) scr_closure_release(t->cb);
+  free(t);
+  if (scr_exc_pending()) scr_stream_dispatch(); /* its exc branch drops the rest */
 }
 
 static void scr_stream_dispatch(void) {
