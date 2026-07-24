@@ -5018,6 +5018,48 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2604-ee-emit-override.ts": {
+   "order": [
+    "<repo>/tests/corpus/2604-ee-emit-override.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2605-ee-override-chain.ts": {
+   "order": [
+    "<repo>/tests/corpus/2605-ee-override-chain.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2606-ee-override-once-order.ts": {
+   "order": [
+    "<repo>/tests/corpus/2606-ee-override-once-order.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2607-ee-override-error-throw.ts": {
+   "order": [
+    "<repo>/tests/corpus/2607-ee-override-error-throw.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2608-ee-override-filter.ts": {
+   "order": [
+    "<repo>/tests/corpus/2608-ee-override-filter.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2609-ee-job-queue.ts": {
+   "order": [
+    "<repo>/tests/corpus/2609-ee-job-queue.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2610-ee-override-js.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2610-ee-override-js.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6276,6 +6318,12 @@
   "<repo>/tests/diagnostics/dynamic-surface.ts": {
    "order": [
     "<repo>/tests/diagnostics/dynamic-surface.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/ee-emit-override.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/ee-emit-override.ts"
    ],
    "diags": []
   },
