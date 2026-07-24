@@ -31,7 +31,10 @@
       { "prefix": "node-builtin.fs.", "teaching": "files are effects: declare reads and writes as commands the host executes." },
       { "prefix": "node-builtin.net.", "teaching": "network is an effect: declare requests as commands; responses arrive as Msgs." },
       { "prefix": "node-builtin.os.", "teaching": "machine identity is an effect: ask the host." },
-      { "prefix": "node-builtin.crypto.", "teaching": "randomness and digests come from the host." }
+      { "prefix": "node-builtin.crypto.", "teaching": "randomness and digests come from the host." },
+      { "prefix": "stdlib.date.", "teaching": "time is an effect: the host passes the clock in as a Msg." },
+      { "prefix": "node-builtin.process.", "teaching": "process ambient state and authority belong to the host." },
+      { "prefix": "node-builtin.perf_hooks.", "teaching": "the monotonic clock is the host's." }
     ]
   }
 }

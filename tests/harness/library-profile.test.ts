@@ -161,8 +161,20 @@ describe("library profile validation", () => {
       { ...good, exports: [{ ...good.exports[0], param: [] }] },
       "unknown field 'exports[0].param'",
     ));
-  test("unknown top-level fields are reserved surface, ignored", () => {
-    const r = loadLibraryProfile(writeProfile({ ...good, determinism: { deny: ["Math.random"] }, contract: {} }));
+  test("unknown root fields refuse — the strict root (anti-inert posture)", () => {
+    expectSc4001({ ...good, contract: {} }, "unknown field 'contract'");
+    expectSc4001({ ...good, exporst: [] }, "unknown field 'exporst'");
+  });
+  test("the ask-5 keys at the root refuse with a pointer to their determinism.* home", () => {
+    expectSc4001(
+      { ...good, fences: [{ id: "stdlib.math.random" }] },
+      "the ask-5 determinism surface lives under 'determinism.fences'",
+    );
+    expectSc4001({ ...good, teachings: { SC4005: "x" } }, "'determinism.teachings'");
+    expectSc4001({ ...good, remediations: { SC4012: "x" } }, "'determinism.remediations'");
+  });
+  test("unknown keys INSIDE determinism stay reserved surface, ignored", () => {
+    const r = loadLibraryProfile(writeProfile({ ...good, determinism: { deny: ["Math.random"] } }));
     expect(r.ok).toBe(true);
   });
   test("duplicate symbols", () =>
@@ -325,13 +337,46 @@ describe("library profile fences", () => {
 
   test("an id matching nothing in this release's manifest refuses (ratified strictness)", () => {
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.date.now" }] } },
+      { ...good, determinism: { fences: [{ id: "stdlib.chrono.now" }] } },
       "determinism.fences[0].id",
     );
     expectSc4001(
-      { ...good, determinism: { fences: [{ id: "stdlib.date.now" }] } },
+      { ...good, determinism: { fences: [{ id: "stdlib.chrono.now" }] } },
       "names no entry",
     );
+  });
+
+  test("the ask-5 worked example's Date family resolves: the attestation's ground is fenceable", () => {
+    // The spec's own worked prefix ('stdlib.date.') plus the other ambient
+    // families the determinism attestation demotes on — every one resolves
+    // against the manifest with detectors, so the §4 invariant is statable.
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        determinism: {
+          fences: [
+            { prefix: "stdlib.date." },
+            { prefix: "node-builtin.process." },
+            { prefix: "node-builtin.perf_hooks." },
+          ],
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dateIds = r.profile.fences[0]!.surfaces.map((s) => s.id);
+    expect(dateIds).toEqual(["stdlib.date.UTC", "stdlib.date.getTime", "stdlib.date.now", "stdlib.date.toISOString"]);
+    expect(r.profile.fences[0]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
+    const processIds = r.profile.fences[1]!.surfaces.map((s) => s.id);
+    expect(processIds).toContain("node-builtin.process.env");
+    expect(processIds).toContain("node-builtin.process.exit");
+    // The live machine-state reads join the family too (the attestation
+    // demotes on them, so the family fence must deny them).
+    expect(processIds).toContain("node-builtin.process.resourceUsage");
+    expect(processIds).toContain("node-builtin.process.cpuUsage");
+    expect(processIds).toContain("node-builtin.process.isTTY");
+    expect(r.profile.fences[1]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
+    expect(r.profile.fences[2]!.surfaces.map((s) => s.id)).toEqual(["node-builtin.perf_hooks.performance.now"]);
   });
 
   test("a prefix matching nothing refuses — the spec's illustrative spelling included", () => {

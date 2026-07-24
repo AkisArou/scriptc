@@ -42,7 +42,8 @@ export {
   type SurfaceManifest,
   type SurfaceManifestEntry,
 } from "./coverage/surface-manifest.js";
-export { validateModule } from "./ir/validate.js";
+export { LIB_FN_SIGS, validateModule } from "./ir/validate.js";
+export { resolveLibraryFences, type LibraryFenceDecl, type ResolvedLibraryFence } from "./library/fence-eval.js";
 export {
   loadLibraryProfile,
   profileTeaching,

@@ -81,10 +81,14 @@
  * Marshalling classes (design §4.2 + session ruling 3): f64, bool, string,
  * bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing classes
  * in v1 (outbound integer returns wait for ask-4's prove-or-refuse
- * machinery); void is return-only. Unknown top-level fields are ignored
- * (reserved surface: determinism, identity/version echo); unknown fields
- * INSIDE `abi` and export entries are refused — a typo there silently
- * changes meaning. */
+ * machinery); void is return-only. Unknown fields are refused at EVERY
+ * level the loader reads — the root included (the anti-inert posture:
+ * profiles pin per compiler release, so an unknown root key is a typo or
+ * a misplaced section, never forward-compat surface; the ask-5 key names
+ * at the root refuse with a pointer to their `determinism.*` home, since
+ * a silently inert `fences` array is exactly the footgun the fence
+ * machinery refuses everywhere else). Only the INTERIOR of `determinism`
+ * keeps a reserved-and-ignored surface beyond the three ask-5 keys. */
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { libProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -245,6 +249,20 @@ export function loadLibraryProfile(
     const p = raw as Record<string, unknown>;
     const format = req<number>(p["profile_format"], "profile_format", "number");
     if (format !== 1) throw new ProfileError(`unsupported profile_format ${format} (this scriptc reads format 1)`);
+    // Root keys are strict (checked AFTER the format gate, so a future
+    // format's profile refuses as the wrong format, not as a typo). The
+    // ask-5 key names get the pointed message: a `fences` array pasted at
+    // the root would otherwise be silently inert — the exact footgun the
+    // fence machinery refuses everywhere else.
+    for (const k of Object.keys(p)) {
+      if (["profile_format", "name", "entry", "emission", "abi", "exports", "sidecar", "determinism"].includes(k)) continue;
+      if (k === "fences" || k === "teachings" || k === "remediations") {
+        throw new ProfileError(
+          `'${k}' at the profile root does nothing — the ask-5 determinism surface lives under 'determinism.${k}'; move it there`,
+        );
+      }
+      throw new ProfileError(`unknown field '${k}' (root keys are strict: a typo here would silently change the build; remove it)`);
+    }
     const name = req<string>(p["name"], "name", "string");
     if (name === "") throw new ProfileError("'name' must be a non-empty identity string");
     const entryRel = req<string>(p["entry"], "entry", "string");

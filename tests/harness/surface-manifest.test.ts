@@ -24,8 +24,11 @@ import {
   analyze,
   compile,
   generateSurfaceManifest,
+  ir,
+  LIB_FN_SIGS,
   renderAll,
   renderSurfaceManifest,
+  resolveLibraryFences,
   type SurfaceManifest,
 } from "@scriptc/compiler";
 
@@ -110,6 +113,9 @@ const PROBES: Probe[] = [
   { id: "stdlib.array.push", source: "const xs: number[] = [1];\nxs.push(2);\nconsole.log(xs.length);\n" },
   { id: "stdlib.math.floor", source: "console.log(Math.floor(1.5));\n" },
   { id: "stdlib.map.has", source: 'const m = new Map<string, number>();\nm.set("a", 1);\nconsole.log(m.has("a"));\n' },
+  { id: "stdlib.date.now", source: "console.log(Date.now() > 0);\n" },
+  { id: "node-builtin.process.pid", source: "console.log(process.pid > 0);\n" },
+  { id: "node-builtin.perf_hooks.performance.now", source: "console.log(performance.now() >= 0);\n" },
   { id: "node-builtin.path.join", source: 'import { join } from "node:path";\nconsole.log(join("a", "b"));\n' },
   { id: "node-builtin.os.EOL", source: 'import { EOL } from "node:os";\nconsole.log(EOL.length);\n' },
   // status dynamic-only — refused with the entry's code statically,
@@ -188,5 +194,77 @@ describe("surface manifest sampling harness", () => {
       ).toEqual([]);
       expect(dyn.stats.statementsFailed).toBe(0);
     }
+  });
+});
+
+/* ── attestation ↔ fence parity: the ask-5 §4 invariant's ground ─────────
+ * The library sidecar's `deterministic` attestation demotes on libCall
+ * spellings by prefix (ir/nodes.ts's LIB_NONDETERMINISTIC_PREFIXES); the
+ * profile's determinism fences deny surfaces by manifest id. The §4
+ * invariant — a program that compiles under full fences attests
+ * deterministic: true — holds only if every spelling the attestation
+ * demotes on is deniable through some manifest entry's fence detector.
+ * This test holds the two scans to that, mechanically, over the exhaustive
+ * IrLibFn registry: a new ambient spelling added to a lowering fails here
+ * until a manifest entry (or an alias on an existing one) covers it. */
+describe("determinism attestation ↔ fence parity", () => {
+  test("every attestation-demoting libFn spelling is deniable by a manifest-id fence", () => {
+    // The full-fence declaration set: every ambient family the attestation
+    // knows, spelled the way a profile would spell it.
+    const resolved = resolveLibraryFences([
+      { path: "parity[0]", id: "stdlib.math.random" },
+      { path: "parity[1]", prefix: "node-builtin.fs." },
+      { path: "parity[2]", prefix: "node-builtin.os." },
+      { path: "parity[3]", prefix: "node-builtin.crypto." },
+      { path: "parity[4]", prefix: "stdlib.date." },
+      { path: "parity[5]", prefix: "node-builtin.process." },
+      { path: "parity[6]", prefix: "node-builtin.perf_hooks." },
+    ]);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    const covered = new Set<string>();
+    for (const fence of resolved.fences) {
+      for (const s of fence.surfaces) {
+        for (const fn of s.detector?.libFns ?? []) covered.add(fn);
+      }
+    }
+    // Spellings the attestation demotes on that no fence detector needs to
+    // witness, pinned WITH REASONS — additions here require the same
+    // scrutiny as a manifest entry:
+    const excused = new Set([
+      // Refused SC4005 in library mode before any fence runs (the async
+      // fs callback surface — LIB_MODE_REFUSED_PREFIXES).
+      "fs.existsChk",
+      // The JS-source validation-ladder spellings whose honest tail is a
+      // compile-rendered runtime fence: the ladder replicates Node's typed
+      // argument errors and then FENCES — the ambient operation never
+      // runs, so the attestation's demote is pure conservatism.
+      "fs.mkdtempChk",
+      "fs.readFileChk",
+      "fs.opendirChk",
+      "fs.watchFileChk",
+      "fs.lchmodChk",
+      "fs.readChk",
+      "fs.streamOptsChk",
+      // fs._toUnixTimestamp — Node's underscore-stable seconds coercion
+      // (the utimes ladder's time argument): it reads the clock only for
+      // negative inputs, and the member is undeclared in @types/node, so
+      // only the JS lane reaches it. A residual, documented gap: no
+      // manifest member exists to hang a detector on yet.
+      "fs.toUnixTimestamp",
+    ]);
+    const missing = Object.keys(LIB_FN_SIGS).filter(
+      (fn) =>
+        ir.LIB_NONDETERMINISTIC_PREFIXES.some(([prefix]) => fn.startsWith(prefix)) &&
+        !covered.has(fn) &&
+        !excused.has(fn),
+    );
+    expect(
+      missing,
+      "attestation-demoting spellings no declarable fence can deny — add a manifest projection (AMBIENT_SURFACE_FNS) or a member alias (BUILTIN_MODULE_FN_ALIASES)",
+    ).toEqual([]);
+    // The excuse list stays honest in the other direction too: an excused
+    // spelling that gains detector coverage must leave the list.
+    expect([...excused].filter((fn) => covered.has(fn))).toEqual([]);
   });
 });
