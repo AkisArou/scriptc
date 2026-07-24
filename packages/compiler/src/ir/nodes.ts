@@ -3022,6 +3022,13 @@ export type IrLibFn =
   | "stream.finishedDyn"
   | "stream.pipeline"
   | "stream.pipelineDyn"
+  /** node:stream/promises — the promise forms over the same machinery:
+   * sp.finished: (s) → a pending void promise the terminal watcher
+   * settles; sp.pipeline: (count, s1..sn) → the callback pipeline's
+   * chaining/destroyer semantics settling a void promise (fulfilled on a
+   * clean finish, rejected with the finish status otherwise). */
+  | "sp.finished"
+  | "sp.pipeline"
   | "readable.newDyn"
   | "writable.newDyn"
   | "duplex.newDyn"
@@ -5247,6 +5254,7 @@ export function moduleUsesStream(mod: IrModule): boolean {
         node.fn.startsWith("passthrough.") ||
         node.fn === "stream.destroy" || node.fn === "stream.destroyErr" ||
         node.fn === "stream.prop" || node.fn === "stream.errored" ||
+        node.fn === "sp.finished" || node.fn === "sp.pipeline" ||
         node.fn.startsWith("stream.set"))
     ) {
       found = true;
@@ -6079,6 +6087,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.finishedDyn",
   "stream.pipeline",
   "stream.pipelineDyn",
+  "sp.finished",
+  "sp.pipeline",
   "readable.newDyn",
   "writable.newDyn",
   "duplex.newDyn",

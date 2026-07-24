@@ -729,6 +729,11 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
   // registrations, suites, hooks, the TestContext surface); the key
   // exists so unlowered members fence module-qualified.
   test: {},
+  // node:stream/promises lowers through the stream spoke too
+  // (lower-stream.ts — finished/pipeline's promise forms special-case
+  // their stream arguments exactly like the callback forms); the key
+  // exists so unlowered members fence module-qualified.
+  "stream/promises": {},
   // node:timers/promises — the delay-only setTimeout and bare setImmediate
   // (void promises the shared timer heap settles). The arity completion
   // (omitted delay = Node's 1ms) and the value/options fences are
