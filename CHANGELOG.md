@@ -4,9 +4,27 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.10
+## 0.0.11
 
 <!-- release:start -->
+
+### Features
+
+- **Profiles declare integer boundary slots**: library exports may class parameters and returns `i64`/`u64`, and the compiler proves integrality and range for every value that can reach them — or refuses with the slot path, the failed obligation with evidence, and the concrete fix. Proven returns cross as exact machine integers; a bounded counter loop proves its exact range; `x | 0` is a proof by the ToInt32 contract. Semantics stay f64 everywhere inside the program.
+- **Library fences cover the whole ambient surface**: the Date, performance, and process families join the surface manifest as fenceable ids, so a profile can deny every surface the determinism attestation knows — full fences now imply a deterministic attestation by construction. The attestation itself tightened: six live ambient reads it previously missed now demote it. Profile roots refuse unknown keys.
+- **Subclasses override `emit`**: the wrap-and-forward pattern (`emit(event, ...args)` delegating to `super.emit`) compiles with Node's dispatch, error-event, and super-chain semantics, monomorphized per event.
+- **Stream timing matches Node's tick order**: stream emissions interleave with `process.nextTick` in enqueue order — Node's order — instead of draining after user ticks; stream emitters model the event-key shape that governs `eventNames()` order; `push(string)` honors `defaultEncoding` with Node's unknown-encoding errors.
+- **`node:stream/consumers` compiles statically** (`text`/`json`/`buffer` with Node's settle timing and rejection set), and **`createRequire` erases at compile time** — builtin specs become static imports, relative JSON bakes as the validated document, npm packages resolve their CJS arms under `--dynamic`, and unresolvable names throw Node's catchable `MODULE_NOT_FOUND`.
+
+### Fixes
+
+- The two 0.0.10 crash classes are fixed and its seven behavior regressions restored: collect-phase probes recover from rejected constructs instead of crashing, and the no-storage binding families claim statement declarators only.
+- `Buffer.slice`/`subarray` and `TypedArray.subarray` are true aliasing views — mutating through a view silently computed wrong bytes before.
+- Math.trunc and Math.ceil compile statically.
+
+<!-- release:end -->
+
+## 0.0.10
 
 ### Features
 
@@ -23,7 +41,6 @@ All notable changes to scriptc will be documented in this file.
 - The LLVM code generator marshals dynamic values in `jsMarshal` positions identically to the C backend (a latent gap).
 - Concurrent plain and sanitized test-suite runs no longer race each other's scratch directories (a test-infrastructure fix).
 
-<!-- release:end -->
 
 ## 0.0.9
 
