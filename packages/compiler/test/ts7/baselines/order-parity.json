@@ -4862,9 +4862,39 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2591-ambient-generic-traps.ts": {
+   "order": [
+    "<repo>/tests/corpus/2591-ambient-generic-traps.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2578-jsval-into-unknown-rows.ts": {
    "order": [
     "<repo>/tests/corpus/2578-jsval-into-unknown-rows.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2592-ambient-trap-uncaught.ts": {
+   "order": [
+    "<repo>/tests/corpus/2592-ambient-trap-uncaught.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2579-jsval-object-param-crossing.js": {
+   "order": [
+    "<repo>/tests/corpus/2579-jsval-object-param-crossing.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2593-generic-inert-bindings.ts": {
+   "order": [
+    "<repo>/tests/corpus/2593-generic-inert-bindings.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2594-nullish-generic-bindings.ts": {
+   "order": [
+    "<repo>/tests/corpus/2594-nullish-generic-bindings.ts"
    ],
    "diags": []
   },
@@ -4877,12 +4907,6 @@
   "<repo>/tests/corpus/2587-array-entries-forof.ts": {
    "order": [
     "<repo>/tests/corpus/2587-array-entries-forof.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/2579-jsval-object-param-crossing.js": {
-   "order": [
-    "<repo>/tests/corpus/2579-jsval-object-param-crossing.js"
    ],
    "diags": []
   },

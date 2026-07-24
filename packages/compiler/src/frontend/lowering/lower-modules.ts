@@ -13,11 +13,11 @@ import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } 
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, arrayOf, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, isPromisifyCall } from "./lower-builtins.js";
-import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf } from "./lower-calls.js";
+import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, deadUnmappableBinding, implicitLocalFnInfoOf, implicitLocalFnNodeOf, nullishGenericBindingUnitOf } from "./lower-calls.js";
 import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
-import { collectNamespaceStmt, nsPathPrefix } from "./lower-namespaces.js";
+import { ambientUndefVarRootOf, collectNamespaceStmt, nsPathPrefix } from "./lower-namespaces.js";
 import { collectExpandoMembers } from "./lower-expando.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import type { ClassInfo } from "./lower-classes.js";
@@ -1001,6 +1001,40 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // probes below would otherwise claim the call-initializer shape
         // and put its fences on the build.
         if (provenanceElidedConstDecl(L, decl)) continue;
+        // A TRAP declaration at file scope — the initializer's chain roots
+        // at an ambient-undefined name (`declare const t: Type<string>;
+        // export const out = t.pipe(...)`): Node throws the root's
+        // ReferenceError evaluating the initializer, so no value ever
+        // exists and no reference can ever run. No global registers; the
+        // binding enters trapBindings (registered HERE, before any body
+        // lowers, so hoisted-function references resolve the trap), and
+        // the statement lowering emits the throw at its position.
+        if (decl.initializer !== undefined && ambientUndefVarRootOf(L, decl.initializer) !== null) {
+          for (const nameNode of boundIdentifiersOf(decl.name)) {
+            const sym = L.checker.getSymbolAtLocation(nameNode);
+            if (sym) L.trapBindings.add(sym);
+          }
+          continue;
+        }
+        // A NULLISH generic binding at file scope (`export const Mixin:
+        // MixinHelperFunc = null as any`): no storage — reads know the
+        // value (lower-exprs/lower-calls claim them); the statement
+        // lowering emits nothing by the same test.
+        if (
+          ts.isIdentifier(decl.name) &&
+          nullishGenericBindingUnitOf(L, L.checker.getSymbolAtLocation(decl.name) ?? null) !== null
+        ) {
+          continue;
+        }
+        // A DEAD unmappable binding at file scope (`var xs2: typeof
+        // Array;` — never read anywhere): no global, no statement, no
+        // type fence for a value the program never consumes.
+        if (
+          ts.isIdentifier(decl.name) &&
+          deadUnmappableBinding(L, L.checker.getSymbolAtLocation(decl.name) ?? null, decl)
+        ) {
+          continue;
+        }
         // `const f = <T>(x: T) => x` at file scope: a generic function
         // value binding — no global exists (the binding is never read;
         // calls and pinned references monomorphize against the

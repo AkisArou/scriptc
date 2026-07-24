@@ -76,4 +76,7 @@ function pick(a: string | number, b: number | boolean): boolean {
 }
 const picked = pick(1, 2);
 
+// The binding is READ so the fence stays observable (an unread bigint
+// declaration is a value Node builds and drops — it compiles to nothing).
 const big = 10n;
+console.log(big);
