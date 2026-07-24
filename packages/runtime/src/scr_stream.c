@@ -1222,6 +1222,24 @@ static ScrStream *scr_stream_alloc(const ScrVt *vt, const char *cls, bool has_r,
   s->reg = NULL;
   s->cls = cls;
   s->st = scr_stream_state_new(has_r, has_w, rhwm, whwm, auto_destroy, emit_close, allow_half_open);
+  /* Node's stream constructors pre-create their known _events keys (a V8
+   * shape optimization) — eventNames() lists these BEFORE user events
+   * added earlier. Same names, same order: Readable close/error/data/end/
+   * readable, Writable close/error/prefinish/finish/drain, Duplex the
+   * union (writable trio first — Node's observed key order). */
+  ScrEmitter *em = (ScrEmitter *)s;
+  scr_emitter_reserve(em, "close");
+  scr_emitter_reserve(em, "error");
+  if (has_w) {
+    scr_emitter_reserve(em, "prefinish");
+    scr_emitter_reserve(em, "finish");
+    scr_emitter_reserve(em, "drain");
+  }
+  if (has_r) {
+    scr_emitter_reserve(em, "data");
+    scr_emitter_reserve(em, "end");
+    scr_emitter_reserve(em, "readable");
+  }
   scr_obj_alloc_note();
   return s;
 }

@@ -1362,6 +1362,10 @@ bool scr_emitter_emit_error(ScrEmitter *em, ScrStr *name, ScrError *err);
 double scr_emitter_listener_count(ScrEmitter *em, ScrStr *name);
 double scr_emitter_listener_count_fn(ScrEmitter *em, ScrStr *name, ScrClosure *fn);
 ScrArr *scr_emitter_event_names(ScrEmitter *em);          /* +1 string[] */
+/* Pre-create a name's eventNames() rank with no listener (Node's stream
+ * classes pre-create their known _events keys; empty = absent for every
+ * other read). The stream constructors call this. */
+void scr_emitter_reserve(ScrEmitter *em, const char *name);
 ScrArr *scr_emitter_listeners(ScrEmitter *em, ScrStr *name); /* +1 closures */
 ScrEmitter *scr_emitter_set_max(ScrEmitter *em, double n);   /* returns em +1 */
 double scr_emitter_get_max(ScrEmitter *em);

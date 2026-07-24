@@ -85,6 +85,12 @@ typedef struct ScrEeBucket {
 struct ScrEeReg {
   ScrEeBucket *head; /* singly linked, first-registration order */
   double max;        /* -1 = unset (follows the default), 0 = unlimited */
+  /* Node's kShapeMode: set when names were PRE-CREATED (the stream
+   * constructors). In shape mode removeListener KEEPS an emptied name's
+   * rank (Node writes events[type] = undefined instead of deleting) —
+   * only removeAllListeners deletes: the named form drops the one key,
+   * the no-argument wipe resets everything and leaves shape mode. */
+  bool shape;
 };
 
 /* The vtable of BARE `new EventEmitter()` instances; the emitted main()
@@ -143,6 +149,21 @@ static ScrEeBucket *scr_ee_bucket_ensure(ScrEeReg *reg, ScrStr *name) {
   while (*link) link = &(*link)->next;
   *link = b;
   return b;
+}
+
+/* Reserve a name's first-registration RANK without any listener: Node's
+ * stream classes pre-create their known _events keys (a V8 shape
+ * optimization eventNames() order observes — 'error'/'data'/... list
+ * before user events added earlier). An empty bucket is ABSENT for every
+ * read (n == 0 everywhere); the first add fills it in place, and a bucket
+ * emptied by removal still drops — Node deleting the key. */
+void scr_emitter_reserve(ScrEmitter *em, const char *name) {
+  ScrEeReg *reg = scr_ee_reg_ensure(em);
+  reg->shape = true;
+  if (scr_ee_bucket_find(reg, name, strlen(name))) return;
+  ScrStr *n = scr_str_new(name, strlen(name));
+  scr_ee_bucket_ensure(reg, n);
+  scr_str_release(n);
 }
 
 /* Drops an emptied bucket from the list (Node deletes the _events key; a
@@ -402,13 +423,14 @@ void scr_ee_inv_fixed4(ScrClosure *cb, va_list ap) {
 
 /* Removes one entry (by index) from a bucket's live list and fires the
  * 'removeListener' meta event AFTER the removal, Node's order. Drops the
- * bucket when emptied. */
+ * bucket when emptied — except in shape mode, where the emptied name
+ * keeps its rank (Node's events[type] = undefined). */
 static void scr_ee_remove_at(ScrEmitter *em, ScrEeBucket *b, size_t i) {
   ScrEeEntry *e = b->ls[i];
   memmove(b->ls + i, b->ls + i + 1, (b->n - i - 1) * sizeof *b->ls);
   b->n--;
   ScrStr *name = scr_str_retain(b->name);
-  if (b->n == 0) scr_ee_bucket_drop(em->reg, b);
+  if (b->n == 0 && !em->reg->shape) scr_ee_bucket_drop(em->reg, b);
   scr_ee_entry_unref(e);
   scr_ee_emit_meta(em, "removeListener", name);
   scr_str_release(name);
@@ -456,6 +478,13 @@ void scr_emitter_check_listener(const ScrDyn *cb) {
  * firing the meta event — and the whole-emitter form does every other
  * event first (bucket order), 'removeListener' itself LAST. Returns em +1. */
 static void scr_ee_remove_all_named(ScrEmitter *em, ScrEeBucket *b, bool meta) {
+  if (b->n == 0) {
+    /* An empty rank-holding bucket reaches here only from the WIPE scan
+     * (the named form skips undefined keys — Node no-ops and the rank
+     * stays): drop it, the wipe resets _events wholesale. */
+    scr_ee_bucket_drop(em->reg, b);
+    return;
+  }
   if (!meta) {
     for (size_t i = 0; i < b->n; i++) scr_ee_entry_unref(b->ls[i]);
     b->n = 0;
@@ -497,7 +526,26 @@ ScrEmitter *scr_emitter_remove_all(ScrEmitter *em, ScrStr *name, bool all) {
   bool meta = scr_ee_has(reg, "removeListener");
   if (!all) {
     ScrEeBucket *b = scr_ee_bucket_find(reg, name->data, name->len);
-    if (b) scr_ee_remove_all_named(em, b, meta);
+    /* A rank-holding empty bucket is Node's `events[type] === undefined`:
+     * the named form no-ops there (the rank survives). A POPULATED name
+     * deletes its key even in shape mode — but through the meta path each
+     * listener leaves via removeListener, whose shape rule KEEPS the
+     * emptied rank (Node's exact split). */
+    if (b && b->n > 0) {
+      scr_ee_remove_all_named(em, b, meta);
+      if (!meta) {
+        /* Node's non-meta named branch: the count hitting zero replaces
+         * _events wholesale — every rank (pre-created included) goes,
+         * though kShapeMode itself stays set (Node's exact quirk). */
+        bool any_live = false;
+        for (ScrEeBucket *w = reg->head; w; w = w->next) {
+          if (w->n > 0) { any_live = true; break; }
+        }
+        if (!any_live) {
+          while (reg->head) scr_ee_bucket_drop(reg, reg->head);
+        }
+      }
+    }
     return scr_emitter_retain(em);
   }
   /* Every event except 'removeListener' first, in bucket order; then
@@ -515,6 +563,10 @@ ScrEmitter *scr_emitter_remove_all(ScrEmitter *em, ScrStr *name, bool all) {
   }
   ScrEeBucket *rl = scr_ee_bucket_find(reg, "removeListener", 14);
   if (rl) scr_ee_remove_all_named(em, rl, meta);
+  /* The wipe replaces _events wholesale in Node — pre-created ranks are
+   * gone and the emitter leaves shape mode. */
+  while (reg->head) scr_ee_bucket_drop(reg, reg->head);
+  reg->shape = false;
   return scr_emitter_retain(em);
 }
 
@@ -633,12 +685,13 @@ double scr_emitter_listener_count_fn(ScrEmitter *em, ScrStr *name, ScrClosure *f
 }
 
 /* eventNames(): +1 string[] of the bucket names in first-registration
- * order (exactly Node's _events key order). */
+ * order (exactly Node's _events key order). Reserved-but-empty buckets
+ * (the stream pre-created keys) are invisible until a listener lands. */
 ScrArr *scr_emitter_event_names(ScrEmitter *em) {
   ScrArr *out = scr_arr_new(SCR_ELEM_STR, 0);
   if (em->reg) {
     for (ScrEeBucket *b = em->reg->head; b; b = b->next) {
-      scr_arr_push_ref(out, scr_str_retain(b->name));
+      if (b->n > 0) scr_arr_push_ref(out, scr_str_retain(b->name));
     }
   }
   return out;
