@@ -327,6 +327,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "net.serverOnConnection": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
   "net.serverOnSecureConnection": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
   "net.connect": { argTypes: [F64, STRING], result: NETSOCKET_T },
+  "net.connectAttempt": { argTypes: [F64, STRING, DYN], result: NETSOCKET_T },
+  "net.connectOptsChk": { argTypes: [DYN, STRING], result: VOID },
   "net.connectCb": { argTypes: [F64, STRING, { kind: "func", params: [], ret: VOID }], result: NETSOCKET_T },
   // The lookup's exact func shape is program data (its answer callback's
   // union/record types) — checked specially in the libCall case.
@@ -358,6 +360,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "dgram.connectCb": { argTypes: [DGRAMSOCK_T, F64, STRING, { kind: "func", params: [], ret: VOID }], result: VOID },
   "dgram.sendStr": { argTypes: [DGRAMSOCK_T, STRING, F64, STRING], result: VOID },
   "dgram.sendBytes": { argTypes: [DGRAMSOCK_T, BYTES_U8, F64, STRING], result: VOID },
+  "dgram.sendChk": { argTypes: [DGRAMSOCK_T, DYN, DYN, DYN, DYN, DYN, STRING], result: VOID },
   "dgram.address": { argTypes: [DGRAMSOCK_T], result: VOID },
   "dgram.close": { argTypes: [DGRAMSOCK_T], result: VOID },
   "dgram.closeCb": { argTypes: [DGRAMSOCK_T, { kind: "func", params: [], ret: VOID }], result: VOID },
@@ -3877,7 +3880,7 @@ function validateFunction(
         if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow" || e.fn === "error.propTypeThrow" ||
             e.fn === "fs.mkdtempChk" || e.fn === "fs.readFileChk" ||
             e.fn === "fs.opendirChk" || e.fn === "fs.watchFileChk" || e.fn === "fs.lchmodChk" ||
-            e.fn === "fs.readChk" || e.fn === "fs.streamOptsChk") {
+            e.fn === "fs.readChk" || e.fn === "fs.streamOptsChk" || e.fn === "net.connectOptsChk") {
           // Always throws — the result type is the replaced expression's
           // own (never materialized; the global.undefRead pattern). The
           // fs Chk ladders qualify: every validation failure throws

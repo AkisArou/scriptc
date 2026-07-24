@@ -92,6 +92,7 @@
 #include "scr_runtime.h"
 
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1599,6 +1600,117 @@ ScrNetSocket *scr_net_connect(double port, ScrStr *host /*borrowed, nullable*/,
   }
   scr_net_sock_register(s);
   return s;
+}
+
+/* ── the connect option-bag validation ladders (checked-dynamic lane) ──
+ * Node-order validation over DOM option values with Node's exact typed
+ * errors; the honest tail (connect for the validated forms, the
+ * compiler-rendered fence for bags with unmodeled keys) runs only after
+ * every validation passes. */
+
+static bool scr_net_attempt_timeout_chk(const ScrDyn *t, const char *name) {
+  if (t->kind != SCR_DYN_NUM) {
+    scr_dyn_prop_type_fail(name, "of type number", t);
+    return false;
+  }
+  char recv[48], msg[192];
+  if (!(isfinite(t->v.num) && trunc(t->v.num) == t->v.num)) {
+    scr_num_received(t->v.num, recv);
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"%s\" is out of range. It must be an integer. Received %s",
+                       name, recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return false;
+  }
+  if (t->v.num < 1 || t->v.num > 2147483647.0) {
+    scr_num_received(t->v.num, recv);
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"%s\" is out of range. It must be >= 1 && <= 2147483647. Received %s",
+                       name, recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return false;
+  }
+  return true;
+}
+
+/* connect({ ..., autoSelectFamilyAttemptTimeout }): the budget validates
+ * (validateInt32 from 1, Node's exact texts) and is then inert — this
+ * slice's single dial has nothing to time, the same simplification the
+ * autoSelectFamily flag already takes. NULL with the throw pending. */
+ScrNetSocket *scr_net_connect_attempt(double port, ScrStr *host, const ScrDyn *t) {
+  if (!scr_net_attempt_timeout_chk(t, "options.autoSelectFamilyAttemptTimeout")) return NULL;
+  return scr_net_connect(port, host, NULL);
+}
+
+static bool scr_net_dyn_truthy(const ScrDyn *v) {
+  switch (v->kind) {
+  case SCR_DYN_UNDEF:
+  case SCR_DYN_NULL: return false;
+  case SCR_DYN_BOOL: return v->v.b;
+  case SCR_DYN_NUM: return v->v.num == v->v.num && v->v.num != 0;
+  case SCR_DYN_STR: return v->v.str->len > 0;
+  default: return true;
+  }
+}
+
+/* net.connect/createConnection over a RUNTIME option bag (computed keys
+ * — the invalid-input probes): Node's Socket-constructor order — the
+ * objectMode trio throws ERR_INVALID_ARG_VALUE first, then the port
+ * (validatePort), the host's string contract, autoSelectFamily's boolean
+ * contract, and the attempt budget. A bag that survives everything meets
+ * the compiler-rendered fence: an unmodeled key must refuse loudly, never
+ * silently drop. Always leaves an exception pending. */
+void scr_net_connect_opts_chk(const ScrDyn *opts, const ScrStr *fence) {
+  if (opts == NULL || opts->kind != SCR_DYN_OBJ) {
+    scr_dyn_arg_type_fail("options", "of type object",
+                          opts ? opts : scr_dyn_undefined());
+    return;
+  }
+  static const char *const om[] = { "objectMode", "readableObjectMode", "writableObjectMode" };
+  for (size_t i = 0; i < 3; i++) {
+    const ScrDyn *v = scr_dyn_obj_get(opts, om[i], strlen(om[i]));
+    if (v != NULL && scr_net_dyn_truthy(v)) {
+      char name[48];
+      snprintf(name, sizeof name, "options.%s", om[i]);
+      scr_dyn_arg_value_fail(name, "is not supported", v);
+      return;
+    }
+  }
+  const ScrDyn *port = scr_dyn_obj_get(opts, "port", 4);
+  if (port != NULL && port->kind != SCR_DYN_UNDEF) {
+    bool ok = port->kind == SCR_DYN_NUM && trunc(port->v.num) == port->v.num &&
+              port->v.num >= 0 && port->v.num < 65536;
+    if (!ok && port->kind == SCR_DYN_STR) {
+      ScrStr *ps = scr_str_retain(port->v.str);
+      double n = scr_string_to_number(ps);
+      scr_str_release(ps);
+      ok = n == n && trunc(n) == n && n >= 0 && n < 65536 && port->v.str->len > 0;
+    }
+    if (!ok) {
+      char detail[64], msg[160];
+      const char *d = scr_dyn_specific_type(port, detail, sizeof detail);
+      int len = snprintf(msg, sizeof msg,
+                         "options.port should be >= 0 and < 65536. Received %s", d);
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_SOCKET_BAD_PORT");
+      return;
+    }
+  }
+  const ScrDyn *host = scr_dyn_obj_get(opts, "host", 4);
+  if (host != NULL && host->kind != SCR_DYN_UNDEF && host->kind != SCR_DYN_STR) {
+    scr_dyn_prop_type_fail("options.host", "of type string", host);
+    return;
+  }
+  const ScrDyn *asf = scr_dyn_obj_get(opts, "autoSelectFamily", 16);
+  if (asf != NULL && asf->kind != SCR_DYN_UNDEF && asf->kind != SCR_DYN_BOOL) {
+    scr_dyn_prop_type_fail("options.autoSelectFamily", "of type boolean", asf);
+    return;
+  }
+  const ScrDyn *att = scr_dyn_obj_get(opts, "autoSelectFamilyAttemptTimeout", 30);
+  if (att != NULL && att->kind != SCR_DYN_UNDEF &&
+      !scr_net_attempt_timeout_chk(att, "options.autoSelectFamilyAttemptTimeout")) {
+    return;
+  }
+  scr_throw_lowering_fence(fence);
 }
 
 /* ── the caller-lookup dial (net.connect with a lookup option) ─────────

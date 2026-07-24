@@ -324,6 +324,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fs.toUnixTimestamp": "scr_fs_to_unix_timestamp",
   "fs.existsChk": "scr_fs_exists_async",
   "fs.mkdtempSyncChk": "scr_fs_mkdtemp_sync_chk",
+  "net.connectAttempt": "scr_net_connect_attempt",
   "fs.lchmodSyncChk": "scr_fs_lchmod_sync_chk",
   "fsp.lchmodChk": "scr_fsp_lchmod_chk",
   "fs.readFileSyncBuf": "scr_fs_read_file_bytes",
@@ -734,7 +735,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "stream.finished", "stream.finishedDyn", "stream.pipeline", "stream.pipelineDyn",
   "sp.finished", "sp.pipeline",
   "net.listen", "net.listenCb", "net.listenOpts", "net.listenOptsCb",
-  "net.connect", "net.connectCb", "net.connectLookup",
+  "net.connect", "net.connectCb", "net.connectLookup", "net.connectAttempt",
   "fs.existsChk",
   "http.createServer", "http.createServerEmpty",
   "http.request", "http.requestCb", "http.requestUrl", "http.requestUrlCb",
@@ -9438,6 +9439,7 @@ class LlEmitter {
         "fs.lchmodChk": "scr_fs_lchmod_chk",
         "fs.readChk": "scr_fs_read_chk",
         "fs.streamOptsChk": "scr_fs_stream_opts_chk",
+        "net.connectOptsChk": "scr_net_connect_opts_chk",
       };
       const sym = FS_CHK_THROW_SYMS[e.fn];
       if (sym !== undefined) {

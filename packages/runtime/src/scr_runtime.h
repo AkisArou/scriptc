@@ -4535,6 +4535,16 @@ void scr_net_server_on_connection(ScrNetServer *s, ScrClosure *cb /*moves*/, Scr
  * server never fires it, like Node). */
 void scr_net_server_on_secure_connection(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrNetConnFn fn, bool once);
 ScrNetSocket *scr_net_connect(double port, ScrStr *host /*borrowed, nullable*/, ScrClosure *cb /*moves, nullable*/); /* +1 */
+/* connect with a validated autoSelectFamilyAttemptTimeout option: the
+ * budget runs Node's validateInt32-from-1 ladder (ERR_OUT_OF_RANGE /
+ * ERR_INVALID_ARG_TYPE) and is then inert — the single dial has nothing
+ * to time. +1, or NULL with the throw pending. */
+ScrNetSocket *scr_net_connect_attempt(double port, ScrStr *host /*borrowed*/, const ScrDyn *t /*borrowed*/);
+/* net.connect/createConnection over a RUNTIME option bag (computed
+ * keys): Node-order validation (objectMode trio, port, host,
+ * autoSelectFamily, attempt budget), then the compiler-rendered fence —
+ * always leaves an exception pending. Borrowed. */
+void scr_net_connect_opts_chk(const ScrDyn *opts, const ScrStr *fence);
 /* connect with a caller lookup (net.connect({ ..., lookup })): invokes
  * lookup(hostname, options, answer-closure) synchronously; answer_fn is
  * the emitted per-shape thunk that decodes the answer down to
@@ -5172,6 +5182,13 @@ void scr_dgram_bind(ScrDgramSocket *s, double port, ScrStr *host /*borrowed*/, S
 void scr_dgram_connect(ScrDgramSocket *s, double port, ScrStr *host /*borrowed*/, ScrClosure *cb /*moves, nullable*/);
 void scr_dgram_send_str(ScrDgramSocket *s, ScrStr *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
 void scr_dgram_send_bytes(ScrDgramSocket *s, ScrBytes *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
+/* The send argument-validation ladder over DOM arguments (Node's
+ * signature shuffle, slice bounds, list/type contracts, port/address
+ * validation, and the connected-state errors); a fully-validated
+ * unconnected single-payload send RUNS, the rest meet the fence. */
+void scr_dgram_send_chk(ScrDgramSocket *s, const ScrDyn *buffer, const ScrDyn *a1,
+                        const ScrDyn *a2, const ScrDyn *a3, const ScrDyn *a4,
+                        const ScrStr *fence);
 /* address() parts: ip THROWS "Not running" before bind/connect (+1
  * otherwise); family/port are only called after ip succeeded. */
 ScrStr *scr_dgram_addr_ip(ScrDgramSocket *s);     /* +1, may throw */

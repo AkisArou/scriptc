@@ -2043,6 +2043,17 @@ export type IrLibFn =
    * exactly Node's split. */
   | "net.serverOnSecureConnection"
   | "net.connect"
+  /** connect with a validated autoSelectFamilyAttemptTimeout option (the
+   * budget runs Node's validateInt32-from-1 ladder and is then inert —
+   * the single dial has nothing to time). May-throw. */
+  | "net.connectAttempt"
+  /** net.connect/createConnection over a RUNTIME option bag (computed
+   * keys — the invalid-input probes): Node-order validation (the
+   * objectMode trio's ERR_INVALID_ARG_VALUE, validatePort, host string,
+   * autoSelectFamily boolean, the attempt budget), then the trailing
+   * compiler-rendered fence — ALWAYS THROWS (the error.nodeThrow
+   * polymorphic-result carve-out). May-throw seed. */
+  | "net.connectOptsChk"
   | "net.connectCb"
   /** connect({ port, host, autoSelectFamily: true, lookup }) — the
    * caller-resolver dial (portless's createLoopbackConnection): args
@@ -2105,6 +2116,12 @@ export type IrLibFn =
   | "dgram.connectCb"
   | "dgram.sendStr"
   | "dgram.sendBytes"
+  /** The send argument-validation ladder over DOM arguments (Node's
+   * signature shuffle: slice bounds, list/type contracts, port/address
+   * validation, connected-state errors) — a fully-validated unconnected
+   * single-payload send RUNS; callback/list/connected forms meet the
+   * trailing fence. May-throw. */
+  | "dgram.sendChk"
   | "dgram.address"
   | "dgram.close"
   | "dgram.closeCb"
@@ -6335,6 +6352,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fsp.lchmodChk",
   "fs.readChk",
   "fs.streamOptsChk",
+  "net.connectAttempt",
+  "net.connectOptsChk",
+  "net.setAutoSelTimeout",
   "error.argTypeThrow",
   "error.propTypeThrow",
   "emitter.setMaxChk",
@@ -6359,6 +6379,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dgram.connectCb",
   "dgram.sendStr",
   "dgram.sendBytes",
+  "dgram.sendChk",
   "dgram.address",
   "dgram.close",
   "dgram.closeCb",

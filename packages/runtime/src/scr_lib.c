@@ -1347,7 +1347,27 @@ static double scr_net_autosel_timeout_ms = 250;
 
 double scr_net_get_autosel_timeout(void) { return scr_net_autosel_timeout_ms; }
 
-void scr_net_set_autosel_timeout(double ms) { scr_net_autosel_timeout_ms = ms; }
+/* Node's setDefaultAutoSelectFamilyAttemptTimeout: validateInt32(value,
+ * 'value', 1), then the sub-10ms floor (Node clamps small budgets to
+ * 10ms). Throws ERR_OUT_OF_RANGE catchably. */
+void scr_net_set_autosel_timeout(double ms) {
+  char recv[48], msg[160];
+  if (!(isfinite(ms) && trunc(ms) == ms)) {
+    scr_num_received(ms, recv);
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"value\" is out of range. It must be an integer. Received %s", recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  if (ms < 1 || ms > 2147483647.0) {
+    scr_num_received(ms, recv);
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"value\" is out of range. It must be >= 1 && <= 2147483647. Received %s", recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  scr_net_autosel_timeout_ms = ms < 10 ? 10 : ms;
+}
 
 /* ── fs error formatting ─────────────────────────────────────────────
  * Node's fs errors read "<ERRNO>: <text>, <syscall> '<path>'"

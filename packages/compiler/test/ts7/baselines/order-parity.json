@@ -4868,6 +4868,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2579-net-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2579-net-arg-ladders.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2580-dgram-send-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2580-dgram-send-ladders.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

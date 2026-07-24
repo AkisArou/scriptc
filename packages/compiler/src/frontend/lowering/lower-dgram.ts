@@ -9,8 +9,9 @@
  * dgram multicast); its members fence with a named hint. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { locOf } from "../program.js";
-import { BOOL, DGRAMSOCK_T, F64, IrExpr, IrLibFn, IrType, SrcLoc, STRING, VOID } from "../../ir/nodes.js";
+import { ladderFenceExpr } from "./lowerer.js";
+import { isJsSourceFile, locOf } from "../program.js";
+import { BOOL, canBoxFuncIntoDyn, DGRAMSOCK_T, DYN, F64, funcOf, IrExpr, IrLibFn, IrType, SrcLoc, STRING, UNDEFINED_T, VOID } from "../../ir/nodes.js";
 import { DNS_LOOKUP_DOCUMENTED_OPTIONS, fenceOrDropOptionKey } from "./surfaces.js";
 
 const DGRAM_SURFACE_HINT =
@@ -46,7 +47,13 @@ function lowerCallbackArg(
   paramOk: (p: IrType, i: number) => boolean,
   paramHint: string,
 ): { cb: IrExpr; nparams: number } {
-  const cb = L.lowerExpr(node);
+  let cb = L.lowerExpr(node);
+  // A checked-dynamic callback (test/common's mustCall wrapper — a dyn
+  // value): the zero-parameter slots adapt through the dynCheck function
+  // boundary, the lower-server listen-callback precedent.
+  if (cb.type.kind === "dyn" && maxParams === 0) {
+    cb = { kind: "dynCheck", value: cb, type: funcOf([], VOID), loc: locOf(node) };
+  }
   if (cb.type.kind !== "func" || cb.type.params.length > maxParams) {
     L.unsupported(
       "SC1090",
@@ -162,6 +169,32 @@ export function lowerDgramDnsModuleCall(L: Lowerer, expr: ts.CallExpression,
         sawType = true;
       } else if (name === "reuseAddr") {
         reuseAddr = L.lowerExprExpecting(prop.initializer, BOOL);
+      } else if (name === "signal" && isJsSourceFile(expr.getSourceFile())) {
+        // A provably-non-AbortSignal signal (the invalid-input probes:
+        // strings, numbers, plain records) throws Node's
+        // validateAbortSignal ladder; plausible signal values keep the
+        // fence — abort-driven close has no lowering yet.
+        const raw = L.lowerExpr(prop.initializer);
+        const provablyNot = raw.type.kind === "string" || raw.type.kind === "f64" ||
+          raw.type.kind === "bool" || raw.type.kind === "record" || raw.type.kind === "array";
+        if (provablyNot && L.dynConvertible(raw.type)) {
+          return {
+            kind: "libCall",
+            fn: "error.propTypeThrow",
+            args: [
+              { kind: "strLit", value: "options.signal", type: STRING, loc },
+              { kind: "strLit", value: "an instance of AbortSignal", type: STRING, loc },
+              { kind: "dynFrom", value: raw, type: DYN, loc },
+            ],
+            type: DGRAMSOCK_T,
+            loc,
+          };
+        }
+        L.noLowering(
+          `createSocket option 'signal'`,
+          prop,
+          "abort-driven close has no lowering yet — type and reuseAddr are the supported options",
+        );
       } else {
         L.noLowering(
           `createSocket option '${name}'`,
@@ -328,29 +361,70 @@ export function lowerDgramMethodCall(L: Lowerer, call: ts.CallExpression,
   }
   if (name === "send") {
     requireStatementPosition(L, call, "socket.send(...)");
-    // send(msg, port, address) — one datagram to an explicit destination.
-    // The connected send and callback forms have no lowering yet.
-    if (args.length !== 3) {
-      L.noLowering(
-        `send with ${args.length} arguments`,
-        call,
-        "the supported form is send(msg, port, address) — one string or Buffer datagram",
-      );
+    // send(msg, port, address) — one datagram to an explicit destination
+    // (the static fast path). Every OTHER shape in a JS source rides the
+    // checked-dynamic ladder (dgram.sendChk): Node's signature shuffle,
+    // slice bounds, list/type contracts, port/address validation, and
+    // the connected-state errors — with the compiler-rendered fence as
+    // the post-validation tail for the callback/list/connected forms.
+    const staticShape =
+      args.length === 3 && !args.some(ts.isSpreadElement) &&
+      (() => {
+        const dataT = L.mapTypeOf(L.typeOf(args[0]!));
+        const portT = L.mapTypeOf(L.typeOf(args[1]!));
+        const hostT = L.mapTypeOf(L.typeOf(args[2]!));
+        return (dataT?.kind === "string" || (dataT?.kind === "bytes" && dataT.elem === "u8")) &&
+               portT?.kind === "f64" && hostT?.kind === "string";
+      })();
+    if (staticShape) {
+      const receiver = L.lowerExpr(access.expression);
+      const data = L.lowerExpr(args[0]!);
+      const port = L.lowerExprExpecting(args[1]!, F64);
+      const host = L.lowerExprExpecting(args[2]!, STRING);
+      const fn: IrLibFn = data.type.kind === "string" ? "dgram.sendStr" : "dgram.sendBytes";
+      return { kind: "libCall", fn, args: [receiver, data, port, host], type: VOID, loc };
     }
-    const receiver = L.lowerExpr(access.expression);
-    const data = L.lowerExpr(args[0]!);
-    const port = L.lowerExprExpecting(args[1]!, F64);
-    const host = L.lowerExprExpecting(args[2]!, STRING);
-    if (data.type.kind === "string") {
-      return { kind: "libCall", fn: "dgram.sendStr", args: [receiver, data, port, host], type: VOID, loc };
-    }
-    if (data.type.kind === "bytes" && data.type.elem === "u8") {
-      return { kind: "libCall", fn: "dgram.sendBytes", args: [receiver, data, port, host], type: VOID, loc };
+    if (isJsSourceFile(call.getSourceFile()) && args.length <= 5 && !args.some(ts.isSpreadElement)) {
+      const receiver = L.lowerExpr(access.expression);
+      const slots: IrExpr[] = [];
+      let ok = true;
+      for (let i = 0; i < 5; i++) {
+        const n = args[i];
+        if (!n) {
+          slots.push({
+            kind: "dynFrom",
+            value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
+            type: DYN,
+            loc,
+          });
+          continue;
+        }
+        const raw = L.lowerExpr(n);
+        if (raw.type.kind === "dyn") slots.push(raw);
+        else if (raw.kind === "unitLit" || L.dynConvertible(raw.type) ||
+                 (raw.type.kind === "func" &&
+                  canBoxFuncIntoDyn(raw.type, (id) => L.shapes.get(id), (id) => L.unions.get(id)))) {
+          slots.push({ kind: "dynFrom", value: raw, type: DYN, loc });
+        } else {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        return {
+          kind: "libCall",
+          fn: "dgram.sendChk",
+          args: [receiver, ...slots, ladderFenceExpr(L, `send in this form`, call,
+            "send(msg, port, address) — one string or Buffer datagram — is the lowered form; callback, list, and connected sends have no lowering yet")],
+          type: VOID,
+          loc,
+        };
+      }
     }
     L.noLowering(
-      `send of '${L.fmt(data.type)}' data`,
-      args[0] ?? call,
-      "send takes one string or one Uint8Array/Buffer datagram (narrow unions first)",
+      `send with ${args.length} arguments`,
+      call,
+      "the supported form is send(msg, port, address) — one string or Buffer datagram",
     );
   }
   if (name === "address") {

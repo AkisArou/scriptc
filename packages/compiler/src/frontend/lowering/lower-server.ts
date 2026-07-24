@@ -10,7 +10,8 @@
  * rejection, never silence. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { locOf } from "../program.js";
+import { ladderFenceExpr } from "./lowerer.js";
+import { isJsSourceFile, locOf } from "../program.js";
 import { arrayOf, BOOL, BYTES_U8, canBoxFuncIntoDyn, canConvertToDyn, DYN, DYN_HANDLE_KINDS, F64, funcOf, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, IrExpr, IrLibFn, IrStmt, IrType, NETSERVER_T, NETSOCKET_T, NULL_T, SECURECTX_T, STRING, UNDEFINED_T, SrcLoc, typeKey, VOID } from "../../ir/nodes.js";
 import {
   builtinFenceHintOf,
@@ -460,6 +461,28 @@ export function lowerNetModuleCall(L: Lowerer, expr: ts.CallExpression,
       return { kind: "libCall", fn: "net.createServer", args: [], type: NETSERVER_T, loc };
     }
     if (args.length === 1) {
+      // A provably-non-object, non-function argument (the invalid-input
+      // probes: createServer('path'), createServer(0)): Node throws
+      // ERR_INVALID_ARG_TYPE on 'options' before any server exists. DYN
+      // result — the checked-dynamic lane's concise arrows box it, and
+      // the throw means it never materializes.
+      if (isJsSourceFile(expr.getSourceFile())) {
+        const t = L.mapTypeOf(L.typeOf(args[0]!));
+        if (t !== null && (t.kind === "string" || t.kind === "f64" || t.kind === "bool")) {
+          const raw = L.lowerExpr(args[0]!);
+          return {
+            kind: "libCall",
+            fn: "error.argTypeThrow",
+            args: [
+              { kind: "strLit", value: "options", type: STRING, loc },
+              { kind: "strLit", value: "of type object", type: STRING, loc },
+              { kind: "dynFrom", value: raw, type: DYN, loc },
+            ],
+            type: NETSERVER_T,
+            loc,
+          };
+        }
+      }
       const { cb } = lowerCallbackArg(
         L, args[0]!, "connection handlers", 1,
         (p) => p.kind === "netSocket",
@@ -486,6 +509,27 @@ export function lowerNetModuleCall(L: Lowerer, expr: ts.CallExpression,
     // no-lookup form is connect(port, host) with the option spellings.
     if (args.length >= 1 && ts.isObjectLiteralExpression(args[0]!)) {
       return lowerNetConnectOptions(L, expr, bi.member, loc);
+    }
+    // A RUNTIME option bag (a record binding or dyn value — the
+    // invalid-input probes build theirs with computed keys): the
+    // checked-dynamic walk validates Node-order and the compiler-rendered
+    // fence is the post-validation tail.
+    if (args.length === 1 && isJsSourceFile(expr.getSourceFile())) {
+      const t = L.mapTypeOf(L.typeOf(args[0]!));
+      if (t !== null && (t.kind === "dyn" || t.kind === "record")) {
+        const raw = L.lowerExpr(args[0]!);
+        if (raw.type.kind === "dyn" || L.dynConvertible(raw.type)) {
+          const bag: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+          return {
+            kind: "libCall",
+            fn: "net.connectOptsChk",
+            args: [bag, ladderFenceExpr(L, `${bi.member} with a runtime options record`, expr,
+              "pass the options as an object literal — port, host, autoSelectFamily, autoSelectFamilyAttemptTimeout, and lookup are the supported options")],
+            type: NETSOCKET_T,
+            loc,
+          };
+        }
+      }
     }
     if (args.length < 1 || args.length > 3) {
       L.noLowering(
@@ -565,10 +609,54 @@ function lookupFnShapeOk(L: Lowerer, t: IrType): boolean {
 function lowerNetConnectOptions(L: Lowerer, expr: ts.CallExpression, member: string, loc: SrcLoc): IrExpr {
   const args = expr.arguments;
   const optsNode = args[0] as ts.ObjectLiteralExpression;
+  const isJs = isJsSourceFile(expr.getSourceFile());
+  // The checked-dynamic option-bag route (JS sources): a literal with
+  // computed keys (the invalid-input probes' spelling) or an objectMode-
+  // trio member rides WHOLE to the runtime walk — Node's Socket-ctor
+  // validation order (the trio's ERR_INVALID_ARG_VALUE first, then
+  // port/host/autoSelectFamily), with the compiler-rendered fence as the
+  // post-validation tail.
+  if (isJs) {
+    const needsBag = optsNode.properties.some((p) =>
+      (!ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p)) ||
+      (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) ||
+      ["objectMode", "readableObjectMode", "writableObjectMode"].includes(
+        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+        (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : "",
+      ),
+    );
+    if (needsBag) {
+      const raw = L.lowerExpr(optsNode);
+      if (raw.type.kind === "dyn" || L.dynConvertible(raw.type)) {
+        const bag: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+        return {
+          kind: "libCall",
+          fn: "net.connectOptsChk",
+          args: [bag, ladderFenceExpr(L, `${member} with these options`, optsNode,
+            "port, host, autoSelectFamily, autoSelectFamilyAttemptTimeout, and lookup are the supported options")],
+          type: NETSOCKET_T,
+          loc,
+        };
+      }
+    }
+  }
   let port: IrExpr | null = null;
   let host: IrExpr | null = null;
   let lookup: IrExpr | null = null;
   let autoSelect = false;
+  let attempt: IrExpr | null = null;
+  let optionThrow: IrExpr | null = null;
+  const propThrow = (name: string, expected: string, got: IrExpr): IrExpr => ({
+    kind: "libCall",
+    fn: "error.propTypeThrow",
+    args: [
+      { kind: "strLit", value: name, type: STRING, loc },
+      { kind: "strLit", value: expected, type: STRING, loc },
+      got.type.kind === "dyn" ? got : { kind: "dynFrom", value: got, type: DYN, loc },
+    ],
+    type: NETSOCKET_T,
+    loc,
+  });
   for (const prop of optsNode.properties) {
     let initializer: ts.Expression | null;
     if (ts.isPropertyAssignment(prop) &&
@@ -596,6 +684,13 @@ function lowerNetConnectOptions(L: Lowerer, expr: ts.CallExpression, member: str
     } else if (key === "host") {
       host = lowerVal();
       if (host.type.kind !== "string") {
+        // A provably-non-string host (the invalid-input probes): Node's
+        // lookupAndConnect throws ERR_INVALID_ARG_TYPE at connect time.
+        if (isJs && (host.type.kind === "dyn" || L.dynConvertible(host.type))) {
+          optionThrow ??= propThrow("options.host", "of type string", host);
+          host = null;
+          continue;
+        }
         L.noLowering(`a ${member} 'host' option of '${L.fmt(host.type)}' values`, prop, "the host is a string here");
       }
     } else if (key === "autoSelectFamily") {
@@ -603,6 +698,14 @@ function lowerNetConnectOptions(L: Lowerer, expr: ts.CallExpression, member: str
       // dial below (false/dynamic would mean Node's single-address dial,
       // which the lookup form does not implement).
       if (initializer === null || initializer.kind !== ts.SyntaxKind.TrueKeyword) {
+        // A provably-non-boolean value throws Node's validateBoolean
+        // ladder instead of fencing.
+        const raw = initializer !== null && isJs ? L.lowerExpr(initializer) : null;
+        if (raw !== null && raw.type.kind !== "bool" &&
+            (raw.type.kind === "dyn" || L.dynConvertible(raw.type))) {
+          optionThrow ??= propThrow("options.autoSelectFamily", "of type boolean", raw);
+          continue;
+        }
         L.noLowering(
           `${member} with a non-literal autoSelectFamily option`,
           prop,
@@ -610,6 +713,19 @@ function lowerNetConnectOptions(L: Lowerer, expr: ts.CallExpression, member: str
         );
       }
       autoSelect = true;
+    } else if (key === "autoSelectFamilyAttemptTimeout") {
+      // The attempt budget validates at runtime (Node's validateInt32-
+      // from-1 ladder) and is then inert — the single dial has nothing
+      // to time, the autoSelectFamily simplification's sibling.
+      const raw = lowerVal();
+      if (!(raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type))) {
+        L.noLowering(
+          `a ${member} 'autoSelectFamilyAttemptTimeout' option of '${L.fmt(raw.type)}' values`,
+          prop,
+          "the budget is a number here",
+        );
+      }
+      attempt = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
     } else if (key === "lookup") {
       if (initializer === null) {
         L.noLowering(`${member} with a shorthand lookup option`, prop, "spell it out: lookup: theResolver");
@@ -630,6 +746,10 @@ function lowerNetConnectOptions(L: Lowerer, expr: ts.CallExpression, member: str
       );
     }
   }
+  // A collected option-contract violation replaces the whole call: Node
+  // throws it from Socket.connect before dialing (port validation held —
+  // the port arm above fenced non-number ports already).
+  if (optionThrow !== null) return optionThrow;
   if (port === null) {
     L.noLowering(
       `${member} options without a port`,
@@ -638,6 +758,16 @@ function lowerNetConnectOptions(L: Lowerer, expr: ts.CallExpression, member: str
     );
   }
   host ??= { kind: "strLit", value: "localhost", type: STRING, loc };
+  if (attempt !== null) {
+    if (lookup !== null || args.length !== 1) {
+      L.noLowering(
+        `${member} with an autoSelectFamilyAttemptTimeout beside a lookup or connect listener`,
+        expr,
+        "the validated-budget form is the bare options call — register listeners separately",
+      );
+    }
+    return { kind: "libCall", fn: "net.connectAttempt", args: [port, host, attempt], type: NETSOCKET_T, loc };
+  }
   if (lookup !== null) {
     if (!autoSelect) {
       L.noLowering(
@@ -878,6 +1008,33 @@ function lowerNetServerMethodCall(L: Lowerer, call: ts.CallExpression,
             }
             v6only = v;
           }
+        } else if (key === "signal" && ts.isPropertyAssignment(prop) &&
+                   isJsSourceFile(call.getSourceFile())) {
+          // A provably-non-AbortSignal signal (the invalid-input probes:
+          // strings, numbers, plain records) throws Node's
+          // validateAbortSignal ladder; plausible signal values keep the
+          // fence — abort-driven close has no lowering yet.
+          const raw = L.lowerExpr(prop.initializer);
+          const provablyNot = raw.type.kind === "string" || raw.type.kind === "f64" ||
+            raw.type.kind === "bool" || raw.type.kind === "record" || raw.type.kind === "array";
+          if (provablyNot && L.dynConvertible(raw.type)) {
+            return {
+              kind: "libCall",
+              fn: "error.propTypeThrow",
+              args: [
+                { kind: "strLit", value: "options.signal", type: STRING, loc },
+                { kind: "strLit", value: "an instance of AbortSignal", type: STRING, loc },
+                { kind: "dynFrom", value: raw, type: DYN, loc },
+              ],
+              type: ts.isExpressionStatement(call.parent) ? VOID : NETSERVER_T,
+              loc,
+            };
+          }
+          L.noLowering(
+            `listen option 'signal'`,
+            prop,
+            "abort-driven close has no lowering yet — port, host, and ipv6Only are the supported listen options",
+          );
         } else {
           L.noLowering(
             `listen option '${key}'`,

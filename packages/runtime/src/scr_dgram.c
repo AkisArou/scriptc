@@ -64,6 +64,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -466,7 +467,18 @@ ScrDgramSocket *scr_dgram_create(bool reuse_addr) {
 }
 
 static void scr_dgram_throw(const char *msg) {
-  scr_throw_error_msg(0 /* Error */, msg, strlen(msg));
+  /* Node's state errors carry their ERR_SOCKET_* codes; the message IS
+   * the discriminant (each arm throws exactly one text). */
+  const char *code =
+      strcmp(msg, "Already connected") == 0 ? "ERR_SOCKET_DGRAM_IS_CONNECTED"
+      : strcmp(msg, "Not running") == 0 ? "ERR_SOCKET_DGRAM_NOT_RUNNING"
+      : strcmp(msg, "Socket is already bound") == 0 ? "ERR_SOCKET_ALREADY_BOUND"
+      : NULL;
+  if (code != NULL) {
+    scr_throw_error_msg_code(0 /* Error */, msg, strlen(msg), code);
+  } else {
+    scr_throw_error_msg(0 /* Error */, msg, strlen(msg));
+  }
 }
 
 /* Resolve a numeric host into a sockaddr_in; "" means any (bind's
@@ -1004,4 +1016,167 @@ void scr_dgram_install(void) {
   installed = true;
   atexit(scr_dgram_cleanup_atexit);
   scr_loop_set_dgram(&scr_dgram_pending, &scr_dgram_dispatch, &scr_dgram_pollfd);
+}
+
+/* ── the send argument-validation ladder (checked-dynamic lane) ─────────
+ * Node's Socket.prototype.send signature shuffle and validation order
+ * over DOM arguments, byte-for-byte: the connected/unconnected split
+ * decides whether (a1, a2) are an offset/length slice or the port/address
+ * pair; sliceBuffer validates the buffer's type and bounds
+ * (ERR_BUFFER_OUT_OF_BOUNDS); list payloads validate per element with the
+ * LIST as the Received tail; unconnected sends validate the port
+ * (ERR_SOCKET_BAD_PORT, > 0 and < 65536 with the specific-type tail and
+ * Node's trailing period) and the address's string contract; a send with
+ * a port or address on a connected socket answers ERR_SOCKET_DGRAM_IS_
+ * CONNECTED. A fully-validated unconnected single-payload send RUNS —
+ * the callback form and the connected sends keep the compiler-rendered
+ * fence. All dyn arguments borrowed. */
+
+static bool scr_dgram_dyn_truthy(const ScrDyn *v) {
+  switch (v->kind) {
+  case SCR_DYN_UNDEF:
+  case SCR_DYN_NULL: return false;
+  case SCR_DYN_BOOL: return v->v.b;
+  case SCR_DYN_NUM: return v->v.num == v->v.num && v->v.num != 0;
+  case SCR_DYN_STR: return v->v.str->len > 0;
+  default: return true;
+  }
+}
+
+static uint32_t scr_dgram_to_u32(const ScrDyn *v) {
+  if (v->kind != SCR_DYN_NUM) return 0; /* >>> 0 over the ladder's shapes */
+  double t = v->v.num;
+  if (t != t || isinf(t)) return 0;
+  t = trunc(t);
+  t = fmod(t, 4294967296.0);
+  if (t < 0) t += 4294967296.0;
+  return (uint32_t)t;
+}
+
+static const char SCR_DGRAM_BUF_EXPECTED[] =
+    "of type string or an instance of Buffer, TypedArray, or DataView";
+
+void scr_dgram_send_chk(ScrDgramSocket *s, const ScrDyn *buffer, const ScrDyn *a1,
+                        const ScrDyn *a2, const ScrDyn *a3, const ScrDyn *a4,
+                        const ScrStr *fence) {
+  const ScrDyn *offset = a1, *length = a2, *port = a3, *address = a4;
+  const ScrDyn *callback = scr_dyn_undefined();
+  bool connected = s->connected;
+  bool sliced = false;
+  if (!connected) {
+    if (scr_dgram_dyn_truthy(address) ||
+        (scr_dgram_dyn_truthy(port) && port->kind != SCR_DYN_FUNC)) {
+      sliced = true;
+    } else {
+      callback = port;
+      port = offset;
+      address = length;
+    }
+  } else {
+    if (length->kind == SCR_DYN_NUM) {
+      sliced = true;
+      if (port->kind == SCR_DYN_FUNC) callback = port;
+    } else {
+      callback = offset;
+      port = a3;
+      address = a4;
+    }
+  }
+  size_t slice_off = 0, slice_len = 0;
+  if (sliced) {
+    double bytelen;
+    if (buffer->kind == SCR_DYN_STR) bytelen = (double)buffer->v.str->len;
+    else if (buffer->kind == SCR_DYN_BYTES) bytelen = scr_bytes_byte_len(buffer->v.bytes);
+    else {
+      scr_dyn_arg_type_fail("buffer", SCR_DGRAM_BUF_EXPECTED, buffer);
+      return;
+    }
+    uint32_t off = scr_dgram_to_u32(offset);
+    uint32_t len = scr_dgram_to_u32(length);
+    if ((double)off > bytelen) {
+      static const char msg[] = "\"offset\" is outside of buffer bounds";
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1, "ERR_BUFFER_OUT_OF_BOUNDS");
+      return;
+    }
+    if ((double)off + (double)len > bytelen) {
+      static const char msg[] = "\"length\" is outside of buffer bounds";
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1, "ERR_BUFFER_OUT_OF_BOUNDS");
+      return;
+    }
+    slice_off = off;
+    slice_len = len;
+  } else if (buffer->kind == SCR_DYN_ARR) {
+    for (size_t i = 0; i < buffer->v.arr.len; i++) {
+      const ScrDyn *e = buffer->v.arr.items[i];
+      if (e->kind != SCR_DYN_STR && e->kind != SCR_DYN_BYTES) {
+        scr_dyn_arg_type_fail("buffer list arguments", SCR_DGRAM_BUF_EXPECTED, buffer);
+        return;
+      }
+    }
+  } else if (buffer->kind != SCR_DYN_STR && buffer->kind != SCR_DYN_BYTES) {
+    scr_dyn_arg_type_fail("buffer", SCR_DGRAM_BUF_EXPECTED, buffer);
+    return;
+  }
+  if (connected) {
+    if (scr_dgram_dyn_truthy(port) || scr_dgram_dyn_truthy(address)) {
+      scr_dgram_throw("Already connected");
+      return;
+    }
+    scr_throw_lowering_fence(fence); /* connected sends have no lowering yet */
+    return;
+  }
+  /* validatePort(port, 'Port', false): integers (or numeric strings)
+   * strictly between 0 and 65536; everything else renders the specific
+   * type with Node's trailing period. */
+  double portnum = -1;
+  {
+    bool ok = false;
+    if (port->kind == SCR_DYN_NUM && trunc(port->v.num) == port->v.num &&
+        port->v.num > 0 && port->v.num < 65536) {
+      ok = true;
+      portnum = port->v.num;
+    } else if (port->kind == SCR_DYN_STR && port->v.str->len > 0) {
+      ScrStr *ps = scr_str_retain(port->v.str);
+      double n = scr_string_to_number(ps);
+      scr_str_release(ps);
+      if (n == n && trunc(n) == n && n > 0 && n < 65536) {
+        ok = true;
+        portnum = n;
+      }
+    }
+    if (!ok) {
+      char detail[64], msg[160];
+      const char *d = scr_dyn_specific_type(port, detail, sizeof detail);
+      int len = snprintf(msg, sizeof msg, "Port should be > 0 and < 65536. Received %s.", d);
+      scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_SOCKET_BAD_PORT");
+      return;
+    }
+  }
+  if (address->kind == SCR_DYN_FUNC) {
+    callback = address;
+    address = scr_dyn_undefined();
+  } else if (address->kind != SCR_DYN_UNDEF && address->kind != SCR_DYN_NULL &&
+             address->kind != SCR_DYN_STR) {
+    /* Node's gate is null/undefined-only: a falsy 0 still throws. */
+    scr_dyn_arg_type_fail("address", "of type string", address);
+    return;
+  }
+  if (callback->kind == SCR_DYN_FUNC || buffer->kind == SCR_DYN_ARR) {
+    /* completion callbacks and list concatenation have no lowering yet —
+     * refuse loudly after the full validation ladder, never drop */
+    scr_throw_lowering_fence(fence);
+    return;
+  }
+  const char *data = buffer->kind == SCR_DYN_STR ? buffer->v.str->data
+                                                 : (const char *)buffer->v.bytes->data;
+  size_t datalen = buffer->kind == SCR_DYN_STR ? buffer->v.str->len
+                                               : (size_t)scr_bytes_byte_len(buffer->v.bytes);
+  if (sliced) {
+    data += slice_off;
+    datalen = slice_len;
+  }
+  ScrStr *host = address->kind == SCR_DYN_STR ? scr_str_retain(address->v.str)
+                                              : scr_str_new("127.0.0.1", 9);
+  scr_dgram_send_raw(s, data, datalen, portnum, host);
+  scr_str_release(host);
 }
