@@ -91,6 +91,58 @@ export const SUPPORTED_NODE_MODULES: readonly string[] = SUPPORTED_BUILTIN_MODUL
   PREFIX_ONLY_BUILTIN_MODULES.has(m) ? [`node:${m}`] : [m, `node:${m}`],
 );
 
+/* ── out-of-scope builtins ───────────────────────────────────────────────
+ * Builtin modules a compiled binary is not going to serve — not "yet",
+ * but by construction — each with the reason its SC1010 fence prints.
+ * Keyed by CANONICAL (bare) name; the node: prefix strips before lookup,
+ * so 'node:sqlite' keys as 'sqlite'. Exact-match only: an npm package
+ * whose name collides with none of these keys keeps the generic wording.
+ * Everything absent from this table stays the plain "not supported yet"
+ * story — genuinely pending surface (console's Console class, stream/web)
+ * must not read as permanently refused. */
+
+/** Node's own HTTP/TLS/stream implementation internals, requireable by
+ * legacy convention (underscore-prefixed lib/ modules). They expose
+ * Node-internal objects — parsers, wrap handles, the Agent's socket
+ * pools — that only exist inside Node's own stack. */
+const NODE_INTERNAL_REASON =
+  "a Node-internal module: it exposes Node's own implementation objects, which the scriptc runtime does not replicate";
+
+const V8_REASON =
+  "it observes V8 engine internals — heap statistics and snapshots, GC and CPU profiles, serialize/deserialize — and a compiled binary embeds no V8 engine to observe";
+
+const OUT_OF_SCOPE_BUILTIN_REASONS: Record<string, string | undefined> = {
+  v8: V8_REASON,
+  inspector: "it drives the V8 inspector protocol — debugger, profiler, heap access — and a compiled binary embeds no V8 engine to inspect",
+  "inspector/promises": "it drives the V8 inspector protocol — debugger, profiler, heap access — and a compiled binary embeds no V8 engine to inspect",
+  sqlite: "it wraps the SQLite library bundled into the node executable, and scriptc binaries bundle no SQLite engine",
+  domain: "deprecated in Node and slated for removal; its implicit error interception hooks every async callback at engine level, which is not modeled",
+  _http_agent: NODE_INTERNAL_REASON,
+  _http_client: NODE_INTERNAL_REASON,
+  _http_common: NODE_INTERNAL_REASON,
+  _http_incoming: NODE_INTERNAL_REASON,
+  _http_outgoing: NODE_INTERNAL_REASON,
+  _http_server: NODE_INTERNAL_REASON,
+  _stream_duplex: NODE_INTERNAL_REASON,
+  _stream_passthrough: NODE_INTERNAL_REASON,
+  _stream_readable: NODE_INTERNAL_REASON,
+  _stream_transform: NODE_INTERNAL_REASON,
+  _stream_wrap: NODE_INTERNAL_REASON,
+  _stream_writable: NODE_INTERNAL_REASON,
+  _tls_common: NODE_INTERNAL_REASON,
+  _tls_wrap: NODE_INTERNAL_REASON,
+};
+
+/** The SC1010 feature string for an unsupported module specifier: the
+ * plain "the 'x' module" for pending surface, with the out-of-scope
+ * reason appended for the modules above. Every "the '<spec>' module"
+ * fence site words through this one helper. */
+export function unsupportedModuleFeatureOf(spec: string): string {
+  const bare = spec.startsWith("node:") ? spec.slice(5) : spec;
+  const reason = Object.hasOwn(OUT_OF_SCOPE_BUILTIN_REASONS, bare) ? OUT_OF_SCOPE_BUILTIN_REASONS[bare] : undefined;
+  return reason === undefined ? `the '${spec}' module` : `the '${spec}' module (${reason})`;
+}
+
 /* ── workspace-linked packages ───────────────────────────────────────────
  * A bare specifier can resolve through node_modules to a SYMLINK whose real
  * location lies outside every node_modules directory — the workspace link

@@ -14,6 +14,7 @@ import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDy
 import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, own } from "./lowerer.js";
 import { IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead, strCharsCall } from "./lower-containers.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
+import { unsupportedModuleFeatureOf } from "../shared.js";
 import { fenceEnumObjectValue, lowerEnumAccess } from "./lower-enums.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, contextualUndefReadType, fenceEarlyAliasUse, fenceEarlyNsMemberRef, lowerNsIdentifierValue, nsMemberIdentOf, nsUndefRead, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoMemberRead, expandoWritableTarget } from "./lower-expando.js";
@@ -789,7 +790,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       {
         const spec = L.fencedBuiltinImportOf(expr);
         if (spec !== null) {
-          L.pushDiag(unsupportedDiag("SC1010", loc, `the '${spec}' module`));
+          L.pushDiag(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(spec)));
           throw new PoisonError();
         }
       }

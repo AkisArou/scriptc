@@ -70,6 +70,7 @@ import {
   overridesDtsPath,
   registerWorkspacePackage,
   SUPPORTED_NODE_MODULES,
+  unsupportedModuleFeatureOf,
   workspacePackageOfPath,
 } from "./shared.js";
 
@@ -1558,7 +1559,7 @@ function preflight7(load: LoadResult): {
       // imports-field family, resolved below.
       const npm = isBare && !spec.startsWith("#") ? resolveNpmImport7(sf.fileName, spec) : null;
       if (npm && isNodeTypesPath(npm.typesFile)) {
-        diags.push(unsupportedDiag("SC1010", locOf7(stmt), `the '${spec}' module`));
+        diags.push(unsupportedDiag("SC1010", locOf7(stmt), unsupportedModuleFeatureOf(spec)));
         continue;
       }
       // --npm-static: an opted-in package's import is a PROGRAM-MODULE
@@ -1612,7 +1613,7 @@ function preflight7(load: LoadResult): {
         if (projDep === null) {
           const nodeBuiltin = spec.startsWith("node:") || nodeBuiltinNames.has(spec);
           if (nodeBuiltin) {
-            diags.push(unsupportedDiag("SC1010", locOf7(stmt), `the '${spec}' module`));
+            diags.push(unsupportedDiag("SC1010", locOf7(stmt), unsupportedModuleFeatureOf(spec)));
             continue;
           }
           if (spec === "#") {
@@ -1805,7 +1806,7 @@ function preflight7(load: LoadResult): {
                 // Binding forms keep the fence: their downstream reads
                 // would need the module that never loads.
                 if (req.decl !== null || probeNodeRequireRefusal(sf.fileName, req.spec) === null) {
-                  diags.push(unsupportedDiag("SC1010", loc, `the '${req.spec}' module`));
+                  diags.push(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(req.spec)));
                 }
               }
               continue;
@@ -1851,7 +1852,7 @@ function preflight7(load: LoadResult): {
               // Binding-less by construction — same require-site throw
               // channel as the statement-level form above.
               if (probeNodeRequireRefusal(sf.fileName, spec) === null) {
-                diags.push(unsupportedDiag("SC1010", loc, `the '${spec}' module`));
+                diags.push(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(spec)));
               }
             }
             continue;
