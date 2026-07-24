@@ -756,6 +756,31 @@ probe(eng);
     );
   });
 
+  test("the collapsed (string | object)[] slot compiles — an island array wraps and the element read reaches the loud ladder", async () => {
+    // Appendix-A repro 4's exit: the union-arm SC2009 fence is RETIRED —
+    // `(string | object)[]` maps to the checked-dynamic representation
+    // wholesale (every arm dyn-subsumable), so the island plugins array
+    // WRAPS at the slot (dynFromJsval) and compiling succeeds. The
+    // element read on the wrapped value keeps lane 1's honest keyed-read
+    // ladder until the routing lane arms it — never SC2009, never a
+    // silent wrong answer.
+    const r = await compileAndRun(
+      "jsval-collapsed-union-slot",
+      `const eng: any = ["p1", { languages: ["js"] }];
+function firstPlugin(ps: (string | object)[]): void {
+  console.log(typeof ps[0]);
+}
+firstPlugin(eng);
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "reading '0' on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
   test("a method call on an island-held unknown fences with the member named", async () => {
     // The JS lane's member calls on dyn receivers ride dynKeyGet+dynCall
     // here, so the keyed-read fence fires first (the member named); the

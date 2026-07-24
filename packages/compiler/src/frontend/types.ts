@@ -1,6 +1,6 @@
 import * as ts from "./ts7/adapter.js";
 import type { IrRecordShape, IrType, IrUnionDef } from "../ir/nodes.js";
-import { arrayOf, BOOL, bytesOf, CHILD_T, DYN, F64, funcOf, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/nodes.js";
+import { arrayOf, BOOL, bytesOf, canConvertToDyn, CHILD_T, DYN, F64, funcOf, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/nodes.js";
 
 import { isJsSourceFile, isNodeTypesPath } from "./program.js";
 import { accessorSlotProp } from "../ir/nodes.js";
@@ -914,11 +914,19 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       elem.kind === "fsWatcher" ||
       elem.kind === "childStream" ||
       elem.kind === "procStream" ||
-      elem.kind === "generator" ||
-      elem.kind === "dyn"
+      elem.kind === "generator"
     ) {
-      return null; // ScrArr has no closure/map/regex/url/dyn element kinds yet
+      return null; // ScrArr has no closure/map/regex/url element kinds yet
     }
+    // A dyn ELEMENT makes the WHOLE array the checked-dynamic value:
+    // `unknown[]`, `object[]`, and the collapsed `(string | object)[]`
+    // (the plugins-slot shape) — the DOM has real arrays, so length/
+    // index/push/iteration ride the keyed-DOM paths, while a dyn-element
+    // STATIC array has no backend representation (ScrArr has no dyn
+    // element kind). This is dynFallbackType's JS stance promoted into
+    // the mapping itself; construction sites build dynArrLit (the DOM
+    // array literal) and typed sources convert per element at the slot.
+    if (elem.kind === "dyn") return DYN;
     // ChildProcess[] (the running-apps list) and Server[] (the [...set]
     // drain of the auxiliary-server registries): handles are ordinary
     // refcounted REF elements (their `_v` adapters, no trace — both drop
@@ -2312,6 +2320,33 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         if (unions.recursivePending(widened)) return null;
         return arms[0]!;
       }
+      // The `string | object`-family COLLAPSE (world unification lane 3):
+      // a union with an 'object'/'unknown'/`{}`-flavored arm (dyn) beside
+      // arms the checked-dynamic representation FAITHFULLY holds maps to
+      // DYN WHOLESALE — the DOM's scalar kinds ARE the scalar arms (===,
+      // typeof, switch dispatch all exact), typeof/Array.isArray/unit
+      // narrowing on dyn already dispatches natively (dynTest +
+      // maybeNarrow's validated scalar extraction), and engine-valued
+      // arms ride the island kind (SCR_DYN_JSVAL), so no per-arm runtime
+      // tag is ever needed and the component fence retires at these
+      // sites. The domain is dynSubsumableUnionArm's: scalars, units, dyn
+      // itself, and records/arrays inside the dynFrom conversion domain
+      // (those enter as DOM data — the deep-copy stance, so identity and
+      // mutation coupling with the source value end at the slot;
+      // SEMANTICS.md). Arms with real typed representations whose
+      // semantics would DEGRADE under the collapse — class instances,
+      // Maps/Sets, functions (closure identity, `x === String`
+      // narrowing), promises, regexes, generators, handles — keep their
+      // existing union homes and fences below. A pending recursive
+      // placeholder cannot collapse (back-references already hold the
+      // union id); the degenerate recursive spelling keeps its fence.
+      if (
+        arms.some((a) => a.kind === "dyn") &&
+        arms.every((a) => dynSubsumableUnionArm(a, ctx)) &&
+        !unions.recursivePending(widened)
+      ) {
+        return DYN;
+      }
       if (
         arms.some(
           (a) =>
@@ -3182,6 +3217,35 @@ const STDLIB_CONTAINERS: Record<string, { role: (i: number) => string }> = {
   AsyncGenerator: { role: (i) => ["yield", "return", "next"][i] ?? "channel" },
 };
 
+/** The `string | object`-family collapse domain (mapTypeInner's union
+ * rule): arms the checked-dynamic representation holds FAITHFULLY, so a
+ * union carrying a dyn arm beside only these maps to DYN wholesale.
+ * Scalars and units are the DOM's own kinds (value-exact ===/typeof);
+ * records and arrays qualify exactly when the dynFrom conversion can
+ * build them (canConvertToDyn — JSON-safe data plus bytes-bearing
+ * composites), entering as DOM data under the documented deep-copy
+ * stance. Everything else — class instances, Maps/Sets, functions
+ * (closure identity and `x === String` narrowing live in the typed union
+ * machinery), promises, regexes, generators, handles, nested unions —
+ * would DEGRADE (identity, methods, dispatch) riding dyn, so those arms
+ * keep their existing homes and fences. */
+export function dynSubsumableUnionArm(arm: IrType, ctx: TypeMapperCtx): boolean {
+  switch (arm.kind) {
+    case "dyn":
+    case "f64":
+    case "string":
+    case "bool":
+    case "undefinedT":
+    case "nullT":
+      return true;
+    case "record":
+    case "array":
+      return canConvertToDyn(arm, (id) => ctx.shapes.get(id), (id) => ctx.unions.get(id));
+    default:
+      return false;
+  }
+}
+
 /** Arm kinds with no home in a compiled union (mapTypeInner's union rule):
  * no runtime narrowing test exists against sibling data arms. */
 function armHasUnionHome(arm: IrType, siblingCount: number): boolean {
@@ -3283,8 +3347,25 @@ export function describeComponentBlocker(widened: ts.Type, ctx: TypeMapperCtx): 
     const parts = widened.getTypes();
     const UNIT = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null;
     const dataArms = parts.filter((p) => (p.flags & UNIT) === 0);
-    for (const part of dataArms) {
-      const mapped = mapType(part, ctx);
+    // A union carrying an 'object'/'unknown'-flavored arm rides the
+    // checked-dynamic representation WHOLESALE when every sibling is
+    // dyn-subsumable (mapTypeInner's collapse) — so when such a union
+    // still failed, the story is the sibling that CANNOT ride the
+    // collapse, never the dyn arm itself.
+    const mappedArms = dataArms.map((p) => ({ p, mapped: mapType(p, ctx) }));
+    if (mappedArms.some(({ mapped }) => mapped?.kind === "dyn")) {
+      const blocker = mappedArms.find(
+        ({ mapped }) => mapped !== null && !dynSubsumableUnionArm(mapped, ctx),
+      );
+      if (blocker) {
+        return `the union shape is supported, and unions in the 'string | object' family ride the checked-dynamic representation wholesale, but '${text(blocker.p)}' arms have a typed representation whose semantics (identity, methods, dispatch) do not survive that collapse`;
+      }
+      // Every sibling subsumable and the union STILL failed: the
+      // recursive-placeholder fence (a degenerate spelling) — no per-arm
+      // story is true, so the residual fence speaks.
+      return null;
+    }
+    for (const { p: part, mapped } of mappedArms) {
       if (!mapped) {
         return `the union shape is supported, but its arm '${text(part)}' does not compile`;
       }
