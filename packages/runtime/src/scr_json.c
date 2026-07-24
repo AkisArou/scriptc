@@ -648,7 +648,11 @@ const char *scr_dyn_specific_type(const ScrDyn *cb, char *detail, size_t cap) {
   case SCR_DYN_OBJ: d = "an instance of Object"; break;
   case SCR_DYN_ARR: d = "an instance of Array"; break;
   case SCR_DYN_BYTES: d = "an instance of Uint8Array"; break;
-  case SCR_DYN_FUNC: d = "function"; break; /* callers usually return before this */
+  case SCR_DYN_FUNC:
+    /* determineSpecificType: `function ${value.name}` — anonymous
+     * functions keep Node's trailing space. */
+    snprintf(detail, cap, "function %s", cb->v.fn.name != NULL ? cb->v.fn.name : "");
+    break;
   case SCR_DYN_HANDLE:
     snprintf(detail, cap, "an instance of %s", scr_dyn_handle_cls(cb));
     break;
@@ -728,7 +732,7 @@ void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDy
  * renders determineSpecificType: strings quote, scalars print plain.
  * Deep shapes render their bracket sketch (enough for the validators'
  * ladders; nothing observable pins the deep forms). */
-static const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap) {
+const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap) {
   switch (v->kind) {
   case SCR_DYN_NULL: return "null";
   case SCR_DYN_UNDEF: return "undefined";

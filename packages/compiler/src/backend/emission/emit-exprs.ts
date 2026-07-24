@@ -3925,6 +3925,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               `scr_tls_create_secure_context((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len)`,
             );
+          case "tls.createSecureContextDyn":
+            // The runtime option-bag form: Node's typed validations, then
+            // the pem walk (throws catchably on both ladders).
+            return finish(`scr_tls_create_secure_context_dyn(${arg(0)})`);
+          case "tls.caCertsChk":
+            // Always throws (validation error or the trailing fence).
+            return finish(
+              `(scr_tls_ca_certs_chk(${arg(0)}, ${arg(1)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
           case "http.serverOnRequest": {
             const cbT = e.args[1]!.type;
             if (cbT.kind !== "func") throw new Error("emitter bug: http.serverOnRequest handler not a func");

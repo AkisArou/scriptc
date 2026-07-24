@@ -2999,6 +2999,9 @@ void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn
  * encoding. Received 'no'") — reason NULL renders "is invalid".
  * TypeError; always throws catchably. */
 void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
+/* The ERR_INVALID_ARG_VALUE/%j "Received" renderer (inspect-lite:
+ * strings quote, scalars print plain, deep shapes sketch). */
+const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap);
 /* A ladder's post-validation refuse: throws the compiler-rendered SC2020
  * statement-fence text verbatim (Node's validation errors run first). */
 void scr_throw_lowering_fence(const ScrStr *msg);
@@ -4759,6 +4762,13 @@ void scr_tls_h2_client_wrap(ScrNetSocket *sock, ScrStr *host /*borrowed*/, bool 
  * the default pair, exactly Node. */
 typedef struct ScrSecureCtx ScrSecureCtx;
 ScrSecureCtx *scr_tls_create_secure_context(const char *cert, size_t cert_len, const char *key, size_t key_len); /* +1 */
+/* createSecureContext over a RUNTIME options record: Node's typed option
+ * validations first, then the pem walk (+1, or NULL with the exception
+ * pending). Borrowed. */
+ScrSecureCtx *scr_tls_create_secure_context_dyn(const ScrDyn *opts);
+/* tls.getCACertificates(type): validateString + the documented name set,
+ * then the compiler-rendered fence — always leaves an exception pending. */
+void scr_tls_ca_certs_chk(const ScrDyn *type, const ScrStr *fence);
 ScrSecureCtx *scr_secure_ctx_retain(ScrSecureCtx *c);
 void scr_secure_ctx_release(ScrSecureCtx *c);
 void *scr_secure_ctx_retain_v(void *p);

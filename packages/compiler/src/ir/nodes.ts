@@ -2378,6 +2378,16 @@ export type IrLibFn =
    * opaque SecureContext handle (secureCtx kind) for SNI callbacks to
    * answer with; cert/key are PEM strings or Buffers like createServer's. */
   | "tls.createSecureContext"
+  /** createSecureContext over a RUNTIME options record (the checked-
+   * dynamic lane): Node's typed option validations first (the ciphers/
+   * passphrase/engine/version/timeout/ticketKeys ladders), then the pem
+   * walk — a validated { cert, key } bag builds the real context.
+   * May-throw. */
+  | "tls.createSecureContextDyn"
+  /** tls.getCACertificates(type): validateString + the documented name
+   * set, then the trailing compiler-rendered fence — ALWAYS THROWS (the
+   * error.nodeThrow polymorphic-result carve-out). May-throw seed. */
+  | "tls.caCertsChk"
   | "https.createServer"
   | "https.request"
   | "https.requestCb"
@@ -5048,7 +5058,14 @@ export function canConvertToDyn(
   }
   if (t.kind === "union") {
     const def = getUnion(t.unionId);
-    return !!def && def.arms.every((a) => a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion));
+    // JSON-safe arms box as before; BOXABLE FUNCTION arms join them (the
+    // invalid-input probes iterate `[1, null, () => {}, true]` — the
+    // union's func arm crosses through the checked-dynamic function
+    // boundary exactly like a bare func dynFrom).
+    return !!def && def.arms.every((a) =>
+      a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion) ||
+      (a.kind === "func" && canBoxFuncIntoDyn(a, getRecord, getUnion)),
+    );
   }
   return false;
 }
@@ -6135,6 +6152,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // divergence-66 stance).
   "tls.pemDyn",
   "tls.createServerDyn",
+  "tls.createSecureContextDyn",
+  "tls.caCertsChk",
   "tls.createServerDynCb",
   "https.createServerDyn",
   "https.createServerDynCb",

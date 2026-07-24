@@ -10,7 +10,7 @@
  * rejection, never silence. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { ladderFenceExpr } from "./lowerer.js";
+import { ladderFenceExpr, nodeThrowExpr } from "./lowerer.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { arrayOf, BOOL, BYTES_U8, canBoxFuncIntoDyn, canConvertToDyn, DYN, DYN_HANDLE_KINDS, F64, funcOf, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, IrExpr, IrLibFn, IrStmt, IrType, NETSERVER_T, NETSOCKET_T, NULL_T, SECURECTX_T, STRING, UNDEFINED_T, SrcLoc, typeKey, VOID } from "../../ir/nodes.js";
 import {
@@ -1364,6 +1364,32 @@ function lowerNetSocketMethodCall(L: Lowerer, call: ts.CallExpression,
   const args = call.arguments;
   if (name === "write" || name === "end") {
     requireStatementPosition(L, call, `socket.${name}(...)`);
+    // write(chunk, encoding) — the two-argument encoding form: 'buffer'
+    // beside a string chunk is Node's stream_base typecheck ("Second
+    // argument must be a buffer", thrown synchronously on an established
+    // socket — the invalid-input probes' shape); utf8 spellings are the
+    // plain write (that IS the encoding written); a Buffer chunk ignores
+    // the encoding like Node does. Other encodings keep the fence.
+    if (name === "write" && args.length === 2) {
+      const encT = L.typeOf(args[1]!);
+      const chunkT = L.mapTypeOf(L.typeOf(args[0]!));
+      if (encT.isStringLiteralType() && chunkT !== null) {
+        if (encT.value === "buffer" && chunkT.kind === "string" &&
+            isJsSourceFile(call.getSourceFile())) {
+          L.lowerExpr(args[0]!); // evaluation order (effect-free in practice)
+          return nodeThrowExpr(1, "ERR_INVALID_ARG_TYPE", "Second argument must be a buffer", VOID, loc);
+        }
+        const passthrough =
+          (chunkT.kind === "string" && (encT.value === "utf8" || encT.value === "utf-8")) ||
+          (chunkT.kind === "bytes" && chunkT.elem === "u8");
+        if (passthrough) {
+          const receiver2 = handleReceiver(L, access.expression, NETSOCKET_T);
+          const data2 = L.lowerExpr(args[0]!);
+          const fn: IrLibFn = data2.type.kind === "string" ? "net.sockWrite" : "net.sockWriteBytes";
+          return { kind: "libCall", fn, args: [receiver2, data2], type: VOID, loc };
+        }
+      }
+    }
     const maxArgs = name === "write" ? 1 : 1;
     const minArgs = name === "write" ? 1 : 0;
     if (args.length < minArgs || args.length > maxArgs) {
@@ -2424,10 +2450,34 @@ function lowerTlsServerOptions(L: Lowerer, node: ts.Expression, what: string): {
  * checked-dynamic JS lane's record — passes whole to the runtime walk
  * (scr_tls_srv_opts_walk: same member split, fences thrown at runtime,
  * the divergence-66 stance); anything else keeps the compile fence. */
+/** The option keys whose Node argument contracts the runtime walker
+ * validates (scr_tls_opts_validate) — a literal carrying any of them
+ * rides WHOLE to the walker so the typed ladders run in Node's order
+ * (the static walk would fence them before validating). */
+const TLS_VALIDATED_OPTIONS: ReadonlySet<string> = new Set([
+  "ciphers", "passphrase", "ecdhCurve", "sessionIdContext",
+  "clientCertEngine", "privateKeyEngine", "privateKeyIdentifier",
+  "minVersion", "maxVersion", "handshakeTimeout", "keepAliveInitialDelay",
+  "sessionTimeout", "ticketKeys",
+]);
+
+/** True when a literal options bag carries a runtime-validated key (and
+ * the source is JS — TypeScript keeps its compile fences). */
+function tlsLiteralNeedsRuntimeWalk(node: ts.ObjectLiteralExpression): boolean {
+  if (!isJsSourceFile(node.getSourceFile())) return false;
+  return node.properties.some((p) =>
+    (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+    (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+    TLS_VALIDATED_OPTIONS.has(p.name.text),
+  );
+}
+
 function lowerTlsServerOptionsOrDyn(
   L: Lowerer, node: ts.Expression, what: string,
 ): { cert: IrExpr; key: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
-  if (ts.isObjectLiteralExpression(node)) return lowerTlsServerOptions(L, node, what);
+  if (ts.isObjectLiteralExpression(node) && !tlsLiteralNeedsRuntimeWalk(node)) {
+    return lowerTlsServerOptions(L, node, what);
+  }
   const v = L.lowerExpr(node);
   if (v.type.kind === "dyn") return { dyn: v };
   // A typed options RECORD binding (`const options = { key, cert, ... };
@@ -2581,6 +2631,23 @@ function lowerTlsModuleCall(L: Lowerer, expr: ts.CallExpression,
   if (bi.member === "connect") {
     return lowerTlsConnectCall(L, expr, loc);
   }
+  if (bi.member === "getCACertificates" && args.length === 1 && !args.some(ts.isSpreadElement) &&
+      isJsSourceFile(expr.getSourceFile())) {
+    // The type-argument ladder (validateString + the documented name
+    // set); the real CA list has no lowering, so a valid name meets the
+    // compiler-rendered fence after the validation.
+    const raw = L.lowerExpr(args[0]!);
+    if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+      const t: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+      return {
+        kind: "libCall",
+        fn: "tls.caCertsChk",
+        args: [t, ladderFenceExpr(L, "tls.getCACertificates", expr)],
+        type: L.mapTypeOf(L.typeOf(expr)) ?? DYN,
+        loc,
+      };
+    }
+  }
   if (bi.member === "createSecureContext") {
     // createSecureContext({ cert, key }) → the opaque SecureContext handle
     // an SNI callback answers with. The minimal honest form: exactly the
@@ -2593,8 +2660,11 @@ function lowerTlsModuleCall(L: Lowerer, expr: ts.CallExpression,
         "the supported form is createSecureContext({ cert, key })",
       );
     }
-    const { cert, key } = lowerTlsServerOptions(L, args[0]!, "tls.createSecureContext");
-    return { kind: "libCall", fn: "tls.createSecureContext", args: [cert, key], type: SECURECTX_T, loc };
+    const opts = lowerTlsServerOptionsOrDyn(L, args[0]!, "tls.createSecureContext");
+    if (opts.dyn !== undefined) {
+      return { kind: "libCall", fn: "tls.createSecureContextDyn", args: [opts.dyn], type: SECURECTX_T, loc };
+    }
+    return { kind: "libCall", fn: "tls.createSecureContext", args: [opts.cert, opts.key], type: SECURECTX_T, loc };
   }
   L.noLowering(
     `tls.${bi.member}`,

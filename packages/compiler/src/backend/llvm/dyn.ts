@@ -1272,6 +1272,16 @@ export class LlDyn {
             B.line(`${x} = call zeroext i1 @scr_union_get_bool(ptr %v)`);
             B.line(`${r} = call ptr @scr_dyn_new_bool(i1 ${x})`);
             B.terminate(`ret ptr ${r}`);
+          } else if (arm.kind === "func") {
+            // A boxable function arm crosses through the checked-dynamic
+            // function boundary (the dynFrom func special case, sans name).
+            const pp = B.tmp();
+            const p = B.tmp();
+            B.line(`${pp} = getelementptr inbounds %ScrUnion, ptr %v, i64 0, i32 5`);
+            B.line(`${p} = load ptr, ptr ${pp}`);
+            const r = B.tmp();
+            B.line(`${r} = call ptr @${this.dynFuncBoxHelper(arm)}(ptr ${p}, ptr null)`);
+            B.terminate(`ret ptr ${r}`);
           } else {
             const pp = B.tmp();
             const p = B.tmp();

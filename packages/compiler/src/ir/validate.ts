@@ -497,6 +497,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "tls.sockOnSession": { argTypes: [NETSOCKET_T, null, BOOL], result: VOID },
   // createSecureContext({ cert, key }) mints the opaque SNI-answer handle.
   "tls.createSecureContext": { argTypes: [null, null], result: SECURECTX_T },
+  "tls.createSecureContextDyn": { argTypes: [DYN], result: SECURECTX_T },
+  "tls.caCertsChk": { argTypes: [DYN, STRING], result: VOID },
   "https.createServer": { argTypes: [null, null, null], result: NETSERVER_T },
   // http2's allowHTTP1 compatibility server (divergence 57): cert/key
   // like tls.createServer; the 'request' handler arrives separately via
@@ -3880,7 +3882,8 @@ function validateFunction(
         if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow" || e.fn === "error.propTypeThrow" ||
             e.fn === "fs.mkdtempChk" || e.fn === "fs.readFileChk" ||
             e.fn === "fs.opendirChk" || e.fn === "fs.watchFileChk" || e.fn === "fs.lchmodChk" ||
-            e.fn === "fs.readChk" || e.fn === "fs.streamOptsChk" || e.fn === "net.connectOptsChk") {
+            e.fn === "fs.readChk" || e.fn === "fs.streamOptsChk" || e.fn === "net.connectOptsChk" ||
+            e.fn === "tls.caCertsChk") {
           // Always throws — the result type is the replaced expression's
           // own (never materialized; the global.undefRead pattern). The
           // fs Chk ladders qualify: every validation failure throws

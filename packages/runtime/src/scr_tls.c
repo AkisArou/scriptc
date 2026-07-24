@@ -73,6 +73,7 @@
 #include "scr_runtime.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1102,6 +1103,121 @@ static const char *const SCR_TLS_SRV_FENCED_OPTIONS[] = {
   "sessionTimeout", "sigalgs", "ticketKeys", NULL,
 };
 
+/* ── the typed option-validation ladders (checked-dynamic lane) ────────
+ * Node's configSecureContext / Server-constructor argument contracts over
+ * every PRESENT validated key, run BEFORE the pem walk and its fences so
+ * Node's typed errors always come first (the invalid-input probes isolate
+ * one bad option per call, so the fixed order below matches each).
+ * false = exception pending. */
+static bool scr_tls_opts_validate(const ScrDyn *opts) {
+  if (opts == NULL || opts->kind != SCR_DYN_OBJ) return true;
+  static const char *const STR_OPTS[] = { "ciphers", "passphrase", "ecdhCurve", "sessionIdContext", NULL };
+  for (size_t i = 0; STR_OPTS[i] != NULL; i++) {
+    const ScrDyn *v = scr_dyn_obj_get(opts, STR_OPTS[i], strlen(STR_OPTS[i]));
+    if (v != NULL && v->kind != SCR_DYN_UNDEF && v->kind != SCR_DYN_NULL && v->kind != SCR_DYN_STR) {
+      char name[48];
+      snprintf(name, sizeof name, "options.%s", STR_OPTS[i]);
+      scr_dyn_prop_type_fail(name, "of type string", v);
+      return false;
+    }
+  }
+  static const char *const ENGINE_OPTS[] = { "clientCertEngine", "privateKeyEngine", "privateKeyIdentifier", NULL };
+  for (size_t i = 0; ENGINE_OPTS[i] != NULL; i++) {
+    const ScrDyn *v = scr_dyn_obj_get(opts, ENGINE_OPTS[i], strlen(ENGINE_OPTS[i]));
+    if (v != NULL && v->kind != SCR_DYN_UNDEF && v->kind != SCR_DYN_NULL && v->kind != SCR_DYN_STR) {
+      char name[48];
+      snprintf(name, sizeof name, "options.%s", ENGINE_OPTS[i]);
+      scr_dyn_prop_type_fail(name, "of type string or one of null or undefined", v);
+      return false;
+    }
+  }
+  static const char *const VERSION_OPTS[] = { "minVersion", "maxVersion", NULL };
+  for (size_t i = 0; VERSION_OPTS[i] != NULL; i++) {
+    const ScrDyn *v = scr_dyn_obj_get(opts, VERSION_OPTS[i], strlen(VERSION_OPTS[i]));
+    if (v == NULL || v->kind == SCR_DYN_UNDEF) continue;
+    bool valid = false;
+    if (v->kind == SCR_DYN_STR) {
+      static const char *const KNOWN[] = { "TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3", NULL };
+      for (size_t k = 0; KNOWN[k] != NULL; k++) {
+        if (v->v.str->len == strlen(KNOWN[k]) && memcmp(v->v.str->data, KNOWN[k], v->v.str->len) == 0) {
+          valid = true;
+          break;
+        }
+      }
+    }
+    if (!valid) {
+      /* %j: strings render JSON-quoted, everything else inspect-lite. */
+      char rendered[96];
+      if (v->kind == SCR_DYN_STR) {
+        snprintf(rendered, sizeof rendered, "\"%.*s\"",
+                 (int)(v->v.str->len < 80 ? v->v.str->len : 80), v->v.str->data);
+      } else {
+        /* %j over non-strings: JSON.stringify's scalar renderings. */
+        char lite[64];
+        snprintf(rendered, sizeof rendered, "%s", scr_dyn_inspect_lite(v, lite, sizeof lite));
+      }
+      char msg[192];
+      int len = snprintf(msg, sizeof msg, "%s is not a valid %s TLS protocol version",
+                         rendered, VERSION_OPTS[i][2] == 'n' ? "minimum" : "maximum");
+      scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_TLS_INVALID_PROTOCOL_VERSION");
+      return false;
+    }
+  }
+  static const char *const NUM_OPTS[] = { "handshakeTimeout", "keepAliveInitialDelay", NULL };
+  for (size_t i = 0; NUM_OPTS[i] != NULL; i++) {
+    const ScrDyn *v = scr_dyn_obj_get(opts, NUM_OPTS[i], strlen(NUM_OPTS[i]));
+    if (v != NULL && v->kind != SCR_DYN_UNDEF && v->kind != SCR_DYN_NULL && v->kind != SCR_DYN_NUM) {
+      char name[48];
+      snprintf(name, sizeof name, "options.%s", NUM_OPTS[i]);
+      scr_dyn_prop_type_fail(name, "of type number", v);
+      return false;
+    }
+  }
+  {
+    const ScrDyn *v = scr_dyn_obj_get(opts, "sessionTimeout", 14);
+    if (v != NULL && v->kind != SCR_DYN_UNDEF && v->kind != SCR_DYN_NULL) {
+      if (v->kind != SCR_DYN_NUM) {
+        scr_dyn_prop_type_fail("options.sessionTimeout", "of type number", v);
+        return false;
+      }
+      double n = v->v.num;
+      char recv[48], msg[192];
+      if (!(isfinite(n) && trunc(n) == n)) {
+        scr_num_received(n, recv);
+        int len = snprintf(msg, sizeof msg,
+                           "The value of \"options.sessionTimeout\" is out of range. It must be an integer. Received %s", recv);
+        scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+        return false;
+      }
+      if (n < 0 || n > 2147483647.0) {
+        scr_num_received(n, recv);
+        int len = snprintf(msg, sizeof msg,
+                           "The value of \"options.sessionTimeout\" is out of range. It must be >= 0 && <= 2147483647. Received %s", recv);
+        scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+        return false;
+      }
+    }
+  }
+  {
+    const ScrDyn *v = scr_dyn_obj_get(opts, "ticketKeys", 10);
+    if (v != NULL && v->kind != SCR_DYN_UNDEF && v->kind != SCR_DYN_NULL) {
+      if (v->kind != SCR_DYN_BYTES) {
+        scr_dyn_prop_type_fail("options.ticketKeys", "an instance of Buffer, TypedArray, or DataView", v);
+        return false;
+      }
+      double bytelen = scr_bytes_byte_len(v->v.bytes);
+      if (bytelen != 48) {
+        char msg[160];
+        int len = snprintf(msg, sizeof msg,
+                           "The property 'options.ticketKeys' must be exactly 48 bytes. Received %.0f", bytelen);
+        scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_VALUE");
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 /* The server-options walk. Fills the cert/key out-params (+1 each) from a
  * DOM options record; false = exception pending (partial results released). */
 static bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
@@ -1112,6 +1228,7 @@ static bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes 
     scr_dyn_arg_type_fail("options", "of type object", opts ? opts : scr_dyn_undefined());
     return false;
   }
+  if (!scr_tls_opts_validate(opts)) return false; /* Node's typed errors first */
   bool ok = true;
   for (size_t i = 0; ok && i < opts->v.obj.len; i++) {
     const ScrDynEntry *e = &opts->v.obj.entries[i];
@@ -1174,6 +1291,45 @@ static bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes 
     *key_out = NULL;
   }
   return ok;
+}
+
+/* createSecureContext over a RUNTIME options record: Node's typed
+ * validations first (scr_tls_opts_validate), then the pem walk — a bag
+ * that validates AND carries both cert and key builds the real context;
+ * everything else met its ladder error or the walk's per-key fence.
+ * +1, or NULL with the exception pending. */
+ScrSecureCtx *scr_tls_create_secure_context_dyn(const ScrDyn *opts /*borrowed*/) {
+  ScrBytes *cert, *key;
+  if (!scr_tls_srv_opts_walk(opts, "tls.createSecureContext", &cert, &key)) return NULL;
+  ScrSecureCtx *c = scr_tls_create_secure_context((const char *)cert->data, cert->len,
+                                                   (const char *)key->data, key->len);
+  scr_bytes_release(cert);
+  scr_bytes_release(key);
+  return c;
+}
+
+/* tls.getCACertificates(type): validateString, then the documented name
+ * set — an unknown name answers ERR_INVALID_ARG_VALUE; the real CA list
+ * has no lowering, so a valid name meets the fence. Always throws. */
+void scr_tls_ca_certs_chk(const ScrDyn *type, const ScrStr *fence) {
+  if (type->kind != SCR_DYN_STR) {
+    scr_dyn_arg_type_fail("type", "of type string", type);
+    return;
+  }
+  static const char *const KNOWN[] = { "default", "system", "bundled", "extra", NULL };
+  bool valid = false;
+  for (size_t i = 0; KNOWN[i] != NULL; i++) {
+    if (type->v.str->len == strlen(KNOWN[i]) &&
+        memcmp(type->v.str->data, KNOWN[i], type->v.str->len) == 0) {
+      valid = true;
+      break;
+    }
+  }
+  if (!valid) {
+    scr_dyn_arg_value_fail("type", NULL, type);
+    return;
+  }
+  scr_throw_lowering_fence(fence);
 }
 
 ScrNetServer *scr_tls_create_server_dyn(const ScrDyn *opts /*borrowed*/,
@@ -1241,6 +1397,22 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
     for (size_t i = 0; ok && i < opts->v.obj.len; i++) {
       const ScrDynEntry *e = &opts->v.obj.entries[i];
       const ScrDyn *v = e->value;
+      if (strcmp(e->key, "checkServerIdentity") == 0) {
+        /* Node spreads user options over the defaults, so a PRESENT key
+         * replaces the builtin verifier even when its value is undefined
+         * — validateFunction then throws for anything non-callable. A
+         * real function keeps the fence (custom verification has no
+         * lowering). */
+        if (v->kind != SCR_DYN_FUNC) {
+          scr_dyn_prop_type_fail("options.checkServerIdentity", "of type function", v);
+          ok = false;
+        } else {
+          scr_tls_opt_fence("tls.connect", "checkServerIdentity",
+                            "custom identity verification has no lowering — the runtime verifies against the servername/host");
+          ok = false;
+        }
+        continue;
+      }
       if (v->kind == SCR_DYN_UNDEF) continue;
       if (strcmp(e->key, "port") == 0) {
         if (port >= 0) continue; /* the argument form wins, like Node */
