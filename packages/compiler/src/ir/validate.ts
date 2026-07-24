@@ -192,6 +192,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "math.floor": { argTypes: [F64], result: F64 },
   "math.abs": { argTypes: [F64], result: F64 },
   "math.round": { argTypes: [F64], result: F64 },
+  "math.trunc": { argTypes: [F64], result: F64 },
+  "math.ceil": { argTypes: [F64], result: F64 },
   "math.min": { argTypes: [F64, F64], result: F64 },
   "math.max": { argTypes: [F64, F64], result: F64 },
   "math.random": { argTypes: [], result: F64 },

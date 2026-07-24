@@ -473,6 +473,11 @@ export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | un
   floor: { fn: "math.floor", arity: 1 },
   abs: { fn: "math.abs", arity: 1 },
   round: { fn: "math.round", arity: 1 },
+  // trunc/ceil joined the static table with ask 4: they are the
+  // integer-boundary inference's wholeness-discharge operators (C
+  // trunc()/ceil() ARE the JS operations, like floor).
+  trunc: { fn: "math.trunc", arity: 1 },
+  ceil: { fn: "math.ceil", arity: 1 },
   min: { fn: "math.min", arity: 2 },
   max: { fn: "math.max", arity: 2 },
   random: { fn: "math.random", arity: 0 },

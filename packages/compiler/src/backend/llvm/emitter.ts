@@ -11233,11 +11233,12 @@ class LlEmitter {
     if (MAY_THROW_LIB_FNS.has(e.fn) && LIB_FN_SYMS[e.fn] === undefined) {
       throw new LlvmUnsupportedError(`libCall:${e.fn}`, e.loc);
     }
-    if (e.fn === "math.floor") {
+    if (e.fn === "math.floor" || e.fn === "math.trunc" || e.fn === "math.ceil") {
+      const intr = e.fn === "math.floor" ? "floor" : e.fn === "math.trunc" ? "trunc" : "ceil";
       const v = this.emitExpr(e.args[0]!);
-      this.declare(`declare double @llvm.floor.f64(double)`);
+      this.declare(`declare double @llvm.${intr}.f64(double)`);
       const t = B.tmp();
-      B.line(`${t} = call double @llvm.floor.f64(double ${v.name})`);
+      B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
       return { name: t, type: e.type };
     }
     if (e.fn === "math.abs") {

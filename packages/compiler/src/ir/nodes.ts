@@ -1708,6 +1708,13 @@ export type IrLibFn =
    * epsilon boundary). Borrow nothing; never throw. */
   | "math.abs"
   | "math.round"
+  /** Math.trunc / Math.ceil — C trunc()/ceil() ARE the JS operations
+   * (NaN/±0/±Infinity pass through bit-exactly; ceil(-0.5) is -0 in IEEE
+   * round-toward-+Infinity exactly as ECMA says). Static like floor —
+   * they are ask-4's wholeness-discharge operators, so the library
+   * inference needs them compiled, not island-served. Never throw. */
+  | "math.trunc"
+  | "math.ceil"
   /** The static global parsers/tests (scr_string.c). num.parseInt is
    * ECMA-262 19.2.5 exactly — JS whitespace, sign, ToInt32 radix (the
    * frontend completes an omitted radix to 0 = the spec's "undefined":

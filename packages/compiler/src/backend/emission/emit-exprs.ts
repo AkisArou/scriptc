@@ -2517,10 +2517,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_math_max_arr(${arg(0)})`);
           case "math.minArr":
             return finish(`scr_math_min_arr(${arg(0)})`);
-          // Math.floor — C floor() IS the JS operation (math.h is always
-          // included). Borrows nothing; no throw.
+          // Math.floor/trunc/ceil — the C functions ARE the JS operations
+          // (math.h is always included). Borrow nothing; no throw.
           case "math.floor":
             return finish(`floor(${arg(0)})`);
+          case "math.trunc":
+            return finish(`trunc(${arg(0)})`);
+          case "math.ceil":
+            return finish(`ceil(${arg(0)})`);
           // Math.abs — C fabs IS the JS operation. Math.round — the JS
           // half-toward-+Infinity rule (scr_lib.c; C round() differs on
           // halves and naive floor(x+0.5) drifts at the epsilon boundary).
