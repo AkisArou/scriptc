@@ -1368,6 +1368,10 @@ bool scr_emitter_emit_error(ScrEmitter *em, ScrStr *name, ScrError *err);
 double scr_emitter_listener_count(ScrEmitter *em, ScrStr *name);
 double scr_emitter_listener_count_fn(ScrEmitter *em, ScrStr *name, ScrClosure *fn);
 ScrArr *scr_emitter_event_names(ScrEmitter *em);          /* +1 string[] */
+/* Pre-create a name's eventNames() rank with no listener (Node's stream
+ * classes pre-create their known _events keys; empty = absent for every
+ * other read). The stream constructors call this. */
+void scr_emitter_reserve(ScrEmitter *em, const char *name);
 ScrArr *scr_emitter_listeners(ScrEmitter *em, ScrStr *name); /* +1 closures */
 ScrEmitter *scr_emitter_set_max(ScrEmitter *em, double n);   /* returns em +1 */
 double scr_emitter_get_max(ScrEmitter *em);
@@ -1568,6 +1572,13 @@ ScrDyn *scr_stream_done_dyn_l(ScrClosure *clo, ScrDyn *const *args, size_t argc)
  * utf8, Node's decodeStrings default); push answers the below-hwm bool. */
 bool scr_stream_push(ScrStream *s, ScrBytes *chunk);
 bool scr_stream_push_str(ScrStream *s, ScrStr *str);
+/* push(chunk, enc): the per-call literal encoding (canonical); overrides
+ * the stream's defaultEncoding. Borrows both. */
+bool scr_stream_push_str_enc(ScrStream *s, ScrStr *str, ScrStr *enc);
+/* The defaultEncoding option's push side: how push(string) decodes chunks
+ * (Buffer.from(chunk, enc)). Canonical literal, never "utf8". Receiver
+ * answers +1 (the setEncoding chaining shape). */
+ScrStream *scr_stream_set_push_encoding(ScrStream *s, ScrStr *enc);
 bool scr_stream_push_null(ScrStream *s);
 void scr_stream_unshift(ScrStream *s, ScrBytes *chunk);
 void scr_stream_unshift_str(ScrStream *s, ScrStr *str);
@@ -3493,6 +3504,11 @@ bool scr_immediate_has_ref(double handle);
  * teardown (they must never run yet must not leak). cb ownership moves
  * in. */
 void scr_next_tick(ScrClosure *cb);
+/* A raw C-hook entry on the SAME queue: the stream unit enqueues one
+ * marker per deferred stream emission, so stream ticks and user
+ * nextTicks run in true FIFO order (in Node they are the same queue).
+ * Teardown drops markers without running them. */
+void scr_next_tick_raw(void (*fn)(void));
 void scr_nticks_teardown(void);
 /* ── the events unit (scr_events.c — OPTIONAL, link-gated) ────────────
  * Process signal/exit events and the piped-stdin surface. The unit links
@@ -4213,13 +4229,15 @@ double scr_bit_not(double a);
 /* ── typed arrays / Buffer (scr_bytes.c) ──────────────────────────────
  * ONE runtime representation for Uint8Array/Uint32Array/Float32Array,
  * Node's Buffer (a Uint8Array subclass), and DataView: a refcounted,
- * MUTABLE, fixed-length element buffer. Typed arrays OWN their storage
- * (backing == NULL) — subarray()/slice() both COPY (slice matches JS;
- * subarray's sharing is a documented divergence, SEMANTICS.md) — so a
- * typed array never aliases another and its byteOffset is always 0. The
- * ONE view kind is DataView (scr_dataview_new): a u8-elem ScrBytes whose
- * `data` points INTO an owner's storage and whose `backing` retains that
- * owner, so reads/writes through the view alias the source JS-exactly.
+ * MUTABLE, fixed-length element buffer. An ScrBytes either OWNS its
+ * storage (backing == NULL, byteOffset 0) or is a VIEW: its `data` points
+ * INTO an owner's storage and its `backing` retains that owner (chain
+ * depth is always exactly 1 — views over views resolve to the owner at
+ * construction), so reads/writes through the view alias the source
+ * JS-exactly. Views come from DataView (scr_dataview_new) and from
+ * subarray()/Buffer-slice() (scr_bytes_subarray — Buffer's slice is
+ * subarray's deprecated alias in Node); only the plain typed arrays'
+ * slice() copies (scr_bytes_slice, matching JS).
  * Elements are scalars only and the backing edge is acyclic by
  * construction (owners point at nothing): never part of a cycle, no
  * trace. Element reads widen to double; writes coerce JS-exactly (ToUint8
@@ -4242,10 +4260,10 @@ typedef struct ScrBytes {
   size_t len; /* ELEMENT count, fixed at construction */
   ScrBytesElem elem;
   uint8_t *data; /* len * elem_size bytes; owned unless backing is set */
-  /* NULL for owners (every typed array/Buffer). A DataView sets this to
-   * the retained OWNER it aliases (chain depth is always exactly 1: views
-   * over a view's .buffer resolve to the owner at construction) and its
-   * `data` points into backing->data — released, never freed. */
+  /* NULL for owners. A view (DataView, subarray, Buffer-slice) sets this
+   * to the retained OWNER it aliases (chain depth is always exactly 1:
+   * views over views resolve to the owner at construction) and its `data`
+   * points into backing->data — released, never freed. */
   struct ScrBytes *backing;
 } ScrBytes;
 
@@ -4350,9 +4368,20 @@ void scr_bytes_set(ScrBytes *b, double i, double v);
 
 /* TypedArray.prototype.slice(start, end): relative indices clamp like
  * string/array slice (ToIntegerOrInfinity, negatives from the end); the
- * result is a fresh same-kind copy. subarray() lowers here too — a COPY,
- * the documented divergence. Never throws. */
+ * result is a fresh same-kind copy. Never throws. */
 ScrBytes *scr_bytes_slice(const ScrBytes *b, double start, double end); /* +1 */
+
+/* TypedArray.prototype.fill on non-u8 receivers: per-element fill with
+ * the element write's coercion, slice-clamped relative indices; answers
+ * the receiver +1 (chaining). Never throws. */
+ScrBytes *scr_bytes_fill_elem(ScrBytes *b, double v, double start, double end); /* +1 */
+
+/* TypedArray.prototype.subarray(start, end) — and Buffer's slice(), its
+ * deprecated alias: a same-elem VIEW aliasing the receiver's storage
+ * (mutations visible both ways, JS-exactly). The view retains the OWNER
+ * (chain depth exactly 1, the DataView rule) and its byteOffset composes.
+ * Same index clamping as slice; never throws. */
+ScrBytes *scr_bytes_subarray(ScrBytes *b, double start, double end); /* +1 */
 
 /* dst.set(src, offset): same-kind bulk copy (memmove — dst may be src).
  * offset goes through ToIntegerOrInfinity; a negative offset or

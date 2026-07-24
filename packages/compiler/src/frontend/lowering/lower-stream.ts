@@ -33,7 +33,7 @@ import type { ClassInfo } from "./lower-classes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { newFnCtx, own } from "./lowerer.js";
 import { appendImplicitUndefinedReturn } from "./lower-calls.js";
-import { bufEncoding } from "./lower-containers.js";
+import { bufEncoding, knownBufEncoding } from "./lower-containers.js";
 import { probeLower } from "./lower-exprs.js";
 import { BOOL, DYN, F64, IrExpr, IrFunction, IrLibFn, IrStmt, IrType, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, VOID, arrayOf, bytesOf, canBoxFuncIntoDyn, funcOf, typeEquals, typeKey } from "../../ir/nodes.js";
 
@@ -251,6 +251,14 @@ interface StreamOptions {
    * ReadableState builds the decoder up front; the buffer is empty at
    * that point, so the two are equivalent). */
   encoding: string | null;
+  /** A LITERAL encoding/defaultEncoding spelling Node does not know: the
+   * construction lowers to Node's runtime ERR_UNKNOWN_ENCODING TypeError
+   * (the state constructors validate encodings up front). */
+  badEncoding: string | null;
+  /** A Readable's valid non-utf8 `defaultEncoding` (canonical): applied
+   * as a follow-up readable.pushEncoding — push(string) decodes through
+   * it (Node's Buffer.from(chunk, state.defaultEncoding)). */
+  pushEncoding: string | null;
   /** Present callbacks in canonical order with their flag bits. */
   flags: number;
   cbs: IrExpr[];
@@ -460,6 +468,8 @@ function parseStreamOptions(
     readableSide: true,
     writableSide: true,
     encoding: null,
+    badEncoding: null,
+    pushEncoding: null,
     flags: 0,
     cbs: [],
   };
@@ -579,17 +589,39 @@ function parseStreamOptions(
       }
       case "encoding": {
         // The readable-side string-chunk mode: a literal encoding, folded
-        // to its canonical name (Writable has no such option).
+        // to its canonical name (Writable has no such option). A literal
+        // spelling Node does not know is Node's RUNTIME rejection —
+        // ERR_UNKNOWN_ENCODING at construction, not a compile fence.
         if (ctorName === "Writable") L.noLowering(`the Writable option 'encoding'`, prop);
+        {
+          const t = L.typeOf(value);
+          if (t.isStringLiteralType() && knownBufEncoding(t.value) === undefined) {
+            out.badEncoding = t.value;
+            break;
+          }
+        }
         out.encoding = bufEncoding(L, `the ${ctorName} option 'encoding'`, value);
         break;
       }
       case "defaultEncoding":
-        // The WRITE-side default: utf8 is the byte default — admit the
-        // literal; other encodings would change what write(string) means.
+        // utf8 is the byte default — admit the literal. A literal Node
+        // does not know throws ERR_UNKNOWN_ENCODING at construction (the
+        // state ctor validates it), Node's ladder. On a pure Readable a
+        // valid non-utf8 name governs how push(string) DECODES chunks
+        // (Buffer.from(chunk, enc)) — lowered as a follow-up
+        // readable.pushEncoding. The write-side meaning (what
+        // write(string) does) stays fenced on the writable classes.
         {
           const t = L.typeOf(value);
           if (t.isStringLiteralType() && (t.value === "utf8" || t.value === "utf-8")) break;
+          if (t.isStringLiteralType() && knownBufEncoding(t.value) === undefined) {
+            out.badEncoding = t.value;
+            break;
+          }
+          if (t.isStringLiteralType() && ctorName === "Readable") {
+            out.pushEncoding = knownBufEncoding(t.value)!;
+            break;
+          }
         }
         L.noLowering(
           `the ${ctorName} option 'defaultEncoding'`,
@@ -661,14 +693,14 @@ function parseStreamOptions(
  * (shared by `new Readable({...})` and a subclass's super(options)),
  * plus the parsed `encoding` option (applied as a follow-up setEncoding). */
 function streamCtorArgs(L: Lowerer, cls: string, arg: ts.Expression | undefined,
-  thisType: IrType, loc: SrcLoc, fallbackCb?: (name: string) => IrExpr | null): { args: IrExpr[]; encoding: string | null } {
+  thisType: IrType, loc: SrcLoc, fallbackCb?: (name: string) => IrExpr | null): { args: IrExpr[]; encoding: string | null; badEncoding: string | null; pushEncoding: string | null } {
   const shape = streamCtorShape(cls);
   const o = parseStreamOptions(L, cls.slice(1), arg, thisType, shape.accepted, loc, fallbackCb);
   const head = shape.duplexShape
     ? [o.hwmR, o.hwmW, o.autoDestroy, o.emitClose, o.allowHalfOpen,
        boolLit(o.readableSide, loc), boolLit(o.writableSide, loc), f64Lit(o.flags, loc)]
     : [cls === "%Writable" ? o.hwmW : o.hwmR, o.autoDestroy, o.emitClose, f64Lit(o.flags, loc)];
-  return { args: [...head, ...o.cbs], encoding: o.encoding };
+  return { args: [...head, ...o.cbs], encoding: o.encoding, badEncoding: o.badEncoding, pushEncoding: o.pushEncoding };
 }
 
 /** `new Readable(opts?)` and friends — called from lowerNew once the
@@ -690,7 +722,17 @@ export function lowerStreamNew(L: Lowerer, expr: ts.NewExpression, info: ClassIn
   }
   const fn = `${streamCtorShape(cls).fn}.new` as IrLibFn;
   const parsed = streamCtorArgs(L, cls, args[0], thisType, loc);
-  const built: IrExpr = { kind: "libCall", fn, args: parsed.args, type: thisType, loc };
+  if (parsed.badEncoding !== null) {
+    // Node's state constructors validate encodings first: an unknown
+    // spelling never constructs — the whole expression throws.
+    return nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", `Unknown encoding: ${parsed.badEncoding}`, thisType, loc);
+  }
+  let built: IrExpr = { kind: "libCall", fn, args: parsed.args, type: thisType, loc };
+  if (parsed.pushEncoding !== null) {
+    // { defaultEncoding }: chain the push-side decode default (the
+    // setEncoding chaining shape — answers the receiver +1).
+    built = { kind: "libCall", fn: "readable.pushEncoding", args: [built, strLit(parsed.pushEncoding, loc)], type: thisType, loc };
+  }
   if (parsed.encoding === null) return built;
   // { encoding }: chain a setEncoding over the fresh stream (the operand
   // temp releases with the frame; setEncoding answers the receiver +1).
@@ -871,11 +913,27 @@ export function lowerStreamSuperCall(L: Lowerer, info: ClassInfo, base: ClassInf
     }
   }
   const parsed = streamCtorArgs(L, cls, argNodes[0], thisType, loc, fallback);
+  if (parsed.badEncoding !== null) {
+    // super(options) with an unknown literal encoding: the state ctor
+    // rejects before any initialization, Node's ladder.
+    return [{
+      kind: "exprStmt",
+      expr: nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", `Unknown encoding: ${parsed.badEncoding}`, VOID, loc),
+      loc,
+    }];
+  }
   const out: IrStmt[] = [{
     kind: "exprStmt",
     expr: { kind: "libCall", fn: `${shape.fn}.init` as IrLibFn, args: [thisRef(), ...parsed.args], type: VOID, loc },
     loc,
   }];
+  if (parsed.pushEncoding !== null) {
+    out.push({
+      kind: "exprStmt",
+      expr: { kind: "libCall", fn: "readable.pushEncoding", args: [thisRef(), strLit(parsed.pushEncoding, loc)], type: thisType, loc },
+      loc,
+    });
+  }
   if (parsed.encoding !== null) {
     out.push({
       kind: "exprStmt",
@@ -1358,6 +1416,29 @@ export function lowerStreamMethodCall(L: Lowerer, call: ts.CallExpression,
     requireSide(readableSide, member);
     if (args.length === 0 || args.length > 2) {
       L.noLowering(`${member} with ${args.length} arguments`, call, "the supported forms are (chunk) and (chunk, \"utf8\")");
+    }
+    // push(chunk, enc) with a LITERAL encoding: the per-call decode
+    // (Buffer.from(chunk, enc)) — an explicit encoding (utf8 included)
+    // overrides the stream's defaultEncoding; unknown literals throw
+    // Node's ERR_UNKNOWN_ENCODING when the push evaluates. unshift keeps
+    // the utf8-only fence below.
+    if (member === "push" && args[1] !== undefined && chunkKind(args[0]!) === "string") {
+      const t = L.typeOf(args[1]!);
+      if (t.isStringLiteralType()) {
+        const canonical = knownBufEncoding(t.value);
+        if (canonical === undefined) {
+          return nodeThrowExpr(1, "ERR_UNKNOWN_ENCODING", `Unknown encoding: ${t.value}`, BOOL, loc);
+        }
+        const receiver = L.lowerExpr(access.expression);
+        const chunk = L.lowerExprExpecting(args[0]!, STRING);
+        return {
+          kind: "libCall",
+          fn: "readable.pushStrEnc",
+          args: [receiver, chunk, strLit(canonical, loc)],
+          type: BOOL,
+          loc,
+        };
+      }
     }
     checkUtf8Encoding(L, member, args[1]);
     const kind = chunkKind(args[0]!);

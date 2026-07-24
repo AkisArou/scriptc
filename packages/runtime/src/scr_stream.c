@@ -13,11 +13,12 @@
  * nothing.
  *
  * EVENT TIMING. Node schedules most stream emissions on process.nextTick;
- * here those deferrals ride a FIFO tick queue drained at the top of every
- * loop turn (scr_loop_set_stream — the station before events/net/timers,
- * the closest to nextTick; ticks scheduled from user code on the main
- * stack run when the loop starts, i.e. after all synchronous code — the
- * nextTick shape). The implemented orderings follow lib/internal/streams:
+ * here each deferral enqueues on the stream tick FIFO AND posts a raw
+ * marker on the USER nextTick queue (scr_next_tick_raw), so stream
+ * emissions and user nextTicks run in true FIFO enqueue order — Node's,
+ * where they are the same queue. The scr_loop_set_stream station remains
+ * as the drain of anything a marker never reached (and the uncaught-throw
+ * cleanup). The implemented orderings follow lib/internal/streams:
  *   - on('data') starts flowing on a TICK (resume_): synchronous code
  *     after the registration runs before the first 'data'.
  *   - push() while flowing with an empty buffer emits 'data'
@@ -103,6 +104,10 @@ struct ScrStreamState {
     bool encoded;       /* string-chunk mode (decoder active) */
     ScrStr *enc;        /* owned canonical encoding name, or NULL */
     double dec_pending; /* scr_strdec packed pending state */
+    /* The defaultEncoding option's push-side effect: how push(string)
+     * DECODES string chunks into bytes (Node's Buffer.from(chunk,
+     * state.defaultEncoding)). Owned canonical name; NULL = utf8. */
+    ScrStr *push_enc;
     /* Readable.from mode: entries are whole OBJECTS (each counts 1
      * toward length/hwm and delivers undivided — Node's objectMode
      * accounting for the from() surface; hwm is 1). */
@@ -223,6 +228,7 @@ static void scr_stream_state_drop(ScrStreamState *st, bool gc) {
   for (size_t i = 0; i < st->r.n; i++) scr_stream_entry_release(st, st->r.buf[i]);
   free(st->r.buf);
   if (st->r.enc) scr_str_release(st->r.enc);
+  if (st->r.push_enc) scr_str_release(st->r.push_enc);
   if (!gc && st->r.next_waiter) scr_promise_release(st->r.next_waiter);
   if (!gc) {
     if (st->r.read_cb) scr_closure_release(st->r.read_cb);
@@ -350,6 +356,8 @@ typedef struct ScrStreamTick {
 static ScrStreamTick *scr_st_head = NULL;
 static ScrStreamTick *scr_st_tail = NULL;
 
+static void scr_stream_dispatch_one(void);
+
 static void scr_st_tick(ScrStream *s, ScrStreamTickOp op, ScrError *err /*moves*/,
                         ScrClosure *cb /*moves*/) {
   ScrStreamTick *t = calloc(1, sizeof *t);
@@ -361,6 +369,13 @@ static void scr_st_tick(ScrStream *s, ScrStreamTickOp op, ScrError *err /*moves*
   if (scr_st_tail) scr_st_tail->next = t;
   else scr_st_head = t;
   scr_st_tail = t;
+  /* One marker per tick on the USER nextTick queue: stream emissions are
+   * process.nextTicks in Node (resume_, emitReadable_, endReadableNT,
+   * afterWrite, ...), so they must interleave with user nextTicks in
+   * enqueue order — a `push(); on('data'); process.nextTick(assert)`
+   * sequence sees its data before the assert runs. The station dispatch
+   * below stays as the drain of anything a marker never reached. */
+  scr_next_tick_raw(&scr_stream_dispatch_one);
 }
 
 static bool scr_stream_ticks_pending(void) { return scr_st_head != NULL; }
@@ -1222,6 +1237,24 @@ static ScrStream *scr_stream_alloc(const ScrVt *vt, const char *cls, bool has_r,
   s->reg = NULL;
   s->cls = cls;
   s->st = scr_stream_state_new(has_r, has_w, rhwm, whwm, auto_destroy, emit_close, allow_half_open);
+  /* Node's stream constructors pre-create their known _events keys (a V8
+   * shape optimization) — eventNames() lists these BEFORE user events
+   * added earlier. Same names, same order: Readable close/error/data/end/
+   * readable, Writable close/error/prefinish/finish/drain, Duplex the
+   * union (writable trio first — Node's observed key order). */
+  ScrEmitter *em = (ScrEmitter *)s;
+  scr_emitter_reserve(em, "close");
+  scr_emitter_reserve(em, "error");
+  if (has_w) {
+    scr_emitter_reserve(em, "prefinish");
+    scr_emitter_reserve(em, "finish");
+    scr_emitter_reserve(em, "drain");
+  }
+  if (has_r) {
+    scr_emitter_reserve(em, "data");
+    scr_emitter_reserve(em, "end");
+    scr_emitter_reserve(em, "readable");
+  }
   scr_obj_alloc_note();
   return s;
 }
@@ -2200,11 +2233,39 @@ bool scr_stream_push(ScrStream *s, ScrBytes *chunk) {
 }
 
 bool scr_stream_push_str(ScrStream *s, ScrStr *str) {
-  ScrBytes *b = scr_bytes_new(SCR_BYTES_U8, (double)str->len);
-  memcpy(b->data, str->data, str->len);
+  ScrStr *enc = s->st->has_r ? s->st->r.push_enc : NULL;
+  ScrBytes *b;
+  if (enc != NULL) {
+    /* Node: Buffer.from(chunk, state.defaultEncoding). */
+    b = scr_bytes_from_str(str, enc);
+  } else {
+    b = scr_bytes_new(SCR_BYTES_U8, (double)str->len);
+    memcpy(b->data, str->data, str->len);
+  }
   bool ret = scr_stream_add_chunk(s, b, false);
   scr_bytes_release(b);
   return ret;
+}
+
+/* push(chunk, encoding) with an explicit non-utf8 literal: the per-call
+ * encoding overrides the stream's default. Borrows both strings. */
+bool scr_stream_push_str_enc(ScrStream *s, ScrStr *str, ScrStr *enc) {
+  ScrBytes *b = scr_bytes_from_str(str, enc);
+  bool ret = scr_stream_add_chunk(s, b, false);
+  scr_bytes_release(b);
+  return ret;
+}
+
+/* The defaultEncoding option's push side (canonical literal, frontend-
+ * folded; never "utf8" — that stays the NULL fast path). Answers the
+ * receiver +1, the setEncoding chaining shape. */
+ScrStream *scr_stream_set_push_encoding(ScrStream *s, ScrStr *enc) {
+  ScrStreamState *st = s->st;
+  if (st->has_r) {
+    if (st->r.push_enc) scr_str_release(st->r.push_enc);
+    st->r.push_enc = scr_str_retain(enc);
+  }
+  return scr_stream_retain(s);
 }
 
 bool scr_stream_push_null(ScrStream *s) {
@@ -2889,6 +2950,25 @@ static void scr_stream_run_tick(ScrStreamTick *t) {
       break;
     }
   }
+}
+
+static void scr_stream_dispatch(void);
+
+/* One tick-marker's dispatch: the queue's FIFO head (markers and entries
+ * are enqueued 1:1 in the same order). After an uncaught throw the
+ * remaining entries drop through the station's exc branch below, keeping
+ * the RC audit clean. */
+static void scr_stream_dispatch_one(void) {
+  ScrStreamTick *t = scr_st_head;
+  if (t == NULL || scr_exc_pending()) return;
+  scr_st_head = t->next;
+  if (scr_st_head == NULL) scr_st_tail = NULL;
+  scr_stream_run_tick(t);
+  scr_stream_release(t->s);
+  if (t->err) scr_error_release(t->err);
+  if (t->cb) scr_closure_release(t->cb);
+  free(t);
+  if (scr_exc_pending()) scr_stream_dispatch(); /* its exc branch drops the rest */
 }
 
 static void scr_stream_dispatch(void) {

@@ -591,7 +591,11 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
   const table = emitterEvents(L);
 
   if (REGISTER_MEMBERS.has(member) || member === "off" || member === "removeListener") {
-    if (args.length !== 2) {
+    // Node's (type, listener) signature IGNORES extra arguments — admit
+    // pure-read extras (literals/identifiers: nothing to evaluate) and
+    // drop them; anything with effects keeps the fence.
+    const extrasPure = args.slice(2).every((a) => ts.isIdentifier(a) || ts.isLiteralExpression(a));
+    if (args.length < 2 || !extrasPure) {
       L.noLowering(`${member} with ${args.length} arguments`, call, "the supported form is (eventName, listener)");
     }
     const name = eventNameOf(L, member, args[0]!);

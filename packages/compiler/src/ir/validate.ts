@@ -863,6 +863,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "readable.read": { argTypes: [null, F64], result: VOID },
   "readable.pause": { argTypes: [null], result: VOID },
   "readable.setEncoding": { argTypes: [null, STRING], result: VOID },
+  "readable.pushStrEnc": { argTypes: [null, STRING, STRING], result: BOOL },
+  "readable.pushEncoding": { argTypes: [null, STRING], result: VOID },
   "readable.nextChunk": { argTypes: [null], result: VOID },
   "readable.nextChunkDyn": { argTypes: [null], result: VOID },
   "readable.fromArr": { argTypes: [null, BOOL], result: VOID },
@@ -2099,6 +2101,8 @@ function validateFunction(
           includesNum: { argTypes: [F64, F64], minArgs: 1, result: BOOL },
           fill: { argTypes: [BYTES_U8, F64, F64], minArgs: 1, result: BYTES_U8 },
           fillNum: { argTypes: [F64, F64, F64], minArgs: 1, result: BYTES_U8 },
+          // Per-element TypedArray fill (any elem — the non-u8 fill path).
+          fillElem: { argTypes: [F64, F64, F64], minArgs: 1, result: bytesOf(recv.elem) },
           fillStr: { argTypes: [STRING, STRING, F64, F64], minArgs: 2, result: BYTES_U8 },
           copy: { argTypes: [BYTES_U8, F64, F64, F64], minArgs: 1, result: F64 },
           swap16: { argTypes: [], minArgs: 0, result: BYTES_U8 },
@@ -2114,7 +2118,7 @@ function validateFunction(
             ? { argTypes: [], minArgs: 0, result: F64 }
             : e.method === "get"
               ? { argTypes: [F64], minArgs: 1, result: F64 }
-              : e.method === "slice"
+              : e.method === "slice" || e.method === "subarray"
                 ? { argTypes: [F64, F64], minArgs: 0, result: bytesOf(recv.elem) }
                 : e.method === "setFrom"
                   ? { argTypes: [bytesOf(recv.elem), F64], minArgs: 1, result: VOID }
@@ -4095,7 +4099,7 @@ function validateFunction(
           }
           if (e.fn === "readable.pause" || e.fn === "readable.resume" ||
               e.fn === "readable.unpipe" || e.fn === "writable.end" ||
-              e.fn === "readable.setEncoding" ||
+              e.fn === "readable.setEncoding" || e.fn === "readable.pushEncoding" ||
               e.fn === "stream.destroy" || e.fn === "stream.destroyErr") {
             if (!typeEquals(e.type, e.args[0]!.type)) {
               err(`libCall ${e.fn} must return its receiver's type (the chaining 'this')`, e.loc);

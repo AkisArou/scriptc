@@ -1343,8 +1343,11 @@ export type IrStrIntrinsicMethod =
  * arrayGet — the write side is the bytesSet STATEMENT); `slice` takes
  * 0–2 f64 relative indices (omitted args are OMITTED from `args`, like
  * strIntrinsic — backends fill start 0 / end +Infinity) → a fresh
- * same-elem bytes COPY (`subarray` lowers here too: copying is the
- * documented divergence); `setFrom` (`dst.set(src, offset?)`) takes a
+ * same-elem bytes COPY; `subarray` takes the same 0–2 f64 relative
+ * indices → a same-elem VIEW aliasing the receiver's storage (JS's
+ * TypedArray.prototype.subarray; Buffer's slice(), subarray's deprecated
+ * Node alias, lowers here too — only plain typed arrays' slice copies);
+ * `setFrom` (`dst.set(src, offset?)`) takes a
  * same-elem bytes src and an optional f64 offset (omitted = 0) → void,
  * THROWS Node's RangeError on overflow (may-throw seed); `toString` takes
  * one string encoding arg (the frontend completes an omitted one to
@@ -1386,6 +1389,7 @@ export type IrBytesIntrinsicMethod =
   | "byteLength"
   | "get"
   | "slice"
+  | "subarray"
   | "setFrom"
   | "toString"
   | "readNum"
@@ -1417,6 +1421,13 @@ export type IrBytesIntrinsicMethod =
   | "fill"
   | "fillNum"
   | "fillStr"
+  /** TypedArray.prototype.fill on NON-u8 receivers: [f64 value, 0-2 f64
+   * relative indices] → the RECEIVER (+1, chaining); the value coerces
+   * per element kind (the scr_bytes_set discipline), indices clamp like
+   * slice, never throws. u8 receivers keep the Buffer fill family above
+   * (same observable number-fill result; Buffer's throwing offset
+   * validation). */
+  | "fillElem"
   | "copy"
   | "swap16"
   | "swap32"
@@ -3203,6 +3214,11 @@ export type IrLibFn =
   | "readable.pause"
   | "readable.resume"
   | "readable.setEncoding"
+  /** push(chunk, enc) with a literal non-utf8 encoding, and the
+   * defaultEncoding option's push side (how push(string) decodes —
+   * Buffer.from(chunk, enc)); both carry the CANONICAL literal. */
+  | "readable.pushStrEnc"
+  | "readable.pushEncoding"
   /** for-await over a readable (the desugared loop's per-pass promise):
    * +1 promise of the next chunk — buffered content, the EOF sentinel
    * (empty Buffer / dyn undefined), or a rejection with the stream's
@@ -6326,6 +6342,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "passthrough.initDyn",
   "readable.push",
   "readable.pushStr",
+  "readable.pushStrEnc",
   "readable.pushNull",
   "readable.pushU",
   "readable.pushDyn",

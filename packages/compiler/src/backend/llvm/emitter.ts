@@ -528,6 +528,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   // generic pending check; loop liveness rides USES_TIMERS_LIB_FNS.
   "readable.push": "scr_stream_push",
   "readable.pushStr": "scr_stream_push_str",
+  "readable.pushStrEnc": "scr_stream_push_str_enc",
+  "readable.pushEncoding": "scr_stream_set_push_encoding",
   "readable.pushNull": "scr_stream_push_null",
   "readable.pushDyn": "scr_stream_push_dyn",
   "readable.unshift": "scr_stream_unshift",
@@ -731,7 +733,8 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "readable.init", "writable.init", "duplex.init", "transform.init", "passthrough.init",
   "readable.newDyn", "writable.newDyn", "duplex.newDyn", "transform.newDyn", "passthrough.newDyn",
   "readable.initDyn", "writable.initDyn", "duplex.initDyn", "transform.initDyn", "passthrough.initDyn",
-  "readable.push", "readable.pushStr", "readable.pushNull", "readable.pushU", "readable.pushDyn",
+  "readable.push", "readable.pushStr", "readable.pushStrEnc", "readable.pushEncoding",
+  "readable.pushNull", "readable.pushU", "readable.pushDyn",
   "readable.unshift", "readable.unshiftStr", "readable.read", "readable.setEncoding",
   "readable.nextChunk", "readable.nextChunkDyn", "readable.fromArr", "readable.resume",
   "readable.pipe", "readable.unpipe",
@@ -8944,6 +8947,16 @@ class LlEmitter {
           true,
           false,
         );
+      case "subarray":
+        // A +1 VIEW aliasing the receiver's storage (subarray / Buffer's
+        // slice); same index defaults as slice.
+        return call(
+          "scr_bytes_subarray",
+          "ptr (ptr, double, double)",
+          `ptr ${r.name}, double ${args[0]?.name ?? f64Lit(0)}, double ${args[1]?.name ?? F64_INF}`,
+          true,
+          false,
+        );
       case "setFrom":
         // dst.set(src, offset?) — void; throws Node's RangeError on
         // overflow.
@@ -9031,6 +9044,16 @@ class LlEmitter {
         B.line(`${t} = fcmp one double ${idx.name}, ${f64Lit(-1)}`);
         return { name: t, type: e.type };
       }
+      case "fillElem":
+        // Per-element TypedArray fill (non-u8): slice-style index
+        // defaults, never throws; the receiver comes back +1.
+        return call(
+          "scr_bytes_fill_elem",
+          "ptr (ptr, double, double, double)",
+          `ptr ${r.name}, double ${args[0]!.name}, double ${args[1]?.name ?? f64Lit(0)}, double ${args[2]?.name ?? F64_INF}`,
+          true,
+          false,
+        );
       case "fill":
       case "fillNum": {
         const sym = method === "fill" ? "scr_bytes_fill" : "scr_bytes_fill_num";
