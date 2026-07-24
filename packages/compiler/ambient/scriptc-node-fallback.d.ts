@@ -814,14 +814,17 @@ declare var performance: import("node:perf_hooks").Performance;
  * Dynamic specifiers fence: a compiled binary's module graph is fixed at
  * build time. builtinModules is the baked Node v24 list (a fresh
  * mutable array per read where Node ships one frozen singleton);
- * isBuiltin and syncBuiltinESMExports fence per site. Bare "module"
- * stays a package specifier (an npm package by that name exists); only
- * the node: spelling names the builtin. */
+ * isBuiltin and syncBuiltinESMExports fence per site. Both spellings
+ * name the builtin, like in Node (the builtin wins over the npm package
+ * named "module" for the bare specifier there too). */
 declare module "node:module" {
   export function createRequire(filename: string | URL): (id: string) => unknown;
   export const builtinModules: string[];
   export function isBuiltin(moduleName: string): boolean;
   export function syncBuiltinESMExports(): void;
+}
+declare module "module" {
+  export * from "node:module";
 }
 /* import.meta: module-loader metadata with no value representation —
  * every read fences (SC1090) EXCEPT as createRequire's base, where it

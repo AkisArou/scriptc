@@ -18,7 +18,7 @@
       "name": "package imports",
       "status": "unsupported",
       "code": "SC1010",
-      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and node:test and node:module modules (bare or node:-prefixed) are supported"
+      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, and module modules (bare or node:-prefixed) and node:test (node:-prefixed only, like in Node) are supported"
     },
     {
       "id": "diagnostic.sc1012",
@@ -825,9 +825,9 @@
     {
       "id": "node-builtin.module",
       "kind": "node-builtin",
-      "name": "node:module",
+      "name": "module",
       "status": "static",
-      "note": "recognized module (node:-prefixed specifier only, matching Node)"
+      "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
       "id": "node-builtin.module.createRequire",
