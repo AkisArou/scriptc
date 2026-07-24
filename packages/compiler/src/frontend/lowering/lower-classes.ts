@@ -686,6 +686,31 @@ export function collectClassShape(L: Lowerer, decl: ts.ClassDeclaration): void {
         }
       }
     }
+    // A poisoned BASE this class EXTENDS must report EAGERLY for the same
+    // reason: the derived statement evaluates its heritage when module
+    // init reaches it (these are top-level declarations), and the base's
+    // fence is the COMPILER's, not Node's — Node defines the base fine and
+    // runs on — so a deferred trap there is a manufactured divergence, not
+    // the Node-parity deferral is licensed by (classFieldSuperAccessibleJs2:
+    // the binary refused at `class D extends C` where Node prints five
+    // lines). Leaf poisoned classes stay deferred — only the extends edge
+    // reports. Resolution runs under the collect pass's guard (this is
+    // collectProgram), so the lookup neither flushes nor fences.
+    {
+      const baseIdent = decl.heritageClauses
+        ?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword)
+        ?.types.map((t) => t.expression)
+        .filter(ts.isIdentifier)[0];
+      const baseSym = baseIdent ? L.resolveValueSymbol(baseIdent) : null;
+      const baseDiags = baseSym ? L.deferredDiags.get(baseSym) : undefined;
+      if (baseSym && baseDiags) {
+        L.deferredDiags.delete(baseSym);
+        if (!L.alreadyFlushed.has(baseSym)) {
+          L.flushedSymbols.add(baseSym);
+          for (const d of baseDiags) L.pushDiag(d);
+        }
+      }
+    }
   }
 
 export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration, jsNameOverride?: string,

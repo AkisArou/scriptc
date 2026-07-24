@@ -5180,6 +5180,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2635-trap-binding-unmappable-written.ts": {
+   "order": [
+    "<repo>/tests/corpus/2635-trap-binding-unmappable-written.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2636-trap-binding-ambient-rooted-rewrite.ts": {
+   "order": [
+    "<repo>/tests/corpus/2636-trap-binding-ambient-rooted-rewrite.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6739,6 +6751,12 @@
   "<repo>/tests/diagnostics/island.ts": {
    "order": [
     "<repo>/tests/diagnostics/island.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/js-extends-poisoned-base.js": {
+   "order": [
+    "<repo>/tests/diagnostics/js-extends-poisoned-base.js"
    ],
    "diags": []
   },
