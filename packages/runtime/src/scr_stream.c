@@ -683,7 +683,9 @@ static void *scr_stream_read_n(ScrStream *s, double size) {
       st->r.hwm = h;
     }
   }
-  if (!absent && n != 0) st->r.emitted_readable = false;
+  /* Node's read(): `if (n !== 0) state.emittedReadable = false` — the
+   * absent form is NaN there, which also clears; only read(0) keeps it. */
+  if (absent || n != 0) st->r.emitted_readable = false;
   if (!absent && n == 0 && st->r.need_readable &&
       (st->r.length >= st->r.hwm || st->r.ended)) {
     if (st->r.length == 0 && st->r.ended) scr_stream_end_readable(s);
@@ -2664,10 +2666,12 @@ double scr_stream_prop(ScrStream *s, const char *name) {
  * arrives outside a _read call). */
 static void scr_stream_emit_readable_now(ScrStream *s) {
   ScrStreamState *st = s->st;
-  st->r.emitted_readable = false;
+  /* Node's emitReadable_ clears emittedReadable AFTER the emit (a
+   * 'readable' listener observes true) and only when it really fired. */
   if (!st->destroyed && !st->errored && (st->r.length > 0 || st->r.ended)) {
     scr_stream_emit0(s, "readable");
     if (scr_exc_pending()) return;
+    st->r.emitted_readable = false;
   }
   st->r.need_readable = st->r.flowing != 1 && !st->r.ended &&
                         st->r.length <= st->r.hwm;
