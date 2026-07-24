@@ -473,9 +473,17 @@ void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what) {
     return;
   }
   if (src->kind == SCR_DYN_JSVAL) {
-    /* An engine array IS iterable — the generic not-iterable TypeError
-     * would be a wrong claim. Loud fence (lane dyn-routing-ops). */
-    scr_dyn_isl_fence(src, "spread");
+    /* A wrapped engine value spreads through the ENGINE's own iterator
+     * protocol (the routed iter_drain — Symbol.iterator implementations,
+     * generators, Maps step exactly as Node runs them); a non-iterable
+     * throws V8's spread-call text from the guard, an iterating throw
+     * bridges with the engine's message. */
+    ScrDyn *pack = scr_dyn_jsval_ops()->iter_drain(src->v.jsval.cell, true, NULL);
+    if (!pack) return; /* pending */
+    for (size_t i = 0; i < pack->v.arr.len; i++) {
+      scr_dyn_arr_push(arr, scr_dyn_retain(pack->v.arr.items[i]));
+    }
+    scr_dyn_release(pack);
     return;
   }
   static const char msg[] = "Spread syntax requires ...iterable[Symbol.iterator] to be a function";
@@ -499,12 +507,14 @@ ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
     scr_dyn_arr_push_spread(out, src, ""); /* iterable kinds never consult `what` */
     return out;
   }
-  /* An engine-held value may well BE iterable — claiming "not iterable"
-   * would be a wrong answer. The routing lane owns iteration; until it
-   * arms this, the island fence names the operation loudly. */
+  /* A wrapped engine value packs through the ENGINE's own iterator
+   * protocol (the routed iter_drain): elements wrap back scalar-
+   * normalized; a non-iterable throws the destructuring kind wording
+   * from the engine-side guard, an iterating throw bridges with the
+   * engine's message. The compile-time spelling is not threaded through
+   * (the engine's wording names the value's own kind). */
   if (src->kind == SCR_DYN_JSVAL) {
-    scr_dyn_isl_fence(src, "destructuring");
-    return NULL;
+    return scr_dyn_jsval_ops()->iter_drain(src->v.jsval.cell, false, msg);
   }
   if (msg != NULL && msg->len > 0) {
     scr_throw_error(SCR_ERR_TYPE, scr_str_new(msg->data, msg->len));
@@ -529,6 +539,19 @@ ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
   scr_jb_puts(&b, " is not iterable (cannot read property Symbol(Symbol.iterator))");
   scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
   return NULL;
+}
+
+/* The for-of-over-dyn pack accessors: the emitted index loop drives them
+ * over a scr_dyn_iter_pack result (ARR by construction — the defensive
+ * arms cover nothing reachable from that lowering). Never throw. */
+double scr_dyn_arr_len(const ScrDyn *d) {
+  return d->kind == SCR_DYN_ARR ? (double)d->v.arr.len : 0;
+}
+ScrDyn *scr_dyn_arr_at(const ScrDyn *d, double i) {
+  if (d->kind != SCR_DYN_ARR || i < 0 || i >= (double)d->v.arr.len) {
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  return scr_dyn_retain(d->v.arr.items[(size_t)i]);
 }
 
 /* Takes ownership of key (malloc'd) and value. Duplicate keys: the LATER
@@ -2719,6 +2742,18 @@ void scr_dyn_pack_push_spread_iter(ScrDyn *pack, const ScrDyn *src) {
   if (src->kind == SCR_DYN_ARR || src->kind == SCR_DYN_BYTES ||
       src->kind == SCR_DYN_STR) {
     scr_dyn_arr_push_spread(pack, src, ""); /* iterable kinds never throw */
+    return;
+  }
+  if (src->kind == SCR_DYN_JSVAL) {
+    /* A wrapped engine value on the ITERATED path: the engine's own
+     * protocol drains (the kind wording on a non-iterable — the
+     * iterated path's value-describing texts, engine-side). */
+    ScrDyn *drained = scr_dyn_jsval_ops()->iter_drain(src->v.jsval.cell, false, NULL);
+    if (!drained) return; /* pending */
+    for (size_t i = 0; i < drained->v.arr.len; i++) {
+      scr_dyn_arr_push(pack, scr_dyn_retain(drained->v.arr.items[i]));
+    }
+    scr_dyn_release(drained);
     return;
   }
   ScrJsonBuf b;

@@ -473,6 +473,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "json.parse": "scr_json_parse",
   "dyn.keySet": "scr_dyn_key_set",
   "dyn.iterPack": "scr_dyn_iter_pack",
+  "dyn.arrLen": "scr_dyn_arr_len",
+  "dyn.arrAt": "scr_dyn_arr_at",
   "dyn.defineProps": "scr_dyn_define_props",
   "dyn.typeof": "scr_dyn_typeof",
   "dyn.toString": "scr_dyn_to_string_method",
@@ -6604,6 +6606,17 @@ class LlEmitter {
         this.emitPendingCheck();
         return out;
       }
+      case "array": {
+        // `any[]`-declared slot: Array.isArray-gated, elements BY
+        // REFERENCE (identity crosses; the spine is a snapshot copy).
+        // The frontend only emits jsval-element targets.
+        this.declare(`declare ptr @scr_jsval_exit_jsval_arr(ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_jsval_exit_jsval_arr(ptr ${v.name})`);
+        const out = this.own({ name: t, type: e.type });
+        this.emitPendingCheck();
+        return out;
+      }
       default: {
         // An undefined-armed union target: the engine's undefined takes
         // the undefined arm FIRST (JSON cannot spell it); then null and
@@ -6641,11 +6654,30 @@ class LlEmitter {
           B.br(lj);
           B.startBlock(ld);
           this.frames.push([]);
-          const t = roundTrip();
-          this.own({ name: t, type: e.type });
-          this.emitPendingCheck();
-          this.moveTemp({ name: t, type: e.type });
-          B.line(`store ptr ${t}, ptr ${slot}`);
+          const unionDef = this.unionsById.get(e.type.unionId);
+          const dataArms = unionDef ? unionDef.arms.flatMap((a, i) => (isUnitType(a) ? [] : [{ a, i }])) : [];
+          const jsvalArr = dataArms.length === 1 && dataArms[0]!.a.kind === "array" && dataArms[0]!.a.elem.kind === "jsval" ? dataArms[0]! : null;
+          let t: string;
+          if (jsvalArr) {
+            // The `any[] | undefined` defaulted-parameter spelling: the
+            // engine array exits BY REFERENCE into the data arm.
+            this.declare(`declare ptr @scr_jsval_exit_jsval_arr(ptr)`);
+            this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
+            this.declare(`declare ptr @scr_arr_retain_v(ptr)`);
+            this.declare(`declare void @scr_arr_release_v(ptr)`);
+            const arr = B.tmp();
+            B.line(`${arr} = call ptr @scr_jsval_exit_jsval_arr(ptr ${v.name})`);
+            this.emitPendingCheck();
+            t = B.tmp();
+            B.line(`${t} = call ptr @scr_union_new_ref(i32 ${jsvalArr.i}, ptr ${arr}, ptr @scr_arr_retain_v, ptr @scr_arr_release_v, ptr null)`);
+            B.line(`store ptr ${t}, ptr ${slot}`);
+          } else {
+            t = roundTrip();
+            this.own({ name: t, type: e.type });
+            this.emitPendingCheck();
+            this.moveTemp({ name: t, type: e.type });
+            B.line(`store ptr ${t}, ptr ${slot}`);
+          }
           this.releaseFrame(this.frames.pop()!);
           B.br(lj);
           B.startBlock(lj);

@@ -2819,6 +2819,13 @@ void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what);
  * compile-time source spelling), else the runtime kind wording. Borrows
  * both; NULL with the exception pending on the throw. */
 ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg);
+/* The for-of-over-dyn pack accessors (the emitted index loop drives them
+ * over a scr_dyn_iter_pack result, which is ARR by construction).
+ * scr_dyn_arr_len answers 0 for non-ARR kinds; scr_dyn_arr_at answers the
+ * undefined singleton past the end (both never throw). scr_dyn_arr_at is
+ * +1. */
+double scr_dyn_arr_len(const ScrDyn *d);
+ScrDyn *scr_dyn_arr_at(const ScrDyn *d, double i);
 void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value);
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets
  * the member (JS: later writes win, insertion order); undefined/null and
@@ -3061,6 +3068,15 @@ typedef struct ScrDynJsvalOps {
    * stringify (toJSON protocols, cycle TypeErrors). NULL + pending when
    * not JSON-representable. */
   ScrStr *(*to_json)(ScrJsval *cell);
+  /* Drain the ENGINE's own iterator protocol into a fresh DOM array
+   * (elements wrap back scalar-normalized) — the for-of/destructuring/
+   * spread arm over a wrapped value. The guard's TypeError wording on a
+   * non-iterable: spread true takes V8's spread-call text; otherwise the
+   * compile-time spelling `spell` verbatim when non-NULL (the named-
+   * source form), else the kind wording. An iterating getter/next throw
+   * bridges with the ENGINE's message. +1, or NULL with the exception
+   * pending. */
+  ScrDyn *(*iter_drain)(ScrJsval *cell, bool spread, const ScrStr *spell);
 } ScrDynJsvalOps;
 
 /* The allocator view the gated constructor uses (installs the ops);
@@ -4084,6 +4100,11 @@ ScrStr *scr_jsval_exit_str(ScrJsval *v);
 /* Uint8Array exit (engine Buffers pass — they ARE Uint8Arrays): a fresh
  * u8 COPY (+1), the boundary's aliasing stance; NULL = thrown. */
 ScrBytes *scr_jsval_exit_bytes(ScrJsval *v);
+/* `any[]`-declared slot exit (the jsval-element-array spelling):
+ * Array.isArray-gated, elements BY REFERENCE into a native array of
+ * engine cells (identity crosses, the spine is a snapshot copy). +1;
+ * NULL = thrown. */
+ScrArr *scr_jsval_exit_jsval_arr(ScrJsval *v);
 ScrStr *scr_jsval_to_json(ScrJsval *v);
 
 /* The import boundary (libCall island.import): loads an embedded module —

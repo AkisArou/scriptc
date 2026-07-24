@@ -2278,10 +2278,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // non-object receivers (may-throw seed set).
             return finish(`scr_dyn_key_set(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "dyn.iterPack":
-            // Destructuring pack over a dyn source: both borrowed, fresh
-            // array +1; throws V8's destructuring TypeError on
-            // non-iterable DOM kinds (may-throw seed set).
+            // Destructuring/for-of pack over a dyn source: both borrowed,
+            // fresh array +1; throws V8's not-iterable TypeError on
+            // non-iterable DOM kinds and drains wrapped engine values
+            // through the engine's protocol (may-throw seed set).
             return finish(`scr_dyn_iter_pack(${arg(0)}, ${arg(1)})`);
+          case "dyn.arrLen":
+            // The for-of pack's length (borrowed; never throws).
+            return finish(`scr_dyn_arr_len(${arg(0)})`);
+          case "dyn.arrAt":
+            // The for-of pack's element at index (+1; never throws — the
+            // undefined singleton past the end).
+            return finish(`scr_dyn_arr_at(${arg(0)}, ${arg(1)})`);
           case "dyn.typeof":
             // Bare typeof on a dyn value: the DOM kind's JS answer (+1).
             return finish(`scr_dyn_typeof(${arg(0)})`);
@@ -6324,11 +6332,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // Buffers pass (they ARE Uint8Arrays). The frontend only
             // emits u8 targets (canExitIslandToType).
             return E.fallibleTemp(e.type, `scr_jsval_exit_bytes(${v.name})`);
+          case "array":
+            // `any[]`-declared slot: the engine array exits Array.isArray-
+            // gated, elements BY REFERENCE (identity crosses; the spine is
+            // a snapshot copy). The frontend only emits jsval-element
+            // targets (canExitIslandToType).
+            return E.fallibleTemp(e.type, `scr_jsval_exit_jsval_arr(${v.name})`);
           default: {
             // An undefined-armed union target: the engine's undefined takes
             // the undefined arm FIRST — JSON cannot spell it (to_json would
             // refuse the exit) — then null and data ride the round trip
-            // into the union's dynCheck like any composite.
+            // into the union's dynCheck like any composite (or, for the
+            // `any[] | undefined` defaulted-parameter spelling, the
+            // jsval-element array exit wrapped into the data arm).
             const undefTag = e.type.kind === "union" ? E.undefinedArmTag(e.type) : -1;
             if (e.type.kind === "union" && undefTag >= 0) {
               const name = `sc_t${E.tempCounter++}`;
@@ -6340,11 +6356,22 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               E.line(`} else {`);
               E.indent++;
               E.frames.push([]);
-              const json = E.fallibleTemp(STRING, `scr_jsval_to_json(${v.name})`);
-              const dom = E.fallibleTemp(DYN, `scr_json_parse(${json.name})`);
-              const out = E.fallibleTemp(e.type, `${E.dynCheckHelper(e.type)}(${dom.name}, NULL)`);
-              E.moveTemp(out);
-              E.line(`${name} = ${out.name};`);
+              const unionDef = E.unionsById.get(e.type.unionId);
+              const dataArms = unionDef ? unionDef.arms.flatMap((a, i) => (isUnitType(a) ? [] : [{ a, i }])) : [];
+              const jsvalArr = dataArms.length === 1 && dataArms[0]!.a.kind === "array" && dataArms[0]!.a.elem.kind === "jsval" ? dataArms[0]! : null;
+              if (jsvalArr) {
+                // The `any[] | undefined` defaulted-parameter spelling:
+                // the engine array exits BY REFERENCE into the data arm.
+                const arr = E.fallibleTemp(jsvalArr.a, `scr_jsval_exit_jsval_arr(${v.name})`);
+                E.moveTemp(arr);
+                E.line(`${name} = scr_union_new_ref(${jsvalArr.i}, ${arr.name}, &scr_arr_retain_v, &scr_arr_release_v, NULL);`);
+              } else {
+                const json = E.fallibleTemp(STRING, `scr_jsval_to_json(${v.name})`);
+                const dom = E.fallibleTemp(DYN, `scr_json_parse(${json.name})`);
+                const out = E.fallibleTemp(e.type, `${E.dynCheckHelper(e.type)}(${dom.name}, NULL)`);
+                E.moveTemp(out);
+                E.line(`${name} = ${out.name};`);
+              }
               E.releaseFrame(E.frames.pop()!);
               E.indent--;
               E.line(`}`);

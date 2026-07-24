@@ -383,6 +383,7 @@ enum {
   ISL_H_OBJWALK,
   ISL_H_HASOWN,
   ISL_H_ASSIGN,
+  ISL_H_ITERDRAIN,
   ISL_H_COUNT,
 };
 
@@ -437,7 +438,22 @@ static const char isl_prelude[] =
      * semantics (own-key order, getters running, ToObject refusals). */
     "(o,m)=>m===0?Object.keys(o):m===1?Object.values(o):Object.entries(o),"
     "(o,k)=>Object.hasOwn(o,k),"
-    "(t,s)=>Object.assign(t,s)]";
+    "(t,s)=>Object.assign(t,s),"
+    /* ISL_H_ITERDRAIN: the ENGINE's own iterator protocol drained into a
+     * fresh array (for-of/destructuring/spread over a wrapped value —
+     * generators, Maps, Sets, Symbol.iterator implementations all step
+     * exactly as Node runs them). The guard front-runs the not-iterable
+     * TypeError in the CALLER's wording: m=1 is V8's spread-call text,
+     * s (when defined) the compile-time source spelling verbatim, else
+     * the kind wording (iterN's). */
+    "(v,m,s)=>{if(v===undefined||v===null||typeof v[Symbol.iterator]!==\"function\"){"
+    "if(m===1)throw new TypeError(\"Spread syntax requires ...iterable[Symbol.iterator] to be a function\");"
+    "if(s!==undefined)throw new TypeError(s);"
+    "let d;if(v===undefined)d=\"undefined\";else if(v===null)d=\"object null\";"
+    "else if(typeof v===\"number\")d=\"number \"+v;else if(typeof v===\"boolean\")d=\"boolean \"+v;"
+    "else if(typeof v===\"function\")d=\"function\";else d=\"object\";"
+    "throw new TypeError(d+\" is not iterable (cannot read property Symbol(Symbol.iterator))\")}"
+    "const o=[];for(const x of v)o.push(x);return o}]";
 
 static void isl_free_boot(void);
 static void isl_prom_wraps_teardown(void);
@@ -1309,6 +1325,36 @@ static bool isl_dynjs_assign(ScrJsval *cell, const ScrDyn *src) {
 
 static ScrStr *isl_dynjs_to_json(ScrJsval *cell) { return scr_jsval_to_json(cell); }
 
+static ScrDyn *isl_dynjs_iter_drain(ScrJsval *cell, bool spread, const ScrStr *spell) {
+  isl_entry();
+  JSValue m = JS_NewInt32(isl_ctx, spread ? 1 : 0);
+  JSValue s = spell && spell->len > 0
+    ? JS_NewStringLen(isl_ctx, spell->data, spell->len)
+    : JS_UNDEFINED;
+  JSValue argv[3] = {cell->v, m, s};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_ITERDRAIN], JS_UNDEFINED, 3, argv);
+  JS_FreeValue(isl_ctx, s);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  /* The drained engine array unpacks into a fresh DOM array — elements
+   * wrap back scalar-normalized (composites stay engine values by
+   * reference), exactly the obj_walk unpack. */
+  int64_t len = 0;
+  JSValue lv = JS_GetPropertyStr(isl_ctx, r, "length");
+  JS_ToInt64(isl_ctx, &len, lv);
+  JS_FreeValue(isl_ctx, lv);
+  ScrDyn *out = scr_dyn_new_arr();
+  for (int64_t i = 0; i < len; i++) {
+    JSValue e = JS_GetPropertyUint32(isl_ctx, r, (uint32_t)i);
+    scr_dyn_arr_push(out, isl_dyn_from_value(e));
+    JS_FreeValue(isl_ctx, e);
+  }
+  JS_FreeValue(isl_ctx, r);
+  return out;
+}
+
 static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_release,
   isl_dynjs_typeof,
@@ -1326,6 +1372,7 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_has_own,
   isl_dynjs_assign,
   isl_dynjs_to_json,
+  isl_dynjs_iter_drain,
 };
 
 ScrDyn *scr_dyn_from_jsval(ScrJsval *cell) {
@@ -9565,6 +9612,37 @@ ScrBytes *scr_jsval_exit_bytes(ScrJsval *v) {
   ScrBytes *b = scr_bytes_new(SCR_BYTES_U8, (double)n);
   if (n > 0) memcpy(b->data, data, n);
   return b;
+}
+
+/* Validated exit of an engine value into an `any[]`-declared slot (the
+ * jsval-element-array spelling — withPlugins' `loadPlugins(plugins)`
+ * boundary): the engine's Array.isArray gates (a non-array refuses with
+ * the catchable boundary TypeError), then elements copy BY REFERENCE
+ * into a native array of engine cells — identity preserved, length a
+ * snapshot (the exit's aliasing stance: element IDENTITY crosses, the
+ * spine is a copy). +1, or NULL with the exception pending. */
+ScrArr *scr_jsval_exit_jsval_arr(ScrJsval *v) {
+  isl_entry();
+  if (JS_IsArray(v->v) <= 0) {
+    isl_exit_fail("an array", v);
+    return NULL;
+  }
+  JSValue lv = JS_GetPropertyStr(isl_ctx, v->v, "length");
+  int64_t len = 0;
+  JS_ToInt64(isl_ctx, &len, lv);
+  JS_FreeValue(isl_ctx, lv);
+  ScrArr *out = scr_arr_new_ref(&scr_jsval_retain_v, &scr_jsval_release_v, NULL,
+                                len > 0 ? (size_t)len : 0);
+  for (int64_t i = 0; i < len; i++) {
+    JSValue e = JS_GetPropertyUint32(isl_ctx, v->v, (uint32_t)i); /* getters run */
+    if (JS_IsException(e)) {
+      isl_bridge_exception();
+      scr_arr_release(out);
+      return NULL;
+    }
+    scr_arr_push_ref(out, isl_cell_new(e)); /* ownership moves in */
+  }
+  return out;
 }
 
 /* Composite exit: engine JSON.stringify, feeding the existing

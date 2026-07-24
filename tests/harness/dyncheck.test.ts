@@ -880,25 +880,37 @@ console.log("unreachable");
     );
   });
 
-  test("destructuring an island-held unknown keeps the loud dyn-source fence (never 'not iterable')", async () => {
-    // The JS lane's destructuring-over-dyn compile fence runs as the
-    // statement's runtime fence BEFORE the source's world is knowable —
-    // the loud path today; the dynIterN runtime arm behind it fences
-    // island values by name if a future lowering reaches it.
+  test("destructuring and for-of over an island-held unknown drain the engine's own iterator", async () => {
+    // The iteration arm (lane dom-jsval-long-tail): dyn.iterPack's JSVAL
+    // arm drains the ENGINE's iterator protocol — the wrapped engine
+    // array destructures and iterates with Node's answers, and a
+    // non-iterable engine value throws V8's for-of spelling instead of
+    // the retired island fence.
     const r = await compileAndRun(
       "jsval-iterate",
       `/** @returns {any} */
-function mint() { return [10, 20]; }
+function mint() { return { list: [10, 20], num: 7 }; }
 const eng = mint();
-/** @param {object} list */
-function firstOf(list) { const [first] = list; return first; }
-firstOf(eng);
+/** @param {object} bag */
+function walk(bag) {
+  const [first] = bag.list;
+  console.log(\`first \${first}\`);
+  let sum = 0;
+  for (const x of bag.list) sum += x;
+  console.log(\`sum \${sum}\`);
+  try {
+    for (const x of bag.num) console.log(x);
+  } catch (err) {
+    console.log(\`caught: \${err.message}\`);
+  }
+}
+walk(eng);
 `,
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("destructuring on an island value held in 'unknown' is not supported yet");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("first 10\nsum 30\ncaught: bag.num is not iterable\n");
   });
 
   test("a keyed write through an island-held unknown lands on the real engine object", async () => {

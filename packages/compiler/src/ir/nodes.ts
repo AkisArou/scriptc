@@ -1578,6 +1578,13 @@ export type IrLibFn =
    * not iterable (cannot read property Symbol(Symbol.iterator))"). In the
    * may-throw seed set. */
   | "dyn.iterPack"
+  /** The for-of-over-dyn pack accessors — the emitted index loop drives
+   * them over a dyn.iterPack result (ARR by construction). arrLen: the
+   * ARR length as f64 (0 for non-ARR kinds; arg borrowed). arrAt: the
+   * element at index (+1; the undefined singleton past the end). Neither
+   * throws. */
+  | "dyn.arrLen"
+  | "dyn.arrAt"
   /** Object.defineProperties over DOM values (args: target, descriptors —
    * both borrowed dyn; result: the target, +1 — JS's return value).
    * Value descriptors become plain own properties on OBJ and FUNC targets
@@ -5259,13 +5266,19 @@ export function canExitIslandToType(
   // Uint8Array exits with a validated kind check + copy (engine Buffers
   // pass — they ARE Uint8Arrays); other element widths stay out.
   if (t.kind === "bytes" && t.elem === "u8") return true;
+  // `any[]`-declared slots (the jsval-element-array spelling): the engine
+  // array exits Array.isArray-gated, elements BY REFERENCE (identity
+  // crosses; the withPlugins `loadPlugins(plugins)` boundary).
+  if (t.kind === "array" && t.elem.kind === "jsval") return true;
   if (t.kind === "union") {
     const def = getUnion(t.unionId);
-    return (
-      !!def &&
-      def.arms.some((a) => a.kind === "undefinedT") &&
-      def.arms.every((a) => isUnitType(a) || isJsonSafeType(a, getRecord, getUnion))
-    );
+    if (!def || !def.arms.some((a) => a.kind === "undefinedT")) return false;
+    if (def.arms.every((a) => isUnitType(a) || isJsonSafeType(a, getRecord, getUnion))) return true;
+    // `any[] | undefined` (the defaulted-parameter spelling): exactly one
+    // jsval-element-array data arm beside units — the engine's undefined
+    // takes the undefined arm, everything else the array exit.
+    const dataArms = def.arms.filter((a) => !isUnitType(a));
+    return dataArms.length === 1 && dataArms[0]!.kind === "array" && dataArms[0]!.elem.kind === "jsval";
   }
   return false;
 }

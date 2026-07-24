@@ -92,6 +92,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "json.parse": { argTypes: [STRING], result: DYN },
   "dyn.keySet": { argTypes: [DYN, STRING, DYN], result: VOID },
   "dyn.iterPack": { argTypes: [DYN, STRING], result: DYN },
+  "dyn.arrLen": { argTypes: [DYN], result: F64 },
+  "dyn.arrAt": { argTypes: [DYN, F64], result: DYN },
   "dyn.toString": { argTypes: [DYN, STRING, STRING], result: STRING },
   "dyn.defineProps": { argTypes: [DYN, DYN], result: DYN },
   "dyn.typeof": { argTypes: [DYN], result: STRING },

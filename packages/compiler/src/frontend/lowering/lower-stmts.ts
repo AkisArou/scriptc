@@ -5718,16 +5718,12 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       if (iterable.type.kind === "jsval") {
         return lowerForOfIsland(L, stmt, iterable, labels);
       }
-      // A CHECKED-DYNAMIC iterable (`unknown[]` and the collapsed
-      // `(string | object)[]` are DOM values now, so the TYPE maps —
-      // badType would tell a stale component story): the OPERATION is
-      // the gap — name it, with the validated-cast escape hatch.
+      // A CHECKED-DYNAMIC iterable (`unknown[]`, the collapsed
+      // `(string | object)[]`, JSON-parsed values, wrapped engine
+      // values): the source packs ONCE through the spread walk and a
+      // hidden index loop binds each element as a dyn value.
       if (iterable.type.kind === "dyn") {
-        L.unsupported(
-          "SC1090",
-          stmt.expression,
-          "for-of over checked-dynamic ('unknown') values (validate into a typed array first — `u as string[]` — or index with a counted loop: length and element reads compile)",
-        );
+        return lowerForOfDyn(L, stmt, iterable, labels);
       }
       if (iterable.type.kind !== "array") {
         L.badType(stmt.expression, L.typeOf(stmt.expression));
@@ -6115,6 +6111,161 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
    * (break/return out of a partial iteration calling it.return()) is NOT
    * run — a divergence only a custom island iterator with a return()
    * method can observe. */
+  /** For-of over a CHECKED-DYNAMIC iterable: the source packs ONCE
+   * through the spread walk (dyn.iterPack — DOM arrays element-by-
+   * element, strings by code point, bytes by byte; a WRAPPED engine
+   * value drains through the ENGINE's own iterator protocol via the
+   * iter_drain arm; every other kind throws V8's not-iterable
+   * TypeError, the identifier spelling when the head has one), then a
+   * hidden index loop binds each element as a dyn value. The pack is an
+   * eager SNAPSHOT (the matchAll stance): body mutations of a DOM-array
+   * source don't extend the iteration where JS's live array iterator
+   * would — documented divergence; engine sources drain through their
+   * own protocol, so generators/Maps/Sets step exactly once like Node. */
+  function lowerForOfDyn(L: Lowerer, stmt: ts.ForOfStatement, iterable: IrExpr, labels?: string[]): IrStmt {
+    const loc = locOf(stmt);
+    const head = stmt.expression;
+    // V8's for-of CallPrinter spellings: named sources (identifiers and
+    // plain property chains) read "<src> is not iterable", call heads
+    // with a nameable callee "<callee> is not a function or its return
+    // value is not iterable"; everything else keeps the runtime kind
+    // wording. The runtime uses the spelling VERBATIM when non-empty.
+    const headText = (e: ts.Expression): string | null => {
+      if (ts.isIdentifier(e)) return e.text;
+      if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && ts.isIdentifier(e.name)) {
+        const base = headText(e.expression);
+        return base !== null ? `${base}.${e.name.text}` : null;
+      }
+      return null;
+    };
+    const headName = headText(head);
+    const calleeName = ts.isCallExpression(head) ? headText(head.expression) : null;
+    const spell =
+      headName !== null
+        ? `${headName} is not iterable`
+        : calleeName !== null
+          ? `${calleeName} is not a function or its return value is not iterable`
+          : "";
+    const pack = L.declareHiddenLocal("%dofpack", DYN);
+    const idx = L.declareHiddenLocal("%dofi", F64);
+    idx.mutable = true;
+    const packRef = (): IrExpr => ({ kind: "varRef", localId: pack.id, type: DYN, loc });
+    const iRef = (): IrExpr => ({ kind: "varRef", localId: idx.id, type: F64, loc });
+    const elemInit = (): IrExpr => ({ kind: "libCall", fn: "dyn.arrAt", args: [packRef(), iRef()], type: DYN, loc });
+    L.scopes.push(new Map());
+    try {
+      const binds: IrStmt[] = [];
+      if (!ts.isVariableDeclarationList(stmt.initializer)) {
+        // Pre-declared heads: identifier targets assign the existing
+        // binding once per pass (JS's shared-binding rule); literal
+        // patterns run the destructuring-assignment machinery over the
+        // dyn element; member targets keep the fence.
+        let target: ts.Node = stmt.initializer;
+        while (ts.isParenthesizedExpression(target)) target = target.expression;
+        const tmp = L.declareHiddenLocal("%vof", DYN);
+        binds.push({ kind: "varDecl", localId: tmp.id, init: elemInit(), loc });
+        const elemRef: IrExpr = { kind: "varRef", localId: tmp.id, type: DYN, loc };
+        if (ts.isArrayLiteralExpression(target) || ts.isObjectLiteralExpression(target)) {
+          binds.push(lowerDestructuringAssign(L, target, elemRef, target, loc));
+        } else if (ts.isIdentifier(target) && L.resolveWritable(target)) {
+          const writable = L.resolveWritable(target)!;
+          binds.push({
+            kind: "assign",
+            localId: writable.id,
+            value: L.coerceInto(target, elemRef, writable.type),
+            loc,
+          });
+        } else {
+          L.unsupported(
+            "SC1090",
+            stmt.initializer,
+            "for-of over a pre-declared variable (declare the loop variable in the loop: for (const x of ...))",
+          );
+        }
+      } else {
+        const list = stmt.initializer;
+        if ((list.flags & ts.NodeFlags.Using) !== 0) {
+          L.unsupported("SC1090", list, "'using' declarations (dispose-at-scope-exit semantics)");
+        }
+        const isLet = (list.flags & ts.NodeFlags.Let) !== 0 || (list.flags & ts.NodeFlags.BlockScoped) === 0;
+        const decl = list.declarations[0]!;
+        if (ts.isArrayBindingPattern(decl.name) || ts.isObjectBindingPattern(decl.name)) {
+          const tmp = L.declareHiddenLocal("%destr", DYN);
+          binds.push({ kind: "varDecl", localId: tmp.id, init: elemInit(), loc });
+          L.lowerBindingPattern(
+            decl.name,
+            () => ({ kind: "varRef", localId: tmp.id, type: DYN, loc }),
+            DYN,
+            isLet,
+            binds,
+          );
+        } else if (ts.isIdentifier(decl.name)) {
+          const varTarget = forOfVarTarget(L, decl);
+          if (varTarget) {
+            // `for (var x of d)`: the element mechanics stay on a hidden
+            // per-iteration local; the body opens by assigning the ONE
+            // hoisted var binding (the array head's rule).
+            const tmp = L.declareHiddenLocal("%vof", DYN);
+            binds.push({ kind: "varDecl", localId: tmp.id, init: elemInit(), loc });
+            binds.push({
+              kind: "assign",
+              localId: varTarget.id,
+              value: L.coerceInto(decl.name, { kind: "varRef", localId: tmp.id, type: DYN, loc }, varTarget.type),
+              loc,
+            });
+          } else {
+            const local = L.declareLocal(decl.name, decl.name.text, DYN, isLet);
+            binds.push({ kind: "varDecl", localId: local.id, init: elemInit(), loc });
+          }
+        } else {
+          L.unsupported("SC1031", decl.name);
+        }
+      }
+      const body = L.inCtl("loop", () => L.lowerScopedBlock(stmt.statement), labels);
+      return {
+        kind: "block",
+        body: [
+          {
+            kind: "varDecl",
+            localId: pack.id,
+            init: {
+              kind: "libCall",
+              fn: "dyn.iterPack",
+              args: [iterable, { kind: "strLit", value: spell, type: STRING, loc }],
+              type: DYN,
+              loc,
+            },
+            loc,
+          },
+          {
+            kind: "for",
+            init: { kind: "varDecl", localId: idx.id, init: { kind: "numLit", value: 0, type: F64, loc }, loc },
+            cond: {
+              kind: "bin",
+              op: "<",
+              left: iRef(),
+              right: { kind: "libCall", fn: "dyn.arrLen", args: [packRef()], type: F64, loc },
+              type: BOOL,
+              loc,
+            },
+            update: {
+              kind: "assign",
+              localId: idx.id,
+              value: { kind: "bin", op: "+", left: iRef(), right: { kind: "numLit", value: 1, type: F64, loc }, type: F64, loc },
+              loc,
+            },
+            body: [...binds, ...body],
+            ...(labels && { labels }),
+            loc,
+          },
+        ],
+        loc,
+      };
+    } finally {
+      L.scopes.pop();
+    }
+  }
+
   function lowerForOfIsland(L: Lowerer, stmt: ts.ForOfStatement, iterable: IrExpr, labels?: string[]): IrStmt {
     const loc = locOf(stmt);
     if (!ts.isVariableDeclarationList(stmt.initializer)) {
