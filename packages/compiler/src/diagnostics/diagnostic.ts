@@ -29,9 +29,16 @@
  *            LIB_RUNTIME_TRAP_CODES below), and npm packages a library
  *            graph imports that fail the npm-static eligibility bar
  *            (SC4020 — static-or-refuse; eligible packages compile
- *            statically instead), and the ask-5 determinism fence
+ *            statically instead), the ask-5 determinism fence
  *            denial (SC4008 — a profile-fenced manifest surface reached
- *            by the compiled library module graph)
+ *            by the compiled library module graph), and the ask-4
+ *            integer-boundary refusals — one code per failed obligation,
+ *            the catch-all-split convention (distinct user stories get
+ *            distinct codes): representability (SC4021 — the literal's
+ *            source spelling does not round-trip f64), wholeness
+ *            (SC4022 — may-be-NaN or may-be-fractional at a declared
+ *            i64/u64 slot), and range (SC4023 — the proven interval does
+ *            not fit ±(2^53 − 1), or is negative at a u64 slot)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -713,7 +720,8 @@ export function libUnmappableSignatureDiag(
     message: `library export '${exportName}': ${position} ${detail}`,
     loc,
     hint:
-      "v1 marshalling classes: f64/u8/u32/i32 (TS number), bool, string, bytes (Uint8Array/Buffer), and a void return; " +
+      "marshalling classes: f64/u8/u32/i32 (TS number; the integer plumbing classes are param-only), i64/u64 (TS number, " +
+      "prove-or-refuse at compile time — params and returns), bool, string, bytes (Uint8Array/Buffer), and a void return; " +
       "records and unions slot in when the contract-sidecar conversation (asks 2/3) lands — deferral, not permanent unsupport",
   };
 }
@@ -852,13 +860,16 @@ export function libSidecarComputedDiag(name: string, which: "conditional" | "map
   };
 }
 /** SC4012 — the library-mode host-contract violation trap a generated
- * entry wrapper raises when an inbound bytes buffer's declared length falls
- * outside the marshalling class's range (past 2^53−1 — no real buffer, so
- * the host and the library disagree about the call contract). A RUNTIME
- * code, never a compile-time refusal: it rides the structured trap-teaching
- * message (library/trap-teaching.ts) the wrapper delivers through the panic
- * sink, alongside the trapping export's C symbol and the profile's teaching
- * and remediation text for this code when the profile supplies them. */
+ * entry wrapper raises when an inbound value falls outside its marshalling
+ * class's f64-exact range: a bytes buffer's declared length past 2^53−1
+ * (no real buffer), or an i64/u64 parameter past ±(2^53−1) (ask 4 — the
+ * value cannot ride f64 exactly, and silent rounding is a coercion the
+ * author never wrote). In both shapes the host and the library disagree
+ * about the call contract. A RUNTIME code, never a compile-time refusal:
+ * it rides the structured trap-teaching message (library/trap-teaching.ts)
+ * the wrapper delivers through the panic sink, alongside the trapping
+ * export's C symbol and the profile's teaching and remediation text for
+ * this code when the profile supplies them. */
 export const LIB_INBOUND_BYTES_TRAP_CODE = "SC4012";
 
 /** SC4013–SC4019 — the library-mode runtime detected-trap family. RUNTIME
@@ -912,6 +923,32 @@ export function libNpmIneligibleDiag(pkg: string, reason: string, loc: SrcLoc): 
     loc,
     hint:
       "library artifacts have no island/dynamic tier to fall back to — vendor the code you need from the package as project modules, or drop the dependency",
+  };
+}
+
+/** SC4021/SC4022/SC4023 — the ask-4 integer-boundary refusals, one code
+ * per failed obligation (the §2.4 check order picks exactly one). Every
+ * refusal carries the teaching triple: the SLOT (its sidecar slot path +
+ * the declared class), the FAILED OBLIGATION with the observed evidence
+ * (`detail` — the proven range, the may-be-NaN finding, or the spelling
+ * and its f64 read-back), and the AUTHOR'S FIX (`fix` — the concrete
+ * edit that states intent), anchored at the offending expression.
+ * Profile teachings ride any of the three codes as the attributed note
+ * via the shared decoration pass. */
+export function libIntBoundaryDiag(
+  path: string,
+  cls: "i64" | "u64",
+  obligation: "representability" | "wholeness" | "range",
+  detail: string,
+  fix: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  const code = obligation === "representability" ? "SC4021" : obligation === "wholeness" ? "SC4022" : "SC4023";
+  return {
+    code,
+    message: `integer slot '${path}' (${cls}) cannot be proven — ${obligation} failed: ${detail}`,
+    loc,
+    hint: fix,
   };
 }
 

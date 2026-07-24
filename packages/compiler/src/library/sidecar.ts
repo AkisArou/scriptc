@@ -28,10 +28,18 @@
  * table derives from the aliased declaration, the alias adds no entry
  * and no reordering.
  *
- * Not-yet facts emit the schema's stated absent forms, never invented
- * values: `integer_slots` is `[]` with every numeric slot spelled `f64`
- * (the pre-ask-4 sequencing the schema names valid — the empty list is
- * itself an attestation), and `deterministic` is computed from the module
+ * Integer slots (ask 4): the profile's `sidecar.integer_slots` declares
+ * specific number slots i64/u64 by slot path; the projection spells each
+ * declared slot's TypeRef/descriptor `i64` (the frozen format-1
+ * vocabulary — u64 is the stricter compile-time obligation over the same
+ * wire spelling), refuses paths that resolve to no plain number slot,
+ * and emits `integer_slots` as the resolved-decision list, in profile
+ * declaration order. The list is an ATTESTATION (schema §5's invariant):
+ * compileLibrary runs the integer-boundary inference before writing any
+ * artifact, so a sidecar carrying an entry means every value that can
+ * reach that slot proved whole-in-range. Undeclared numeric slots keep
+ * spelling `f64` and the empty list stays a valid attestation that no
+ * slot was integer-classed. `deterministic` is computed from the module
  * graph (ir/nodes.ts's conservative ambient-surface scan), never
  * defaulted. */
 import { Buffer } from "node:buffer";
@@ -304,6 +312,16 @@ class Projector {
   private readonly flatArms = new Map<string, { name: string; fields: ContractField[]; loc: SrcLoc }[]>();
   private readonly flattening = new Set<string>();
   private synthCounter = 0;
+  /** The profile's declared integer slots (ask 4), by slot path; entries
+   * move to `intConsumed` as the projection spells them — a declared path
+   * the projection never touches refuses (a typo'd path would silently
+   * drop an ABI obligation). */
+  private readonly intDeclared = new Map<string, "i64" | "u64">();
+  readonly intConsumed = new Map<string, "i64" | "u64">();
+  /** The record-field slots' resolution facts for the inference: the
+   * containing record's full projected field-name list plus the target
+   * field (ir shapes intern structurally by field names). */
+  readonly intRecordFacts: { fieldNames: string[]; targetField: string; cls: "i64" | "u64"; path: string }[] = [];
 
   constructor(
     readonly facts: ContractFacts,
@@ -314,6 +332,57 @@ class Projector {
     // a multi-site fact, refused below when the name is actually used).
     facts.types.forEach((decl, index) => this.byName.set(decl.name, classify(decl, index)));
     for (const m of facts.multiSiteTypes) this.multiSite.set(m.name, m.sites);
+    for (const e of config.integerSlots) this.intDeclared.set(e.slot, e.cls);
+  }
+
+  /** Spell a projected slot i64 when the profile declared it (ask 4).
+   * Only a PLAIN NUMBER slot can be integer-declared: optionals, slices,
+   * and named types refuse — the declaration must match the wire shape
+   * the schema freezes. The document spells i64 for both classes (the
+   * frozen format-1 vocabulary has no u64; u64 is the stricter
+   * compile-time obligation over the same wire spelling). */
+  intify(ref: TypeRef, slotPath: string, loc: SrcLoc): TypeRef {
+    const cls = this.intDeclared.get(slotPath);
+    if (cls === undefined) return ref;
+    if (ref.kind !== "f64") {
+      throw new SidecarError(
+        `the profile declares integer slot '${slotPath}' (${cls}), but that slot is not a plain number slot (it projects as '${ref.kind}')`,
+        loc,
+      );
+    }
+    this.intConsumed.set(slotPath, cls);
+    return { kind: "i64" };
+  }
+
+  /** intify for a struct field (declared or synthesized), recording the
+   * record-resolution fact the inference maps onto interned IR shapes. */
+  intifyStructField(ref: TypeRef, container: string, field: string, allFields: string[], loc: SrcLoc): TypeRef {
+    const slotPath = `${container}.${field}`;
+    const before = this.intConsumed.has(slotPath);
+    const out = this.intify(ref, slotPath, loc);
+    if (!before && this.intConsumed.has(slotPath)) {
+      this.intRecordFacts.push({
+        fieldNames: allFields,
+        targetField: field,
+        cls: this.intConsumed.get(slotPath)!,
+        path: slotPath,
+      });
+    }
+    return out;
+  }
+
+  /** A declared slot path that the whole projection never spelled: the
+   * path names nothing (or names a slot outside the schema's integer
+   * grammar), and silently ignoring it would drop an ABI obligation. */
+  checkIntConsumed(): void {
+    for (const [slot, cls] of this.intDeclared) {
+      if (!this.intConsumed.has(slot)) {
+        throw new SidecarError(
+          `the profile declares integer slot '${slot}' (${cls}), but the projected contract has no number slot at that path (paths: 'Type.field', 'Union.arm', '<msg>.arm', '<msg>.arm.numberField', 'helpers.<name>.params[i]', 'helpers.<name>.return')`,
+          this.entryLoc,
+        );
+      }
+    }
   }
 
   lookup(name: string, loc: SrcLoc): Exclude<Classified, { c: "unsupported" }> {
@@ -518,7 +587,10 @@ class Projector {
         for (const f of c.fields) {
           if (seen.has(f.name)) throw new SidecarError(`record '${name}' repeats field '${f.name}'`, f.loc);
           seen.add(f.name);
-          entry.fields.push({ name: f.name, type: this.fieldRef(f, name) });
+          entry.fields.push({
+            name: f.name,
+            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields.map((x) => x.name), f.loc),
+          });
         }
         this.table.set(name, { kind: "struct", entry, anchor: c.index, sub: -1 });
         return;
@@ -528,7 +600,21 @@ class Projector {
       // in unionArms).
       const entry: SidecarUnion = { name, arms: [] };
       for (const arm of this.unionArms(name, loc)) {
-        entry.arms.push({ name: arm.name, payload: this.armPayloadRef(name, arm) });
+        let payload = this.armPayloadRef(name, arm);
+        const slotPath = `${name}.${arm.name}`;
+        const before = this.intConsumed.has(slotPath);
+        payload = this.intify(payload, slotPath, arm.loc);
+        if (!before && this.intConsumed.has(slotPath)) {
+          // The one intifiable arm shape is a single number payload
+          // field; its IR record carries the 'kind' discriminant too.
+          this.intRecordFacts.push({
+            fieldNames: [...arm.fields.map((f) => f.name), "kind"],
+            targetField: arm.fields[0]!.name,
+            cls: this.intConsumed.get(slotPath)!,
+            path: slotPath,
+          });
+        }
+        entry.arms.push({ name: arm.name, payload });
       }
       this.table.set(name, { kind: "union", entry, anchor: c.index, sub: -1 });
     } finally {
@@ -566,7 +652,10 @@ class Projector {
     for (const f of fields) {
       if (seen.has(f.name)) throw new SidecarError(`the inline record at '${container}.${member}' repeats field '${f.name}'`, f.loc);
       seen.add(f.name);
-      entry.fields.push({ name: f.name, type: this.fieldRef(f, name) });
+      entry.fields.push({
+        name: f.name,
+        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields.map((x) => x.name), f.loc),
+      });
     }
     return name;
   }
@@ -586,11 +675,37 @@ class Projector {
         first.shape.k === "number" &&
         (second.shape.k === "text" || second.shape.k === "bytes")
       ) {
-        return { kind: "number_bytes", number_field: first.name, number_class: "f64", bytes_field: second.name };
+        // The number half is an ask-4 declarable slot:
+        // `<msg>.<arm>.<numberField>` (the schema's number_bytes path).
+        const slotPath = `${msgName}.${arm.name}.${first.name}`;
+        const numRef = this.intify({ kind: "f64" }, slotPath, first.loc);
+        if (numRef.kind === "i64") {
+          this.intRecordFacts.push({
+            fieldNames: [first.name, second.name, "kind"],
+            targetField: first.name,
+            cls: this.intConsumed.get(slotPath)!,
+            path: slotPath,
+          });
+        }
+        return { kind: "number_bytes", number_field: first.name, number_class: numRef.kind as "f64" | "i64", bytes_field: second.name };
       }
     }
     if (fields.length === 1 && !fields[0]!.optional) {
-      const ref = this.fieldRef(fields[0]!, msgName);
+      let ref = this.fieldRef(fields[0]!, msgName);
+      if (ref.kind === "f64") {
+        // A plain number payload is an ask-4 declarable slot: `<msg>.<arm>`.
+        const slotPath = `${msgName}.${arm.name}`;
+        const before = this.intConsumed.has(slotPath);
+        ref = this.intify(ref, slotPath, arm.loc);
+        if (!before && this.intConsumed.has(slotPath)) {
+          this.intRecordFacts.push({
+            fieldNames: [fields[0]!.name, "kind"],
+            targetField: fields[0]!.name,
+            cls: this.intConsumed.get(slotPath)!,
+            path: slotPath,
+          });
+        }
+      }
       switch (ref.kind) {
         case "bytes":
           return { kind: "bytes" };
@@ -640,8 +755,20 @@ export interface SidecarBuildInput {
   deterministic: boolean;
 }
 
+/** The declared integer slots (ask 4), resolved by the projection into
+ * the facts the boundary inference maps onto lowered IR: helper slots by
+ * function name and IR parameter index (the schema's helper param index
+ * skips the model receiver, so `index` is already shifted +1), and
+ * record-field slots by the containing record's projected field-name
+ * list plus the target field (IR record shapes intern structurally by
+ * field name, so the list is the join key). */
+export interface SidecarIntegerSlotFacts {
+  helpers: { fnName: string; kind: "param" | "return"; index?: number; cls: "i64" | "u64"; path: string }[];
+  records: { fieldNames: string[]; targetField: string; cls: "i64" | "u64"; path: string }[];
+}
+
 export type SidecarBuildResult =
-  | { ok: true; doc: SidecarDoc; json: string }
+  | { ok: true; doc: SidecarDoc; json: string; integerSlotFacts: SidecarIntegerSlotFacts }
   | { ok: false; diagnostics: ScrDiagnostic[] };
 
 /** Whether a helper's result rides the transient result arena (anything
@@ -664,6 +791,7 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
 
   try {
     const projector = new Projector(facts, config, entryLoc);
+    const helperIntFacts: SidecarIntegerSlotFacts["helpers"] = [];
 
     // The model: the designated root state type, a record in the table.
     const modelClass = projector.lookup(config.model, entryLoc);
@@ -711,7 +839,13 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
         if (p.shape === null) {
           throw new SidecarError(`helper '${fn.name}' parameter ${i + 2} ('${p.name}') has no type annotation`, fn.loc);
         }
-        params.push(projector.shapeRef(p.shape, `helpers_${fn.name}`, p.name, fn.loc));
+        const pPath = `helpers.${fn.name}.params[${i}]`;
+        const ref = projector.intify(projector.shapeRef(p.shape, `helpers_${fn.name}`, p.name, fn.loc), pPath, fn.loc);
+        if (projector.intConsumed.has(pPath)) {
+          // IR param 0 is the model receiver the schema's index skips.
+          helperIntFacts.push({ fnName: fn.name, kind: "param", index: i + 1, cls: projector.intConsumed.get(pPath)!, path: pPath });
+        }
+        params.push(ref);
       });
       if (fn.returns === null) {
         throw new SidecarError(`helper '${fn.name}' has no return type annotation`, fn.loc);
@@ -722,7 +856,11 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
       // Helper-return synthesized names are two-part like everything else:
       // container 'helpers', member the helper's name — `helpers_<name>`,
       // never a '_return' suffix (the ratified spelling).
-      const returns = projector.shapeRef(fn.returns, "helpers", fn.name, fn.loc);
+      const rPath = `helpers.${fn.name}.return`;
+      const returns = projector.intify(projector.shapeRef(fn.returns, "helpers", fn.name, fn.loc), rPath, fn.loc);
+      if (projector.intConsumed.has(rPath)) {
+        helperIntFacts.push({ fnName: fn.name, kind: "return", cls: projector.intConsumed.get(rPath)!, path: rPath });
+      }
       if (helpers.some((h) => h.name === fn.name)) {
         throw new SidecarError(`helper '${fn.name}' is declared twice`, fn.loc);
       }
@@ -808,6 +946,10 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
       }
     }
 
+    // Every declared integer slot must have been spelled by now — the
+    // whole contract (model, msg, helpers, channels) is projected.
+    projector.checkIntConsumed();
+
     const doc: SidecarDoc = {
       format: SIDECAR_FORMAT,
       wire_version: config.wireVersion,
@@ -834,17 +976,29 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
         env_msgs: envMsgs,
       },
       abi: { prefix: profile.prefix, exports, snapshot_format: config.snapshotFormat },
-      // The pre-ask-4 absent form the schema names valid: every numeric
-      // slot above spelled f64, and the empty list is itself the
-      // attestation that no slot was integer-classed.
-      integer_slots: [],
+      // Ask 4's resolved integer-class decisions, one entry per declared
+      // slot in profile declaration order, every one spelled i64 (the
+      // frozen format-1 vocabulary; a u64 declaration is the stricter
+      // compile-time obligation over the same wire spelling). The V10
+      // bijection with the i64-spelled slots above holds by construction
+      // (intify is the only i64 speller and checkIntConsumed just proved
+      // every declaration was spelled). The list is an ATTESTATION: the
+      // compiler refuses the build before writing any artifact when an
+      // integer-slot proof fails, so a sidecar carrying these entries
+      // means every listed slot's obligations were discharged (§5).
+      integer_slots: config.integerSlots.map((e) => ({ slot: e.slot, class: "i64" as const })),
       deterministic: input.deterministic,
       // Structural in library mode: the SC4005 gate refused any graph
       // reaching async/timer/event-loop surface before emission, so a
       // sidecar exists only for async_free graphs.
       async_free: true,
     };
-    return { ok: true, doc, json: JSON.stringify(doc, null, 2) + "\n" };
+    return {
+      ok: true,
+      doc,
+      json: JSON.stringify(doc, null, 2) + "\n",
+      integerSlotFacts: { helpers: helperIntFacts, records: projector.intRecordFacts },
+    };
   } catch (e) {
     if (e instanceof SidecarRefusal) {
       return { ok: false, diagnostics: [e.diag] };

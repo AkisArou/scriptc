@@ -1206,6 +1206,12 @@ class LlEmitter {
       if (this.mod.lib.exports.some((e) => e.params.includes("bytes"))) {
         this.declare(`declare ptr @scr_library_bytes_in(ptr, i64, ptr)`);
       }
+      if (this.mod.lib.exports.some((e) => e.params.includes("i64"))) {
+        this.declare(`declare double @scr_library_i64_in(i64, ptr)`);
+      }
+      if (this.mod.lib.exports.some((e) => e.params.includes("u64"))) {
+        this.declare(`declare double @scr_library_u64_in(i64, ptr)`);
+      }
       if (this.mod.lib.exports.some((e) => e.returns === "string")) {
         this.declare(`declare void @scr_library_str_out(ptr, ptr, ptr)`);
       }
@@ -1601,6 +1607,14 @@ class LlEmitter {
         const trapBytes = Buffer.byteLength(e.inboundBytesTrap, "utf8");
         out.push(`@sc_lib_bytes_trap_${e.symbol} = internal constant [${trapBytes + 1} x i8] c"${llStrBytes(e.inboundBytesTrap)}"`, ``);
       }
+      if (e.inboundIntTrap !== undefined) {
+        // The i64/u64-in helpers' host-contract trap message (ask 4): an
+        // inbound integer past ±(2^53−1) cannot ride f64 exactly. Same
+        // assembled structured form, same SC4012 code, same
+        // emission-invariance argument as the bytes trap.
+        const trapBytes = Buffer.byteLength(e.inboundIntTrap, "utf8");
+        out.push(`@sc_lib_int_trap_${e.symbol} = internal constant [${trapBytes + 1} x i8] c"${llStrBytes(e.inboundIntTrap)}"`, ``);
+      }
       e.params.forEach((cls, i) => {
         switch (cls) {
           case "f64":
@@ -1625,6 +1639,19 @@ class LlEmitter {
           case "i32":
             params.push(`i32 %a${i}`);
             body.push(`  %c${i} = sitofp i32 %a${i} to double`);
+            args.push(`double %c${i}`);
+            break;
+          case "i64":
+            // Inbound declared-integer edge (ask 4): the helper converts
+            // exactly or delivers the host-contract trap (past ±(2^53−1)
+            // the value cannot ride f64 without silent rounding).
+            params.push(`i64 %a${i}`);
+            body.push(`  %c${i} = call double @scr_library_i64_in(i64 %a${i}, ptr @sc_lib_int_trap_${e.symbol})`);
+            args.push(`double %c${i}`);
+            break;
+          case "u64":
+            params.push(`i64 %a${i}`);
+            body.push(`  %c${i} = call double @scr_library_u64_in(i64 %a${i}, ptr @sc_lib_int_trap_${e.symbol})`);
             args.push(`double %c${i}`);
             break;
           case "string":
@@ -1655,6 +1682,21 @@ class LlEmitter {
             `  %r = call double ${target}(${callArgs})`,
             `  call void @scr_library_check_exc()`,
             `  ret double %r`,
+          );
+          break;
+        case "i64":
+        case "u64":
+          // The outbound declared-integer edge (ask 4): every value
+          // reaching this return was PROVEN whole and inside the class's
+          // range at compile time, so the fp-to-int conversion is exact
+          // by construction — the crossing carries the mathematically
+          // exact integer the f64 held.
+          retType = "i64";
+          body.push(
+            `  %r = call double ${target}(${callArgs})`,
+            `  call void @scr_library_check_exc()`,
+            `  %z = ${e.returns === "i64" ? "fptosi" : "fptoui"} double %r to i64`,
+            `  ret i64 %z`,
           );
           break;
         case "bool":
@@ -11233,11 +11275,12 @@ class LlEmitter {
     if (MAY_THROW_LIB_FNS.has(e.fn) && LIB_FN_SYMS[e.fn] === undefined) {
       throw new LlvmUnsupportedError(`libCall:${e.fn}`, e.loc);
     }
-    if (e.fn === "math.floor") {
+    if (e.fn === "math.floor" || e.fn === "math.trunc" || e.fn === "math.ceil") {
+      const intr = e.fn === "math.floor" ? "floor" : e.fn === "math.trunc" ? "trunc" : "ceil";
       const v = this.emitExpr(e.args[0]!);
-      this.declare(`declare double @llvm.floor.f64(double)`);
+      this.declare(`declare double @llvm.${intr}.f64(double)`);
       const t = B.tmp();
-      B.line(`${t} = call double @llvm.floor.f64(double ${v.name})`);
+      B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
       return { name: t, type: e.type };
     }
     if (e.fn === "math.abs") {

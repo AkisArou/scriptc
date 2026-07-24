@@ -741,8 +741,11 @@ export interface IrLibExport {
   symbol: string;
   /** IR function name (entry-file top-level, so unqualified). */
   fnName: string;
-  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32")[];
-  returns: "f64" | "bool" | "string" | "bytes" | "void";
+  /** i64/u64 (ask 4): int64_t/uint64_t at the C edge — inbound values
+   * range-check in the wrapper (`inboundIntTrap`), internal call sites
+   * and returns are compile-time proven before this lands on the IR. */
+  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32" | "i64" | "u64")[];
+  returns: "f64" | "bool" | "string" | "bytes" | "void" | "i64" | "u64";
   /** The exact sink-message bytes this wrapper passes to the inbound-bytes
    * marshalling helper's trap — present exactly when a parameter is
    * bytes-classed. Already the assembled structured trap-teaching form
@@ -751,6 +754,12 @@ export interface IrLibExport {
    * 0x1F when supplied. Assembled ONCE at export resolution so both
    * backends emit identical bytes by construction. */
   inboundBytesTrap?: string;
+  /** The sibling message for the inbound INTEGER host-contract trap
+   * (ask 4): present exactly when a parameter is i64/u64-classed, passed
+   * to the scr_library_i64_in/u64_in helpers, which trap when the inbound
+   * value cannot ride f64 exactly (|v| past 2^53−1). Same assembled
+   * structured form and the same SC4012 code — one host-contract story. */
+  inboundIntTrap?: string;
 }
 
 /** One runtime-trap overlay row: the profile's teaching (replaces the
@@ -1708,6 +1717,13 @@ export type IrLibFn =
    * epsilon boundary). Borrow nothing; never throw. */
   | "math.abs"
   | "math.round"
+  /** Math.trunc / Math.ceil — C trunc()/ceil() ARE the JS operations
+   * (NaN/±0/±Infinity pass through bit-exactly; ceil(-0.5) is -0 in IEEE
+   * round-toward-+Infinity exactly as ECMA says). Static like floor —
+   * they are ask-4's wholeness-discharge operators, so the library
+   * inference needs them compiled, not island-served. Never throw. */
+  | "math.trunc"
+  | "math.ceil"
   /** The static global parsers/tests (scr_string.c). num.parseInt is
    * ECMA-262 19.2.5 exactly — JS whitespace, sign, ToInt32 radix (the
    * frontend completes an omitted radix to 0 = the spec's "undefined":
@@ -3731,7 +3747,14 @@ export type IrNumBinOp =
 export type IrStrCmpOp = "<" | "<=" | ">" | ">=";
 
 export type IrExpr =
-  | { kind: "numLit"; value: number; type: IrType; loc: SrcLoc }
+  /** `spelling` (ask 4's representability input) is the author's SOURCE
+   * spelling of a decimal integer literal, present exactly when that
+   * spelling does not round-trip f64 (`9007199254740993` reads back as
+   * 9007199254740992) — the library integer-boundary check refuses on the
+   * spelling, never on the already-rounded value. Round-tripping literals
+   * and non-integer spellings carry nothing, so the IR is byte-identical
+   * for every program that held its numbers. */
+  | { kind: "numLit"; value: number; spelling?: string; type: IrType; loc: SrcLoc }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.

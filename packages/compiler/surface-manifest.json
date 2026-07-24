@@ -1784,8 +1784,8 @@
       "id": "stdlib.math.ceil",
       "kind": "stdlib",
       "name": "Math.ceil",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.math.cos",
@@ -1903,8 +1903,8 @@
       "id": "stdlib.math.trunc",
       "kind": "stdlib",
       "name": "Math.trunc",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.number.toFixed",
