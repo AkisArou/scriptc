@@ -2953,6 +2953,13 @@ export type IrLibFn =
    * Symbol(Symbol.iterator))"). The frontend picks by position. */
   | "dyn.packPushSpreadIter"
   | "dyn.assignAll"
+  /** `Object.create(null)` (scr_json.c): a fresh NULL-PROTOTYPE DOM
+   * dictionary. The DOM's OBJ dispatch is already own-member-only —
+   * Node's null-proto answer — so the flag's whole job is the observations
+   * that SEE the prototype: inspect's "[Object: null prototype]" prefix
+   * and deepStrictEqual's prototype gate. Never throws. Static builds
+   * only; --dynamic routes Object.create through the engine instead. */
+  | "dyn.objCreateNullProto"
   | "dyn.objValues"
   | "dyn.objEntries"
   /** structuredClone over the DOM (scr_json.c): the JSON-safe subset plus

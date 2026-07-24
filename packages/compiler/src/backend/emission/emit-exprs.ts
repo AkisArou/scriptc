@@ -2237,8 +2237,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_dyn_typeof(${arg(0)})`);
           case "dyn.toString":
             // Receiver-kind-dispatched toString (+1); throws Node's
-            // TypeError on undefined/null (may-throw seed set).
-            return finish(`scr_dyn_to_string(${arg(0)}, ${arg(1)})`);
+            // TypeError on undefined/null and the "is not a function"
+            // TypeError on null-prototype dictionaries (may-throw seed
+            // set) — args[2] carries the call's source spelling.
+            return finish(`scr_dyn_to_string_method(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "fs.readFileSync":
             // args[1] is the (always-"utf8") encoding: evaluated for
             // JS-exact side-effect order, ignored by the runtime.
@@ -4787,6 +4789,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // The flattened pack copies onto the target left to right;
             // the target returns (+1). Nullish targets throw like Node.
             return finish(`scr_dyn_assign_all(${arg(0)}, ${arg(1)})`);
+          case "dyn.objCreateNullProto":
+            // Object.create(null): the fresh null-prototype dictionary
+            // (+1). Never throws.
+            return finish(`scr_dyn_new_obj_null_proto()`);
           case "dyn.hasOwn":
             // Object.hasOwn over a DOM receiver (throws on nullish, like
             // Node's ToObject).

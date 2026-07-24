@@ -328,6 +328,7 @@ static ScrDyn *scr_dyn_alloc(ScrDynKind kind) {
     d->rc = 1;
     d->kind = kind;
     d->buffer = false;
+    d->null_proto = false;
     if (kind == SCR_DYN_ARR) {
       d->v.arr.len = 0; /* cap/items preserved from the node's last life */
     } else if (kind == SCR_DYN_OBJ) {
@@ -527,6 +528,11 @@ ScrDyn *scr_dyn_new_str(ScrStr *s) {
 
 ScrDyn *scr_dyn_new_arr(void) { return scr_dyn_alloc(SCR_DYN_ARR); }
 ScrDyn *scr_dyn_new_obj(void) { return scr_dyn_alloc(SCR_DYN_OBJ); }
+ScrDyn *scr_dyn_new_obj_null_proto(void) {
+  ScrDyn *d = scr_dyn_alloc(SCR_DYN_OBJ);
+  d->null_proto = true;
+  return d;
+}
 
 ScrDyn *scr_dyn_new_bytes_copy(const ScrBytes *b) {
   ScrDyn *d = scr_dyn_alloc(SCR_DYN_BYTES);
@@ -1176,6 +1182,23 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
     return scr_str_new("", 0);
   }
   }
+}
+
+/* The METHOD-CALL spelling `d.toString(enc?)` — scr_dyn_to_string with
+ * the one receiver whose prototype LACKS the method carved out: a
+ * null-prototype dictionary (Object.create(null)) has no toString at
+ * all, so Node throws "<spelling> is not a function" where every other
+ * OBJ answers "[object Object]". `what` carries the source spelling. */
+ScrStr *scr_dyn_to_string_method(const ScrDyn *d, const ScrStr *enc, const ScrStr *what) {
+  if (d->kind == SCR_DYN_OBJ && d->null_proto) {
+    ScrJsonBuf b;
+    scr_jb_init(&b);
+    for (size_t i = 0; i < what->len; i++) scr_jb_putc(&b, what->data[i]);
+    scr_jb_puts(&b, " is not a function");
+    scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+    return scr_str_new("", 0);
+  }
+  return scr_dyn_to_string(d, enc);
 }
 
 /* JS String() over the DOM kind — the WebIDL ToString the web globals

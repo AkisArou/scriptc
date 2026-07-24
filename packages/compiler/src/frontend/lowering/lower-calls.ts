@@ -4004,10 +4004,17 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       const enc = call.arguments[0]
         ? bufEncoding(L, "toString", call.arguments[0])
         : "utf8";
+      // The source spelling rides along for the ONE receiver whose
+      // prototype lacks toString: a null-prototype dictionary throws
+      // Node's "<spelling> is not a function" at runtime.
       return {
         kind: "libCall",
         fn: "dyn.toString",
-        args: [recv, { kind: "strLit", value: enc, type: STRING, loc: locOf(call) }],
+        args: [
+          recv,
+          { kind: "strLit", value: enc, type: STRING, loc: locOf(call) },
+          { kind: "strLit", value: access.getText(), type: STRING, loc: locOf(call) },
+        ],
         type: STRING,
         loc: locOf(call),
       };
@@ -6570,6 +6577,68 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
         `Object.is over '${L.fmt(left.type)}' and '${L.fmt(right.type)}' operands`,
         call,
         "the operands must share one comparable kind (numbers, strings, booleans, units, one union shape, or one reference type)",
+      );
+    }
+    // Object.create — the null-prototype DICTIONARY (`Object.create(null)`
+    // then keyed assignment, the memo-table idiom prettier's index/
+    // group-mode maps spell) and, under --dynamic, the engine's own
+    // Object.create for engine-held prototypes. Everything else is a
+    // NAMED fence: the compiled representations have no prototype chain,
+    // and the own-copy stand-in would answer WRONG observably — Node's
+    // Object.keys/inspect/JSON of the created object list NO own keys,
+    // and mutating the prototype afterwards is visible through the
+    // created object (live delegation), which no copy can honor.
+    if (member === "create") {
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        L.noLowering("Object.create with spread arguments", call);
+      }
+      if (call.arguments.length >= 2) {
+        L.noLowering(
+          "Object.create with a properties-descriptor argument",
+          call,
+          "create first, then assign: const o = Object.create(null); o.k = v",
+        );
+      }
+      if (call.arguments.length !== 1) {
+        L.noLowering(`Object.create with ${call.arguments.length} arguments`, call);
+      }
+      const loc = locOf(call);
+      let protoNode: ts.Expression = call.arguments[0]!;
+      while (ts.isParenthesizedExpression(protoNode)) protoNode = protoNode.expression;
+      const nullProto = protoNode.kind === ts.SyntaxKind.NullKeyword;
+      if (L.dynamic) {
+        // The checker types the result `any` — an ENGINE value under
+        // --dynamic — and the engine's own Object.create answers with
+        // REAL prototype semantics: reads delegate LIVE, writes shadow,
+        // and inspect renders Node's exact shapes ("[Object: null
+        // prototype]" included). null and engine-held (jsval) prototypes
+        // route; checked-dynamic (DOM) prototypes keep the named fence —
+        // their marshal into the engine is a DEEP COPY, so a later
+        // prototype mutation would be invisible through the created
+        // object where Node delegates live.
+        const objectGlobal = (): IrExpr => ({ kind: "jsOp", op: "globalGet", name: "Object", args: [], type: JSVAL, loc });
+        if (nullProto) {
+          const nullIn: IrExpr = { kind: "jsOp", op: "nullLit", args: [], type: JSVAL, loc };
+          return { kind: "jsOp", op: "callMethod", name: "create", args: [objectGlobal(), nullIn], type: JSVAL, loc };
+        }
+        const proto = L.lowerExpr(protoNode);
+        if (proto.type.kind === "jsval") {
+          return { kind: "jsOp", op: "callMethod", name: "create", args: [objectGlobal(), proto], type: JSVAL, loc };
+        }
+        L.noLowering(
+          `Object.create over '${L.fmt(proto.type)}' prototypes`,
+          call,
+          "prototype reads delegate LIVE in Node (mutating the prototype shows through the created object), which the boundary's deep copy cannot honor — only null and engine-held ('any') prototypes lower",
+        );
+      }
+      if (nullProto) {
+        return { kind: "libCall", fn: "dyn.objCreateNullProto", args: [], type: DYN, loc };
+      }
+      const proto = L.lowerExpr(protoNode);
+      L.noLowering(
+        `Object.create over '${L.fmt(proto.type)}' prototypes`,
+        call,
+        "the compiled representations have no prototype chain, and an own-copy would answer wrong observably (Node lists NO own keys on the created object, and prototype mutations show through it live) — only Object.create(null) lowers",
       );
     }
     // `Object.assign(fn, { props })` whose RESULT type maps to the hybrid
