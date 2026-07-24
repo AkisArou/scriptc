@@ -22,7 +22,11 @@ const streamObj = new Duplex();
 streamObj.end();
 finished(streamObj, () => console.log('finished fired'));
 
-const server = net.createServer().listen(0, () => {
+// Deterministic teardown: destroy the ACCEPTED socket too — relying on
+// the peer's destroy to close the server side races the event loop (the
+// server keeps the loop alive until its connection count drains, which
+// under a slow environment can outlive the run).
+const server = net.createServer((sock) => sock.destroy()).listen(0, () => {
   const client = net.connect(server.address().port, () => {
     show(() => { client.write('broken', 'buffer'); });
     client.write('fine', 'utf8');
