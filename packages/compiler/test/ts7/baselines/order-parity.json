@@ -4880,6 +4880,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2581-tls-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2581-tls-arg-ladders.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2582-stream-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2582-stream-arg-ladders.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
