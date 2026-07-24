@@ -13,7 +13,7 @@ import { COMPOUND_ASSIGN_OPS, CompoundOp, STR_METHODS, UNSUPPORTED_STMT, isStdli
 import { isProvenanceSourceFile } from "../provenance-registry.js";
 import { lowerImportEquals, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.js";
-import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape, strCharsCall } from "./lower-containers.js";
+import { ForOfIterProjection, lowerForOfArrayIter, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape, strCharsCall } from "./lower-containers.js";
 import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 import type { ClassInfo, ClassIteratorInfo } from "./lower-classes.js";
@@ -5340,6 +5340,15 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         // the live index walk with the projection applied.
         if (recv?.kind === "searchParams") {
           return lowerForOfSearchParams(L, stmt, L.lowerExpr(src.expression.expression), proj);
+        }
+        // ARRAY keys()/entries() projections: the live index walk yielding
+        // the index or the [index, element] pair (lower-containers).
+        // `values` falls through to the receiver unwrap below.
+        if (recv?.kind === "array" && (proj === "keys" || proj === "entries")) {
+          const container = L.lowerExpr(src.expression.expression);
+          if (container.type.kind === "array") {
+            return lowerForOfArrayIter(L, stmt, container as IrExpr & { type: IrType & { kind: "array" } }, proj);
+          }
         }
       }
     }
