@@ -5,14 +5,14 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
-import { NpmGraphBuilder, packageNameOfPath, probeNodeImportRefusal } from "../npm.js";
+import { NpmGraphBuilder, packageNameOfPath, probeNodeImportRefusal, probeNodeRequireRefusal } from "../npm.js";
 import { isNpmStaticPackage } from "../npm-static.js";
 import { isJsSourceFileName, isRelativeSpecifier } from "../shared.js";
-import { cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
+import { canonicalBuiltinModule, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
 import { invalidJsonModuleDiag, npmEmbedFailedDiag, requiresDynamicImportDiag } from "../../diagnostics/diagnostic.js";
 import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrStmt, IrUnionDef, JSVAL, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, arrayOf, canConvertToDyn, isUnitType } from "../../ir/nodes.js";
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
-import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, isPromisifyCall } from "./lower-builtins.js";
+import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, isPromisifyCall } from "./lower-builtins.js";
 import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, deadUnmappableBinding, implicitLocalFnInfoOf, implicitLocalFnNodeOf, nullishGenericBindingUnitOf } from "./lower-calls.js";
 import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
@@ -352,6 +352,7 @@ export interface FileParts {
     }
     if (builder) {
       for (const fp of parts) collectDynamicImports(L, builder, fp.sf);
+      for (const fp of parts) collectCreateRequires(L, builder, fp.sf);
       const graph = builder.finish();
       if (graph.modules.length > 0) {
         L.npmEmbedded = { modules: graph.modules, edges: graph.edges };
@@ -406,6 +407,53 @@ export interface FileParts {
             );
           } else if (res.kind === "unresolved") {
             L.pushDiag(npmEmbedFailedDiag(res.message, locOf(node)));
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+
+/** The createRequire half of the npm chokepoint (--dynamic only): every
+   * `require("bare-literal")` through a createRequire binding — whatever
+   * body it sits in — resolves under Node's "require" condition and
+   * embeds AT COLLECTION time, so the per-site lowering later just looks
+   * its entry up (lowerCreateRequireCall). Builtins, relative documents,
+   * "#" specifiers, --npm-static opt-ins, and Node-refused bare names
+   * are the lowering's own arms — only resolvable installed packages
+   * register here; resolution failures are diagnostics at the call
+   * expression, exactly like static npm imports at their statements. */
+  function collectCreateRequires(L: Lowerer, builder: NpmGraphBuilder, sf: ts.SourceFile): void {
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const cr = createRequireSpecOf(L, node);
+        const spec = cr?.spec ?? null;
+        if (
+          cr !== null &&
+          spec !== null &&
+          canonicalBuiltinModule(spec) === null &&
+          !isRelativeSpecifier(spec) &&
+          !spec.startsWith("/") &&
+          !spec.startsWith("#") &&
+          probeNodeRequireRefusal(cr.baseFile.fileName, spec) === null
+        ) {
+          const pkgName = spec.startsWith("@")
+            ? spec.split("/").slice(0, 2).join("/")
+            : spec.split("/")[0]!;
+          const mapKey = `${cr.baseFile.fileName}\u0000${spec}`;
+          if (!L.createRequireImports.has(mapKey) && !isNpmStaticPackage(pkgName)) {
+            const before = builder.errors.length;
+            const entryKey = builder.addRequire(cr.baseFile.fileName, spec);
+            for (const err of builder.errors.slice(before)) {
+              L.pushDiag(npmEmbedFailedDiag(err.message, locOf(node)));
+            }
+            L.createRequireImports.set(
+              mapKey,
+              entryKey === null
+                ? ""
+                : { entryKey, format: builder.moduleFormatOf(entryKey) ?? "cjs" },
+            );
           }
         }
       }
@@ -1129,6 +1177,13 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // — no global storage; the statement lowering skips it by the
         // same test.
         if (builtinMemberRequireDecl(decl.name, decl.initializer)) continue;
+        // `const require = createRequire(import.meta.url)` at file scope:
+        // compile-time plumbing — no global storage; the statement
+        // lowering skips it by the same test.
+        if (isConst && createRequireBindingDecl(L, decl.name, decl.initializer)) continue;
+        // `const fs = require("node:fs")` through that binding at file
+        // scope — a namespace import in const clothing, same story.
+        if (isConst && createRequireNamespaceDecl(L, decl.name, decl.initializer)) continue;
         // `const { createSign } = crypto` over a builtin NAMESPACE binding
         // at file scope: alias plumbing like the destructured-require form
         // — no storage (the statement lowering skips by the same test).

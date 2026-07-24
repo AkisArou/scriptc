@@ -14,7 +14,7 @@ import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.
 import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
-import { lowerChildStreamMethodCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
+import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
 import { droppableStatic, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
 import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
@@ -2521,6 +2521,15 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
           return nodeThrowExpr(1, "", `Cannot read properties of ${unit} (reading '${expr.expression.name.text}')`, t, loc);
         }
       }
+    }
+
+    // `require("spec")` through a createRequire binding (and the inline
+    // `createRequire(import.meta.url)("spec")` spelling — a CallExpression
+    // callee no other dispatch path serves): the static erasure —
+    // builtins/json/npm per lowerCreateRequireCall's arms.
+    {
+      const crServed = lowerCreateRequireCall(L, expr, loc);
+      if (crServed) return crServed;
     }
 
     // `process.getuid?.()` — intercepted BEFORE the optional-chain

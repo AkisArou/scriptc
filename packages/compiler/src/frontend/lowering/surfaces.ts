@@ -854,6 +854,44 @@ export function builtinConstLit(value: string | number | boolean, loc: { file: s
   return { kind: "boolLit", value, type: BOOL, loc };
 }
 
+/** node:module's builtinModules, BAKED — Node v24's exact list (verbatim
+ * order: the bare names, then the node:-prefix-only tails), pinned to
+ * the compat target rather than read from the COMPILING host's Node so
+ * emitted programs are host-independent (the cache-identity contract).
+ * Node ships one frozen singleton; each read here mints a fresh string
+ * array — a divergence only mutation could observe, and mutating Node's
+ * frozen array throws anyway. */
+export const NODE_BUILTIN_MODULES_V24: readonly string[] = [
+  "_http_agent", "_http_client", "_http_common", "_http_incoming",
+  "_http_outgoing", "_http_server", "_stream_duplex", "_stream_passthrough",
+  "_stream_readable", "_stream_transform", "_stream_wrap", "_stream_writable",
+  "_tls_common", "_tls_wrap", "assert", "assert/strict", "async_hooks",
+  "buffer", "child_process", "cluster", "console", "constants", "crypto",
+  "dgram", "diagnostics_channel", "dns", "dns/promises", "domain", "events",
+  "fs", "fs/promises", "http", "http2", "https", "inspector",
+  "inspector/promises", "module", "net", "os", "path", "path/posix",
+  "path/win32", "perf_hooks", "process", "punycode", "querystring",
+  "readline", "readline/promises", "repl", "stream", "stream/consumers",
+  "stream/promises", "stream/web", "string_decoder", "sys", "timers",
+  "timers/promises", "tls", "trace_events", "tty", "url", "util",
+  "util/types", "v8", "vm", "wasi", "worker_threads", "zlib",
+  "node:sea", "node:sqlite", "node:test", "node:test/reporters",
+];
+
+/** The array-literal read of module.builtinModules — both value paths
+ * (the named-import binding and the namespace member read) mint the
+ * same fresh string[]. */
+export function builtinModulesArrayLit(loc: { file: string; start: number; end: number }): IrExpr {
+  return {
+    kind: "arrayLit",
+    elems: NODE_BUILTIN_MODULES_V24.map(
+      (m): IrExpr => ({ kind: "strLit", value: m, type: STRING, loc }),
+    ),
+    type: arrayOf(STRING),
+    loc,
+  };
+}
+
 /** Member-specific hints for RECOGNIZED builtin modules whose member has
  * no lowering. deflateSync/inflateSync lower now (Buffers are real);
  * the rest of the zlib surface points at the lowered pair. */
@@ -914,9 +952,16 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
   },
   module: {
     createRequire:
-      "createRequire loads CommonJS from disk at RUNTIME (the config/plugin-loading pattern) — " +
-      "a compiled program's modules are fixed at build time, so no lowering can exist; " +
-      "in JS sources the call defers to a runtime error naming this pattern",
+      "the lowered shape is a const binding over createRequire(import.meta.url) (or __filename) " +
+      "whose require calls take STATIC string literals — builtins, relative .json documents, " +
+      "and installed npm packages (under --dynamic) resolve at build time; " +
+      "dynamic specifiers cannot exist in a compiled binary's fixed module graph",
+    isBuiltin:
+      "builtinModules.includes(name) answers the same question over the baked list " +
+      "(strip a node: prefix first; the prefix-only builtins appear with it, as node:test)",
+    syncBuiltinESMExports:
+      "a compiled program has no live builtin ESM namespace bindings to synchronize — " +
+      "nothing a compiled surface can mutate makes the call observable; remove it",
   },
   child_process: {
     execFile:

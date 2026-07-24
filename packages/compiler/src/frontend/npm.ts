@@ -861,6 +861,36 @@ export class NpmGraphBuilder {
     return key === undefined || key === "" ? null : key;
   }
 
+  /** Registers one user-level createRequire(...) require and walks what
+   * it reaches, answering the runtime entry key — resolveEntry's twin
+   * under Node's "require" condition (a dual package embeds its CJS arm,
+   * exactly what Node's createRequire loads). The cache key carries the
+   * mode so a file both importing and requiring one specifier keeps two
+   * entries, like the graph's own kind-split edges. */
+  addRequire(fromFile: string, specifier: string): string | null {
+    const cacheKey = `require\u0000${this.entryKeyFor(fromFile, specifier)}`;
+    const cached = this.entries.get(cacheKey);
+    if (cached !== undefined) {
+      if (cached !== "") this.walk(cached, [packageNameOf(specifier)], false);
+      return cached === "" ? null : cached;
+    }
+    const key = this.resolvePackage(dirname(resolve(fromFile)), specifier, "require", {
+      importer: resolve(fromFile),
+      chain: [],
+    });
+    this.entries.set(cacheKey, key ?? "");
+    if (key) this.walk(key, [packageNameOf(specifier)], false);
+    return key;
+  }
+
+  /** The embedded format of a resolved module key ("cjs"/"esm"/"json") —
+   * the require lowering picks its export name by it (a CJS facade's
+   * default IS module.exports; an ESM entry answers its namespace, the
+   * require(esm) shape). */
+  moduleFormatOf(key: string): EmbeddedFormat | null {
+    return this.modules.get(key)?.format ?? null;
+  }
+
   private entryKeyFor(fromFile: string, specifier: string): string {
     return `${dirname(resolve(fromFile))}\u0000${specifier}`;
   }
