@@ -5018,6 +5018,29 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2604-cycle-classes-mutual/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2604-cycle-classes-mutual/group.ts",
+    "<repo>/tests/corpus/2604-cycle-classes-mutual/item.ts",
+    "<repo>/tests/corpus/2604-cycle-classes-mutual/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2605-cycle-three-module/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2605-cycle-three-module/c.ts",
+    "<repo>/tests/corpus/2605-cycle-three-module/b.ts",
+    "<repo>/tests/corpus/2605-cycle-three-module/a.ts",
+    "<repo>/tests/corpus/2605-cycle-three-module/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2606-dynamic-import-cycle/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2606-dynamic-import-cycle/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6089,7 +6112,8 @@
       "start": 0,
       "end": 0
      },
-     "milestone": "later"
+     "milestone": "later",
+     "hint": "cycles of ES modules with declaration-only top levels whose cycle-crossing bindings are only used inside function bodies compile as-is; move the named top-level read or call into a function body (or break the named edge) so nothing runs during the cycle's init window"
     }
    ]
   },
@@ -6155,7 +6179,8 @@
       "start": 0,
       "end": 0
      },
-     "milestone": "later"
+     "milestone": "later",
+     "hint": "cycles of ES modules with declaration-only top levels whose cycle-crossing bindings are only used inside function bodies compile as-is; move the named top-level read or call into a function body (or break the named edge) so nothing runs during the cycle's init window"
     }
    ]
   },
@@ -6174,7 +6199,8 @@
       "start": 0,
       "end": 0
      },
-     "milestone": "later"
+     "milestone": "later",
+     "hint": "cycles of ES modules with declaration-only top levels whose cycle-crossing bindings are only used inside function bodies compile as-is; move the named top-level read or call into a function body (or break the named edge) so nothing runs during the cycle's init window"
     }
    ]
   },
@@ -6193,7 +6219,8 @@
       "start": 0,
       "end": 0
      },
-     "milestone": "later"
+     "milestone": "later",
+     "hint": "cycles of ES modules with declaration-only top levels whose cycle-crossing bindings are only used inside function bodies compile as-is; move the named top-level read or call into a function body (or break the named edge) so nothing runs during the cycle's init window"
     }
    ]
   },
@@ -6251,6 +6278,12 @@
   "<repo>/tests/diagnostics/destructuring-fences.ts": {
    "order": [
     "<repo>/tests/diagnostics/destructuring-fences.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/dyn-import-cycle-tdz/main.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/dyn-import-cycle-tdz/main.ts"
    ],
    "diags": []
   },
