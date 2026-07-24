@@ -716,6 +716,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...driver.targetArgs,
     ...(sanitize ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"] : ["-O2"]),
     "-fno-math-errno",
+    "-fno-strict-aliasing", // the emitted object model type-puns — see compileC's buildArgs
     "-Wno-deprecated-declarations",
     "-DSCR_LIB",
     "-I", rtDir,
@@ -1025,6 +1026,18 @@ export async function compileC(opts: CcOptions): Promise<void> {
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
     "-fno-math-errno",
+    // The emitted object model is deliberately type-punned C: a hierarchy
+    // upcast is a raw pointer cast, so one object's header (rc, vt) and
+    // fields are read and written through BOTH the base and derived struct
+    // types (sc_retain_Derived vs sc_release_Base on the same object).
+    // C's effective-type rule calls that UB, and clang's TBAA at -O2
+    // reorders/elides the rc updates once everything inlines — an upcast
+    // identity compare frees the object while a global still owns it.
+    // The LLVM backend emits no TBAA metadata, so this flag is also what
+    // keeps the two backends' memory semantics identical. Mirrored in the
+    // cache-miss cflags below and compileLibArchive — the three option
+    // sets must stay in lockstep.
+    "-fno-strict-aliasing",
     "-Wno-deprecated-declarations", // ucontext fibers (scr_async.c)
     "-I", rtDir,
     ...RUNTIME_SOURCES.map((f) => rt(join(rtDir, f))),
@@ -1226,6 +1239,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
     "-fno-math-errno",
+    "-fno-strict-aliasing", // the emitted object model type-puns — see buildArgs
     "-Wno-deprecated-declarations",
     "-I", rtDir,
     ...(regex || dynamic ? ["-I", vendorEngineDir()] : []),
