@@ -301,13 +301,22 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         const argsWith: IrExpr[] = [];
         const getters: { name: string; fn: IrExpr; loc: SrcLoc }[] = [];
         let spread: { cond: IrExpr; whenTrue: boolean } | null = null;
-        // A MEMBER a JS file cannot lower or marshal (a generic function
-        // as a value, a signature with checked-dynamic parameters — the
-        // doc-builder public aggregate's degraded pieces): defer like a
-        // statement fence — the slot holds a host closure that THROWS the
-        // captured diagnostic when invoked, so building the aggregate
-        // compiles and only a CALL through the island stops the run.
-        const islandMemberFence = (diagsBefore: number, err: unknown, valueNode: ts.Node): IrExpr => {
+        // A MEMBER a JS file cannot lower or marshal: defer like a
+        // statement fence, shaped by what the member IS. A FUNCTION-shaped
+        // member (a generic function as a value, a signature with
+        // checked-dynamic parameters — the doc-builder public aggregate's
+        // degraded pieces) becomes a host closure that THROWS the captured
+        // diagnostic when invoked — building the aggregate compiles and
+        // only a CALL through the island stops the run. A DATA-shaped
+        // member must NOT become a callable (the retired fence box's
+        // silent wrong answers: typeof said "function", downstream errors
+        // blamed the wrong thing — the withPlugins `plugins:` slot), so it
+        // defines through the engine's getter machinery instead: READING
+        // the member throws the diagnostic — the honest granularity, since
+        // using the value is exactly what cannot be answered. `getterName`
+        // null keeps the closure shape (function-shaped members, and the
+        // conditional-spread arms where getters cannot combine).
+        const islandMemberFence = (diagsBefore: number, err: unknown, valueNode: ts.Node, getterName: string | null = null): IrExpr | null => {
           if (
             !(err instanceof PoisonError) ||
             !isJsSourceFile(expr.getSourceFile()) ||
@@ -342,7 +351,28 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             loc: locOf(valueNode),
           });
           const fence: IrExpr = { kind: "closure", fnName, captures: [], type: funcOf([], VOID), loc: locOf(valueNode) };
+          if (getterName !== null) {
+            getters.push({ name: getterName, fn: L.jsvalIn(fence, valueNode), loc: locOf(valueNode) });
+            return null;
+          }
           return L.jsvalIn(fence, valueNode);
+        };
+        // The member's SHAPE decides the fence's granularity: syntactic
+        // functions and checker-callable values keep the call-time
+        // closure; everything else (call results, awaits, data reads —
+        // the withPlugins `plugins:` shape) fences at the READ.
+        const funcShapedMember = (p: ts.ObjectLiteralElementLike): boolean => {
+          if (ts.isMethodDeclaration(p)) return true;
+          const src: ts.Node | null = ts.isPropertyAssignment(p)
+            ? p.initializer
+            : ts.isShorthandPropertyAssignment(p)
+              ? p.name
+              : null;
+          if (!src || !ts.isExpression(src)) return true; // unknown form: keep the closure shape
+          let inner: ts.Expression = src;
+          while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+          if (ts.isArrowFunction(inner) || ts.isFunctionExpression(inner)) return true;
+          return L.checker.getCallSignatures(L.typeOf(src)).length > 0;
         };
         const pushProp = (
           name: ts.Identifier | ts.StringLiteral,
@@ -355,7 +385,14 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           try {
             marshaled = L.jsvalIn(value, valueNode);
           } catch (err) {
-            marshaled = islandMemberFence(diagsBefore, err, valueNode);
+            // A value that LOWERED but cannot cross (a promise, a class
+            // instance): func-typed values keep the call-time closure;
+            // data-shaped values fence at the read (the getter), unless a
+            // conditional spread owns the literal (getters cannot combine).
+            const asGetter = value.type.kind !== "func" && spread === null;
+            const fence = islandMemberFence(diagsBefore, err, valueNode, asGetter ? name.text : null);
+            if (fence === null) return; // registered as a fence getter — no data property
+            marshaled = fence;
           }
           for (const args of into) {
             args.push({
@@ -454,7 +491,11 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
                   ? (L.rejectThisInObjectMethod(prop.body), L.lowerLambda(prop))
                   : null;
           } catch (err) {
-            value = islandMemberFence(valueDiagsBefore, err, prop);
+            const nameText =
+              name && (ts.isIdentifier(name) || ts.isStringLiteral(name)) ? name.text : null;
+            const asGetter = nameText !== null && spread === null && !funcShapedMember(prop);
+            value = islandMemberFence(valueDiagsBefore, err, prop, asGetter ? nameText : null);
+            if (value === null) continue; // registered as a fence getter — no data property
           }
           if (value && name && (ts.isIdentifier(name) || ts.isStringLiteral(name))) {
             pushProp(name, value, prop, [argsWithout, argsWith]);
