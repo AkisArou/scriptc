@@ -42,8 +42,8 @@ assertNs(true); // namespace objects are not callable in Node
 
 assert.throws(() => { throw new Error("x"); }, { errno: -2 }); // properties outside the static error surface
 assert.throws(() => { throw new Error("x"); }, {}); // Node rejects the empty shape
-const shapeValue = { name: "TypeError" };
-assert.throws(() => { throw new Error("x"); }, shapeValue); // non-literal expected objects
+// (a convertible record VARIABLE as the expected shape lowers now — the
+// errValue key walk; corpus 2556 pins it)
 void assert.doesNotReject(async () => {}, { name: "TypeError" }); // Node's own TypeError (function or RegExp only)
 assert.ifError(new Map<string, number>()); // no honest ifError rendering for this type
 
