@@ -499,6 +499,13 @@ ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
     scr_dyn_arr_push_spread(out, src, ""); /* iterable kinds never consult `what` */
     return out;
   }
+  /* An engine-held value may well BE iterable — claiming "not iterable"
+   * would be a wrong answer. The routing lane owns iteration; until it
+   * arms this, the island fence names the operation loudly. */
+  if (src->kind == SCR_DYN_JSVAL) {
+    scr_dyn_isl_fence(src, "destructuring");
+    return NULL;
+  }
   if (msg != NULL && msg->len > 0) {
     scr_throw_error(SCR_ERR_TYPE, scr_str_new(msg->data, msg->len));
     return NULL;

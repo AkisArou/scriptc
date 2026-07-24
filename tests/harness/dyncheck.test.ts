@@ -898,7 +898,7 @@ firstOf(eng);
       true,
     );
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("array destructuring of non-array values");
+    expect(r.stderr).toContain("destructuring on an island value held in 'unknown' is not supported yet");
   });
 
   test("a keyed write through an island-held unknown lands on the real engine object", async () => {
