@@ -272,7 +272,10 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.stats.statementsFailed).toBe(0);
 
-    const outDir = join(cacheDir, "npm-static-workspace");
+    // Flavor-split like every fixed-name build dir: the other flavor's
+    // concurrent suite runs this same test (with a different sanitize
+    // flag, even) and must not share the dir.
+    const outDir = join(cacheDir, `npm-static-workspace-${sanitize ? "san" : "plain"}`);
     mkdirSync(outDir, { recursive: true });
     const result = await compile(entry, { outPath: join(outDir, "program"), outDir, sanitize, npmStatic: ["wslinked"] });
     if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

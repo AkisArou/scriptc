@@ -30,7 +30,11 @@ import { compileLibrary, validateSidecar, wyhash64, type SidecarDoc } from "@scr
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/library-mode");
-const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-contract");
+/* Suite-flavor segment: the plain and SCRIPTC_SAN=1 suites may run
+ * concurrently (the suite lock is per flavor) and both run these same
+ * builds, so they must never share build dirs. */
+const flavor = process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain";
+const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-contract", flavor);
 
 type Emission = "llvm" | "c";
 const EMISSIONS: Emission[] = ["llvm", "c"];
@@ -261,7 +265,7 @@ identity stable: 1
   });
 
   test("identity hashes cover statically-compiled npm modules; the type table stays authored surface", async () => {
-    const npmRoot = join(tmpdir(), "scriptc-tests-library-contract");
+    const npmRoot = join(tmpdir(), `scriptc-tests-library-contract-${flavor}`);
     const a = await buildContract("contract-npm", emission, "-npm1", npmRoot);
     const b = await buildContract("contract-npm", emission, "-npm2", npmRoot);
     expect(validateSidecar(a.doc)).toEqual([]);

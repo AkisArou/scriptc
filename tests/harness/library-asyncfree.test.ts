@@ -11,9 +11,13 @@ import { compile, ir } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
+/* Suite-flavor segment: the plain and SCRIPTC_SAN=1 suites may run
+ * concurrently (the suite lock is per flavor) and both run these same
+ * builds, so they must never share build dirs. */
+const flavor = process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain";
 
 async function surfaceOf(name: string, source: string): Promise<string | null> {
-  const outDir = join(cacheDir, "lib-asyncfree", name);
+  const outDir = join(cacheDir, `lib-asyncfree-${flavor}`, name);
   mkdirSync(outDir, { recursive: true });
   const entry = join(outDir, "main.ts");
   writeFileSync(entry, source);

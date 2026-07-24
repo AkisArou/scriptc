@@ -38,7 +38,7 @@
  * windows-dev). */
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, globSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, globSync, mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -202,7 +202,11 @@ function decOraclePath(file: string): string {
   const dir = join(cacheDir, "win-dec-oracle", key);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, decOracleName(file));
-  writeFileSync(path, out);
+  // Atomic publish: a concurrent run writes this same content-keyed path;
+  // rename keeps readers from ever seeing a truncated oracle.
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, out);
+  renameSync(tmp, path);
   return path;
 }
 

@@ -22,7 +22,10 @@ describe(`diagnostics corpus (${files.length} programs)`, () => {
   test.for(files.map((f) => [f.slice(diagDir.length + 1), f] as const))(
     "%s",
     async ([name, file]) => {
-      const outDir = join(tmpdir(), "scriptc-diag");
+      // Flavor-split scratch: some entries reach the backend and emit
+      // artifacts (.ll etc.) before failing, and the other flavor's
+      // concurrent suite writes the same names — never share the dir.
+      const outDir = join(tmpdir(), `scriptc-diag-${process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain"}`);
       // `// @dynamic` on the entry's FIRST line: compile with the island
       // engine embedded — for diagnostics only --dynamic builds can reach
       // (dynamic-import resolution failures, island-only fences).
