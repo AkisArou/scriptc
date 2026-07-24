@@ -1096,12 +1096,25 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     }
     const tmp = L.declareHiddenLocal("%destr", init.type);
     out.push({ kind: "varDecl", localId: tmp.id, init, loc });
+    // V8's destructuring TypeError spells STATIC sources: an identifier
+    // source reads "<name> is not iterable", an identifier-callee call
+    // "<name> is not a function or its return value is not iterable";
+    // everything else (property reads, method calls, parameters) gets the
+    // runtime kind wording — exactly V8's CallPrinter behavior. Only the
+    // DYN pattern arm consumes this.
+    const src = decl.initializer!;
+    const dynSpell = ts.isIdentifier(src)
+      ? `${src.text} is not iterable`
+      : ts.isCallExpression(src) && ts.isIdentifier(src.expression)
+        ? `${src.expression.text} is not a function or its return value is not iterable`
+        : undefined;
     L.lowerBindingPattern(
       decl.name as ts.ArrayBindingPattern | ts.ObjectBindingPattern,
       () => ({ kind: "varRef", localId: tmp.id, type: init.type, loc }),
       init.type,
       isLet,
       out,
+      dynSpell,
     );
     return out;
   }
@@ -1112,7 +1125,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     srcRef: () => IrExpr,
     srcType: IrType,
     isLet: boolean,
-    out: IrStmt[],): void {
+    out: IrStmt[],
+    dynSpell?: string,): void {
     if (ts.isArrayBindingPattern(pattern)) {
       // Tuple sources: each position is a field read of the tuple's record
       // shape — the positional twin of object destructuring below.
@@ -1236,6 +1250,71 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
           isLet,
           out,
         );
+        return;
+      }
+      // DYN sources (`const [a, b] = d` over a DOM value, `([_, code]) =>`
+      // params destructuring dyn callback arguments — the suite harness's
+      // _expectWarning shapes): the source packs ONCE through the spread
+      // walk (dyn.iterPack — arrays element-by-element, strings by code
+      // point, bytes by byte; every other kind throws V8's destructuring
+      // TypeError, the compile-time spelling when the source has one),
+      // then positions bind the pack's index keys as dyn values — reads
+      // past the end bind undefined, exactly JS. Defaults fire on the DOM
+      // undefined (JS's rule); rest elements keep the fence (surplus
+      // packing over the DOM needs a slice the IR does not spell yet).
+      if (srcType.kind === "dyn") {
+        const loc = locOf(pattern);
+        const pack = L.declareHiddenLocal("%dpack", DYN);
+        out.push({
+          kind: "varDecl",
+          localId: pack.id,
+          init: {
+            kind: "libCall",
+            fn: "dyn.iterPack",
+            args: [srcRef(), { kind: "strLit", value: dynSpell ?? "", type: STRING, loc }],
+            type: DYN,
+            loc,
+          },
+          loc,
+        });
+        pattern.elements.forEach((el, i) => {
+          if (ts.isOmittedExpression(el) || el.name === undefined) return; // hole: the position skips
+          const elLoc = locOf(el);
+          if (el.dotDotDotToken) {
+            L.unsupported("SC1031", el, "rest elements over checked-dynamic sources");
+          }
+          let value: IrExpr = {
+            kind: "dynKeyGet",
+            key: { kind: "strLit", value: String(i), type: STRING, loc: elLoc },
+            value: { kind: "varRef", localId: pack.id, type: DYN, loc: elLoc },
+            type: DYN,
+            loc: elLoc,
+          };
+          if (el.initializer) {
+            // The default fires exactly on the DOM undefined (JS's rule),
+            // its value converting into the DOM like any dyn-slot value.
+            const rl = L.declareHiddenLocal("%delem", DYN);
+            out.push({ kind: "varDecl", localId: rl.id, init: value, loc: elLoc });
+            const ref = (): IrExpr => ({ kind: "varRef", localId: rl.id, type: DYN, loc: elLoc });
+            const dflt = L.coerceToExpected(L.lowerExpr(el.initializer), DYN);
+            if (dflt.type.kind !== "dyn") {
+              L.unsupported(
+                "SC1031",
+                el.initializer,
+                `defaults of '${L.fmt(dflt.type)}' type over checked-dynamic sources (the value cannot convert into the DOM)`,
+              );
+            }
+            value = {
+              kind: "ternary",
+              cond: { kind: "dynTest", test: "undefined", value: ref(), type: BOOL, loc: elLoc },
+              then: dflt,
+              else_: ref(),
+              type: DYN,
+              loc: elLoc,
+            };
+          }
+          L.bindPatternTarget(el.name, value, isLet, out);
+        });
         return;
       }
       if (srcType.kind !== "array") {

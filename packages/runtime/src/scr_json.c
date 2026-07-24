@@ -470,6 +470,48 @@ void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what) {
   scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
 }
 
+/* Destructuring pack over a DOM source (`const [a, b] = d`, a destructured
+ * dyn callback param): the spread walk's iterable kinds collect into a
+ * FRESH array — arrays element-by-element (retained), strings by code
+ * point, bytes by byte — and every other kind throws V8's DESTRUCTURING
+ * TypeError: `msg` verbatim when non-empty (the compile-time spelling —
+ * "v is not iterable" for identifier sources, "f is not a function or its
+ * return value is not iterable" for identifier-callee calls), else the
+ * runtime kind wording ("number 5 is not iterable (cannot read property
+ * Symbol(Symbol.iterator))"; objects and functions carry no value text,
+ * undefined no kind prefix, null V8's "object null"). Borrows both; +1 or
+ * NULL with the TypeError pending. */
+ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
+  if (src->kind == SCR_DYN_ARR || src->kind == SCR_DYN_BYTES || src->kind == SCR_DYN_STR) {
+    ScrDyn *out = scr_dyn_new_arr();
+    scr_dyn_arr_push_spread(out, src, ""); /* iterable kinds never consult `what` */
+    return out;
+  }
+  if (msg != NULL && msg->len > 0) {
+    scr_throw_error(SCR_ERR_TYPE, scr_str_new(msg->data, msg->len));
+    return NULL;
+  }
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  switch (src->kind) {
+  case SCR_DYN_UNDEF: scr_jb_puts(&b, "undefined"); break;
+  case SCR_DYN_NULL: scr_jb_puts(&b, "object null"); break;
+  case SCR_DYN_BOOL: scr_jb_puts(&b, src->v.b ? "boolean true" : "boolean false"); break;
+  case SCR_DYN_NUM: {
+    char buf[32];
+    scr_jb_puts(&b, "number ");
+    size_t n = scr_f64_to_str(src->v.num, buf);
+    scr_jb_write(&b, buf, n);
+    break;
+  }
+  case SCR_DYN_FUNC: scr_jb_puts(&b, "function"); break;
+  default: scr_jb_puts(&b, "object"); break;
+  }
+  scr_jb_puts(&b, " is not iterable (cannot read property Symbol(Symbol.iterator))");
+  scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+  return NULL;
+}
+
 /* Takes ownership of key (malloc'd) and value. Duplicate keys: the LATER
  * value wins (like JS JSON.parse) — the old value is released and the new
  * key buffer freed (the surviving entry keeps its original, equal key). */
@@ -1271,6 +1313,22 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
     for (size_t i = 0; i < key->len; i++) scr_jb_putc(&b, key->data[i]);
     scr_jb_puts(&b, "' on ");
     scr_jb_puts(&b, scr_dyn_kind_name(recv));
+    /* V8 quotes the primitive's own rendering after the kind — "on number
+     * '5'", "on string 'abc'", "on boolean 'true'". Other kinds stop at
+     * the kind word. */
+    if (recv->kind == SCR_DYN_NUM) {
+      char buf[32];
+      size_t n = scr_f64_to_str(recv->v.num, buf);
+      scr_jb_puts(&b, " '");
+      scr_jb_write(&b, buf, n);
+      scr_jb_putc(&b, '\'');
+    } else if (recv->kind == SCR_DYN_STR) {
+      scr_jb_puts(&b, " '");
+      scr_jb_write(&b, recv->v.str->data, recv->v.str->len);
+      scr_jb_putc(&b, '\'');
+    } else if (recv->kind == SCR_DYN_BOOL) {
+      scr_jb_puts(&b, recv->v.b ? " 'true'" : " 'false'");
+    }
   }
   scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
 }

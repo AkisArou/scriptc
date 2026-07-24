@@ -91,6 +91,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "island.castFail": { argTypes: [JSVAL, STRING], result: VOID },
   "json.parse": { argTypes: [STRING], result: DYN },
   "dyn.keySet": { argTypes: [DYN, STRING, DYN], result: VOID },
+  "dyn.iterPack": { argTypes: [DYN, STRING], result: DYN },
   "dyn.toString": { argTypes: [DYN, STRING], result: STRING },
   "dyn.defineProps": { argTypes: [DYN, DYN], result: DYN },
   "dyn.typeof": { argTypes: [DYN], result: STRING },

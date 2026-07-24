@@ -5530,10 +5530,13 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const obj = L.lowerExpr(expr.expression);
       if (obj.type.kind === "dyn") {
         const rawKey = L.lowerExpr(expr.argumentExpression);
+        // Number, bool, and DYN keys stringify (ToPropertyKey) — the
+        // dyn-keyed read `catchWarning[warning.name]` where the property
+        // chain itself lowered dyn.
         const key: IrExpr | null =
           rawKey.type.kind === "string"
             ? rawKey
-            : rawKey.type.kind === "f64"
+            : rawKey.type.kind === "f64" || rawKey.type.kind === "bool" || rawKey.type.kind === "dyn"
               ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
               : null;
         if (key) {
@@ -6133,6 +6136,40 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           ...(overflowOnly ? { overflowOnly: true as const } : {}),
           loc: locOf(expr),
         };
+      }
+    }
+    // `catchWarning[name] = fn` / `bag[key] = v` on a DYN receiver (a
+    // checked-dynamic DOM object: an untyped `let` holding an object
+    // literal, a JSON.parse result, an unknown-typed slot) — the DOM
+    // keyed write, dynKeyGet's twin: dyn.keySet (later writes win,
+    // insertion order; Node's TypeErrors on non-object receivers). An
+    // UNMAPPABLE checker type (`any`) takes the same path when the
+    // receiver LOWERS dyn — the suite harness's
+    // `catchWarning[nameOrMap] = _expectWarning(...)` shape, an object
+    // built up dynamically through a runtime key. Number/bool/dyn keys
+    // stringify (ToPropertyKey); values convert into the DOM (closures
+    // cross as the callable kind, identity preserved).
+    if (receiverIr?.kind === "dyn" || receiverIr === null) {
+      const obj = L.lowerExpr(target.expression);
+      if (obj.type.kind === "dyn") {
+        const loc = locOf(expr);
+        let key = L.lowerExpr(target.argumentExpression);
+        if (key.type.kind === "f64") key = L.ensureString(key, target.argumentExpression);
+        if (key.type.kind === "bool" || key.type.kind === "dyn") {
+          key = { kind: "toString", operand: key, type: STRING, loc: locOf(target.argumentExpression) };
+        }
+        if (key.type.kind !== "string") {
+          L.unsupported("SC1090", target.argumentExpression, "indexing with non-string or non-number keys");
+        }
+        const value = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
+        if (value.type.kind !== "dyn") {
+          L.unsupported(
+            "SC1101",
+            expr.right,
+            `storing '${L.fmt(value.type)}' values in a checked-dynamic object (the value cannot convert into the DOM)`,
+          );
+        }
+        return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
       }
     }
     if (receiverIr?.kind !== "array") {

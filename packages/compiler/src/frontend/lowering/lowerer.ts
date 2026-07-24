@@ -6468,7 +6468,8 @@ export class Lowerer {
     srcRef: () => IrExpr,
     srcType: IrType,
     isLet: boolean,
-    out: IrStmt[],): void {
+    out: IrStmt[],
+    dynSpell?: string,): void {
     // An ISLAND source (`const { readFileSync } = await import("fs")` —
     // a namespace handle, or any 'any'-typed object): each bound name is
     // an engine property read, mirroring the island property-read rule —
@@ -6539,7 +6540,7 @@ export class Lowerer {
       }
       return;
     }
-    return lowerBindingPattern(this, pattern, srcRef, srcType, isLet, out);
+    return lowerBindingPattern(this, pattern, srcRef, srcType, isLet, out, dynSpell);
   }
 
   checkBindingElement(el: ts.BindingElement, allowDefault = false): void {
