@@ -236,7 +236,6 @@ function nodeOracle(c: CorpusCase): number[] {
   const send = (x: number): void => {
     crossed.push(x);
   };
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const fn = new Function("send", "sendU64", "a", c.body) as (s: unknown, u: unknown, a?: number) => void;
   if (c.param === true) {
     for (const a of c.args ?? []) fn(send, send, Number(a));
