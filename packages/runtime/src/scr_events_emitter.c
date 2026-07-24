@@ -662,6 +662,18 @@ ScrArr *scr_emitter_listeners(ScrEmitter *em, ScrStr *name) {
 
 /* ── max listeners ────────────────────────────────────────────────────── */
 
+/* The checked-dynamic setMaxListeners ladder: non-numbers throw Node's
+ * ERR_INVALID_ARG_TYPE ("The \"setMaxListeners\" argument must be of
+ * type number. Received ..."), numbers run the range gate below.
+ * Borrowed dyn; +1 receiver either way (the pending check unwinds). */
+ScrEmitter *scr_emitter_set_max_chk(ScrEmitter *em, const ScrDyn *n) {
+  if (n->kind != SCR_DYN_NUM) {
+    scr_dyn_arg_type_fail("setMaxListeners", "of type number", n);
+    return scr_emitter_retain(em);
+  }
+  return scr_emitter_set_max(em, n->v.num);
+}
+
 ScrEmitter *scr_emitter_set_max(ScrEmitter *em, double n) {
   if (!(n >= 0)) { /* negatives and NaN — Node's validateNumber */
     char num[32];
@@ -680,6 +692,28 @@ ScrEmitter *scr_emitter_set_max(ScrEmitter *em, double n) {
 double scr_emitter_get_max(ScrEmitter *em) {
   if (em->reg && em->reg->max >= 0) return em->reg->max;
   return scr_emitter_default_max;
+}
+
+/* The checked-dynamic defaultMaxListeners ladder — `name` picks the
+ * message's slot ("setMaxListeners" for the static call,
+ * "defaultMaxListeners" for the module-property assignment, Node's own
+ * split). Borrowed. */
+void scr_emitter_set_default_max_chk(const ScrDyn *n, const ScrStr *name) {
+  if (n->kind != SCR_DYN_NUM) {
+    scr_dyn_arg_type_fail(name->data, "of type number", n);
+    return;
+  }
+  if (!(n->v.num >= 0)) {
+    char num[32];
+    size_t nlen = scr_f64_to_str(n->v.num, num);
+    char msg[128];
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"%s\" is out of range. It must be >= 0. Received %.*s",
+                       name->data, (int)nlen, num);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  scr_emitter_set_default_max(n->v.num);
 }
 
 void scr_emitter_set_default_max(double n) {

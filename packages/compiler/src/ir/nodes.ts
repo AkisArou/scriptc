@@ -2521,6 +2521,19 @@ export type IrLibFn =
    * finite numbers coerce (negatives answer now/1000, Node's shape);
    * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
   | "fs.toUnixTimestamp"
+  /** The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
+   * rendered Received tail: args [argname, "of type ..." clause, the
+   * offending DOM value]. ALWAYS THROWS; polymorphic result (the
+   * error.nodeThrow pattern). May-throw seed. */
+  | "error.argTypeThrow"
+  /** The checked-dynamic max-listeners ladders: setMaxChk is the
+   * instance form over a DOM n (non-numbers ERR_INVALID_ARG_TYPE,
+   * negatives/NaN ERR_OUT_OF_RANGE; +1 receiver back — chaining);
+   * setDefaultMaxChk is the static/property form, its second argument
+   * naming the message slot ("setMaxListeners" for the static call,
+   * "defaultMaxListeners" for the module-property assignment). */
+  | "emitter.setMaxChk"
+  | "emitter.setDefaultMaxChk"
   /** The Buffer forms of the fs quartet: readFileSync(path) with NO
    * encoding → bytes<u8> (+1), writeFileSync(path, bytes), and the
    * fs/promises readFile(path) no-encoding form (an already-settled
@@ -6204,6 +6217,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "bytes.compareChk",
   "buffer.newStringFail",
   "fs.toUnixTimestamp",
+  "error.argTypeThrow",
+  "emitter.setMaxChk",
+  "emitter.setDefaultMaxChk",
   "fs.readFileSyncBytes",
   "fs.writeFileSyncBytes",
   "zlib.inflateSync",

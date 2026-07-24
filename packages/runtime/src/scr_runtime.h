@@ -2968,6 +2968,9 @@ void scr_dyn_check_listener(const ScrDyn *cb, const char *argname);
  * generic ERR_INVALID_ARG_TYPE thrower over it (`expected` is the whole
  * "of type ..." clause). The handle dispatchers' per-arg gates. */
 const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
+/* ERR_INVALID_ARG_TYPE with the runtime-rendered Received tail (the
+ * error.argTypeThrow libCall). Borrows all three; always throws. */
+void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
 void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
 /* Listener-closure builders for the handle dispatchers' .on(...) paths:
  * a runtime-built ScrClosure whose capture is the boxed dyn listener and
@@ -4181,6 +4184,9 @@ ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
  * numbers coerce (negatives answer now/1000), the rest throw Node's
  * ERR_INVALID_ARG_TYPE. Borrowed. */
 double scr_fs_to_unix_timestamp(const ScrDyn *t);
+/* The checked-dynamic max-listeners ladders (scr_events_emitter.c). */
+ScrEmitter *scr_emitter_set_max_chk(ScrEmitter *em, const ScrDyn *n);
+void scr_emitter_set_default_max_chk(const ScrDyn *n, const ScrStr *name);
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd);
 double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd);
 ScrBytes *scr_bytes_fill(ScrBytes *b, const ScrBytes *pattern, double nargs, double offset, double end);

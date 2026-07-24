@@ -635,6 +635,14 @@ const char *scr_dyn_specific_type(const ScrDyn *cb, char *detail, size_t cap) {
  * number (5)") — the handle dispatchers' and argument validators'
  * per-arg gates. `expected` is the full "of type ..."/"an instance of
  * ..." clause. */
+/* The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
+ * rendered Received tail (error.argTypeThrow — the always-throwing
+ * lowered arms whose offending value is not a literal). Borrows all
+ * three; always throws catchably. */
+void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got) {
+  scr_dyn_arg_type_fail(argname->data, expected->data, got);
+}
+
 void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got) {
   char detail[64];
   const char *d = scr_dyn_specific_type(got, detail, sizeof detail);

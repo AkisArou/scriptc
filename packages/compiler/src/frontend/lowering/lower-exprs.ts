@@ -6618,6 +6618,49 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         const value = L.lowerExprExpecting(expr.right, target.type);
         return { kind: "assignExpr", localId: target.id, value, type: target.type, loc };
       }
+      // `events.defaultMaxListeners = v` — the module-property write
+      // Node validates (validateNumber(n, 'defaultMaxListeners', 0)):
+      // the value crosses into the DOM and the runtime ladder throws
+      // ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE with Node's exact slot
+      // name; valid numbers apply. The expression's value is the RHS
+      // (JS's assignment yield).
+      if (
+        op === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(expr.left) &&
+        !expr.left.questionDotToken &&
+        expr.left.name.text === "defaultMaxListeners"
+      ) {
+        const bi = L.builtinMemberOf(expr.left);
+        if (bi && bi.module === "events" && bi.member === "defaultMaxListeners") {
+          const rhs = L.lowerExpr(expr.right);
+          if (rhs.type.kind === "dyn" || rhs.kind === "unitLit" || L.dynConvertible(rhs.type)) {
+            const valTmp = L.declareHiddenLocal("%setVal", rhs.type);
+            const valRef = (): IrExpr => ({ kind: "varRef", localId: valTmp.id, type: rhs.type, loc });
+            const dynVal: IrExpr =
+              rhs.type.kind === "dyn" ? valRef() : { kind: "dynFrom", value: valRef(), type: DYN, loc };
+            return {
+              kind: "seqExpr",
+              stmts: [
+                { kind: "varDecl", localId: valTmp.id, init: rhs, loc },
+                {
+                  kind: "exprStmt",
+                  expr: {
+                    kind: "libCall",
+                    fn: "emitter.setDefaultMaxChk",
+                    args: [dynVal, { kind: "strLit", value: "defaultMaxListeners", type: STRING, loc }],
+                    type: VOID,
+                    loc,
+                  },
+                  loc,
+                },
+              ],
+              result: valRef(),
+              type: rhs.type,
+              loc,
+            };
+          }
+        }
+      }
       // Member targets whose storage IS a module global — namespace
       // members (`N.x`) and expando function members (`Foo.baz`): the
       // same assignExpr, since the "member" is a variable.

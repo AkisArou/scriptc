@@ -7083,6 +7083,11 @@ export class Lowerer {
     }
     const bi = this.builtinMemberOf(expr);
     if (!bi) return null;
+    // events.defaultMaxListeners READS the process-wide default (its
+    // write twin routes through emitter.setDefaultMaxChk).
+    if (bi.module === "events" && bi.member === "defaultMaxListeners") {
+      return { kind: "libCall", fn: "emitter.getDefaultMax", args: [], type: F64, loc };
+    }
     const c = builtinModuleConstOf(this, bi.module, bi.member);
     if (c !== undefined) return builtinConstLit(c, loc);
     if (bi.member === "constants" && bi.module === "fs") {

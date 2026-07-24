@@ -509,6 +509,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "emitter.names": "scr_emitter_event_names",
   "emitter.listeners": "scr_emitter_listeners",
   "emitter.setMax": "scr_emitter_set_max",
+  "emitter.setMaxChk": "scr_emitter_set_max_chk",
+  "emitter.setDefaultMaxChk": "scr_emitter_set_default_max_chk",
   "emitter.getMax": "scr_emitter_get_max",
   "emitter.setDefaultMax": "scr_emitter_set_default_max",
   "emitter.getDefaultMax": "scr_emitter_get_default_max",
@@ -9289,6 +9291,24 @@ class LlEmitter {
     // Loop liveness first (one table for generic and special shapes).
     if (USES_TIMERS_LIB_FNS.has(e.fn)) this.usesTimers = true;
     // The handful with non-generic shapes first.
+    if (e.fn === "error.argTypeThrow") {
+      // Always throws with the runtime-rendered Received tail (the
+      // error.nodeThrow dummy pattern). Borrows all three.
+      const an = this.emitExpr(e.args[0]!);
+      const ex = this.emitExpr(e.args[1]!);
+      const got = this.emitExpr(e.args[2]!);
+      this.declare(`declare void @scr_throw_arg_type(ptr, ptr, ptr)`);
+      B.line(`call void @scr_throw_arg_type(ptr ${an.name}, ptr ${ex.name}, ptr ${got.name})`);
+      const ty = this.llType(e.type);
+      if (ty === "void") {
+        this.emitPendingCheck();
+        return { name: "", type: e.type };
+      }
+      const dummy = ty === "double" ? f64Lit(0) : ty === "i1" ? "false" : "null";
+      const out = this.own({ name: dummy, type: e.type });
+      this.emitPendingCheck();
+      return out;
+    }
     if (e.fn === "error.nodeThrow") {
       // The compiler-resolved Node-parity throw (always throws — the
       // typed dummy is abandoned by the pending check's unwind).

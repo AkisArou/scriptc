@@ -4294,6 +4294,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_buffer_new_string_fail(${arg(0)})`);
           case "fs.toUnixTimestamp":
             return finish(`scr_fs_to_unix_timestamp(${arg(0)})`);
+          case "error.argTypeThrow":
+            // Always throws with the runtime-rendered Received tail (the
+            // error.nodeThrow dummy pattern). Borrows all three.
+            return finish(
+              `(scr_throw_arg_type(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
           // The fs Buffer forms (scr_bytes_io.c): the sync pair throws
           // like the utf8 forms (may-throw seed set); the promise form
           // rejects instead.
@@ -4860,10 +4866,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               `(${cType(e.type).trim()})scr_emitter_set_max((ScrEmitter *)${arg(0)}, ${arg(1)})`,
             );
+          case "emitter.setMaxChk":
+            // The checked-dynamic ladder (may throw); +1 receiver back.
+            return finish(
+              `(${cType(e.type).trim()})scr_emitter_set_max_chk((ScrEmitter *)${arg(0)}, ${arg(1)})`,
+            );
           case "emitter.getMax":
             return finish(`scr_emitter_get_max((ScrEmitter *)${arg(0)})`);
           case "emitter.setDefaultMax":
             return finish(`scr_emitter_set_default_max(${arg(0)})`);
+          case "emitter.setDefaultMaxChk":
+            return finish(`scr_emitter_set_default_max_chk(${arg(0)}, ${arg(1)})`);
           case "emitter.getDefaultMax":
             return finish(`scr_emitter_get_default_max()`);
           // node:stream (scr_stream.c — linked exactly when these appear,

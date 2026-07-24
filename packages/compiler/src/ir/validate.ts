@@ -672,6 +672,9 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "bytes.compareChk": { argTypes: [BYTES_U8, DYN, DYN, DYN, DYN, DYN], result: F64 },
   "buffer.newStringFail": { argTypes: [DYN], result: BYTES_U8 },
   "fs.toUnixTimestamp": { argTypes: [DYN], result: F64 },
+  "error.argTypeThrow": { argTypes: [STRING, STRING, DYN], result: VOID },
+  "emitter.setMaxChk": { argTypes: [null, DYN], result: VOID },
+  "emitter.setDefaultMaxChk": { argTypes: [DYN, STRING], result: VOID },
   "fs.readFileSyncBytes": { argTypes: [STRING], result: BYTES_U8 },
   "fs.writeFileSyncBytes": { argTypes: [STRING, BYTES_U8], result: VOID },
   "fsp.readFileBytes": { argTypes: [STRING], result: { kind: "promise", inner: BYTES_U8 } },
@@ -3831,7 +3834,7 @@ function validateFunction(
           // of the undefined global mapped to (never materialized).
           break;
         }
-        if (e.fn === "error.nodeThrow") {
+        if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow") {
           // Always throws — the result type is the replaced expression's
           // own (never materialized; the global.undefRead pattern).
           break;
@@ -4050,6 +4053,7 @@ function validateFunction(
           break;
         }
         if (e.fn.startsWith("emitter.") && e.fn !== "emitter.setDefaultMax" &&
+            e.fn !== "emitter.setDefaultMaxChk" &&
             e.fn !== "emitter.getDefaultMax" && e.fn !== "emitter.checkListener") {
           // Receiver: an emitter-hierarchy object (the %EventEmitter class
           // itself, or a class whose base chain reaches it). emitter.new
@@ -4077,7 +4081,8 @@ function validateFunction(
           if (e.fn === "emitter.on" || e.fn === "emitter.off" ||
               e.fn === "emitter.onDyn" || e.fn === "emitter.offDyn" ||
               e.fn === "emitter.onData" || e.fn === "emitter.onDataDyn" ||
-              e.fn === "emitter.removeAll" || e.fn === "emitter.setMax") {
+              e.fn === "emitter.removeAll" || e.fn === "emitter.setMax" ||
+              e.fn === "emitter.setMaxChk") {
             if (!typeEquals(e.type, e.args[0]!.type)) {
               err(`libCall ${e.fn} must return its receiver's type (the chaining 'this')`, e.loc);
             }

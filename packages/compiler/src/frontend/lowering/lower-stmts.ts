@@ -3578,6 +3578,32 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
               };
             }
           }
+          // `events.defaultMaxListeners = v` in STATEMENT position — the
+          // module-property write Node validates (the lowerBinary
+          // expression twin): the value crosses into the DOM, the runtime
+          // ladder throws Node's exact errors, valid numbers apply.
+          if (!expr.left.questionDotToken && expr.left.name.text === "defaultMaxListeners") {
+            const bi = L.builtinMemberOf(expr.left);
+            if (bi && bi.module === "events" && bi.member === "defaultMaxListeners") {
+              const loc = locOf(expr);
+              const rhs = L.lowerExpr(expr.right);
+              if (rhs.type.kind === "dyn" || rhs.kind === "unitLit" || L.dynConvertible(rhs.type)) {
+                const dynVal: IrExpr =
+                  rhs.type.kind === "dyn" ? rhs : { kind: "dynFrom", value: rhs, type: DYN, loc };
+                return {
+                  kind: "exprStmt",
+                  expr: {
+                    kind: "libCall",
+                    fn: "emitter.setDefaultMaxChk",
+                    args: [dynVal, { kind: "strLit", value: "defaultMaxListeners", type: STRING, loc }],
+                    type: VOID,
+                    loc,
+                  },
+                  loc,
+                };
+              }
+            }
+          }
           // `r._read = fn` / `w._write = fn` (and the other underscore
           // methods) on a runtime-stream-rooted receiver: Node's
           // own-property shadow of the prototype method — the runtime
