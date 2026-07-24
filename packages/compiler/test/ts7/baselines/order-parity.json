@@ -5018,6 +5018,30 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2604-bytes-views.ts": {
+   "order": [
+    "<repo>/tests/corpus/2604-bytes-views.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2605-stream-event-names.ts": {
+   "order": [
+    "<repo>/tests/corpus/2605-stream-event-names.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2606-stream-ticks-are-nextticks.ts": {
+   "order": [
+    "<repo>/tests/corpus/2606-stream-ticks-are-nextticks.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2607-stream-push-encodings.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2607-stream-push-encodings.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

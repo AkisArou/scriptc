@@ -7,7 +7,7 @@ dataview.ts:9:7 - error SC2020: 'ArrayBuffer' is part of the standard library ty
 
   hint: no free-standing ArrayBuffer value exists — typed arrays own their storage (new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)
 
-dataview.ts:9:17 - error SC1090: '.buffer' outside new DataView(x.buffer, ...) — scriptc typed arrays own their storage: no free-standing ArrayBuffer value exists, and slice()/subarray() copy is not supported yet
+dataview.ts:9:17 - error SC1090: '.buffer' outside new DataView(x.buffer, ...) / Buffer.from(x.buffer, ...) (no free-standing ArrayBuffer value exists; subarray() answers an aliasing view directly) is not supported yet
 
    8 | // '.buffer' only compiles inside new DataView(x.buffer, ...).
    9 | const escaped = buf.buffer;
