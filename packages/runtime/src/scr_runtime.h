@@ -163,6 +163,12 @@ ScrStr *scr_library_str_in(const uint8_t *p, size_t len);   /* +1 */
  * (structured trap-teaching bytes naming this entry's symbol), delivered
  * through the funnel when len falls outside the marshalling class. */
 ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len, const char *trap_msg); /* +1, u8 */
+/* The inbound declared-integer edge (ask 4's i64/u64 parameter classes):
+ * exact conversion for |v| <= 2^53-1, the host-contract trap (same
+ * assembled SC4012 message shape as the bytes trap) past it — silent
+ * rounding is a coercion the author never wrote. */
+double scr_library_i64_in(int64_t v, const char *trap_msg);
+double scr_library_u64_in(uint64_t v, const char *trap_msg);
 void scr_library_str_out(ScrStr *s, const uint8_t **out, size_t *out_len);
 void scr_library_bytes_out(ScrBytes *b, const uint8_t **out, size_t *out_len);
 

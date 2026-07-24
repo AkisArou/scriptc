@@ -3,7 +3,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkLibraryIntegerSlots, classSeed, hasIntSlots, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
@@ -13,6 +14,7 @@ import {
   canonicalPath,
   compilerReleaseVersion,
   libraryIdentityHashes,
+  type SidecarIntegerSlotFacts,
 } from "./library/sidecar.js";
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
@@ -875,6 +877,20 @@ function resolveLibrarySection(
           profileRemediation(profile, LIB_INBOUND_BYTES_TRAP_CODE),
         );
       }
+      if (e.params.includes("i64") || e.params.includes("u64")) {
+        // The sibling host-contract trap for inbound declared-integer
+        // parameters (ask 4): a value past ±(2^53−1) cannot ride f64
+        // exactly, and silent rounding is a coercion the author never
+        // wrote. Same code (SC4012 — one host-contract story), same
+        // assembly-once discipline.
+        resolvedExport.inboundIntTrap = assembleTrapTeaching(
+          profileTeaching(profile, LIB_INBOUND_BYTES_TRAP_CODE) ??
+            "scriptc: library inbound integer parameter out of range\n",
+          LIB_INBOUND_BYTES_TRAP_CODE,
+          e.symbol,
+          profileRemediation(profile, LIB_INBOUND_BYTES_TRAP_CODE),
+        );
+      }
       exports.push(resolvedExport);
     }
   }
@@ -910,6 +926,97 @@ function resolveLibrarySection(
       trapOverlays,
     },
   };
+}
+
+/** The export map's integer-slot obligations (ask 4): i64/u64 params and
+ * returns become declared boundary slots keyed `exports.<name>.params[i]`
+ * / `exports.<name>.return`; the u8/u32/i32 plumbing classes contribute
+ * their proven inbound shapes as parameter seeds (the wrapper's coercion
+ * contract), tightening the intraprocedural analysis at zero declaration
+ * cost. Sidecar-declared slots (record fields, msg arms, helper params
+ * and returns) merge into the same config at sidecar build. */
+function libraryIntSlotConfig(profile: LibraryProfile): IntSlotConfig {
+  const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
+  for (const e of profile.exports) {
+    const params = e.params.map((c) => (c === "i64" || c === "u64" ? c : null));
+    const ret = e.returns === "i64" || e.returns === "u64" ? e.returns : null;
+    const paramSeeds = e.params.map((c) => (c === "u8" || c === "u32" || c === "i32" ? classSeed(c) : null));
+    if (params.every((p) => p === null) && ret === null && paramSeeds.every((s) => s === null)) continue;
+    const slots: FnIntSlots = {
+      fnName: e.export,
+      params,
+      paramPaths: e.params.map((c, i) => (c === "i64" || c === "u64" ? `exports.${e.export}.params[${i}]` : null)),
+      ret,
+      retPath: ret !== null ? `exports.${e.export}.return` : null,
+      paramSeeds,
+    };
+    cfg.fns.set(e.export, slots);
+  }
+  return cfg;
+}
+
+/** Merge the sidecar-resolved integer slots (ask 4) into the inference
+ * config: helper slots key by function name and IR parameter index (the
+ * projection already shifted past the model receiver); record-field
+ * slots map onto every interned IR shape whose field-name set matches
+ * the projected record's — shapes intern structurally, so a same-shaped
+ * second type shares the obligation (a sound over-approximation). A
+ * record fact that matches no shape binds nothing: the program never
+ * constructs the type, and the attestation holds vacuously. */
+function mergeSidecarIntSlots(cfg: IntSlotConfig, facts: SidecarIntegerSlotFacts, mod: IrModule): IntSlotConfig {
+  for (const h of facts.helpers) {
+    const fn = mod.functions.find((f) => f.name === h.fnName);
+    const arity = Math.max(fn?.params.length ?? 0, (h.index ?? 0) + 1);
+    let slots = cfg.fns.get(h.fnName);
+    if (slots === undefined) {
+      slots = {
+        fnName: h.fnName,
+        params: new Array<null>(arity).fill(null),
+        paramPaths: new Array<null>(arity).fill(null),
+        ret: null,
+        retPath: null,
+        paramSeeds: new Array<null>(arity).fill(null),
+      };
+      cfg.fns.set(h.fnName, slots);
+    }
+    if (h.kind === "param") {
+      const i = h.index!;
+      while (slots.params.length <= i) {
+        slots.params.push(null);
+        slots.paramPaths.push(null);
+        slots.paramSeeds.push(null);
+      }
+      slots.params[i] = h.cls;
+      slots.paramPaths[i] = h.path;
+    } else {
+      slots.ret = h.cls;
+      slots.retPath = h.path;
+    }
+  }
+  for (const r of facts.records) {
+    const wanted = new Set(r.fieldNames);
+    const wantedSansKind = new Set(r.fieldNames.filter((n) => n !== "kind"));
+    for (const shape of mod.records ?? []) {
+      if (shape.tuple === true || shape.indexValue !== undefined) continue;
+      const names = shape.fields.map((f) => f.name);
+      if (names.some((n) => n.startsWith("%"))) continue;
+      // The union discriminant may or may not materialize as a shape
+      // field depending on the arm's lowering; match either spelling.
+      const matches =
+        (names.length === wanted.size && names.every((n) => wanted.has(n))) ||
+        (names.length === wantedSansKind.size && names.every((n: string) => wantedSansKind.has(n)));
+      if (!matches) continue;
+      const target = shape.fields.find((f) => f.name === r.targetField);
+      if (target === undefined || target.type.kind !== "f64") continue;
+      let m = cfg.records.get(shape.id);
+      if (m === undefined) {
+        m = new Map();
+        cfg.records.set(shape.id, m);
+      }
+      m.set(r.targetField, { cls: r.cls, path: r.path });
+    }
+  }
+  return cfg;
 }
 
 export async function compileLibrary(opts: CompileLibraryOptions): Promise<CompileLibraryResult> {
@@ -1009,6 +1116,12 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   if (fenced.length > 0) return fail(fenced);
   mod.lib = resolved.lib;
 
+  // Ask 4's declared integer slots: the export map's i64/u64 classes
+  // seed the config here; sidecar-declared slots (record fields, msg
+  // arms, helper params/returns) merge in after the projection resolves
+  // them below.
+  let intCfg = libraryIntSlotConfig(profile);
+
   // The ask-2 contract sidecar rides the same invocation. Identity first
   // (schema §2's worked build_id definition over compiler version, profile
   // bytes, and the sorted canonical module graph; source_hash per the
@@ -1045,6 +1158,22 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       return fail(violations.map((v) => iceDiag(`sidecar self-check failed — ${v}`, { file: entryPath, start: 0, end: 0 })));
     }
     sidecarJson = built.json;
+    intCfg = mergeSidecarIntSlots(intCfg, built.integerSlotFacts, mod);
+  }
+
+  // Ask 4: the integer-boundary inference — every value that can reach a
+  // profile-declared i64/u64 slot must PROVE representability, wholeness,
+  // and range, or the build refuses with the failed obligation, the
+  // observed evidence, and the author's fix (SC4021/SC4022/SC4023). Runs
+  // only when at least one integer slot is declared; the sidecar (already
+  // built above, written only on success) may then attest the classes —
+  // §5's invariant that an attested integer class means the proof was
+  // discharged holds because no artifact leaves this function otherwise.
+  if (hasIntSlots(intCfg)) {
+    const refusals = checkLibraryIntegerSlots(mod, intCfg).filter((v) => v.outcome === "refuse");
+    if (refusals.length > 0) {
+      return fail(refusals.map((v) => libIntBoundaryDiag(v.path, v.cls, v.obligation!, v.detail!, v.fix!, v.loc)));
+    }
   }
 
   const validation = validateModule(mod);

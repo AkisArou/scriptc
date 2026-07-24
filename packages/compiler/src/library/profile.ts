@@ -78,10 +78,12 @@
  * getters are pure data returns exempt from the poisoned guard and every
  * runtime touch (ratified): callable before init and after a trap.
  *
- * Marshalling classes (design §4.2 + session ruling 3): f64, bool, string,
- * bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing classes
- * in v1 (outbound integer returns wait for ask-4's prove-or-refuse
- * machinery); void is return-only. Unknown top-level fields are ignored
+ * Marshalling classes (design §4.2 + session ruling 3 + ask 4): f64, bool,
+ * string, bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing
+ * classes; i64/u64 are ask-4's declared integer boundary classes (params:
+ * wrapper range-check inbound, compile-time proof at internal call sites;
+ * returns: prove-or-refuse over every value reaching them); void is
+ * return-only. Unknown top-level fields are ignored
  * (reserved surface: determinism, identity/version echo); unknown fields
  * INSIDE `abi` and export entries are refused — a typo there silently
  * changes meaning. */
@@ -90,11 +92,25 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { libProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import { resolveLibraryFences, type LibraryFenceDecl, type ResolvedLibraryFence } from "./fence-eval.js";
 
-/** Marshalling classes legal in PARAMETER position (v1). */
-export const LIB_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32"] as const;
-/** Marshalling classes legal in RETURN position (v1): the value classes
- * plus void; the integer plumbing classes are param-only until ask 4. */
-export const LIB_RETURN_CLASSES = ["f64", "bool", "string", "bytes", "void"] as const;
+/** Marshalling classes legal in PARAMETER position: the v1 classes plus
+ * ask 4's declared integer boundary classes. An i64/u64 PARAMETER is an
+ * FFI edge contract on both sides: inbound host calls range-check in the
+ * marshalled wrapper (values past ±(2^53−1) cannot ride f64 exactly — the
+ * SC4012 host-contract trap), and internal call sites must PROVE the
+ * argument whole-in-range at compile time (library/int-infer.ts). */
+export const LIB_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32", "i64", "u64"] as const;
+/** Marshalling classes legal in RETURN position: the value classes, void,
+ * and ask 4's i64/u64 — an integer RETURN compiles only when every value
+ * reaching it is PROVEN whole and in range (prove-or-refuse; the wrapper's
+ * (int64_t)/(uint64_t) conversion is then exact by construction). The
+ * u8/u32/i32 plumbing classes stay param-only: they were ratified as
+ * inbound plumbing, and outbound integers are the proven classes'
+ * business. */
+export const LIB_RETURN_CLASSES = ["f64", "bool", "string", "bytes", "void", "i64", "u64"] as const;
+
+/** Ask 4's declared integer classes (the prove-or-refuse pair). */
+export const LIB_INT_CLASSES = ["i64", "u64"] as const;
+export type LibIntClass = (typeof LIB_INT_CLASSES)[number];
 
 export type LibParamClass = (typeof LIB_PARAM_CLASSES)[number];
 export type LibReturnClass = (typeof LIB_RETURN_CLASSES)[number];
@@ -136,6 +152,17 @@ export interface LibrarySidecarConfig {
    * length-prefixed sorted module graph — canonical root-relative POSIX
    * paths and exact source bytes). */
   sourceHash: "module-graph";
+  /** Ask 4's declared integer boundary slots, keyed by the sidecar's slot
+   * path grammar (`Msg.count`, `Point.x`, `helpers.clamp.params[0]`,
+   * `helpers.clamp.return`). Each named slot must resolve to a NUMBER
+   * slot of the projected contract (refused at sidecar build otherwise),
+   * is spelled i64 in the emitted document (the frozen format-1 TypeRef
+   * vocabulary has no u64 — a u64 declaration is the stricter
+   * compile-time obligation over the same wire spelling), joins
+   * `integer_slots`, and obligates every program-side value that can
+   * reach it to the prove-or-refuse check. Empty when the profile
+   * declares none. */
+  integerSlots: { slot: string; cls: "i64" | "u64" }[];
 }
 
 export interface LibraryProfile {
@@ -295,7 +322,7 @@ export function loadLibraryProfile(
       if (!(LIB_RETURN_CLASSES as readonly string[]).includes(returns)) {
         const detail =
           returns === "u8" || returns === "u32" || returns === "i32"
-            ? `'${path}.returns': integer classes are parameter-only in v1 — outbound integer returns wait for the prove-or-refuse machinery (ask 4); return f64 and convert on the host side`
+            ? `'${path}.returns': the u8/u32/i32 plumbing classes are parameter-only — an outbound integer return is declared i64 or u64 and compiles only when every value reaching it proves whole and in ±(2^53 − 1) (ask 4's prove-or-refuse)`
             : `'${path}.returns' must be one of ${LIB_RETURN_CLASSES.join("/")}, got '${returns}'`;
         throw new ProfileError(detail);
       }
@@ -313,6 +340,7 @@ export function loadLibraryProfile(
         "path", "wire_version", "abi_version", "snapshot_format",
         "build_id_symbol", "abi_version_symbol", "model", "msg",
         "init_export", "update_export", "subscriptions_export", "source_hash",
+        "integer_slots",
       ]);
       const s = sc as Record<string, unknown>;
       const intField = (key: string): number => {
@@ -343,6 +371,34 @@ export function loadLibraryProfile(
           `'sidecar.source_hash' names an unknown hashing contract '${sourceHash}' (this scriptc implements "module-graph")`,
         );
       }
+      // Ask 4's declared integer boundary slots: each entry names a
+      // contract slot by its sidecar path and picks the integer class.
+      // Path RESOLUTION happens at sidecar build (the contract must
+      // exist first); here the shape is pinned — a typo'd key or class
+      // would silently change an ABI obligation.
+      const integerSlots: { slot: string; cls: "i64" | "u64" }[] = [];
+      const isRaw = s["integer_slots"];
+      if (isRaw !== undefined && isRaw !== null) {
+        if (!Array.isArray(isRaw)) throw new ProfileError("'sidecar.integer_slots' must be an array");
+        const seenSlots = new Set<string>();
+        isRaw.forEach((entry, i) => {
+          const epath = `sidecar.integer_slots[${i}]`;
+          if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+            throw new ProfileError(`'${epath}' must be an object`);
+          }
+          rejectUnknownKeys(entry, epath, ["slot", "class"]);
+          const ee2 = entry as Record<string, unknown>;
+          const slot = req<string>(ee2["slot"], `${epath}.slot`, "string");
+          if (slot === "") throw new ProfileError(`'${epath}.slot' must be a non-empty slot path`);
+          const cls = req<string>(ee2["class"], `${epath}.class`, "string");
+          if (cls !== "i64" && cls !== "u64") {
+            throw new ProfileError(`'${epath}.class' must be "i64" or "u64", got '${cls}'`);
+          }
+          if (seenSlots.has(slot)) throw new ProfileError(`'${epath}.slot' repeats slot path '${slot}'`);
+          seenSlots.add(slot);
+          integerSlots.push({ slot, cls });
+        });
+      }
       sidecar = {
         path,
         wireVersion: intField("wire_version"),
@@ -356,6 +412,7 @@ export function loadLibraryProfile(
         updateExport: nameField("update_export", "update"),
         subscriptionsExport: nameField("subscriptions_export", "subscriptions"),
         sourceHash: "module-graph",
+        integerSlots,
       };
       if (sidecar.model === sidecar.msg) {
         throw new ProfileError(`'sidecar.msg' must differ from 'sidecar.model' ('${sidecar.model}')`);

@@ -183,13 +183,13 @@ describe("library profile validation", () => {
     ));
   test("unknown marshalling class", () =>
     expectSc4001(
-      { ...good, exports: [{ export: "f", symbol: "kx_f", params: ["i64"], returns: "void" }] },
+      { ...good, exports: [{ export: "f", symbol: "kx_f", params: ["i16"], returns: "void" }] },
       "params[0]",
     ));
-  test("integer classes are param-only in v1", () =>
+  test("the integer plumbing classes are param-only", () =>
     expectSc4001(
       { ...good, exports: [{ export: "f", symbol: "kx_f", params: [], returns: "u32" }] },
-      "parameter-only in v1",
+      "parameter-only",
     ));
   test("void is return-only", () =>
     expectSc4001(
@@ -228,6 +228,7 @@ describe("library profile sidecar section", () => {
       updateExport: "update",
       subscriptionsExport: "subscriptions",
       sourceHash: "module-graph",
+      integerSlots: [],
     });
     // The profile's exact bytes ride along (build_id input 2).
     expect(r.profile.profileBytes.length).toBeGreaterThan(0);
@@ -254,6 +255,67 @@ describe("library profile sidecar section", () => {
     expectSc4001({ ...good, sidecar: { ...goodSidecar, wire_version: 1.5 } }, "sidecar.wire_version"));
   test("an absolute sidecar path refuses", () =>
     expectSc4001({ ...good, sidecar: { ...goodSidecar, path: "/tmp/contract.json" } }, "sidecar.path"));
+
+  /* ── ask 4: the declared integer boundary surface ─────────────────── */
+
+  test("i64/u64 are declarable in params and returns", () => {
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        exports: [{ export: "send", symbol: "kx_send", params: ["i64", "u64"], returns: "i64" }],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.exports[0]!.params).toEqual(["i64", "u64"]);
+    expect(r.profile.exports[0]!.returns).toBe("i64");
+  });
+
+  test("sidecar integer_slots parse in declaration order", () => {
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        sidecar: {
+          ...goodSidecar,
+          integer_slots: [
+            { slot: "Msg.count", class: "i64" },
+            { slot: "Msg.id", class: "u64" },
+          ],
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.sidecar!.integerSlots).toEqual([
+      { slot: "Msg.count", cls: "i64" },
+      { slot: "Msg.id", cls: "u64" },
+    ]);
+  });
+
+  test("an integer_slots class outside i64/u64 refuses", () =>
+    expectSc4001(
+      { ...good, sidecar: { ...goodSidecar, integer_slots: [{ slot: "Msg.count", class: "u32" }] } },
+      "integer_slots[0].class",
+    ));
+  test("a repeated integer_slots path refuses", () =>
+    expectSc4001(
+      {
+        ...good,
+        sidecar: {
+          ...goodSidecar,
+          integer_slots: [
+            { slot: "Msg.count", class: "i64" },
+            { slot: "Msg.count", class: "u64" },
+          ],
+        },
+      },
+      "repeats slot path",
+    ));
+  test("an unknown field inside an integer_slots entry refuses", () =>
+    expectSc4001(
+      { ...good, sidecar: { ...goodSidecar, integer_slots: [{ slot: "Msg.count", class: "i64", sign: true }] } },
+      "integer_slots[0].sign",
+    ));
 });
 
 

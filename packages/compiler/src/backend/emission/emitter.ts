@@ -951,6 +951,18 @@ export class CEmitter {
             params.push(`int32_t a${i}`);
             args.push(`(double)a${i}`);
             break;
+          case "i64":
+            // The inbound declared-integer edge (ask 4): the helper
+            // converts exactly or delivers the host-contract trap — a
+            // value past ±(2^53−1) cannot ride f64 without silent
+            // rounding, which is a coercion the author never wrote.
+            params.push(`int64_t a${i}`);
+            args.push(`scr_library_i64_in(a${i}, ${cStringLiteral(Buffer.from(e.inboundIntTrap!, "utf8"))})`);
+            break;
+          case "u64":
+            params.push(`uint64_t a${i}`);
+            args.push(`scr_library_u64_in(a${i}, ${cStringLiteral(Buffer.from(e.inboundIntTrap!, "utf8"))})`);
+            break;
           case "string":
             params.push(`const uint8_t *a${i}_ptr`, `size_t a${i}_len`);
             args.push(`scr_library_str_in(a${i}_ptr, a${i}_len)`);
@@ -968,7 +980,12 @@ export class CEmitter {
       if (e.returns === "string" || e.returns === "bytes") {
         params.push(`const uint8_t **out`, `size_t *out_len`);
       }
-      const retType = e.returns === "f64" ? "double" : e.returns === "bool" ? "uint8_t" : "void";
+      const retType =
+        e.returns === "f64" ? "double"
+        : e.returns === "bool" ? "uint8_t"
+        : e.returns === "i64" ? "int64_t"
+        : e.returns === "u64" ? "uint64_t"
+        : "void";
       const call = `${mangleFunction(e.fnName)}(${args.join(", ")})`;
       out.push(`${retType} ${e.symbol}(${params.length > 0 ? params.join(", ") : "void"}) {`);
       // The prologue records this entry's symbol in the funnel's
@@ -981,6 +998,18 @@ export class CEmitter {
           break;
         case "f64":
           out.push(`  double sc_r = ${call};`, `  scr_library_check_exc();`, `  return sc_r;`);
+          break;
+        case "i64":
+        case "u64":
+          // The outbound declared-integer edge (ask 4): every value
+          // reaching this return was PROVEN whole and inside the class's
+          // range at compile time, so the cast is exact by construction
+          // (and the unwind path's 0.0 converts cleanly).
+          out.push(
+            `  double sc_r = ${call};`,
+            `  scr_library_check_exc();`,
+            `  return (${retType})sc_r;`,
+          );
           break;
         case "bool":
           out.push(`  bool sc_r = ${call};`, `  scr_library_check_exc();`, `  return (uint8_t)(sc_r ? 1 : 0);`);

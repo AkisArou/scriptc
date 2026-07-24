@@ -741,8 +741,11 @@ export interface IrLibExport {
   symbol: string;
   /** IR function name (entry-file top-level, so unqualified). */
   fnName: string;
-  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32")[];
-  returns: "f64" | "bool" | "string" | "bytes" | "void";
+  /** i64/u64 (ask 4): int64_t/uint64_t at the C edge — inbound values
+   * range-check in the wrapper (`inboundIntTrap`), internal call sites
+   * and returns are compile-time proven before this lands on the IR. */
+  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32" | "i64" | "u64")[];
+  returns: "f64" | "bool" | "string" | "bytes" | "void" | "i64" | "u64";
   /** The exact sink-message bytes this wrapper passes to the inbound-bytes
    * marshalling helper's trap — present exactly when a parameter is
    * bytes-classed. Already the assembled structured trap-teaching form
@@ -751,6 +754,12 @@ export interface IrLibExport {
    * 0x1F when supplied. Assembled ONCE at export resolution so both
    * backends emit identical bytes by construction. */
   inboundBytesTrap?: string;
+  /** The sibling message for the inbound INTEGER host-contract trap
+   * (ask 4): present exactly when a parameter is i64/u64-classed, passed
+   * to the scr_library_i64_in/u64_in helpers, which trap when the inbound
+   * value cannot ride f64 exactly (|v| past 2^53−1). Same assembled
+   * structured form and the same SC4012 code — one host-contract story. */
+  inboundIntTrap?: string;
 }
 
 /** One runtime-trap overlay row: the profile's teaching (replaces the

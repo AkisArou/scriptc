@@ -251,6 +251,21 @@ ScrBytes *scr_library_bytes_in(const uint8_t *p, size_t len, const char *trap_ms
   return b;
 }
 
+double scr_library_i64_in(int64_t v, const char *trap_msg) {
+  /* The inbound declared-integer edge (ask 4): only |v| <= 2^53-1 rides
+   * f64 exactly; past it, (double)v silently rounds — a coercion the
+   * author never wrote, so the wrapper funnels the host-contract
+   * violation instead (same story as an impossible bytes length; the
+   * message is the compiler-assembled structured trap-teaching form). */
+  if (v > 9007199254740991LL || v < -9007199254740991LL) scr_trap(trap_msg);
+  return (double)v;
+}
+
+double scr_library_u64_in(uint64_t v, const char *trap_msg) {
+  if (v > 9007199254740991ULL) scr_trap(trap_msg);
+  return (double)v;
+}
+
 void scr_library_str_out(ScrStr *s, const uint8_t **out, size_t *out_len) {
   scr_library_arena_keep(s, true);
   *out = (const uint8_t *)s->data; /* NUL-terminated after len (ScrStr layout) */
