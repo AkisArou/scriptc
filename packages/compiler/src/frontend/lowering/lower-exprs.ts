@@ -4448,6 +4448,9 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           L.fmt(type),
           own ? L.fmt(own) : L.checker.typeToString(L.typeOf(expr)),
           locOf(node),
+          own?.kind === "record"
+            ? (L.describeRecordWidthBlocker(own.shapeId, type.shapeId) ?? undefined)
+            : undefined,
         ),
       );
       throw new PoisonError();
@@ -4668,14 +4671,14 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
               if (targetType.kind === "union") {
                 const retag = L.unionRetagHelper(f.type.unionId, targetType.unionId, locOf(prop));
                 if (!retag) {
-                  L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(recArm), locOf(prop)));
+                  L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(recArm), locOf(prop), `spread field '${f.name}': '${L.fmt(f.type)}' cannot re-tag into '${L.fmt(targetType)}' behind the present-test`));
                   throw new PoisonError();
                 }
                 thenVal = { kind: "call", callee: retag, args: [fRead()], type: targetType, loc: locOf(prop) };
               } else if (ftDef && ftDef.arms.length === 2 && L.armTag(f.type.unionId, targetType) >= 0) {
                 thenVal = { kind: "unionNarrow", unionId: f.type.unionId, tag: L.armTag(f.type.unionId, targetType), value: fRead(), type: targetType, loc: locOf(prop) };
               } else {
-                L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(recArm), locOf(prop)));
+                L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(recArm), locOf(prop), `spread field '${f.name}': '${L.fmt(f.type)}' cannot narrow into '${L.fmt(targetType)}' behind the present-test`));
                 throw new PoisonError();
               }
             } else {
@@ -4686,7 +4689,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
               // undefined trap must not shadow.
               const lift = L.widthLiftPlan(f.type, targetType);
               if (!lift) {
-                L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(recArm), locOf(prop)));
+                L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(recArm), locOf(prop), `spread field '${f.name}': '${L.fmt(f.type)}' does not lift into '${L.fmt(targetType)}'`));
                 throw new PoisonError();
               }
               thenVal = L.applyWidthLift(lift, fRead(), targetType, locOf(prop));
@@ -4777,7 +4780,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             // it can render identically to the target while the spread
             // source (the thing that actually mismatches) differs — an
             // invisible difference is a diagnostics bug.
-            L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(srcType), locOf(prop)));
+            L.pushDiag(recordShapeMismatchDiag(L.fmt(type), L.fmt(srcType), locOf(prop), `spread field '${f.name}': '${L.fmt(f.type)}' does not lift into '${L.fmt(targetType)}'`));
             throw new PoisonError();
           }
           const obj = srcLowered ?? L.lowerExpr(srcNode);

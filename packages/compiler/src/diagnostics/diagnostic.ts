@@ -200,7 +200,7 @@ export const FENCE_CODES: Record<string, { name: string; status: "unsupported" |
   // fences; standard-library types with no lowering report SC2020). What
   // remains here is the remainder the name enumerates.
   SC2001: { name: "values of types outside the compilable set (bigint and symbol primitives, constructor objects, and library-derived or unresolved generic shapes)", status: "unsupported" },
-  SC2002: { name: "record width subtyping (shapes must match exactly)", status: "unsupported" },
+  SC2002: { name: "record shape flows outside the width-copy rules (shapes must match exactly or width-coerce)", status: "unsupported" },
   SC2003: { name: "union-to-union conversions outside the re-tagging rule", status: "unsupported" },
   SC2004: { name: "uses of a binding whose declaration did not compile (cascade marker)", status: "unsupported" },
   SC2005: { name: "values whose type keeps a generic call signature (a compiled function is one concrete signature)", status: "unsupported" },
@@ -473,22 +473,26 @@ export function noLoweringDiag(
 }
 
 /** Records are monomorphic structs, so a value's shape must match the
- * expected shape EXACTLY — TypeScript's structural width subtyping
- * (`{a: 1, b: 2}` where `{a: number}` is expected) would need a runtime
- * shape coercion that doesn't exist yet. */
+ * expected shape exactly OR narrow through the width-copy family
+ * (recordWidthPlan / the overflow capture: target fields copied off the
+ * source, extra fields dropped, per-field lifts). What reaches this is
+ * the RESIDUE those rules decline — `detail`, when the classifier has a
+ * pointed answer (describeRecordWidthBlocker), names the first blocking
+ * rule instead of leaving two near-identical type prints to eyeball. */
 export function recordShapeMismatchDiag(
   expectedText: string,
   actualText: string,
   loc: SrcLoc,
+  detail?: string,
 ): ScrDiagnostic {
   return {
     code: "SC2002",
     message:
-      `record shapes must match exactly: expected '${expectedText}', got '${actualText}' ` +
-      `(structural width subtyping needs a shape coercion that is not supported yet)`,
+      `record shapes must match exactly or width-coerce: expected '${expectedText}', got '${actualText}'` +
+      (detail !== undefined ? ` — ${detail}` : ""),
     loc,
     milestone: "later",
-    hint: "build a new literal with exactly the expected fields instead of passing a wider value",
+    hint: "width subtyping compiles as a copy (each expected field copied off the source; extra fields drop) — this pair is outside the copy's rules; build a literal with exactly the expected fields instead",
   };
 }
 

@@ -124,7 +124,10 @@ export type WidthLift =
   | { how: "emptyArr" }
   | { how: "objWidth" }
   | { how: "clsWidth" }
-  | { how: "narrow" };
+  | { how: "narrow" }
+  | { how: "dynIn" }
+  | { how: "upcast" }
+  | { how: "funcAdapt" };
 
 export class PoisonError extends Error {}
 
@@ -2059,8 +2062,8 @@ export class Lowerer {
       throw new PoisonError();
     }
     // Would-be records with INDEX SIGNATURES (`Record<string, T>`,
-    // `{ [k: string]: T }`) get a message that points at Map<K, V> — the
-    // container that holds unbounded keys — instead of the generic
+    // `{ [k: string]: T }`) get the index-signature fence (SC2006) naming
+    // the supported key/value domain instead of the generic
     // supported-types recitation.
     if (
       widened.flags & (ts.TypeFlags.Object | ts.TypeFlags.Intersection) &&
@@ -2421,8 +2424,10 @@ export class Lowerer {
 
   /** Exact-shape enforcement (SC2002). Records are monomorphic structs, so
    * everywhere a value flows into a typed slot (call arg, initializer,
-   * assignment, field, return) the shapes must MATCH — TS's structural width
-   * subtyping (`{a, b}` where `{a}` is expected) has no runtime coercion.
+   * assignment, field, return) the shapes must MATCH — or width-coerce:
+   * coerceToExpected already ran widthCoerce (the copy-reshape family),
+   * so what reaches here is the RESIDUE its rules decline, and the
+   * diagnostic names the first blocking rule (describeRecordWidthBlocker).
    * Non-record mismatches are not reachable through tsc-clean programs; the
    * validator ICEs on them as the usual backstop. */
   requireExactShape(node: ts.Node, actual: IrType, expected: IrType): void {
@@ -2496,7 +2501,14 @@ export class Lowerer {
       throw new PoisonError();
     }
     if (containsRecord(actual) || containsRecord(expected)) {
-      this.pushDiag(recordShapeMismatchDiag(this.fmt(expected), this.fmt(actual), locOf(node)));
+      // A record→record pair gets the pointed story: WHICH width rule
+      // declined (a field that doesn't lift, a required field with no
+      // source, an index signature that could hold the completed key).
+      const detail =
+        actual.kind === "record" && expected.kind === "record"
+          ? (this.describeRecordWidthBlocker(actual.shapeId, expected.shapeId) ?? undefined)
+          : undefined;
+      this.pushDiag(recordShapeMismatchDiag(this.fmt(expected), this.fmt(actual), locOf(node), detail));
       throw new PoisonError();
     }
     // Everything else — a plain-kind mismatch like a string flowing into a
@@ -3006,9 +3018,22 @@ export class Lowerer {
    *               recursively — NESTED width)
    *   arr       — array into array whose element pair lifts (per-element
    *               copy loop, arrayWidthHelper)
+   *   dynIn     — a typed value into an 'unknown' (dyn) slot — the same
+   *               static→DOM deep copy coerceToExpected applies top-level
+   *   upcast    — a derived class instance into a base-typed slot (the
+   *               prefix-layout pointer reinterpret, no copy)
+   *   funcAdapt — a function into a slot whose signature differs only by
+   *               CLEAN mechanical conversions (cleanFuncAdaptable); the
+   *               stranded (trap-only) dispositions stay out of the plan
    * Null when the pair isn't in the relation — callers keep their fences. */
   widthLiftPlan(src: IrType, dst: IrType): WidthLift | null {
     if (typeEquals(src, dst)) return { how: "copy" };
+    // An 'unknown' (dyn) DESTINATION slot: the static→DOM conversion —
+    // dynFrom, a DEEP COPY (`{ v: 5 }` into `{ v: unknown }`, `number[]`
+    // into `unknown[]` — tsc's top type over the width family's copies).
+    if (dst.kind === "dyn" && src.kind !== "dyn" && this.dynConvertible(src)) {
+      return { how: "dynIn" };
+    }
     if (dst.kind === "union") {
       if (src.kind === "union") {
         return this.unionRetagMappable(src.unionId, dst.unionId) ? { how: "retag" } : null;
@@ -3041,6 +3066,25 @@ export class Lowerer {
     // other arm throws the catchable TypeError (divergence 38's stance).
     if (src.kind === "union" && !isUnitType(dst) && dst.kind !== "void" && this.armTag(src.unionId, dst) >= 0) {
       return { how: "narrow" };
+    }
+    // A DERIVED instance into a BASE-typed slot (`{ p: Q }` copying into
+    // `{ p: P }`): the same implicit upcast coerceToExpected performs at
+    // top level — prefix layout, a pointer reinterpret, no copy.
+    if (
+      dst.kind === "object" &&
+      src.kind === "object" &&
+      this.isSubclassOf(src.className, dst.className)
+    ) {
+      return { how: "upcast" };
+    }
+    // A FUNCTION into a slot whose signature differs only by CLEAN
+    // mechanical conversions (fewer params — JS ignores extras — and
+    // coercibleValue pieces): the general function-value adapter, plan-
+    // gated to the clean subset. The stranded (trap-only) dispositions
+    // funcCoerceAdapter also builds stay TOP-LEVEL only: a width plan
+    // never promises a bridge that can only throw.
+    if (dst.kind === "func" && src.kind === "func" && this.cleanFuncAdaptable(src, dst)) {
+      return { how: "funcAdapt" };
     }
     if (dst.kind === "record" && src.kind === "record") {
       return this.recordWidthPlan(src.shapeId, dst.shapeId) !== null ? { how: "width" } : null;
@@ -3151,6 +3195,20 @@ export class Lowerer {
         if (!helper) throw new Error("lowerer bug: planned narrow lift failed to intern");
         return { kind: "call", callee: helper, args: [value], type: dst, loc };
       }
+      case "dynIn": {
+        if (dst.kind !== "dyn") throw new Error("lowerer bug: dynIn lift against a non-dyn slot");
+        return { kind: "dynFrom", value, type: DYN, loc };
+      }
+      case "upcast": {
+        if (dst.kind !== "object" || value.type.kind !== "object") throw new Error("lowerer bug: upcast lift shape");
+        return this.upcastTo(value, dst.className);
+      }
+      case "funcAdapt": {
+        if (dst.kind !== "func" || value.type.kind !== "func") throw new Error("lowerer bug: funcAdapt lift shape");
+        const adapter = this.funcCoerceAdapter(value.type, dst, loc);
+        if (!adapter) throw new Error("lowerer bug: planned funcAdapt lift failed to intern");
+        return { kind: "call", callee: adapter, args: [value], type: dst, loc };
+      }
       default: {
         const _exhaustive: never = lift;
         void _exhaustive;
@@ -3169,9 +3227,11 @@ export class Lowerer {
    * optional-flavored field completes to its undefined arm (the
    * literal-completion rule). TUPLES width-coerce too, arity-exact (TS
    * permits no other tuple width): per-position lifts, never completion.
-   * Index-signature shapes keep the exactness fences here (the overflow
-   * CAPTURE helper owns their reshapes). Null when the shapes don't
-   * relate that way. */
+   * Index-signature SOURCES narrow here like any wider record — declared
+   * fields copy, the overflow drops with the width (missing target
+   * fields decline: the overflow could hold them). Index-signature
+   * TARGETS keep the overflow CAPTURE helper (widthCoerce's other arm).
+   * Null when the shapes don't relate that way. */
   /** The pure planning half of recordWidthHelper — every target field's
    * lift, or null when the pair isn't width-coercible. Callers that must
    * validate a WHOLE plan before interning anything (the retag helper's
@@ -3179,7 +3239,13 @@ export class Lowerer {
   recordWidthPlan(fromId: string, toId: string): Map<string, { src: IrType; lift: WidthLift } | { absent: true; utag: number } | { absentDyn: true }> | null {
     const from = this.shapes.get(fromId);
     const to = this.shapes.get(toId);
-    if (!from || !to || from.indexValue || to.indexValue) return null;
+    // INDEX-SIGNATURE sources narrow like any wider record — the target
+    // fields copy off the declared struct slots and the overflow drops
+    // with the rest of the width (divergence 36's stance; the absent-
+    // completion rule below is the one extra fence). Index-signature
+    // TARGETS keep the overflow CAPTURE helper (widthCoerce's other arm):
+    // a fresh hybrid needs keyed writes, not a field-list literal.
+    if (!from || !to || to.indexValue) return null;
     // Tuple↔record pairs never relate; tuple↔tuple only arity-exact.
     if (!!from.tuple !== !!to.tuple) return null;
     if (from.tuple && from.fields.length !== to.fields.length) return null;
@@ -3201,8 +3267,12 @@ export class Lowerer {
           // the absent-property read: the options-record call shape
           // against `{ plugins: unknown, ... }`). Never for tuples: a
           // completed position would change .length and JSON where Node
-          // keeps the source arity.
-          if (from.tuple) return null;
+          // keeps the source arity. Never for INDEX-SIGNATURE sources:
+          // the overflow may hold this very key at runtime (tsc lets the
+          // signature satisfy optional target members), so completing to
+          // undefined would drop a value Node keeps — the pair stays
+          // fenced.
+          if (from.tuple || from.indexValue) return null;
           if (tf.type.kind === "dyn") {
             plan.set(tf.name, { absentDyn: true });
             continue;
@@ -3222,6 +3292,91 @@ export class Lowerer {
     } finally {
       this.widthPlanning.delete(key);
     }
+  }
+
+  /** Post-hoc classifier for SC2002's record→record residue: WHY the
+   * width family (recordWidthPlan and the overflow capture — widthCoerce's
+   * two record arms) declined this pair — the FIRST blocking rule, named.
+   * Pure description on the failure path (the site already carries the
+   * rejection): mirrors the planners' gates, never changes what coerces,
+   * and answers null when no pointed story applies (the generic message
+   * stands). */
+  describeRecordWidthBlocker(fromId: string, toId: string): string | null {
+    const from = this.shapes.get(fromId);
+    const to = this.shapes.get(toId);
+    if (!from || !to) return null;
+    if (to.indexValue) {
+      // The overflow CAPTURE's gates (lowerRecordOvfCaptureHelper).
+      if (from.tuple || to.tuple) return "a tuple cannot reshape into an index-signature record";
+      const tIv = to.indexValue;
+      const slotOk = (t: IrType): boolean =>
+        typeEquals(t, tIv) ||
+        (tIv.kind === "dyn" && (t.kind === "dyn" || this.dynConvertible(t))) ||
+        this.widthLiftPlan(t, tIv) !== null;
+      const consumed = new Set<string>();
+      for (const tf of to.fields) {
+        const sf = from.fields.find((f) => f.name === tf.name);
+        if (sf) {
+          if (this.widthLiftPlan(sf.type, tf.type) !== null) {
+            consumed.add(tf.name);
+            continue;
+          }
+          return `field '${tf.name}': '${this.fmt(sf.type)}' does not lift into '${this.fmt(tf.type)}'`;
+        }
+        if (tf.type.kind !== "union" || this.armTag(tf.type.unionId, UNDEFINED_T) < 0) {
+          return `the expected field '${tf.name}' is required and the source has no field to copy into it`;
+        }
+        if (tIv.kind === "dyn" ? !this.dynConvertible(tf.type) : !typeEquals(tf.type, tIv)) {
+          return `the expected field '${tf.name}' ('${this.fmt(tf.type)}') cannot take a runtime key collision from the '${this.fmt(tIv)}' signature slot`;
+        }
+      }
+      for (const ff of from.fields) {
+        if (consumed.has(ff.name)) continue;
+        if (!slotOk(ff.type)) {
+          return `the source field '${ff.name}' ('${this.fmt(ff.type)}') cannot enter the expected '[key: string]: ${this.fmt(tIv)}' slot`;
+        }
+      }
+      if (from.indexValue && !slotOk(from.indexValue)) {
+        return `the source's '[key: string]: ${this.fmt(from.indexValue)}' slot cannot enter the expected '[key: string]: ${this.fmt(tIv)}' slot`;
+      }
+      // The dispatch-writes gate: runtime-keyed writes can collide with a
+      // declared field whose type is not the slot's.
+      const dispatchWrites =
+        from.indexValue !== undefined ||
+        from.fields.some((ff) => !consumed.has(ff.name) && to.fields.some((f) => f.name === ff.name));
+      if (dispatchWrites) {
+        const bad = to.fields.find((f) =>
+          tIv.kind === "dyn" ? !this.dynConvertible(f.type) : !typeEquals(f.type, tIv),
+        );
+        if (bad) {
+          return `runtime-keyed writes can collide with the expected field '${bad.name}' ('${this.fmt(bad.type)}'), which cannot take a '${this.fmt(tIv)}' slot value`;
+        }
+      }
+      return null;
+    }
+    // The field-copy plan's gates (recordWidthPlan).
+    if (!!from.tuple !== !!to.tuple) return null;
+    if (from.tuple && from.fields.length !== to.fields.length) {
+      return `tuple arities differ (${from.fields.length} vs ${to.fields.length}; TS permits no tuple width)`;
+    }
+    for (const tf of to.fields) {
+      const ff = from.fields.find((f) => f.name === tf.name);
+      if (!ff) {
+        if (from.tuple) return null;
+        if (from.indexValue) {
+          return `'${tf.name}' is not a declared field of the source, and the source's index signature could hold it at runtime (a completed undefined would drop that value)`;
+        }
+        if (tf.type.kind === "dyn") continue;
+        if (tf.type.kind !== "union" || this.armTag(tf.type.unionId, UNDEFINED_T) < 0) {
+          return `the expected field '${tf.name}' is missing on the source and is not optional`;
+        }
+        continue;
+      }
+      if (this.widthLiftPlan(ff.type, tf.type) === null) {
+        return `field '${tf.name}': '${this.fmt(ff.type)}' does not lift into '${this.fmt(tf.type)}'`;
+      }
+    }
+    return null;
   }
 
   recordWidthHelper(fromId: string, toId: string, loc: SrcLoc): string | null {
@@ -3852,6 +4007,24 @@ export class Lowerer {
       return !isUnitType(dst) && dst.kind !== "void" && this.armTag(src.unionId, dst) >= 0;
     }
     return false;
+  }
+
+  /** True when a `src` function value enters a `dst` slot through
+   * funcCoerceAdapter with NO stranded (trap-only) piece: no rest packs,
+   * no surplus source params, every slot parameter converts into the
+   * wrapped function's own type, and the result converts back (a void
+   * slot drops it; a void result answers the exact JS undefined for
+   * dyn/jsval slots). The width family's func gate — widthLiftPlan
+   * bridges only signatures whose every call succeeds by construction. */
+  cleanFuncAdaptable(src: IrType & { kind: "func" }, dst: IrType & { kind: "func" }): boolean {
+    if (src.rest === true || dst.rest === true) return false;
+    if (src.params.length > dst.params.length) return false;
+    for (let i = 0; i < src.params.length; i++) {
+      if (!this.coercibleValue(dst.params[i]!, src.params[i]!)) return false;
+    }
+    if (dst.ret.kind === "void") return src.ret.kind !== "jsval";
+    if (this.coercibleValue(src.ret, dst.ret)) return true;
+    return src.ret.kind === "void" && (dst.ret.kind === "dyn" || dst.ret.kind === "jsval");
   }
 
   /** Interned `%fn.adapt.<n>(f)` — the GENERAL function-value adapter: a

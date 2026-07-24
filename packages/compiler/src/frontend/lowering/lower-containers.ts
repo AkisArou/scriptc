@@ -5587,8 +5587,10 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
    * every source value (declared fields, and the overflow slot when the
    * source carries one) must enter the target's value slot (identity, a
    * width lift — arm wrap/re-tag/nested reshape, or JSON-safe into a dyn
-   * slot), and every target field must be optional-flavored (the fresh
-   * record's default) and writable at runtime. */
+   * slot), and every target field must either be initialized directly by
+   * a same-named source declared field (the rule that admits REQUIRED
+   * declared members) or be optional-flavored (the fresh record's
+   * default) and writable at runtime. */
   export function lowerRecordOvfCaptureHelper(L: Lowerer, fromId: string, toId: string, loc: SrcLoc,): string | null {
     const from = L.shapes.get(fromId);
     const to = L.shapes.get(toId);
@@ -5605,16 +5607,37 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
     // The overflow value slot must line up (sources without an index
     // signature have no overflow to carry over).
     if (fIv && slotLift(fIv) === null) return null;
-    // Every target field defaults to its undefined arm (fresh record) and
-    // must accept a runtime collision (dyn slots validate via dynCheck —
-    // fields must be DOM-convertible; typed slots write through directly).
-    const defaults: { name: string; unionId: string; utag: number }[] = [];
+    // Target declared fields initialize one of two ways. A same-named
+    // SOURCE declared field whose type lifts initializes the slot DIRECTLY
+    // (consumed — no keyed write below): the declared half of a width flow
+    // into a hybrid target (`{ a: 1, b: 2 }` into `{ a: number;
+    // [k: string]: number }`), which is also what admits REQUIRED declared
+    // target fields — tsc guarantees the source declares them (an index
+    // signature alone never satisfies a required member), and an
+    // index-signature source's OVERFLOW can never collide with them (its
+    // own declared name owns the key). Every other target field defaults
+    // to its undefined arm (fresh record), so it must be optional-flavored
+    // and must accept a runtime collision (dyn slots validate via dynCheck
+    // — fields must be DOM-convertible; typed slots write through
+    // directly).
+    type FieldInit =
+      | { name: string; kind: "undef"; unionId: string; utag: number }
+      | { name: string; kind: "direct"; src: IrType; lift: WidthLift };
+    const inits: FieldInit[] = [];
+    const consumed = new Set<string>();
     for (const tf of to.fields) {
+      const sf = from.fields.find((f) => f.name === tf.name);
+      const directLift = sf ? L.widthLiftPlan(sf.type, tf.type) : null;
+      if (sf && directLift) {
+        inits.push({ name: tf.name, kind: "direct", src: sf.type, lift: directLift });
+        consumed.add(tf.name);
+        continue;
+      }
       if (tf.type.kind !== "union") return null;
       const utag = L.armTag(tf.type.unionId, UNDEFINED_T);
       if (utag < 0) return null;
       if (tIv.kind === "dyn" ? !L.dynConvertible(tf.type) : !typeEquals(tf.type, tIv)) return null;
-      defaults.push({ name: tf.name, unionId: tf.type.unionId, utag });
+      inits.push({ name: tf.name, kind: "undef", unionId: tf.type.unionId, utag });
     }
     // Every source declared field must flow into the keyed-write slot —
     // in DECLARATION order (insertion order below; declaredOrder omits
@@ -5627,9 +5650,28 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
       : from.fields;
     const fieldLifts = new Map<string, WidthLift | "dyn">();
     for (const ff of orderedFields) {
+      if (consumed.has(ff.name)) continue; // direct-initialized above
       const lift = slotLift(ff.type);
       if (lift === null) return null;
       fieldLifts.set(ff.name, lift);
+    }
+    // DISPATCH writes — keys that can hit a declared target slot: the
+    // overflow loop's runtime keys, and a literal source-field name the
+    // target also declares. Non-dyn slots store THROUGH on a collision, so
+    // such writes need every declared field to BE the slot type (the
+    // validator's recordKeySet rule); dyn slots validate per field
+    // (dynCheck), so each field must be DOM-convertible. Writes to
+    // literal names the target does NOT declare are overflowOnly and
+    // exempt — which is what lets a direct-initialized required field
+    // (`id: number` beside a `number | undefined` slot) coexist with a
+    // declared-only source, while an index-signature source declines.
+    const dispatchWrites =
+      fIv !== undefined ||
+      orderedFields.some((ff) => !consumed.has(ff.name) && to.fields.some((f) => f.name === ff.name));
+    if (dispatchWrites) {
+      if (tIv.kind === "dyn" ? !to.fields.every((f) => L.dynConvertible(f.type)) : !to.fields.every((f) => typeEquals(f.type, tIv))) {
+        return null;
+      }
     }
     const key = `ovf:${fromId}:${toId}`;
     const existing = L.widthHelpers.get(key);
@@ -5652,16 +5694,24 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
         localId: "out.0",
         init: {
           kind: "recordLit",
-          fields: defaults.map((d) => ({
+          fields: inits.map((d) => ({
             name: d.name,
-            value: {
-              kind: "unionWrap",
-              unionId: d.unionId,
-              tag: d.utag,
-              value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
-              type: to.fields.find((f) => f.name === d.name)!.type,
-              loc,
-            } satisfies IrExpr,
+            value:
+              d.kind === "direct"
+                ? L.applyWidthLift(
+                    d.lift,
+                    { kind: "recordGet", obj: sRef, shapeId: fromId, field: d.name, type: d.src, loc },
+                    to.fields.find((f) => f.name === d.name)!.type,
+                    loc,
+                  )
+                : ({
+                    kind: "unionWrap",
+                    unionId: d.unionId,
+                    tag: d.utag,
+                    value: { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc },
+                    type: to.fields.find((f) => f.name === d.name)!.type,
+                    loc,
+                  } satisfies IrExpr),
           })),
           type: toT,
           loc,
@@ -5670,8 +5720,9 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
       },
     ];
     // Source declared fields in declaration order, skipping unset
-    // optionals (stance 37).
+    // optionals (stance 37) and the direct-initialized (consumed) names.
     for (const ff of orderedFields) {
+      if (consumed.has(ff.name)) continue;
       const raw: IrExpr = { kind: "recordGet", obj: sRef, shapeId: fromId, field: ff.name, type: ff.type, loc };
       const utag = ff.type.kind === "union" ? L.armTag(ff.type.unionId, UNDEFINED_T) : -1;
       const write: IrStmt = {
@@ -5680,6 +5731,9 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
         shapeId: toId,
         key: { kind: "strLit", value: ff.name, type: STRING, loc },
         value: intoSlot(raw, fieldLifts.get(ff.name)!),
+        // A literal name the target does not declare can only land in the
+        // overflow — skip the declared dispatch (and its validator gate).
+        ...(to.fields.some((f) => f.name === ff.name) ? {} : { overflowOnly: true as const }),
         loc,
       };
       body.push(
