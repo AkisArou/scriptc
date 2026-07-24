@@ -39,7 +39,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { compileLibrary, validateSidecar } from "@scriptc/compiler";
+import { compileLibrary, renderAll, validateSidecar } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/library-mode");
@@ -417,6 +417,46 @@ survived, sink_calls=1
     }
     expect(outputs[1]).toBe(outputs[0]);
   });
+});
+
+/* ── the rendered refusals, snapshotted per code ─────────────────────────
+ * One program refusing all three obligations at once: the full rendered
+ * output (codes, spans, evidence, fixes) is the quality artifact — the
+ * diagnostics-corpus discipline applied to the library-only codes the
+ * executable-lane corpus cannot reach. */
+
+test("SC4021/SC4022/SC4023 render with the teaching triple (snapshot)", async () => {
+  const source = `${PRELUDE}send(9007199254740993);
+export function half(a: number): void {
+  if (a >= 0 && a <= 1000) {
+    send(a * 0.5);
+  }
+}
+export function grow(a: number): void {
+  if (a >= 0 && a <= 2 ** 30) {
+    const t = Math.trunc(a);
+    send(t * t);
+  }
+}
+`;
+  const c: CorpusCase = { name: "render", body: "", param: false, expected: "refuse" };
+  const profile = corpusProfile(c, "c", "lib.ts") as { exports: object[] };
+  profile.exports.push(
+    { export: "half", symbol: "kc_half", params: ["f64"], returns: "void" },
+    { export: "grow", symbol: "kc_grow", params: ["f64"], returns: "void" },
+  );
+  const outDir = join(cacheDir, "render-refusals");
+  mkdirSync(outDir, { recursive: true });
+  const entry = join(outDir, "lib.ts");
+  writeFileSync(entry, source);
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(profilePath, JSON.stringify({ ...profile, entry }, null, 2));
+  const result = await compileLibrary({ profilePath, outDir });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((d) => d.code).sort()).toEqual(["SC4021", "SC4022", "SC4023"]);
+  const rendered = renderAll(result.diagnostics, result.sourceTexts, { color: false }).replaceAll(outDir + "/", "");
+  await expect(rendered).toMatchFileSnapshot("__snapshots__/library-int-refusals.txt");
 });
 
 /* ── sidecar-declared slots (msg arms, record fields, helpers) ───────────
