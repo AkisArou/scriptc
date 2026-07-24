@@ -703,6 +703,15 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
   const sources = [
     ...LIB_RUNTIME_SOURCES,
+    // win32 targets compile the libc-shim TU into the archive (stpcpy,
+    // arc4random_buf — scr_number.c/scr_lib.c/scr_bytes_io.c call them and
+    // mingw's CRT has neither), exactly like compileC's unconditional win32
+    // arm. The system-DLL imports the shim and scr_lib.c reference
+    // (advapi32's CSPRNG/GetUserNameA, iphlpapi's GetAdaptersAddresses,
+    // ws2_32's inet_ntop/htonl) stay the EMBEDDER's link line — an archive
+    // carries no -l flags. Never present off win32, so host archives
+    // cannot change by a byte.
+    ...(targetPlatform(driver) === "win32" ? ["scr_win.c"] : []),
     ...(regex ? ["scr_regex.c"] : []),
     ...(opts.assert || regex || opts.symbol ? ["scr_assert.c"] : []),
     ...(opts.inspect ? ["scr_inspect.c"] : []),
