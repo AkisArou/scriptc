@@ -5207,6 +5207,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const list = Array.from({ length: n }, (_, i) => `(ScrStream *)${arg(1 + i)}`).join(", ");
             return finish(`scr_sp_pipeline(${n}, (ScrStream *[]){ ${list} })`);
           }
+          case "sc.text":
+            // stream/consumers: +1 pending promises the accumulate-and-
+            // settle machinery resolves or rejects (the stream's
+            // error / premature close / json's SyntaxError).
+            E.usesTimers = true;
+            return finish(`scr_sc_text((ScrStream *)${arg(0)})`);
+          case "sc.json":
+            E.usesTimers = true;
+            return finish(`scr_sc_json((ScrStream *)${arg(0)})`);
+          case "sc.buffer":
+            E.usesTimers = true;
+            return finish(`scr_sc_buffer((ScrStream *)${arg(0)})`);
           case "readable.newDyn":
           case "writable.newDyn":
           case "duplex.newDyn":

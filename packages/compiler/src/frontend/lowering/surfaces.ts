@@ -734,6 +734,11 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
   // their stream arguments exactly like the callback forms); the key
   // exists so unlowered members fence module-qualified.
   "stream/promises": {},
+  // node:stream/consumers rides the stream spoke as well (text/json/
+  // buffer special-case their stream argument); arrayBuffer and blob
+  // fence module-qualified with the pointed hints below — neither value
+  // has a representation in a compiled binary.
+  "stream/consumers": {},
   // node:timers/promises — the delay-only setTimeout and bare setImmediate
   // (void promises the shared timer heap settles). The arity completion
   // (omitted delay = Node's 1ms) and the value/options fences are
@@ -898,6 +903,14 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
       "const execFileAsync = promisify(execFile), then call execFileAsync directly",
     // child_process.execFile itself exists to be promisified — the same
     // story from the other end.
+  },
+  "stream/consumers": {
+    arrayBuffer:
+      "no free-standing ArrayBuffer value exists here (typed arrays own their storage) — " +
+      "buffer(stream) collects the same bytes as a Buffer",
+    blob:
+      "Blob values have no representation in a compiled binary — " +
+      "buffer(stream) collects the same bytes as a Buffer, text(stream) the decoded text",
   },
   module: {
     createRequire:

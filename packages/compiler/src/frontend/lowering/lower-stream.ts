@@ -1222,6 +1222,42 @@ export function lowerStreamModuleCall(L: Lowerer, call: ts.CallExpression,
     }
     return null;
   }
+  if (bi.module === "stream/consumers") {
+    const args = call.arguments;
+    // text/json/buffer(stream) → a pending promise the accumulate-and-
+    // settle machinery resolves at the terminal point (the utf8 decode / the parsed
+    // JSON DOM / the concatenated bytes) or rejects — with the stream's
+    // error, ERR_STREAM_PREMATURE_CLOSE on an early close, or json's
+    // SyntaxError on malformed text, Node's own rejection set.
+    // arrayBuffer/blob return null here: neither value has a
+    // representation, so the module-qualified fence (with the pointed
+    // hints in BUILTIN_MODULE_FENCE_HINTS) speaks.
+    if (bi.member === "text" || bi.member === "json" || bi.member === "buffer") {
+      if (args.length !== 1) {
+        L.noLowering(
+          `stream/consumers.${bi.member} with ${args.length} arguments`,
+          call,
+          `the supported form is ${bi.member}(stream)`,
+        );
+      }
+      let recv: IrExpr;
+      try {
+        recv = lowerStreamArg(L, args[0]!, bi.member);
+      } catch (e) {
+        if (e instanceof StreamArgTypeThrow) return e.expr;
+        throw e;
+      }
+      const inner: IrType = bi.member === "text" ? STRING : bi.member === "json" ? DYN : BYTES;
+      return {
+        kind: "libCall",
+        fn: `sc.${bi.member}` as IrLibFn,
+        args: [recv],
+        type: { kind: "promise", inner },
+        loc,
+      };
+    }
+    return null;
+  }
   if (bi.module !== "stream") return null;
   const args = call.arguments;
 

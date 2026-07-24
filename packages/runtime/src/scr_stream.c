@@ -2193,6 +2193,133 @@ ScrPromise *scr_sp_pipeline(double n, ScrStream **streams) {
   return p;
 }
 
+/* ── node:stream/consumers ────────────────────────────────────────────
+ * text/json/buffer over the readable machinery: a native 'data' listener
+ * accumulates every chunk (Buffer chunks as-is; string chunks — an
+ * encoded stream or Readable.from strings — as their utf8 bytes, the
+ * Blob rule Node's consumers share for whole-stream accumulation), and
+ * the finished watcher settles at the terminal point — the accumulated
+ * result on a clean end (right after 'close', Node's own timing: the
+ * consumer's async iterator completes through eos), the stream's error,
+ * or ERR_STREAM_PREMATURE_CLOSE on an early close — and marks lifecycle
+ * errors handled, exactly like the iterator's eos registration. Both
+ * closures share the cap layout: caps[0] the pending promise, caps[1]
+ * the chunk list (Buffer entries). */
+
+enum { SCR_SC_TEXT = 0, SCR_SC_JSON = 1, SCR_SC_BUFFER = 2 };
+
+static void scr_sc_settle_ok(ScrClosure *cb, int kind) {
+  ScrPromise *p = scr_box_get_ref(cb->caps[0]);  /* +1 */
+  ScrArr *chunks = scr_box_get_ref(cb->caps[1]); /* +1 */
+  ScrBytes *all = scr_bytes_concat(chunks);
+  scr_arr_release(chunks);
+  if (kind == SCR_SC_BUFFER) {
+    scr_promise_fulfill_ref(p, all, scr_bytes_retain_v, scr_bytes_release_v, NULL);
+    scr_promise_release(p);
+    return;
+  }
+  ScrStr *enc = scr_str_new("utf8", 4);
+  ScrStr *text = scr_bytes_to_str(all, enc); /* U+FFFD per invalid subpart */
+  scr_str_release(enc);
+  scr_bytes_release(all);
+  if (kind == SCR_SC_TEXT) {
+    scr_promise_fulfill_str(p, text); /* moves */
+  } else {
+    ScrDyn *doc = scr_json_parse(text);
+    scr_str_release(text);
+    if (doc == NULL) {
+      /* the parse's SyntaxError rides the cell — the rejection, like
+       * Node's json() rejecting with JSON.parse's throw */
+      scr_promise_reject_pending(p);
+    } else {
+      scr_promise_fulfill_ref(p, doc, scr_dyn_retain_v, scr_dyn_release_v, NULL);
+    }
+  }
+  scr_promise_release(p);
+}
+
+/* The 'data' accumulation (the emit ABI's two payload slots — exactly
+ * one non-NULL). */
+static void scr_sc_data(ScrClosure *cb, void *b, void *str) {
+  ScrArr *chunks = scr_box_get_ref(cb->caps[1]); /* +1 */
+  if (b != NULL) {
+    scr_arr_push_ref(chunks, scr_bytes_retain((ScrBytes *)b));
+  } else if (str != NULL) {
+    ScrStr *enc = scr_str_new("utf8", 4);
+    scr_arr_push_ref(chunks, scr_bytes_from_str((ScrStr *)str, enc));
+    scr_str_release(enc);
+  }
+  scr_arr_release(chunks);
+}
+
+static void scr_sc_fin(ScrClosure *cb, ScrError *err, int kind) {
+  if (err != NULL) {
+    ScrPromise *p = scr_box_get_ref(cb->caps[0]); /* +1 */
+    scr_throw_obj(scr_error_retain(err), &scr_error_retain_v, &scr_error_release_v,
+                  scr_error_trace_arg());
+    scr_promise_reject_pending(p);
+    scr_promise_release(p);
+    return;
+  }
+  scr_sc_settle_ok(cb, kind);
+}
+
+static void scr_sc_fin_text(ScrClosure *cb, ScrStream *s, ScrError *err) {
+  (void)s;
+  scr_sc_fin(cb, err, SCR_SC_TEXT);
+}
+static void scr_sc_fin_json(ScrClosure *cb, ScrStream *s, ScrError *err) {
+  (void)s;
+  scr_sc_fin(cb, err, SCR_SC_JSON);
+}
+static void scr_sc_fin_buffer(ScrClosure *cb, ScrStream *s, ScrError *err) {
+  (void)s;
+  scr_sc_fin(cb, err, SCR_SC_BUFFER);
+}
+
+static ScrClosure *scr_sc_closure(void *fn, ScrPromise *p, ScrArr *chunks) {
+  ScrClosure *c = scr_closure_new(fn, 2);
+  c->caps[0] = scr_box_new_obj(scr_promise_retain_v, scr_promise_release_v, scr_promise_trace_v);
+  scr_box_set_ref(c->caps[0], scr_promise_retain(p));
+  c->caps[1] = scr_box_new_obj(scr_arr_retain_v, scr_arr_release_v, NULL);
+  scr_box_set_ref(c->caps[1], scr_arr_retain(chunks));
+  return c;
+}
+
+static ScrPromise *scr_sc_consume(ScrStream *s, int kind) {
+  ScrPromise *p = scr_promise_new();
+  if (s->st == NULL || !s->st->has_r) {
+    /* Node's consumers for-await the argument; a stream with no readable
+     * side has no async iterator — the TypeError rejects. */
+    static const char msg[] = "stream is not async iterable";
+    scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+    scr_promise_reject_pending(p);
+    return p;
+  }
+  ScrArr *chunks = scr_arr_new_ref(scr_bytes_retain_v, scr_bytes_release_v, NULL, 4);
+  ScrStreamErrInv fin_inv = kind == SCR_SC_TEXT    ? &scr_sc_fin_text
+                            : kind == SCR_SC_JSON  ? &scr_sc_fin_json
+                                                   : &scr_sc_fin_buffer;
+  /* The terminal watcher first (it marks lifecycle errors handled); the
+   * promise form exposes no unhook — the cleanup closure drops. */
+  ScrClosure *cleanup = scr_stream_finished(s, scr_sc_closure((void *)fin_inv, p, chunks), fin_inv);
+  scr_closure_release(cleanup);
+  ScrStr *dn = scr_str_new("data", 4);
+  scr_emitter_release(scr_emitter_on((ScrEmitter *)s, dn,
+                                     scr_sc_closure((void *)&scr_sc_data, p, chunks),
+                                     scr_ee_inv_fixed2, false, false));
+  scr_str_release(dn);
+  /* resume() rather than the 'data' hook alone: Node's consumer pulls
+   * through the iterator, which drains a PAUSED stream too. */
+  scr_stream_release(scr_stream_resume(s));
+  scr_arr_release(chunks);
+  return p;
+}
+
+ScrPromise *scr_sc_text(ScrStream *s) { return scr_sc_consume(s, SCR_SC_TEXT); }
+ScrPromise *scr_sc_json(ScrStream *s) { return scr_sc_consume(s, SCR_SC_JSON); }
+ScrPromise *scr_sc_buffer(ScrStream *s) { return scr_sc_consume(s, SCR_SC_BUFFER); }
+
 /* ── the readable surface ─────────────────────────────────────────────── */
 
 bool scr_stream_push(ScrStream *s, ScrBytes *chunk) {

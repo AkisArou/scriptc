@@ -3166,6 +3166,15 @@ export type IrLibFn =
    * clean finish, rejected with the finish status otherwise). */
   | "sp.finished"
   | "sp.pipeline"
+  /** node:stream/consumers — the promise consumers over the readable
+   * machinery: (s) → a pending promise settled at the terminal point
+   * with the accumulated result (sc.text: the utf8 decode, sc.json: the
+   * parsed DOM — malformed input rejects with the parse's SyntaxError,
+   * sc.buffer: the concatenated bytes) or rejected with the stream's
+   * error / ERR_STREAM_PREMATURE_CLOSE. */
+  | "sc.text"
+  | "sc.json"
+  | "sc.buffer"
   | "readable.newDyn"
   | "writable.newDyn"
   | "duplex.newDyn"
@@ -5438,6 +5447,7 @@ export function moduleUsesStream(mod: IrModule): boolean {
         node.fn === "stream.destroy" || node.fn === "stream.destroyErr" ||
         node.fn === "stream.prop" || node.fn === "stream.errored" ||
         node.fn === "sp.finished" || node.fn === "sp.pipeline" ||
+        node.fn.startsWith("sc.") ||
         node.fn.startsWith("stream.set"))
     ) {
       found = true;
@@ -6278,6 +6288,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.pipelineDyn",
   "sp.finished",
   "sp.pipeline",
+  "sc.text",
+  "sc.json",
+  "sc.buffer",
   "readable.newDyn",
   "writable.newDyn",
   "duplex.newDyn",

@@ -65,7 +65,7 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
       "and the built-in fs, fs/promises, path, os, url, crypto, zlib, " +
       "child_process, net, http, tls, https, http2, dgram, dns, util, " +
       "util/types, string_decoder, querystring, readline, events, stream, " +
-      "stream/promises, buffer, assert, assert/strict, worker_threads, " +
+      "stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, " +
       "cluster, tty, async_hooks, timers, timers/promises, " +
       "diagnostics_channel, perf_hooks, and node:test and node:module " +
       "modules (bare or node:-prefixed) are supported",
