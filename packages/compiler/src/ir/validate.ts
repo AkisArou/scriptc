@@ -674,7 +674,19 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "bytes.compareChk": { argTypes: [BYTES_U8, DYN, DYN, DYN, DYN, DYN], result: F64 },
   "buffer.newStringFail": { argTypes: [DYN], result: BYTES_U8 },
   "fs.toUnixTimestamp": { argTypes: [DYN], result: F64 },
+  "fs.existsChk": { argTypes: [DYN, DYN], result: DYN },
+  "fs.mkdtempChk": { argTypes: [DYN, DYN, STRING], result: VOID },
+  "fs.mkdtempSyncChk": { argTypes: [DYN, DYN, STRING], result: STRING },
+  "fs.readFileChk": { argTypes: [DYN, DYN, DYN, STRING], result: VOID },
+  "fs.opendirChk": { argTypes: [DYN, DYN, STRING], result: VOID },
+  "fs.watchFileChk": { argTypes: [DYN, DYN, STRING], result: VOID },
+  "fs.lchmodChk": { argTypes: [DYN, DYN, DYN, STRING], result: VOID },
+  "fs.lchmodSyncChk": { argTypes: [DYN, DYN], result: DYN },
+  "fsp.lchmodChk": { argTypes: [DYN, DYN], result: { kind: "promise", inner: VOID } },
+  "fs.readChk": { argTypes: [DYN, DYN, DYN, DYN, DYN, STRING], result: VOID },
+  "fs.streamOptsChk": { argTypes: [DYN, DYN, STRING], result: VOID },
   "error.argTypeThrow": { argTypes: [STRING, STRING, DYN], result: VOID },
+  "error.propTypeThrow": { argTypes: [STRING, STRING, DYN], result: VOID },
   "emitter.setMaxChk": { argTypes: [null, DYN], result: VOID },
   "emitter.setDefaultMaxChk": { argTypes: [DYN, STRING], result: VOID },
   "fs.readFileSyncBytes": { argTypes: [STRING], result: BYTES_U8 },
@@ -3862,9 +3874,15 @@ function validateFunction(
           // of the undefined global mapped to (never materialized).
           break;
         }
-        if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow") {
+        if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow" || e.fn === "error.propTypeThrow" ||
+            e.fn === "fs.mkdtempChk" || e.fn === "fs.readFileChk" ||
+            e.fn === "fs.opendirChk" || e.fn === "fs.watchFileChk" || e.fn === "fs.lchmodChk" ||
+            e.fn === "fs.readChk" || e.fn === "fs.streamOptsChk") {
           // Always throws — the result type is the replaced expression's
-          // own (never materialized; the global.undefRead pattern).
+          // own (never materialized; the global.undefRead pattern). The
+          // fs Chk ladders qualify: every validation failure throws
+          // Node's typed error, and a full pass throws the trailing
+          // compiler-rendered fence.
           break;
         }
         if (e.fn === "error.new") {

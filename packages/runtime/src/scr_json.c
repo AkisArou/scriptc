@@ -705,6 +705,81 @@ void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrD
   scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_TYPE");
 }
 
+/* The property flavor of the same ladder — Node renders option-bag
+ * members as "The \"options.x\" property must be ..." (errors.js keys the
+ * wording on the name, but every property-path caller here knows it is
+ * one). Same runtime-rendered Received tail; always throws catchably. */
+void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got) {
+  char detail[64];
+  const char *d = scr_dyn_specific_type(got, detail, sizeof detail);
+  char msg[224];
+  int len = snprintf(msg, sizeof msg,
+                     "The \"%s\" property must be %s. Received %s", name, expected, d);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_TYPE");
+}
+
+/* The compiler-resolved property-typed throw (error.propTypeThrow —
+ * argTypeThrow's option-bag sibling). Borrows all three; always throws. */
+void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got) {
+  scr_dyn_prop_type_fail(name->data, expected->data, got);
+}
+
+/* ERR_INVALID_ARG_VALUE's "Received" tail — util.inspect where ARG_TYPE
+ * renders determineSpecificType: strings quote, scalars print plain.
+ * Deep shapes render their bracket sketch (enough for the validators'
+ * ladders; nothing observable pins the deep forms). */
+static const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap) {
+  switch (v->kind) {
+  case SCR_DYN_NULL: return "null";
+  case SCR_DYN_UNDEF: return "undefined";
+  case SCR_DYN_BOOL: return v->v.b ? "true" : "false";
+  case SCR_DYN_NUM: {
+    scr_f64_to_str(v->v.num, buf);
+    return buf;
+  }
+  case SCR_DYN_STR: {
+    const ScrStr *s = v->v.str;
+    size_t n = 0;
+    buf[n++] = '\'';
+    for (size_t i = 0; i < s->len && n + 5 < cap; i++) buf[n++] = s->data[i];
+    if (s->len + 2 + 5 > cap) {
+      memcpy(buf + n, "...", 3);
+      n += 3;
+    }
+    buf[n++] = '\'';
+    buf[n] = 0;
+    return buf;
+  }
+  case SCR_DYN_ARR: return "[ ... ]";
+  case SCR_DYN_OBJ: return "{ ... }";
+  case SCR_DYN_BYTES: return "<Buffer ...>";
+  default: return "[object]";
+  }
+}
+
+/* Node's ERR_INVALID_ARG_VALUE thrower: "The <argument|property> '<name>'
+ * <reason>. Received <inspected>" — the argument/property choice follows
+ * errors.js (a dotted name is a property path). `reason` defaults to
+ * "is invalid" when NULL. TypeError, like Node's default. */
+void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got) {
+  char insp[64];
+  const char *d = scr_dyn_inspect_lite(got, insp, sizeof insp);
+  char msg[256];
+  int len = snprintf(msg, sizeof msg, "The %s '%s' %s. Received %s",
+                     strchr(name, '.') != NULL ? "property" : "argument", name,
+                     reason != NULL ? reason : "is invalid", d);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_VALUE");
+}
+
+/* The deferred JS lowering fence, thrown from a ladder's post-validation
+ * tail: the compiler renders the message (the statement fence's own text,
+ * "[SC2020 at file:line]" included) and the ladder throws it verbatim
+ * AFTER its Node-order validations pass — Node's validation errors come
+ * first, the honest refuse second. Borrowed; always throws catchably. */
+void scr_throw_lowering_fence(const ScrStr *msg) {
+  scr_throw_error_msg_code(SCR_ERR_ERROR, msg->data, msg->len, "SC2020");
+}
+
 static void scr_dyn_handle_release(void *h, ScrDynHandleTag tag) {
   scr_dyn_handle_ops(tag)->release(h);
 }

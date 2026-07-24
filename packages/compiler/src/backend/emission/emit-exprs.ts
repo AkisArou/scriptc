@@ -4345,11 +4345,58 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_buffer_new_string_fail(${arg(0)})`);
           case "fs.toUnixTimestamp":
             return finish(`scr_fs_to_unix_timestamp(${arg(0)})`);
+          // The fs argument-validation ladders: the always-throw Chk
+          // forms (validation error or the trailing fence) take the
+          // error.nodeThrow dummy pattern; mkdtempSyncChk and the lchmod
+          // pair answer real results on a validated pass.
+          case "fs.existsChk":
+            E.usesTimers = true; // the scheduled answer holds the loop open
+            return finish(`scr_fs_exists_async(${arg(0)}, ${arg(1)})`);
+          case "fs.mkdtempChk":
+            return finish(
+              `(scr_fs_mkdtemp_chk(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "fs.mkdtempSyncChk":
+            return finish(`scr_fs_mkdtemp_sync_chk(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "fs.readFileChk":
+            return finish(
+              `(scr_fs_read_file_chk(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "fs.opendirChk":
+            return finish(
+              `(scr_fs_opendir_chk(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "fs.watchFileChk":
+            return finish(
+              `(scr_fs_watch_file_chk(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "fs.lchmodChk":
+            return finish(
+              `(scr_fs_lchmod_chk(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "fs.lchmodSyncChk":
+            return finish(`scr_fs_lchmod_sync_chk(${arg(0)}, ${arg(1)})`);
+          case "fsp.lchmodChk":
+            return finish(`scr_fsp_lchmod_chk(${arg(0)}, ${arg(1)})`);
+          case "fs.readChk":
+            return finish(
+              `(scr_fs_read_chk(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "fs.streamOptsChk":
+            return finish(
+              `(scr_fs_stream_opts_chk(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
           case "error.argTypeThrow":
             // Always throws with the runtime-rendered Received tail (the
             // error.nodeThrow dummy pattern). Borrows all three.
             return finish(
               `(scr_throw_arg_type(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
+            );
+          case "error.propTypeThrow":
+            // The property flavor ("The \"options.x\" property must be
+            // ...") — same always-throw dummy pattern.
+            return finish(
+              `(scr_throw_prop_type(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
             );
           // The fs Buffer forms (scr_bytes_io.c): the sync pair throws
           // like the utf8 forms (may-throw seed set); the promise form

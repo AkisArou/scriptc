@@ -2570,11 +2570,35 @@ export type IrLibFn =
    * finite numbers coerce (negatives answer now/1000, Node's shape);
    * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
   | "fs.toUnixTimestamp"
+  /** The fs argument-validation ladders (checked-dynamic lane): each Chk
+   * replicates its API's Node-order validation over DOM values (Node's
+   * exact typed errors — ERR_INVALID_ARG_TYPE/VALUE, ERR_OUT_OF_RANGE),
+   * and a full pass meets the trailing compiler-rendered SC2020 fence
+   * string — so the ALWAYS-THROW forms take the error.nodeThrow
+   * polymorphic-result carve-out. mkdtempSyncChk and the lchmod sync/
+   * promise pair run the REAL operation on a validated pass instead
+   * (macOS lchmod(2); non-APPLE answers Node's not-a-function /
+   * ERR_METHOD_NOT_IMPLEMENTED shapes). May-throw seeds, all of them. */
+  | "fs.existsChk"
+  | "fs.mkdtempChk"
+  | "fs.mkdtempSyncChk"
+  | "fs.readFileChk"
+  | "fs.opendirChk"
+  | "fs.watchFileChk"
+  | "fs.lchmodChk"
+  | "fs.lchmodSyncChk"
+  | "fsp.lchmodChk"
+  | "fs.readChk"
+  | "fs.streamOptsChk"
   /** The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
    * rendered Received tail: args [argname, "of type ..." clause, the
    * offending DOM value]. ALWAYS THROWS; polymorphic result (the
    * error.nodeThrow pattern). May-throw seed. */
   | "error.argTypeThrow"
+  /** The property flavor of argTypeThrow ("The \"options.x\" property
+   * must be ..."): the option-bag ladders' provably-invalid arms. ALWAYS
+   * THROWS; polymorphic result. May-throw seed. */
+  | "error.propTypeThrow"
   /** The checked-dynamic max-listeners ladders: setMaxChk is the
    * instance form over a DOM n (non-numbers ERR_INVALID_ARG_TYPE,
    * negatives/NaN ERR_OUT_OF_RANGE; +1 receiver back — chaining);
@@ -6300,7 +6324,19 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "bytes.compareChk",
   "buffer.newStringFail",
   "fs.toUnixTimestamp",
+  "fs.existsChk",
+  "fs.mkdtempChk",
+  "fs.mkdtempSyncChk",
+  "fs.readFileChk",
+  "fs.opendirChk",
+  "fs.watchFileChk",
+  "fs.lchmodChk",
+  "fs.lchmodSyncChk",
+  "fsp.lchmodChk",
+  "fs.readChk",
+  "fs.streamOptsChk",
   "error.argTypeThrow",
+  "error.propTypeThrow",
   "emitter.setMaxChk",
   "emitter.setDefaultMaxChk",
   "fs.readFileSyncBytes",

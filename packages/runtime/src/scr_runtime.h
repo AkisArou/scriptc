@@ -2991,6 +2991,21 @@ const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
  * error.argTypeThrow libCall). Borrows all three; always throws. */
 void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
 void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
+/* The property flavor ("The \"options.x\" property must be ...") — the
+ * option-bag validators' gate (error.propTypeThrow). Always throws. */
+void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
+void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
+/* Node's ERR_INVALID_ARG_VALUE ("The argument 'encoding' is invalid
+ * encoding. Received 'no'") — reason NULL renders "is invalid".
+ * TypeError; always throws catchably. */
+void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
+/* A ladder's post-validation refuse: throws the compiler-rendered SC2020
+ * statement-fence text verbatim (Node's validation errors run first). */
+void scr_throw_lowering_fence(const ScrStr *msg);
+/* ERR_OUT_OF_RANGE's "Received" number rendering (Node's
+ * addNumericalSeparator underscores past 2^32) — scr_bytes.c's renderer,
+ * shared by the fs/net/tls option-ladder validators. */
+size_t scr_num_received(double v, char out[48]);
 /* Listener-closure builders for the handle dispatchers' .on(...) paths:
  * a runtime-built ScrClosure whose capture is the boxed dyn listener and
  * whose invoke boxes the event tuple back into the DOM and calls through
@@ -4236,6 +4251,23 @@ ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
  * numbers coerce (negatives answer now/1000), the rest throw Node's
  * ERR_INVALID_ARG_TYPE. Borrowed. */
 double scr_fs_to_unix_timestamp(const ScrDyn *t);
+/* The fs argument-validation ladders (the fs.*Chk libCalls): Node-order
+ * validation over DOM values with Node's exact typed errors; a pass
+ * meets the real operation where one exists (mkdtempSync, macOS
+ * lchmodSync) or the compiler-rendered fence. All borrowed; the Chk
+ * forms without results always leave an exception pending. */
+ScrDyn *scr_fs_exists_async(const ScrDyn *path, const ScrDyn *cb);
+void scr_fs_mkdtemp_chk(const ScrDyn *prefix, const ScrDyn *cb, const ScrStr *fence);
+ScrStr *scr_fs_mkdtemp_sync_chk(const ScrDyn *prefix, const ScrDyn *opts, const ScrStr *fence);
+void scr_fs_read_file_chk(const ScrDyn *path, const ScrDyn *opts, const ScrDyn *cb, const ScrStr *fence);
+void scr_fs_opendir_chk(const ScrDyn *path, const ScrDyn *opts, const ScrStr *fence);
+void scr_fs_watch_file_chk(const ScrDyn *path, const ScrDyn *listener, const ScrStr *fence);
+void scr_fs_lchmod_chk(const ScrDyn *path, const ScrDyn *mode, const ScrDyn *cb, const ScrStr *fence);
+ScrDyn *scr_fs_lchmod_sync_chk(const ScrDyn *path, const ScrDyn *mode);
+ScrPromise *scr_fsp_lchmod_chk(const ScrDyn *path, const ScrDyn *mode);
+void scr_fs_read_chk(const ScrDyn *fd, const ScrDyn *buffer, const ScrDyn *offset,
+                     const ScrDyn *length, const ScrDyn *position, const ScrStr *fence);
+void scr_fs_stream_opts_chk(const ScrDyn *path, const ScrDyn *opts, const ScrStr *fence);
 /* The checked-dynamic max-listeners ladders (scr_events_emitter.c). */
 ScrEmitter *scr_emitter_set_max_chk(ScrEmitter *em, const ScrDyn *n);
 void scr_emitter_set_default_max_chk(const ScrDyn *n, const ScrStr *name);
