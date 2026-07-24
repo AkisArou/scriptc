@@ -3738,7 +3738,14 @@ export type IrNumBinOp =
 export type IrStrCmpOp = "<" | "<=" | ">" | ">=";
 
 export type IrExpr =
-  | { kind: "numLit"; value: number; type: IrType; loc: SrcLoc }
+  /** `spelling` (ask 4's representability input) is the author's SOURCE
+   * spelling of a decimal integer literal, present exactly when that
+   * spelling does not round-trip f64 (`9007199254740993` reads back as
+   * 9007199254740992) — the library integer-boundary check refuses on the
+   * spelling, never on the already-rounded value. Round-tripping literals
+   * and non-integer spellings carry nothing, so the IR is byte-identical
+   * for every program that held its numbers. */
+  | { kind: "numLit"; value: number; spelling?: string; type: IrType; loc: SrcLoc }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.
