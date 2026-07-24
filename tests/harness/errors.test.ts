@@ -402,13 +402,15 @@ console.log('never runs', a);
 });
 
 describe("checked-dynamic/island boundary fences (scriptc-only)", () => {
-  test("an island-typed argument into a call through 'unknown' fences catchably", async () => {
+  test("an island-typed argument into a call through 'unknown' runs Node-exactly (the retired SC1101 fence)", async () => {
     // `this` in a plain JS function is the checked-dynamic ambient
-    // receiver; a member CALL through it with an 'any'-typed argument has
-    // no lowering (no jsval→DOM bridge exists), so the statement compiles
-    // to its runtime fence — an SC-coded catchable throw, never an ICE.
-    // Node would throw its own TypeError reading the member; the fence's
-    // wording is the divergence this pin owns.
+    // receiver; a member CALL through it with an 'any'-typed argument
+    // used to fence at compile (no jsval→DOM crossing existed — SEMANTICS
+    // 383(d)'s "one unbridgeable mix"). The crossing exists now
+    // (dynFromJsval, SEMANTICS 394): the argument wraps by reference, the
+    // statement compiles for real, and the unbound-`this` member read
+    // throws Node's OWN TypeError — the divergence this pin used to own
+    // is retired.
     const r = await compileAndRun(
       "island-arg-dyn-call",
       `// @dynamic
@@ -427,7 +429,7 @@ console.log(\`\${register(7)}\`);
       { "tsconfig.json": '{"compilerOptions":{"strict":true,"noImplicitAny":false}}\n' },
     );
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toMatch(/^caught: .*\[SC1101 at .*island-arg-dyn-call\.mjs:5\]\n$/);
+    expect(r.stdout).toBe("caught: Cannot read properties of undefined (reading 'registry')\n");
     expect(r.stderr).toBe("");
   });
 });

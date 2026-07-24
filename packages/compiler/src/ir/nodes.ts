@@ -4135,6 +4135,18 @@ export type IrExpr =
    * ([Function: name]) and Node-shaped call errors. The operand is
    * borrowed; the result is owned (+1). Never throws. */
   | { kind: "dynFrom"; value: IrExpr; fnName?: string; type: IrType; loc: SrcLoc }
+  /** Island value → dyn DOM conversion (`type` is always dyn; the operand
+   * is always jsval): the jsval→DOM crossing — an 'any'-typed engine
+   * value flowing into an 'unknown'/'object'/JS-residue slot wraps BY
+   * REFERENCE as the DOM's SCR_DYN_JSVAL kind (scr_dyn_from_jsval).
+   * Engine scalars (number/string/boolean/null/undefined) normalize to
+   * the native DOM kinds at wrap time, so wrapped nodes only ever hold
+   * engine objects/arrays/functions; typeof/truthiness/String()/=== on
+   * the wrapped node route to the engine, un-armed DOM walks fence
+   * loudly, and scr_jsval_from_dyn unwraps the SAME engine value back
+   * (identity round trip). The operand is borrowed; the result is owned
+   * (+1). Never throws. */
+  | { kind: "dynFromJsval"; value: IrExpr; type: IrType; loc: SrcLoc }
   /** CALLING a dyn DOM value — `fn(a, b)` where fn is checked-dynamic (an
    * implicit-any JS binding, a dyn record member, a dynKeyGet result).
    * Arguments are ALREADY dyn-typed (typed values box through dynFrom at

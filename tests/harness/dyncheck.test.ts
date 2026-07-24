@@ -38,10 +38,11 @@ interface RunResult {
 /** Compiles an inline program and runs the binary, tolerating nonzero exit.
  * `ext` selects the source lane: "cjs" for the JS lane's per-site checked
  * lowerings (dyn member dispatch exists only there). */
-async function compileAndRun(name: string, source: string, ext: "ts" | "cjs" = "ts"): Promise<RunResult> {
+async function compileAndRun(name: string, source: string, ext: "ts" | "cjs" = "ts", dynamic = false): Promise<RunResult> {
   const key = createHash("sha256")
     .update(source)
     .update(sanitize ? "san" : "plain")
+    .update(dynamic ? "dyn" : "")
     .digest("hex")
     .slice(0, 16);
   const outDir = join(cacheDir, `dyncheck-${key}`);
@@ -51,7 +52,7 @@ async function compileAndRun(name: string, source: string, ext: "ts" | "cjs" = "
   // Pinned: the exact TypeError text and path rendering of failed checked
   // casts are C-reference pins; lane identity stays fixed so a diff means
   // the dyn boundary changed, never that the default backend moved.
-  const result = await compile(file, { outPath: join(outDir, name), outDir, sanitize, backend: "c" });
+  const result = await compile(file, { outPath: join(outDir, name), outDir, sanitize, backend: "c", dynamic });
   if (!result.ok) {
     throw new Error(
       "dyncheck program failed to compile:\n" +
@@ -717,5 +718,233 @@ console.log("unreachable", req.url);
     expect(r.stdout).toContain(
       'caught: TypeError [ERR_INVALID_ARG_TYPE]: The "listener" argument must be of type function. Received type number (5)',
     );
+  });
+
+  /* ── the jsval→DOM crossing's honesty ladder (SCR_DYN_JSVAL) ────────
+   * The armed rows (typeof/truthiness/String()/===, the narrowing tests,
+   * the identity round trip) are corpus-tested differentially (2578,
+   * 2579, npm jsval-into-dyn). These pin the LOUD fences of every
+   * un-armed DOM walk over an island-held value — the retired fence box
+   * answered typeof "function" and .length 0 SILENTLY here; a wrong
+   * answer is never acceptable, a named refusal is. All --dynamic. */
+
+  // A JS-lane `any` producer: JSDoc-`any` returns are ISLAND values under
+  // --dynamic (a bare record literal would infer a typed record and take
+  // the deep-copy path instead; a local initialized FROM an island value
+  // also stays island-world by the ratified runtime-world dispatch — the
+  // crossing needs a real dyn slot: a param, a literal member, a return).
+  const wrapPreamble = `const eng: any = { a: 1, list: [1, 2, 3] };
+const u: unknown = eng;
+`;
+
+  test("a keyed read on an island-held unknown fences loudly (the retired .length -> 0 bug)", async () => {
+    const r = await compileAndRun(
+      "jsval-key-read",
+      `/** @returns {any} */
+function mint() { return { a: 1, list: [1, 2, 3] }; }
+const eng = mint();
+/** @param {object} bag */
+function probe(bag) { console.log(bag.list.length); }
+probe(eng);
+`,
+      "cjs",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "reading 'list' on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("a method call on an island-held unknown fences with the member named", async () => {
+    // The JS lane's member calls on dyn receivers ride dynKeyGet+dynCall
+    // here, so the keyed-read fence fires first (the member named); the
+    // scr_dyn_invoke dispatch path carries its own JSVAL fence for the
+    // shapes that reach it.
+    const r = await compileAndRun(
+      "jsval-method",
+      `/** @returns {any} */
+function mint() { return [{ languages: ["js"] }]; }
+const eng = mint();
+/** @param {object} plugins */
+function walk(plugins) { return plugins.slice(); }
+walk(eng);
+`,
+      "cjs",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "reading 'slice' on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("JSON.stringify of an island-held unknown fences loudly", async () => {
+    const r = await compileAndRun(
+      "jsval-stringify",
+      wrapPreamble + `console.log(JSON.stringify(u));
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "JSON.stringify of an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("structuredClone of an island-held unknown fences loudly", async () => {
+    const r = await compileAndRun(
+      "jsval-clone",
+      wrapPreamble + `const c = structuredClone(u);
+console.log("unreachable", typeof c);
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "structuredClone on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("Object.keys over an island-held unknown fences loudly", async () => {
+    const r = await compileAndRun(
+      "jsval-keys",
+      `/** @returns {any} */
+function mint() { return { a: 1 }; }
+const eng = mint();
+/** @param {object} bag */
+function keys(bag) { return Object.keys(bag); }
+console.log(keys(eng).length);
+`,
+      "cjs",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "Object.keys on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("deepStrictEqual over island-held values: identity passes, structure fences", async () => {
+    const r = await compileAndRun(
+      "jsval-deepeq",
+      `import assert from "node:assert";
+const eng: any = { a: 1 };
+const other: any = { a: 1 };
+const u1: unknown = eng;
+const u2: unknown = eng;
+assert.deepStrictEqual(u1, u2); // the same engine value: honest true
+console.log("identity ok");
+const u3: unknown = other;
+assert.deepStrictEqual(u1, u3); // distinct values: the structural walk fences
+console.log("unreachable");
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("identity ok");
+    expect(r.stderr).toContain(
+      "deepStrictEqual on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("util.inspect (console.log) of an island-held unknown fences with the engine typeof", async () => {
+    const r = await compileAndRun(
+      "jsval-inspect",
+      wrapPreamble + `console.log(u);
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "util.inspect of a composite 'any' value (typeof 'object') is not supported yet",
+    );
+  });
+
+  test("destructuring an island-held unknown keeps the loud dyn-source fence (never 'not iterable')", async () => {
+    // The JS lane's destructuring-over-dyn compile fence runs as the
+    // statement's runtime fence BEFORE the source's world is knowable —
+    // the loud path today; the dynIterN runtime arm behind it fences
+    // island values by name if a future lowering reaches it.
+    const r = await compileAndRun(
+      "jsval-iterate",
+      `/** @returns {any} */
+function mint() { return [10, 20]; }
+const eng = mint();
+/** @param {object} list */
+function firstOf(list) { const [first] = list; return first; }
+firstOf(eng);
+`,
+      "cjs",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("array destructuring of non-array values");
+  });
+
+  test("a keyed write through an island-held unknown fences (never a silent drop)", async () => {
+    const r = await compileAndRun(
+      "jsval-key-write",
+      `/** @returns {any} */
+function mint() { return { a: 1 }; }
+const eng = mint();
+/** @param {object} bag */
+function poke(bag) { bag.a = 2; }
+poke(eng);
+`,
+      "cjs",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "setting 'a' on an island value held in 'unknown' is not supported yet",
+    );
+  });
+
+  test("'in' over an island-held unknown fences (never a silent false)", async () => {
+    const r = await compileAndRun(
+      "jsval-in",
+      `/** @returns {any} */
+function mint() { return { a: 1 }; }
+const eng = mint();
+/** @param {object} bag */
+function has(bag) { return "a" in bag; }
+console.log(has(eng));
+`,
+      "cjs",
+      true,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("'in' on an island value held in 'unknown' is not supported yet");
+  });
+
+  test("a wrapped island value RC-balances through catch-and-continue fences", async () => {
+    // The fence throws are catchable; the wrapped cell must release
+    // cleanly through the unwind (the SAN lane's RC audit is the check).
+    // The crossing rides a real dyn PARAM slot — a local initialized from
+    // an island value stays island-world by the runtime-world dispatch.
+    const r = await compileAndRun(
+      "jsval-fence-unwind",
+      `const eng: any = { a: 1 };
+let caught = 0;
+function probe(u: unknown): void {
+  try {
+    JSON.stringify(u);
+  } catch (e) {
+    if (e instanceof Error) caught++;
+  }
+}
+for (let i = 0; i < 100; i++) probe(eng);
+console.log("done", caught);
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("done 100\n");
   });
 });

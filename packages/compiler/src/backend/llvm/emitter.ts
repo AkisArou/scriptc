@@ -5747,6 +5747,16 @@ class LlEmitter {
         B.line(`${t} = call ptr @${conv}(${valTy} ${v.name})`);
         return this.own({ name: t, type: e.type });
       }
+      case "dynFromJsval": {
+        // Island value → DOM: the by-reference wrap (scr_dyn_from_jsval
+        // retains the cell in; engine scalars normalize to native DOM
+        // kinds at wrap time). Operand borrowed, result +1, never throws.
+        const v = this.emitExpr(e.value);
+        this.declare(`declare ptr @scr_dyn_from_jsval(ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_dyn_from_jsval(ptr ${v.name})`);
+        return this.own({ name: t, type: e.type });
+      }
       case "caughtToDyn": {
         // A catch binding flowing into an `unknown` slot: the snapshot's
         // runtime kind converts through the interned helper (+1 fresh
@@ -5929,7 +5939,8 @@ class LlEmitter {
         B.startBlock(lNotObj);
         const isArr = B.tmp();
         B.line(`${isArr} = icmp eq i32 ${kd}, ${DK.ARR}`);
-        B.condBr(isArr, lArr, lj);
+        const lNotArr = B.newLabel("dhk.na");
+        B.condBr(isArr, lArr, lNotArr);
         B.startBlock(lArr);
         if (e.key === "length") {
           B.line(`store i1 true, ptr ${slot}`);
@@ -5943,9 +5954,20 @@ class LlEmitter {
           B.line(`store i1 ${inR}, ptr ${slot}`);
         }
         B.br(lj);
+        // An ISLAND-held receiver fences loudly (Node asks the real
+        // engine object — `false` would be a silent wrong answer); the
+        // helper answers false for every other kind, so this arm is a
+        // plain unconditional call.
+        B.startBlock(lNotArr);
+        this.declare(`declare zeroext i1 @scr_dyn_isl_fence(ptr, ptr)`);
+        const fenced = B.tmp();
+        B.line(`${fenced} = call zeroext i1 @scr_dyn_isl_fence(ptr ${d.name}, ptr ${this.cstr("'in'")})`);
+        B.line(`store i1 ${fenced}, ptr ${slot}`);
+        B.br(lj);
         B.startBlock(lj);
         const raw = B.tmp();
         B.line(`${raw} = load i1, ptr ${slot}`);
+        this.emitPendingCheck();
         if (!e.negated) return { name: raw, type: e.type };
         const neg = B.tmp();
         B.line(`${neg} = xor i1 ${raw}, true`);
@@ -6019,13 +6041,18 @@ class LlEmitter {
           B.line(`${test} = call zeroext i1 @scr_dyn_truthy(ptr ${d.name})`);
         } else if (e.test === "error") {
           // `u instanceof Error`: the DOM's error encoding — an object
-          // carrying the reserved "%error" marker key.
+          // carrying the reserved "%error" marker key — or a real engine
+          // Error held by reference (the isl helper answers false for
+          // every non-JSVAL kind, so the call is unconditional).
           const kd = this.dynKind(d.name);
           const isObj = B.tmp();
           B.line(`${isObj} = icmp eq i32 ${kd}, ${DK.OBJ}`);
           const slot = B.slot();
           B.entryAllocas.push(`${slot} = alloca i1`);
-          B.line(`store i1 false, ptr ${slot}`);
+          this.declare(`declare zeroext i1 @scr_dyn_isl_is_error(ptr)`);
+          const isl = B.tmp();
+          B.line(`${isl} = call zeroext i1 @scr_dyn_isl_is_error(ptr ${d.name})`);
+          B.line(`store i1 ${isl}, ptr ${slot}`);
           const lObj = B.newLabel("dts.o");
           const lj = B.newLabel("dts.j");
           B.condBr(isObj, lObj, lj);
@@ -6057,12 +6084,30 @@ class LlEmitter {
             }
             return acc;
           };
+          // ISLAND-held nodes route the tests that depend on the engine's
+          // answer through the scr_dyn_isl_* helpers (false on every
+          // other kind — the calls stay unconditional and branch-free).
+          const orIsl = (acc: string, helper: string, arg?: string): string => {
+            this.declare(`declare zeroext i1 @${helper}(ptr${arg !== undefined ? ", ptr" : ""})`);
+            const c = B.tmp();
+            B.line(`${c} = call zeroext i1 @${helper}(ptr ${d.name}${arg !== undefined ? `, ptr ${arg}` : ""})`);
+            const o = B.tmp();
+            B.line(`${o} = or i1 ${acc}, ${c}`);
+            return o;
+          };
           if (e.test === "nullish") {
             test = oneOf([DK.UNDEF, DK.NULL]);
           } else if (e.test === "object") {
             // `typeof v === "object"`: objects, arrays, bytes, native
-            // handles, promises, AND null.
-            test = oneOf([DK.OBJ, DK.ARR, DK.BYTES, DK.HANDLE, DK.PROMISE, DK.NULL]);
+            // handles, promises, AND null — engine-held objects by the
+            // engine's own typeof.
+            test = orIsl(oneOf([DK.OBJ, DK.ARR, DK.BYTES, DK.HANDLE, DK.PROMISE, DK.NULL]), "scr_dyn_isl_typeof_is", this.cstr("object"));
+          } else if (e.test === "array") {
+            // Array.isArray: the DOM's array kind, or the engine's own
+            // answer for an engine-held value.
+            test = orIsl(oneOf([DK.ARR]), "scr_dyn_isl_is_array");
+          } else if (e.test === "function") {
+            test = orIsl(oneOf([DK.FUNC]), "scr_dyn_isl_typeof_is", this.cstr("function"));
           } else {
             const kindOf: Record<string, number> = {
               string: DK.STR,
@@ -6071,8 +6116,6 @@ class LlEmitter {
               undefined: DK.UNDEF,
               null: DK.NULL,
               bytes: DK.BYTES,
-              array: DK.ARR,
-              function: DK.FUNC,
             };
             test = oneOf([kindOf[e.test]!]);
           }
@@ -6185,6 +6228,13 @@ class LlEmitter {
         return simple("scr_jsval_from_bool", "i1", false);
       case "string":
         return simple("scr_jsval_from_str", "ptr", false);
+      case "dyn":
+        // A CHECKED-DYNAMIC (DOM) value entering the island: deep copy,
+        // data kinds only — boxed functions/handles/promises throw the
+        // catchable TypeError in the runtime, and a wrapped island value
+        // unwraps to the SAME engine value (the identity round trip).
+        // The C emitter's rule, mirrored.
+        return simple("scr_jsval_from_dyn", "ptr", true);
       case "bytes":
         // A typed array crossing IN: a COPY (the boundary's copy stance).
         return simple("scr_jsval_from_bytes", "ptr", true);
