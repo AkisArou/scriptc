@@ -312,6 +312,49 @@ double scr_dataview_get(const ScrBytes *b, double byte_off, ScrDataViewGet kind,
   return 0; /* unreachable */
 }
 
+void scr_dataview_set(ScrBytes *b, double byte_off, double value, ScrDataViewGet kind, bool le) {
+  size_t width = scr_dataview_get_size(kind);
+  /* ToIndex + the view-relative bounds check — the getters' ONE message. */
+  double off = (byte_off != byte_off) ? 0 : trunc(byte_off);
+  if (!(off >= 0) || off > 9007199254740991.0 || off + (double)width > (double)b->len) {
+    static const char msg[] = "Offset is outside the bounds of the DataView";
+    scr_throw_error_msg(SCR_ERR_RANGE, msg, sizeof msg - 1);
+    return;
+  }
+  /* Coerce to the stored bit pattern. The integer kinds share ToUint32's
+   * 2^32 residue (signed/unsigned store the same bits; narrower widths
+   * take the low bytes — 2^width divides 2^32, so the residues agree);
+   * F32 rounds double→float to nearest even, exactly the spec. */
+  uint64_t u = 0;
+  switch (kind) {
+    case SCR_DV_U8:
+    case SCR_DV_I8:
+    case SCR_DV_U16:
+    case SCR_DV_I16:
+    case SCR_DV_U32:
+    case SCR_DV_I32:
+      u = (uint64_t)scr_bytes_to_u32(value);
+      break;
+    case SCR_DV_F32: {
+      float f = (float)value;
+      uint32_t bits;
+      memcpy(&bits, &f, 4);
+      u = bits;
+      break;
+    }
+    case SCR_DV_F64:
+      memcpy(&u, &value, 8);
+      break;
+    default:
+      return; /* BIG kinds never lower (bigint arguments) */
+  }
+  /* Scatter host-independently; le false is the JS big-endian default. */
+  uint8_t *p = b->data + (size_t)off;
+  for (size_t i = 0; i < width; i++) {
+    p[le ? i : width - 1 - i] = (uint8_t)(u >> (8 * i));
+  }
+}
+
 /* ── encodings (u8 only — the compiler routes only u8 receivers here) ──── */
 
 static const char scr_hex_digits[] = "0123456789abcdef";

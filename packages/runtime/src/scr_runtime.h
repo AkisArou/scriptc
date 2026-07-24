@@ -4052,6 +4052,14 @@ typedef enum ScrDataViewGet {
 } ScrDataViewGet;
 double scr_dataview_get(const ScrBytes *b, double byte_off, ScrDataViewGet kind, bool le);
 
+/* DataView setters (the integer/float kinds only — the BIG kinds never
+ * lower: bigint arguments have no representation). Values coerce
+ * JS-exactly: the integer kinds by modular truncation (ToUint32's residue
+ * — the narrower widths store its low bytes, the same 2^width residue),
+ * F32 by double→float round-to-nearest-even. Offsets go through ToIndex
+ * with the getters' one RangeError. */
+void scr_dataview_set(ScrBytes *b, double byte_off, double value, ScrDataViewGet kind, bool le);
+
 /* Element read/write. Any invalid index — negative, fractional, NaN, or
  * out of bounds — TRAPS like the array runtime (SEMANTICS.md documents
  * the divergence from JS's undefined-read/ignored-write). Writes coerce

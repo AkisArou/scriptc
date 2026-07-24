@@ -849,6 +849,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             Reflect: "reflective property access has no static lowering — read and call members directly",
             Intl: "locale- and ICU-backed behavior lives outside the static runtime (the localeCompare stance: code-unit order, no collation/locale data)",
             SharedArrayBuffer: "no shared-memory threads exist in a compiled program — Uint8Array is the byte storage",
+            ArrayBuffer: "no free-standing ArrayBuffer value exists — typed arrays own their storage (new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)",
             WeakRef: "deref()-after-collect exposes GC timing — genuinely dynamic; hold a strong reference instead",
             FinalizationRegistry: "finalization callbacks expose GC timing — genuinely dynamic; release resources explicitly instead",
             eval: "runtime code evaluation cannot be compiled ahead of time",

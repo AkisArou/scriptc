@@ -3,7 +3,7 @@
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
 import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
-import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
+import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
@@ -1136,6 +1136,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             );
             E.emitPendingCheck();
             return t;
+          }
+          case "dvSetUint8":
+          case "dvSetInt8":
+          case "dvSetUint16":
+          case "dvSetInt16":
+          case "dvSetUint32":
+          case "dvSetInt32":
+          case "dvSetFloat32":
+          case "dvSetFloat64": {
+            // DataView setters: [offset, value, littleEndian?] — void;
+            // throw the getters' constant RangeError on a bad offset.
+            const kind = DV_SET_KIND_C[method];
+            E.line(
+              `scr_dataview_set(${r.name}, ${args[0]!.name}, ${args[1]!.name}, ${kind}, ` +
+                `${args[2]?.name ?? "false"});${E.srcComment(e.loc)}`,
+            );
+            E.emitPendingCheck();
+            return { name: "", type: e.type };
           }
           default: {
             const _exhaustive: never = method;

@@ -1038,6 +1038,15 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
       hint =
         "the regex-LITERAL argument forms lower (s.match(/re/)); a string pattern constructs " +
         "a RegExp at runtime, which has no lowering";
+    } else if (container === "ArrayBuffer" || container.startsWith("ArrayBuffer<")) {
+      hint =
+        "resize/transfer/maxByteLength need the buffer to exist as a runtime value, and no " +
+        "free-standing ArrayBuffer value does — typed arrays own fixed-length storage " +
+        "(new Uint8Array(n)); allocate a new view and copy instead";
+    } else if (container === "SharedArrayBuffer" || container.startsWith("SharedArrayBuffer<")) {
+      hint =
+        "no shared-memory threads exist in a compiled program — Uint8Array is the byte storage " +
+        "(a fixed-length allocation: grow has nothing to share it with)";
     } else if (
       container === "Intl" || container.startsWith("Intl.") ||
       ["NumberFormat", "DateTimeFormat", "PluralRules", "Collator", "Locale",

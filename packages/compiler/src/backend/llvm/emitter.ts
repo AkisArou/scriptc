@@ -772,6 +772,19 @@ const DV_GET_KIND: Record<string, number> = {
   dvGetBigInt64Number: 9,
 };
 
+/** ScrDataViewGet per dvSet* method (the setters reuse the getter kinds;
+ * no BIG setters exist). */
+const DV_SET_KIND: Record<string, number> = {
+  dvSetUint8: 0,
+  dvSetInt8: 1,
+  dvSetUint16: 2,
+  dvSetInt16: 3,
+  dvSetUint32: 4,
+  dvSetInt32: 5,
+  dvSetFloat32: 6,
+  dvSetFloat64: 7,
+};
+
 class LlEmitter {
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
    * first-use order, the C emitter's determinism discipline. */
@@ -8846,6 +8859,24 @@ class LlEmitter {
           "scr_dataview_get",
           "double (ptr, double, i32, i1 zeroext)",
           `ptr ${r.name}, double ${args[0]!.name}, i32 ${DV_GET_KIND[method]}, i1 ${args[1]?.name ?? "false"}`,
+          false,
+          true,
+        );
+      case "dvSetUint8":
+      case "dvSetInt8":
+      case "dvSetUint16":
+      case "dvSetInt16":
+      case "dvSetUint32":
+      case "dvSetInt32":
+      case "dvSetFloat32":
+      case "dvSetFloat64":
+        // DataView setters: [offset, value, littleEndian?] — void; throw
+        // the getters' constant RangeError on a bad offset.
+        return call(
+          "scr_dataview_set",
+          "void (ptr, double, double, i32, i1 zeroext)",
+          `ptr ${r.name}, double ${args[0]!.name}, double ${args[1]!.name}, ` +
+            `i32 ${DV_SET_KIND[method]}, i1 ${args[2]?.name ?? "false"}`,
           false,
           true,
         );

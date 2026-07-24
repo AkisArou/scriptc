@@ -2198,9 +2198,19 @@ export class Lowerer {
       }
     }
     // STANDARD-LIBRARY nominal types with no lowering at all: the SC2020
-    // story, naming the type.
+    // story, naming the type — and for the families with a WHY, the same
+    // pointed reason the identifier/constructor chokepoints teach.
     if (stdlibNominal) {
-      this.pushDiag(noLoweringDiag(this.checker.typeToString(type), locOf(node)));
+      const typeHints: Record<string, string | undefined> = {
+        ArrayBuffer:
+          "no free-standing ArrayBuffer value exists — typed arrays own their storage " +
+          "(new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)",
+        SharedArrayBuffer:
+          "no shared-memory threads exist in a compiled program — Uint8Array is the byte storage",
+      };
+      this.pushDiag(
+        noLoweringDiag(this.checker.typeToString(type), locOf(node), typeHints[stdlibOwnSym?.name ?? ""]),
+      );
       throw new PoisonError();
     }
     // USER record shapes blocked by ONE member (SC2009's record arm):

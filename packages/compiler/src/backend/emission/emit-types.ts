@@ -585,6 +585,19 @@ export const DV_GET_KIND_C: Record<string, string> = {
   dvGetBigInt64Number: "SCR_DV_BIGI64",
 };
 
+/** The runtime's ScrDataViewGet tag per dvSet* bytesIntrinsic method (the
+ * setters reuse the getter kinds; no BIG setters exist). */
+export const DV_SET_KIND_C: Record<string, string> = {
+  dvSetUint8: "SCR_DV_U8",
+  dvSetInt8: "SCR_DV_I8",
+  dvSetUint16: "SCR_DV_U16",
+  dvSetInt16: "SCR_DV_I16",
+  dvSetUint32: "SCR_DV_U32",
+  dvSetInt32: "SCR_DV_I32",
+  dvSetFloat32: "SCR_DV_F32",
+  dvSetFloat64: "SCR_DV_F64",
+};
+
 /** Runtime accessor suffix for an element type: arrays store f64 and bool
  * unboxed and everything refcounted as a pointer (`_ref`). */
 export function elemAccess(elem: IrType): "f64" | "bool" | "ref" {

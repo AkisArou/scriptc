@@ -1332,7 +1332,12 @@ export type IrStrIntrinsicMethod =
  * DataView" RangeError on any bad offset. `dvGetBigUint64Number`/
  * `dvGetBigInt64Number` are the COMPOSED `Number(view.getBigUint64(...))`
  * lowerings — the bare bigint-returning calls are fenced, the wrapped
- * form converts the 8-byte integer to double exactly as Number(bigint). */
+ * form converts the 8-byte integer to double exactly as Number(bigint).
+ * The `dvSet*` setters mirror the getters: [offset, value] plus the
+ * optional bool littleEndian on the multi-byte kinds → void, the same
+ * constant RangeError on any bad offset; values coerce JS-exactly
+ * (integer kinds by modular truncation, Float32 by double→float
+ * rounding). No BIG setters exist — bigint arguments never lower. */
 export type IrBytesIntrinsicMethod =
   | "length"
   | "byteLength"
@@ -1385,7 +1390,15 @@ export type IrBytesIntrinsicMethod =
   | "dvGetFloat32"
   | "dvGetFloat64"
   | "dvGetBigUint64Number"
-  | "dvGetBigInt64Number";
+  | "dvGetBigInt64Number"
+  | "dvSetUint8"
+  | "dvSetInt8"
+  | "dvSetUint16"
+  | "dvSetInt16"
+  | "dvSetUint32"
+  | "dvSetInt32"
+  | "dvSetFloat32"
+  | "dvSetFloat64";
 
 /** The bytesIntrinsic methods that can raise a catchable error — backends'
  * may-throw analyses seed on these exactly like MAY_THROW_LIB_FNS. */
@@ -1415,6 +1428,14 @@ export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new 
   "dvGetFloat64",
   "dvGetBigUint64Number",
   "dvGetBigInt64Number",
+  "dvSetUint8",
+  "dvSetInt8",
+  "dvSetUint16",
+  "dvSetInt16",
+  "dvSetUint32",
+  "dvSetInt32",
+  "dvSetFloat32",
+  "dvSetFloat64",
 ]);
 
 /** The regex operation surface. Receiver/arg conventions (validated):
