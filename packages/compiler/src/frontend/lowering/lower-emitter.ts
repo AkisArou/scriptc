@@ -40,7 +40,7 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { dynFallbackType, newFnCtx } from "./lowerer.js";
 import type { ClassInfo } from "./lower-classes.js";
-import { locOf } from "../program.js";
+import { isJsSourceFile, locOf } from "../program.js";
 import { arrayOf, BOOL, canBoxFuncIntoDyn, canConvertToDyn, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, isUnitType, STRING, SrcLoc, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { streamForcedTuple, streamSidesOf } from "./lower-stream.js";
 
@@ -943,7 +943,16 @@ export function emitOverrideShapeReason(L: Lowerer, member: ts.MethodDeclaration
     return "the second parameter must be a plain rest parameter (...args)";
   }
   try {
-    if (L.mapTypeOf(L.typeOf(p0.name))?.kind !== "string") {
+    // TS: the event parameter must be annotated `string` (bivariance
+    // admits it under the `string | symbol` base — symbols have no
+    // lowering anyway). JS: unannotated is the only spelling (checker
+    // `any`); the specialization binds it as the string it always is —
+    // event names are compile-time literals program-wide.
+    const p0T = L.mapTypeOf(L.typeOf(p0.name));
+    const jsUnannotated =
+      p0.type === undefined && isJsSourceFile(member.getSourceFile()) &&
+      (p0T === null || p0T.kind === "dyn" || p0T.kind === "jsval");
+    if (p0T?.kind !== "string" && !jsUnannotated) {
       return "the event parameter must be typed 'string' (symbol event names have no lowering)";
     }
     const sig = L.checker.getSignatureFromDeclaration(member);
