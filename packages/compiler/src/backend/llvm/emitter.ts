@@ -5526,12 +5526,17 @@ class LlEmitter {
         }
         if (e.name === "promise.reject") {
           // A fresh promise rejected through the exception cell: the
-          // %Error-rooted reason moves in as the cell's OBJ payload, and
-          // reject_pending moves the cell into the promise (consumed
-          // immediately — no pending check runs in between).
+          // %Error-rooted reason moves in as the cell's OBJ payload (a
+          // checked-dynamic reason rides the thrown-dyn REF representation
+          // instead — identity flows to catch/unhandledRejection observers,
+          // emitThrowValue's dyn arm), and reject_pending moves the cell
+          // into the promise (consumed immediately — no pending check runs
+          // in between).
           if (e.type.kind !== "promise") throw new Error("llvm emitter bug: promise.reject type");
           const reasonT = e.args[0]!.type;
-          if (reasonT.kind !== "object") throw new Error("llvm emitter bug: promise.reject reason");
+          if (reasonT.kind !== "object" && reasonT.kind !== "dyn") {
+            throw new Error("llvm emitter bug: promise.reject reason");
+          }
           this.declare(`declare ptr @scr_promise_new()`);
           this.declare(`declare void @scr_promise_reject_pending(ptr)`);
           const reason = this.emitExpr(e.args[0]!);
