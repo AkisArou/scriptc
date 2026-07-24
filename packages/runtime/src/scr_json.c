@@ -424,6 +424,52 @@ void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item) {
   arr->v.arr.items[arr->v.arr.len++] = item; /* ownership moves in */
 }
 
+/* Spread completion for a runtime-arity argument list (`f(...xs)` in the
+ * checked-dynamic tier): JS's spread over the DOM's iterable kinds —
+ * arrays element-by-element (retained), strings by code POINT (the string
+ * iterator; astral chars arrive unsplit), bytes by byte; every other kind
+ * throws V8's exact SPREAD-CALL TypeError (catchable, pending — callers
+ * check): nullish sources spell the spread expression (`what`) — "v is
+ * not iterable (cannot read property undefined)" — and everything else is
+ * the generic "Spread syntax requires ...iterable[Symbol.iterator] to be
+ * a function". Borrows src. */
+void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what) {
+  if (src->kind == SCR_DYN_ARR) {
+    for (size_t i = 0; i < src->v.arr.len; i++) {
+      scr_dyn_arr_push(arr, scr_dyn_retain(src->v.arr.items[i]));
+    }
+    return;
+  }
+  if (src->kind == SCR_DYN_BYTES) {
+    for (size_t i = 0; i < src->v.bytes->len; i++) {
+      scr_dyn_arr_push(arr, scr_dyn_new_num((double)src->v.bytes->data[i]));
+    }
+    return;
+  }
+  if (src->kind == SCR_DYN_STR) {
+    double len = scr_str_utf16_len(src->v.str);
+    for (double at = 0; at < len;) {
+      ScrStr *cp = scr_str_cp_at(src->v.str, at);
+      at += scr_str_utf16_len(cp);
+      scr_dyn_arr_push(arr, scr_dyn_new_str(cp));
+      scr_str_release(cp);
+    }
+    return;
+  }
+  if (src->kind == SCR_DYN_UNDEF || src->kind == SCR_DYN_NULL) {
+    ScrJsonBuf b;
+    scr_jb_init(&b);
+    scr_jb_puts(&b, what);
+    scr_jb_puts(&b, " is not iterable (cannot read property ");
+    scr_jb_puts(&b, src->kind == SCR_DYN_UNDEF ? "undefined" : "null");
+    scr_jb_puts(&b, ")");
+    scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+    return;
+  }
+  static const char msg[] = "Spread syntax requires ...iterable[Symbol.iterator] to be a function";
+  scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+}
+
 /* Takes ownership of key (malloc'd) and value. Duplicate keys: the LATER
  * value wins (like JS JSON.parse) — the old value is released and the new
  * key buffer freed (the surviving entry keeps its original, equal key). */
@@ -549,6 +595,13 @@ ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const ch
     return NULL;
   }
   return d->v.fn.thunk(d->v.fn.clo, args, argc);
+}
+
+/* scr_dyn_call over a DOM ARRAY's elements — the spread-application form
+ * (`f(...args)` after the emitted argument array is built). Borrows both;
+ * result owned (+1), or NULL with the exception pending. */
+ScrDyn *scr_dyn_apply(const ScrDyn *d, const ScrDyn *args, const char *what) {
+  return scr_dyn_call(d, args->v.arr.items, args->v.arr.len, what);
 }
 
 /* ── native handles in the DOM (SCR_DYN_HANDLE) ───────────────────────

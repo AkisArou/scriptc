@@ -2803,6 +2803,19 @@ function validateFunction(
           checkExpr(a);
           if (a.type.kind !== "dyn") err(`dynCall argument of kind ${a.type.kind} (must be dyn)`, e.loc);
         }
+        // The runtime-arity form: spread entries point into args (their
+        // dyn values flatten at the call), strictly increasing.
+        if (e.spreads !== undefined) {
+          if (e.spreads.length === 0) err("dynCall spreads must be non-empty when present", e.loc);
+          let prev = -1;
+          for (const s of e.spreads) {
+            if (!Number.isInteger(s.arg) || s.arg < 0 || s.arg >= e.args.length) {
+              err(`dynCall spread index ${s.arg} out of range`, e.loc);
+            }
+            if (s.arg <= prev) err("dynCall spread indices must be strictly increasing", e.loc);
+            prev = s.arg;
+          }
+        }
         break;
       }
       case "dynInvoke": {
@@ -4414,7 +4427,8 @@ function validateFunction(
           err(`jsOp ${e.op} must be ${jsOpResultKind(e.op)}, got ${e.type.kind}`, e.loc);
         }
         const named =
-          e.op === "getProp" || e.op === "setProp" || e.op === "callMethod" || e.op === "optCallMethod" || e.op === "globalGet";
+          e.op === "getProp" || e.op === "setProp" || e.op === "callMethod" || e.op === "optCallMethod" || e.op === "globalGet" ||
+          e.op === "callSpread"; // the spread expression's source spelling (V8's nullish text spells it)
         if (named !== (e.name !== undefined)) {
           err(`jsOp ${e.op} ${named ? "requires" : "forbids"} a name`, e.loc);
         }
@@ -4424,6 +4438,7 @@ function validateFunction(
           neg: 1, plus: 1, truthy: 1, not: 1, typeof: 1, toStr: 1,
           getProp: 1, setProp: 2, getIdx: 2, setIdx: 3, globalGet: 0,
           undefLit: 0, nullLit: 0, iterNew: 1, defineGetter: 3, objSpread: 2,
+          callSpread: 3, // callee + pre array + spread source
           callMethod: null, optCallMethod: null, callFn: null, construct: null, // receiver/callee + any number of args
           objLit: null, arrLit: null, tplStrings: null, // variable length (objLit: key/value pairs; tplStrings: n cooked + n raw)
         };

@@ -379,6 +379,7 @@ enum {
   ISL_H_DESTRCHECK,
   ISL_H_ITERN,
   ISL_H_ITER,
+  ISL_H_CALLSPREAD,
   ISL_H_COUNT,
 };
 
@@ -417,7 +418,17 @@ static const char isl_prelude[] =
     "else if(typeof v===\"number\")d=\"number \"+v;else if(typeof v===\"boolean\")d=\"boolean \"+v;"
     "else if(typeof v===\"function\")d=\"function\";else d=\"object\";"
     "throw new TypeError(d+\" is not iterable (cannot read property Symbol(Symbol.iterator))\")}"
-    "return v[Symbol.iterator]()}]";
+    "return v[Symbol.iterator]()},"
+    /* ISL_H_CALLSPREAD: spread application (`f(...pre, ...s)` — the
+     * rest-forwarding idiom's call): REAL spread syntax, so iterator
+     * protocols are the engine's own; the guards front-run V8's exact
+     * spread-call TypeError texts (nullish spells the spread expression
+     * `w`, everything else the generic Spread-syntax text). */
+    "(f,p,s,w)=>{if(s===undefined||s===null)"
+    "throw new TypeError(w+\" is not iterable (cannot read property \"+s+\")\");"
+    "if(typeof s[Symbol.iterator]!==\"function\")"
+    "throw new TypeError(\"Spread syntax requires ...iterable[Symbol.iterator] to be a function\");"
+    "return f(...p,...s)}]";
 
 static void isl_free_boot(void);
 static void isl_prom_wraps_teardown(void);
@@ -1267,6 +1278,23 @@ ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv) {
   for (int i = 0; i < argc; i++) args[i] = argv[i]->v;
   JSValue r = JS_Call(isl_ctx, f->v, JS_UNDEFINED, argc, args);
   if (args != stack_args) free(args);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  return isl_cell_new(r);
+}
+
+/* Spread application on an island callee (jsOp callSpread) — the prelude
+ * helper's real `f(...pre, ...spread)`, so iterator protocols are the
+ * engine's own and the guards front-run V8's exact spread-call TypeError
+ * texts (`what` is the spread expression's source spelling). Borrows
+ * everything; +1 out, or NULL with the engine exception bridged. */
+ScrJsval *scr_jsval_call_spread(ScrJsval *f, ScrJsval *pre, ScrJsval *spread, const ScrStr *what) {
+  isl_entry();
+  JSValue argv[4] = {f->v, pre->v, spread->v, JS_NewStringLen(isl_ctx, what->data, what->len)};
+  JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_CALLSPREAD], JS_UNDEFINED, 4, argv);
+  JS_FreeValue(isl_ctx, argv[3]);
   if (JS_IsException(r)) {
     isl_bridge_exception();
     return NULL;

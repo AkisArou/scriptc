@@ -72,7 +72,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, F64, islandCallbackRet, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -5592,12 +5592,17 @@ class LlEmitter {
         }
         if (e.name === "promise.reject") {
           // A fresh promise rejected through the exception cell: the
-          // %Error-rooted reason moves in as the cell's OBJ payload, and
-          // reject_pending moves the cell into the promise (consumed
-          // immediately — no pending check runs in between).
+          // %Error-rooted reason moves in as the cell's OBJ payload (a
+          // checked-dynamic reason rides the thrown-dyn REF representation
+          // instead — identity flows to catch/unhandledRejection observers,
+          // emitThrowValue's dyn arm), and reject_pending moves the cell
+          // into the promise (consumed immediately — no pending check runs
+          // in between).
           if (e.type.kind !== "promise") throw new Error("llvm emitter bug: promise.reject type");
           const reasonT = e.args[0]!.type;
-          if (reasonT.kind !== "object") throw new Error("llvm emitter bug: promise.reject reason");
+          if (reasonT.kind !== "object" && reasonT.kind !== "dyn") {
+            throw new Error("llvm emitter bug: promise.reject reason");
+          }
           this.declare(`declare ptr @scr_promise_new()`);
           this.declare(`declare void @scr_promise_reject_pending(ptr)`);
           const reason = this.emitExpr(e.args[0]!);
@@ -5763,6 +5768,39 @@ class LlEmitter {
         // boxed thunk builds its own typed copies. The callee's source
         // spelling rides along for Node's "<name> is not a function".
         const callee = this.emitExpr(e.callee);
+        if (e.spreads !== undefined && e.spreads.length > 0) {
+          // The RUNTIME-ARITY form (`f(...args)`): one fresh DOM array
+          // collects the arguments left-to-right — plain args move in
+          // (push takes ownership), spread args FLATTEN (push_spread
+          // retains elements in and throws V8's spread-call TypeError for
+          // non-iterable DOM kinds, checked per spread — JS's
+          // ArgumentListEvaluation order) — then apply calls through the
+          // array's elements (borrowed, exactly scr_dyn_call).
+          this.declare(`declare ptr @scr_dyn_new_arr()`);
+          this.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
+          this.declare(`declare void @scr_dyn_arr_push_spread(ptr, ptr, ptr)`);
+          this.declare(`declare ptr @scr_dyn_apply(ptr, ptr, ptr)`);
+          const spreadAt = new Map(e.spreads.map((s) => [s.arg, s.what]));
+          const pack = B.tmp();
+          B.line(`${pack} = call ptr @scr_dyn_new_arr()`);
+          this.own({ name: pack, type: DYN });
+          e.args.forEach((a, i) => {
+            const v = this.emitExpr(a);
+            const spreadWhat = spreadAt.get(i);
+            if (spreadWhat !== undefined) {
+              B.line(`call void @scr_dyn_arr_push_spread(ptr ${pack}, ptr ${v.name}, ptr ${this.cstr(spreadWhat)})`);
+              this.emitPendingCheck();
+            } else {
+              this.moveTemp(v);
+              B.line(`call void @scr_dyn_arr_push(ptr ${pack}, ptr ${v.name})`);
+            }
+          });
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_dyn_apply(ptr ${callee.name}, ptr ${pack}, ptr ${this.cstr(e.calleeName)})`);
+          const out = this.own({ name: t, type: e.type });
+          this.emitPendingCheck();
+          return out;
+        }
         const args = e.args.map((a) => this.emitExpr(a));
         let argsPtr = "null";
         if (args.length > 0) {
@@ -6327,6 +6365,18 @@ class LlEmitter {
         return fallible(() => {
           const t = B.tmp();
           B.line(`${t} = call ptr @scr_jsval_call(ptr ${a(0)}, i32 ${args.length - 1}, ptr ${pack})`);
+          return t;
+        });
+      }
+      case "callSpread": {
+        // Spread application (`f(...pre, ...s)`): the prelude helper's
+        // real spread syntax — iterator protocols are the engine's own,
+        // the guards front-run V8's spread-call TypeError texts (the name
+        // literal is the spread expression's spelling).
+        this.declare(`declare ptr @scr_jsval_call_spread(ptr, ptr, ptr, ptr)`);
+        return fallible(() => {
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_jsval_call_spread(ptr ${a(0)}, ptr ${a(1)}, ptr ${a(2)}, ptr ${nameSym()})`);
           return t;
         });
       }
