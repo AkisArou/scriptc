@@ -1330,13 +1330,22 @@ export function lowerStreamModuleCall(L: Lowerer, call: ts.CallExpression,
           `the supported form is ${bi.member}(stream)`,
         );
       }
-      let recv: IrExpr;
-      try {
-        recv = lowerStreamArg(L, args[0]!, bi.member);
-      } catch (e) {
-        if (e instanceof StreamArgTypeThrow) return e.expr;
-        throw e;
+      // A provably-non-stream argument: Node's consumers reject the
+      // returned promise asynchronously with the plain "stream is not
+      // async iterable" TypeError — no sync ladder exists to borrow
+      // (finished/pipeline throw synchronously; consumers do not). A
+      // sync throw here would be observably wrong timing, so the
+      // provable case takes the named fence instead.
+      const argV = L.lowerExpr(args[0]!);
+      const argInfo = argV.type.kind === "object" ? L.classes.get(argV.type.className) : undefined;
+      if (argV.type.kind !== "dyn" && argV.type.kind !== "jsval" && !streamSidesOf(L, argInfo)) {
+        L.noLowering(
+          `stream/consumers.${bi.member} over a value that is not a stream`,
+          call,
+          "Node rejects the promise with 'stream is not async iterable' — pass a readable stream",
+        );
       }
+      const recv: IrExpr = argV;
       const inner: IrType = bi.member === "text" ? STRING : bi.member === "json" ? DYN : BYTES;
       return {
         kind: "libCall",
