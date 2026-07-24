@@ -1076,8 +1076,8 @@ export class CEmitter {
     return unionTruthyHelper(this, unionId);
   }
 
-  unionEqHelper(unionId: string): string {
-    return unionEqHelper(this, unionId);
+  unionEqHelper(unionId: string, sameValue: boolean): string {
+    return unionEqHelper(this, unionId, sameValue);
   }
 
   unionToStrHelper(unionId: string): string {

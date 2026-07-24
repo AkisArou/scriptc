@@ -5,7 +5,7 @@ dataview.ts:9:7 - error SC2020: 'ArrayBuffer' is part of the standard library ty
      |       ^~~~~~~
   10 | 
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: no free-standing ArrayBuffer value exists — typed arrays own their storage (new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)
 
 dataview.ts:9:17 - error SC1090: '.buffer' outside new DataView(x.buffer, ...) — scriptc typed arrays own their storage: no free-standing ArrayBuffer value exists, and slice()/subarray() copy is not supported yet
 
@@ -37,7 +37,7 @@ dataview.ts:15:7 - error SC2020: 'ArrayBuffer' is part of the standard library t
      |       ^~
   16 | const direct = new DataView(ab);
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: no free-standing ArrayBuffer value exists — typed arrays own their storage (new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)
 
 dataview.ts:15:12 - error SC2020: 'new ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 
@@ -46,7 +46,7 @@ dataview.ts:15:12 - error SC2020: 'new ArrayBuffer' is part of the standard libr
      |            ^~~~~~~~~~~~~~~~~~
   16 | const direct = new DataView(ab);
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: no free-standing ArrayBuffer value exists — typed arrays own their storage: allocate the view directly (new Uint8Array(n)), or erase a fresh buffer into one (new Uint8Array(new ArrayBuffer(n)), new DataView(new ArrayBuffer(n), ...))
 
 dataview.ts:16:29 - error SC2020: 'new DataView over this buffer expression' is part of the standard library types but has no scriptc lowering yet
 
@@ -55,4 +55,4 @@ dataview.ts:16:29 - error SC2020: 'new DataView over this buffer expression' is 
      |                             ^~
   17 | 
 
-  hint: views compile over a typed array's own storage — new DataView(x.buffer, byteOffset?, byteLength?) where x is a Uint8Array/Uint32Array/Float32Array/Buffer value; free-standing ArrayBuffers have no representation
+  hint: views compile over a typed array's own storage — new DataView(x.buffer, byteOffset?, byteLength?) where x is a Uint8Array/Uint32Array/Float32Array/Buffer value — or a fresh buffer erased into the view: new DataView(new ArrayBuffer(n), ...); free-standing ArrayBuffers have no representation

@@ -2822,6 +2822,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
               kind: "unionEq",
               unionId: unionType.unionId,
               negated: false,
+              sameValue: false,
               left: disc,
               right: L.coerceInto(clause.expression, test, unionType),
               type: BOOL,

@@ -48,7 +48,7 @@ stdlib-fence.ts:20:7 - error SC2020: 'NumberFormat' is part of the standard libr
      |       ^~~
   21 | 
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: Intl formatter values have no representation — the COMPOSED en-US forms lower: new Intl.NumberFormat("en-US").format(x) and x.toLocaleString("en-US") with default options; the rest is ICU locale data the binary does not carry
 
 stdlib-fence.ts:20:13 - error SC1090: constructing values other than classes declared in the program is not supported yet
 
@@ -109,7 +109,7 @@ stdlib-fence.ts:26:7 - error SC2020: 'ArrayBuffer' is part of the standard libra
      |       ^~~
   27 | const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds stay fenced
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: no free-standing ArrayBuffer value exists — typed arrays own their storage (new Uint8Array(n) allocates; new Uint8Array(new ArrayBuffer(n)) erases the buffer into the view)
 
 stdlib-fence.ts:26:13 - error SC2020: 'new ArrayBuffer' is part of the standard library types but has no scriptc lowering yet
 
@@ -118,7 +118,7 @@ stdlib-fence.ts:26:13 - error SC2020: 'new ArrayBuffer' is part of the standard 
      |             ^~~~~~~~~~~~~~~~~~
   27 | const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds stay fenced
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: no free-standing ArrayBuffer value exists — typed arrays own their storage: allocate the view directly (new Uint8Array(n)), or erase a fresh buffer into one (new Uint8Array(new ArrayBuffer(n)), new DataView(new ArrayBuffer(n), ...))
 
 stdlib-fence.ts:27:12 - error SC2020: 'new Set(values)' is part of the standard library types but has no scriptc lowering yet
 
@@ -210,14 +210,14 @@ stdlib-fence.ts:42:17 - error SC2020: '.split with 2 arguments on strings' is pa
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-stdlib-fence.ts:44:19 - error SC2020: 'number.toLocaleString' is part of the standard library types but has no scriptc lowering yet
+stdlib-fence.ts:44:19 - error SC2020: 'Number.prototype.toLocaleString without a locale' is part of the standard library types but has no scriptc lowering yet
 
   43 | const fixed = (1.5).toFixed(); // digit-free toFixed lowers now (the static ties-up integer)
   44 | const localized = (1234.5).toLocaleString();
-     |                   ^~~~~~~~~~~~~~~~~~~~~~~
+     |                   ^~~~~~~~~~~~~~~~~~~~~~~~~
   45 | 
 
-  hint: locale- and ICU-backed behavior lives outside the static runtime (the localeCompare stance: code-unit order, no collation/locale data) — format with template literals, toFixed, and toString instead
+  hint: the default locale is the host environment's, which a compiled binary cannot carry — pass it explicitly: x.toLocaleString("en-US")
 
 stdlib-fence.ts:49:15 - error SC2020: '.indexOf with 2 arguments' is part of the standard library types but has no scriptc lowering yet
 
@@ -282,16 +282,34 @@ stdlib-fence.ts:66:16 - error SC2020: 'then with 2 arguments' is part of the sta
 
   hint: the supported form takes exactly one fulfillment handler — chain .catch(...) for the rejection half
 
-stdlib-fence.ts:70:7 - error SC2001: values of type '10n' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+stdlib-fence.ts:73:15 - error SC2020: 'Object.is over a dynamic operand' is part of the standard library types but has no scriptc lowering yet
 
-  69 | 
-  70 | const big = 10n;
+  72 | // unions needing narrowing.
+  73 | const dynIs = Object.is(JSON.parse("1") as unknown, 1);
+     |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  74 | function pick(a: string | number, b: number | boolean): boolean {
+
+  hint: validate/narrow the value first (strict equality's rule) — SameValue only differs from === on numbers (NaN, ±0)
+
+stdlib-fence.ts:75:10 - error SC2020: 'Object.is over these union operands' is part of the standard library types but has no scriptc lowering yet
+
+  74 | function pick(a: string | number, b: number | boolean): boolean {
+  75 |   return Object.is(a, b); // partially-overlapping unions: narrow first
+     |          ^~~~~~~~~~~~~~~
+  76 | }
+
+  hint: union-typed comparisons need one comparable shape (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms)
+
+stdlib-fence.ts:79:7 - error SC2001: values of type '10n' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  78 | 
+  79 | const big = 10n;
      |       ^~~
-  71 | 
+  80 | 
 
-stdlib-fence.ts:70:13 - error SC1090: syntax 'BigIntLiteral' is not supported yet
+stdlib-fence.ts:79:13 - error SC1090: syntax 'BigIntLiteral' is not supported yet
 
-  69 | 
-  70 | const big = 10n;
+  78 | 
+  79 | const big = 10n;
      |             ^~~
-  71 | 
+  80 | 

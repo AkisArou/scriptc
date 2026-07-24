@@ -3,7 +3,7 @@
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
 import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
-import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
+import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
@@ -1137,6 +1137,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.emitPendingCheck();
             return t;
           }
+          case "dvSetUint8":
+          case "dvSetInt8":
+          case "dvSetUint16":
+          case "dvSetInt16":
+          case "dvSetUint32":
+          case "dvSetInt32":
+          case "dvSetFloat32":
+          case "dvSetFloat64": {
+            // DataView setters: [offset, value, littleEndian?] — void;
+            // throw the getters' constant RangeError on a bad offset.
+            const kind = DV_SET_KIND_C[method];
+            E.line(
+              `scr_dataview_set(${r.name}, ${args[0]!.name}, ${args[1]!.name}, ${kind}, ` +
+                `${args[2]?.name ?? "false"});${E.srcComment(e.loc)}`,
+            );
+            E.emitPendingCheck();
+            return { name: "", type: e.type };
+          }
           default: {
             const _exhaustive: never = method;
             void _exhaustive;
@@ -1927,11 +1945,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, e.negated ? `!(${test})` : test);
       }
       case "unionEq": {
-        // Strict equality of the ARM values via the per-union helper (tag
-        // compare + per-arm payload compare). Both boxes are borrowed.
+        // Strict equality (or Object.is's SameValue — the f64 arm's
+        // compare is the one difference) of the ARM values via the
+        // per-union helper (tag compare + per-arm payload compare). Both
+        // boxes are borrowed.
         const l = E.emitExpr(e.left);
         const r = E.emitExpr(e.right);
-        const call = `${E.unionEqHelper(e.unionId)}(${l.name}, ${r.name})`;
+        const call = `${E.unionEqHelper(e.unionId, e.sameValue)}(${l.name}, ${r.name})`;
         return E.newTemp(e.type, e.negated ? `!${call}` : call);
       }
       case "caughtTest": {
@@ -2480,6 +2500,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_num_to_exponential(${arg(0)})`);
           case "num.toFixed0":
             return finish(`scr_num_to_fixed0(${arg(0)})`);
+          // Object.is over two numbers — SameValue on doubles. No throw.
+          case "num.sameValue":
+            return finish(`scr_num_same_value(${arg(0)}, ${arg(1)})`);
+          // Intl.NumberFormat("en-US").format / toLocaleString("en-US")
+          // with default options (scr_lib.c). +1 string; no throw.
+          case "intl.numFormatEnUs":
+            return finish(`scr_intl_num_format_en_us(${arg(0)})`);
           // The URL surface (scr_url.c): construction and the two
           // fileURLToPath receiver forms throw catchable TypeErrors
           // (may-throw seed set); the getters are pure reads. Receivers

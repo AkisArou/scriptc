@@ -1366,7 +1366,12 @@ export type IrStrIntrinsicMethod =
  * DataView" RangeError on any bad offset. `dvGetBigUint64Number`/
  * `dvGetBigInt64Number` are the COMPOSED `Number(view.getBigUint64(...))`
  * lowerings — the bare bigint-returning calls are fenced, the wrapped
- * form converts the 8-byte integer to double exactly as Number(bigint). */
+ * form converts the 8-byte integer to double exactly as Number(bigint).
+ * The `dvSet*` setters mirror the getters: [offset, value] plus the
+ * optional bool littleEndian on the multi-byte kinds → void, the same
+ * constant RangeError on any bad offset; values coerce JS-exactly
+ * (integer kinds by modular truncation, Float32 by double→float
+ * rounding). No BIG setters exist — bigint arguments never lower. */
 export type IrBytesIntrinsicMethod =
   | "length"
   | "byteLength"
@@ -1419,7 +1424,15 @@ export type IrBytesIntrinsicMethod =
   | "dvGetFloat32"
   | "dvGetFloat64"
   | "dvGetBigUint64Number"
-  | "dvGetBigInt64Number";
+  | "dvGetBigInt64Number"
+  | "dvSetUint8"
+  | "dvSetInt8"
+  | "dvSetUint16"
+  | "dvSetInt16"
+  | "dvSetUint32"
+  | "dvSetInt32"
+  | "dvSetFloat32"
+  | "dvSetFloat64";
 
 /** The bytesIntrinsic methods that can raise a catchable error — backends'
  * may-throw analyses seed on these exactly like MAY_THROW_LIB_FNS. */
@@ -1449,6 +1462,14 @@ export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new 
   "dvGetFloat64",
   "dvGetBigUint64Number",
   "dvGetBigInt64Number",
+  "dvSetUint8",
+  "dvSetInt8",
+  "dvSetUint16",
+  "dvSetInt16",
+  "dvSetUint32",
+  "dvSetInt32",
+  "dvSetFloat32",
+  "dvSetFloat64",
 ]);
 
 /** The regex operation surface. Receiver/arg conventions (validated):
@@ -1749,6 +1770,20 @@ export type IrLibFn =
    * forms keep their island lowering. Results +1; never throw. */
   | "num.toExponential"
   | "num.toFixed0"
+  /** Object.is over two numbers — the spec's SameValue on doubles: NaN
+   * equals NaN, +0 differs from -0, everything else is `===`. Plain bool
+   * result; never throws. (Union-armed operands take unionEq's sameValue
+   * flag instead — this is the both-f64 fast path.) */
+  | "num.sameValue"
+  /** `new Intl.NumberFormat("en-US").format(x)` and
+   * `x.toLocaleString("en-US")` with DEFAULT options — the one locale
+   * whose data the runtime embeds (Node's default-build locale): decimal
+   * notation, 0–3 fraction digits rounded half-up on the SHORTEST
+   * round-tripping decimal (ICU's rounding input, probed vs Node —
+   * format(1.0005) is "1.001" though toFixed(3) answers "1.000"), ","
+   * grouping every three integer digits, "∞"/"NaN" texts, and "-0" for
+   * negative inputs rounding to zero. Result +1; never throws. */
+  | "intl.numFormatEnUs"
   /** `delete process.env[NAME]` — unsetenv(3): the mutation is visible to
    * every later read (process.envGet asks getenv fresh) and inherited by
    * spawned children, exactly Node. Statement position only (JS's boolean
@@ -4306,11 +4341,15 @@ export type IrExpr =
    * comparison (`u === "text"`) arrives here after the frontend wraps the
    * plain side (payload identity is preserved by the wrap, so ref-arm
    * semantics stay JS-exact). Operands are borrowed; result is a plain
-   * bool. `negated` is the `!==` spelling. */
+   * bool. `negated` is the `!==` spelling. `sameValue` upgrades the f64
+   * arm's compare from `===` to SameValue (NaN equals NaN, +0 differs
+   * from -0) — the Object.is lowering; every other arm's compare is
+   * shared between the two semantics. */
   | {
       kind: "unionEq";
       unionId: string;
       negated: boolean;
+      sameValue: boolean;
       left: IrExpr;
       right: IrExpr;
       type: IrType;

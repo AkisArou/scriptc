@@ -4400,30 +4400,44 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
         const seed: IrExpr = { kind: "arrayLit", elems, type: arrayOf(F64), loc };
         return { kind: "bytesNew", source: seed, type, loc };
       }
-      // The SYNTACTIC `new T(new SharedArrayBuffer(n))` form — the
-      // Atomics.wait sleep idiom's construction. The buffer never exists
-      // as a value: n must be a byte-length LITERAL divisible by the
-      // element size (tsc would admit any number; a bad one is Node's
-      // RangeError — rejected at compile time instead of half-lowering),
-      // and the whole expression is a zero-filled typed array of
-      // n/elemSize elements. Sharing is unobservable without threads
-      // (scriptc has none), so erasing the SharedArrayBuffer is exact —
-      // SEMANTICS.md documents the stance.
+      // The SYNTACTIC `new T(new ArrayBuffer(n))` and `new T(new
+      // SharedArrayBuffer(n))` forms — fresh-buffer construction (the
+      // shared spelling is the Atomics.wait sleep idiom's). The buffer
+      // never exists as a value: n must be a byte-length LITERAL divisible
+      // by the element size (tsc would admit any number; a bad one is
+      // Node's RangeError — rejected at compile time instead of
+      // half-lowering), and the whole expression is a zero-filled typed
+      // array of n/elemSize elements. Erasing the buffer is exact: nothing
+      // else can ever reference it, so neither sharing (scriptc has no
+      // threads) nor aliasing is observable — SEMANTICS.md documents the
+      // stance. The RESIZABLE form (a maxByteLength options bag) fences by
+      // name: resize needs the buffer to exist as a value, and none does.
       if (
         ts.isNewExpression(argNode) &&
         ts.isIdentifier(argNode.expression) &&
-        argNode.expression.text === "SharedArrayBuffer" &&
+        (argNode.expression.text === "ArrayBuffer" ||
+          argNode.expression.text === "SharedArrayBuffer") &&
         L.isStdlibSymbol(L.resolveValueSymbol(argNode.expression) ?? undefined)
       ) {
+        const bufCtor = argNode.expression.text;
+        if ((argNode.arguments?.length ?? 0) > 1) {
+          L.noLowering(
+            `new ${name} over a resizable ${bufCtor}`,
+            argNode,
+            "a maxByteLength options bag makes the buffer resizable, and resizing needs the buffer " +
+              "to exist as a runtime value — no free-standing ArrayBuffer value exists (the buffer here " +
+              "erases into the view): drop the options bag",
+          );
+        }
         const elemSize = elem === "u8" ? 1 : 4;
         const lenArg = argNode.arguments?.length === 1 ? argNode.arguments[0] : undefined;
         const lenT = lenArg ? L.typeOf(lenArg) : null;
         const byteLen = lenT?.isNumberLiteralType() ? lenT.value : null;
         if (byteLen === null || byteLen % elemSize !== 0 || byteLen < 0) {
           L.noLowering(
-            `new ${name} over this SharedArrayBuffer`,
+            `new ${name} over this ${bufCtor}`,
             argNode,
-            `the byte length must be a number literal divisible by ${elemSize} — new ${name}(new SharedArrayBuffer(${elemSize}))`,
+            `the byte length must be a number literal divisible by ${elemSize} — new ${name}(new ${bufCtor}(${elemSize}))`,
           );
         }
         const count: IrExpr = { kind: "numLit", value: byteLen / elemSize, type: F64, loc };
@@ -4477,9 +4491,48 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
         "supported: new DataView(x.buffer), (x.buffer, byteOffset), or (x.buffer, byteOffset, byteLength)",
       );
     }
+    // The FRESH-BUFFER form: `new DataView(new ArrayBuffer(n), ...)` — the
+    // buffer erases into the view (nothing else can ever reference it, so
+    // the aliasing a shared buffer would exhibit is unobservable): the
+    // view's storage is a fresh zero-filled n-byte allocation. n must be a
+    // non-negative integer LITERAL (tsc admits any number; a fractional
+    // one is ToIndex truncation nothing here implements). byteOffset and
+    // byteLength keep their runtime Node-RangeError story. The RESIZABLE
+    // form (a maxByteLength options bag) fences by name.
+    if (
+      ts.isNewExpression(bufNode) &&
+      ts.isIdentifier(bufNode.expression) &&
+      bufNode.expression.text === "ArrayBuffer" &&
+      L.isStdlibSymbol(L.resolveValueSymbol(bufNode.expression) ?? undefined)
+    ) {
+      if ((bufNode.arguments?.length ?? 0) > 1) {
+        L.noLowering(
+          "new DataView over a resizable ArrayBuffer",
+          bufNode,
+          "a maxByteLength options bag makes the buffer resizable, and resizing needs the buffer " +
+            "to exist as a runtime value — no free-standing ArrayBuffer value exists (the buffer here " +
+            "erases into the view): drop the options bag",
+        );
+      }
+      const lenArg = bufNode.arguments?.length === 1 ? bufNode.arguments[0] : undefined;
+      const lenT = lenArg ? L.typeOf(lenArg) : null;
+      const byteLen = lenT?.isNumberLiteralType() ? lenT.value : null;
+      if (byteLen === null || !Number.isInteger(byteLen) || byteLen < 0) {
+        L.noLowering(
+          "new DataView over this ArrayBuffer",
+          bufNode,
+          "the byte length must be a non-negative integer literal — new DataView(new ArrayBuffer(8))",
+        );
+      }
+      const count: IrExpr = { kind: "numLit", value: byteLen, type: F64, loc };
+      const receiver: IrExpr = { kind: "bytesNew", source: count, type: BYTES_U8, loc };
+      const idxArgs = args.slice(1).map((a) => L.lowerExprExpecting(a, F64));
+      return { kind: "bytesIntrinsic", method: "dataViewNew", receiver, args: idxArgs, type: BYTES_U8, loc };
+    }
     const hint =
       "views compile over a typed array's own storage — new DataView(x.buffer, byteOffset?, byteLength?) " +
-      "where x is a Uint8Array/Uint32Array/Float32Array/Buffer value; free-standing ArrayBuffers have no representation";
+      "where x is a Uint8Array/Uint32Array/Float32Array/Buffer value — or a fresh buffer erased into " +
+      "the view: new DataView(new ArrayBuffer(n), ...); free-standing ArrayBuffers have no representation";
     if (!ts.isPropertyAccessExpression(bufNode) || bufNode.name.text !== "buffer" || bufNode.questionDotToken) {
       L.noLowering("new DataView over this buffer expression", bufNode, hint);
     }
@@ -4666,6 +4719,26 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
       const args = [L.lowerExprExpecting(call.arguments[0]!, F64)];
       if (nArgs === 2) args.push(L.lowerExprExpecting(call.arguments[1]!, BOOL));
       return { kind: "bytesIntrinsic", method: dvGetter.method, receiver, args, type: F64, loc };
+    }
+    // DataView setters — the getters' mirror: (byteOffset, value) plus the
+    // optional littleEndian bool on the multi-byte kinds. Void results;
+    // the same constant Node RangeError on a bad offset (may-throw seeds).
+    // setBigUint64/setBigInt64 never lower (bigint ARGUMENTS have no
+    // representation and no composed form exists) — they keep the member
+    // fence, as does setFloat16.
+    const dvSetter = own(DV_SETTERS, name);
+    if (dvSetter !== undefined && receiverIr.elem === "u8") {
+      const maxArgs = dvSetter.le ? 3 : 2;
+      if (nArgs < 2 || nArgs > maxArgs) {
+        L.noLowering(`.${name} with ${nArgs} arguments`, call);
+      }
+      const receiver = L.lowerExpr(access.expression);
+      const args = [
+        L.lowerExprExpecting(call.arguments[0]!, F64),
+        L.lowerExprExpecting(call.arguments[1]!, F64),
+      ];
+      if (nArgs === 3) args.push(L.lowerExprExpecting(call.arguments[2]!, BOOL));
+      return { kind: "bytesIntrinsic", method: dvSetter.method, receiver, args, type: VOID, loc };
     }
     return null;
   }
@@ -4907,6 +4980,17 @@ const DV_GETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
   getFloat64: { method: "dvGetFloat64", le: true },
   getBigUint64: { method: "dvGetBigUint64Number", le: true },
   getBigInt64: { method: "dvGetBigInt64Number", le: true },
+};
+
+const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean } | undefined> = {
+  setUint8: { method: "dvSetUint8", le: false },
+  setInt8: { method: "dvSetInt8", le: false },
+  setUint16: { method: "dvSetUint16", le: true },
+  setInt16: { method: "dvSetInt16", le: true },
+  setUint32: { method: "dvSetUint32", le: true },
+  setInt32: { method: "dvSetInt32", le: true },
+  setFloat32: { method: "dvSetFloat32", le: true },
+  setFloat64: { method: "dvSetFloat64", le: true },
 };
 
 /** The Buffer statics — `Buffer.from(...)`, `Buffer.alloc(n)`,

@@ -209,6 +209,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "regexp.escape": { argTypes: [STRING], result: STRING },
   "num.toExponential": { argTypes: [F64], result: STRING },
   "num.toFixed0": { argTypes: [F64], result: STRING },
+  "num.sameValue": { argTypes: [F64, F64], result: BOOL },
+  "intl.numFormatEnUs": { argTypes: [F64], result: STRING },
   "sym.new": { argTypes: [STRING], result: SYMBOL_T },
   "sym.newAnon": { argTypes: [], result: SYMBOL_T },
   "sym.for": { argTypes: [STRING], result: SYMBOL_T },
@@ -2082,13 +2084,23 @@ function validateFunction(
                             ? { argTypes: [STRING, F64, F64, F64], minArgs: 4, result: F64 }
                             : e.method === "dataViewNew"
                               ? { argTypes: [F64, F64], minArgs: 0, result: BYTES_U8 }
-                              : {
-                                  // dvGet*: the 8-bit getters take no littleEndian.
-                                  argTypes:
-                                    e.method === "dvGetUint8" || e.method === "dvGetInt8" ? [F64] : [F64, BOOL],
-                                  minArgs: 1,
-                                  result: F64,
-                                });
+                              : e.method.startsWith("dvSet")
+                                ? {
+                                    // dvSet*: [offset, value], the 8-bit setters take no littleEndian.
+                                    argTypes:
+                                      e.method === "dvSetUint8" || e.method === "dvSetInt8"
+                                        ? [F64, F64]
+                                        : [F64, F64, BOOL],
+                                    minArgs: 2,
+                                    result: VOID,
+                                  }
+                                : {
+                                    // dvGet*: the 8-bit getters take no littleEndian.
+                                    argTypes:
+                                      e.method === "dvGetUint8" || e.method === "dvGetInt8" ? [F64] : [F64, BOOL],
+                                    minArgs: 1,
+                                    result: F64,
+                                  });
         if (e.args.length < sig.minArgs || e.args.length > sig.argTypes.length) {
           err(`bytesIntrinsic ${e.method}: ${e.args.length} args`, e.loc);
         }

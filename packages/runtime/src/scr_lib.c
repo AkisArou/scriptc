@@ -3486,6 +3486,104 @@ ScrStr *scr_num_to_fixed0(double x) {
   return r;
 }
 
+/* Increment a decimal digit string in place. Returns true on overflow —
+ * the value becomes 1 followed by len zeros (the caller folds the zeros
+ * into its scale); an EMPTY string increments to "1" the same way (the
+ * round-up-from-nothing case: 0.0005 at 3 fraction digits). */
+static bool scr_dec_inc(char *d, int len) {
+  for (int i = len - 1; i >= 0; i--) {
+    if (d[i] != '9') {
+      d[i]++;
+      return false;
+    }
+    d[i] = '0';
+  }
+  d[0] = '1';
+  return true;
+}
+
+/* Intl.NumberFormat("en-US").format(x) / x.toLocaleString("en-US") with
+ * DEFAULT options: decimal notation, minimum 0 / maximum 3 fraction
+ * digits, "," grouping every three integer digits, "∞"/"NaN" texts, and
+ * "-0" whenever the input is negative or negative zero even after
+ * rounding to zero. Rounding is half-up ON THE SHORTEST ROUND-TRIPPING
+ * DECIMAL — ICU's rounding input, probed against Node: format(1.0005) is
+ * "1.001" although the double is 1.000499... and toFixed(3) answers
+ * "1.000"; format(1e23) prints the shortest form's trailing zeros, not
+ * the double's exact expansion. The en-US/latn symbols (",", ".", "∞",
+ * "NaN", group size 3) are the whole embedded locale surface. Verified
+ * differentially against Node. Result +1; never throws. */
+ScrStr *scr_intl_num_format_en_us(double x) {
+  if (isnan(x)) return scr_str_new("NaN", 3);
+  if (isinf(x)) {
+    return x < 0 ? scr_str_new("-\xE2\x88\x9E", 4) : scr_str_new("\xE2\x88\x9E", 3);
+  }
+  bool neg = signbit(x) != 0;
+  if (x == 0) return neg ? scr_str_new("-0", 2) : scr_str_new("0", 1);
+  double a = neg ? -x : x;
+
+  /* Shortest digits: value = 0.d × 10^n (no trailing zeros, k ≤ 17). */
+  char d[18];
+  int n;
+  int k = scr_f64_digits(a, d, &n);
+
+  /* Round at 3 fraction digits: fraction position p is digit index
+   * n+p-1, so index n+3 is the first DROPPED digit. Half-up on the
+   * decimal digits — the shortest string ends right after them, so
+   * "first dropped digit ≥ 5" IS the whole decision. */
+  int keep = n + 3;
+  if (keep < k) {
+    bool up = keep >= 0 && d[keep] >= '5';
+    k = keep < 0 ? 0 : keep;
+    if (up && scr_dec_inc(d, k)) {
+      /* Carried out (all nines, or the round-up-from-nothing 0.0005
+       * case): one leading 1, the dropped nines fold into the scale. */
+      k = 1;
+      n += 1;
+    } else if (k == 0) {
+      /* Everything rounded away: ±0 with the sign preserved. */
+      return neg ? scr_str_new("-0", 2) : scr_str_new("0", 1);
+    }
+  }
+
+  /* Assemble: integer digits (indices [0, n)), zero-padded past k, then
+   * the ≤ 3 fraction digits (indices n..n+2, '0' outside [0, k)) with
+   * trailing zeros trimmed, then commas every three integer digits. */
+  char frac[3];
+  int flen = 0;
+  for (int p = 1; p <= 3; p++) {
+    int idx = n + p - 1;
+    frac[flen++] = (idx >= 0 && idx < k) ? d[idx] : '0';
+  }
+  while (flen > 0 && frac[flen - 1] == '0') flen--;
+
+  char out[512];
+  int o = 0;
+  if (neg) out[o++] = '-';
+  if (n <= 0) {
+    out[o++] = '0';
+  } else {
+    for (int i = 0; i < n; i++) {
+      if (i > 0 && (n - i) % 3 == 0) out[o++] = ',';
+      out[o++] = (i < k) ? d[i] : '0';
+    }
+  }
+  if (flen > 0) {
+    out[o++] = '.';
+    memcpy(out + o, frac, (size_t)flen);
+    o += flen;
+  }
+  return scr_str_new(out, (size_t)o);
+}
+
+/* Object.is over two numbers — the spec's SameValue on doubles: NaN
+ * equals NaN, +0 differs from -0, everything else is ==. */
+bool scr_num_same_value(double a, double b) {
+  if (a != a) return b != b;
+  if (a == 0 && b == 0) return signbit(a) == signbit(b);
+  return a == b;
+}
+
 bool scr_num_is_nan(double x) { return isnan(x) != 0; }
 
 bool scr_num_is_integer(double x) { return isfinite(x) && trunc(x) == x; }

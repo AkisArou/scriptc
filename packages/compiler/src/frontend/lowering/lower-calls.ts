@@ -10,12 +10,12 @@ import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
-import { builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
+import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
 import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
 import { lowerChildStreamMethodCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
-import { lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
+import { droppableStatic, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
 import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
@@ -3589,6 +3589,9 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         lowerSymbolStaticCall(L, expr, expr.expression) ??
         lowerSymbolMethodCall(L, expr, expr.expression) ??
         lowerRegExpStaticCall(L, expr, expr.expression) ??
+        // The composed en-US Intl.NumberFormat form — before the member
+        // fences (the receiver's Intl.NumberFormat type has no mapping).
+        lowerIntlNumberFormatCall(L, expr, expr.expression) ??
         lowerGroupByStaticCall(L, expr, expr.expression) ??
         // Iterator-helper chains rooted at arr.values() — before the
         // array method paths (the terminal names collide with array
@@ -4285,6 +4288,43 @@ const inliningPredicates = new Set<ts.Symbol>();
       if (operand.type.kind !== "f64") return null;
       const fn = name === "toExponential" ? "num.toExponential" : "num.toFixed0";
       return { kind: "libCall", fn, args: [operand], type: STRING, loc };
+    }
+    // Number.prototype.toLocaleString("en-US") — the spec makes it
+    // NumberFormat(locale).format(this), so the en-US embedded formatter
+    // answers exactly. The unlowered forms fence by NAME: no locale (the
+    // host environment's default, which a compiled binary cannot carry),
+    // other locales (ICU data the binary does not embed), options bags.
+    if (name === "toLocaleString" && recvKind === "f64") {
+      if (call.arguments.length === 0) {
+        L.noLowering(
+          "Number.prototype.toLocaleString without a locale",
+          call,
+          "the default locale is the host environment's, which a compiled binary cannot carry — " +
+            'pass it explicitly: x.toLocaleString("en-US")',
+        );
+      }
+      if (call.arguments.length > 1) {
+        L.noLowering(
+          "Number.prototype.toLocaleString with an options bag",
+          call,
+          "the embedded data covers DEFAULT options only (decimal notation, up to 3 fraction " +
+            'digits, grouping) — x.toLocaleString("en-US")',
+        );
+      }
+      const locNode = call.arguments[0]!;
+      if (ts.isSpreadElement(locNode) || !ts.isStringLiteralLike(locNode) || locNode.text !== "en-US") {
+        L.noLowering(
+          !ts.isSpreadElement(locNode) && ts.isStringLiteralLike(locNode)
+            ? `Number.prototype.toLocaleString at locale "${locNode.text}"`
+            : "Number.prototype.toLocaleString with a non-literal locale",
+          locNode,
+          '"en-US" (Node\'s default-build locale) is the one locale whose data the runtime embeds — ' +
+            "everything else is ICU data the binary does not carry",
+        );
+      }
+      const operand = L.lowerExpr(recv);
+      if (operand.type.kind !== "f64") return null;
+      return { kind: "libCall", fn: "intl.numFormatEnUs", args: [operand], type: STRING, loc };
     }
     if (name === "charAt" && recvKind === "string" && call.arguments.length === 1 &&
         !ts.isSpreadElement(call.arguments[0]!)) {
@@ -6147,11 +6187,217 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     return { kind: "libCall", fn: "regexp.escape", args: [arg], type: STRING, loc: locOf(call) };
   }
 
+  /** The composed en-US Intl.NumberFormat form: `new Intl.NumberFormat(
+   * "en-US").format(x)` (and the callable spelling without `new` — the
+   * spec makes them the same formatter). Only the COMPOSED form lowers —
+   * formatter values have no representation — and only the one locale
+   * whose data the runtime embeds, with default options: decimal
+   * notation, 0–3 fraction digits rounded half-up on the shortest
+   * round-tripping decimal (ICU's rounding input — format(1.0005) is
+   * "1.001" though toFixed(3) answers "1.000"), "," grouping. The
+   * unlowered forms fence by NAME (no locale — the host environment's
+   * default, which a compiled binary cannot carry; other locales — ICU
+   * data the binary does not embed; options bags; non-number arguments).
+   * Null when the callee isn't a NumberFormat-construction .format. */
+  function lowerIntlNumberFormatCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    if (call.questionDotToken || access.questionDotToken) return null;
+    if (access.name.text !== "format") return null;
+    let recv: ts.Expression = access.expression;
+    while (ts.isParenthesizedExpression(recv)) recv = recv.expression;
+    let ctorArgs: readonly ts.Expression[];
+    if (ts.isNewExpression(recv) || (ts.isCallExpression(recv) && !recv.questionDotToken)) {
+      const ctor = recv.expression;
+      if (
+        !ts.isPropertyAccessExpression(ctor) || ctor.questionDotToken ||
+        ctor.name.text !== "NumberFormat" || !L.isStdlibGlobal(ctor.expression, "Intl")
+      ) {
+        return null;
+      }
+      ctorArgs = recv.arguments ?? [];
+    } else {
+      return null;
+    }
+    const loc = locOf(call);
+    if (ctorArgs.length === 0) {
+      L.noLowering(
+        "Intl.NumberFormat without a locale",
+        recv,
+        "the default locale is the host environment's, which a compiled binary cannot carry — " +
+          'pass it explicitly: new Intl.NumberFormat("en-US").format(x)',
+      );
+    }
+    if (ctorArgs.length > 1) {
+      L.noLowering(
+        "Intl.NumberFormat with an options bag",
+        ctorArgs[1]!,
+        "the embedded data covers DEFAULT options only (decimal notation, up to 3 fraction digits, " +
+          'grouping) — new Intl.NumberFormat("en-US").format(x)',
+      );
+    }
+    const locArg = ctorArgs[0]!;
+    if (ts.isSpreadElement(locArg) || !ts.isStringLiteralLike(locArg) || locArg.text !== "en-US") {
+      L.noLowering(
+        !ts.isSpreadElement(locArg) && ts.isStringLiteralLike(locArg)
+          ? `Intl.NumberFormat at locale "${locArg.text}"`
+          : "Intl.NumberFormat with a non-literal locale",
+        locArg,
+        '"en-US" (Node\'s default-build locale) is the one locale whose data the runtime embeds — ' +
+          "everything else is ICU data the binary does not carry",
+      );
+    }
+    if (call.arguments.length !== 1 || ts.isSpreadElement(call.arguments[0]!)) {
+      L.noLowering(`Intl.NumberFormat("en-US").format with ${call.arguments.length} arguments`, call);
+    }
+    const argNode = call.arguments[0]!;
+    if (L.mapTypeOf(L.typeOf(argNode))?.kind !== "f64") {
+      L.noLowering(
+        `Intl.NumberFormat("en-US").format over a '${L.checker.typeToString(L.typeOf(argNode))}'`,
+        argNode,
+        "a number argument is the lowered form (bigint and numeric-string inputs have no representation)",
+      );
+    }
+    const arg = L.lowerExprExpecting(argNode, F64);
+    if (arg.type.kind !== "f64") L.badType(argNode, L.typeOf(argNode));
+    return { kind: "libCall", fn: "intl.numFormatEnUs", args: [arg], type: STRING, loc };
+  }
+
+  /** Object.is over statically disjoint kinds: the constant false, with
+   * both operands still evaluated for their effects (droppable statics
+   * fold away — JS evaluates arguments, but nothing observes a pure one). */
+  function objectIsDisjointFalse(left: IrExpr, right: IrExpr, loc: SrcLoc): IrExpr {
+    const stmts: IrStmt[] = [];
+    for (const e of [left, right]) {
+      if (!droppableStatic(e)) stmts.push({ kind: "exprStmt", expr: e, loc });
+    }
+    const answer: IrExpr = { kind: "boolLit", value: false, type: BOOL, loc };
+    if (stmts.length === 0) return answer;
+    return { kind: "seqExpr", stmts, result: answer, type: BOOL, loc };
+  }
+
   function lowerObjectStaticCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (call.questionDotToken || access.questionDotToken) return null;
     if (!L.isStdlibGlobal(access.expression, "Object")) return null;
     const member = access.name.text;
+    // Object.is — the spec's SameValue over the static kinds. Number
+    // pairs take the runtime SameValue (NaN equals NaN, +0 differs from
+    // -0 — the two divergences from ===); every other supported pair
+    // rides exactly the strict-equality machinery, whose answers
+    // SameValue shares: strings by bytes, bools by value, unit literals
+    // by tag, unions per arm (a number arm's payload compare upgrades to
+    // SameValue via unionEq's flag), and the reference kinds by pointer
+    // identity. Statically DISJOINT kind pairs answer the constant false
+    // with the operands still evaluated (tsc admits any pair — Object.is
+    // is (any, any) — and JS evaluates the arguments either way).
+    // dyn/jsval operands keep strict equality's stance: validate first.
+    if (member === "is") {
+      if (call.arguments.length !== 2 || call.arguments.some((a) => ts.isSpreadElement(a))) {
+        L.noLowering(
+          `Object.is with ${call.arguments.length} arguments`,
+          call,
+          "exactly two arguments are the lowered form (JS treats a missing one as undefined — pass it explicitly)",
+        );
+      }
+      const loc = locOf(call);
+      const leftNode = call.arguments[0]!;
+      const rightNode = call.arguments[1]!;
+      const left = L.lowerExpr(leftNode);
+      const right = L.lowerExpr(rightNode);
+      const lk = left.type.kind;
+      const rk = right.type.kind;
+      if (lk === "f64" && rk === "f64") {
+        return { kind: "libCall", fn: "num.sameValue", args: [left, right], type: BOOL, loc };
+      }
+      if (left.type.kind === "string" && right.type.kind === "string") {
+        return { kind: "strEq", negated: false, left, right, type: BOOL, loc };
+      }
+      if (lk === "bool" && rk === "bool") {
+        return { kind: "bin", op: "===", left, right, type: BOOL, loc };
+      }
+      const unitTest = L.lowerUnitComparison(left, right, false, loc);
+      if (unitTest) return unitTest;
+      if (lk === "dyn" || rk === "dyn" || lk === "jsval" || rk === "jsval") {
+        L.noLowering(
+          "Object.is over a dynamic operand",
+          call,
+          "validate/narrow the value first (strict equality's rule) — SameValue only differs from === on numbers (NaN, ±0)",
+        );
+      }
+      if (left.type.kind === "union" || right.type.kind === "union") {
+        const ut = left.type.kind === "union" ? left.type : (right.type as IrType & { kind: "union" });
+        const bothUnion = left.type.kind === "union" && right.type.kind === "union";
+        const sameUnion = bothUnion && typeEquals(left.type, right.type);
+        if ((sameUnion || !bothUnion) && L.eqComparableUnion(ut.unionId)) {
+          const plain = left.type.kind === "union" ? right : left;
+          const arms = L.unions.get(ut.unionId)?.arms ?? [];
+          // The plain side wraps into the union exactly like === when the
+          // union holds its type; a plain PRIMITIVE the union has no arm
+          // for is the disjoint constant false (coercing it would strand).
+          if (bothUnion || arms.some((a) => typeEquals(a, plain.type))) {
+            const sameValue = arms.some((a) => a.kind === "f64");
+            return {
+              kind: "unionEq",
+              unionId: ut.unionId,
+              negated: false,
+              sameValue,
+              left: L.coerceInto(leftNode, left, ut),
+              right: L.coerceInto(rightNode, right, ut),
+              type: BOOL,
+              loc,
+            };
+          }
+          if (
+            plain.type.kind === "f64" || plain.type.kind === "string" ||
+            plain.type.kind === "bool" || isUnitType(plain.type)
+          ) {
+            return objectIsDisjointFalse(left, right, loc);
+          }
+        }
+        L.noLowering(
+          "Object.is over these union operands",
+          call,
+          `union-typed comparisons need one comparable shape (${NARROW_FIRST})`,
+        );
+      }
+      // Reference kinds: pointer identity — exactly strict equality
+      // (hierarchy-related classes widen the derived side first).
+      let idLeft = left;
+      let idRight = right;
+      if (left.type.kind === "object" && right.type.kind === "object") {
+        if (L.isSubclassOf(left.type.className, right.type.className)) {
+          idLeft = L.upcastTo(left, right.type.className);
+        } else if (L.isSubclassOf(right.type.className, left.type.className)) {
+          idRight = L.upcastTo(right, left.type.className);
+        }
+      }
+      if (
+        (idLeft.type.kind === "func" && idRight.type.kind === "func") ||
+        (idLeft.type.kind === "classval" && idRight.type.kind === "classval")
+      ) {
+        return { kind: "bin", op: "===", left: idLeft, right: idRight, type: BOOL, loc };
+      }
+      if (
+        (idLeft.type.kind === "array" || idLeft.type.kind === "map" ||
+          idLeft.type.kind === "set" || idLeft.type.kind === "object" ||
+          idLeft.type.kind === "record" || idLeft.type.kind === "symbol" ||
+          idLeft.type.kind === "bytes" || idLeft.type.kind === "promise") &&
+        typeEquals(idLeft.type, idRight.type)
+      ) {
+        return { kind: "bin", op: "===", left: idLeft, right: idRight, type: BOOL, loc };
+      }
+      // Statically disjoint pairs with a primitive/unit side: SameValue
+      // never crosses kinds, so the answer is the constant false.
+      const disjoint = new Set(["f64", "string", "bool", "undefinedT", "nullT"]);
+      if (lk !== rk && (disjoint.has(lk) || disjoint.has(rk))) {
+        return objectIsDisjointFalse(left, right, loc);
+      }
+      L.noLowering(
+        `Object.is over '${L.fmt(left.type)}' and '${L.fmt(right.type)}' operands`,
+        call,
+        "the operands must share one comparable kind (numbers, strings, booleans, units, one union shape, or one reference type)",
+      );
+    }
     // `Object.assign(fn, { props })` whose RESULT type maps to the hybrid
     // (function-with-properties) record: the chalk-shape CONSTRUCTOR.
     if (member === "assign") {

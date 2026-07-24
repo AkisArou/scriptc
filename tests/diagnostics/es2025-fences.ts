@@ -10,6 +10,10 @@ const ab = new ArrayBuffer(8, { maxByteLength: 16 });
 ab.resize(16);
 const moved = ab.transfer();
 
+// The resizable form fences by name even in an erasure position (the
+// fixed-length new Uint8Array(new ArrayBuffer(8)) lowers).
+const rz = new Uint8Array(new ArrayBuffer(8, { maxByteLength: 16 }));
+
 // SharedArrayBuffer growth.
 const sab = new SharedArrayBuffer(8, { maxByteLength: 16 });
 sab.grow(16);

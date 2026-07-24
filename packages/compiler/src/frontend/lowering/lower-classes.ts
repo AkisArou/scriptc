@@ -5330,6 +5330,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
           WeakRef: "deref()-after-collect exposes GC timing — genuinely dynamic; hold a strong reference instead",
           FinalizationRegistry: "finalization callbacks expose GC timing — genuinely dynamic; release resources explicitly instead",
           SharedArrayBuffer: "no shared-memory threads exist in a compiled program — Uint8Array is the byte storage",
+          ArrayBuffer: "no free-standing ArrayBuffer value exists — typed arrays own their storage: allocate the view directly (new Uint8Array(n)), or erase a fresh buffer into one (new Uint8Array(new ArrayBuffer(n)), new DataView(new ArrayBuffer(n), ...))",
           Proxy: "property-access metaprogramming has no static lowering (every property read must resolve at compile time)",
           Function: "runtime code generation cannot be compiled ahead of time (the eval stance) — write the function",
         };

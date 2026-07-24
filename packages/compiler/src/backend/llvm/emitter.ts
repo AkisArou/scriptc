@@ -185,6 +185,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "dyn.errInstanceof": "scr_dyn_err_instanceof",
   "num.toExponential": "scr_num_to_exponential",
   "num.toFixed0": "scr_num_to_fixed0",
+  "num.sameValue": "scr_num_same_value",
+  "intl.numFormatEnUs": "scr_intl_num_format_en_us",
   "number.isFinite": "scr_num_is_finite",
   "number.isNaN": "scr_num_is_nan",
   "number.isInteger": "scr_num_is_integer",
@@ -770,6 +772,19 @@ const DV_GET_KIND: Record<string, number> = {
   dvGetFloat64: 7,
   dvGetBigUint64Number: 8,
   dvGetBigInt64Number: 9,
+};
+
+/** ScrDataViewGet per dvSet* method (the setters reuse the getter kinds;
+ * no BIG setters exist). */
+const DV_SET_KIND: Record<string, number> = {
+  dvSetUint8: 0,
+  dvSetInt8: 1,
+  dvSetUint16: 2,
+  dvSetInt16: 3,
+  dvSetUint32: 4,
+  dvSetInt32: 5,
+  dvSetFloat32: 6,
+  dvSetFloat64: 7,
 };
 
 class LlEmitter {
@@ -4363,7 +4378,14 @@ class LlEmitter {
               const t = B.tmp();
               B.line(`${a} = call double @scr_union_get_f64(ptr ${l.name})`);
               B.line(`${b} = call double @scr_union_get_f64(ptr ${r.name})`);
-              B.line(`${t} = fcmp oeq double ${a}, ${b}`);
+              if (e.sameValue) {
+                // Object.is's f64 compare: NaN equals NaN, +0 differs
+                // from -0 — the runtime SameValue.
+                this.declare(`declare zeroext i1 @scr_num_same_value(double, double)`);
+                B.line(`${t} = call zeroext i1 @scr_num_same_value(double ${a}, double ${b})`);
+              } else {
+                B.line(`${t} = fcmp oeq double ${a}, ${b}`);
+              }
               B.line(`store i1 ${t}, ptr ${slot}`);
               break;
             }
@@ -8886,6 +8908,24 @@ class LlEmitter {
           "scr_dataview_get",
           "double (ptr, double, i32, i1 zeroext)",
           `ptr ${r.name}, double ${args[0]!.name}, i32 ${DV_GET_KIND[method]}, i1 ${args[1]?.name ?? "false"}`,
+          false,
+          true,
+        );
+      case "dvSetUint8":
+      case "dvSetInt8":
+      case "dvSetUint16":
+      case "dvSetInt16":
+      case "dvSetUint32":
+      case "dvSetInt32":
+      case "dvSetFloat32":
+      case "dvSetFloat64":
+        // DataView setters: [offset, value, littleEndian?] — void; throw
+        // the getters' constant RangeError on a bad offset.
+        return call(
+          "scr_dataview_set",
+          "void (ptr, double, double, i32, i1 zeroext)",
+          `ptr ${r.name}, double ${args[0]!.name}, double ${args[1]!.name}, ` +
+            `i32 ${DV_SET_KIND[method]}, i1 ${args[2]?.name ?? "false"}`,
           false,
           true,
         );
