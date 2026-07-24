@@ -2813,6 +2813,12 @@ void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item);
  * nullish sources spell the spread expression (`what`), everything else is
  * the generic "Spread syntax requires ..." text. Borrows src. */
 void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what);
+/* Destructuring pack over a DOM source: iterable kinds (arrays, strings by
+ * code point, bytes) collect into a fresh array (+1); every other kind
+ * throws V8's destructuring TypeError — `msg` verbatim when non-empty (the
+ * compile-time source spelling), else the runtime kind wording. Borrows
+ * both; NULL with the exception pending on the throw. */
+ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg);
 void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value);
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets
  * the member (JS: later writes win, insertion order); undefined/null and

@@ -1562,11 +1562,22 @@ export type IrLibFn =
    * OBJ receiver sets the member (later writes win, insertion order
    * preserved — JS exactly); undefined/null throws Node's catchable
    * "Cannot set properties of undefined (setting 'k')"; every other kind
-   * throws Node's STRICT-mode "Cannot create property 'k' on <kind>"
+   * throws Node's STRICT-mode "Cannot create property 'k' on <kind>" —
+   * primitives quoting their rendering, V8's "on number '5'"
    * (sloppy mode would silently ignore — suite tests are 'use strict';
    * SEMANTICS.md notes the sloppy divergence: loud, never silent). Void
    * result; in the may-throw seed set. */
   | "dyn.keySet"
+  /** Destructuring pack over a dyn DOM source — `const [a, b] = d`, a
+   * destructured dyn callback param (args: the source and the STATIC
+   * TypeError spelling, "" when the source has none — both borrowed;
+   * result: a fresh DOM array, +1). Iterable kinds collect like spread
+   * (arrays element-by-element, strings by code point, bytes by byte);
+   * every other kind throws V8's destructuring TypeError — the spelling
+   * verbatim when non-empty, else the runtime kind wording ("number 5 is
+   * not iterable (cannot read property Symbol(Symbol.iterator))"). In the
+   * may-throw seed set. */
+  | "dyn.iterPack"
   /** Object.defineProperties over DOM values (args: target, descriptors —
    * both borrowed dyn; result: the target, +1 — JS's return value).
    * Value descriptors become plain own properties on OBJ and FUNC targets
@@ -6376,6 +6387,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // throws Node's catchable SyntaxError at construction.
   "regex.new",
   "dyn.keySet",
+  // the destructuring pack throws V8's TypeError on non-iterable DOM kinds
+  "dyn.iterPack",
   "dyn.toString",
   "dyn.defineProps",
   "process.chdir",

@@ -5624,10 +5624,13 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const obj = L.lowerExpr(expr.expression);
       if (obj.type.kind === "dyn") {
         const rawKey = L.lowerExpr(expr.argumentExpression);
+        // Number, bool, and DYN keys stringify (ToPropertyKey) — the
+        // dyn-keyed read `catchWarning[warning.name]` where the property
+        // chain itself lowered dyn.
         const key: IrExpr | null =
           rawKey.type.kind === "string"
             ? rawKey
-            : rawKey.type.kind === "f64"
+            : rawKey.type.kind === "f64" || rawKey.type.kind === "bool" || rawKey.type.kind === "dyn"
               ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
               : null;
         if (key) {

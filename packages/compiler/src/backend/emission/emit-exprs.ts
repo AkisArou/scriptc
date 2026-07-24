@@ -2277,6 +2277,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // member retains the value in); throws Node's TypeErrors on
             // non-object receivers (may-throw seed set).
             return finish(`scr_dyn_key_set(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "dyn.iterPack":
+            // Destructuring pack over a dyn source: both borrowed, fresh
+            // array +1; throws V8's destructuring TypeError on
+            // non-iterable DOM kinds (may-throw seed set).
+            return finish(`scr_dyn_iter_pack(${arg(0)}, ${arg(1)})`);
           case "dyn.typeof":
             // Bare typeof on a dyn value: the DOM kind's JS answer (+1).
             return finish(`scr_dyn_typeof(${arg(0)})`);

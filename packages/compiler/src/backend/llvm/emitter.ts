@@ -472,6 +472,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   // ambient-this read never throw. The fs dyn read is the sync-fs story.
   "json.parse": "scr_json_parse",
   "dyn.keySet": "scr_dyn_key_set",
+  "dyn.iterPack": "scr_dyn_iter_pack",
   "dyn.defineProps": "scr_dyn_define_props",
   "dyn.typeof": "scr_dyn_typeof",
   "dyn.toString": "scr_dyn_to_string_method",
