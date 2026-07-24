@@ -38,7 +38,7 @@ class Holder {
   data: unknown = JSON.parse("{}");
 }
 const anything: any = 5; // checker-`any` bindings ride the DOM now — no fence
-const dynArray: unknown[] = [];
+const dynArray: unknown[] = []; // unknown[] IS the DOM array now — no fence (corpus 2585)
 const parseRef = JSON.parse;
 // BARE undefined-armed unions are not JSON on the STRINGIFY side: Node
 // stringifies bare undefined to a non-string. (The cast direction

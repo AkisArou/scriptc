@@ -756,6 +756,28 @@ probe(eng);
     expect(r.stdout).toBe("3 1 true\n");
   });
 
+  test("the collapsed (string | object)[] slot compiles and the element read routes", async () => {
+    // Appendix-A repro 4's exit, one lane further along: the union-arm
+    // SC2009 fence is RETIRED — `(string | object)[]` maps to the
+    // checked-dynamic representation wholesale (every arm dyn-subsumable),
+    // the island plugins array WRAPS at the slot (dynFromJsval), and the
+    // element read rides the routed keyed-read arm: the engine answers,
+    // the scalar normalizes, and typeof prints Node's answer.
+    const r = await compileAndRun(
+      "jsval-collapsed-union-slot",
+      `const eng: any = ["p1", { languages: ["js"] }];
+function firstPlugin(ps: (string | object)[]): void {
+  console.log(typeof ps[0]);
+}
+firstPlugin(eng);
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("string\n");
+  });
+
   test("a method call on an island-held unknown runs the engine's own prototype", async () => {
     // scr_dyn_invoke's JSVAL arm routes to scr_jsval_call_method — the
     // ENGINE's Array.prototype.slice runs (JS-exact), and the result

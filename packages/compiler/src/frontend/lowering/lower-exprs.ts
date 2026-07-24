@@ -1515,13 +1515,26 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // read (ARR answers length; everything else JS's own-property
       // answer). Mapped receivers keep the fence-first order: their
       // members' gaps are real surface gaps ([1,2].entries), not
-      // representation artifacts.
+      // representation artifacts. `.length` on a receiver whose checker
+      // ARRAY type lowers to the checked-dynamic representation —
+      // `unknown[]`, the collapsed `(string | object)[]`, and the `any[]`
+      // an Array.isArray guard narrows a collapsed union to — is the DOM
+      // array's OWN length (a keyed read the ARR kind answers exactly),
+      // never an `Array.prototype` surface gap; both source languages.
+      // Prototype-method VALUE reads (`ps.map` unparenthesized) keep the
+      // fence-first order: a stored-member undefined would mis-answer
+      // them, and calls dispatch through the dyn method machinery
+      // instead.
       if (
-        isJsSourceFile(expr.getSourceFile()) &&
-        (L.mapTypeOf(L.typeOf(expr.expression)) === null ||
-          // A never-tainted receiver type maps (never rides as f64) but
-          // its VALUE lowered checked-dynamic — same DOM read.
-          neverTaintedJsType(L, expr.expression, L.typeOf(expr.expression)))
+        (isJsSourceFile(expr.getSourceFile()) &&
+          (L.mapTypeOf(L.typeOf(expr.expression)) === null ||
+            // A never-tainted receiver type maps (never rides as f64) but
+            // its VALUE lowered checked-dynamic — same DOM read.
+            neverTaintedJsType(L, expr.expression, L.typeOf(expr.expression)))) ||
+        (expr.name.text === "length" &&
+          (L.checkerAnyArray(expr.expression) ||
+            (L.checker.isArrayType(L.typeOf(expr.expression)) &&
+              L.mapTypeOf(L.typeOf(expr.expression))?.kind === "dyn")))
       ) {
         const recv = L.lowerExpr(expr.expression);
         if (recv.type.kind === "dyn") {
@@ -3413,8 +3426,12 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       // []) builds as a DOM ARRAY — one dyn value whose elements each
       // convert through the usual boundary (dynFrom's JSON-safe domain);
       // an element that cannot convert fences per element. length/index
-      // reads and dynamic consumers ride the keyed-DOM paths.
-      if (isJsSourceFile(expr.getSourceFile())) {
+      // reads and dynamic consumers ride the keyed-DOM paths. TS literals
+      // take the same build when the slot ITSELF is checked-dynamic — an
+      // `unknown[]` annotation or a collapsed `(string | object)[]` maps
+      // to DYN wholesale now (mapType's dyn-element array rule), so the
+      // literal IS the DOM array.
+      if (isJsSourceFile(expr.getSourceFile()) || mapped?.kind === "dyn") {
         const elems = expr.elements.map((el): IrExpr => {
           if (ts.isSpreadElement(el)) {
             L.unsupported("SC1090", el, "spread elements in a dynamic (unknown[]) array literal");
@@ -6013,6 +6030,34 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const value = L.jsvalIn(L.lowerExpr(expr.right), expr.right);
       const loc = locOf(expr);
       return { kind: "exprStmt", expr: { kind: "jsOp", op: "setIdx", args: [obj, key, value], type: VOID, loc }, loc };
+    }
+    // A checked-dynamic receiver TYPE (`unknown[]` and the collapsed
+    // `(string | object)[]` map to DYN wholesale now): the DOM keyed
+    // write — dyn.keySet. Number keys canonicalize through the JS-exact
+    // formatter; ARR receivers take canonical index keys as element
+    // set/extend (undefined-hole padding, JS's length growth exactly),
+    // OBJ receivers set the member, and the runtime throws Node's
+    // TypeErrors on every other kind. Values convert into the DOM;
+    // unconvertible ones fence per site (the dynFrom stance).
+    if (receiverIr?.kind === "dyn") {
+      const obj = L.lowerExpr(target.expression);
+      if (obj.type.kind === "dyn") {
+        const loc = locOf(expr);
+        let key = L.lowerExpr(target.argumentExpression);
+        if (key.type.kind === "f64") key = L.ensureString(key, target.argumentExpression);
+        if (key.type.kind !== "string") {
+          L.unsupported("SC1090", target.argumentExpression, "indexing with non-string or non-number keys");
+        }
+        const value = L.coerceToExpected(L.lowerExpr(expr.right), DYN);
+        if (value.type.kind !== "dyn") {
+          L.unsupported(
+            "SC1101",
+            expr.right,
+            `storing '${L.fmt(value.type)}' values in a checked-dynamic array (the value cannot convert into the DOM)`,
+          );
+        }
+        return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
+      }
     }
     // Typed-array element write `b[i] = v` — bytesSet: the value is an f64
     // the runtime coerces JS-exactly; invalid indices trap (no appends —

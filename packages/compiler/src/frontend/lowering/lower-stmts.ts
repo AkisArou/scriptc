@@ -5555,6 +5555,17 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       if (iterable.type.kind === "jsval") {
         return lowerForOfIsland(L, stmt, iterable, labels);
       }
+      // A CHECKED-DYNAMIC iterable (`unknown[]` and the collapsed
+      // `(string | object)[]` are DOM values now, so the TYPE maps —
+      // badType would tell a stale component story): the OPERATION is
+      // the gap — name it, with the validated-cast escape hatch.
+      if (iterable.type.kind === "dyn") {
+        L.unsupported(
+          "SC1090",
+          stmt.expression,
+          "for-of over checked-dynamic ('unknown') values (validate into a typed array first — `u as string[]` — or index with a counted loop: length and element reads compile)",
+        );
+      }
       if (iterable.type.kind !== "array") {
         L.badType(stmt.expression, L.typeOf(stmt.expression));
       }
