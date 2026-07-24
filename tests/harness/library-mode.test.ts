@@ -800,6 +800,22 @@ describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
     expect(diags[0]!.note).toContain("process ambient state");
   });
 
+  test("a live machine-state read under the full-fence profile refuses SC4008 naming its entry", async () => {
+    // process.stdout.isTTY joined the attestation's demote set as a
+    // correction (a live terminal-attachment read); the family fence must
+    // deny it or the §4 invariant would leak through it.
+    const diags = await refusal(
+      `export function tty(): number { return process.stdout.isTTY ? 1 : 0; }\n`,
+      {
+        exports: [{ export: "tty", symbol: "kx_tty", params: [], returns: "f64" }],
+        determinism: { fences: WORKED_FENCES },
+      },
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'node-builtin.process.isTTY'");
+  });
+
   test("a reached prefix-fenced surface refuses SC4008 naming the covered member id", async () => {
     const diags = await refusal(
       `import { readFileSync } from "node:fs";\nexport function f(): number { return readFileSync("x", "utf8").length; }\n`,

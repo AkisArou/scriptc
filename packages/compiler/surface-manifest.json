@@ -1175,6 +1175,26 @@
       "status": "static"
     },
     {
+      "id": "node-builtin.process.columns",
+      "kind": "node-builtin",
+      "name": "process.columns",
+      "status": "static",
+      "note": "the columns read on the process stdio streams (terminal geometry)"
+    },
+    {
+      "id": "node-builtin.process.constrainedMemory",
+      "kind": "node-builtin",
+      "name": "process.constrainedMemory",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.process.cpuUsage",
+      "kind": "node-builtin",
+      "name": "process.cpuUsage",
+      "status": "static",
+      "note": "the plain-sample and previous-value diff forms are one surface"
+    },
+    {
       "id": "node-builtin.process.cwd",
       "kind": "node-builtin",
       "name": "process.cwd",
@@ -1213,6 +1233,13 @@
       "status": "static"
     },
     {
+      "id": "node-builtin.process.isTTY",
+      "kind": "node-builtin",
+      "name": "process.isTTY",
+      "status": "static",
+      "note": "the isTTY read on process.stdin/stdout/stderr — one surface across the three streams"
+    },
+    {
       "id": "node-builtin.process.kill",
       "kind": "node-builtin",
       "name": "process.kill",
@@ -1224,6 +1251,20 @@
       "kind": "node-builtin",
       "name": "process.pid",
       "status": "static"
+    },
+    {
+      "id": "node-builtin.process.resourceUsage",
+      "kind": "node-builtin",
+      "name": "process.resourceUsage",
+      "status": "static",
+      "note": "getrusage's 16 fields — every field read samples live machine state"
+    },
+    {
+      "id": "node-builtin.process.threadCpuUsage",
+      "kind": "node-builtin",
+      "name": "process.threadCpuUsage",
+      "status": "static",
+      "note": "the plain-sample and previous-value diff forms are one surface"
     },
     {
       "id": "node-builtin.process.umask",

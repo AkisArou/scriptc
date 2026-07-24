@@ -6143,7 +6143,16 @@ export const LIB_NONDETERMINISTIC_PREFIXES: readonly [string, string][] = [
   ["process.execPath", "process identity"],
   ["process.uptime", "the live clock (process.uptime)"],
   ["process.availableMemory", "machine memory state"],
-  ["process.memoryUsage", "machine memory state"],
+  ["process.constrainedMemory", "machine memory state"],
+  // process.memoryUsage carries NO row: nothing lowers it — no IrLibFn
+  // spelling exists for it, so a prefix here would be dead. If a lowering
+  // ever lands, its spellings must join this table AND the manifest's
+  // ambient projection (the parity test fails until both agree).
+  ["process.rusage", "machine resource usage (process.resourceUsage)"],
+  ["process.cpu", "the process CPU clock (process.cpuUsage)"],
+  ["process.threadCpu", "the thread CPU clock (process.threadCpuUsage)"],
+  ["process.isTTY", "terminal attachment (isTTY)"],
+  ["process.columns", "terminal geometry (columns)"],
   ["process.kill", "process authority (kill)"],
   ["process.umask", "process authority (umask)"],
   ["process.exit", "process authority (exit)"],

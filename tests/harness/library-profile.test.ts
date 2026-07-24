@@ -370,6 +370,11 @@ describe("library profile fences", () => {
     const processIds = r.profile.fences[1]!.surfaces.map((s) => s.id);
     expect(processIds).toContain("node-builtin.process.env");
     expect(processIds).toContain("node-builtin.process.exit");
+    // The live machine-state reads join the family too (the attestation
+    // demotes on them, so the family fence must deny them).
+    expect(processIds).toContain("node-builtin.process.resourceUsage");
+    expect(processIds).toContain("node-builtin.process.cpuUsage");
+    expect(processIds).toContain("node-builtin.process.isTTY");
     expect(r.profile.fences[1]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
     expect(r.profile.fences[2]!.surfaces.map((s) => s.id)).toEqual(["node-builtin.perf_hooks.performance.now"]);
   });
