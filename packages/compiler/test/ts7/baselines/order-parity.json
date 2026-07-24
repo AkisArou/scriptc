@@ -4862,9 +4862,9 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2591-ambient-generic-traps.ts": {
+  "<repo>/tests/corpus/2595-fs-arg-ladders.cjs": {
    "order": [
-    "<repo>/tests/corpus/2591-ambient-generic-traps.ts"
+    "<repo>/tests/corpus/2595-fs-arg-ladders.cjs"
    ],
    "diags": []
   },
@@ -4874,27 +4874,33 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2592-ambient-trap-uncaught.ts": {
-   "order": [
-    "<repo>/tests/corpus/2592-ambient-trap-uncaught.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/2579-jsval-object-param-crossing.js": {
    "order": [
     "<repo>/tests/corpus/2579-jsval-object-param-crossing.js"
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2593-generic-inert-bindings.ts": {
+  "<repo>/tests/corpus/2596-net-arg-ladders.cjs": {
    "order": [
-    "<repo>/tests/corpus/2593-generic-inert-bindings.ts"
+    "<repo>/tests/corpus/2596-net-arg-ladders.cjs"
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2594-nullish-generic-bindings.ts": {
+  "<repo>/tests/corpus/2597-dgram-send-ladders.cjs": {
    "order": [
-    "<repo>/tests/corpus/2594-nullish-generic-bindings.ts"
+    "<repo>/tests/corpus/2597-dgram-send-ladders.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2598-tls-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2598-tls-arg-ladders.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2599-stream-arg-ladders.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2599-stream-arg-ladders.cjs"
    ],
    "diags": []
   },
@@ -4925,6 +4931,30 @@
   "<repo>/tests/corpus/2590-object-create-dynamic.js": {
    "order": [
     "<repo>/tests/corpus/2590-object-create-dynamic.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2591-ambient-generic-traps.ts": {
+   "order": [
+    "<repo>/tests/corpus/2591-ambient-generic-traps.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2592-ambient-trap-uncaught.ts": {
+   "order": [
+    "<repo>/tests/corpus/2592-ambient-trap-uncaught.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2593-generic-inert-bindings.ts": {
+   "order": [
+    "<repo>/tests/corpus/2593-generic-inert-bindings.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2594-nullish-generic-bindings.ts": {
+   "order": [
+    "<repo>/tests/corpus/2594-nullish-generic-bindings.ts"
    ],
    "diags": []
   },

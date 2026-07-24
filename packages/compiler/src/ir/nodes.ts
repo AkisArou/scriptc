@@ -2043,6 +2043,17 @@ export type IrLibFn =
    * exactly Node's split. */
   | "net.serverOnSecureConnection"
   | "net.connect"
+  /** connect with a validated autoSelectFamilyAttemptTimeout option (the
+   * budget runs Node's validateInt32-from-1 ladder and is then inert —
+   * the single dial has nothing to time). May-throw. */
+  | "net.connectAttempt"
+  /** net.connect/createConnection over a RUNTIME option bag (computed
+   * keys — the invalid-input probes): Node-order validation (the
+   * objectMode trio's ERR_INVALID_ARG_VALUE, validatePort, host string,
+   * autoSelectFamily boolean, the attempt budget), then the trailing
+   * compiler-rendered fence — ALWAYS THROWS (the error.nodeThrow
+   * polymorphic-result carve-out). May-throw seed. */
+  | "net.connectOptsChk"
   | "net.connectCb"
   /** connect({ port, host, autoSelectFamily: true, lookup }) — the
    * caller-resolver dial (portless's createLoopbackConnection): args
@@ -2105,6 +2116,12 @@ export type IrLibFn =
   | "dgram.connectCb"
   | "dgram.sendStr"
   | "dgram.sendBytes"
+  /** The send argument-validation ladder over DOM arguments (Node's
+   * signature shuffle: slice bounds, list/type contracts, port/address
+   * validation, connected-state errors) — a fully-validated unconnected
+   * single-payload send RUNS; callback/list/connected forms meet the
+   * trailing fence. May-throw. */
+  | "dgram.sendChk"
   | "dgram.address"
   | "dgram.close"
   | "dgram.closeCb"
@@ -2361,6 +2378,16 @@ export type IrLibFn =
    * opaque SecureContext handle (secureCtx kind) for SNI callbacks to
    * answer with; cert/key are PEM strings or Buffers like createServer's. */
   | "tls.createSecureContext"
+  /** createSecureContext over a RUNTIME options record (the checked-
+   * dynamic lane): Node's typed option validations first (the ciphers/
+   * passphrase/engine/version/timeout/ticketKeys ladders), then the pem
+   * walk — a validated { cert, key } bag builds the real context.
+   * May-throw. */
+  | "tls.createSecureContextDyn"
+  /** tls.getCACertificates(type): validateString + the documented name
+   * set, then the trailing compiler-rendered fence — ALWAYS THROWS (the
+   * error.nodeThrow polymorphic-result carve-out). May-throw seed. */
+  | "tls.caCertsChk"
   | "https.createServer"
   | "https.request"
   | "https.requestCb"
@@ -2570,11 +2597,35 @@ export type IrLibFn =
    * finite numbers coerce (negatives answer now/1000, Node's shape);
    * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
   | "fs.toUnixTimestamp"
+  /** The fs argument-validation ladders (checked-dynamic lane): each Chk
+   * replicates its API's Node-order validation over DOM values (Node's
+   * exact typed errors — ERR_INVALID_ARG_TYPE/VALUE, ERR_OUT_OF_RANGE),
+   * and a full pass meets the trailing compiler-rendered SC2020 fence
+   * string — so the ALWAYS-THROW forms take the error.nodeThrow
+   * polymorphic-result carve-out. mkdtempSyncChk and the lchmod sync/
+   * promise pair run the REAL operation on a validated pass instead
+   * (macOS lchmod(2); non-APPLE answers Node's not-a-function /
+   * ERR_METHOD_NOT_IMPLEMENTED shapes). May-throw seeds, all of them. */
+  | "fs.existsChk"
+  | "fs.mkdtempChk"
+  | "fs.mkdtempSyncChk"
+  | "fs.readFileChk"
+  | "fs.opendirChk"
+  | "fs.watchFileChk"
+  | "fs.lchmodChk"
+  | "fs.lchmodSyncChk"
+  | "fsp.lchmodChk"
+  | "fs.readChk"
+  | "fs.streamOptsChk"
   /** The compiler-resolved ERR_INVALID_ARG_TYPE throw with a RUNTIME-
    * rendered Received tail: args [argname, "of type ..." clause, the
    * offending DOM value]. ALWAYS THROWS; polymorphic result (the
    * error.nodeThrow pattern). May-throw seed. */
   | "error.argTypeThrow"
+  /** The property flavor of argTypeThrow ("The \"options.x\" property
+   * must be ..."): the option-bag ladders' provably-invalid arms. ALWAYS
+   * THROWS; polymorphic result. May-throw seed. */
+  | "error.propTypeThrow"
   /** The checked-dynamic max-listeners ladders: setMaxChk is the
    * instance form over a DOM n (non-numbers ERR_INVALID_ARG_TYPE,
    * negatives/NaN ERR_OUT_OF_RANGE; +1 receiver back — chaining);
@@ -5046,7 +5097,14 @@ export function canConvertToDyn(
   }
   if (t.kind === "union") {
     const def = getUnion(t.unionId);
-    return !!def && def.arms.every((a) => a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion));
+    // JSON-safe arms box as before; BOXABLE FUNCTION arms join them (the
+    // invalid-input probes iterate `[1, null, () => {}, true]` — the
+    // union's func arm crosses through the checked-dynamic function
+    // boundary exactly like a bare func dynFrom).
+    return !!def && def.arms.every((a) =>
+      a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion) ||
+      (a.kind === "func" && canBoxFuncIntoDyn(a, getRecord, getUnion)),
+    );
   }
   return false;
 }
@@ -6140,6 +6198,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // divergence-66 stance).
   "tls.pemDyn",
   "tls.createServerDyn",
+  "tls.createSecureContextDyn",
+  "tls.caCertsChk",
   "tls.createServerDynCb",
   "https.createServerDyn",
   "https.createServerDynCb",
@@ -6351,7 +6411,22 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "bytes.compareChk",
   "buffer.newStringFail",
   "fs.toUnixTimestamp",
+  "fs.existsChk",
+  "fs.mkdtempChk",
+  "fs.mkdtempSyncChk",
+  "fs.readFileChk",
+  "fs.opendirChk",
+  "fs.watchFileChk",
+  "fs.lchmodChk",
+  "fs.lchmodSyncChk",
+  "fsp.lchmodChk",
+  "fs.readChk",
+  "fs.streamOptsChk",
+  "net.connectAttempt",
+  "net.connectOptsChk",
+  "net.setAutoSelTimeout",
   "error.argTypeThrow",
+  "error.propTypeThrow",
   "emitter.setMaxChk",
   "emitter.setDefaultMaxChk",
   "fs.readFileSyncBytes",
@@ -6374,6 +6449,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dgram.connectCb",
   "dgram.sendStr",
   "dgram.sendBytes",
+  "dgram.sendChk",
   "dgram.address",
   "dgram.close",
   "dgram.closeCb",

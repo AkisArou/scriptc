@@ -3136,6 +3136,24 @@ const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
  * error.argTypeThrow libCall). Borrows all three; always throws. */
 void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
 void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
+/* The property flavor ("The \"options.x\" property must be ...") — the
+ * option-bag validators' gate (error.propTypeThrow). Always throws. */
+void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
+void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
+/* Node's ERR_INVALID_ARG_VALUE ("The argument 'encoding' is invalid
+ * encoding. Received 'no'") — reason NULL renders "is invalid".
+ * TypeError; always throws catchably. */
+void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
+/* The ERR_INVALID_ARG_VALUE/%j "Received" renderer (inspect-lite:
+ * strings quote, scalars print plain, deep shapes sketch). */
+const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap);
+/* A ladder's post-validation refuse: throws the compiler-rendered SC2020
+ * statement-fence text verbatim (Node's validation errors run first). */
+void scr_throw_lowering_fence(const ScrStr *msg);
+/* ERR_OUT_OF_RANGE's "Received" number rendering (Node's
+ * addNumericalSeparator underscores past 2^32) — scr_bytes.c's renderer,
+ * shared by the fs/net/tls option-ladder validators. */
+size_t scr_num_received(double v, char out[48]);
 /* Listener-closure builders for the handle dispatchers' .on(...) paths:
  * a runtime-built ScrClosure whose capture is the boxed dyn listener and
  * whose invoke boxes the event tuple back into the DOM and calls through
@@ -4403,6 +4421,23 @@ ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
  * numbers coerce (negatives answer now/1000), the rest throw Node's
  * ERR_INVALID_ARG_TYPE. Borrowed. */
 double scr_fs_to_unix_timestamp(const ScrDyn *t);
+/* The fs argument-validation ladders (the fs.*Chk libCalls): Node-order
+ * validation over DOM values with Node's exact typed errors; a pass
+ * meets the real operation where one exists (mkdtempSync, macOS
+ * lchmodSync) or the compiler-rendered fence. All borrowed; the Chk
+ * forms without results always leave an exception pending. */
+ScrDyn *scr_fs_exists_async(const ScrDyn *path, const ScrDyn *cb);
+void scr_fs_mkdtemp_chk(const ScrDyn *prefix, const ScrDyn *cb, const ScrStr *fence);
+ScrStr *scr_fs_mkdtemp_sync_chk(const ScrDyn *prefix, const ScrDyn *opts, const ScrStr *fence);
+void scr_fs_read_file_chk(const ScrDyn *path, const ScrDyn *opts, const ScrDyn *cb, const ScrStr *fence);
+void scr_fs_opendir_chk(const ScrDyn *path, const ScrDyn *opts, const ScrStr *fence);
+void scr_fs_watch_file_chk(const ScrDyn *path, const ScrDyn *listener, const ScrStr *fence);
+void scr_fs_lchmod_chk(const ScrDyn *path, const ScrDyn *mode, const ScrDyn *cb, const ScrStr *fence);
+ScrDyn *scr_fs_lchmod_sync_chk(const ScrDyn *path, const ScrDyn *mode);
+ScrPromise *scr_fsp_lchmod_chk(const ScrDyn *path, const ScrDyn *mode);
+void scr_fs_read_chk(const ScrDyn *fd, const ScrDyn *buffer, const ScrDyn *offset,
+                     const ScrDyn *length, const ScrDyn *position, const ScrStr *fence);
+void scr_fs_stream_opts_chk(const ScrDyn *path, const ScrDyn *opts, const ScrStr *fence);
 /* The checked-dynamic max-listeners ladders (scr_events_emitter.c). */
 ScrEmitter *scr_emitter_set_max_chk(ScrEmitter *em, const ScrDyn *n);
 void scr_emitter_set_default_max_chk(const ScrDyn *n, const ScrStr *name);
@@ -4670,6 +4705,16 @@ void scr_net_server_on_connection(ScrNetServer *s, ScrClosure *cb /*moves*/, Scr
  * server never fires it, like Node). */
 void scr_net_server_on_secure_connection(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrNetConnFn fn, bool once);
 ScrNetSocket *scr_net_connect(double port, ScrStr *host /*borrowed, nullable*/, ScrClosure *cb /*moves, nullable*/); /* +1 */
+/* connect with a validated autoSelectFamilyAttemptTimeout option: the
+ * budget runs Node's validateInt32-from-1 ladder (ERR_OUT_OF_RANGE /
+ * ERR_INVALID_ARG_TYPE) and is then inert — the single dial has nothing
+ * to time. +1, or NULL with the throw pending. */
+ScrNetSocket *scr_net_connect_attempt(double port, ScrStr *host /*borrowed*/, const ScrDyn *t /*borrowed*/);
+/* net.connect/createConnection over a RUNTIME option bag (computed
+ * keys): Node-order validation (objectMode trio, port, host,
+ * autoSelectFamily, attempt budget), then the compiler-rendered fence —
+ * always leaves an exception pending. Borrowed. */
+void scr_net_connect_opts_chk(const ScrDyn *opts, const ScrStr *fence);
 /* connect with a caller lookup (net.connect({ ..., lookup })): invokes
  * lookup(hostname, options, answer-closure) synchronously; answer_fn is
  * the emitted per-shape thunk that decodes the answer down to
@@ -4884,6 +4929,13 @@ void scr_tls_h2_client_wrap(ScrNetSocket *sock, ScrStr *host /*borrowed*/, bool 
  * the default pair, exactly Node. */
 typedef struct ScrSecureCtx ScrSecureCtx;
 ScrSecureCtx *scr_tls_create_secure_context(const char *cert, size_t cert_len, const char *key, size_t key_len); /* +1 */
+/* createSecureContext over a RUNTIME options record: Node's typed option
+ * validations first, then the pem walk (+1, or NULL with the exception
+ * pending). Borrowed. */
+ScrSecureCtx *scr_tls_create_secure_context_dyn(const ScrDyn *opts);
+/* tls.getCACertificates(type): validateString + the documented name set,
+ * then the compiler-rendered fence — always leaves an exception pending. */
+void scr_tls_ca_certs_chk(const ScrDyn *type, const ScrStr *fence);
 ScrSecureCtx *scr_secure_ctx_retain(ScrSecureCtx *c);
 void scr_secure_ctx_release(ScrSecureCtx *c);
 void *scr_secure_ctx_retain_v(void *p);
@@ -5307,6 +5359,13 @@ void scr_dgram_bind(ScrDgramSocket *s, double port, ScrStr *host /*borrowed*/, S
 void scr_dgram_connect(ScrDgramSocket *s, double port, ScrStr *host /*borrowed*/, ScrClosure *cb /*moves, nullable*/);
 void scr_dgram_send_str(ScrDgramSocket *s, ScrStr *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
 void scr_dgram_send_bytes(ScrDgramSocket *s, ScrBytes *data /*borrowed*/, double port, ScrStr *host /*borrowed*/);
+/* The send argument-validation ladder over DOM arguments (Node's
+ * signature shuffle, slice bounds, list/type contracts, port/address
+ * validation, and the connected-state errors); a fully-validated
+ * unconnected single-payload send RUNS, the rest meet the fence. */
+void scr_dgram_send_chk(ScrDgramSocket *s, const ScrDyn *buffer, const ScrDyn *a1,
+                        const ScrDyn *a2, const ScrDyn *a3, const ScrDyn *a4,
+                        const ScrStr *fence);
 /* address() parts: ip THROWS "Not running" before bind/connect (+1
  * otherwise); family/port are only called after ip succeeded. */
 ScrStr *scr_dgram_addr_ip(ScrDgramSocket *s);     /* +1, may throw */

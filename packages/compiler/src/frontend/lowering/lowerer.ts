@@ -92,7 +92,7 @@ import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } fro
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction } from "./lower-calls.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
-import { builtinImportOf, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
+import { builtinImportOf, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
 import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
 import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty } from "./lower-server.js";
 import { lowerDgramDnsModuleCall, lowerDgramMethodCall } from "./lower-dgram.js";
@@ -532,6 +532,27 @@ export function nodeThrowExpr(kind: 0 | 1 | 2, code: string, message: string, ty
       { kind: "strLit", value: message, type: STRING, loc },
     ],
     type,
+    loc,
+  };
+}
+
+/** The post-validation fence STRING a validation-ladder Chk libCall
+ * throws after its Node-order checks pass: the same SC2020 text the
+ * per-statement runtime fence would have thrown (message + "[code at
+ * file:line]"), rendered eagerly so the runtime can throw it verbatim
+ * (scr_throw_lowering_fence). The diagnostic joins the runtime-fence
+ * ledger exactly like a deferred statement fence — nothing silently
+ * drops off the coverage report. */
+export function ladderFenceExpr(L: Lowerer, surface: string, node: ts.Node, hint?: string): IrExpr {
+  const loc = locOf(node);
+  const d = noLoweringDiag(surface, loc, hint);
+  L.runtimeFences.push(d);
+  const sf = node.getSourceFile();
+  const pos = ts.getLineAndCharacterOfPosition(sf, loc.start);
+  return {
+    kind: "strLit",
+    value: `${d.message} [${d.code} at ${loc.file}:${pos.line + 1}]`,
+    type: STRING,
     loc,
   };
 }
@@ -7195,6 +7216,25 @@ export class Lowerer {
         const spec = requireSpecOf(decl.initializer);
         return spec !== null ? canonicalBuiltinModule(spec) : null;
       }
+      // A DESTRUCTURED sub-namespace binding — `const { promises } =
+      // fs` / `= require('fs')`: the member is itself a supported module
+      // ("fs/promises"), so the binding carries that module's namespace
+      // surface. canonicalBuiltinModule gates the composition (an
+      // ordinary destructured FUNCTION binding composes to an unknown
+      // name and answers null — builtinImportOf owns those).
+      if (ts.isBindingElement(decl) && ts.isObjectBindingPattern(decl.parent) &&
+          ts.isVariableDeclaration(decl.parent.parent) && decl.parent.parent.initializer !== undefined &&
+          decl.propertyName === undefined && decl.initializer === undefined) {
+        const name = decl.name;
+        if (name === undefined || !ts.isIdentifier(name)) return null;
+        const init = decl.parent.parent.initializer;
+        const spec = requireSpecOf(init);
+        const outer = spec !== null
+          ? canonicalBuiltinModule(spec)
+          : ts.isIdentifier(init) ? this.builtinNamespaceModuleOf(init) : null;
+        if (outer !== null) return canonicalBuiltinModule(`${outer}/${name.text}`);
+        return null;
+      }
     }
     // The INLINE CommonJS spelling: `require("cluster").isPrimary` — the
     // call expression IS the module namespace (Node evaluates the member
@@ -7293,6 +7333,11 @@ export class Lowerer {
     // internal), served by its own spoke before the table fence.
     const fsTs = this.lowerFsToUnixTimestampCall(call, bi, locOf(access));
     if (fsTs) return fsTs;
+    // The fs validation-ladder spoke (checked-dynamic lane): misuse of
+    // implemented-namespace members throws Node's typed errors instead
+    // of meeting the table fence.
+    const fsLadder = this.lowerFsLadderCall(call, bi, locOf(access));
+    if (fsLadder) return fsLadder;
     const builtinFn = builtinModuleFnOf(this, bi.module, bi.member);
     if (!builtinFn) {
       this.noLowering(
@@ -7369,6 +7414,12 @@ export class Lowerer {
     bi: { module: string; member: string },
     loc: SrcLoc,): IrExpr | null {
     return lowerFsToUnixTimestampCall(this, expr, bi, loc);
+  }
+
+  lowerFsLadderCall(expr: ts.CallExpression,
+    bi: { module: string; member: string },
+    loc: SrcLoc,): IrExpr | null {
+    return lowerFsLadderCall(this, expr, bi, loc);
   }
 
   lowerChildArgsArg(node: ts.Expression | undefined, loc: SrcLoc): IrExpr {

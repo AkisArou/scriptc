@@ -322,6 +322,11 @@ const LIB_FN_SYMS: Record<string, string> = {
   "bytes.compareChk": "scr_bytes_compare_chk",
   "buffer.newStringFail": "scr_buffer_new_string_fail",
   "fs.toUnixTimestamp": "scr_fs_to_unix_timestamp",
+  "fs.existsChk": "scr_fs_exists_async",
+  "fs.mkdtempSyncChk": "scr_fs_mkdtemp_sync_chk",
+  "net.connectAttempt": "scr_net_connect_attempt",
+  "fs.lchmodSyncChk": "scr_fs_lchmod_sync_chk",
+  "fsp.lchmodChk": "scr_fsp_lchmod_chk",
   "fs.readFileSyncBuf": "scr_fs_read_file_bytes",
   "fs.readFileSyncBytes": "scr_fs_read_file_bytes",
   "fs.writeFileSyncBytes": "scr_fs_write_file_bytes",
@@ -738,7 +743,8 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "stream.finished", "stream.finishedDyn", "stream.pipeline", "stream.pipelineDyn",
   "sp.finished", "sp.pipeline",
   "net.listen", "net.listenCb", "net.listenOpts", "net.listenOptsCb",
-  "net.connect", "net.connectCb", "net.connectLookup",
+  "net.connect", "net.connectCb", "net.connectLookup", "net.connectAttempt",
+  "fs.existsChk",
   "http.createServer", "http.createServerEmpty",
   "http.request", "http.requestCb", "http.requestUrl", "http.requestUrlCb",
   "http.requestConn", "http.requestConnCb",
@@ -9487,6 +9493,54 @@ class LlEmitter {
       const out = this.own({ name: dummy, type: e.type });
       this.emitPendingCheck();
       return out;
+    }
+    if (e.fn === "error.propTypeThrow") {
+      // The property flavor of argTypeThrow — same always-throw shape.
+      const an = this.emitExpr(e.args[0]!);
+      const ex = this.emitExpr(e.args[1]!);
+      const got = this.emitExpr(e.args[2]!);
+      this.declare(`declare void @scr_throw_prop_type(ptr, ptr, ptr)`);
+      B.line(`call void @scr_throw_prop_type(ptr ${an.name}, ptr ${ex.name}, ptr ${got.name})`);
+      const ty = this.llType(e.type);
+      if (ty === "void") {
+        this.emitPendingCheck();
+        return { name: "", type: e.type };
+      }
+      const dummy = ty === "double" ? f64Lit(0) : ty === "i1" ? "false" : "null";
+      const out = this.own({ name: dummy, type: e.type });
+      this.emitPendingCheck();
+      return out;
+    }
+    {
+      // The fs validation-ladder Chk forms that ALWAYS throw (a
+      // validation error or the trailing compiler-rendered fence): every
+      // argument is a ptr (dyns + the fence string), and the typed dummy
+      // is abandoned by the pending check's unwind.
+      const FS_CHK_THROW_SYMS: Record<string, string | undefined> = {
+        "fs.mkdtempChk": "scr_fs_mkdtemp_chk",
+        "fs.readFileChk": "scr_fs_read_file_chk",
+        "fs.opendirChk": "scr_fs_opendir_chk",
+        "fs.watchFileChk": "scr_fs_watch_file_chk",
+        "fs.lchmodChk": "scr_fs_lchmod_chk",
+        "fs.readChk": "scr_fs_read_chk",
+        "fs.streamOptsChk": "scr_fs_stream_opts_chk",
+        "net.connectOptsChk": "scr_net_connect_opts_chk",
+      };
+      const sym = FS_CHK_THROW_SYMS[e.fn];
+      if (sym !== undefined) {
+        const args = e.args.map((a) => this.emitExpr(a));
+        this.declare(`declare void @${sym}(${args.map(() => "ptr").join(", ")})`);
+        B.line(`call void @${sym}(${args.map((a) => `ptr ${a.name}`).join(", ")})`);
+        const ty = this.llType(e.type);
+        if (ty === "void") {
+          this.emitPendingCheck();
+          return { name: "", type: e.type };
+        }
+        const dummy = ty === "double" ? f64Lit(0) : ty === "i1" ? "false" : "null";
+        const out = this.own({ name: dummy, type: e.type });
+        this.emitPendingCheck();
+        return out;
+      }
     }
     if (e.fn === "error.nodeThrow") {
       // The compiler-resolved Node-parity throw (always throws — the

@@ -28,9 +28,9 @@
  * its Node signature (the emitter listener rule). */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { dynFallbackType } from "./lowerer.js";
+import { dynFallbackType, nodeThrowExpr } from "./lowerer.js";
 import type { ClassInfo } from "./lower-classes.js";
-import { locOf } from "../program.js";
+import { isJsSourceFile, locOf } from "../program.js";
 import { newFnCtx, own } from "./lowerer.js";
 import { appendImplicitUndefinedReturn } from "./lower-calls.js";
 import { bufEncoding } from "./lower-containers.js";
@@ -1002,6 +1002,27 @@ export function lowerStreamStaticCall(L: Lowerer, call: ts.CallExpression,
   const member = access.name.text;
   const loc = locOf(call);
   const cls = info.def.name;
+  // Readable.toWeb's type-option ladder (JS sources): a provably-invalid
+  // `type` throws Node's ERR_INVALID_ARG_VALUE before any web stream
+  // exists; valid shapes keep the fence — the web bridge has no lowering.
+  if (member === "toWeb" && cls === "%Readable" && call.arguments.length === 2 &&
+      isJsSourceFile(call.getSourceFile()) && ts.isObjectLiteralExpression(call.arguments[1]!)) {
+    for (const p of call.arguments[1]!.properties) {
+      if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === "type") {
+        const t = L.typeOf(p.initializer);
+        if (t.isStringLiteralType() && t.value !== "bytes") {
+          L.lowerExpr(call.arguments[0]!); // evaluation order (the stream argument)
+          return nodeThrowExpr(
+            1,
+            "ERR_INVALID_ARG_VALUE",
+            `The property 'options.type' must be one of: 'bytes', undefined. Received '${t.value}'`,
+            L.mapTypeOf(L.typeOf(call)) ?? DYN,
+            loc,
+          );
+        }
+      }
+    }
+  }
   if (member !== "from") {
     L.noLowering(`${cls.slice(1)}.${member}`, call);
   }
@@ -1058,6 +1079,25 @@ function lowerStreamArg(L: Lowerer, node: ts.Expression, what: string): IrExpr {
   const v = L.lowerExpr(node);
   const info = v.type.kind === "object" ? L.classes.get(v.type.className) : undefined;
   if (!streamSidesOf(L, info)) {
+    // A provably-non-stream value in a JS source (the invalid-input
+    // probes: finished({}, cb)): Node's isNodeStream gate throws
+    // ERR_INVALID_ARG_TYPE before any watcher exists.
+    if (isJsSourceFile(node.getSourceFile()) &&
+        (v.type.kind === "record" || v.type.kind === "string" || v.type.kind === "f64" ||
+         v.type.kind === "bool" || v.type.kind === "array") &&
+        L.dynConvertible(v.type)) {
+      throw new StreamArgTypeThrow({
+        kind: "libCall",
+        fn: "error.argTypeThrow",
+        args: [
+          { kind: "strLit", value: "stream", type: STRING, loc: locOf(node) },
+          { kind: "strLit", value: "an instance of ReadableStream, WritableStream, or Stream", type: STRING, loc: locOf(node) },
+          { kind: "dynFrom", value: v, type: DYN, loc: locOf(node) },
+        ],
+        type: VOID,
+        loc: locOf(node),
+      });
+    }
     L.noLowering(
       `${what} over a '${L.fmt(v.type)}'`,
       node,
@@ -1065,6 +1105,15 @@ function lowerStreamArg(L: Lowerer, node: ts.Expression, what: string): IrExpr {
     );
   }
   return v;
+}
+
+/** The always-throw replacement lowerStreamArg surfaces when the stream
+ * slot holds a provably-non-stream value — the CALL's lowering catches it
+ * and answers the throw as the whole call's value (Node throws before
+ * registering anything, so the other arguments never evaluate their
+ * effects; listener arguments are effect-free in practice). */
+class StreamArgTypeThrow {
+  constructor(readonly expr: IrExpr) {}
 }
 
 /** The finished/pipeline completion callback: an inline function lowers
@@ -1145,7 +1194,13 @@ export function lowerStreamModuleCall(L: Lowerer, call: ts.CallExpression,
           args.length === 2 ? "the options argument has no lowering yet — the one-argument form is supported" : "the supported form is finished(stream)",
         );
       }
-      const recv = lowerStreamArg(L, args[0]!, "finished");
+      let recv: IrExpr;
+      try {
+        recv = lowerStreamArg(L, args[0]!, "finished");
+      } catch (e) {
+        if (e instanceof StreamArgTypeThrow) return e.expr;
+        throw e;
+      }
       return { kind: "libCall", fn: "sp.finished", args: [recv], type: { kind: "promise", inner: VOID }, loc };
     }
     // pipeline(...streams) → the callback pipeline's chaining/destroyer
@@ -1190,7 +1245,13 @@ export function lowerStreamModuleCall(L: Lowerer, call: ts.CallExpression,
         args.length === 3 ? "the options argument has no lowering yet — the two-argument form is supported" : "the supported form is finished(stream, callback)",
       );
     }
-    const recv = lowerStreamArg(L, args[0]!, "finished");
+    let recv: IrExpr;
+    try {
+      recv = lowerStreamArg(L, args[0]!, "finished");
+    } catch (e) {
+      if (e instanceof StreamArgTypeThrow) return e.expr;
+      throw e;
+    }
     const { cb, dyn } = lowerEosCallback(L, "finished", args[1]!, recv.type);
     return {
       kind: "libCall",

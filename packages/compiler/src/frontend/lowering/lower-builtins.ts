@@ -5,7 +5,7 @@
 import { builtinModules } from "node:module";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { dynUndefinedExpr, nodeThrowExpr, own } from "./lowerer.js";
+import { dynUndefinedExpr, ladderFenceExpr, nodeThrowExpr, own } from "./lowerer.js";
 import { canonicalBuiltinModule, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
 import {
   BuiltinModuleFn,
@@ -394,6 +394,141 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       return { kind: "libCall", fn: "fs.toUnixTimestamp", args: [arg], type: F64, loc };
     }
     return null;
+  }
+
+  /** The fs validation-ladder spoke (checked-dynamic lane, JS sources
+   * only — TypeScript keeps its compile fences): implemented-namespace
+   * calls whose misuse Node rejects with typed errors lower to fs.*Chk
+   * libCalls that replicate the validation ladder over DOM values and
+   * throw Node's exact ERR_INVALID_ARG_TYPE / ERR_INVALID_ARG_VALUE /
+   * ERR_OUT_OF_RANGE — the honest tail (the real operation where one
+   * exists, the compiler-rendered SC2020 fence otherwise) runs only
+   * after every validation passes, exactly Node's order. Null when this
+   * is not a claimed member/shape (the table or fence path stands). */
+  export function lowerFsLadderCall(L: Lowerer, expr: ts.CallExpression,
+    bi: { module: string; member: string },
+    loc: SrcLoc,): IrExpr | null {
+    if (bi.module !== "fs" && bi.module !== "fs/promises") return null;
+    if (!isJsSourceFile(expr.getSourceFile())) return null;
+    const args = expr.arguments;
+    if (args.some(ts.isSpreadElement)) return null;
+    // Every ladder argument crosses as a DOM value; an argument that
+    // cannot leaves the historical fence in place.
+    const dynArg = (node: ts.Expression | undefined): IrExpr | null => {
+      if (!node) return dynUndefinedExpr(loc);
+      const raw = L.lowerExpr(node);
+      if (raw.type.kind === "dyn") return raw;
+      if (raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+        return { kind: "dynFrom", value: raw, type: DYN, loc };
+      }
+      return null;
+    };
+    const dynArgs = (nodes: (ts.Expression | undefined)[]): IrExpr[] | null => {
+      const out: IrExpr[] = [];
+      for (const n of nodes) {
+        const v = dynArg(n);
+        if (v === null) return null;
+        out.push(v);
+      }
+      return out;
+    };
+    const resultT = L.mapTypeOf(L.typeOf(expr)) ?? DYN;
+    const chk = (fn: IrLibFn, chkArgs: IrExpr[], type: IrType): IrExpr =>
+      ({ kind: "libCall", fn, args: chkArgs, type, loc });
+    if (bi.module === "fs/promises") {
+      if (bi.member !== "lchmod" || args.length !== 2) return null;
+      const a = dynArgs([args[0], args[1]]);
+      return a && chk("fsp.lchmodChk", a, { kind: "promise", inner: VOID });
+    }
+    switch (bi.member) {
+      case "exists": {
+        // The REAL deprecated-API shape: the callback validates
+        // synchronously (Node's one throwing arm), invalid paths answer
+        // false THROUGH it, and the answer is asynchronous.
+        // A provably-non-file `new URL('<literal>')` path (the suite's
+        // https://foo probe): Node answers false through the callback
+        // synchronously — the DOM has no URL kind, so the path slot
+        // carries the unvalidatable token instead (construction of a
+        // parseable literal is effect-free; file: URLs keep the fence —
+        // they would need the real path conversion).
+        let pathNode: ts.Expression | undefined = args[0];
+        let pathExpr: IrExpr | null = null;
+        if (pathNode && ts.isNewExpression(pathNode) && ts.isIdentifier(pathNode.expression) &&
+            pathNode.expression.text === "URL" && L.mapTypeOf(L.typeOf(pathNode))?.kind === "url" &&
+            pathNode.arguments?.length === 1 && ts.isStringLiteral(pathNode.arguments[0]!)) {
+          let parsed: URL | null = null;
+          try {
+            parsed = new URL(pathNode.arguments[0]!.text);
+          } catch {
+            parsed = null;
+          }
+          if (parsed === null || parsed.protocol === "file:") return null;
+          pathExpr = dynUndefinedExpr(loc);
+          pathNode = undefined;
+        }
+        pathExpr ??= dynArg(pathNode);
+        const cbExpr = dynArg(args[1]);
+        if (pathExpr === null || cbExpr === null) return null;
+        return chk("fs.existsChk", [pathExpr, cbExpr], DYN);
+      }
+      case "mkdtemp": {
+        // mkdtemp(prefix[, options], callback) — the callback is the
+        // LAST argument (makeCallback runs first, then the prefix).
+        const a = dynArgs([args[0], args.length >= 2 ? args[args.length - 1] : undefined]);
+        return a && chk("fs.mkdtempChk", [...a, ladderFenceExpr(L, "fs.mkdtemp", expr)], resultT);
+      }
+      case "mkdtempSync": {
+        // The table serves the plain string 1-arg form; the ladder takes
+        // every other shape — prefix/encoding validation, then the REAL
+        // mkdtemp when the options leave utf8 semantics.
+        if (args.length === 1 && L.mapTypeOf(L.typeOf(args[0]!))?.kind === "string") return null;
+        if (args.length > 2) return null;
+        const a = dynArgs([args[0], args[1]]);
+        return a && chk("fs.mkdtempSyncChk", [...a, ladderFenceExpr(L, "fs.mkdtempSync with these options", expr)], STRING);
+      }
+      case "readFile": {
+        // readFile(path[, options], callback): callback, assertEncoding,
+        // path — then the async read fences.
+        const a = dynArgs([args[0], args.length >= 3 ? args[1] : undefined, args.length >= 2 ? args[args.length - 1] : undefined]);
+        return a && chk("fs.readFileChk", [...a, ladderFenceExpr(L, "fs.readFile", expr)], resultT);
+      }
+      case "opendirSync": {
+        const a = dynArgs([args[0], args[1]]);
+        return a && chk("fs.opendirChk", [...a, ladderFenceExpr(L, "fs.opendirSync", expr)], resultT);
+      }
+      case "watchFile": {
+        // watchFile(filename[, options], listener): the path first, the
+        // listener's function contract second; real watching fences.
+        const a = dynArgs([args[0], args.length >= 2 ? args[args.length - 1] : undefined]);
+        return a && chk("fs.watchFileChk", [...a, ladderFenceExpr(L, "fs.watchFile", expr)], resultT);
+      }
+      case "lchmod": {
+        // lchmod(path, mode, callback): callback, path, mode — macOS
+        // shapes (non-APPLE answers Node's not-a-function TypeError).
+        const a = dynArgs([args[0], args[1], args[2]]);
+        return a && chk("fs.lchmodChk", [...a, ladderFenceExpr(L, "fs.lchmod", expr)], resultT);
+      }
+      case "lchmodSync": {
+        if (args.length > 2) return null;
+        const a = dynArgs([args[0], args[1]]);
+        return a && chk("fs.lchmodSyncChk", a, DYN);
+      }
+      case "read": {
+        // read(fd, buffer, offset, length, position, callback) — the
+        // positional form's full ladder; options-object forms keep the
+        // fence (their misuse arms are not in the target set).
+        if (args.length < 4) return null;
+        const a = dynArgs([args[0], args[1], args[2], args[3], args.length >= 6 ? args[4] : undefined]);
+        return a && chk("fs.readChk", [...a, ladderFenceExpr(L, "fs.read", expr)], resultT);
+      }
+      case "createReadStream":
+      case "createWriteStream": {
+        const a = dynArgs([args[0], args[1]]);
+        return a && chk("fs.streamOptsChk", [...a, ladderFenceExpr(L, `fs.${bi.member}`, expr)], resultT);
+      }
+      default:
+        return null;
+    }
   }
 
   export function lowerBuiltinModuleCall(L: Lowerer, expr: ts.CallExpression,

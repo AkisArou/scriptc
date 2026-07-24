@@ -3130,6 +3130,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         if (streamServed) return streamServed;
         const fsTs = L.lowerFsToUnixTimestampCall(expr, bi, loc);
         if (fsTs) return fsTs;
+        // The fs validation-ladder spoke (checked-dynamic lane): misuse
+        // of implemented-namespace members throws Node's typed errors
+        // instead of meeting the table fence.
+        const fsLadder = L.lowerFsLadderCall(expr, bi, loc);
+        if (fsLadder) return fsLadder;
         const builtinFn = builtinModuleFnOf(L, bi.module, bi.member);
         if (!builtinFn) {
           // Typed by @types/node (the fallback declarations only declare

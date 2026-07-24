@@ -327,6 +327,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "net.serverOnConnection": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
   "net.serverOnSecureConnection": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
   "net.connect": { argTypes: [F64, STRING], result: NETSOCKET_T },
+  "net.connectAttempt": { argTypes: [F64, STRING, DYN], result: NETSOCKET_T },
+  "net.connectOptsChk": { argTypes: [DYN, STRING], result: VOID },
   "net.connectCb": { argTypes: [F64, STRING, { kind: "func", params: [], ret: VOID }], result: NETSOCKET_T },
   // The lookup's exact func shape is program data (its answer callback's
   // union/record types) — checked specially in the libCall case.
@@ -358,6 +360,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "dgram.connectCb": { argTypes: [DGRAMSOCK_T, F64, STRING, { kind: "func", params: [], ret: VOID }], result: VOID },
   "dgram.sendStr": { argTypes: [DGRAMSOCK_T, STRING, F64, STRING], result: VOID },
   "dgram.sendBytes": { argTypes: [DGRAMSOCK_T, BYTES_U8, F64, STRING], result: VOID },
+  "dgram.sendChk": { argTypes: [DGRAMSOCK_T, DYN, DYN, DYN, DYN, DYN, STRING], result: VOID },
   "dgram.address": { argTypes: [DGRAMSOCK_T], result: VOID },
   "dgram.close": { argTypes: [DGRAMSOCK_T], result: VOID },
   "dgram.closeCb": { argTypes: [DGRAMSOCK_T, { kind: "func", params: [], ret: VOID }], result: VOID },
@@ -494,6 +497,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "tls.sockOnSession": { argTypes: [NETSOCKET_T, null, BOOL], result: VOID },
   // createSecureContext({ cert, key }) mints the opaque SNI-answer handle.
   "tls.createSecureContext": { argTypes: [null, null], result: SECURECTX_T },
+  "tls.createSecureContextDyn": { argTypes: [DYN], result: SECURECTX_T },
+  "tls.caCertsChk": { argTypes: [DYN, STRING], result: VOID },
   "https.createServer": { argTypes: [null, null, null], result: NETSERVER_T },
   // http2's allowHTTP1 compatibility server (divergence 57): cert/key
   // like tls.createServer; the 'request' handler arrives separately via
@@ -674,7 +679,19 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "bytes.compareChk": { argTypes: [BYTES_U8, DYN, DYN, DYN, DYN, DYN], result: F64 },
   "buffer.newStringFail": { argTypes: [DYN], result: BYTES_U8 },
   "fs.toUnixTimestamp": { argTypes: [DYN], result: F64 },
+  "fs.existsChk": { argTypes: [DYN, DYN], result: DYN },
+  "fs.mkdtempChk": { argTypes: [DYN, DYN, STRING], result: VOID },
+  "fs.mkdtempSyncChk": { argTypes: [DYN, DYN, STRING], result: STRING },
+  "fs.readFileChk": { argTypes: [DYN, DYN, DYN, STRING], result: VOID },
+  "fs.opendirChk": { argTypes: [DYN, DYN, STRING], result: VOID },
+  "fs.watchFileChk": { argTypes: [DYN, DYN, STRING], result: VOID },
+  "fs.lchmodChk": { argTypes: [DYN, DYN, DYN, STRING], result: VOID },
+  "fs.lchmodSyncChk": { argTypes: [DYN, DYN], result: DYN },
+  "fsp.lchmodChk": { argTypes: [DYN, DYN], result: { kind: "promise", inner: VOID } },
+  "fs.readChk": { argTypes: [DYN, DYN, DYN, DYN, DYN, STRING], result: VOID },
+  "fs.streamOptsChk": { argTypes: [DYN, DYN, STRING], result: VOID },
   "error.argTypeThrow": { argTypes: [STRING, STRING, DYN], result: VOID },
+  "error.propTypeThrow": { argTypes: [STRING, STRING, DYN], result: VOID },
   "emitter.setMaxChk": { argTypes: [null, DYN], result: VOID },
   "emitter.setDefaultMaxChk": { argTypes: [DYN, STRING], result: VOID },
   "fs.readFileSyncBytes": { argTypes: [STRING], result: BYTES_U8 },
@@ -3885,9 +3902,16 @@ function validateFunction(
           // of the undefined global mapped to (never materialized).
           break;
         }
-        if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow") {
+        if (e.fn === "error.nodeThrow" || e.fn === "error.argTypeThrow" || e.fn === "error.propTypeThrow" ||
+            e.fn === "fs.mkdtempChk" || e.fn === "fs.readFileChk" ||
+            e.fn === "fs.opendirChk" || e.fn === "fs.watchFileChk" || e.fn === "fs.lchmodChk" ||
+            e.fn === "fs.readChk" || e.fn === "fs.streamOptsChk" || e.fn === "net.connectOptsChk" ||
+            e.fn === "tls.caCertsChk") {
           // Always throws — the result type is the replaced expression's
-          // own (never materialized; the global.undefRead pattern).
+          // own (never materialized; the global.undefRead pattern). The
+          // fs Chk ladders qualify: every validation failure throws
+          // Node's typed error, and a full pass throws the trailing
+          // compiler-rendered fence.
           break;
         }
         if (e.fn === "error.new") {

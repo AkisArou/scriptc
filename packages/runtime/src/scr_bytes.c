@@ -927,7 +927,7 @@ ScrBytes *scr_bytes_from_arr(ScrBytesElem elem, const ScrArr *arr) {
  * the '>= 0 && <= max' render, ERR_OUT_OF_RANGE's Received rules — and
  * copy's C++-side ladder; pinned by corpus 1663) ─────────────────────── */
 
-static size_t scr_bytes_received(double v, char out[48]); /* the numeric section below */
+size_t scr_num_received(double v, char out[48]); /* the numeric section below */
 
 /* validateOffset(name, 0, max): non-integers are 'an integer' (Number.
  * isInteger — ±Infinity render 'an integer' too), the rest '>= 0 && <=
@@ -938,7 +938,7 @@ static size_t scr_bytes_received(double v, char out[48]); /* the numeric section
 bool scr_bytes_validate_off(const char *name, double value, double max) {
   if (isfinite(value) && floor(value) == value && value >= 0 && (max < 0 || value <= max)) return true;
   char recv[48];
-  scr_bytes_received(value, recv);
+  scr_num_received(value, recv);
   char msg[160];
   int mlen;
   if (floor(value) != value || !isfinite(value)) {
@@ -1250,8 +1250,9 @@ ScrBytes *scr_bytes_concat(const ScrArr *list) {
 /* ERR_OUT_OF_RANGE's "Received" rendering: integers with |v| > 2^32 get
  * Node's addNumericalSeparator underscores applied to the plain String()
  * form — INCLUDING its quirks on exponent renderings ("1e_+21",
- * "1e+_300"); everything else is the shortest-roundtrip number. */
-static size_t scr_bytes_received(double v, char out[48]) {
+ * "1e+_300"); everything else is the shortest-roundtrip number. Shared
+ * with the fs/net option-ladder validators (scr_num_received). */
+size_t scr_num_received(double v, char out[48]) {
   char plain[32];
   size_t n = scr_f64_to_str(v, plain);
   if (!(isfinite(v) && trunc(v) == v && fabs(v) > 4294967296.0)) {
@@ -1281,7 +1282,7 @@ static size_t scr_bytes_received(double v, char out[48]) {
  * "byteLength" renders min 1. All catchable RangeErrors. */
 static void scr_bytes_bounds_error(double value, double length, const char *type) {
   char recv[48];
-  scr_bytes_received(value, recv);
+  scr_num_received(value, recv);
   char msg[160];
   int mlen;
   if (floor(value) != value) {
@@ -1322,7 +1323,7 @@ static bool scr_bytes_check_int(const ScrBytes *b, double value, double offset,
   double min = sign ? -exp2((double)(8 * width - 1)) : 0;
   if (value > max || value < min) {
     char recv[48];
-    scr_bytes_received(value, recv);
+    scr_num_received(value, recv);
     char msg[160];
     int mlen;
     if (width > 4) {
