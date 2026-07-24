@@ -2500,6 +2500,23 @@ export type IrLibFn =
    * zero-padded to the total. THROWS Node's 'length' RangeError on a
    * negative/non-integer total (may-throw seed). */
   | "buffer.concatLen"
+  /** The checked-dynamic compare/equals validators (scr_bytes_io.c) —
+   * the lowered form when an argument is NOT statically bytes<u8> (the
+   * invalid-input probes; a dyn from an untyped JS helper): Node's own
+   * argument ladders run at runtime — ERR_INVALID_ARG_TYPE with the
+   * API's argument name ("buf1"/"buf2", "otherBuffer", "target"; offsets
+   * "of type number"), validateOffset's ERR_OUT_OF_RANGE for bad
+   * numbers, undefined offsets taking their Node defaults — and a
+   * well-typed value still computes the real answer. All args borrowed
+   * dyn; compareChk's four offset slots pass the undefined dyn when
+   * syntactically absent. May-throw seeds. */
+  | "buffer.compareChk"
+  | "bytes.equalsChk"
+  | "bytes.compareChk"
+  /** The deprecated `new Buffer(number, 'enc')` string-arm rejection:
+   * always throws Node's ERR_INVALID_ARG_TYPE ("The \"string\" argument
+   * must be of type string. Received ..."). Borrowed dyn; may-throw. */
+  | "buffer.newStringFail"
   /** The Buffer forms of the fs quartet: readFileSync(path) with NO
    * encoding → bytes<u8> (+1), writeFileSync(path, bytes), and the
    * fs/promises readFile(path) no-encoding form (an already-settled
@@ -6158,6 +6175,12 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.randomBytesToString",
   "crypto.randomBytes",
   "buffer.concatLen",
+  // The checked-dynamic compare/equals validators: Node's argument
+  // ladders throw ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE catchably.
+  "buffer.compareChk",
+  "bytes.equalsChk",
+  "bytes.compareChk",
+  "buffer.newStringFail",
   "fs.readFileSyncBytes",
   "fs.writeFileSyncBytes",
   "zlib.inflateSync",

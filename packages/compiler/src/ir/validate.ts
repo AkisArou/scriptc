@@ -665,6 +665,12 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "buffer.byteLenStr": { argTypes: [STRING, STRING], result: F64 },
   "buffer.isEncoding": { argTypes: [STRING], result: BOOL },
   "buffer.concatLen": { argTypes: [arrayOf(BYTES_U8), F64], result: BYTES_U8 },
+  // The checked-dynamic compare/equals validators (Node's argument
+  // ladders over DOM-boxed invalid-input probes).
+  "buffer.compareChk": { argTypes: [DYN, DYN], result: F64 },
+  "bytes.equalsChk": { argTypes: [BYTES_U8, DYN], result: BOOL },
+  "bytes.compareChk": { argTypes: [BYTES_U8, DYN, DYN, DYN, DYN, DYN], result: F64 },
+  "buffer.newStringFail": { argTypes: [DYN], result: BYTES_U8 },
   "fs.readFileSyncBytes": { argTypes: [STRING], result: BYTES_U8 },
   "fs.writeFileSyncBytes": { argTypes: [STRING, BYTES_U8], result: VOID },
   "fsp.readFileBytes": { argTypes: [STRING], result: { kind: "promise", inner: BYTES_U8 } },

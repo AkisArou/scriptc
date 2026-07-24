@@ -312,6 +312,12 @@ const LIB_FN_SYMS: Record<string, string> = {
   "buffer.concatLen": "scr_bytes_concat_len",
   "buffer.byteLenStr": "scr_bytes_byte_length_str",
   "buffer.isEncoding": "scr_bytes_is_encoding",
+  // The checked-dynamic compare/equals validators (scr_bytes_io.c):
+  // Node's argument ladders throw catchably (MAY_THROW_LIB_FNS).
+  "buffer.compareChk": "scr_buffer_compare_chk",
+  "bytes.equalsChk": "scr_bytes_equals_chk",
+  "bytes.compareChk": "scr_bytes_compare_chk",
+  "buffer.newStringFail": "scr_buffer_new_string_fail",
   "fs.readFileSyncBuf": "scr_fs_read_file_bytes",
   "fs.readFileSyncBytes": "scr_fs_read_file_bytes",
   "fs.writeFileSyncBytes": "scr_fs_write_file_bytes",

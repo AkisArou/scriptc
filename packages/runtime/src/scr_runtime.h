@@ -4151,6 +4151,25 @@ bool scr_bytes_is_encoding(const ScrStr *s);
 bool scr_bytes_equals(const ScrBytes *a, const ScrBytes *b);
 double scr_bytes_compare(const ScrBytes *src, const ScrBytes *target, double nargs,
                          double ts, double te, double ss, double se);
+/* Node's validateOffset ladder (buffer.js): non-integers (±Infinity and
+ * NaN included) throw the 'an integer' ERR_OUT_OF_RANGE RangeError, the
+ * rest the '>= 0 && <= max' render; max < 0 drops the upper bound.
+ * Returns false after arming the pending throw. */
+bool scr_bytes_validate_off(const char *name, double value, double max);
+/* The checked-dynamic compare/equals validators (scr_bytes_io.c): Node's
+ * argument ladder over DOM-boxed arguments — a non-bytes value throws
+ * ERR_INVALID_ARG_TYPE with the API's own argument name ("buf1"/"buf2",
+ * "otherBuffer", "target"), non-number offsets ERR_INVALID_ARG_TYPE
+ * "of type number", out-of-range numbers the validateOffset RangeError;
+ * an undefined offset takes its Node default. All arguments BORROWED. */
+double scr_buffer_compare_chk(const ScrDyn *a, const ScrDyn *b);
+bool scr_bytes_equals_chk(const ScrBytes *recv, const ScrDyn *other);
+double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
+                             const ScrDyn *ts, const ScrDyn *te,
+                             const ScrDyn *ss, const ScrDyn *se);
+/* new Buffer(number, encoding)'s string-arm type error (always throws;
+ * borrowed). */
+ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd);
 double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd);
 ScrBytes *scr_bytes_fill(ScrBytes *b, const ScrBytes *pattern, double nargs, double offset, double end);

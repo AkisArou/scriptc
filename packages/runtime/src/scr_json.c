@@ -582,6 +582,68 @@ const ScrDynHandleOps *scr_dyn_handle_ops_of(const ScrDyn *d) {
   return scr_dyn_handle_ops(d->v.handle.tag);
 }
 
+/* errors.js's determineSpecificType over a DOM value — the "Received
+ * ..." tail of Node's ERR_INVALID_ARG_TYPE messages. Renders into buf
+ * when the shape needs a payload; returns the text either way. Lives
+ * beside the DOM core (not the gated handle unit) because the always-
+ * linked argument validators (bytes, fs) render through it too. */
+const char *scr_dyn_specific_type(const ScrDyn *cb, char *detail, size_t cap) {
+  const char *d = detail;
+  switch (cb->kind) {
+  case SCR_DYN_NULL: d = "null"; break;
+  case SCR_DYN_UNDEF: d = "undefined"; break;
+  case SCR_DYN_OBJ: d = "an instance of Object"; break;
+  case SCR_DYN_ARR: d = "an instance of Array"; break;
+  case SCR_DYN_BYTES: d = "an instance of Uint8Array"; break;
+  case SCR_DYN_FUNC: d = "function"; break; /* callers usually return before this */
+  case SCR_DYN_HANDLE:
+    snprintf(detail, cap, "an instance of %s", scr_dyn_handle_cls(cb));
+    break;
+  case SCR_DYN_PROMISE: d = "an instance of Promise"; break;
+  case SCR_DYN_BOOL:
+    snprintf(detail, cap, "type boolean (%s)", cb->v.b ? "true" : "false");
+    break;
+  case SCR_DYN_NUM: {
+    char num[32];
+    size_t n = scr_f64_to_str(cb->v.num, num);
+    snprintf(detail, cap, "type number (%.*s)", (int)n, num);
+    break;
+  }
+  case SCR_DYN_STR: {
+    const ScrStr *sv = cb->v.str;
+    char insp[32];
+    size_t n = 0;
+    insp[n++] = '\'';
+    for (size_t i = 0; i < sv->len && n < 28; i++) insp[n++] = sv->data[i];
+    if (sv->len + 2 > 28) {
+      n = 25;
+      memcpy(insp + n, "...", 3);
+      n += 3;
+    } else {
+      insp[n++] = '\'';
+    }
+    snprintf(detail, cap, "type string (%.*s)", (int)n, insp);
+    break;
+  }
+  default: d = "an instance of Object"; break;
+  }
+  return d;
+}
+
+/* Node's ERR_INVALID_ARG_TYPE thrower ("The \"chunk\" argument must be
+ * of type string or an instance of Buffer or Uint8Array. Received type
+ * number (5)") — the handle dispatchers' and argument validators'
+ * per-arg gates. `expected` is the full "of type ..."/"an instance of
+ * ..." clause. */
+void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got) {
+  char detail[64];
+  const char *d = scr_dyn_specific_type(got, detail, sizeof detail);
+  char msg[224];
+  int len = snprintf(msg, sizeof msg,
+                     "The \"%s\" argument must be %s. Received %s", argname, expected, d);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_TYPE");
+}
+
 static void scr_dyn_handle_release(void *h, ScrDynHandleTag tag) {
   scr_dyn_handle_ops(tag)->release(h);
 }

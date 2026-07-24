@@ -621,6 +621,21 @@ function classifyThrowsExpected(
       return { form: "errValue", value: { kind: "dynFrom", value, type: DYN, loc } };
     }
   }
+  // A plain expected object held in a VARIABLE (`const oor = { code: ... };
+  // assert.throws(fn, oor)` — the suite's shared expectation records): the
+  // same runtime key walk as an error instance — Node's expectsError reads
+  // the expected's own keys only, so a convertible record crosses as its
+  // DOM object. Records carrying regex members are not convertible and
+  // keep the fence (the runtime walk would deep-compare, not test).
+  if (expectedT?.kind === "record" && L.dynConvertible(expectedT)) {
+    const value = L.lowerExpr(node);
+    // JS-lane locals holding object literals lower to dyn already; a
+    // typed record crosses through dynFrom.
+    if (value.type.kind === "dyn") return { form: "errValue", value };
+    if (typeEquals(value.type, expectedT)) {
+      return { form: "errValue", value: { kind: "dynFrom", value, type: DYN, loc } };
+    }
+  }
   L.noLowering(
     `${surface} with this expected-error shape`,
     node,
