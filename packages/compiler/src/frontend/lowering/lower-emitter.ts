@@ -30,13 +30,18 @@
  * routes through emitter.emitError — no listener means the payload
  * THROWS, Node's contract — and subclass payloads upcast to the root);
  * 'newListener'/'removeListener' are forced to the one-string tuple (the
- * runtime emits them internally with the affected event's name). */
+ * runtime emits them internally with the affected event's name).
+ *
+ * One member is overridable: `emit`, in the forwarding shape — see the
+ * emit-overrides block at the bottom of this file (per-event
+ * monomorphization of the override body, dispatch on the dynamic class,
+ * super.emit as the prototype chain). */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { dynFallbackType } from "./lowerer.js";
+import { dynFallbackType, newFnCtx } from "./lowerer.js";
 import type { ClassInfo } from "./lower-classes.js";
 import { locOf } from "../program.js";
-import { arrayOf, BOOL, canBoxFuncIntoDyn, canConvertToDyn, DYN, F64, IrExpr, IrStmt, IrType, isUnitType, STRING, SrcLoc, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { arrayOf, BOOL, canBoxFuncIntoDyn, canConvertToDyn, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, isUnitType, STRING, SrcLoc, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { streamForcedTuple, streamSidesOf } from "./lower-stream.js";
 
 /** True when the class descends from (or is) the runtime emitter. */
@@ -491,12 +496,20 @@ function lowerListenerArg(
 
 /** `recv.<member>(...)` over an emitter-rooted receiver — the whole
  * EventEmitter method surface. Returns null only for members this spoke
- * does not own (the caller falls through to its own fences). */
+ * does not own (the caller falls through to its own fences).
+ *
+ * `superRecv` is the `super.<member>(...)` spelling (lowerSuperMethodCall
+ * routes here): the receiver is the current method's `this`, and emit
+ * NEVER dispatches through an override at-or-below the lexical class —
+ * JS's static super dispatch (the nearest override STRICTLY ABOVE the
+ * lexical class still answers, exactly like a prototype-chain walk). */
 export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression, info: ClassInfo): IrExpr | null {
+  access: ts.PropertyAccessExpression, info: ClassInfo,
+  superRecv?: { thisRef: IrExpr; cls: ClassInfo }): IrExpr | null {
   const member = access.name.text;
   const loc = locOf(call);
   const args = call.arguments;
+  const lowerReceiver = (): IrExpr => superRecv?.thisRef ?? L.lowerExpr(access.expression);
   // The class VALUE, not an instance (`EventEmitter.setMaxListeners(n)` —
   // the receiver's checker type carries construct signatures; mapType
   // answers the instance object for every EventEmitter-symbol type, so the
@@ -505,7 +518,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
   // are a DIFFERENT surface: setMaxListeners(n) writes the process-wide
   // defaultMaxListeners (validated at runtime — Node's ERR_OUT_OF_RANGE);
   // everything else fences by its static name.
-  if (L.checker.getConstructSignatures(L.typeOf(access.expression)).length > 0) {
+  if (superRecv === undefined && L.checker.getConstructSignatures(L.typeOf(access.expression)).length > 0) {
     if (member === "setMaxListeners" && args.length === 1) {
       if (L.mapTypeOf(L.typeOf(args[0]!))?.kind !== "f64") {
         // Node's runtime ladder over the DOM value ("setMaxListeners" is
@@ -582,8 +595,23 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       L.noLowering(`${member} with ${args.length} arguments`, call, "the supported form is (eventName, listener)");
     }
     const name = eventNameOf(L, member, args[0]!);
-    const receiver = L.lowerExpr(access.expression);
     const registering = REGISTER_MEMBERS.has(member);
+    // The runtime fires the meta events INTERNALLY (scr_ee_emit_meta —
+    // Node calls this.emit, which would dispatch through an emit
+    // override): with an override anywhere the receiver's instances could
+    // be, a registered meta listener is the one observer of that
+    // divergence, so the registration is the honest fence site.
+    if (registering && META_EVENTS.has(name)) {
+      const ov = emitOverrideComparable(info);
+      if (ov) {
+        L.noLowering(
+          `'${member}' of '${name}' while '${ov.def.jsName || ov.def.name}' overrides emit`,
+          call,
+          "the runtime fires meta events internally, which cannot route through an emit override",
+        );
+      }
+    }
+    const receiver = lowerReceiver();
     const once = member === "once" || member === "prependOnceListener";
     const prepend = member === "prependListener" || member === "prependOnceListener";
     // Stream 'data' rides its own two-slot payload ABI (bytes + string —
@@ -661,7 +689,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       L.noLowering("emit without an event name", call);
     }
     const name = eventNameOf(L, member, args[0]!);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     if (name === "error") {
       // The special event: exactly one %Error-rooted payload; no listener
       // means the runtime THROWS it (emitter.emitError, may-throw).
@@ -687,13 +715,10 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
           "the supported payload is an Error-hierarchy instance",
         );
       }
-      return {
-        kind: "libCall",
-        fn: "emitter.emitError",
-        args: [receiver, strLit(name, loc), L.upcastTo(err, "%Error")],
-        type: BOOL,
-        loc,
-      };
+      return emitDispatchExpr(
+        L, info, name, [{ kind: "object", className: "%Error" }],
+        receiver, [L.upcastTo(err, "%Error")], superRecv?.cls, loc,
+      );
     }
     // Stream 'data' rides the two-slot payload ABI: a user emit fills
     // the chunk's slot (bytes or string), NULLs the other.
@@ -723,13 +748,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       );
     }
     const payload = args.slice(1).map((a, i) => L.lowerExprExpecting(a, tuple[i]));
-    return {
-      kind: "libCall",
-      fn: "emitter.emit",
-      args: [receiver, strLit(name, loc), ...payload],
-      type: BOOL,
-      loc,
-    };
+    return emitDispatchExpr(L, info, name, tuple, receiver, payload, superRecv?.cls, loc);
   }
 
   // The pure-introspection members take ANY string-typed name — no tuple
@@ -740,7 +759,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       L.noLowering(`removeAllListeners with ${args.length} arguments`, call);
     }
     const all = args.length === 0;
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     const name = all ? strLit("", loc) : L.lowerExprExpecting(args[0]!, STRING);
     if (name.type.kind !== "string") {
       L.noLowering(`removeAllListeners with a '${L.fmt(name.type)}' event name`, args[0] ?? call);
@@ -758,7 +777,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
     if (args.length !== 1 && args.length !== 2) {
       L.noLowering(`listenerCount with ${args.length} arguments`, call);
     }
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     const name = L.lowerExprExpecting(args[0]!, STRING);
     if (name.type.kind !== "string") {
       L.noLowering(`listenerCount with a '${L.fmt(name.type)}' event name`, args[0]!);
@@ -800,7 +819,7 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
       );
     }
     const tuple = tupleOf(L, table, name, call);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     return {
       kind: "libCall",
       fn: "emitter.listeners",
@@ -812,13 +831,13 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
 
   if (member === "eventNames") {
     if (args.length !== 0) L.noLowering(`eventNames with ${args.length} arguments`, call);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     return { kind: "libCall", fn: "emitter.names", args: [receiver], type: arrayOf(STRING), loc };
   }
 
   if (member === "setMaxListeners") {
     if (args.length !== 1) L.noLowering(`setMaxListeners with ${args.length} arguments`, call);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     if (L.mapTypeOf(L.typeOf(args[0]!))?.kind !== "f64") {
       // The invalid-input probes (string n, dyn helpers): Node's ladder
       // runs at runtime — ERR_INVALID_ARG_TYPE for non-numbers,
@@ -835,9 +854,445 @@ export function lowerEmitterMethodCall(L: Lowerer, call: ts.CallExpression,
 
   if (member === "getMaxListeners") {
     if (args.length !== 0) L.noLowering(`getMaxListeners with ${args.length} arguments`, call);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = lowerReceiver();
     return { kind: "libCall", fn: "emitter.getMax", args: [receiver], type: F64, loc };
   }
 
   return null;
+}
+
+/* ── emit overrides (`class Logged extends EventEmitter { emit(...) }`) ──
+ * The one EventEmitter member a subclass may re-declare, in the FORWARDING
+ * SHAPE: `emit(event: string, ...args: unknown[]): boolean` whose rest
+ * parameter appears only as `super.emit(event, ...args)` in the method's
+ * own body (`event` reads freely; writes to it would un-pin the forward's
+ * name). The static story is per-event monomorphization, riding the same
+ * program-global tuple table as every emit site: each event name that can
+ * dispatch through the override gets one specialization method `emit:<e>`
+ * — a REAL hierarchy method (vtable participation, override-exact ABI
+ * `(this, ...tuple) => bool`), whose body is the user body with `event`
+ * bound to the name and the super-forward lowered to the runtime emit (or
+ * to the nearest override ancestor's specialization — JS's super chain).
+ * Dispatch at emit sites is then the ordinary whole-program rule: a
+ * receiver at-or-below an override class calls the specialization directly
+ * (virtually when a deeper override exists); a receiver ABOVE every
+ * override (a plain EventEmitter binding) routes through an interned
+ * helper that tests the dynamic class per topmost override subtree
+ * (preorder-interval instanceOf) and falls through to the runtime emit.
+ * What stays out: the runtime's INTERNAL meta-event emission cannot route
+ * through an override, so registering 'newListener'/'removeListener'
+ * listeners fences while a comparable override exists (the registration
+ * is the one observer); every other member keeps the override fence. */
+
+export interface EmitOverrideRec {
+  decl: ts.MethodDeclaration;
+  eventSym: ts.Symbol;
+  restSym: ts.Symbol;
+}
+
+/** The lowering context of one specialization body (lowerEmitOverrideSpec
+ * sets it; lowerSuperMethodCall's forward interception reads it). */
+export interface EmitSpecCtx {
+  info: ClassInfo;
+  event: string;
+  tuple: IrType[];
+  eventSym: ts.Symbol;
+  restSym: ts.Symbol;
+  tupleParams: IrLocal[];
+}
+
+/** One queued specialization: `%<class>.emit:<event>`, lowered in the
+ * drive loop's fixpoint (its body can queue further specializations —
+ * the super-forward chain — and generic instances). */
+export interface EmitSpecRequest {
+  info: ClassInfo;
+  event: string;
+  tuple: IrType[];
+  /** Per-class body ordinal: bodies past the first suppress coverage
+   * stats (one source method, many monomorphized copies). */
+  ordinal: number;
+}
+
+/** Why a subclass `emit` declaration is NOT the forwarding shape, or null
+ * when it conforms. Checked at class collection; the recorded override
+ * then lowers per event with no further shape questions. */
+export function emitOverrideShapeReason(L: Lowerer, member: ts.MethodDeclaration): string | null {
+  if (!member.body) return "the declaration has no body";
+  if (member.asteriskToken !== undefined) return "generator methods cannot answer emit's boolean";
+  if ((member as { questionToken?: ts.Node }).questionToken !== undefined) return "optional method declarations have no lowering";
+  if (member.typeParameters !== undefined) return "the compiled shape declares no type parameters";
+  for (const m of member.modifiers ?? []) {
+    if (m.kind === ts.SyntaxKind.AsyncKeyword) return "async methods answer a Promise, not emit's boolean";
+    if (m.kind === ts.SyntaxKind.AbstractKeyword) return "abstract declarations have no body to lower";
+    if (m.kind === ts.SyntaxKind.Decorator) return "decorated methods have no lowering";
+  }
+  if (member.parameters.length !== 2) return "it must declare exactly (event, ...args)";
+  const p0 = member.parameters[0]!;
+  const p1 = member.parameters[1]!;
+  if (
+    !ts.isIdentifier(p0.name) || p0.dotDotDotToken !== undefined ||
+    p0.questionToken !== undefined || p0.initializer !== undefined ||
+    (p0.modifiers?.length ?? 0) > 0
+  ) {
+    return "the event parameter must be a plain identifier";
+  }
+  if (
+    !p1.dotDotDotToken || !ts.isIdentifier(p1.name) ||
+    p1.initializer !== undefined || (p1.modifiers?.length ?? 0) > 0
+  ) {
+    return "the second parameter must be a plain rest parameter (...args)";
+  }
+  try {
+    if (L.mapTypeOf(L.typeOf(p0.name))?.kind !== "string") {
+      return "the event parameter must be typed 'string' (symbol event names have no lowering)";
+    }
+    const sig = L.checker.getSignatureFromDeclaration(member);
+    const ret = sig ? L.mapTypeOf(L.checker.getReturnTypeOfSignature(sig)) : null;
+    if (ret?.kind !== "bool") {
+      return "every code path must return a boolean (emit's contract)";
+    }
+  } catch {
+    return "its signature does not resolve statically";
+  }
+  const eventSym = L.checker.getSymbolAtLocation(p0.name);
+  const restSym = L.checker.getSymbolAtLocation(p1.name);
+  if (!eventSym || !restSym) return "its parameters do not resolve statically";
+  let reason: string | null = null;
+  const visit = (n: ts.Node): void => {
+    if (reason !== null) return;
+    if (ts.isIdentifier(n)) {
+      let s: ts.Symbol | undefined;
+      try {
+        s = L.checker.getSymbolAtLocation(n) ?? undefined;
+      } catch {
+        s = undefined;
+      }
+      if (s === restSym && !isEmitForwardSpread(L, member, n, eventSym)) {
+        reason = "the rest parameter may only forward through super.emit(event, ...args) in the method's own body";
+      } else if (s === eventSym && n !== p0.name && isWriteTarget(n)) {
+        reason = "the event parameter cannot be reassigned (the forward's event name must stay pinned)";
+      }
+    }
+    n.forEachChild(visit);
+  };
+  member.body.forEachChild(visit);
+  return reason;
+}
+
+/** True when this rest-parameter reference is exactly the forward spread:
+ * `super.emit(<event param>, ...<this identifier>)`, two arguments, sitting
+ * in the override method's OWN body (a nested function could not reach the
+ * specialization's tuple parameters). */
+function isEmitForwardSpread(L: Lowerer, method: ts.MethodDeclaration, id: ts.Identifier, eventSym: ts.Symbol): boolean {
+  const sp = id.parent;
+  if (!ts.isSpreadElement(sp) || sp.expression !== id) return false;
+  const call = sp.parent;
+  if (!ts.isCallExpression(call) || call.arguments.length !== 2 || call.arguments[1] !== sp) return false;
+  const callee = call.expression;
+  if (
+    !ts.isPropertyAccessExpression(callee) ||
+    callee.expression.kind !== ts.SyntaxKind.SuperKeyword ||
+    callee.name.text !== "emit"
+  ) {
+    return false;
+  }
+  const a0 = call.arguments[0]!;
+  if (!ts.isIdentifier(a0)) return false;
+  try {
+    if (L.checker.getSymbolAtLocation(a0) !== eventSym) return false;
+  } catch {
+    return false;
+  }
+  for (let p: ts.Node | undefined = call.parent; p; p = p.parent) {
+    if (p === method) return true;
+    if (
+      ts.isArrowFunction(p) || ts.isFunctionExpression(p) || ts.isFunctionDeclaration(p) ||
+      ts.isMethodDeclaration(p) || ts.isConstructorDeclaration(p) ||
+      ts.isGetAccessor(p) || ts.isSetAccessor(p) ||
+      ts.isClassDeclaration(p) || ts.isClassExpression(p)
+    ) {
+      return false;
+    }
+  }
+  return false;
+}
+
+/** True when the identifier sits in a WRITE position: assignment target
+ * (destructuring patterns included — the climb crosses array/object
+ * literal layers), ++/--, or a for-in/of initializer. */
+function isWriteTarget(id: ts.Identifier): boolean {
+  let n: ts.Node = id;
+  for (;;) {
+    const p: ts.Node = n.parent;
+    if (ts.isBinaryExpression(p)) {
+      const k = p.operatorToken.kind;
+      return p.left === n && k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
+    }
+    if (ts.isPostfixUnaryExpression(p) || ts.isPrefixUnaryExpression(p)) {
+      return (
+        (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken) &&
+        p.operand === n
+      );
+    }
+    if (ts.isForOfStatement(p) || ts.isForInStatement(p)) return p.initializer === n;
+    if (
+      ts.isParenthesizedExpression(p) || ts.isArrayLiteralExpression(p) ||
+      ts.isSpreadElement(p) || ts.isSpreadAssignment(p) ||
+      ts.isShorthandPropertyAssignment(p) || ts.isObjectLiteralExpression(p) ||
+      (ts.isPropertyAssignment(p) && p.initializer === n)
+    ) {
+      n = p;
+      continue;
+    }
+    return false;
+  }
+}
+
+/** The nearest class at-or-above `info` declaring an emit override. */
+export function emitOverrideAtOrAbove(info: ClassInfo | null | undefined): ClassInfo | null {
+  for (let c: ClassInfo | null = info ?? null; c; c = c.base) {
+    if (c.emitOverride) return c;
+  }
+  return null;
+}
+
+/** Every STRICT descendant of `info` declaring an emit override. */
+function collectEmitOverridesBelow(info: ClassInfo, out: ClassInfo[]): void {
+  for (const s of info.subclasses) {
+    if (s.emitOverride) out.push(s);
+    collectEmitOverridesBelow(s, out);
+  }
+}
+
+/** The topmost override classes strictly below `info` (deeper overrides
+ * intercept these through the vtable — one interval test each covers a
+ * whole override subtree). */
+function topmostEmitOverridesBelow(info: ClassInfo): ClassInfo[] {
+  const out: ClassInfo[] = [];
+  const walk = (c: ClassInfo): void => {
+    for (const s of c.subclasses) {
+      if (s.emitOverride) out.push(s);
+      else walk(s);
+    }
+  };
+  walk(info);
+  return out;
+}
+
+/** An emit-override class COMPARABLE to `info` (ancestor-or-self or
+ * descendant — a dynamic instance under this static type could dispatch
+ * through it), or null. The meta-registration fence's test. */
+export function emitOverrideComparable(info: ClassInfo): ClassInfo | null {
+  const above = emitOverrideAtOrAbove(info);
+  if (above) return above;
+  const below: ClassInfo[] = [];
+  collectEmitOverridesBelow(info, below);
+  return below[0] ?? null;
+}
+
+/** Interns the specialization `%<class>.emit:<event>`: registers the
+ * method on the class (vtable participation — the ABI is `(this, ...tuple)
+ * => bool` for every declarer of one event, override-exact by
+ * construction) and queues the body for the drive loop's fixpoint. */
+export function ensureEmitSpec(L: Lowerer, info: ClassInfo, event: string, tuple: IrType[]): void {
+  const mName = `emit:${event}`;
+  const key = `%${info.def.name}.${mName}`;
+  if (L.emitSpecDone.has(key)) return;
+  L.emitSpecDone.add(key);
+  if (!info.methods.has(mName)) {
+    info.methods.set(mName, { params: tuple.map((t) => ({ type: t, mode: "required" as const })), ret: BOOL });
+    if (info.def.methods) info.def.methods.push(mName);
+    else info.def.methods = [mName];
+  }
+  const ordinal = L.emitSpecQueue.filter((q) => q.info === info).length;
+  L.emitSpecQueue.push({ info, event, tuple, ordinal });
+}
+
+/** One specialization body: the override method's statements lowered with
+ * `event` bound to the name and hidden tuple parameters standing in for
+ * the rest parameter (readable ONLY through the super-forward, which the
+ * collection shape check guaranteed). */
+export function lowerEmitOverrideSpec(L: Lowerer, req: EmitSpecRequest): IrFunction | null {
+  const { info, event, tuple, ordinal } = req;
+  const ov = info.emitOverride;
+  if (!ov?.decl.body) return null;
+  const className = info.def.name;
+  const thisType: IrType = { kind: "object", className };
+  const prevClass = L.currentClass;
+  const prevSpec = L.emitSpecCtx;
+  const prevSuppress = L.suppressStats;
+  L.currentClass = info;
+  L.suppressStats = prevSuppress || ordinal > 0;
+  L.fnStack.push(newFnCtx(false, null, null, BOOL));
+  try {
+    const loc = locOf(ov.decl);
+    const thisLocal = L.declareThis(thisType);
+    const params: IrParam[] = [{ localId: thisLocal.id, name: "this", type: thisType }];
+    const tupleParams: IrLocal[] = tuple.map((t, i) => {
+      const p = L.declareHiddenLocal(`%ee${i}`, t);
+      params.push({ localId: p.id, name: `%ee${i}`, type: t });
+      return p;
+    });
+    const eventDecl = ov.decl.parameters[0]!;
+    const eventLocal = L.declareLocal(
+      eventDecl.name,
+      ts.isIdentifier(eventDecl.name) ? eventDecl.name.text : "event",
+      STRING,
+      true,
+    );
+    const prologue: IrStmt[] = [
+      { kind: "varDecl", localId: eventLocal.id, init: strLit(event, loc), loc },
+    ];
+    L.emitSpecCtx = { info, event, tuple, eventSym: ov.eventSym, restSym: ov.restSym, tupleParams };
+    const body = [...prologue, ...L.lowerStmts(ov.decl.body.statements)];
+    return {
+      name: `%${className}.emit:${event}`,
+      params,
+      returnType: BOOL,
+      locals: L.ctx.locals,
+      body,
+      loc,
+    };
+  } finally {
+    L.emitSpecCtx = prevSpec;
+    L.fnStack.pop();
+    L.currentClass = prevClass;
+    L.suppressStats = prevSuppress;
+  }
+}
+
+/** The specialization body's `super.emit(event, ...args)` — matched
+ * BEFORE the general super lowering (the event name is this
+ * specialization's, not a source literal). The target is the nearest
+ * override ancestor's specialization (JS's super chain) or the runtime
+ * emit. Null when the call is not the forward (a literal-name super.emit
+ * rides the general super-emitter route). */
+export function emitSpecSuperForward(L: Lowerer, call: ts.CallExpression,
+  access: ts.PropertyAccessExpression): IrExpr | null {
+  const ctx = L.emitSpecCtx;
+  if (!ctx || access.name.text !== "emit" || call.arguments.length !== 2) return null;
+  const a0 = call.arguments[0]!;
+  const a1 = call.arguments[1]!;
+  if (!ts.isIdentifier(a0) || !ts.isSpreadElement(a1) || !ts.isIdentifier(a1.expression)) return null;
+  if (L.checker.getSymbolAtLocation(a0) !== ctx.eventSym) return null;
+  if (L.checker.getSymbolAtLocation(a1.expression) !== ctx.restSym) return null;
+  const loc = locOf(call);
+  const thisLocal = L.resolveThis();
+  if (!thisLocal) return null;
+  const thisRef: IrExpr = { kind: "varRef", localId: thisLocal.id, type: thisLocal.type, loc };
+  const payload: IrExpr[] = ctx.tupleParams.map((p) => ({ kind: "varRef", localId: p.id, type: p.type, loc }));
+  const anc = emitOverrideAtOrAbove(ctx.info.base);
+  if (anc) {
+    ensureEmitSpec(L, anc, ctx.event, ctx.tuple);
+    const callee = `%${anc.def.name}.emit:${ctx.event}`;
+    L.noteEdge(callee);
+    return { kind: "call", callee, args: [L.upcastTo(thisRef, anc.def.name), ...payload], type: BOOL, loc };
+  }
+  if (ctx.event === "error") {
+    return { kind: "libCall", fn: "emitter.emitError", args: [thisRef, strLit(ctx.event, loc), payload[0]!], type: BOOL, loc };
+  }
+  return { kind: "libCall", fn: "emitter.emit", args: [thisRef, strLit(ctx.event, loc), ...payload], type: BOOL, loc };
+}
+
+/** `super.<member>(...)` over an emitter-rooted base — the emitter spoke
+ * with the current method's `this` as the receiver and STATIC dispatch
+ * (an emit override at-or-below the lexical class never answers a super
+ * call — JS's prototype-chain rule). */
+export function lowerEmitterSuperCall(L: Lowerer, call: ts.CallExpression,
+  access: ts.PropertyAccessExpression, cls: ClassInfo): IrExpr | null {
+  const thisLocal = L.resolveThis();
+  if (!thisLocal) return null;
+  const loc = locOf(call);
+  const thisRef: IrExpr = { kind: "varRef", localId: thisLocal.id, type: thisLocal.type, loc };
+  return lowerEmitterMethodCall(L, call, access, cls, { thisRef, cls });
+}
+
+/** One emit site's dispatch: the plain runtime libCall when no override
+ * is comparable to the receiver's static class; a direct or virtual
+ * specialization call when an override sits at-or-above it; an interned
+ * instanceOf-branch helper when overrides exist only strictly below
+ * (evaluating receiver and payload exactly once as its arguments). */
+function emitDispatchExpr(
+  L: Lowerer,
+  info: ClassInfo,
+  name: string,
+  tuple: IrType[],
+  receiver: IrExpr,
+  payload: IrExpr[],
+  superOf: ClassInfo | undefined,
+  loc: SrcLoc,
+): IrExpr {
+  const method = `emit:${name}`;
+  const runtime = (recv: IrExpr, args: IrExpr[]): IrExpr =>
+    name === "error"
+      ? { kind: "libCall", fn: "emitter.emitError", args: [recv, strLit(name, loc), args[0]!], type: BOOL, loc }
+      : { kind: "libCall", fn: "emitter.emit", args: [recv, strLit(name, loc), ...args], type: BOOL, loc };
+  if (superOf !== undefined) {
+    // super.emit: the nearest override STRICTLY ABOVE the lexical class.
+    const anc = emitOverrideAtOrAbove(superOf.base);
+    if (!anc) return runtime(receiver, payload);
+    ensureEmitSpec(L, anc, name, tuple);
+    const callee = `%${anc.def.name}.${method}`;
+    L.noteEdge(callee);
+    return { kind: "call", callee, args: [L.upcastTo(receiver, anc.def.name), ...payload], type: BOOL, loc };
+  }
+  const above = emitOverrideAtOrAbove(info);
+  const below: ClassInfo[] = [];
+  collectEmitOverridesBelow(info, below);
+  if (!above && below.length === 0) return runtime(receiver, payload);
+  // Every override class an instance at this site could dispatch through
+  // gets the event's specialization (descendants intercept via the vtable;
+  // the super-forward chain above `above` is ensured as each body lowers).
+  if (above) ensureEmitSpec(L, above, name, tuple);
+  for (const c of below) ensureEmitSpec(L, c, name, tuple);
+  if (above) {
+    if (below.length > 0) {
+      L.noteVirtualEdge(info, method);
+      return { kind: "virtualCall", className: info.def.name, method, args: [receiver, ...payload], type: BOOL, loc };
+    }
+    const callee = `%${above.def.name}.${method}`;
+    L.noteEdge(callee);
+    return { kind: "call", callee, args: [L.upcastTo(receiver, above.def.name), ...payload], type: BOOL, loc };
+  }
+  // Overrides only strictly below: the interned dispatch helper.
+  const recvT = receiver.type;
+  const key = `emitter.emitDispatch:${typeKey(recvT)}:${name}`;
+  let helper = L.arrHofHelpers.get(key);
+  if (!helper) {
+    helper = `%emitter.emitDispatch.${L.arrHofHelpers.size}`;
+    L.arrHofHelpers.set(key, helper);
+    const params: IrParam[] = [
+      { localId: "r.0", name: "r", type: recvT },
+      ...tuple.map((t, i) => ({ localId: `a${i}.0`, name: `a${i}`, type: t })),
+    ];
+    const locals: IrLocal[] = params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false }));
+    const rRef = (): IrExpr => ({ kind: "varRef", localId: "r.0", type: recvT, loc });
+    const argRefs = (): IrExpr[] => tuple.map((t, i) => ({ kind: "varRef", localId: `a${i}.0`, type: t, loc }));
+    const body: IrStmt[] = [];
+    for (const o of topmostEmitOverridesBelow(info)) {
+      const oT: IrType = { kind: "object", className: o.def.name };
+      const down: IrExpr = { kind: "downcast", value: rRef(), type: oT, loc };
+      const oBelow: ClassInfo[] = [];
+      collectEmitOverridesBelow(o, oBelow);
+      let target: IrExpr;
+      if (oBelow.length > 0) {
+        L.noteVirtualEdge(o, method);
+        target = { kind: "virtualCall", className: o.def.name, method, args: [down, ...argRefs()], type: BOOL, loc };
+      } else {
+        const callee = `%${o.def.name}.${method}`;
+        L.noteEdge(callee);
+        target = { kind: "call", callee, args: [down, ...argRefs()], type: BOOL, loc };
+      }
+      body.push({
+        kind: "if",
+        cond: { kind: "instanceOf", value: rRef(), className: o.def.name, type: BOOL, loc },
+        then: [{ kind: "return", value: target, loc }],
+        else_: null,
+        loc,
+      });
+    }
+    body.push({ kind: "return", value: runtime(rRef(), argRefs()), loc });
+    L.liftedFns.push({ name: helper, params, returnType: BOOL, locals, body, loc });
+  }
+  return { kind: "call", callee: helper, args: [receiver, ...payload], type: BOOL, loc };
 }

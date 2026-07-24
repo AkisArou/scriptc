@@ -15,6 +15,7 @@ import { pureReemittable } from "./lower-exprs.js";
 import { lowerSearchParamsNew } from "./lower-builtins.js";
 import { requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { STREAM_API_MEMBERS, STREAM_PROP_MEMBERS, UNDERSCORE_METHODS, lowerStreamNew, lowerStreamSuperCall, streamCtorShape } from "./lower-stream.js";
+import { emitOverrideShapeReason, emitSpecSuperForward, emitterRooted, lowerEmitterSuperCall, type EmitOverrideRec } from "./lower-emitter.js";
 import { declSymbolOf } from "./lower-modules.js";
 import { uniqueSymbolKeyOf } from "./lower-exprs.js";
 import { lowerHttpServerNew } from "./lower-server.js";
@@ -85,6 +86,12 @@ export interface ClassInfo {
    * the base chain. The value names which SIDES the class carries. User
    * `extends` of these classes is fenced at the declaration (phase 1). */
   builtinStream?: "r" | "w" | "rw";
+  /** This class's own `emit` override in the FORWARDING SHAPE (the one
+   * EventEmitter member a subclass may re-declare): never in `methods` —
+   * emit calls keep routing through the emitter spoke, which lowers the
+   * body once per event name as the specialization method `emit:<event>`
+   * (lower-emitter.ts's emit-overrides block has the whole story). */
+  emitOverride?: EmitOverrideRec;
   ctor: ts.ConstructorDeclaration | null;
   /** PARAMETER PROPERTIES (`constructor(public x: number)`), in parameter
    * order: each declares a field (placed BEFORE the class's declared
@@ -1070,6 +1077,10 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
        * symbol-slot refinement retries them after the constructor scan
        * declares this class's OWN symbol-keyed slots. */
       const dynRetMethods = new Map<string, ts.MethodDeclaration>();
+      /** The class's own `emit` override in the forwarding shape (emitter-
+       * rooted classes only) — recorded here, NEVER in `methods`, so emit
+       * calls keep routing through the emitter spoke's dispatch. */
+      let emitOverride: EmitOverrideRec | undefined;
       let ctor: ts.ConstructorDeclaration | null = null;
       /** Initializer-less fields whose type cannot hold undefined and whose
        * definite assignment tsc did NOT verify (a `!` assertion, or
@@ -1277,7 +1288,13 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         // The EventEmitter API surface is runtime-provided: a subclass
         // member with one of its names would shadow behavior the runtime
         // dispatches internally (meta events, once removal), so the
-        // override is fenced rather than silently split-brained.
+        // override is fenced rather than silently split-brained — with ONE
+        // exception: `emit` in the forwarding shape on a plain (non-
+        // stream) emitter-rooted class monomorphizes per event name
+        // (lower-emitter.ts's emit-overrides block). Stream-rooted classes
+        // keep the fence for emit too: the runtime stream machinery emits
+        // 'data'/'end'/... internally, which could never route through
+        // the override.
         if (
           memberName && ts.isIdentifier(memberName) &&
           EMITTER_API_MEMBERS.has(memberName.text) &&
@@ -1286,6 +1303,30 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             return false;
           })()
         ) {
+          const streamRooted = (() => {
+            for (let c = base; c; c = c.base) if (c.builtinStream !== undefined) return true;
+            return false;
+          })();
+          if (
+            memberName.text === "emit" && !streamRooted && !inst && !mixin &&
+            ts.isMethodDeclaration(member) &&
+            !member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword)
+          ) {
+            const reason = emitOverrideShapeReason(L, member);
+            if (reason === null) {
+              const eventSym = L.checker.getSymbolAtLocation(member.parameters[0]!.name);
+              const restSym = L.checker.getSymbolAtLocation(member.parameters[1]!.name);
+              if (eventSym && restSym) {
+                emitOverride = { decl: member, eventSym, restSym };
+                continue;
+              }
+            }
+            L.unsupported(
+              "SC1090",
+              memberName,
+              `overriding EventEmitter's 'emit' outside the forwarding shape (${reason ?? "its parameters do not resolve statically"}; the compiled form is \`emit(event: string, ...args: unknown[]): boolean\`)`,
+            );
+          }
           L.unsupported(
             "SC1090",
             memberName,
@@ -2195,6 +2236,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         fieldOrder,
         methods,
         decl,
+        ...(emitOverride !== undefined ? { emitOverride } : {}),
         ctor,
         ctorParams,
         ...(paramProps.length > 0 ? { paramProps } : {}),
@@ -4406,6 +4448,12 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
       // tsc rejects super outside derived-class bodies first; defensive.
       L.unsupported("SC1090", access, "'super' outside a derived class");
     }
+    // An emit-override SPECIALIZATION body's forward — `super.emit(event,
+    // ...args)` — carries no literal event name; the specialization's own
+    // context answers it (matched before any lookup: neither identifier
+    // resolves through the ordinary lowering).
+    const forward = emitSpecSuperForward(L, call, access);
+    if (forward) return forward;
     const found = L.findMethodOn(cls.base, access.name.text);
     if (!found) {
       // `super.m(...)` of a GENERIC method: super dispatch is static in JS
@@ -4426,6 +4474,16 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
           type: instance.returnType,
           loc,
         };
+      }
+      // The runtime-provided emitter surface through `super` —
+      // `super.emit('x', v)`, `super.on(...)`: Node's prototype-chain rule
+      // is STATIC dispatch above the lexical class, which the emitter
+      // spoke lowers with this method's own `this` as the receiver (an
+      // emit override at-or-below `cls` never answers; the nearest one
+      // strictly above does).
+      if (EMITTER_API_MEMBERS.has(access.name.text) && emitterRooted(L, cls.base)) {
+        const viaEmitter = lowerEmitterSuperCall(L, call, access, cls);
+        if (viaEmitter) return viaEmitter;
       }
       L.unsupported("SC1090", access, `'super.${access.name.text}' (no base class declares it)`);
     }
