@@ -6626,18 +6626,18 @@ class LlEmitter {
         this.emitPendingCheck();
         return out;
       }
-      case "array": {
+      default: {
         // `any[]`-declared slot: Array.isArray-gated, elements BY
         // REFERENCE (identity crosses; the spine is a snapshot copy).
-        // The frontend only emits jsval-element targets.
-        this.declare(`declare ptr @scr_jsval_exit_jsval_arr(ptr)`);
-        const t = B.tmp();
-        B.line(`${t} = call ptr @scr_jsval_exit_jsval_arr(ptr ${v.name})`);
-        const out = this.own({ name: t, type: e.type });
-        this.emitPendingCheck();
-        return out;
-      }
-      default: {
+        // JSON-safe element types keep the round trip below.
+        if (e.type.kind === "array" && e.type.elem.kind === "jsval") {
+          this.declare(`declare ptr @scr_jsval_exit_jsval_arr(ptr)`);
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_jsval_exit_jsval_arr(ptr ${v.name})`);
+          const out = this.own({ name: t, type: e.type });
+          this.emitPendingCheck();
+          return out;
+        }
         // An undefined-armed union target: the engine's undefined takes
         // the undefined arm FIRST (JSON cannot spell it); then null and
         // data ride the round trip into the union's dynCheck like any

@@ -3037,6 +3037,15 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // and .catch/.finally chains on the local bridge per use site (each
     // bridge is an independent observer of the same settlement).
     if (init.type.kind === "jsval" && type.kind === "promise") type = JSVAL;
+    // An island value under an `any[]`-declared LOCAL spelling stays an
+    // island HANDLE too (the runtime-world rule): the jsval-element-array
+    // exit is a CALL-boundary conversion (the loadPlugins param ABI) —
+    // converting a local would strand the engine's own prototypes
+    // (join/map/... on a native handle-element array), where the handle
+    // routes every use engine-side.
+    if (init.type.kind === "jsval" && type.kind === "array" && type.elem.kind === "jsval") {
+      type = JSVAL;
+    }
     // A STATIC array of island HANDLES under an unannotated declared type
     // spelling evolved elements (`const kept = fns.filter(...)` over an
     // evolving-`any` receiver — the handle-element lowering keeps the

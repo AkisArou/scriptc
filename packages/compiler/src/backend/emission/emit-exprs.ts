@@ -6345,13 +6345,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // Buffers pass (they ARE Uint8Arrays). The frontend only
             // emits u8 targets (canExitIslandToType).
             return E.fallibleTemp(e.type, `scr_jsval_exit_bytes(${v.name})`);
-          case "array":
+          default: {
             // `any[]`-declared slot: the engine array exits Array.isArray-
             // gated, elements BY REFERENCE (identity crosses; the spine is
-            // a snapshot copy). The frontend only emits jsval-element
-            // targets (canExitIslandToType).
-            return E.fallibleTemp(e.type, `scr_jsval_exit_jsval_arr(${v.name})`);
-          default: {
+            // a snapshot copy). JSON-safe element types keep the round
+            // trip below.
+            if (e.type.kind === "array" && e.type.elem.kind === "jsval") {
+              return E.fallibleTemp(e.type, `scr_jsval_exit_jsval_arr(${v.name})`);
+            }
             // An undefined-armed union target: the engine's undefined takes
             // the undefined arm FIRST — JSON cannot spell it (to_json would
             // refuse the exit) — then null and data ride the round trip
