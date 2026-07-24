@@ -457,6 +457,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   // ambient-this read never throw. The fs dyn read is the sync-fs story.
   "json.parse": "scr_json_parse",
   "dyn.keySet": "scr_dyn_key_set",
+  "dyn.hasKey": "scr_dyn_has_key",
   "dyn.defineProps": "scr_dyn_define_props",
   "dyn.typeof": "scr_dyn_typeof",
   "dyn.toString": "scr_dyn_to_string",
@@ -595,6 +596,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "http.clientDestroy": "scr_http_client_destroy",
   "http.clientDestroyed": "scr_http_client_destroyed",
   "http2.streamUndefCall": "scr_http2_stream_undef_call",
+  "http.agentNew": "scr_http_agent_new",
   // The island surface (--dynamic): eval/import bridge catchably (the
   // may-throw seed's pending check); importDyn answers an engine promise
   // and never throws itself. insp.jsval throws on composite island
@@ -718,6 +720,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "http.createServer", "http.createServerEmpty",
   "http.request", "http.requestCb", "http.requestUrl", "http.requestUrlCb",
   "http.requestConn", "http.requestConnCb",
+  "http.agentNew", "http.requestAgent", "http.requestAgentCb",
   // The dyn-async slice (emit-exprs.ts's markings): fiber parks, the
   // microtask/immediate mints, the tracing-promise reaction fiber, and
   // the loop-end unhandled-rejection report.
@@ -10824,9 +10827,11 @@ class LlEmitter {
       B.line(`call void @${entry}(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr @${adapter}, i1 ${args[2]!.name})`);
       return { name: "", type: e.type };
     }
-    if (e.fn === "http.request" || e.fn === "http.requestCb" || e.fn === "http.requestUrl" || e.fn === "http.requestUrlCb") {
+    if (e.fn === "http.request" || e.fn === "http.requestCb" || e.fn === "http.requestUrl" || e.fn === "http.requestUrlCb" ||
+        e.fn === "http.requestAgent" || e.fn === "http.requestAgentCb") {
       const isUrl = e.fn.startsWith("http.requestUrl");
-      const cbIdx = isUrl ? 3 : 7;
+      const isAgent = e.fn.startsWith("http.requestAgent");
+      const cbIdx = isUrl ? 3 : isAgent ? 8 : 7;
       const hasCb = e.fn.endsWith("Cb");
       const args = e.args.map((a) => this.emitExpr(a));
       let cb = "null";
@@ -10842,7 +10847,7 @@ class LlEmitter {
       }
       const head = args.slice(0, cbIdx);
       const decls = head.map((a) => (this.llType(a.type) === "i1" ? "i1 zeroext" : this.llType(a.type)));
-      const entry = isUrl ? "scr_http_request_url" : "scr_http_request";
+      const entry = isUrl ? "scr_http_request_url" : isAgent ? "scr_http_request_agent" : "scr_http_request";
       this.declare(`declare ptr @${entry}(${[...decls, "ptr", "ptr"].join(", ")})`);
       const t = B.tmp();
       B.line(

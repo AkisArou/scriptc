@@ -91,6 +91,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "island.castFail": { argTypes: [JSVAL, STRING], result: VOID },
   "json.parse": { argTypes: [STRING], result: DYN },
   "dyn.keySet": { argTypes: [DYN, STRING, DYN], result: VOID },
+  "dyn.hasKey": { argTypes: [DYN, STRING], result: BOOL },
   "dyn.toString": { argTypes: [DYN, STRING], result: STRING },
   "dyn.defineProps": { argTypes: [DYN, DYN], result: DYN },
   "dyn.typeof": { argTypes: [DYN], result: STRING },
@@ -459,6 +460,9 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // program-dependent (checked below); header pairs arrive flat.
   "http.request": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL], result: HTTPCLIENTREQ_T },
   "http.requestCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, null], result: HTTPCLIENTREQ_T },
+  "http.agentNew": { argTypes: [BOOL, BOOL, F64, F64, F64, F64, F64], result: DYN },
+  "http.requestAgent": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, DYN], result: HTTPCLIENTREQ_T },
+  "http.requestAgentCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, DYN, null], result: HTTPCLIENTREQ_T },
   "http.requestUrl": { argTypes: [STRING, STRING, BOOL], result: HTTPCLIENTREQ_T },
   "http.requestUrlCb": { argTypes: [STRING, STRING, BOOL, null], result: HTTPCLIENTREQ_T },
   "net.sockOnReadable": { argTypes: [NETSOCKET_T, null, BOOL], result: VOID },
@@ -579,6 +583,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "http.requestConnCb": { argTypes: [null, STRING, STRING, F64, arrayOf(STRING), BOOL, null], result: HTTPCLIENTREQ_T },
   "https.request": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null], result: HTTPCLIENTREQ_T },
   "https.requestCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, null], result: HTTPCLIENTREQ_T },
+  "https.requestAgent": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, DYN], result: HTTPCLIENTREQ_T },
+  "https.requestAgentCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, DYN, null], result: HTTPCLIENTREQ_T },
   // The requestFn binding's runtime-secure rows: https.request's shape
   // with the leading `secure` bool.
   "https.requestFn": { argTypes: [BOOL, STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null], result: HTTPCLIENTREQ_T },
@@ -3318,9 +3324,15 @@ function validateFunction(
           }
           break;
         }
-        if (e.fn === "http.requestCb" || e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse") {
+        if (e.fn === "http.requestCb" || e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse" ||
+            e.fn === "http.requestAgentCb" || e.fn === "https.requestAgentCb") {
           // The response listener: void, no params or exactly (res: httpReq).
-          const cbT = e.args[e.fn === "http.requestCb" ? 7 : e.fn === "http.requestUrlCb" ? 3 : 1]?.type;
+          const cbT = e.args[
+            e.fn === "http.requestCb" ? 7
+            : e.fn === "http.requestUrlCb" ? 3
+            : e.fn === "http.requestAgentCb" ? 8
+            : e.fn === "https.requestAgentCb" ? 10
+            : 1]?.type;
           let ok = cbT?.kind === "func" && cbT.ret.kind === "void" && cbT.params.length <= 1;
           if (ok && cbT?.kind === "func" && cbT.params.length === 1) {
             ok = cbT.params[0]!.kind === "httpReq";

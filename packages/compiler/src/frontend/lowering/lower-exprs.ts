@@ -5749,7 +5749,10 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         litKey !== null
           ? ({ kind: "strLit", value: litKey, type: STRING, loc: locOf(keyNode) } satisfies IrExpr)
           : L.lowerExpr(keyNode);
-      if (dk.type.kind === "f64") dk = L.ensureString(dk, keyNode);
+      // Number AND checked-dynamic keys ride the JS-exact formatter —
+      // property keys ARE strings (o[k] is o[String(k)] in JS), and a dyn
+      // key (agent.sockets[agent.getName(...)]) stringifies the same way.
+      if (dk.type.kind === "f64" || dk.type.kind === "dyn") dk = L.ensureString(dk, keyNode);
       if (dk.type.kind !== "string") {
         L.unsupported("SC1090", keyNode, "indexing records with non-string or non-number keys");
       }
@@ -8300,6 +8303,23 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       // runtime key table to ask.
       const rIn = lowerRuntimeKeyIn(L, expr, loc);
       if (rIn) return rIn;
+      // A runtime key over a CHECKED-DYNAMIC receiver (`name in
+      // agent.sockets` — both sides computed): the DOM presence answer,
+      // with the key stringified like every property key (o[k] is
+      // o[String(k)] in JS; `in` shares the coercion).
+      {
+        const recvT = L.mapTypeOf(L.typeOf(expr.right));
+        if (recvT?.kind === "dyn") {
+          let k = L.lowerExpr(expr.left);
+          if (k.type.kind === "f64" || k.type.kind === "string" || k.type.kind === "dyn") {
+            k = L.ensureString(k, expr.left);
+            const recvD = L.lowerExpr(expr.right);
+            if (recvD.type.kind === "dyn") {
+              return { kind: "libCall", fn: "dyn.hasKey", args: [recvD, k], type: BOOL, loc };
+            }
+          }
+        }
+      }
       L.unsupported(
         "SC1090",
         expr.left,

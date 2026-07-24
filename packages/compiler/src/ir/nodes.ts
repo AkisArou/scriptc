@@ -1512,6 +1512,11 @@ export type IrLibFn =
    * SEMANTICS.md notes the sloppy divergence: loud, never silent). Void
    * result; in the may-throw seed set. */
   | "dyn.keySet"
+  /** `key in v` with a RUNTIME (string) key on a checked-dynamic
+   * receiver (args: value dyn, key string; result bool): OBJ answers
+   * own-member presence, ARR answers 'length'/a valid index — exactly
+   * the compile-time dynHasKey fold, per value. Never throws. */
+  | "dyn.hasKey"
   /** Object.defineProperties over DOM values (args: target, descriptors —
    * both borrowed dyn; result: the target, +1 — JS's return value).
    * Value descriptors become plain own properties on OBJ and FUNC targets
@@ -2234,6 +2239,27 @@ export type IrLibFn =
    * Content-Length exactly like Node. */
   | "http.request"
   | "http.requestCb"
+  /** new http.Agent(opts) / new https.Agent(opts): (secure, keepAlive,
+   * keepAliveMsecs, maxSockets, maxFreeSockets, timeoutMs, port) — the
+   * numeric options arrive < 0 for "unset" (Infinity/256/none; port
+   * seeds the settable defaultPort, Node's option merge). Returns the
+   * Agent as a checked-dynamic HANDLE (getName/destroy and the
+   * sockets/requests/freeSockets counters dispatch through the DOM
+   * handle ops). keepAlive: true THROWS the named construction fence —
+   * socket POOLING is not modeled (one dial per request); maxSockets
+   * accounting is real: over-limit requests defer their dial and queue.
+   * MAY THROW. */
+  | "http.agentNew"
+  /** The agent-threaded request rows: the http.request/https.request
+   * shape with a trailing `agent` dyn argument (an Agent handle, false —
+   * the one-shot Connection: close dial — or null/undefined for the
+   * default path). port < 0 means "no port option": the agent's settable
+   * defaultPort, then the scheme's. MAY THROW (a non-Agent value is
+   * Node's ERR_INVALID_ARG_TYPE). */
+  | "http.requestAgent"
+  | "http.requestAgentCb"
+  | "https.requestAgent"
+  | "https.requestAgentCb"
   /** The createConnection form (the proxy's own dialer): args are
    * (connCb, path, method, timeout, headers, autoEnd[, cb]) — connCb is
    * a `() => net.Socket` closure the runtime invokes ONCE, synchronously
@@ -6070,6 +6096,14 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "http.requestCb",
   "http.requestConn",
   "http.requestConnCb",
+  // The agent rows add the runtime agent-value gates (a non-Agent value
+  // is Node's ERR_INVALID_ARG_TYPE); agentNew's keepAlive: true throws
+  // the named pooling fence.
+  "http.agentNew",
+  "http.requestAgent",
+  "http.requestAgentCb",
+  "https.requestAgent",
+  "https.requestAgentCb",
   "https.request",
   "https.requestCb",
   "https.requestFn",

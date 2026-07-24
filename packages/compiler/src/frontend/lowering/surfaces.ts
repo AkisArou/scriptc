@@ -172,6 +172,16 @@ export const HTTP_SERVER_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   "requireHostHeader", "uniqueHeaders",
 ]);
 
+/** new http.Agent(options)'s documented keys (Node v24 — the Agent
+ * constructor table plus the socket.connect() options it forwards into
+ * each dial). The lowered set is keepAlive/keepAliveMsecs/maxSockets/
+ * maxFreeSockets/timeout/port (+ scheduling, dropped: no free pool
+ * exists); the rest fence by name and unknown keys drop like Node. */
+export const AGENT_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
+  "family", "hints", "host", "keepAliveInitialDelay", "localAddress",
+  "localPort", "lookup", "maxTotalSockets", "noDelay", "path",
+]);
+
 /** https.request adds tls.connect's client-side TLS knobs. */
 export const HTTPS_CLIENT_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   ...HTTP_CLIENT_DOCUMENTED_OPTIONS,

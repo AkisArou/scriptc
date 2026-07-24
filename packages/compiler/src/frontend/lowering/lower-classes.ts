@@ -16,7 +16,7 @@ import { requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/d
 import { STREAM_API_MEMBERS, STREAM_PROP_MEMBERS, UNDERSCORE_METHODS, lowerStreamNew, lowerStreamSuperCall, streamCtorShape } from "./lower-stream.js";
 import { declSymbolOf } from "./lower-modules.js";
 import { uniqueSymbolKeyOf } from "./lower-exprs.js";
-import { lowerHttpServerNew } from "./lower-server.js";
+import { lowerHttpAgentNew, lowerHttpServerNew } from "./lower-server.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, fenceEarlyAliasUse, fenceEarlyNsMemberRef, nsMemberIdentOf, nsUndefRead } from "./lower-namespaces.js";
 import { mixinResultBindingClassOf, type MixinInstanceInfo } from "./lower-mixins.js";
 
@@ -4806,6 +4806,13 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       const httpServer = lowerHttpServerNew(L, expr);
       if (httpServer) return httpServer;
     }
+    // `new http.Agent(opts?)` / `new https.Agent(opts?)` — the Agent
+    // handle (lower-server): getName/destroy/counters through the DOM
+    // handle ops, requests thread it via the agent option.
+    {
+      const agent = lowerHttpAgentNew(L, expr);
+      if (agent) return agent;
+    }
     if (ts.isIdentifier(expr.expression)) {
       // `import C = N.C; new C()` — the alias's own source-order guards
       // (a no-op for every non-import= binding).
@@ -5509,7 +5516,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
     {
       const STDLIB_CTOR_HINTS: Record<string, string | undefined> = {
         Agent:
-          "constructing an http Agent (compiled clients dial one connection per request and close it with the response — pass agent: false for Node's one-shot semantics, or omit the option)",
+          "constructing an http Agent through an indirect class binding (spell the construction on the module binding — new http.Agent(...)/new https.Agent(...) or the named Agent import — which lowers to the Agent handle)",
       };
       const ctorName = ts.isIdentifier(expr.expression)
         ? expr.expression

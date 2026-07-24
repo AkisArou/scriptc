@@ -2192,6 +2192,7 @@ static void scr_h2_compat_dispatch(ScrH2Session *s, ScrH2Stream *st, const ScrH2
     scr_http_h2_req_header(req, name, value);
   }
   ScrHttpRes *res = scr_http_h2_res_new(s->sock, st);
+  scr_http_res_set_req(res, req); /* res.req — the compat pair's backref */
   st->compat_req = scr_http_req_retain(req);
   st->compat_res = scr_http_res_retain(res);
   /* the req owns the READ side: the stream's own 'end' bookkeeping is
