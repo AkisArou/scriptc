@@ -102,7 +102,9 @@ describe("library profile validation", () => {
   test("teaching and remediation text reject the encoding's reserved bytes", () => {
     // 0x01 is the structured message's version marker, 0x1F its field
     // separator: either byte inside profile-authored text would corrupt
-    // the assembled sink message, so the load refuses (SC4001).
+    // the assembled sink message, so the load refuses (SC4001). The full
+    // ratified constraint bans every control byte below 0x20 except
+    // newline in TEXT (and every control byte, newline included, in keys).
     expectSc4001(
       { ...good, determinism: { teachings: { SC4012: "bad \u0001 marker" } } },
       "determinism.teachings.SC4012",
@@ -115,6 +117,28 @@ describe("library profile validation", () => {
       { ...good, determinism: { teachings: { "NS\u001f12": "text is fine" } } },
       "reserved byte",
     );
+    expectSc4001(
+      { ...good, determinism: { teachings: { SC4012: "tabs\tare control bytes" } } },
+      "determinism.teachings.SC4012",
+    );
+    const withNewline = loadLibraryProfile(
+      writeProfile({ ...good, determinism: { teachings: { SC4012: "line one\nline two" } } }),
+    );
+    expect(withNewline.ok).toBe(true);
+  });
+
+  test("teaching and remediation text cap at 512 bytes, refuse over", () => {
+    const atCap = loadLibraryProfile(
+      writeProfile({ ...good, determinism: { teachings: { SC4012: "x".repeat(512) } } }),
+    );
+    expect(atCap.ok).toBe(true);
+    expectSc4001({ ...good, determinism: { teachings: { SC4012: "x".repeat(513) } } }, "512 bytes");
+    expectSc4001(
+      { ...good, determinism: { remediations: { SC4012: "x".repeat(513) } } },
+      "determinism.remediations.SC4012",
+    );
+    // The cap counts UTF-8 BYTES, not code points.
+    expectSc4001({ ...good, determinism: { teachings: { SC4012: "\u00e9".repeat(300) } } }, "512");
   });
 
   test("parse error", () => expectSc4001("{ not json", "not valid JSON"));
@@ -230,4 +254,158 @@ describe("library profile sidecar section", () => {
     expectSc4001({ ...good, sidecar: { ...goodSidecar, wire_version: 1.5 } }, "sidecar.wire_version"));
   test("an absolute sidecar path refuses", () =>
     expectSc4001({ ...good, sidecar: { ...goodSidecar, path: "/tmp/contract.json" } }, "sidecar.path"));
+});
+
+
+/* ── the ask-5 fences array ────────────────────────────────────────────────
+ * Selector strictness is RATIFIED: fence profiles pin per compiler
+ * release, so an id or prefix matching nothing in this release's surface
+ * manifest refuses SC4001 at load — there is no forward-compatible
+ * acceptance of unknown selectors, and no silently-inert fence. Static
+ * surfaces no detector can police refuse the same way, with the reason
+ * named (folded constants, desugared methods). */
+
+describe("library profile fences", () => {
+  test("well-formed fences resolve: id and prefix selectors, covered surfaces, detectors", () => {
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        determinism: {
+          fences: [
+            { id: "stdlib.math.random", teaching: "randomness is an effect", remediation: "ask the host" },
+            { prefix: "node-builtin.fs.", teaching: "files are effects" },
+            { id: "stdlib.math.sin", teaching: "trig is host math", remediation: "request it as an effect" },
+          ],
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.fences).toHaveLength(3);
+    // The id fence covers exactly its entry; math.random is static, so it
+    // carries a detector (the compile-time denial's reach witness).
+    expect(r.profile.fences[0]!.declared).toBe("id 'stdlib.math.random'");
+    expect(r.profile.fences[0]!.surfaces).toHaveLength(1);
+    expect(r.profile.fences[0]!.surfaces[0]!.id).toBe("stdlib.math.random");
+    expect(r.profile.fences[0]!.surfaces[0]!.detector).toBeDefined();
+    // The prefix fence covers the whole fs member family.
+    const fsIds = r.profile.fences[1]!.surfaces.map((s) => s.id);
+    expect(fsIds).toContain("node-builtin.fs.readFileSync");
+    expect(fsIds).toContain("node-builtin.fs.promises.readFile");
+    // A fenced dynamic-only surface carries its own refusal code and no
+    // detector: the teaching rides the refusal that already fires.
+    const sin = r.profile.fences[2]!.surfaces[0]!;
+    expect(sin.code).toBe("SC2012");
+    expect(sin.detector).toBeUndefined();
+  });
+
+  test("a fence remediation feeds the trap-remediation lookup through covered codes", () => {
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        determinism: {
+          remediations: { SC2012: "the explicit map key wins" },
+          fences: [
+            { id: "stdlib.math.sin", remediation: "request it as an effect" },
+            { id: "node-builtin.crypto.createHash", remediation: "digests come from the host" },
+          ],
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Explicit remediations keys win over fence-supplied text.
+    expect(profileRemediation(r.profile, "SC2012")).toBe("the explicit map key wins");
+    // A fence's remediation answers for its covered entries' codes
+    // (crypto.createHash is SC2020) — spec §3's "in a fence entry or a
+    // remediations map", one lookup either way.
+    expect(profileRemediation(r.profile, "SC2020")).toBe("digests come from the host");
+    expect(profileRemediation(r.profile, "SC4014")).toBeUndefined();
+  });
+
+  test("an id matching nothing in this release's manifest refuses (ratified strictness)", () => {
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.date.now" }] } },
+      "determinism.fences[0].id",
+    );
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.date.now" }] } },
+      "names no entry",
+    );
+  });
+
+  test("a prefix matching nothing refuses — the spec's illustrative spelling included", () => {
+    // The worked example's 'node.fs.' is illustrative prose; the real
+    // taxonomy spells 'node-builtin.fs.', and the strict refusal catches
+    // the drift instead of shipping an inert fence.
+    expectSc4001(
+      { ...good, determinism: { fences: [{ prefix: "node.fs." }] } },
+      "determinism.fences[0].prefix",
+    );
+  });
+
+  test("exactly one of id/prefix per fence", () => {
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.math.random", prefix: "node-builtin.fs." }] } },
+      "exactly one of 'id' or 'prefix'",
+    );
+    expectSc4001(
+      { ...good, determinism: { fences: [{ teaching: "no selector" }] } },
+      "exactly one of 'id' or 'prefix'",
+    );
+  });
+
+  test("unknown fields inside a fence entry refuse (a typo silently disarms a denial)", () => {
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.math.random", teachng: "typo" }] } },
+      "unknown field 'determinism.fences[0].teachng'",
+    );
+  });
+
+  test("fence teaching/remediation strings share the reserved-byte and 512-byte rules", () => {
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.math.random", teaching: "bad \u0001 marker" }] } },
+      "determinism.fences[0].teaching",
+    );
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.math.random", remediation: "x".repeat(513) }] } },
+      "determinism.fences[0].remediation",
+    );
+  });
+
+  test("a compile-time-folded constant cannot be id-fenced; a prefix exempts it", () => {
+    // os.EOL folds to a per-binary literal: nothing at runtime reads it,
+    // so an id fence naming it would be a lie — refused with the reason.
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "node-builtin.os.EOL" }] } },
+      "fold",
+    );
+    // The family sweep stays usable: the prefix covers the os members and
+    // exempts the folded constant.
+    const r = loadLibraryProfile(
+      writeProfile({ ...good, determinism: { fences: [{ prefix: "node-builtin.os." }] } }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.fences[0]!.surfaces.map((s) => s.id)).not.toContain("node-builtin.os.EOL");
+    expect(r.profile.fences[0]!.surfaces.map((s) => s.id)).toContain("node-builtin.os.homedir");
+  });
+
+  test("a desugared surface no detector can police refuses, id and prefix alike", () => {
+    expectSc4001(
+      { ...good, determinism: { fences: [{ id: "stdlib.array.map" }] } },
+      "desugars",
+    );
+    expectSc4001(
+      { ...good, determinism: { fences: [{ prefix: "stdlib.array." }] } },
+      "cannot be fenced",
+    );
+  });
+
+  test("no fences array means no fences", () => {
+    const r = loadLibraryProfile(writeProfile(good));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.fences).toEqual([]);
+  });
 });

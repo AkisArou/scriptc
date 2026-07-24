@@ -5,6 +5,7 @@ import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
+import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
   buildSidecar,
@@ -805,9 +806,7 @@ function resolveLibrarySection(
       continue;
     }
     if (info.async || info.generator) {
-      diagnostics.push(
-        libAsyncExportDiag(e.export, info.async ? "async" : "generator", info.loc, profileTeaching(profile, "SC4004")),
-      );
+      diagnostics.push(libAsyncExportDiag(e.export, info.async ? "async" : "generator", info.loc));
       continue;
     }
     const fn = fnByName.get(e.export);
@@ -934,9 +933,12 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   let entryInfo: Map<string, EntryExportInfo>;
   let contractFacts: ContractFacts | null;
   try {
+    // Every library refusal leaves through the ask-5 teaching decoration:
+    // profile text attaches by code, manifest id, or fence coverage as the
+    // attributed note (the SC4004/SC4005 rider generalized).
     const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
       ok: false,
-      diagnostics,
+      diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
     });
     // The npm verdicts FIRST: whatever the shared frontend would have
@@ -957,7 +959,6 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
             // this path to serve anything.
             (s.detail ?? "its static compilation was refused").replace("; the island serves the package", ""),
             fe.npmImportSites.get(s.package) ?? { file: entryPath, start: 0, end: 0 },
-            profileTeaching(profile, "SC4020"),
           ),
         ),
       );
@@ -986,19 +987,26 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   }
   const mod = lowered.module!;
 
-  const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({ ok: false, diagnostics, sourceTexts });
+  const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
+    ok: false,
+    diagnostics: decorateLibraryRefusals(diagnostics, profile),
+    sourceTexts,
+  });
 
   // Export resolution first (SC4002/SC4003/SC4004/SC4007 anchor at the
   // mapped declaration — a mapped async export reports as SC4004, not the
-  // graph-wide gate), then the async_free requirement (ratified, SC4005):
-  // both refused before anything is emitted, so the narrowed library link set
-  // below is structural fact.
+  // graph-wide gate), then the async_free requirement (ratified, SC4005),
+  // then the profile's determinism fences (ask 5, SC4008) over the same
+  // compiled graph the attestation scan reads: all refused before anything
+  // is emitted, so the narrowed library link set below is structural fact.
   const resolved = resolveLibrarySection(profile, entryInfo, mod, entryPath);
   if ("diagnostics" in resolved) return fail(resolved.diagnostics);
   const asyncSurface = moduleLibAsyncSurface(mod);
   if (asyncSurface !== null) {
-    return fail([libAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc, profileTeaching(profile, "SC4005"))]);
+    return fail([libAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc)]);
   }
+  const fenced = evaluateLibraryFences(mod, profile);
+  if (fenced.length > 0) return fail(fenced);
   mod.lib = resolved.lib;
 
   // The ask-2 contract sidecar rides the same invocation. Identity first

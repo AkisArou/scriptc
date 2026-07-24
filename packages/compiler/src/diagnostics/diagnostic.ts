@@ -29,8 +29,9 @@
  *            LIB_RUNTIME_TRAP_CODES below), and npm packages a library
  *            graph imports that fail the npm-static eligibility bar
  *            (SC4020 — static-or-refuse; eligible packages compile
- *            statically instead); SC4008 reserved for ask-5
- *            determinism denials
+ *            statically instead), and the ask-5 determinism fence
+ *            denial (SC4008 — a profile-fenced manifest surface reached
+ *            by the compiled library module graph)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -46,6 +47,12 @@ export interface ScrDiagnostic {
   loc: SrcLoc;
   milestone?: Milestone;
   hint?: string;
+  /** Embedder-authored guidance riding a refusal (the ask-5 teaching
+   * surface): rendered as its own visibly-attributed trailing line, so the
+   * tool's message and hint stay the tool's and the profile's text is
+   * recognizably the profile's. Only library-mode refusals carry one —
+   * the text always arrives prefixed `from the '<profile name>' profile:`. */
+  note?: string;
 }
 
 interface UnsupportedEntry {
@@ -650,9 +657,12 @@ export function comptimeFailedDiag(detail: string, loc: SrcLoc): ScrDiagnostic {
 /* ── SC4xxx: library-mode/profile refusals ─────────────────────────────────
  * The library-emission mode's own code block (design §5.4 + the ratified
  * SC4xxx range): neither preflight nor type rules nor backend coverage —
- * each refusal names the profile entry involved and the fix, and SC4004/
- * SC4005 additionally carry the profile's own teaching text when the
- * profile supplies one (the ratification session's rider). */
+ * each refusal names the profile entry involved and the fix. Profile
+ * teaching text no longer threads through individual factories: EVERY
+ * library-mode refusal passes through one decoration pass
+ * (library/fence-eval.ts's decorateLibraryRefusals — the SC4004/SC4005
+ * rider generalized to any refusal code or manifest id), which attaches
+ * the profile's text as the diagnostic's attributed `note`. */
 
 /** SC4001 — the profile file itself is malformed: parse errors, unknown
  * fields at meaning-changing positions, prefix violations, duplicate
@@ -698,37 +708,61 @@ export function libUnmappableSignatureDiag(
 }
 
 /** SC4004 — a mapped export is async or a generator: a synchronous ABI
- * entry cannot be either. Carries the profile's teaching when supplied. */
+ * entry cannot be either. The profile's teaching arrives via the shared
+ * decoration pass (the "async" shared key or an SC4004 key). */
 export function libAsyncExportDiag(
   exportName: string,
   kind: "async" | "generator",
   loc: SrcLoc,
-  teaching?: string,
 ): ScrDiagnostic {
   return {
     code: "SC4004",
     message: `library export '${exportName}' is ${kind === "async" ? "an async function" : "a generator"} — a profile entry is a synchronous ABI symbol`,
     loc,
-    hint:
-      "expose a synchronous facade function and map that instead" +
-      (teaching !== undefined ? ` — ${teaching}` : ""),
+    hint: "expose a synchronous facade function and map that instead",
   };
 }
 
 /** SC4005 — the library module graph reaches event-loop or ambient-process
  * surface (async functions, generators, timers, sockets, signals, child
  * processes, ...): async_free is a v1 REQUIREMENT, derived from the module
- * graph, never observed at runtime. Carries the profile's teaching. */
-export function libAsyncSurfaceDiag(surface: string, loc: SrcLoc, teaching?: string): ScrDiagnostic {
+ * graph, never observed at runtime. */
+export function libAsyncSurfaceDiag(surface: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC4005",
     message: `library mode requires an async_free module graph, and this graph reaches ${surface}`,
     loc,
     hint:
       "v1 library artifacts link no event loop, install no signal handlers, and create no threads — remove the surface from " +
-      "everything the entry module reaches" +
-      (teaching !== undefined ? ` — ${teaching}` : ""),
+      "everything the entry module reaches",
   };
+}
+
+/** SC4008 — the ask-5 determinism denial: the profile fences a surface by
+ * its surface-manifest id, and the compiled library module graph REACHES
+ * it. Minted only for manifest entries the static tier compiles (a fenced
+ * surface the tier refuses anyway keeps its own code, with the fence's
+ * teaching riding that refusal as the note); anchored at the reaching
+ * construct. `surfaceCode` is the diagnostic code the manifest entry
+ * carries, when it carries one. */
+export function libFenceDiag(
+  profileName: string,
+  surfaceId: string,
+  surfaceName: string,
+  loc: SrcLoc,
+  surfaceCode?: string,
+  teaching?: string,
+): ScrDiagnostic {
+  const diag: ScrDiagnostic = {
+    code: "SC4008",
+    message: `the '${profileName}' profile fences '${surfaceId}' (${surfaceName}${surfaceCode !== undefined ? `, ${surfaceCode}` : ""}), and this library graph reaches it`,
+    loc,
+    hint:
+      "the profile denies this surface at compile time (a determinism fence over the surface manifest's ids) — " +
+      "remove the use from everything the entry module reaches, or lift the fence",
+  };
+  if (teaching !== undefined) diag.note = `from the '${profileName}' profile: ${teaching}`;
+  return diag;
 }
 
 /** SC4006 — island/dynamic machinery on the library path: --dynamic,
@@ -859,16 +893,14 @@ export const LIB_RUNTIME_TRAP_CODES = [
  * had to refuse. Library mode is STATIC-OR-REFUSE by construction: the
  * island/dynamic tier the executable lane falls back to does not exist on
  * this path (SC4006's ground), so the refusal names the package, the
- * specific bar it missed, and the remedy. Carries the profile's teaching
- * for this code when supplied. */
-export function libNpmIneligibleDiag(pkg: string, reason: string, loc: SrcLoc, teaching?: string): ScrDiagnostic {
+ * specific bar it missed, and the remedy. */
+export function libNpmIneligibleDiag(pkg: string, reason: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC4020",
     message: `library mode compiles npm packages statically or not at all, and '${pkg}' cannot compile statically: ${reason}`,
     loc,
     hint:
-      "library artifacts have no island/dynamic tier to fall back to — vendor the code you need from the package as project modules, or drop the dependency" +
-      (teaching !== undefined ? ` — ${teaching}` : ""),
+      "library artifacts have no island/dynamic tier to fall back to — vendor the code you need from the package as project modules, or drop the dependency",
   };
 }
 

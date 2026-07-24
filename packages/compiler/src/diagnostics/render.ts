@@ -1,5 +1,6 @@
 /* Terminal rendering: file:line:col, a hand-rolled code frame with ±1 line
- * of context and a ^~~~ underline sized to the span, optional hint line.
+ * of context and a ^~~~ underline sized to the span, optional hint line,
+ * and the optional attributed profile-note line after it.
  */
 import type { ScrDiagnostic } from "./diagnostic.js";
 
@@ -70,6 +71,13 @@ export function renderDiagnostic(
   }
   if (diag.hint) {
     out.push("", `  ${c(CYAN, "hint:")} ${diag.hint}`);
+  }
+  if (diag.note) {
+    // Embedder-authored teaching text: its own attributed trailing line
+    // (the text itself begins "from the '<profile>' profile:"), so the
+    // tool's message and hint stay visibly the tool's.
+    if (!diag.hint) out.push("");
+    out.push(`  ${c(CYAN, "note:")} ${diag.note}`);
   }
   return out.join("\n");
 }
