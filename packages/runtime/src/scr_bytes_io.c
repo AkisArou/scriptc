@@ -7,9 +7,11 @@
 #include "scr_runtime.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static void scr_bytes_io_oom(void) {
   scr_trap("scriptc: out of memory\n");
@@ -225,4 +227,30 @@ double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
 ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got) {
   scr_dyn_arg_type_fail("string", "of type string", got);
   return NULL;
+}
+
+/* fs._toUnixTimestamp — the seconds coercion the utimes family runs on
+ * its time arguments (fs.js's toUnixTimestamp, underscore-exported):
+ * numeric STRINGS pass ToNumber's loose-equality gate (+time == time —
+ * whitespace-only strings answer 0), finite numbers pass (negatives
+ * answer now/1000, Node's "past times" shape), everything else throws
+ * Node's exact ERR_INVALID_ARG_TYPE. Borrowed; the throw is pending on
+ * the dummy 0 return. */
+double scr_fs_to_unix_timestamp(const ScrDyn *t) {
+  if (t->kind == SCR_DYN_STR) {
+    double n = scr_string_to_number(t->v.str);
+    /* +time == time: NaN fails; every parsed number loosely equals its
+     * own source string by construction of ToNumber. */
+    if (n == n) return n;
+  }
+  if (t->kind == SCR_DYN_NUM && isfinite(t->v.num)) {
+    if (t->v.num < 0) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      return ((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6) / 1000.0;
+    }
+    return t->v.num;
+  }
+  scr_dyn_arg_type_fail("time", "an instance of Date or an Time in seconds", t);
+  return 0;
 }

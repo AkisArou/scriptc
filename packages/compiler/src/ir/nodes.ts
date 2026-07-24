@@ -2517,6 +2517,10 @@ export type IrLibFn =
    * always throws Node's ERR_INVALID_ARG_TYPE ("The \"string\" argument
    * must be of type string. Received ..."). Borrowed dyn; may-throw. */
   | "buffer.newStringFail"
+  /** fs._toUnixTimestamp(time) over a DOM value: numeric strings and
+   * finite numbers coerce (negatives answer now/1000, Node's shape);
+   * everything else throws Node's ERR_INVALID_ARG_TYPE. May-throw. */
+  | "fs.toUnixTimestamp"
   /** The Buffer forms of the fs quartet: readFileSync(path) with NO
    * encoding → bytes<u8> (+1), writeFileSync(path, bytes), and the
    * fs/promises readFile(path) no-encoding form (an already-settled
@@ -6199,6 +6203,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "bytes.equalsChk",
   "bytes.compareChk",
   "buffer.newStringFail",
+  "fs.toUnixTimestamp",
   "fs.readFileSyncBytes",
   "fs.writeFileSyncBytes",
   "zlib.inflateSync",

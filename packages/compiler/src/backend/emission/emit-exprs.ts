@@ -4292,6 +4292,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_bytes_compare_chk(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`);
           case "buffer.newStringFail":
             return finish(`scr_buffer_new_string_fail(${arg(0)})`);
+          case "fs.toUnixTimestamp":
+            return finish(`scr_fs_to_unix_timestamp(${arg(0)})`);
           // The fs Buffer forms (scr_bytes_io.c): the sync pair throws
           // like the utf8 forms (may-throw seed set); the promise form
           // rejects instead.

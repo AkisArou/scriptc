@@ -3049,6 +3049,8 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // and getDefaultHighWaterMark the same way.
         const streamServed = lowerStreamModuleCall(L, expr, bi, loc);
         if (streamServed) return streamServed;
+        const fsTs = L.lowerFsToUnixTimestampCall(expr, bi, loc);
+        if (fsTs) return fsTs;
         const builtinFn = builtinModuleFnOf(L, bi.module, bi.member);
         if (!builtinFn) {
           // Typed by @types/node (the fallback declarations only declare
@@ -3553,6 +3555,9 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // island path (bytes never cross the boundary).
         L.lowerBytesMethodCall(expr, expr.expression) ??
         L.lowerBufferStaticCall(expr, expr.expression) ??
+        // URL.revokeObjectURL's zero-argument contract (the one-argument
+        // form keeps the fence — createObjectURL does too).
+        lowerUrlStaticCall(L, expr, expr.expression) ??
         // Readable.from — the stream classes' one static (before the
         // stdlib chokepoint claims the member).
         lowerStreamStaticCall(L, expr, expr.expression) ??
@@ -7107,6 +7112,20 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
    * direct `call` of the instance with the receiver unevaluated. Claims
    * every call whose member is generic-callable — lowering it or fencing
    * with a named message. */
+  /** URL.revokeObjectURL() with NO argument: Node's ERR_MISSING_ARGS
+   * throws before the registry lookup, so the zero-argument contract is
+   * exact without any blob machinery. The one-argument form (Node's
+   * silent no-op for unregistered ids) and createObjectURL keep their
+   * fences — a compiled program has no blob registry to consult. */
+  function lowerUrlStaticCall(L: Lowerer, call: ts.CallExpression, callee: ts.Expression): IrExpr | null {
+    if (!ts.isPropertyAccessExpression(callee) || callee.questionDotToken !== undefined) return null;
+    if (!ts.isIdentifier(callee.expression) || callee.expression.text !== "URL") return null;
+    if (callee.name.text !== "revokeObjectURL" || call.arguments.length !== 0) return null;
+    const sym = L.resolveValueSymbol(callee.expression);
+    if (!sym || !L.isStdlibSymbol(sym)) return null;
+    return nodeThrowExpr(1, "ERR_MISSING_ARGS", 'The "url" argument must be specified', VOID, locOf(call));
+  }
+
   const SP_BRAND_METHODS = new Set([
     "append", "delete", "get", "getAll", "has", "set", "sort",
     "forEach", "keys", "values", "entries", "toString",

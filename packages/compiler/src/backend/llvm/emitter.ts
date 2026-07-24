@@ -319,6 +319,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "bytes.equalsChk": "scr_bytes_equals_chk",
   "bytes.compareChk": "scr_bytes_compare_chk",
   "buffer.newStringFail": "scr_buffer_new_string_fail",
+  "fs.toUnixTimestamp": "scr_fs_to_unix_timestamp",
   "fs.readFileSyncBuf": "scr_fs_read_file_bytes",
   "fs.readFileSyncBytes": "scr_fs_read_file_bytes",
   "fs.writeFileSyncBytes": "scr_fs_write_file_bytes",

@@ -4177,6 +4177,10 @@ double scr_bytes_compare_chk(const ScrBytes *src, const ScrDyn *target,
 /* new Buffer(number, encoding)'s string-arm type error (always throws;
  * borrowed). */
 ScrBytes *scr_buffer_new_string_fail(const ScrDyn *got);
+/* fs._toUnixTimestamp over a DOM time value: numeric strings and finite
+ * numbers coerce (negatives answer now/1000), the rest throw Node's
+ * ERR_INVALID_ARG_TYPE. Borrowed. */
+double scr_fs_to_unix_timestamp(const ScrDyn *t);
 double scr_bytes_index_of(const ScrBytes *b, const ScrBytes *needle, double off, double align, bool fwd);
 double scr_bytes_index_of_num(const ScrBytes *b, double v, double off, bool fwd);
 ScrBytes *scr_bytes_fill(ScrBytes *b, const ScrBytes *pattern, double nargs, double offset, double end);

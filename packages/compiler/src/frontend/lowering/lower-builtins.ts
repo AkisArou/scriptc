@@ -376,6 +376,26 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
    * arguments into a single array-literal argument; `defaults` complete
    * omitted trailing arguments. fs.readFileSync keeps its historical
    * per-site checks (the encoding must be the literal "utf8"). */
+  /** fs._toUnixTimestamp — the (underscore-stable) seconds coercion the
+   * utimes family runs on its time arguments: finite numbers pass
+   * (negatives answer now/1000, Node's shape), numeric STRINGS coerce
+   * through ToNumber's loose-equality gate, everything else throws
+   * Node's exact ERR_INVALID_ARG_TYPE. The argument crosses as a DOM
+   * value so the runtime renders the Received tail. Null when this is
+   * not that call (the table fence stays for other shapes). */
+  export function lowerFsToUnixTimestampCall(L: Lowerer, expr: ts.CallExpression,
+    bi: { module: string; member: string },
+    loc: SrcLoc,): IrExpr | null {
+    if (bi.module !== "fs" || bi.member !== "_toUnixTimestamp") return null;
+    if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) return null;
+    const raw = L.lowerExpr(expr.arguments[0]!);
+    if (raw.type.kind === "dyn" || raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+      const arg: IrExpr = raw.type.kind === "dyn" ? raw : { kind: "dynFrom", value: raw, type: DYN, loc };
+      return { kind: "libCall", fn: "fs.toUnixTimestamp", args: [arg], type: F64, loc };
+    }
+    return null;
+  }
+
   export function lowerBuiltinModuleCall(L: Lowerer, expr: ts.CallExpression,
     bi: { module: string; member: string },
     fn: BuiltinModuleFn,
