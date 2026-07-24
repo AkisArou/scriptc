@@ -114,6 +114,11 @@ static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
      * for a bare promise is "[object Promise]". */
     scr_jb_puts(b, "[object Promise]");
     return;
+  case SCR_DYN_JSVAL:
+    /* The engine's own ToString (a bridged failure leaves the exception
+     * pending and appends nothing — the loud path). */
+    scr_dyn_isl_tostr_buf(b, d);
+    return;
   }
 }
 
@@ -186,6 +191,12 @@ static ScrDyn *dyn_call_cb(ScrDyn *cb, ScrDyn *item, size_t i, ScrDyn *recv) {
 static bool dyn_cb_check(ScrDyn *const *args, size_t argc) {
   ScrDyn *cb = argc > 0 ? args[0] : scr_dyn_undefined();
   if (cb->kind == SCR_DYN_FUNC) return true;
+  if (cb->kind == SCR_DYN_JSVAL) {
+    /* An engine callback may well be callable — "is not a function"
+     * would be a wrong claim. Loud fence (lane dyn-routing-ops). */
+    scr_dyn_isl_fence(cb, "callback calls");
+    return false;
+  }
   ScrJsonBuf b;
   scr_jb_init(&b);
   scr_dyn_display_buf(&b, cb);
@@ -323,6 +334,20 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
    * loudly. */
   if (recv->kind == SCR_DYN_HANDLE) {
     return scr_dynh_dispatch(recv, method, args, argc, what);
+  }
+
+  /* Island-held receivers: the engine's own prototypes would run these
+   * (JS-exact) — lane dyn-routing-ops routes them through
+   * scr_jsval_call_method; until then, the loud ladder with the method
+   * named, never "is not a function" (a wrong claim for real methods). */
+  if (recv->kind == SCR_DYN_JSVAL) {
+    ScrJsonBuf b;
+    scr_jb_init(&b);
+    scr_jb_puts(&b, "calling '");
+    scr_jb_puts(&b, method);
+    scr_jb_puts(&b, "' on an island value held in 'unknown' is not supported yet");
+    scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
+    return NULL;
   }
 
   /* OBJ: the own member calls (own properties shadow prototypes in JS
@@ -598,6 +623,11 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
  * (DOM properties are plain data properties — SEMANTICS.md); get/set
  * throw the loud unsupported Error, never a silent drop. */
 ScrDyn *scr_dyn_define_props(ScrDyn *target, ScrDyn *descs) {
+  /* Island-held operands ARE objects to Node — the non-object TypeError
+   * below would be a wrong claim. Loud fence (lane dyn-routing-ops). */
+  scr_dyn_isl_fence(target, "Object.defineProperties");
+  if (!scr_exc_pending()) scr_dyn_isl_fence(descs, "Object.defineProperties");
+  if (scr_exc_pending()) return NULL;
   if (target->kind != SCR_DYN_OBJ && target->kind != SCR_DYN_FUNC) {
     scr_throw_error_msg(SCR_ERR_TYPE, "Object.defineProperties called on non-object",
                         strlen("Object.defineProperties called on non-object"));

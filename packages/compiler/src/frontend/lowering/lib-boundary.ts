@@ -73,6 +73,12 @@ function coerceSlot(L: Lowerer, arg: IrExpr, want: IrType, what: string): IrExpr
   // a lying handle throws the catchable TypeError. Targets outside the
   // exit set keep the named fence.
   if (arg.type.kind === "jsval" && want.kind !== "jsval") {
+    // A jsval into a dyn slot: the by-reference jsval→DOM wrap — the same
+    // edge coerceToExpected converts (dyn slots accept engine values;
+    // world unification's engine-handle kind).
+    if (want.kind === "dyn") {
+      return { kind: "dynFromJsval", value: arg, type: DYN, loc: arg.loc };
+    }
     if (L.boundaryExitSafe(want)) {
       return { kind: "jsExit", value: arg, type: want, loc: arg.loc };
     }

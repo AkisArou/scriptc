@@ -439,6 +439,11 @@ static bool scr_assert_dyn_same_value(const ScrDyn *a, const ScrDyn *b) {
     case SCR_DYN_PROMISE:
       /* Identity is the PROMISE (the strict_eq stance). */
       return a->v.promise == b->v.promise;
+    case SCR_DYN_JSVAL:
+      /* Identity is the ENGINE VALUE (the strict_eq stance): the engine's
+       * === — exact for SameValue too, since wrap-time scalar
+       * normalization leaves only reference kinds behind. */
+      return a == b || scr_dyn_jsval_ops()->strict_eq(a->v.jsval.cell, b->v.jsval.cell);
     default:
       return a == b; /* ARR/OBJ/BYTES: node identity */
   }
@@ -501,6 +506,14 @@ static bool scr_assert_dyn_deep_eq(const ScrDyn *a, const ScrDyn *b) {
       }
       return true;
     }
+    case SCR_DYN_JSVAL:
+      /* Node walks the engine objects structurally — a walk this runtime
+       * cannot run. Engine-identical answers true honestly; anything else
+       * throws the loud ladder (scr_assert_eq_dyn propagates the pending
+       * exception INSTEAD of minting an AssertionError). */
+      if (scr_dyn_jsval_ops()->strict_eq(a->v.jsval.cell, b->v.jsval.cell)) return true;
+      scr_dyn_isl_fence(a, "deepStrictEqual");
+      return false;
   }
   return false; /* unreachable */
 }
@@ -651,6 +664,14 @@ static void scr_assert_cf_value(ScrAssertBuf *b, const ScrDyn *d, size_t indent,
       ab_char(b, '\n');
       scr_assert_cf_pad(b, indent);
       ab_char(b, ']');
+      return;
+    }
+    case SCR_DYN_JSVAL: {
+      /* The depth-elided placeholder (the handle stance): Node renders
+       * the engine object's property dump — internals this walker does
+       * not model; the text only appears inside FAILURE reports, which
+       * already diverge in format. */
+      ab_cstr(b, "[island value]");
       return;
     }
     case SCR_DYN_OBJ: {
@@ -893,7 +914,8 @@ static bool scr_assert_print_myers(ScrAssertBuf *b, const ScrDiffOp *diff, size_
 /* Is this DOM kind `typeof == "object" && != null` to assertion_error.js? */
 static bool scr_assert_dyn_is_object(const ScrDyn *d) {
   return d->kind == SCR_DYN_ARR || d->kind == SCR_DYN_OBJ || d->kind == SCR_DYN_BYTES ||
-         d->kind == SCR_DYN_HANDLE || d->kind == SCR_DYN_PROMISE;
+         d->kind == SCR_DYN_HANDLE || d->kind == SCR_DYN_PROMISE ||
+         scr_dyn_isl_typeof_is(d, "object"); /* engine-held: the engine's typeof */
 }
 
 /* The failing EQUAL operators over dyn operands — createErrDiff. */
@@ -1065,6 +1087,10 @@ static void scr_assert_dyn_neq_fail(ScrDyn *a, bool deep, ScrStr *msg, bool has_
 void scr_assert_eq_dyn(ScrDyn *a, ScrDyn *b, bool negated, bool deep,
                        ScrStr *msg, bool has_msg) {
   bool same = deep ? scr_assert_dyn_deep_eq(a, b) : scr_assert_dyn_same_value(a, b);
+  /* The deep walk's JSVAL arm fences loudly (an island value it cannot
+   * compare structurally): propagate THAT, never a fabricated
+   * AssertionError over a comparison that did not run. */
+  if (scr_exc_pending()) return;
   if ((negated && !same) || (!negated && same)) return;
   if (negated) {
     scr_assert_dyn_neq_fail(a, deep, msg, has_msg);

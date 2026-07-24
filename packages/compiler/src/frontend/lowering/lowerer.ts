@@ -2670,6 +2670,21 @@ export class Lowerer {
       return expr;
     }
     if (expr.type.kind === "jsval" && expected.kind !== "jsval") {
+      // The jsval→DOM crossing (the world unification's engine-handle
+      // kind): an 'any'-typed engine value flowing into an 'unknown'/
+      // 'object'/JS-residue slot wraps BY REFERENCE as the DOM's island
+      // kind — engine scalars normalize to native DOM kinds at wrap time,
+      // typeof/truthiness/String()/=== route to the engine, un-armed DOM
+      // walks fence loudly, and the value unwraps back identity-preserved
+      // (scr_jsval_from_dyn). Monotone under evolution/widening: a value
+      // wraps once at its first dyn edge and stays valid through every
+      // subsequent dyn slot; narrowing never changes representation.
+      // This wrap RETIRES the silent-wrong-answer fence-closure box for
+      // jsval members of DOM object literals (lowerDynObjectLiteral's
+      // coercion lands here first).
+      if (expected.kind === "dyn") {
+        return { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc };
+      }
       // The exit set: everything round-trippable, plus bare undefined-armed
       // unions of JSON-safe data arms (the engine's undefined takes the
       // undefined arm before the JSON detour) — canExitIslandToType.
@@ -5389,6 +5404,11 @@ export class Lowerer {
     // the key; JSON.stringify drops an undefined-valued one, like Node).
     if (value.kind === "unitLit") {
       return { kind: "dynFrom", value, type: DYN, loc: value.loc };
+    }
+    // An ISLAND ('any') value: the by-reference jsval→DOM wrap — the same
+    // edge coerceToExpected converts (dyn slots accept engine values).
+    if (value.type.kind === "jsval") {
+      return { kind: "dynFromJsval", value, type: DYN, loc: value.loc };
     }
     if (!this.dynConvertible(value.type)) {
       this.unsupported(

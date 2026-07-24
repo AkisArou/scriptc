@@ -368,6 +368,11 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       `    /* Object.prototype.toString with the Promise @@toStringTag. */`,
       `    scr_jb_puts(b, "[object Promise]");`,
       `    break;`,
+      `  case SCR_DYN_JSVAL:`,
+      `    /* Island-held: the engine's own ToString (a bridged failure`,
+      `     * leaves the exception pending and appends nothing). */`,
+      `    scr_dyn_isl_tostr_buf(b, d);`,
+      `    break;`,
       `  }`,
       `}`,
       `static ScrStr *${name}(const ScrDyn *d) { /* String(unknown) -> owned (+1) */`,
@@ -918,6 +923,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     E.walkerProtos.push(`${sig}; /* destructuring GetIterator + N steps */`);
     E.walkerDefs.push(
       `${sig} { /* destructuring GetIterator + N steps */`,
+      `  if (d->kind == SCR_DYN_JSVAL) {`,
+      `    /* An engine array IS iterable — the not-iterable TypeError below`,
+      `     * would be a wrong claim. Loud fence (lane dyn-routing-ops). */`,
+      `    scr_dyn_isl_fence(d, "iteration");`,
+      `    return NULL;`,
+      `  }`,
       `  if (d->kind != SCR_DYN_ARR && d->kind != SCR_DYN_STR && d->kind != SCR_DYN_BYTES) {`,
       `    ScrJsonBuf b;`,
       `    scr_jb_init(&b);`,
@@ -1000,6 +1011,13 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     d.push(`  if (d->kind == SCR_DYN_OBJ) {`);
     d.push(`    ScrDyn *m = scr_dyn_obj_get(d, k->data, k->len);`);
     d.push(`    return scr_dyn_retain(m ? m : scr_dyn_undefined());`);
+    d.push(`  }`);
+    d.push(`  if (d->kind == SCR_DYN_JSVAL) {`);
+    d.push(`    /* Island-held: Node reads the real engine property — the`);
+    d.push(`     * undefined tail below would be a silent wrong answer (the`);
+    d.push(`     * retired fence-box bug's .length -> 0). Loud fence until`);
+    d.push(`     * lane dyn-routing-ops routes it through scr_jsval_get_prop. */`);
+    d.push(`    return scr_dyn_isl_key_fence(d, k);`);
     d.push(`  }`);
     d.push(`  if (d->kind == SCR_DYN_HANDLE) {`);
     d.push(`    /* Native handles: the tag's modeled properties (req.url,`);

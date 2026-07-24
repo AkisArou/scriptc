@@ -2617,6 +2617,28 @@ typedef enum {
    * (the dyn→closure stance): a cycle THROUGH a dyn-boxed promise is
    * merely never collected. */
   SCR_DYN_PROMISE,
+  /* An ISLAND (engine-held) value — the jsval→DOM crossing. Never
+   * produced by the parser — it enters the DOM through the gated
+   * constructor scr_dyn_from_jsval (scr_island.c): an 'any'-typed value
+   * flowing into an 'unknown'/'object'/JS-residue slot. Boxes by
+   * REFERENCE (a retained ScrJsval cell). The constructor SCALAR-
+   * NORMALIZES: engine numbers/strings/booleans/null/undefined convert
+   * to the native DOM kinds at wrap time, so JSVAL nodes only ever hold
+   * engine objects, arrays, and functions (plus the symbol/bigint edge —
+   * kinds the DOM cannot represent at all). Identity is the CELL's
+   * engine value: strict equality routes to the engine's === (two wraps
+   * of one engine value compare equal), and scr_jsval_from_dyn unwraps
+   * the SAME cell back (+1) — the boundary is identity-preserving for
+   * engine-born values. typeof/truthiness/String() route to the engine
+   * per use (scr_dyn_jsval_ops); every DOM walk without an armed route
+   * (JSON, structuredClone, deepStrictEqual, inspect, keyed access,
+   * calls, iteration) throws the LOUD "not supported yet" ladder — never
+   * a silent wrong answer. The dyn→cell edge is NOT visible to the cycle
+   * collector (the dyn→closure stance): a cycle DOM → cell → engine
+   * object → host closure → DOM is merely never collected (the
+   * documented cross-boundary-cycle divergence). Enum position: LAST —
+   * the LLVM backend hardcodes the preceding kind numbers. */
+  SCR_DYN_JSVAL,
 } ScrDynKind;
 
 /* The handle-type tags the DOM can carry. The set is deliberately the
@@ -2636,6 +2658,10 @@ typedef enum {
 typedef struct ScrDyn ScrDyn;
 typedef struct ScrBytes ScrBytes; /* full definition below (C11 repeat) */
 typedef struct ScrClosure ScrClosure; /* full definition below (C11 repeat) */
+typedef struct ScrJsval ScrJsval; /* opaque island cell (C11 repeat; the
+                                   * always-linked DOM core never touches
+                                   * its engine value — only the gated ops
+                                   * installed by scr_dyn_from_jsval do) */
 
 /* The compiler-emitted call glue carried by a SCR_DYN_FUNC box: checks the
  * dyn arguments against the boxed closure's declared parameter types (a
@@ -2688,6 +2714,11 @@ struct ScrDyn {
      * emitted converters guarantee it (direct box for promise<dyn>,
      * adapter promise otherwise). */
     ScrPromise *promise;
+    /* SCR_DYN_JSVAL: the retained island cell (engine objects/arrays/
+     * functions only — the constructor scalar-normalizes; see the kind's
+     * comment). Released through the installed ops so this always-linked
+     * core never references the gated island unit. */
+    struct { ScrJsval *cell; } jsval;
   } v;
 };
 
@@ -2943,6 +2974,50 @@ ScrDyn *scr_dyn_new_promise_adapting(ScrPromise *src,
 /* BORROWED peek at the boxed promise; NULL when d is not a promise box. */
 ScrPromise *scr_dyn_promise_of(const ScrDyn *d);
 
+/* ── island values in the DOM (SCR_DYN_JSVAL) ─────────────────────────
+ * Engine routing ops for JSVAL nodes, installed by the gated constructor
+ * (scr_dyn_from_jsval, scr_island.c — the scr_dyn_alloc_promise hook
+ * story: JSVAL nodes exist only after the constructor ran, so the ops
+ * are always installed when a dispatch arm meets the kind, and a
+ * dynamic-free link never references engine symbols). Contracts mirror
+ * the scr_jsval_* entries they route to. */
+typedef struct ScrDynJsvalOps {
+  void (*release)(ScrJsval *cell);
+  ScrStr *(*type_of)(ScrJsval *cell); /* engine typeof; +1, never throws */
+  bool (*truthy)(ScrJsval *cell);     /* engine ToBoolean; never throws */
+  /* String(v) in the engine (the full ToString protocol — user toString
+   * runs, its throw bridges): +1, or NULL with the exception pending. */
+  ScrStr *(*to_str)(ScrJsval *cell);
+  bool (*strict_eq)(ScrJsval *a, ScrJsval *b); /* engine ===; never throws */
+  bool (*is_array)(ScrJsval *cell);   /* Array.isArray, engine-side */
+  bool (*is_error)(ScrJsval *cell);   /* native Error instance, engine-side */
+} ScrDynJsvalOps;
+
+/* The allocator view the gated constructor uses (installs the ops);
+ * ownership of `cell` MOVES in (the caller retains first). */
+ScrDyn *scr_dyn_alloc_jsval(ScrJsval *cell, const ScrDynJsvalOps *ops);
+/* The installed ops (traps on a missing install — impossible unless a
+ * JSVAL node was forged without the constructor). */
+const ScrDynJsvalOps *scr_dyn_jsval_ops(void);
+/* dynTest arms that need the ENGINE's answer on a JSVAL node. Each
+ * answers false for every other kind (callers test unconditionally —
+ * the emitted narrowing tests stay branch-free). Never throw. */
+bool scr_dyn_isl_typeof_is(const ScrDyn *d, const char *name);
+bool scr_dyn_isl_is_array(const ScrDyn *d);
+bool scr_dyn_isl_is_error(const ScrDyn *d);
+/* The JSVAL honesty ladder: when d is a JSVAL node, THROWS the catchable
+ * "<what> on an island value held in 'unknown' is not supported yet"
+ * Error and returns false; every other kind returns false untouched.
+ * Callers gate un-armed operations with it — never a silent wrong
+ * answer (the retired fence-box bug). */
+bool scr_dyn_isl_fence(const ScrDyn *d, const char *what);
+/* The emitted keyed-read fence (sc_dyn_key_get's JSVAL arm): throws
+ * "reading '<k>' on an island value held in 'unknown' is not supported
+ * yet" and returns NULL. d MUST be a JSVAL node. */
+ScrDyn *scr_dyn_isl_key_fence(const ScrDyn *d, const ScrStr *k);
+/* scr_dyn_isl_tostr_buf (the display walkers' JSVAL arm) is declared
+ * with the ScrJsonBuf surface below. */
+
 /* ── the ambient receiver (JS `this` inside listener/callback bodies) ──
  * Node calls a handle's listeners with `this` bound to the emitting
  * handle (server.listen(0, function() { this.address().port })), and a
@@ -3065,6 +3140,12 @@ void scr_jb_put_f64(ScrJsonBuf *b, double v);
  * as \u00XX, everything else (UTF-8 included) verbatim — exactly the JS
  * JSON.stringify escape set for well-formed strings. */
 void scr_jb_put_json_str(ScrJsonBuf *b, const ScrStr *s);
+/* String(v) of a JSVAL node appended into b (the emitted sc_ds display
+ * walkers' arm; scr_dyn_display/to_string route here too): the engine's
+ * ToString. A bridged failure (throwing user toString, a symbol) leaves
+ * the exception PENDING and appends nothing — the loud path, never a
+ * fabricated rendering. */
+void scr_dyn_isl_tostr_buf(ScrJsonBuf *b, const ScrDyn *d);
 /* JSON-serialize a DOM value into the buffer — the sc_jw_* walker for the
  * dyn leaves the compiler cannot type: object members holding undefined
  * DROP, array slots holding undefined print null (exactly Node). */
@@ -3740,8 +3821,20 @@ ScrJsval *scr_jsval_from_str(const ScrStr *s);
 ScrJsval *scr_jsval_from_json(const ScrStr *json);
 /* A CHECKED-DYNAMIC (DOM) value entering the island — deep copy, data
  * kinds only (a boxed function/handle/promise throws the catchable
- * TypeError). NULL with a pending exception on failure. Borrows d. */
+ * TypeError). A JSVAL node unwraps to its OWN cell (+1) — an engine
+ * value that crossed into the DOM and back is the SAME engine value, by
+ * reference (nested JSVAL members embed their engine values directly).
+ * NULL with a pending exception on failure. Borrows d. */
 ScrJsval *scr_jsval_from_dyn(const ScrDyn *d);
+
+/* The jsval→DOM crossing (the IR's dynFromJsval): wraps an island value
+ * as a SCR_DYN_JSVAL node, SCALAR-NORMALIZING first — engine numbers/
+ * strings/booleans/null/undefined convert to the native DOM kinds (the
+ * strict exits cannot fail on engine-reported scalars), so JSVAL nodes
+ * only ever hold engine objects/arrays/functions (and the symbol/bigint
+ * edge). Installs the DOM's engine-routing ops on first use. Borrows
+ * the cell (retains it into the node); +1 out; never throws. */
+ScrDyn *scr_dyn_from_jsval(ScrJsval *cell);
 
 /* Engine operations. Arithmetic yields a fresh cell (NULL = bridged);
  * comparisons yield 0/1 (-1 = bridged); truthy/not never fail. */

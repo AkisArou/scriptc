@@ -1028,6 +1028,10 @@ static JSValue isl_from_dyn(const ScrDyn *d) {
     }
     return obj;
   }
+  case SCR_DYN_JSVAL:
+    /* An engine value riding inside DOM data: embed the SAME engine
+     * value by reference — the identity round trip, member position. */
+    return JS_DupValue(isl_ctx, d->v.jsval.cell->v);
   default:
     /* Pre-scanned away — defensive. */
     return JS_ThrowTypeError(isl_ctx, "unmarshalable dynamic value");
@@ -1035,6 +1039,11 @@ static JSValue isl_from_dyn(const ScrDyn *d) {
 }
 
 ScrJsval *scr_jsval_from_dyn(const ScrDyn *d) {
+  /* The identity round trip: an engine value that crossed into the DOM
+   * (scr_dyn_from_jsval) and back is the SAME engine value, by reference
+   * — the one direction that used to throw (SEMANTICS.md supersedes the
+   * "one unbridgeable mix"). */
+  if (d->kind == SCR_DYN_JSVAL) return scr_jsval_retain(d->v.jsval.cell);
   isl_entry();
   const char *bad = isl_dyn_unmarshalable(d);
   if (bad != NULL) {
@@ -1050,6 +1059,60 @@ ScrJsval *scr_jsval_from_dyn(const ScrDyn *d) {
     return NULL;
   }
   return isl_cell_new(v);
+}
+
+/* ── the jsval→DOM crossing (SCR_DYN_JSVAL's constructor + ops) ───────
+ * The reverse direction: an 'any'-typed engine value flowing into an
+ * 'unknown'/'object'/JS-residue slot wraps BY REFERENCE as the DOM's
+ * island kind. The DOM core (scr_json.c) stays island-free — it routes
+ * the armed operations (typeof/truthy/String()/===, the narrowing
+ * tests) through these installed ops; everything un-armed there keeps
+ * the loud "not supported yet" ladder. */
+
+static void isl_dynjs_release(ScrJsval *cell) { scr_jsval_release(cell); }
+static ScrStr *isl_dynjs_typeof(ScrJsval *cell) { return scr_jsval_typeof(cell); }
+static bool isl_dynjs_truthy(ScrJsval *cell) { return scr_jsval_truthy(cell) != 0; }
+static ScrStr *isl_dynjs_to_str(ScrJsval *cell) { return scr_jsval_to_str(cell); }
+static bool isl_dynjs_strict_eq(ScrJsval *a, ScrJsval *b) {
+  /* The engine's === through the pinned helper (a bridged surprise
+   * answers false — strict equality itself cannot throw in JS). */
+  return scr_jsval_cmp(SCR_JSOP_EQ, a, b) == 1;
+}
+static bool isl_dynjs_is_array(ScrJsval *cell) { return JS_IsArray(cell->v); }
+static bool isl_dynjs_is_error(ScrJsval *cell) { return JS_IsError(cell->v); }
+
+static const ScrDynJsvalOps isl_dynjs_ops = {
+  isl_dynjs_release,
+  isl_dynjs_typeof,
+  isl_dynjs_truthy,
+  isl_dynjs_to_str,
+  isl_dynjs_strict_eq,
+  isl_dynjs_is_array,
+  isl_dynjs_is_error,
+};
+
+ScrDyn *scr_dyn_from_jsval(ScrJsval *cell) {
+  isl_entry();
+  JSValue v = cell->v;
+  /* Scalar normalization: engine-reported scalars become the NATIVE DOM
+   * kinds at wrap time (the strict exits cannot fail on them), so every
+   * scalar path in the DOM core — ===, typeof tests, JSON of leaves —
+   * stays untouched and the JSVAL kind never competes with them. */
+  if (JS_IsUndefined(v)) return scr_dyn_retain(scr_dyn_undefined());
+  if (JS_IsNull(v)) return scr_dyn_new_null();
+  if (JS_IsBool(v)) return scr_dyn_new_bool(JS_ToBool(isl_ctx, v) > 0);
+  if (JS_IsNumber(v)) {
+    double num = 0;
+    JS_ToFloat64(isl_ctx, &num, v); /* cannot fail on a number */
+    return scr_dyn_new_num(num);
+  }
+  if (JS_IsString(v)) {
+    ScrStr *s = isl_js_to_str(v); /* cannot bridge on a string */
+    ScrDyn *d = scr_dyn_new_str(s);
+    scr_str_release(s);
+    return d;
+  }
+  return scr_dyn_alloc_jsval(scr_jsval_retain(cell), &isl_dynjs_ops);
 }
 
 /* ── operators (through the pinned prelude helpers) ───────────────────── */
