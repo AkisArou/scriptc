@@ -20,6 +20,22 @@ function mint() {
 }
 const eng = mint();
 
+/** @returns {any} */
+function mintLoader() {
+  return {
+    /** @returns {Promise<any>} */
+    one: async (x) => ({ got: `${x}` }),
+  };
+}
+const loader = mintLoader();
+
+// the loadPlugins shape: Promise.all over a NON-literal any[] argument,
+// through an INFERRED Promise<any[]> return — the bridge's array payload
+// exits Array.isArray-gated by reference at the settle
+function loadAll(xs = []) {
+  return Promise.all(xs.map((x) => loader.one(x)));
+}
+
 /** @returns {Promise<any[]>} */
 async function loadOthers(xs = []) {
   return xs.map((x) => ({ name: `${x}` }));
@@ -46,5 +62,8 @@ async function main(...args) {
     ).flat(),
   };
   console.log(`len ${args[0].plugins.length} first ${args[0].plugins[0].name} second ${args[0].plugins[1].name}`);
+
+  const got = await loadAll(["a", "b"]);
+  console.log(`all ${got.length} ${got[0].got} ${got[1].got}`);
 }
 void main({ plugins: ["p1"] });

@@ -4544,13 +4544,17 @@ function validateFunction(
       case "jsBridgePromise": {
         checkExpr(e.value);
         expectType(e.value, JSVAL, "jsBridgePromise operand");
-        // The settled engine value crosses as a HANDLE (or not at all):
-        // the bridge never converts payloads — typed uses exit later.
+        // The settled engine value crosses as a HANDLE (or not at all) —
+        // plus the ONE converting payload: an `any[]`-declared
+        // fulfillment exits Array.isArray-gated by reference AT THE
+        // SETTLE (SCR_ISLP_JSVAL_ARR); every other typed use exits later.
         if (
           e.type.kind !== "promise" ||
-          (e.type.inner.kind !== "jsval" && e.type.inner.kind !== "void")
+          (e.type.inner.kind !== "jsval" &&
+            e.type.inner.kind !== "void" &&
+            !(e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"))
         ) {
-          err("jsBridgePromise must be a promise of jsval or void", e.loc);
+          err("jsBridgePromise must be a promise of jsval, void, or jsval-element array", e.loc);
         }
         break;
       }

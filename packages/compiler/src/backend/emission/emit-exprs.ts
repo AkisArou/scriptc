@@ -6407,7 +6407,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const payload =
           e.type.kind === "promise" && e.type.inner.kind === "void"
             ? "SCR_ISLP_VOID"
-            : "SCR_ISLP_JSVAL";
+            : e.type.kind === "promise" && e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"
+              ? "SCR_ISLP_JSVAL_ARR" // `any[]` fulfillment: the Array.isArray-gated by-reference exit at settle
+              : "SCR_ISLP_JSVAL";
         return E.fallibleTemp(e.type, `scr_jsval_bridge_promise(${v.name}, ${payload})`);
       }
       default: {

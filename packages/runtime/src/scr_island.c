@@ -2159,6 +2159,20 @@ static JSValue isl_bridge_settle(JSContext *ctx, JSValueConst this_val, int argc
       /* fulfill_ref takes the +1 cell; awaiters retain their own out. */
       scr_promise_fulfill_ref(b->p, isl_cell_new(JS_DupValue(ctx, v)),
                                scr_jsval_retain_v, scr_jsval_release_v, NULL);
+    } else if (b->payload == SCR_ISLP_JSVAL_ARR) {
+      /* An `any[]`-declared fulfillment (the inferred loadPlugins return):
+       * the engine array exits Array.isArray-gated, elements BY REFERENCE
+       * (the jsval-element-array exit). A lying fulfillment (non-array)
+       * REJECTS the static promise with the boundary TypeError —
+       * trust-but-verify at the settle, like every dyn→static edge. */
+      ScrJsval *cell = isl_cell_new(JS_DupValue(ctx, v));
+      ScrArr *arr = scr_jsval_exit_jsval_arr(cell);
+      scr_jsval_release(cell);
+      if (!arr) {
+        scr_promise_reject_pending(b->p);
+      } else {
+        scr_promise_fulfill_ref(b->p, arr, scr_arr_retain_v, scr_arr_release_v, NULL);
+      }
     } else {
       scr_promise_fulfill_void(b->p);
     }

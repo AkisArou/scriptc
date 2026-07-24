@@ -2729,6 +2729,22 @@ export class Lowerer {
       if (expected.kind === "dyn") {
         return { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc };
       }
+      // An island value flowing into a PROMISE-typed slot (the inferred
+      // `loadPlugins` return — `Promise.all(...)` lowered engine-side
+      // against a Promise<any[]> inference): the island→static promise
+      // bridge — the engine promise settles a fresh static promise (void
+      // fulfillments drop, `any[]`-declared fulfillments exit
+      // Array.isArray-gated by reference at the settle, 'any' parks as an
+      // island handle). Only inner shapes the bridge can deliver take the
+      // arm; the rest keep the exit fence with the type named.
+      if (
+        expected.kind === "promise" &&
+        (expected.inner.kind === "void" ||
+          expected.inner.kind === "jsval" ||
+          (expected.inner.kind === "array" && expected.inner.elem.kind === "jsval"))
+      ) {
+        return { kind: "jsBridgePromise", value: expr, type: expected, loc: expr.loc };
+      }
       // The exit set: everything round-trippable, plus bare undefined-armed
       // unions of JSON-safe data arms (the engine's undefined takes the
       // undefined arm before the JSON detour) — canExitIslandToType.

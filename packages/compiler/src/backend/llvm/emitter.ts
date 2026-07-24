@@ -6224,7 +6224,9 @@ class LlEmitter {
         const payload =
           e.type.kind === "promise" && e.type.inner.kind === "void"
             ? 0 // SCR_ISLP_VOID
-            : 4; // SCR_ISLP_JSVAL
+            : e.type.kind === "promise" && e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"
+              ? 5 // SCR_ISLP_JSVAL_ARR: the Array.isArray-gated by-reference exit at settle
+              : 4; // SCR_ISLP_JSVAL
         this.declare(`declare ptr @scr_jsval_bridge_promise(ptr, i32)`);
         const t = B.tmp();
         B.line(`${t} = call ptr @scr_jsval_bridge_promise(ptr ${v.name}, i32 ${payload})`);

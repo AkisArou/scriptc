@@ -6154,6 +6154,32 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
         );
       }
       const entries = L.lowerExpr(argNode);
+      // A NON-literal island argument (`Promise.all(plugins.map((p) =>
+      // loadPlugin(p)))` — the loadPlugins shape, where the checker
+      // spells `any[]`): the ENGINE's own Promise.all runs over the
+      // marshaled array (an 'any' value passes through; an `any[]` value
+      // lifts per element by reference), the result staying an island
+      // value the static side awaits through the island→static bridge.
+      if (
+        entries.type.kind === "jsval" ||
+        (entries.type.kind === "array" && entries.type.elem.kind === "jsval")
+      ) {
+        const diagsBefore = L.diags.length;
+        try {
+          const arg = L.jsvalIn(entries, argNode);
+          return {
+            kind: "jsOp",
+            op: "callMethod",
+            name: "all",
+            args: [{ kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc }, arg],
+            type: JSVAL,
+            loc,
+          };
+        } catch (err) {
+          if (!(err instanceof PoisonError)) throw err;
+          L.diags.splice(diagsBefore);
+        }
+      }
       if (entries.type.kind !== "array" || entries.type.elem.kind !== "promise") {
         // The heterogeneous-literal case: the checker's tuple overload
         // types the literal as a TUPLE of promises (a tuple-flagged record
