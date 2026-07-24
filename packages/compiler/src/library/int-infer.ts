@@ -52,7 +52,12 @@
  * class range: i64 ⇒ ±(2^53−1), u64 ⇒ [0, 2^53−1], the u8/u32/i32
  * plumbing classes their C ranges); a call RESULT of a declared integer
  * return is likewise assumed whole-in-range (its own function's returns
- * are checked). External calls of the same slots are the wrapper's
+ * are checked). A declared RECORD FIELD works the same way: every write
+ * into the field (construction or assignment, in any function) is
+ * checked, and a read of the field is assumed whole-in-class-range —
+ * which is what makes `count: model.count + 1` a RANGE refusal (the
+ * unbounded counter may leave ±(2^53 − 1)) rather than a spurious
+ * NaN complaint. External calls of the same slots are the wrapper's
  * business (inbound integer parameters range-check at the marshalled
  * edge — index.ts assembles the host-contract trap). Undeclared function
  * boundaries stay TOP — the obligations are the contract; the strategy
@@ -1327,6 +1332,18 @@ class FnAnalyzer {
           const slot = slotMap?.get(f.name);
           if (slot !== undefined && f.value.type.kind === "f64") this.emit(v, slot.path, slot.cls, f.value.loc);
         }
+        return { ...TOP };
+      }
+      case "recordGet": {
+        // A declared record-field slot is an assumption on the read side,
+        // exactly like a declared parameter inside its callee: every write
+        // into the field discharged the class's obligations, so the value
+        // read back is whole and in class range (the read that lets
+        // `model.count + 1` refuse RANGE — the unbounded-counter teaching
+        // — instead of a spurious may-be-NaN wholeness refusal).
+        this.evalExpr(e.obj, env);
+        const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
+        if (slot !== undefined && e.type.kind === "f64") return classSeed(slot.cls);
         return { ...TOP };
       }
       default: {

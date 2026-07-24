@@ -464,7 +464,7 @@ export function validateSidecar(doc: unknown): string[] {
   } else {
     const declared = new Set<string>();
     for (const e of integerSlots as unknown[]) {
-      if (!isDict(e) || typeof e["slot"] !== "string" || e["class"] !== "i64") {
+      if (!isDict(e) || typeof e["slot"] !== "string" || (e["class"] !== "i64" && e["class"] !== "u64")) {
         bad("V1", "integer_slots carries a malformed entry");
         continue;
       }
