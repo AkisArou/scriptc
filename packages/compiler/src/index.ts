@@ -1077,8 +1077,16 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         targetPlatform: buildTargetPlatform(),
         // The profile-mapped exports are called from OUTSIDE the graph:
         // they seed reachability beside the entry's top level (an
-        // executable build would dead-strip an uncalled export).
-        libRoots: profile.exports.map((e) => e.export),
+        // executable build would dead-strip an uncalled export). A helper
+        // with a declared integer slot (ask 4) seeds too: its attestation
+        // must cover a COMPILED body, never a dead-stripped vacuity — the
+        // sidecar advertises the slot's class, so the proof must exist.
+        libRoots: [
+          ...profile.exports.map((e) => e.export),
+          ...(profile.sidecar?.integerSlots ?? [])
+            .map((s) => /^helpers\.([^.]+)\.(?:params\[\d+\]|return)$/.exec(s.slot)?.[1])
+            .filter((n): n is string => n !== undefined),
+        ],
       });
     } catch (e) {
       if (!isCheckerPanic(e)) throw e;
