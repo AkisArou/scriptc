@@ -864,9 +864,15 @@ static void scr_net_sock_buffer(ScrNetSocket *s, const char *data, size_t len) {
  * dead or ended write half (Node fires 'error' there; this slice drops —
  * SEMANTICS.md documents the bound). */
 static void scr_net_sock_write_raw(ScrNetSocket *s, const char *data, size_t len) {
-  if (s->fd < 0 || s->wr_ending || s->close_emitted || len == 0) return;
+  /* A socket whose dial hasn't STARTED yet (the agent's deferred dial,
+   * the caller-lookup wait) has no fd but is logically connecting —
+   * bytes buffer and flush at establishment like any mid-connect write. */
+  bool pre_dial = s->fd < 0 && (s->dial_deferred || s->lookup_wait) &&
+                  !s->wr_ending && !s->close_emitted;
+  if (!pre_dial && (s->fd < 0 || s->wr_ending || s->close_emitted)) return;
+  if (len == 0) return;
   s->bytes_written += len; /* accepted bytes (Node counts buffered ones too) */
-  if (s->connecting || s->wlen > s->whead || (s->tops && !s->t_est)) {
+  if (pre_dial || s->connecting || s->wlen > s->whead || (s->tops && !s->t_est)) {
     /* mid-connect and mid-handshake bytes buffer; the flush after
      * 'connect'/establishment sends them */
     scr_net_sock_buffer(s, data, len);
