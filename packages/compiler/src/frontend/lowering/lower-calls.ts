@@ -7661,7 +7661,20 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     const unit = nullishValueUnitOf(L, sym);
     if (unit === null) return null;
     const mapped = L.mapTypeOf(L.checker.getTypeOfSymbol(sym));
-    if (mapped !== null && mapped.kind !== "record") return null;
+    if (mapped !== null) {
+      // Only the EMPTY interned shape qualifies among record mappings —
+      // the all-generic-signature interface (`I<A & B>`) whose struct has
+      // no slot at all. A record with DATA fields (`const value: { inner:
+      // number | string } = null as any`) keeps its real storage and
+      // every ordinary lowering: its reads flow through positions (comma
+      // chains, call arguments) the no-storage read paths never claim,
+      // so claiming the binding would fence working programs.
+      if (mapped.kind !== "record") return null;
+      const shape = L.shapes.get(mapped.shapeId);
+      if (!shape || shape.fields.length > 0 || shape.tuple !== undefined || shape.indexValue !== undefined) {
+        return null;
+      }
+    }
     return unit;
   }
 

@@ -17,7 +17,7 @@ import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingG
 import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
-import { ambientUndefVarRootOf, collectNamespaceStmt, nsPathPrefix } from "./lower-namespaces.js";
+import { collectNamespaceStmt, nsPathPrefix, trapDeclRootOf } from "./lower-namespaces.js";
 import { collectExpandoMembers } from "./lower-expando.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import type { ClassInfo } from "./lower-classes.js";
@@ -1021,7 +1021,8 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             // binding enters trapBindings (registered HERE, before any body
             // lowers, so hoisted-function references resolve the trap), and
             // the statement lowering emits the throw at its position.
-            if (decl.initializer !== undefined && ambientUndefVarRootOf(L, decl.initializer) !== null) {
+            // Written bindings keep ordinary storage (trapDeclRootOf).
+            if (trapDeclRootOf(L, decl) !== null) {
               for (const nameNode of boundIdentifiersOf(decl.name)) {
                 const sym = L.checker.getSymbolAtLocation(nameNode);
                 if (sym) L.trapBindings.add(sym);

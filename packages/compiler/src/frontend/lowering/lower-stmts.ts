@@ -11,7 +11,7 @@ import { enforceLibBoundary } from "./lib-boundary.js";
 import { cjsExportAssignmentOf, cjsExportDiscardReason, cjsExportTargetLiteral, isCjsJsFile, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
 import { COMPOUND_ASSIGN_OPS, CompoundOp, STR_METHODS, UNSUPPORTED_STMT, isStdlibMember, sideEffectFreeOptionValue, stdlibGlobalAliasDecl, stdlibGlobalNameOf } from "./surfaces.js";
 import { isProvenanceSourceFile } from "../provenance-registry.js";
-import { ambientUndefVarRootOf, lowerImportEquals, nsUndefRead, nsWritableTarget } from "./lower-namespaces.js";
+import { ambientUndefVarRootOf, lowerImportEquals, nsUndefRead, nsWritableTarget, trapDeclRootOf } from "./lower-namespaces.js";
 import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.js";
 import { ForOfIterProjection, lowerForOfArrayIter, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape, strCharsCall } from "./lower-containers.js";
 import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, deadUnmappableBinding, implicitLocalFnInfoOf, implicitLocalFnNodeOf, nullishExprUnitOf, nullishGenericBindingUnitOf, recordKeysArrayCall } from "./lower-calls.js";
@@ -2662,8 +2662,10 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // statement lowers to exactly that throw; the binding registers as a
     // trap (references lower to the same never-reached shape), and no
     // storage or type mapping is needed for a value that never exists.
-    if (decl.initializer !== undefined) {
-      const root = ambientUndefVarRootOf(L, decl.initializer);
+    // Written bindings keep ordinary storage (trapDeclRootOf) — the
+    // initializer read still lowers to the root's throw below.
+    {
+      const root = trapDeclRootOf(L, decl);
       if (root !== null) {
         for (const nameNode of boundIdentifiersOf(decl.name)) {
           const sym = L.checker.getSymbolAtLocation(nameNode);
@@ -2671,7 +2673,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         }
         return {
           kind: "exprStmt",
-          expr: nsUndefRead(L, root.text, decl.initializer, F64),
+          expr: nsUndefRead(L, root.text, decl.initializer!, F64),
           loc: locOf(decl),
         };
       }
