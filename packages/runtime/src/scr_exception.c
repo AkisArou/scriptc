@@ -181,7 +181,10 @@ ScrStr *scr_caught_to_string(const ScrCaught *c) {
  * contract-shaped failure exactly like a trap. Render the same "Uncaught
  * ..." first line the executable epilogue prints (scr_exc_print_uncaught's
  * arms, buffer-writing), release the payload, and route the text through
- * the trap funnel — one failure channel at the boundary. */
+ * the trap funnel — one failure channel at the boundary. The funnel
+ * (scr_library.c) assembles the rendered line into the structured
+ * trap-teaching form (code SC4013, the trapping entry's symbol) before
+ * delivery; only the 0x01-led verbatim path below bypasses assembly. */
 void scr_library_check_exc(void) {
   if (!scr_exc_pending()) return;
   static char buf[1024]; /* the message is copied out before the payload dies */

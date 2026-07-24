@@ -16,10 +16,15 @@
  *                           state, run-once guards all reset)
  *   K5  trap-to-sink-once   the range trap's message + address exactly
  *                           once, no process termination from compiled
- *                           code; a trap during init routes the same
+ *                           code — structured (SC4014, the trapping
+ *                           export's symbol, default text, no remediation
+ *                           on this no-teachings profile); a trap during
+ *                           init routes the same with the init symbol
  *   K6  pre-registration    a trap before sink registration aborts
- *   K7  escaped-throw       "Uncaught ..." reaches the sink; the poisoned
- *                           library aborts every later entry deterministically
+ *   K7  escaped-throw       "Uncaught ..." reaches the sink as the
+ *                           structured message's text (SC4013); the
+ *                           poisoned library aborts every later entry
+ *                           deterministically
  *   K8  ambient-audit       no undefined refs to sigaction/signal/
  *                           pthread_create/atexit anywhere in the archive
  *   K9  refusals            SC4002/SC4003/SC4004/SC4005/SC4007 with the
@@ -32,9 +37,18 @@
  *                           code 0x1F symbol 0x1F remediation (exact byte
  *                           layout through the spec's parse rule), an
  *                           0x01-led throw rides the sink verbatim (no
- *                           "Uncaught " prefix), and baseline messages
- *                           keep a printable first byte — the marker's
- *                           unambiguity pin
+ *                           "Uncaught " prefix), and the human text always
+ *                           LEADS the buffer with a printable byte — the
+ *                           plain-text-degradation pin the marker's
+ *                           unambiguity rests on
+ *   K12 runtime-trap family runtime-DETECTED traps arrive structured
+ *                           unconditionally: a teachings-declared profile
+ *                           overlays its text/remediation for the trap
+ *                           kind's code (SC4014 here); an undeclared code
+ *                           keeps the baseline human line as field 0 and
+ *                           carries NO remediation field (fields=3) — the
+ *                           no-teachings default is pinned by K5/K7 over
+ *                           the teachings-free traps profile
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -239,9 +253,19 @@ recall: a,b
     const run = runProbe(probe, ["trap"]);
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
+    // The runtime-detected trap arrives structured (K12's no-teachings
+    // default): field 0 is the runtime's own line unchanged (its newline
+    // intact), the code names the range kind, the symbol names the export
+    // the host called, and no remediation field exists on this
+    // teachings-free profile.
     expect(run.stdout).toBe(
       `traps ready
-sink[1]: scriptc: RangeError: array index 9 out of bounds (length 3)
+sink[1]:
+text=[scriptc: RangeError: array index 9 out of bounds (length 3)
+]
+code=[SC4014]
+symbol=[kp_boom]
+fields=3 text_printable=1
 addr: nonzero
 survived, sink_calls=1
 `,
@@ -254,9 +278,16 @@ survived, sink_calls=1
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
+    // Init counts as an entry: the structured message names the init
+    // symbol itself as the trapping entry.
     expect(run.stdout).toBe(
       `about to trap
-sink[1]: scriptc: RangeError: array index 7 out of bounds (length 3)
+sink[1]:
+text=[scriptc: RangeError: array index 7 out of bounds (length 3)
+]
+code=[SC4014]
+symbol=[ki_init]
+fields=3 text_printable=1
 survived init trap, sink_calls=1
 `,
     );
@@ -268,9 +299,17 @@ survived init trap, sink_calls=1
     const run = runProbe(probe, ["throw"]);
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
+    // The escaped-exception renderer's "Uncaught ..." line is the
+    // structured message's text; the code names the escaped-exception
+    // kind and the symbol the entry the throw escaped through.
     expect(run.stdout).toBe(
       `traps ready
-sink[1]: Uncaught Error: kaput
+sink[1]:
+text=[Uncaught Error: kaput
+]
+code=[SC4013]
+symbol=[kp_fail]
+fields=3 text_printable=1
 addr: nonzero
 survived, sink_calls=1
 `,
@@ -316,7 +355,7 @@ text=[inbound bytes length does not fit the marshalling class — the host and t
 code=[SC4012]
 symbol=[kv_wrap]
 remediation=[pass the buffer's true byte length; lengths must stay below 2^53]
-fields=4
+fields=4 text_printable=1
 survived, sink_calls=1
 `,
     );
@@ -338,7 +377,7 @@ text=[tag 99 does not name a bare message arm of this core]
 code=[NS1207]
 symbol=[kv_dispatch]
 remediation=[rebuild the app so the compiled core and the host shim come from one build]
-fields=4
+fields=4 text_printable=1
 survived, sink_calls=1
 `,
     );
@@ -358,35 +397,57 @@ sink[1]:
 text=[string-thrown teaching]
 code=[NS0002]
 symbol=[kv_teach_str]
-fields=3
+fields=3 text_printable=1
 survived, sink_calls=1
 `,
     );
   });
 
-  test("K11: baseline sink messages keep a printable first byte", async () => {
+  /* ── K12: the runtime-detected trap family arrives structured ────────── */
+
+  test("K12: a runtime trap overlays the profile's teaching and remediation", async () => {
     const { archive, outDir } = await buildLibrary("teach", emission);
     const probe = buildProbe("teach", archive, outDir);
-    // A runtime trap and an ordinary escaped throw both stay baseline —
-    // whole-buffer human text, first byte printable (>= 0x20) — the
-    // guarantee msg[0] == 0x01 versioning rests on.
-    const trap = runProbe(probe, ["baseline-trap"]);
-    expect(trap.signal).toBeNull();
-    expect(trap.status).toBe(0);
-    expect(trap.stdout).toBe(
+    // The profile declares SC4014 (range) teaching + remediation: the
+    // funnel-assembled message carries the overlay text as field 0 (its
+    // authored newline intact), the range code, the trapping export's
+    // symbol, and the remediation as the fourth field. text_printable=1
+    // is the plain-text-degradation pin: the human text still LEADS the
+    // buffer with a printable byte.
+    const run = runProbe(probe, ["runtime-trap"]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(
       `teach ready
 sink[1]:
-baseline printable=1 text=scriptc: RangeError: array index 9 out of bounds (length 3)
+text=[this core read past the end of a collection — an index the embedding fed it does not exist
+]
+code=[SC4014]
+symbol=[kv_boom_runtime]
+remediation=[clamp indices to the collection's length before calling into the core]
+fields=4 text_printable=1
 survived, sink_calls=1
 `,
     );
-    const thrown = runProbe(probe, ["baseline-throw"]);
-    expect(thrown.signal).toBeNull();
-    expect(thrown.status).toBe(0);
-    expect(thrown.stdout).toBe(
+  });
+
+  test("K12: an undeclared code keeps the default text and no remediation", async () => {
+    const { archive, outDir } = await buildLibrary("teach", emission);
+    const probe = buildProbe("teach", archive, outDir);
+    // Nothing is declared for the escaped-exception code (SC4013): field 0
+    // is the baseline "Uncaught ..." line unchanged and the whole
+    // remediation field is absent — exactly the spec's worked example 2.
+    const run = runProbe(probe, ["runtime-throw"]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(
       `teach ready
 sink[1]:
-baseline printable=1 text=Uncaught Error: kaput
+text=[Uncaught Error: kaput
+]
+code=[SC4013]
+symbol=[kv_fail_runtime]
+fields=3 text_printable=1
 survived, sink_calls=1
 `,
     );
@@ -411,7 +472,7 @@ survived, sink_calls=1
     expect(trap.stdout).toContain("survived, sink_calls=1");
     const thrown = runProbe(probe, ["throw"]);
     expect(thrown.status).toBe(0);
-    expect(thrown.stdout).toContain("sink[1]: Uncaught Error: kaput");
+    expect(thrown.stdout).toContain("text=[Uncaught Error: kaput");
   });
 });
 

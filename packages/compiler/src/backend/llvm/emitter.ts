@@ -1150,7 +1150,7 @@ class LlEmitter {
     // LIBRARY mode: the runtime entry points the generated library
     // symbols delegate to — declared before the extern block flushes.
     if (this.mod.lib !== undefined) {
-      this.declare(`declare void @scr_library_entry(i1 zeroext)`);
+      this.declare(`declare void @scr_library_entry(i1 zeroext, ptr)`);
       this.declare(`declare void @scr_library_reset()`);
       this.declare(`declare void @scr_library_check_exc()`);
       this.declare(`declare void @scr_library_set_sink(ptr, ptr)`);
@@ -1434,6 +1434,46 @@ class LlEmitter {
     const lib = this.mod.lib!;
     const autoReset = lib.resultResetSymbol === null;
     const out: string[] = [``, `; ── library-mode entries (profile: ${lib.profileName}) ──`, ``];
+    // Every entry's prologue records its external symbol in the funnel's
+    // current-entry slot (structured trap-teaching field 2); the symbols
+    // live as internal constants, one per entry.
+    const symConst = (sym: string): string => `@sc_lib_sym_${sym}`;
+    const emitSymConst = (sym: string): void => {
+      out.push(`${symConst(sym)} = internal constant [${Buffer.byteLength(sym, "utf8") + 1} x i8] c"${llStrBytes(sym)}"`);
+    };
+    emitSymConst(lib.initSymbol);
+    if (lib.resultResetSymbol !== null) emitSymConst(lib.resultResetSymbol);
+    if (lib.collectSymbol !== null) emitSymConst(lib.collectSymbol);
+    for (const e of lib.exports) emitSymConst(e.symbol);
+    out.push(``);
+    // The runtime detected-trap overlay table (scr_runtime.h declares it,
+    // the library trap funnel consults it): flat code/teaching/remediation
+    // triples, one per runtime trap code (SC4013–SC4019) the profile
+    // declares text for — the same data the C emission defines, so the
+    // funnel-assembled sink message is emission-invariant by construction.
+    // The empty table still defines the symbols the funnel links against.
+    const ovlCells: string[] = [];
+    lib.trapOverlays.forEach((o, i) => {
+      const cell = (name: string, text: string | undefined): void => {
+        if (text === undefined) {
+          ovlCells.push("ptr null");
+          return;
+        }
+        const sym = `@sc_lib_ovl_${i}_${name}`;
+        out.push(`${sym} = internal constant [${Buffer.byteLength(text, "utf8") + 1} x i8] c"${llStrBytes(text)}"`);
+        ovlCells.push(`ptr ${sym}`);
+      };
+      cell("code", o.code);
+      cell("teach", o.teaching);
+      cell("rem", o.remediation);
+    });
+    out.push(
+      ovlCells.length === 0
+        ? `@scr_library_trap_overlays = constant [1 x ptr] zeroinitializer`
+        : `@scr_library_trap_overlays = constant [${ovlCells.length} x ptr] [${ovlCells.join(", ")}]`,
+      `@scr_library_trap_overlays_len = constant i64 ${lib.trapOverlays.length}`,
+      ``,
+    );
     // The init entry: full deterministic reset-and-reevaluate. Program
     // globals release and zero first (run-once guards included), then the
     // runtime session reset, the error-vt interval stamps verbatim from
@@ -1446,7 +1486,7 @@ class LlEmitter {
     out.push(
       `define void @${lib.initSymbol}() ${FN_ATTRS} {`,
       `entry:`,
-      `  call void @scr_library_entry(i1 zeroext true) ; init always resets the result arena`,
+      `  call void @scr_library_entry(i1 zeroext true, ptr ${symConst(lib.initSymbol)}) ; init always resets the result arena`,
       ...globalReleaseLines("ci"),
       ...zeroStores,
       `  call void @scr_library_reset()`,
@@ -1487,7 +1527,7 @@ class LlEmitter {
       out.push(
         `define void @${lib.resultResetSymbol}() ${FN_ATTRS} {`,
         `entry:`,
-        `  call void @scr_library_entry(i1 zeroext false)`,
+        `  call void @scr_library_entry(i1 zeroext false, ptr ${symConst(lib.resultResetSymbol)})`,
         `  call void @scr_library_arena_reset()`,
         `  ret void`,
         `}`,
@@ -1498,7 +1538,7 @@ class LlEmitter {
       out.push(
         `define void @${lib.collectSymbol}() ${FN_ATTRS} {`,
         `entry:`,
-        `  call void @scr_library_entry(i1 zeroext false)`,
+        `  call void @scr_library_entry(i1 zeroext false, ptr ${symConst(lib.collectSymbol)})`,
         `  call void @scr_library_collect() ; arena reset + a full cycle collection`,
         `  ret void`,
         `}`,
@@ -1507,7 +1547,7 @@ class LlEmitter {
     }
     for (const e of lib.exports) {
       const params: string[] = [];
-      const body: string[] = [`  call void @scr_library_entry(i1 zeroext ${autoReset ? "true" : "false"})`];
+      const body: string[] = [`  call void @scr_library_entry(i1 zeroext ${autoReset ? "true" : "false"}, ptr ${symConst(e.symbol)})`];
       const args: string[] = [];
       if (e.inboundBytesTrap !== undefined) {
         // The bytes-in helper's trap message: the compiler-assembled

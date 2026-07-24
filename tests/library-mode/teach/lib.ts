@@ -13,9 +13,15 @@
 // newline. The embedded code is embedder-prefixed (NS space), exactly the
 // code-space ruling.
 //
-// `boomBaseline` and `failBaseline` trap and throw the ordinary way: their
-// sink messages stay baseline, and the probe pins the printable-first-byte
-// guarantee the 0x01 marker's unambiguity rests on.
+// `boomRuntime` and `failRuntime` trap and throw the ordinary way — the
+// RUNTIME-detected family: the funnel assembles their sink messages into
+// the structured form unconditionally. This profile declares a teaching
+// and remediation for the range code (SC4014), so `boomRuntime`'s message
+// overlays both; the escaped-exception code (SC4013) declares neither, so
+// `failRuntime`'s message keeps the baseline "Uncaught ..." line as its
+// text and carries NO remediation field. The probe also pins that the
+// human text still LEADS the buffer with a printable byte — the plain-text
+// degradation the 0x01 marker's unambiguity rests on.
 export function wrap(b: Uint8Array): number {
   return b.length;
 }
@@ -30,12 +36,12 @@ export function teachStr(): number {
   throw "\u0001string-thrown teaching\u001fNS0002\u001fkv_teach_str";
 }
 
-export function boomBaseline(i: number): number {
+export function boomRuntime(i: number): number {
   const xs = [1, 2, 3];
   return xs[i]!;
 }
 
-export function failBaseline(): number {
+export function failRuntime(): number {
   throw new Error("kaput");
 }
 

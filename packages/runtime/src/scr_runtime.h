@@ -48,8 +48,10 @@ void scr_init(void);
  * the host-registered panic sink and abort only as the last resort: before
  * registration, or if the sink returns (the ruled host-contract violation —
  * a conforming sink longjmps to a host frame BELOW the entry, never back
- * into library frames). Messages keep their trailing newline in both lanes so
- * the funnel is a pure indirection over identical bytes. */
+ * into library frames). Messages keep their trailing newline in both lanes;
+ * the library funnel additionally assembles every DETECTED trap into the
+ * structured trap-teaching form before delivery (a message that already
+ * begins with the 0x01 marker passes verbatim) — see ScrLibSinkFn below. */
 _Noreturn void scr_trap(const char *msg);
 _Noreturn void scr_trap_fmt(const char *fmt, ...);
 
@@ -82,7 +84,17 @@ typedef struct ScrBytes ScrBytes;
  * diagnostic code, 2 the trapping symbol as the host linked it, 3 the
  * remediation; a missing or empty field means none; ignore any field past
  * the fourth. Fields are (pointer, length) — never assume NUL termination.
- * A plain-text host may print the whole buffer: the teaching leads it. */
+ * A plain-text host may print the whole buffer: the teaching leads it.
+ *
+ * Every trap the runtime DETECTS arrives structured: the funnel assembles
+ * the baseline human line into field 0 unchanged, a stable code for the
+ * trap kind (the compiler registry's SC4013–SC4019 runtime family,
+ * classified in scr_library.c), the entry symbol recorded by the trapping
+ * entry's prologue, and the profile's remediation for that code when the
+ * program TU's overlay table declares one (the whole fourth field is
+ * absent otherwise). A message that already begins with the marker — a
+ * facade-authored structured throw, or the wrapper's compile-time-
+ * assembled SC4012 contract trap — passes through byte-for-byte. */
 typedef void (*ScrLibSinkFn)(void *ctx, const uint8_t *msg, size_t msg_len,
                               uint64_t address);
 void scr_library_set_sink(ScrLibSinkFn fn, void *ctx); /* latest wins */
@@ -90,8 +102,15 @@ void scr_library_set_sink(ScrLibSinkFn fn, void *ctx); /* latest wins */
 /* Entry prologue: aborts deterministically when the library is poisoned (a
  * trap already fired — no profile entry may run again; recovery is process
  * restart). reset_arena additionally drops the result arena (the
- * auto-reset posture, and the reset/collect entries' shared body). */
-void scr_library_entry(bool reset_arena);
+ * auto-reset posture, and the reset/collect entries' shared body).
+ * entry_symbol is the generated entry's external symbol exactly as the
+ * host linked it (a static string in the program TU): the prologue records
+ * it in the funnel's current-entry slot so a detected trap's structured
+ * message can name the trapping entry — sound as a single static slot
+ * because exactly one core is ever live and entries never nest. Init and
+ * the mode entries (reset, collect) record theirs too; the identity
+ * getters and sink registration touch no runtime and never trap. */
+void scr_library_entry(bool reset_arena, const char *entry_symbol);
 void scr_library_arena_reset(void);
 /* The mode-provided collect entry's body: arena reset + a full cycle
  * collection (snapshot-invariant by construction — collection frees only
@@ -123,6 +142,16 @@ void scr_library_check_exc(void);
  * given bytes to the sink — the verbatim path above needs it because a
  * structured message is length-delimited, never NUL-scanned. */
 _Noreturn void scr_trap_len(const char *msg, size_t len);
+
+/* The runtime-trap overlay table, DEFINED by the generated program TU
+ * (both emissions emit identical data) and consumed by the funnel when it
+ * assembles a detected trap's structured message: flat triples of
+ * (code, teaching-or-NULL, remediation-or-NULL), one per runtime trap code
+ * (SC4013–SC4019 family) the profile declares text for; _len counts
+ * triples. A declared teaching replaces the baseline human line as field 0;
+ * a declared remediation becomes the optional fourth field. */
+extern const char *const scr_library_trap_overlays[];
+extern const size_t scr_library_trap_overlays_len;
 
 /* Marshalling helpers the generated wrappers call (both emissions share
  * these bodies, which is how the two lanes stay identical by

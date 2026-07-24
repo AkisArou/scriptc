@@ -858,9 +858,26 @@ export class CEmitter {
     if (globals.length === 0) out.push(`  /* no globals */`);
     out.push(`}`, ``);
 
+    // The runtime detected-trap overlay table (scr_runtime.h declares it,
+    // the library trap funnel consults it): flat code/teaching/remediation
+    // triples, one per runtime trap code (SC4013–SC4019) the profile
+    // declares text for. NULL keeps the funnel's default for that cell;
+    // the empty table still defines the symbols the funnel links against.
+    if (lib.trapOverlays.length === 0) {
+      out.push(`const char *const scr_library_trap_overlays[] = { NULL };`);
+    } else {
+      const cells = lib.trapOverlays.flatMap((o) => [
+        cStringLiteral(Buffer.from(o.code, "utf8")),
+        o.teaching !== undefined ? cStringLiteral(Buffer.from(o.teaching, "utf8")) : "NULL",
+        o.remediation !== undefined ? cStringLiteral(Buffer.from(o.remediation, "utf8")) : "NULL",
+      ]);
+      out.push(`const char *const scr_library_trap_overlays[] = { ${cells.join(", ")} };`);
+    }
+    out.push(`const size_t scr_library_trap_overlays_len = ${lib.trapOverlays.length};`, ``);
+
     out.push(
       `void ${lib.initSymbol}(void) {`,
-      `  scr_library_entry(true); /* init always resets the result arena */`,
+      `  scr_library_entry(true, "${lib.initSymbol}"); /* init always resets the result arena */`,
       `  sc_lib_release_globals();`,
       `  scr_library_reset();`,
       ...this.errorVtStampLines(),
@@ -893,7 +910,7 @@ export class CEmitter {
     if (lib.resultResetSymbol !== null) {
       out.push(
         `void ${lib.resultResetSymbol}(void) {`,
-        `  scr_library_entry(false);`,
+        `  scr_library_entry(false, "${lib.resultResetSymbol}");`,
         `  scr_library_arena_reset();`,
         `}`,
         ``,
@@ -902,7 +919,7 @@ export class CEmitter {
     if (lib.collectSymbol !== null) {
       out.push(
         `void ${lib.collectSymbol}(void) {`,
-        `  scr_library_entry(false);`,
+        `  scr_library_entry(false, "${lib.collectSymbol}");`,
         `  scr_library_collect(); /* arena reset + a full cycle collection */`,
         `}`,
         ``,
@@ -953,7 +970,10 @@ export class CEmitter {
       const retType = e.returns === "f64" ? "double" : e.returns === "bool" ? "uint8_t" : "void";
       const call = `${mangleFunction(e.fnName)}(${args.join(", ")})`;
       out.push(`${retType} ${e.symbol}(${params.length > 0 ? params.join(", ") : "void"}) {`);
-      out.push(`  scr_library_entry(${autoReset ? "true" : "false"});`);
+      // The prologue records this entry's symbol in the funnel's
+      // current-entry slot: a detected trap anywhere below names the
+      // entry the host called (structured trap-teaching field 2).
+      out.push(`  scr_library_entry(${autoReset ? "true" : "false"}, "${e.symbol}");`);
       switch (e.returns) {
         case "void":
           out.push(`  ${call};`, `  scr_library_check_exc();`);
