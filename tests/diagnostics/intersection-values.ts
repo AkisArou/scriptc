@@ -3,7 +3,11 @@
 // '%call' records — what fences is the remainder, like a primitive part
 // against an object part (inhabited only per the checker, never buildable).
 
+// The producer has a BODY (an ambient `declare function` would compile to
+// Node's ReferenceError at the call instead — the declare-erasure stance).
 type Branded = number & { __brand: "id" };
-declare function mint(): Branded;
+function mint(): Branded {
+  return 1 as Branded;
+}
 const kept = mint();
 console.log(kept);

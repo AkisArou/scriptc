@@ -709,6 +709,29 @@ export class Lowerer {
   /** Per-symbol result of the never-reassigned file scan
    * (bindingNeverReassigned — object-literal generic-method receivers). */
   readonly neverReassignedCache = new Map<ts.Symbol, boolean>();
+  /** TRAP bindings: declarations whose initializer provably throws before
+   * producing a value (its chain roots at an ambient-undefined name —
+   * ambientUndefVarRootOf). Module init unwinds at the declaration, so no
+   * reference to the binding can ever execute; the statement lowers to the
+   * root's throw, no storage exists, and references lower to the same
+   * trap shape (never reached — sound whatever the type). */
+  readonly trapBindings = new Set<ts.Symbol>();
+  /** NULLISH bindings of unmappable (generic-signature) types: `const i:
+   * I<A & B> = null as any` — the binding provably holds null/undefined
+   * forever (every write's RHS is nullish too), so no storage exists and
+   * each READ knows the value. Member reads and method calls through one
+   * lower to Node's exact TypeError ("Cannot read properties of null
+   * (reading 'fn')"); nullish-to-nullish flows lower to nothing. The map
+   * answers which unit the binding holds (the TypeError names it). Null
+   * entries cache probed non-qualifiers. */
+  readonly nullishBindings = new Map<ts.Symbol, "null" | "undefined" | null>();
+  /** DEAD bindings of unmappable types: never READ anywhere in the
+   * program, declared with no initializer or a value-only one (a function
+   * literal), every write's RHS side-effect-free. Node materializes the
+   * value and drops it — zero observable effect — so the declaration and
+   * its writes lower to nothing, and no type fence fires for a value the
+   * program never consumes. */
+  readonly deadBindings = new Set<ts.Symbol>();
   /** IMPLICIT-ANY function-value bindings (npm-static JS — `const knownBy
    * = (cmd) => ...`), by their VariableDeclaration: the registered info,
    * or null for probed non-qualifiers (implicitLocalFnNodeOf). */

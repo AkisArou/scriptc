@@ -73,30 +73,23 @@ generic-value-bindings.ts:26:10 - error SC2004: uses of 'inner' inherit the bloc
 
   hint: the declaration of 'inner' did not compile — fix the diagnostic reported there and these sites clear with it
 
-generic-value-bindings.ts:32:13 - error SC1030: the generic-signature binding 'ambient' (its type keeps type parameters and the declaration has no initializer — no function body exists to monomorphize, so nothing can pin a concrete signature) is not supported yet
+generic-value-bindings.ts:39:13 - error SC1090: results that are themselves generic functions ('<U>(y: U) => string' keeps its type parameters — no call-site instantiation pins them, and the returned value would need the producing call's frame; restructure to one generic function taking all arguments) are not supported yet
 
-  31 | declare const ambient: undefined | (<T>(f: (a: T) => T) => T);
-  32 | console.log(ambient?.((n: number) => n) === undefined);
-     |             ^~~~~~~
-  33 | 
-
-generic-value-bindings.ts:37:13 - error SC1090: results that are themselves generic functions ('<U>(y: U) => string' keeps its type parameters — no call-site instantiation pins them, and the returned value would need the producing call's frame; restructure to one generic function taking all arguments) are not supported yet
-
-  36 | const curried = <T>(x: T) => <U>(y: U): string => `${x}|${y}`;
-  37 | console.log(curried(1)("a"));
+  38 | const curried = <T>(x: T) => <U>(y: U): string => `${x}|${y}`;
+  39 | console.log(curried(1)("a"));
      |             ^~~~~~~~~~
-  38 | 
+  40 | 
 
-generic-value-bindings.ts:49:15 - error SC1090: calls of the generic method 'm' through this receiver (no compiled declaration with a body resolves statically here — ambient 'declare class' and interface-only methods are signature-only, and only class, static, and object-literal generic methods with bodies monomorphize) is not supported yet
+generic-value-bindings.ts:51:15 - error SC1090: calls of the generic method 'm' through this receiver (no compiled declaration with a body resolves statically here — ambient 'declare class' and interface-only methods are signature-only, and only class, static, and object-literal generic methods with bodies monomorphize) is not supported yet
 
-  48 | function throughParam(a: Amb): void {
-  49 |   console.log(a.m(4));
+  50 | function throughParam(a: Amb): void {
+  51 |   console.log(a.m(4));
      |               ^~~~~~
-  50 | }
+  52 | }
 
-generic-value-bindings.ts:54:14 - error SC1090: generic arrow/function expressions outside a never-reassigned module-scope binding (only `const f = <T>(x: T) => ...` bindings and top-level generic function declarations monomorphize) is not supported yet
+generic-value-bindings.ts:56:14 - error SC1090: generic arrow/function expressions outside a never-reassigned module-scope binding (only `const f = <T>(x: T) => ...` bindings and top-level generic function declarations monomorphize) is not supported yet
 
-  53 | // A generic lambda outside any monomorphizable home (an IIFE).
-  54 | console.log((<T>(x: T): T => x)(5));
+  55 | // A generic lambda outside any monomorphizable home (an IIFE).
+  56 | console.log((<T>(x: T): T => x)(5));
      |              ^~~~~~~~~~~~~~~~~
-  55 | 
+  57 | 

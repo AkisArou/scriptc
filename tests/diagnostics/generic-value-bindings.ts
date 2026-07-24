@@ -27,7 +27,9 @@ function outer(): number {
 }
 console.log(outer());
 
-// An ambient binding of generic function type has no body to monomorphize.
+// An ambient binding of generic function type now compiles to Node's exact
+// ReferenceError at the access (the declare-erasure stance — no diagnostic
+// here; the optional chain cannot guard the root's own throw).
 declare const ambient: undefined | (<T>(f: (a: T) => T) => T);
 console.log(ambient?.((n: number) => n) === undefined);
 

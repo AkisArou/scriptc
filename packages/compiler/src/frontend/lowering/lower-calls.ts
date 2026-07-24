@@ -2471,6 +2471,58 @@ export function islandPrimitiveExit(L: Lowerer, call: ts.CallExpression, result:
 export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     const loc = locOf(expr);
 
+    // A call whose chain ROOTS at an ambient-undefined name (`declare
+    // const value: Y | undefined; value?.foo("a")`, `declare function
+    // chain...; chain(o).mapValues(f).value()`, a trap binding's read):
+    // Node evaluates the root FIRST and throws the catchable
+    // ReferenceError before any member, type argument, or argument runs —
+    // the whole call IS that throw, typed by the use site (arguments
+    // never lower; Node never evaluates them). Claimed before every
+    // intrinsic and dispatch path: no lowering can answer differently
+    // when the root read itself is the crash.
+    {
+      const root = ambientUndefVarRootOf(L, expr);
+      if (root !== null) {
+        const mapped = L.mapTypeOf(L.typeOf(expr));
+        const t =
+          mapped && mapped.kind !== "void" && !L.typeNamesUnregisteredClass(mapped)
+            ? mapped
+            : (contextualUndefReadType(L, expr) ?? F64);
+        return nsUndefRead(L, root.text, expr, t);
+      }
+    }
+    // A method call through a NULLISH binding (`const i: I<A & B> = null
+    // as any; i.fn(...)` — the receiver provably holds null/undefined
+    // forever): the member READ throws Node's exact TypeError before any
+    // argument evaluates — the whole call lowers to that throw. Claimed
+    // when the receiver's type has no mapping (no other story exists) or
+    // the member is a generic signature (the alternative is the
+    // interface-dispatch fence — the runtime truth is this throw).
+    if (
+      ts.isPropertyAccessExpression(expr.expression) &&
+      ts.isIdentifier(expr.expression.expression) &&
+      expr.expression.questionDotToken === undefined
+    ) {
+      const recvSym = L.resolveValueSymbol(expr.expression.expression);
+      const unit = nullishValueUnitOf(L, recvSym);
+      if (unit !== null) {
+        const recvUnmappable =
+          recvSym !== null && L.mapTypeOf(L.checker.getTypeOfSymbol(recvSym)) === null;
+        const propSym = L.checker.getPropertyOfType(
+          L.typeOf(expr.expression.expression),
+          expr.expression.name.text,
+        );
+        const genericMember =
+          propSym !== undefined && propSym !== null &&
+          isGenericCallableMemberType(L.checker.getTypeOfSymbol(propSym), L.checker);
+        if (recvUnmappable || genericMember) {
+          const mapped = L.mapTypeOf(L.typeOf(expr));
+          const t = mapped && mapped.kind !== "void" && !L.typeNamesUnregisteredClass(mapped) ? mapped : F64;
+          return nodeThrowExpr(1, "", `Cannot read properties of ${unit} (reading '${expr.expression.name.text}')`, t, loc);
+        }
+      }
+    }
+
     // `process.getuid?.()` — intercepted BEFORE the optional-chain
     // machinery (the member always exists on a POSIX target, so the
     // optional call IS the call; `process.getuid` itself has no value
@@ -7298,6 +7350,260 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     return !written;
   }
 
+/** Strips the value-preserving wrappers off an expression: parens,
+   * non-null assertions, `as`/`satisfies`/angle-bracket casts. What
+   * remains is the expression that actually evaluates. */
+  export function stripValueWrappers(e: ts.Expression): ts.Expression {
+    let v: ts.Expression = e;
+    for (;;) {
+      if (
+        ts.isParenthesizedExpression(v) || ts.isNonNullExpression(v) ||
+        ts.isAsExpression(v) || ts.isSatisfiesExpression(v) || ts.isTypeAssertion(v)
+      ) {
+        v = v.expression;
+        continue;
+      }
+      return v;
+    }
+  }
+
+/** The nullish unit `e` provably evaluates to: a bare null/undefined
+   * literal (assertion-wrapped — `null as any`, `null!`), or a read of a
+   * registered NULLISH binding (nullishGenericBindingUnitOf). Null when
+   * the value could be anything else. */
+  export function nullishExprUnitOf(L: Lowerer, e: ts.Expression): "null" | "undefined" | null {
+    const v = stripValueWrappers(e);
+    if (v.kind === ts.SyntaxKind.NullKeyword) return "null";
+    if (ts.isIdentifier(v)) {
+      if (v.text === "undefined" && (L.typeOf(v).flags & ts.TypeFlags.Undefined) !== 0) {
+        return "undefined";
+      }
+      return nullishValueUnitOf(L, L.resolveValueSymbol(v));
+    }
+    return null;
+  }
+
+/** The nullish unit a binding provably holds FOREVER, by VALUE alone: its
+   * initializer is nullish (`const i: I<A & B> = null as any`) and every
+   * write in its declaring file is nullish too (`a = b` where b is
+   * another nullish binding). No type condition — callers add their own
+   * (nullishGenericBindingUnitOf gates the no-storage family on
+   * unmappable types; the generic-method call path rescues its fence with
+   * the value fact alone). Cached per symbol; the pre-seeded null entry
+   * guards probe cycles (mutually-assigned bindings resolve link by link,
+   * declaration order). */
+  export function nullishValueUnitOf(L: Lowerer, sym: ts.Symbol | null): "null" | "undefined" | null {
+    if (!sym) return null;
+    const cached = L.nullishBindings.get(sym);
+    if (cached !== undefined) return cached;
+    L.nullishBindings.set(sym, null); // cycle guard: self-referential probes answer non-qualifying
+    const decl = L.checker.valueDeclarationOf(sym);
+    if (
+      !decl || !ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name) ||
+      decl.getSourceFile().isDeclarationFile || decl.initializer === undefined
+    ) {
+      return null;
+    }
+    const unit = nullishExprUnitOf(L, decl.initializer);
+    if (unit === null) return null;
+    // Bindings with a CHECKED-DYNAMIC fallback (`const maybe: any =
+    // undefined`, JS inference residue) keep that story: the dyn world
+    // already holds null/undefined correctly and serves every read form
+    // (optional chains included) — this family exists for types with NO
+    // other home.
+    if (dynFallbackType(L, decl.name, L.checker.getTypeOfSymbol(sym)) !== null) return null;
+    if (!allWritesNullish(L, sym, decl)) return null;
+    // A use inside a class HERITAGE clause (`class X extends Mixin(...)`)
+    // declines the whole family: heritage resolution is structural (the
+    // mixin machinery can pin the instantiation from the ARGUMENT class
+    // expression without ever reading the callee binding), so a claimed
+    // nullish callee would compile a working class where Node throws
+    // "Mixin is not a function" evaluating the extends expression. The
+    // declaration keeps its type fence instead.
+    if (usedInHeritageClause(L, sym)) return null;
+    L.nullishBindings.set(sym, unit);
+    return unit;
+  }
+
+/** True when any identifier resolving to `sym` sits inside a class
+   * heritage clause anywhere in the program. */
+  function usedInHeritageClause(L: Lowerer, sym: ts.Symbol): boolean {
+    const symText = sym.name;
+    let found = false;
+    const visit = (n: ts.Node): void => {
+      if (found) return;
+      if (
+        ts.isIdentifier(n) && n.text === symText &&
+        L.resolveValueSymbol(n) === sym
+      ) {
+        for (let p: ts.Node | undefined = n.parent; p !== undefined && !ts.isSourceFile(p); p = p.parent) {
+          if (ts.isHeritageClause(p)) {
+            found = true;
+            return;
+          }
+        }
+        return;
+      }
+      n.forEachChild(visit);
+    };
+    for (const file of L.program.getSourceFiles()) {
+      if (found) break;
+      if (file.isDeclarationFile) continue;
+      file.forEachChild(visit);
+    }
+    return found;
+  }
+
+/** nullishValueUnitOf gated on a declared type that CANNOT hold the
+   * value — the NO-STORAGE family: an unmappable type has no other story,
+   * and a RECORD-mapped one (`const i: I<A & B> = null as any` — an
+   * interface whose members are all generic signatures interns an empty
+   * shape) has a slot null can never inhabit, so storing would throw the
+   * representation error where Node stores null silently. Either way the
+   * declaration emits nothing and reads know the value. Null-tolerant
+   * mappings (unions with a null/undefined arm, dyn) keep their real
+   * storage and every ordinary lowering. */
+  export function nullishGenericBindingUnitOf(L: Lowerer, sym: ts.Symbol | null): "null" | "undefined" | null {
+    if (!sym) return null;
+    // The VALUE probe first — it is purely syntactic, so no checker type
+    // query runs for the overwhelmingly common non-nullish declarations
+    // (a query can even panic upstream — the 1e999 checker bug).
+    const unit = nullishValueUnitOf(L, sym);
+    if (unit === null) return null;
+    const mapped = L.mapTypeOf(L.checker.getTypeOfSymbol(sym));
+    if (mapped !== null && mapped.kind !== "record") return null;
+    return unit;
+  }
+
+/** True when every write of `sym` in its declaring file is a plain `x =
+   * <nullish>` assignment — the discipline that keeps a nullish binding's
+   * value knowable. Compound assignments, ++/--, for-in/of cursors, and
+   * destructuring targets all disqualify. */
+  function allWritesNullish(L: Lowerer, sym: ts.Symbol, decl: ts.Node): boolean {
+    const symText = sym.name;
+    const namesSym = (e: ts.Node): boolean =>
+      ts.isIdentifier(e) && e.text === symText && L.resolveValueSymbol(e) === sym;
+    let ok = true;
+    const visit = (n: ts.Node): void => {
+      if (!ok) return;
+      if (ts.isBinaryExpression(n)) {
+        const k = n.operatorToken.kind;
+        if (k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment) {
+          let lhs: ts.Expression = n.left;
+          while (ts.isParenthesizedExpression(lhs)) lhs = lhs.expression;
+          if (namesSym(lhs)) {
+            if (k !== ts.SyntaxKind.EqualsToken || nullishExprUnitOf(L, n.right) === null) ok = false;
+          } else if (ts.isArrayLiteralExpression(lhs) || ts.isObjectLiteralExpression(lhs)) {
+            const walk = (m: ts.Node): void => {
+              if (namesSym(m)) ok = false;
+              else m.forEachChild(walk);
+            };
+            walk(lhs);
+          }
+        }
+      } else if (
+        (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+        (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
+      ) {
+        let op: ts.Expression = n.operand as ts.Expression;
+        while (ts.isParenthesizedExpression(op)) op = op.expression;
+        if (namesSym(op)) ok = false;
+      } else if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) {
+        let t: ts.Node = n.initializer;
+        while (ts.isParenthesizedExpression(t as ts.Expression)) t = (t as ts.ParenthesizedExpression).expression;
+        if (namesSym(t)) ok = false;
+      }
+      n.forEachChild(visit);
+    };
+    decl.getSourceFile().forEachChild(visit);
+    return ok;
+  }
+
+/** A VALUE-ONLY expression: materializing it has no observable effect
+   * beyond the value itself — function/arrow literals, class-free
+   * literals, nullish units. The dead-binding rule's purity test: Node
+   * builds the value and drops it, so skipping the build entirely is
+   * unobservable. Bare identifier reads stay OUT (a read above a `let`
+   * declaration is a TDZ throw Node WOULD serve). */
+  function sideEffectFreeValueExpr(L: Lowerer, e: ts.Expression): boolean {
+    const v = stripValueWrappers(e);
+    if (ts.isArrowFunction(v) || ts.isFunctionExpression(v)) return true;
+    if (ts.isLiteralExpression(v) || v.kind === ts.SyntaxKind.NullKeyword ||
+        v.kind === ts.SyntaxKind.TrueKeyword || v.kind === ts.SyntaxKind.FalseKeyword) {
+      return true;
+    }
+    if (ts.isIdentifier(v) && v.text === "undefined" && (L.typeOf(v).flags & ts.TypeFlags.Undefined) !== 0) {
+      return true;
+    }
+    return false;
+  }
+
+/** True when `sym` — a binding whose type has NO static mapping — is DEAD:
+   * never read anywhere in the program, not exported through a specifier,
+   * declared with no initializer or a side-effect-free one, and written
+   * (if at all) only by plain assignments of side-effect-free values. Node
+   * materializes those values and drops them — zero observable effect —
+   * so the declaration and its writes lower to NOTHING instead of fencing
+   * on a type the program never consumes (`var xs2: typeof Array;`, the
+   * write-only `var f2: { <T, U>(x: T, y: U): T }`). TS program files
+   * only: JS bindings keep their checked-dynamic fallbacks. Positive
+   * answers register in L.deadBindings (the assignment lowering skips
+   * writes by the same set). */
+  export function deadUnmappableBinding(L: Lowerer, sym: ts.Symbol | null, decl: ts.VariableDeclaration): boolean {
+    if (!sym) return false;
+    if (L.deadBindings.has(sym)) return true;
+    if (!ts.isIdentifier(decl.name)) return false;
+    const sf = decl.getSourceFile();
+    if (sf.isDeclarationFile || isJsSourceFile(sf)) return false;
+    if (decl.initializer !== undefined && !sideEffectFreeValueExpr(L, decl.initializer)) return false;
+    // Exported bindings stay out: a library build's exports are consumed
+    // from outside the graph, and export specifiers double as reads.
+    if (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Export) return false;
+    // The type gate LAST among the cheap checks: querying the checker for
+    // a type is the expensive step (and can panic upstream — the 1e999
+    // bug), so only survivors of the syntactic filters pay it. Mappable
+    // types keep their real storage.
+    if (L.mapTypeOf(L.checker.getTypeOfSymbol(sym)) !== null) return false;
+    const symText = sym.name;
+    const namesSym = (e: ts.Node): boolean =>
+      ts.isIdentifier(e) && e.text === symText && L.resolveValueSymbol(e) === sym;
+    let dead = true;
+    const visit = (n: ts.Node): void => {
+      if (!dead) return;
+      if (ts.isIdentifier(n) && n.text === symText) {
+        // Declaration-name occurrences are not reads.
+        if (n.parent !== undefined && ts.isVariableDeclaration(n.parent) && n.parent.name === n) {
+          n.forEachChild(visit);
+          return;
+        }
+        // A plain-assignment LHS is a WRITE — dead only when the RHS
+        // builds no observable effect (the value is dropped with the
+        // binding).
+        const p = n.parent;
+        if (
+          p !== undefined && ts.isBinaryExpression(p) &&
+          p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === n
+        ) {
+          if (!namesSym(n)) return;
+          if (!sideEffectFreeValueExpr(L, p.right)) dead = false;
+          return;
+        }
+        // Import/export specifiers, and every other occurrence, count as
+        // reads.
+        if (namesSym(n)) dead = false;
+        return;
+      }
+      n.forEachChild(visit);
+    };
+    for (const file of L.program.getSourceFiles()) {
+      if (!dead) break;
+      if (file.isDeclarationFile) continue;
+      file.forEachChild(visit);
+    }
+    if (dead) L.deadBindings.add(sym);
+    return dead;
+  }
+
 /** The generic function-like INITIALIZER behind a binding declaration —
    * `const f = <T>(x: T) => x` or `const f = function g<T>(x: T) {...}`
    * (parens stripped). Null when the declaration isn't that shape; the
@@ -7305,8 +7611,9 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
    * reassigned) is bindingGenericFnInfoOf's business. */
   export function bindingGenericFnNodeOf(decl: ts.VariableDeclaration): ts.FunctionExpression | ts.ArrowFunction | null {
     if (!ts.isIdentifier(decl.name) || decl.initializer === undefined) return null;
-    let init: ts.Expression = decl.initializer;
-    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    // Assertion wrappers strip like parens: `const r = (<T>(x: T) => x) as
+    // Mapper` evaluates the arrow — the cast only renames its type.
+    const init = stripValueWrappers(decl.initializer);
     if (
       (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) &&
       init.typeParameters !== undefined && init.body !== undefined
@@ -7325,9 +7632,15 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
    * signature. Null when the shape doesn't match (a concrete annotation, a
    * generic arrow — the syntactic probe's case, an overloaded alias). */
   export function bindingContextualGenericFnNodeOf(L: Lowerer, decl: ts.VariableDeclaration): ts.FunctionExpression | ts.ArrowFunction | null {
-    if (!ts.isIdentifier(decl.name) || decl.initializer === undefined || decl.type === undefined) return null;
-    let init: ts.Expression = decl.initializer;
-    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    if (!ts.isIdentifier(decl.name) || decl.initializer === undefined) return null;
+    // The generic signature can arrive as an ANNOTATION or as a type
+    // ASSERTION on the initializer (`var r = < <T>(x: T) => T >((x) => x)`
+    // — the checker contextually types the operand's parameters by the
+    // asserted signature exactly like an annotation would).
+    const asserted =
+      ts.isAsExpression(decl.initializer) || ts.isTypeAssertion(decl.initializer);
+    if (decl.type === undefined && !asserted) return null;
+    const init = stripValueWrappers(decl.initializer);
     if (
       !(ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ||
       init.typeParameters !== undefined || init.body === undefined
@@ -7618,6 +7931,29 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     }
     const found = objLitGenericFnNodeOf(L, propSym);
     if (!found) {
+      // Function.prototype.apply/call/bind spelled through a FUNCTION
+      // receiver: compiled functions are direct calls with no runtime
+      // `this`/arguments object to re-route — name the working spelling
+      // instead of a class-receiver hint (or an SC2020 recitation) no
+      // function value can follow. Before the stdlib decline: these ARE
+      // stdlib members (CallableFunction), but the pointed message is
+      // the honest one.
+      if (
+        (name === "apply" || name === "call" || name === "bind") &&
+        L.checker.getCallSignatures(recvT).length > 0
+      ) {
+        L.unsupported(
+          "SC1090",
+          call,
+          `Function.prototype.${name} on a compiled function value (compiled calls are direct — no runtime 'this' or arguments object exists to re-route; spell the call directly: '${access.expression.getText()}(...)')`,
+        );
+      }
+      // STANDARD-LIBRARY generic members (Promise.then, Object.
+      // defineProperty, Array-augmentation methods) are the lib fence's
+      // story (SC2020, naming the member) — decline so the stdlib
+      // chokepoint downstream reports, instead of an interface-dispatch
+      // recitation about a receiver no user constructed.
+      if (L.isStdlibMember(access)) return null;
       // Interface-declared generic methods dispatch statically, so the
       // receiver's runtime class must be provable — name that discipline
       // instead of the object-literal wording when the method lives on an

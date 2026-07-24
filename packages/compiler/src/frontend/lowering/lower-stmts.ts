@@ -11,10 +11,10 @@ import { enforceLibBoundary } from "./lib-boundary.js";
 import { cjsExportAssignmentOf, cjsExportDiscardReason, cjsExportTargetLiteral, isCjsJsFile, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
 import { COMPOUND_ASSIGN_OPS, CompoundOp, STR_METHODS, UNSUPPORTED_STMT, isStdlibMember, sideEffectFreeOptionValue, stdlibGlobalAliasDecl, stdlibGlobalNameOf } from "./surfaces.js";
 import { isProvenanceSourceFile } from "../provenance-registry.js";
-import { lowerImportEquals, nsWritableTarget } from "./lower-namespaces.js";
+import { ambientUndefVarRootOf, lowerImportEquals, nsUndefRead, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoWritableTarget, lowerExpandoAssignStmt } from "./lower-expando.js";
 import { ForOfIterProjection, lowerForOfMap, lowerForOfSearchParams, lowerForOfSet, objectIterOverIndexShape, strCharsCall } from "./lower-containers.js";
-import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, implicitLocalFnInfoOf, implicitLocalFnNodeOf, recordKeysArrayCall } from "./lower-calls.js";
+import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, deadUnmappableBinding, implicitLocalFnInfoOf, implicitLocalFnNodeOf, nullishExprUnitOf, nullishGenericBindingUnitOf, recordKeysArrayCall } from "./lower-calls.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 import type { ClassInfo, ClassIteratorInfo } from "./lower-classes.js";
 import { genericIfaceBindingKeepsClass } from "./lower-classes.js";
@@ -2551,7 +2551,49 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // probes below would otherwise claim the call-initializer shape and
     // put its fences on the build.
     if (provenanceElidedConstDecl(L, decl)) return null;
+
+    // A TRAP declaration — the initializer's chain roots at an
+    // ambient-undefined name (`declare function factory...; const make =
+    // factory<T>()`): Node throws the root's ReferenceError while
+    // evaluating the initializer, module init unwinds THERE, and nothing
+    // after — including every reference to this binding — ever runs. The
+    // statement lowers to exactly that throw; the binding registers as a
+    // trap (references lower to the same never-reached shape), and no
+    // storage or type mapping is needed for a value that never exists.
+    if (decl.initializer !== undefined) {
+      const root = ambientUndefVarRootOf(L, decl.initializer);
+      if (root !== null) {
+        for (const nameNode of boundIdentifiersOf(decl.name)) {
+          const sym = L.checker.getSymbolAtLocation(nameNode);
+          if (sym) L.trapBindings.add(sym);
+        }
+        return {
+          kind: "exprStmt",
+          expr: nsUndefRead(L, root.text, decl.initializer, F64),
+          loc: locOf(decl),
+        };
+      }
+    }
     if (!ts.isIdentifier(decl.name)) L.unsupported("SC1031", decl.name);
+
+    // A NULLISH generic binding (`const i: I<A & B> = null as any` — the
+    // declared type has no mapping, the value is provably null/undefined
+    // forever): no storage exists; reads know the value (member reads and
+    // method calls lower to Node's exact TypeError, nullish-to-nullish
+    // flows to nothing), so the declaration emits nothing.
+    if (nullishGenericBindingUnitOf(L, L.checker.getSymbolAtLocation(decl.name) ?? null) !== null) {
+      return null;
+    }
+
+    // A DEAD unmappable binding (`var xs2: typeof Array;`, the write-only
+    // `var f2: { <T, U>(x: T, y: U): T }`): never read anywhere in the
+    // program, its initializer (if any) a side-effect-free value — Node
+    // materializes the value and drops it, zero observable effect — so
+    // the declaration emits nothing instead of fencing on a type the
+    // program never consumes.
+    if (deadUnmappableBinding(L, L.checker.getSymbolAtLocation(decl.name) ?? null, decl)) {
+      return null;
+    }
 
     // An initializer-LESS declaration named `module` or `exports` at the
     // top level of an import/export-free TS file shadows the CommonJS
@@ -3598,6 +3640,39 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
   export function lowerExprStatement(L: Lowerer, expr: ts.Expression): IrStmt {
     const stmtNode = expr.parent;
     while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+    // Assignment statements over the no-storage binding families:
+    //   - `f1 = f2` where the RHS roots at an ambient-undefined name:
+    //     Node evaluates the RHS first and dies on the root's
+    //     ReferenceError before any binding is touched — the statement IS
+    //     that throw;
+    //   - `a = b` between NULLISH generic bindings: the value is known
+    //     and the target has no storage — nothing happens;
+    //   - a write to a DEAD binding (registration proved every write's
+    //     RHS side-effect-free): Node builds the value and drops it —
+    //     nothing happens.
+    if (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(expr.left)
+    ) {
+      const rhsRoot = ambientUndefVarRootOf(L, expr.right);
+      if (rhsRoot !== null) {
+        return {
+          kind: "exprStmt",
+          expr: nsUndefRead(L, rhsRoot.text, expr.right, F64),
+          loc: locOf(expr),
+        };
+      }
+      const targetSym = L.resolveValueSymbol(expr.left);
+      if (targetSym !== null) {
+        if (nullishGenericBindingUnitOf(L, targetSym) !== null && nullishExprUnitOf(L, expr.right) !== null) {
+          return { kind: "block", body: [], loc: locOf(expr) };
+        }
+        if (L.deadBindings.has(targetSym)) {
+          return { kind: "block", body: [], loc: locOf(expr) };
+        }
+      }
+    }
     // A bare module-namespace binding in STATEMENT position (`ns;` for
     // `import * as ns from ...` — the corpus's canonical "the import
     // linked" assertion): Node evaluates an initialized binding (namespace

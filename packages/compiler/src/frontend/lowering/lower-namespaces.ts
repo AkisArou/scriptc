@@ -313,36 +313,68 @@ export function ambientNsRootOf(L: Lowerer, e: ts.Expression): ts.Identifier | n
   return root;
 }
 
-/** The ROOT identifier of a property/element-access chain that names an
- * initializer-less AMBIENT variable (`declare const x: T;`, `declare var`)
- * in a user program file — the `declare const __VERSION__` stance's CHAIN
- * form. Node erases the declaration entirely, so the ROOT read throws the
- * catchable ReferenceError "<name> is not defined" BEFORE any member or
- * element key matters; callers lower the whole chain to that throw, typed
- * by the use site. Mappable roots never need this (their bare-read
- * undefRead composes through ordinary member lowerings); this serves the
- * roots whose declared type has no mapping. Null for stdlib/@types roots
- * (their own chokepoints stand), optional chains (conservative — the
- * ordinary fences keep them), and anything declared with a value. */
+/** The ROOT identifier of an expression whose FIRST runtime step is a read
+ * Node cannot serve — the `declare const __VERSION__` stance's CHAIN form,
+ * widened over every chain shape whose root evaluates first. Three root
+ * families qualify:
+ *
+ *   - an initializer-less AMBIENT variable (`declare const/let/var x: T;`)
+ *     in a user program file — Node erases the declaration entirely, so
+ *     the root read throws the catchable ReferenceError "<name> is not
+ *     defined";
+ *   - an ambient `declare function` nothing defines (the same erasure,
+ *     ambientUndefinedFnSymbolOf);
+ *   - a TRAP BINDING (L.trapBindings) — a binding whose own initializer
+ *     provably threw before producing a value, so module init unwound and
+ *     no reference to it can ever execute (any lowering is sound there;
+ *     the trap keeps the shape honest if reachability analysis is wrong).
+ *
+ * The walk steps through parens, non-null/as/satisfies assertions,
+ * property and element accesses (OPTIONAL chains included — `?.` guards
+ * null/undefined AFTER a successful read; it cannot guard the root's own
+ * ReferenceError), calls and `new` (the callee evaluates before any
+ * argument), instantiation expressions, and tagged templates (the tag
+ * evaluates first). Callers lower the WHOLE expression to the root's
+ * throw, typed by the use site — and never lower the arguments, exactly
+ * the order Node dies in. Null for stdlib/@types roots (their own
+ * chokepoints stand) and anything declared with a value. */
 export function ambientUndefVarRootOf(L: Lowerer, e: ts.Expression): ts.Identifier | null {
   let root: ts.Expression = e;
   for (;;) {
-    if (ts.isParenthesizedExpression(root) || ts.isNonNullExpression(root)) {
+    if (
+      ts.isParenthesizedExpression(root) ||
+      ts.isNonNullExpression(root) ||
+      ts.isAsExpression(root) ||
+      ts.isSatisfiesExpression(root) ||
+      ts.isTypeAssertion(root)
+    ) {
       root = root.expression;
       continue;
     }
-    if (
-      (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) &&
-      root.questionDotToken === undefined
-    ) {
+    if (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) {
       root = root.expression;
+      continue;
+    }
+    if (ts.isCallExpression(root) || ts.isNewExpression(root)) {
+      root = root.expression;
+      continue;
+    }
+    if (ts.isExpressionWithTypeArguments(root)) {
+      root = root.expression;
+      continue;
+    }
+    if (ts.isTaggedTemplateExpression(root)) {
+      root = root.tag;
       continue;
     }
     break;
   }
   if (!ts.isIdentifier(root)) return null;
   const sym = L.resolveValueSymbol(root);
-  if (!sym || L.isStdlibSymbol(sym)) return null;
+  if (!sym) return null;
+  if (L.trapBindings.has(sym)) return root;
+  if (L.isStdlibSymbol(sym)) return null;
+  if (ambientUndefinedFnSymbolOf(L, root) !== null) return root;
   const decls = L.checker.declarationsOf(sym);
   if (decls.length === 0) return null;
   for (const d of decls) {

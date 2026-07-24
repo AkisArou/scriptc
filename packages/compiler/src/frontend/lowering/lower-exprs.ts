@@ -11,7 +11,7 @@ import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, I
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
-import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, own } from "./lowerer.js";
+import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, nodeThrowExpr, own } from "./lowerer.js";
 import { IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead, strCharsCall } from "./lower-containers.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
 import { unsupportedModuleFeatureOf } from "../shared.js";
@@ -20,7 +20,7 @@ import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUn
 import { expandoMemberRead, expandoWritableTarget } from "./lower-expando.js";
 import { lowerSocketInstanceOf } from "./lower-server.js";
 import { findGenericMethodOn, lowerStaticFieldRead } from "./lower-classes.js";
-import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
+import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, nullishGenericBindingUnitOf, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
 import { mixinFnOfCallee } from "./lower-mixins.js";
 import { isConstAssertionTypeNode, isGenericCallableMemberType, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
@@ -896,6 +896,18 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           if (t) return nsUndefRead(L, expr.text, expr, t);
         }
       }
+      // A read of a TRAP binding — a declaration whose own initializer
+      // provably threw (module init unwound there), so this reference can
+      // never execute: any lowering is sound, and the trap keeps the
+      // shape honest. Typed by the use site when it maps, the F64 dummy
+      // otherwise (never observed — never even reached).
+      {
+        const sym = L.resolveValueSymbol(expr);
+        if (sym !== null && L.trapBindings.has(sym)) {
+          const t = ambientUndefReadType(L, expr) ?? contextualUndefReadType(L, expr) ?? F64;
+          return nsUndefRead(L, expr.text, expr, t);
+        }
+      }
       // A program CLASS NAME as a value: the classRef over the class's
       // immortal class object (member accesses and construction never
       // reach here — their hooks claim the property/new forms first).
@@ -1601,6 +1613,23 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         if (ambientRoot !== null) {
           const t = ambientUndefReadType(L, expr) ?? contextualUndefReadType(L, expr);
           if (t) return nsUndefRead(L, ambientRoot.text, expr, t);
+        }
+      }
+      // A member read through a NULLISH generic binding (`const i: I<A &
+      // B> = null as any; const _i: I<A> = i.something` — the receiver
+      // provably holds null/undefined forever): the read throws Node's
+      // exact TypeError at the access.
+      if (ts.isIdentifier(expr.expression) && expr.questionDotToken === undefined) {
+        const unit = nullishGenericBindingUnitOf(L, L.resolveValueSymbol(expr.expression));
+        if (unit !== null) {
+          const t = ambientUndefReadType(L, expr) ?? contextualUndefReadType(L, expr) ?? F64;
+          return nodeThrowExpr(
+            1,
+            "",
+            `Cannot read properties of ${unit} (reading '${expr.name.text}')`,
+            t,
+            loc,
+          );
         }
       }
       // The lib fence's PROPERTY chokepoint: a stdlib-declared member that
