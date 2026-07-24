@@ -4304,9 +4304,26 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     // [whole match, ...captures] or the null arm. The g-flag match returns
     // EVERY match (a different shape) and /y is stateful — both fence at
     // compile time on literal arguments (values reaching the runtime with
-    // those flags abort, the test() stance). `.index`/`.input`/`.groups`
-    // reads on the result fence per member (array-typed value).
-    if (receiverKind === "string" && name === "match") {
+    // those flags abort, the test() stance). `.index`/`.input` reads on
+    // the result fence per member (array-typed value); `.groups` reads
+    // desugar at their access sites when the regex is statically known
+    // (lowerMatchGroupsRead).
+    // `s.match(re)` also claims a NULLABLE string receiver (string + unit
+    // arms — `process.versions.openssl.match(...)`, the Dict<string>
+    // member the node suite's crypto helper reads): the checked
+    // extraction narrows to the string arm and a unit value throws the
+    // catchable TypeError at the read, where Node's own member read
+    // throws — tsc only admits the spelling in JS sources.
+    const nullableStringRecv =
+      receiverKind === "union" &&
+      name === "match" &&
+      (() => {
+        const t = L.mapTypeOf(L.typeOf(access.expression));
+        if (t?.kind !== "union") return false;
+        const arms = L.unions.get(t.unionId)?.arms ?? [];
+        return arms.some((a) => a.kind === "string") && arms.every((a) => a.kind === "string" || isUnitType(a));
+      })();
+    if ((receiverKind === "string" || nullableStringRecv) && name === "match") {
       const arg0 = call.arguments[0];
       if (!arg0 || L.mapTypeOf(L.typeOf(arg0))?.kind !== "regex") return null; // string-pattern match: the SC2020 fence
       if (call.arguments.length !== 1) return null;
@@ -4322,7 +4339,7 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
           );
         }
       }
-      const receiver = lowerReceiver();
+      const receiver = nullableStringRecv ? L.lowerExprExpecting(access.expression, STRING) : lowerReceiver();
       const re = L.lowerExpr(arg0);
       // RegExpMatchArray | null maps to the string[] | null union by
       // itself; intern it directly when the checker's spelling doesn't —
