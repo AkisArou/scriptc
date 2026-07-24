@@ -23,8 +23,11 @@
  *            declarations feeding a tabled type (SC4010), conditional/
  *            mapped types producing a tabled type (SC4011), the
  *            inbound-bytes host-contract runtime trap (SC4012 — a
- *            structured trap-teaching code, not a refusal); SC4008
- *            reserved for ask-5 determinism denials
+ *            structured trap-teaching code, not a refusal), npm packages
+ *            a library graph imports that fail the npm-static
+ *            eligibility bar (SC4013 — static-or-refuse; eligible
+ *            packages compile statically instead); SC4008 reserved for
+ *            ask-5 determinism denials
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -719,7 +722,9 @@ export function libAsyncSurfaceDiag(surface: string, loc: SrcLoc, teaching?: str
 }
 
 /** SC4006 — island/dynamic machinery on the library path: --dynamic,
- * --npm-static, npm imports, `any`-typed island surface. */
+ * --npm-static as a FLAG, `any`-typed island surface. Bare npm imports
+ * themselves are not this code: an eligible package compiles statically
+ * as part of the library graph, an ineligible one refuses SC4013. */
 export function libDynamicDiag(what: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC4006",
@@ -800,6 +805,25 @@ export function libSidecarComputedDiag(name: string, which: "conditional" | "map
  * sink, alongside the trapping export's C symbol and the profile's teaching
  * and remediation text for this code when the profile supplies them. */
 export const LIB_INBOUND_BYTES_TRAP_CODE = "SC4012";
+
+/** SC4013 — a bare npm specifier in a library graph naming a package that
+ * fails the npm-static eligibility bar (own .d.ts, unminified shipped JS,
+ * no build-transform markers) or whose static compilation the preflight
+ * had to refuse. Library mode is STATIC-OR-REFUSE by construction: the
+ * island/dynamic tier the executable lane falls back to does not exist on
+ * this path (SC4006's ground), so the refusal names the package, the
+ * specific bar it missed, and the remedy. Carries the profile's teaching
+ * for this code when supplied. */
+export function libNpmIneligibleDiag(pkg: string, reason: string, loc: SrcLoc, teaching?: string): ScrDiagnostic {
+  return {
+    code: "SC4013",
+    message: `library mode compiles npm packages statically or not at all, and '${pkg}' cannot compile statically: ${reason}`,
+    loc,
+    hint:
+      "library artifacts have no island/dynamic tier to fall back to — vendor the code you need from the package as project modules, or drop the dependency" +
+      (teaching !== undefined ? ` — ${teaching}` : ""),
+  };
+}
 
 export function iceDiag(message: string, loc: SrcLoc): ScrDiagnostic {
   return {

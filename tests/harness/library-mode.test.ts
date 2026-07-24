@@ -35,6 +35,14 @@
  *                           "Uncaught " prefix), and baseline messages
  *                           keep a printable first byte — the marker's
  *                           unambiguity pin
+ *   K12 npm-posture         bare npm specifiers are static-or-refuse: an
+ *                           eligible package (own .d.ts, unminified JS,
+ *                           no transform markers) compiles statically
+ *                           into the library graph, its own npm deps
+ *                           judged by the same bar; every ineligible one
+ *                           refuses SC4013 naming the failed bar — never
+ *                           a generic SC1010/SC2013 — and builtins keep
+ *                           the SC4005 async_free story
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -183,6 +191,33 @@ describe.each(EMISSIONS)("library mode, %s emission", (emission) => {
     const loopish = /^scr_(loop|fiber|on_fiber|timer|set_timeout|set_interval|set_immediate|next_tick|child|spawn)/;
     expect([...defined].filter((s) => loopish.test(s))).toEqual([]);
     expect([...undef].filter((s) => loopish.test(s))).toEqual([]);
+  });
+
+  /* ── K12: the npm posture's compile side ─────────────────────────────── */
+
+  test("K12: an eligible npm package (and its own dep) compiles statically", async () => {
+    const { archive, outDir } = await buildLibrary("npm-static", emission);
+    const probe = buildProbe("npm-static", archive, outDir);
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    // scaled: mathkit.scale (which itself calls mathdep.twice) + OFFSET —
+    // values computed by the packages' shipped JS, statically compiled;
+    // tail: the node:path builtin riding the same graph (async_free, so
+    // SC4005 has nothing to say).
+    expect(run.stdout).toBe(
+      `npm-static ready
+scaled: 37
+tail: c.txt (len 5)
+`,
+    );
+    // K1 discipline holds with npm code in the graph: prefix-carrying
+    // definitions are exactly the declared set, no prefix undefineds.
+    const { defined, undef } = nmSymbols(archive);
+    expect([...defined].filter((s) => s.startsWith("kn_")).sort()).toEqual([
+      "kn_collect", "kn_init", "kn_scaled", "kn_set_panic_sink", "kn_tail",
+    ]);
+    expect([...undef].filter((s) => s.startsWith("kn_"))).toEqual([]);
   });
 
   /* ── K3: buffers, both arena postures over one library ──────────────────── */
@@ -504,5 +539,98 @@ describe("K9: library-mode refusals", () => {
     );
     expect(diags[0]!.code).toBe("SC4007");
     expect(diags[0]!.hint).toContain("concrete instantiation");
+  });
+});
+
+/* ── K12: npm static-or-refuse, the refusal side ─────────────────────────
+ * The entries live in the npm-refuse fixture dir (its vendored
+ * node_modules is what the specifiers resolve against); the profile is
+ * synthesized per test like K9's. Emission never engages — SC4013 is a
+ * frontend verdict — so one lane suffices. */
+let npmRefusalCounter = 0;
+async function npmRefusal(
+  entryFile: string,
+  exports: unknown[],
+  profilePatch: Record<string, unknown> = {},
+): Promise<{ code: string; message: string; hint?: string; file: string }[]> {
+  const outDir = join(cacheDir, `npm-refusal-${npmRefusalCounter++}`);
+  mkdirSync(outDir, { recursive: true });
+  const profile = {
+    profile_format: 1,
+    name: "npm-refusal-fixture",
+    entry: join(fixtureRoot, "npm-refuse", entryFile),
+    emission: "c",
+    abi: {
+      prefix: "kx_",
+      init_symbol: "kx_init",
+      sink_register_symbol: "kx_set_panic_sink",
+      collect_symbol: null,
+      result_reset_symbol: null,
+    },
+    exports,
+    ...profilePatch,
+  };
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile));
+  const result = await compileLibrary({ profilePath, outDir });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("unreachable");
+  return result.diagnostics.map((d) => ({
+    code: d.code,
+    message: d.message,
+    ...(d.hint !== undefined ? { hint: d.hint } : {}),
+    file: d.loc.file,
+  }));
+}
+
+describe("K12: library-mode npm refusals (SC4013, static-or-refuse)", () => {
+  test("build-transform markers refuse with the failed bar named", async () => {
+    const diags = await npmRefusal("lib-markers.ts", [{ export: "f", symbol: "kx_f", params: [], returns: "string" }]);
+    expect(diags.map((d) => d.code)).toEqual(["SC4013"]);
+    expect(diags[0]!.message).toContain("'webbundle'");
+    expect(diags[0]!.message).toContain("build-transform markers");
+    expect(diags[0]!.hint).toContain("vendor");
+    // Anchored at the import site in the entry, not a whole-file blur.
+    expect(diags[0]!.file.endsWith("lib-markers.ts")).toBe(true);
+  });
+
+  test("minified shipped JS refuses", async () => {
+    const diags = await npmRefusal("lib-minified.ts", [
+      { export: "f", symbol: "kx_f", params: ["f64", "f64"], returns: "f64" },
+    ]);
+    expect(diags.map((d) => d.code)).toEqual(["SC4013"]);
+    expect(diags[0]!.message).toContain("'slimmed'");
+    expect(diags[0]!.message).toContain("looks minified");
+  });
+
+  test("no own .d.ts refuses by name — never the generic import fence", async () => {
+    const diags = await npmRefusal("lib-untyped.ts", [
+      { export: "f", symbol: "kx_f", params: ["f64", "f64"], returns: "f64" },
+    ]);
+    // The package resolves at runtime (Node would load it) but ships no
+    // types: the library answer is the bar's, not SC1010's "nothing
+    // installed resolves it" nor SC2013's --dynamic teaching.
+    expect(diags.map((d) => d.code)).toEqual(["SC4013"]);
+    expect(diags[0]!.message).toContain("'untyped'");
+    expect(diags[0]!.message).toContain("no own .d.ts");
+  });
+
+  test("the profile teaching rides the SC4013 hint", async () => {
+    const diags = await npmRefusal(
+      "lib-markers.ts",
+      [{ export: "f", symbol: "kx_f", params: [], returns: "string" }],
+      { determinism: { teachings: { SC4013: "request the vendored copy from the embedder SDK" } } },
+    );
+    expect(diags[0]!.code).toBe("SC4013");
+    expect(diags[0]!.hint).toContain("request the vendored copy from the embedder SDK");
+  });
+
+  test("a builtin pulling the event loop keeps the SC4005 story, not a new fence", async () => {
+    const diags = await refusal(
+      `import { setTimeout as later } from "node:timers";\nexport function f(): number { later(() => {}, 1); return 1; }\n`,
+      { exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }] },
+    );
+    expect(diags[0]!.code).toBe("SC4005");
+    expect(diags[0]!.message).toContain("timers");
   });
 });

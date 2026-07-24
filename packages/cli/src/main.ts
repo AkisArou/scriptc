@@ -103,7 +103,9 @@ async function main(): Promise<number> {
     // LIBRARY mode: the profile names the entry module and pins the
     // emission; the executable lane's mode flags have no meaning here
     // (library artifacts are static-tier only, and there is no fallback
-    // concept).
+    // concept — bare npm specifiers are static-or-refuse: the npm-static
+    // eligibility bar runs automatically, eligible packages compile into
+    // the graph, ineligible ones refuse with SC4013).
     if (command !== "build") fail(`--lib is a build mode (scriptc build --lib --profile <p.json>)\n\n${USAGE}`);
     const profileArg = values.profile;
     if (!profileArg) fail(`scriptc build --lib needs --profile <profile.json>\n\n${USAGE}`);
@@ -111,7 +113,9 @@ async function main(): Promise<number> {
       fail("scriptc build --lib takes no input positional: the profile names the entry module");
     }
     if (values.dynamic || values.backend !== undefined || (values["npm-static"] ?? []).length > 0) {
-      fail("scriptc build --lib takes no --dynamic/--backend/--npm-static: the profile pins the emission, and library artifacts are static-tier only");
+      fail(
+        "scriptc build --lib takes no --dynamic/--backend/--npm-static: the profile pins the emission, and npm imports are judged automatically — an eligible package compiles statically, an ineligible one refuses (library artifacts have no island tier)",
+      );
     }
     const profilePath = resolve(profileArg);
     const libOutDir = values.out ? dirname(resolve(values.out)) : join(dirname(profilePath), ".scriptc");

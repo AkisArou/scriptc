@@ -1447,8 +1447,16 @@ export class Lowerer {
    * specifier is not a relative program module (builtins load nothing;
    * anything else kept its preflight fence). */
   requireInitStmt(spec: string, node: ts.Node): IrStmt | null {
-    if (!isRelativeSpecifier(spec)) return null;
-    const dep = resolveImport(this.program, node.getSourceFile(), spec);
+    // Relative requires resolve within the program; a BARE require can be
+    // a program-module edge too when it names an opted-in --npm-static
+    // package (one package requiring another — the resolution answered
+    // its shipped JS, the file is in the module order, and the reads
+    // alias its globals). Without the guarded %init call at this position
+    // those globals stay uninitialized: the dep's module body would never
+    // run.
+    const dep = isRelativeSpecifier(spec)
+      ? resolveImport(this.program, node.getSourceFile(), spec)
+      : npmStaticDepSf7(this.program, node.getSourceFile(), spec);
     if (!dep || dep.fileName.endsWith(".json")) return null;
     const initName = this.initNameOf.get(dep);
     if (initName === undefined) return null;

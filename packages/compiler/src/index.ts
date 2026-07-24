@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
@@ -16,10 +16,10 @@ import {
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib, type IrLibSection, type IrModule, type IrType } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesZlib, type IrLibSection, type IrModule, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
-import { checkPreflight, isNodeTypesPath, loadProgram, resolveNpmImport, type LoadResult } from "./frontend/program.js";
+import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
 import { npmStaticIneligibleReason, npmStaticOffenders, npmStaticPackageOfPath } from "./frontend/npm-static.js";
 import { provenanceSources } from "./frontend/provenance-registry.js";
 import { resolveBareModule } from "./frontend/resolve.js";
@@ -196,17 +196,39 @@ interface Frontend {
   /** --npm-static: each requested (or auto-detected) package's outcome —
    * compiled statically, or fallen back with the first refusal reason. */
   npmStatic: NpmStaticStatus[];
+  /** Library mode only (empty otherwise): each judged npm package's first
+   * import site, the anchor for the SC4013 static-or-refuse teaching. */
+  npmImportSites: ReadonlyMap<string, SrcLoc>;
   /** Releases the frontend's resources (the spawned tsgo server). Call
    * exactly once, after the last lower(). */
   dispose: () => void;
 }
 
-/** --npm-static=auto: one throwaway load finds every bare npm import the
- * program's own modules make, then the eligibility heuristics
- * (npm-static.ts) pick the packages whose shipped JS is worth attempting.
- * Rejected candidates report their reason so the coverage output says why
- * auto skipped them. */
-function detectAutoPackages(load: LoadResult, statuses: NpmStaticStatus[]): string[] {
+/** --npm-static=auto (and library mode's mandatory twin): one throwaway
+ * load finds every bare npm import the program's own modules make, then
+ * the eligibility heuristics (npm-static.ts) pick the packages whose
+ * shipped JS is worth attempting. Rejected candidates report their reason
+ * so the coverage output says why auto skipped them.
+ *
+ * "lib" widens the scan to the STATIC-OR-REFUSE posture (a fallback
+ * status is a build-stopping SC4013 there, never an island note):
+ *   - opted-in packages' OWN files are scanned too — import statements
+ *     and top-level requires alike — so runFrontend's fixpoint loop
+ *     judges every bare edge the growing graph exposes (the executable
+ *     lane leaves a package's deps to the island; the library lane has
+ *     no island);
+ *   - a bare specifier no TYPES resolution answers but whose runtime JS
+ *     resolves (a package with no own .d.ts) is judged instead of
+ *     skipped — it fails the bar by name, not as a generic import fence;
+ *   - `judged` dedups across fixpoint iterations and `sites` records
+ *     each package's first import site, the SC4013 anchor. */
+function detectAutoPackages(
+  load: LoadResult,
+  statuses: NpmStaticStatus[],
+  mode: "auto" | "lib" = "auto",
+  judged?: Set<string>,
+  sites?: Map<string, SrcLoc>,
+): string[] {
   // package → the resolved types file AND the file whose import found it:
   // the runtime-JS probe below must resolve from the SAME importing file,
   // or a package visible only to a nested package.json realm (a pnpm
@@ -214,18 +236,45 @@ function detectAutoPackages(load: LoadResult, statuses: NpmStaticStatus[]): stri
   // walk-up) answers "no runtime JS" for perfectly ordinary installs.
   const seen = new Map<string, { typesFile: string; fromFile: string }>();
   for (const sf of [...load.moduleOrder, load.entry]) {
-    if (sf.fileName.includes("/node_modules/")) continue;
+    if (mode === "auto" && sf.fileName.includes("/node_modules/")) continue;
+    const edges: { spec: string; loc: SrcLoc }[] = [];
     for (const stmt of sf.statements) {
-      if (!ts7IsImportWithStringSpec(stmt)) continue;
-      const spec = (stmt as { moduleSpecifier: { text: string } }).moduleSpecifier.text;
+      if (ts7IsImportWithStringSpec(stmt)) {
+        edges.push({ spec: (stmt as { moduleSpecifier: { text: string } }).moduleSpecifier.text, loc: locOf(stmt) });
+      } else if (mode === "lib") {
+        // CJS packages spell their dep edges as top-level requires; the
+        // import-statement scan alone would miss every one of them.
+        for (const req of requiresOf(stmt)) edges.push({ spec: req.spec, loc: locOf(req.node) });
+      }
+    }
+    for (const { spec, loc } of edges) {
       if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
+      // Bare builtin names ("fs", "path") are the builtin machinery's
+      // business (and the SC4005 async_free gate's, in library mode) —
+      // never npm candidates. Auto keeps its original path (the
+      // @types/node answer skips them below), byte-for-byte.
+      if (mode === "lib" && canonicalBuiltinModule(spec) !== null) continue;
       const npm = resolveNpmImport(sf.fileName, spec);
-      if (npm === null || isNodeTypesPath(npm.typesFile)) continue;
-      if (!seen.has(npm.packageName)) seen.set(npm.packageName, { typesFile: npm.typesFile, fromFile: sf.fileName });
+      if (npm !== null && isNodeTypesPath(npm.typesFile)) continue;
+      if (npm === null) {
+        if (mode !== "lib") continue;
+        const js = resolveBareModule(sf.fileName, spec, "js-only");
+        if (js === null || judged!.has(js.packageName)) continue;
+        judged!.add(js.packageName);
+        sites!.set(js.packageName, loc);
+        statuses.push({ package: js.packageName, status: "fallback", detail: "it ships no own .d.ts declaration surface" });
+        continue;
+      }
+      if (judged?.has(npm.packageName)) continue;
+      if (!seen.has(npm.packageName)) {
+        seen.set(npm.packageName, { typesFile: npm.typesFile, fromFile: sf.fileName });
+        sites?.set(npm.packageName, loc);
+      }
     }
   }
   const chosen: string[] = [];
   for (const [pkg, { typesFile, fromFile }] of seen) {
+    judged?.add(pkg);
     const jsEntry = resolveBareModule(fromFile, pkg, "js-only");
     const reason = npmStaticIneligibleReason(
       pkg,
@@ -233,7 +282,7 @@ function detectAutoPackages(load: LoadResult, statuses: NpmStaticStatus[]): stri
       jsEntry !== null && isJsSourceFileName(jsEntry.typesFile) ? jsEntry.typesFile : null,
     );
     if (reason === null) chosen.push(pkg);
-    else statuses.push({ package: pkg, status: "fallback", detail: `auto: ${reason}` });
+    else statuses.push({ package: pkg, status: "fallback", detail: mode === "lib" ? reason : `auto: ${reason}` });
   }
   return chosen;
 }
@@ -264,14 +313,26 @@ function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set
   return hits;
 }
 
-function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"): Frontend {
+/** The one frontend, three npm postures: `undefined`/explicit package
+ * lists and `"auto"` are the executable lane's (--npm-static; fallback =
+ * island). `"lib"` is library mode's mandatory auto twin — the same
+ * eligibility bar and the same opt-in machinery, but every fallback
+ * status the shared loops record becomes compileLibrary's SC4013
+ * static-or-refuse teaching, and the detection closes over the opted-in
+ * packages' own bare edges (no island exists to serve a dep from). */
+function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" | "lib"): Frontend {
   const statuses: NpmStaticStatus[] = [];
+  const npmSites = new Map<string, SrcLoc>();
+  const judged = new Set<string>();
   let requested: string[] = [];
-  if (npmStatic === "auto") {
+  if (npmStatic === "auto" || npmStatic === "lib") {
     const scout = loadProgram(entryPath);
     try {
       checkPreflight(scout);
-      requested = detectAutoPackages(scout, statuses);
+      requested =
+        npmStatic === "lib"
+          ? detectAutoPackages(scout, statuses, "lib", judged, npmSites)
+          : detectAutoPackages(scout, statuses);
     } finally {
       scout.dispose();
     }
@@ -300,6 +361,23 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
   // attempt, not a broken build.
   let load = loadProgram(entryPath, { npmStatic: requested });
   let preflight = checkPreflight(load);
+  // Library mode's fixpoint: the opted-in packages' files joined the
+  // program just now, and THEIR bare edges (import statements and
+  // top-level requires) name packages the scout could not see. Judge each
+  // by the same bar — eligible ones join the set and the frontend
+  // reloads; ineligible ones record the fallback status compileLibrary
+  // refuses on. Bounded by the dependency count (every iteration settles
+  // at least one new package for good).
+  if (npmStatic === "lib") {
+    for (;;) {
+      const grown = detectAutoPackages(load, statuses, "lib", judged, npmSites);
+      if (grown.length === 0) break;
+      requested = [...requested, ...grown];
+      load.dispose();
+      load = loadProgram(entryPath, { npmStatic: requested });
+      preflight = checkPreflight(load);
+    }
+  }
   const effective = new Set(requested);
   while (effective.size > 0) {
     const reasons = new Map<string, string>(npmStaticOffenders());
@@ -318,7 +396,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
       for (const [pkg, count] of named) {
         reasons.set(
           pkg,
-          `its inferred export surface breaks ${count} import site${count === 1 ? "" : "s"} in program files — the package serves from the island instead (bundler-emitted surfaces type only as far as inference reaches)`,
+          `its inferred export surface breaks ${count} import site${count === 1 ? "" : "s"} in program files${npmStatic === "lib" ? "" : " — the package serves from the island instead"} (bundler-emitted surfaces type only as far as inference reaches)`,
         );
       }
     }
@@ -354,7 +432,9 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
         detail:
           npmStatic === "auto"
             ? "auto: the program does not typecheck against its inferred surface"
-            : "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase) — the package serves from the island instead",
+            : npmStatic === "lib"
+              ? "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase)"
+              : "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase) — the package serves from the island instead",
       });
     };
     // Attribute per package by probing each SOLO (culprits are almost
@@ -389,15 +469,25 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
     // The contract scans the PROGRAM's source files, not the runtime
     // module order: a type-only module (nothing but exported types) has no
     // runtime edge and never joins moduleOrder, yet its declarations are
-    // contract surface. Declaration files (default libs, @types) stay out;
-    // every remaining source file is authored program surface, because the
-    // library path refuses npm imports (SC4006) long before projection.
+    // contract surface. Declaration files (default libs, @types) stay out,
+    // and so do statically-compiled npm packages' files: their .d.ts is
+    // dropped by construction (inference types the bodies), so no npm
+    // declaration can name a wire-contract type — the contract vocabulary
+    // is authored program surface only, and a workspace-linked package's
+    // shipped .ts must not smuggle same-name declarations into the type
+    // table.
     entryContract: () =>
-      entryContractFacts(finalLoad.entry, finalLoad.program.getSourceFiles().filter((sf) => !sf.isDeclarationFile)),
+      entryContractFacts(
+        finalLoad.entry,
+        finalLoad.program.getSourceFiles().filter((sf) => !sf.isDeclarationFile && npmStaticPackageOfPath(sf.fileName) === null),
+      ),
     // Runtime evaluation order first, then any type-only program modules
     // (no runtime edge, so absent from moduleOrder — but they are contract
     // surface now, and the library identity hashes cover the WHOLE module
-    // graph; the Map dedups by fileName).
+    // graph; the Map dedups by fileName). Statically-compiled npm modules
+    // are in moduleOrder like any program module, so their bytes join the
+    // library identity hashes (source_hash/build_id) — compiled code is
+    // identity, whatever directory it came from.
     sourceTexts: () =>
       new Map<string, string>(
         [finalLoad.entry, ...finalLoad.moduleOrder, ...finalLoad.program.getSourceFiles().filter((sf) => !sf.isDeclarationFile)].map(
@@ -406,6 +496,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto"):
       ),
     lower: (opts) => lowerToIr(finalLoad.program, finalLoad.entry, finalLoad.moduleOrder, { ...opts, startupCrash: finalLoad.startupCrash ?? null }),
     npmStatic: statuses,
+    npmImportSites: npmSites,
     dispose: finalLoad.dispose,
   };
 }
@@ -810,7 +901,13 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const profile = loadedProfile.profile;
   const entryPath = profile.entry;
 
-  const fe = runFrontend(entryPath);
+  // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
+  // posture: "lib" runs the same auto-detection and eligibility bar as
+  // the executable lane's --npm-static (own .d.ts, unminified shipped JS,
+  // no build-transform markers), automatically — the library path has no
+  // island/dynamic tier to offer (SC4006's ground), so eligibility needs
+  // no flag and a miss is a refusal, never a fallback.
+  const fe = runFrontend(entryPath, "lib");
   let lowered: LowerResult;
   let entryText: string;
   let sourceTexts: Map<string, string>;
@@ -822,6 +919,29 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       diagnostics,
       sourceTexts: fe.sourceTexts(),
     });
+    // The npm verdicts FIRST: whatever the shared frontend would have
+    // served from the island — an eligibility miss, an untyped install, a
+    // preflight offender inside a package's files, a dropped inferred
+    // surface — refuses here with the package and the specific bar it
+    // missed. Checked before the general preflight, whose diagnostics for
+    // these same imports speak executable-lane teachings (SC1010/SC0001 at
+    // the unresolvable edge); the library answer is this one.
+    const npmRefused = fe.npmStatic.filter((s) => s.status === "fallback");
+    if (npmRefused.length > 0) {
+      return fail(
+        npmRefused.map((s) =>
+          libNpmIneligibleDiag(
+            s.package,
+            // The one shared offender reason that narrates the executable
+            // lane's fallback loses that clause here — no island exists on
+            // this path to serve anything.
+            (s.detail ?? "its static compilation was refused").replace("; the island serves the package", ""),
+            fe.npmImportSites.get(s.package) ?? { file: entryPath, start: 0, end: 0 },
+            profileTeaching(profile, "SC4013"),
+          ),
+        ),
+      );
+    }
     if (fe.preflight.length > 0) return fail(fe.preflight);
     try {
       lowered = fe.lower({

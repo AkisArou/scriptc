@@ -22,7 +22,8 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary, validateSidecar, wyhash64, type SidecarDoc } from "@scriptc/compiler";
@@ -51,12 +52,26 @@ async function buildContract(
   fixture: string,
   emission: Emission,
   tag = "",
+  /** Build-root override. The default cache sits under the repo's
+   * node_modules — fine for pure-TS fixtures, but an ENTRY under a
+   * node_modules segment is npm surface to every path-keyed attribution
+   * heuristic, so fixtures with a vendored node_modules build from a
+   * root outside any node_modules (byte-reproducibility across build
+   * directories is exactly what the canonical root-relative paths
+   * guarantee, and the V13-style assertions prove it). */
+  root = cacheDir,
 ): Promise<{ outDir: string; archive: string; sidecarPath: string; doc: SidecarDoc; bytes: Buffer }> {
   const dir = join(fixtureRoot, fixture);
-  const outDir = join(cacheDir, `${fixture}-${emission}${tag}`);
+  const outDir = join(root, `${fixture}-${emission}${tag}`);
   mkdirSync(outDir, { recursive: true });
   for (const name of readdirSync(dir)) {
     if (name.endsWith(".ts")) writeFileSync(join(outDir, name), readFileSync(join(dir, name)));
+  }
+  // A fixture with a vendored node_modules brings it along: the copied
+  // compilation root resolves the same packages, and their canonical
+  // root-relative paths keep the hash inputs byte-reproducible.
+  if (existsSync(join(dir, "node_modules"))) {
+    cpSync(join(dir, "node_modules"), join(outDir, "node_modules"), { recursive: true });
   }
   const profile = JSON.parse(readFileSync(join(dir, "profile.json"), "utf8")) as { emission: string };
   profile.emission = emission;
@@ -243,6 +258,32 @@ identity stable: 1
     const b = await buildContract("contract", emission, "-det2");
     const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
     expect(sha(a.bytes)).toBe(sha(b.bytes));
+  });
+
+  test("identity hashes cover statically-compiled npm modules; the type table stays authored surface", async () => {
+    const npmRoot = join(tmpdir(), "scriptc-tests-library-contract");
+    const a = await buildContract("contract-npm", emission, "-npm1", npmRoot);
+    const b = await buildContract("contract-npm", emission, "-npm2", npmRoot);
+    expect(validateSidecar(a.doc)).toEqual([]);
+    expect(a.doc.entry).toBe("lib.ts");
+    expect(a.doc.deterministic).toBe(true);
+    expect(a.doc.async_free).toBe(true);
+    // Byte determinism holds with a vendored node_modules in the graph.
+    const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
+    expect(sha(a.bytes)).toBe(sha(b.bytes));
+    // The contract vocabulary is the ENTRY's: no npm-derived type joined
+    // the table (the opted-in package's .d.ts is dropped by construction).
+    expect(a.doc.types.structs.map((s) => s.name)).toEqual(["Model"]);
+    // The npm module's bytes are identity input: an edit inside the
+    // package flips source_hash AND build_id on an otherwise-identical
+    // rebuild of the same root.
+    const pkgFile = join(b.outDir, "node_modules/adderkit/index.js");
+    writeFileSync(pkgFile, `${readFileSync(pkgFile, "utf8")}// dist edit\n`);
+    const again = await compileLibrary({ profilePath: join(b.outDir, "profile.json"), outDir: b.outDir });
+    if (!again.ok) throw new Error(again.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    const mutated = JSON.parse(readFileSync(again.sidecarPath!, "utf8")) as SidecarDoc;
+    expect(mutated.source_hash).not.toBe(a.doc.source_hash);
+    expect(mutated.build_id).not.toBe(a.doc.build_id);
   });
 
   test("attestations and absent forms: tuple flags, subscriptions, a clock demotes deterministic", async () => {
