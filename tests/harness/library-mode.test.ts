@@ -66,7 +66,14 @@ import { compileLibrary } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/library-mode");
-const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-mode");
+/* The plain and SCRIPTC_SAN=1 suites may run concurrently by design (the
+ * suite lock is per flavor) and this suite runs the same ordinary builds in
+ * both, so the cache path carries the SUITE flavor — otherwise the two runs
+ * race ar/ranlib in shared build dirs. The per-build `-san` tag below is a
+ * different axis: it distinguishes explicitly-sanitized BUILDS within one
+ * suite (K10). */
+const flavor = process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain";
+const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-mode", flavor);
 
 type Emission = "llvm" | "c";
 const EMISSIONS: Emission[] = ["llvm", "c"];

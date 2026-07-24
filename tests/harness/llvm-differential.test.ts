@@ -17,7 +17,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { globSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -151,7 +151,12 @@ function nodeOracleFile(file: string): string {
   const key = createHash("sha256").update(ts5.version).update("\0").update(src).digest("hex").slice(0, 16);
   const path = join(cacheDir, `dec-oracle-${key}.mjs`);
   mkdirSync(cacheDir, { recursive: true });
-  writeFileSync(path, out);
+  // Atomic publish: concurrent suites (the other flavor's full run, or
+  // another lane over the same program) write this same content-keyed
+  // path; rename keeps readers from ever seeing a truncated oracle.
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, out);
+  renameSync(tmp, path);
   return path;
 }
 

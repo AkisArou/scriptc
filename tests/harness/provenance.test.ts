@@ -27,7 +27,11 @@ const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureDir = join(repoRoot, "tests/fixtures/provenance");
 const entry = join(fixtureDir, "cases/greet/main.ts");
-const outDir = join(repoRoot, "node_modules/.cache/scriptc-tests/provenance");
+/* Suite-flavor segment: the plain and SCRIPTC_SAN=1 suites both run these
+ * same (unsanitized) builds and may run concurrently — the suite lock is
+ * per flavor — so they must never share a build dir. */
+const flavor = process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain";
+const outDir = join(repoRoot, "node_modules/.cache/scriptc-tests/provenance", flavor);
 
 const EXPECTED = "hello, world\nHELLO, COMPILER!\nhello, chain!\n";
 
