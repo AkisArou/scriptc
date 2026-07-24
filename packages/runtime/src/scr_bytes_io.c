@@ -356,6 +356,7 @@ static bool scr_fs_mode_chk(const ScrDyn *m, const char *name) {
  * (Node swallows getValidatedPath failures there). The loop-held timer
  * matches Node's I/O-completion timing closely enough for the
  * sequential CLI corpus. */
+#ifndef SCR_LIB
 static void scr_fs_exists_fire(ScrClosure *self) {
   ScrDyn *path = scr_box_get_ref(self->caps[0]); /* +1 */
   ScrDyn *cb = scr_box_get_ref(self->caps[1]);   /* +1 */
@@ -376,6 +377,7 @@ static void scr_fs_exists_fire(ScrClosure *self) {
   scr_dyn_release(path);
   scr_dyn_release(cb);
 }
+#endif
 
 ScrDyn *scr_fs_exists_async(const ScrDyn *path, const ScrDyn *cb) {
   if (!scr_fs_cb_chk(cb, "cb")) return NULL;
@@ -390,6 +392,13 @@ ScrDyn *scr_fs_exists_async(const ScrDyn *path, const ScrDyn *cb) {
     if (scr_exc_pending()) return NULL;
     return scr_dyn_retain(scr_dyn_undefined());
   }
+#ifdef SCR_LIB
+  /* Library links exclude the event-loop unit, and the compile-time scan
+   * refuses the fs.exists surface (SC4005's family) — this arm exists
+   * only so the TU links without scr_async. Unreachable by construction. */
+  scr_trap("scriptc: internal error: fs.exists async fire reached in a library build — please report this");
+  return NULL;
+#else
   ScrClosure *clo = scr_closure_new((void *)scr_fs_exists_fire, 2);
   clo->caps[0] = scr_box_new_obj(scr_dyn_retain_v, scr_dyn_release_v, NULL);
   scr_box_set_ref(clo->caps[0], scr_dyn_retain((ScrDyn *)path));
@@ -397,6 +406,7 @@ ScrDyn *scr_fs_exists_async(const ScrDyn *path, const ScrDyn *cb) {
   scr_box_set_ref(clo->caps[1], scr_dyn_retain((ScrDyn *)cb));
   scr_set_timeout(clo, 0);
   return scr_dyn_retain(scr_dyn_undefined());
+#endif
 }
 
 /* fs.mkdtemp(prefix, options?, cb): callback first (makeCallback), then

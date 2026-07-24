@@ -5974,6 +5974,10 @@ export function moduleUsesTls(mod: IrModule): boolean {
 /** libCall families a v1 library artifact refuses, with the surface name the SC4005
  * teaching uses. Prefix match over IrLibFn spellings. */
 const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
+  // fs.exists is the one CALLBACK-async fs op with a real implementation:
+  // its fire rides the timer queue (scr_bytes_io.c), which library links
+  // exclude — refuse the surface like the rest of the event-loop family.
+  ["fs.existsChk", "the async fs callback surface (fs.exists)"],
   ["timers.", "the timers surface (setTimeout family)"],
   ["tp.", "the timers/promises surface"],
   ["cp.", "the child_process surface"],

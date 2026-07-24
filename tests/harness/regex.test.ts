@@ -181,9 +181,10 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // platforms: regex linkage is a ~110KB jump above the static class
     // and the engine a ~620KB one, so a page-scale cushion cannot mask
     // either regression.
-    // (The dyn-async page re-base above moves this arm in step.)
+    // (The dyn-async page re-base above moves this arm in step. Re-based
+    // +8KB for the engine-handle kind arms and validation-ladder strings.)
     expect(statSync(regexBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 532_000 : 504_000,
+      process.platform === "linux" ? 540_000 : 512_000,
     );
   });
 });
