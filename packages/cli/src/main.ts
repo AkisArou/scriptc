@@ -37,6 +37,8 @@ Options:
       --emit-ir      also write the IR as JSON next to the executable
       --sanitize     build with ASan + runtime RC audit
       --dynamic      embed the dynamic engine (adds ~620KB; static stays the default)
+      --ffi <file>   bind signature-only TypeScript declarations to native
+                     C symbols and link the manifest's archives/libraries
       --npm-static <pkg[,pkg…]|auto>
                      compile the named npm packages' shipped JS statically as
                      program modules (repeatable; "auto" opts in every eligible
@@ -109,6 +111,7 @@ const CLI_OPTIONS = {
   "emit-ir": { type: "boolean", default: false },
   sanitize: { type: "boolean", default: false },
   dynamic: { type: "boolean", default: false },
+  ffi: { type: "string" },
   "npm-static": { type: "string", multiple: true },
   "provenance-sources": { type: "boolean", default: false },
   lib: { type: "boolean", default: false },
@@ -147,9 +150,9 @@ async function main(): Promise<number> {
     if (inputArg) {
       fail("scriptc build --lib takes no input positional: the profile names the entry module");
     }
-    if (values.dynamic || values.backend !== undefined || (values["npm-static"] ?? []).length > 0) {
+    if (values.dynamic || values.backend !== undefined || values.ffi !== undefined || (values["npm-static"] ?? []).length > 0) {
       fail(
-        "scriptc build --lib takes no --dynamic/--backend/--npm-static: the profile pins the emission, and npm imports are judged automatically — an eligible package compiles statically, an ineligible one refuses (library artifacts have no island tier)",
+        "scriptc build --lib takes no --dynamic/--backend/--npm-static/--ffi: the profile pins the emission, npm imports are judged automatically, and outbound FFI currently belongs to executable builds",
       );
     }
     const profilePath = resolve(profileArg);
@@ -177,6 +180,7 @@ async function main(): Promise<number> {
   }
   if (!inputArg) fail(`missing input file\n\n${USAGE}`);
   const input = resolve(inputArg);
+  const ffiProfilePath = values.ffi !== undefined ? resolve(values.ffi) : undefined;
   const backend = values.backend;
   if (backend !== undefined && backend !== "c" && backend !== "llvm") {
     fail(`unknown backend "${backend}" (supported: c, llvm)\n\n${USAGE}`);
@@ -210,7 +214,11 @@ async function main(): Promise<number> {
   }
 
   if (command === "coverage") {
-    const { coverage, sourceTexts } = analyze(input, { dynamic: values.dynamic, ...(npmStatic !== undefined ? { npmStatic } : {}) });
+    const { coverage, sourceTexts } = analyze(input, {
+      dynamic: values.dynamic,
+      ...(npmStatic !== undefined ? { npmStatic } : {}),
+      ...(ffiProfilePath !== undefined ? { ffiProfilePath } : {}),
+    });
     const color = process.stdout.isTTY ?? false;
     process.stdout.write(renderCoverage(coverage, { color, sourceTexts }) + "\n");
     return coverage.preflightFailed ? 1 : 0;
@@ -222,6 +230,9 @@ async function main(): Promise<number> {
 
   const build = async (): Promise<string> => {
     if (values["from-c"]) {
+      if (ffiProfilePath !== undefined) {
+        fail("--ffi is a TypeScript/JavaScript compiler feature and cannot be combined with --from-c");
+      }
       await compileC({ cPath: input, outPath, sanitize: values.sanitize, dynamic: values.dynamic });
       return outPath;
     }
@@ -233,6 +244,7 @@ async function main(): Promise<number> {
       dynamic: values.dynamic,
       ...(backend !== undefined ? { backend } : {}),
       ...(npmStatic !== undefined ? { npmStatic } : {}),
+      ...(ffiProfilePath !== undefined ? { ffiProfilePath } : {}),
     });
     if (!result.ok) {
       const color = process.stderr.isTTY ?? false;

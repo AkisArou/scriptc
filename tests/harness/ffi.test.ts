@@ -1,0 +1,174 @@
+/* Outbound native FFI is an integration lane rather than a corpus case:
+ * Node has no equivalent static-link surface to differential-run. The same
+ * TypeScript and native archive run through BOTH scriptc backends, and the
+ * result bytes must match. The fixture covers every format-1 ABI class,
+ * integer coercion, embedded-NUL/UTF-8 string spans, byte spans, and a void
+ * call with observable native state. */
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, test } from "vitest";
+import { compile, loadFfiProfile } from "@scriptc/compiler";
+
+const repoRoot = join(import.meta.dirname, "../..");
+const fixtureRoot = join(repoRoot, "tests/ffi");
+const sanitize = process.env["SCRIPTC_SAN"] === "1";
+const flavor = sanitize ? "san" : "plain";
+const cacheRoot = join(
+  repoRoot,
+  "node_modules/.cache/scriptc-tests/ffi",
+  flavor,
+);
+
+function nativeArchive(): string {
+  const outDir = join(cacheRoot, "native");
+  mkdirSync(outDir, { recursive: true });
+  const object = join(outDir, "native.o");
+  const archive = join(outDir, "libnative.a");
+  execFileSync("clang", [
+    "-std=c11",
+    ...(sanitize ? ["-O1", "-fsanitize=address"] : ["-O2"]),
+    "-c",
+    join(fixtureRoot, "native.c"),
+    "-o",
+    object,
+  ]);
+  execFileSync("ar", ["rcs", archive, object]);
+  return archive;
+}
+
+function manifest(archive: string): string {
+  const outDir = join(cacheRoot, "manifest");
+  mkdirSync(outDir, { recursive: true });
+  const profile = JSON.parse(
+    readFileSync(join(fixtureRoot, "profile.json"), "utf8"),
+  ) as { libraries: string[] };
+  profile.libraries = [archive];
+  const path = join(outDir, "profile.json");
+  writeFileSync(path, JSON.stringify(profile, null, 2));
+  return path;
+}
+
+const expected = [
+  "42",
+  "true false",
+  "2 4294967295 -1",
+  "429",
+  "6",
+  "12.5",
+  "",
+].join("\n");
+
+describe.each(["c", "llvm"] as const)("outbound native FFI, %s backend", (backend) => {
+  test("calls the manifest-bound archive across every v1 ABI class", async () => {
+    const outDir = join(cacheRoot, backend);
+    mkdirSync(outDir, { recursive: true });
+    const result = await compile(join(fixtureRoot, "main.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      ffiProfilePath: manifest(nativeArchive()),
+    });
+    if (!result.ok) {
+      throw new Error(
+        result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+      );
+    }
+    expect(
+      execFileSync(result.binaryPath, [], { encoding: "utf8" }),
+    ).toBe(expected);
+  });
+});
+
+test("manifest validation is strict and source-facing", () => {
+  const path = join(cacheRoot, "invalid.json");
+  mkdirSync(cacheRoot, { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({
+      ffi_format: 1,
+      functions: [
+        { name: "f", symbol: "not-a-C-symbol", params: [], returns: "f64" },
+      ],
+    }),
+  );
+  const result = loadFfiProfile(path);
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.diagnostics[0]?.code).toBe("SC5001");
+    expect(result.diagnostics[0]?.message).toContain("not a C identifier");
+  }
+});
+
+test("manifest validation reports a missing native link input", () => {
+  const path = join(cacheRoot, "missing-library.json");
+  mkdirSync(cacheRoot, { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({
+      ffi_format: 1,
+      functions: [],
+      libraries: ["does-not-exist.a"],
+    }),
+  );
+  const result = loadFfiProfile(path);
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.diagnostics[0]?.code).toBe("SC5001");
+    expect(result.diagnostics[0]?.message).toContain("cannot be read");
+  }
+});
+
+test.each([
+  {
+    name: "a TypeScript signature that disagrees with the manifest",
+    source: [
+      "declare function nativeScale(value: string): number;",
+      "console.log(nativeScale('21'));",
+      "",
+    ].join("\n"),
+    code: "SC5003",
+    message: "parameter 1",
+  },
+  {
+    name: "an ordinary function body with a configured name",
+    source: [
+      "function nativeScale(value: number): number { return value; }",
+      "console.log(nativeScale(21));",
+      "",
+    ].join("\n"),
+    code: "SC5002",
+    message: "signature-only",
+  },
+])("rejects $name", async ({ source, code, message }) => {
+  const outDir = join(cacheRoot, `reject-${code}`);
+  mkdirSync(outDir, { recursive: true });
+  const entry = join(outDir, "main.ts");
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(entry, source);
+  writeFileSync(
+    profilePath,
+    JSON.stringify({
+      ffi_format: 1,
+      functions: [
+        {
+          name: "nativeScale",
+          symbol: "sf_scale",
+          params: ["f64"],
+          returns: "f64",
+        },
+      ],
+    }),
+  );
+  const result = await compile(entry, {
+    outDir,
+    outPath: join(outDir, "never"),
+    ffiProfilePath: profilePath,
+  });
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.diagnostics[0]?.code).toBe(code);
+    expect(result.diagnostics[0]?.message).toContain(message);
+  }
+});

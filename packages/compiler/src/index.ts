@@ -29,6 +29,7 @@ import { resolveBareModule } from "./frontend/resolve.js";
 import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
+import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
 
 export const VERSION = "0.0.1";
 
@@ -58,6 +59,15 @@ export {
   type LibParamClass,
   type LibReturnClass,
 } from "./library/profile.js";
+export {
+  loadFfiProfile,
+  FFI_PARAM_CLASSES,
+  FFI_RETURN_CLASSES,
+  type FfiFunction,
+  type FfiParamClass,
+  type FfiProfile,
+  type FfiReturnClass,
+} from "./ffi/profile.js";
 export {
   assembleTrapTeaching,
   TRAP_TEACHING_MARKER,
@@ -122,6 +132,10 @@ export interface CompileOptions {
    * — never a silent misbuild. Off by default: nothing changes without
    * the flag. */
   npmStatic?: readonly string[] | "auto";
+  /** Outbound native FFI manifest. Its signature-only TypeScript bindings
+   * lower to direct C ABI calls, and its archive/system-library inputs are
+   * appended to the executable link. */
+  ffiProfilePath?: string;
 }
 
 export type CompileResult =
@@ -173,6 +187,8 @@ export interface AnalyzeOptions {
    * opted-in packages' JS as program modules and the coverage report
    * carries each package's static/fallback status. */
   npmStatic?: readonly string[] | "auto";
+  /** Analyze with the outbound native bindings from this FFI manifest. */
+  ffiProfilePath?: string;
 }
 
 /* ── the frontend, one pipeline shape ───────────────────────────────────
@@ -508,6 +524,23 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
 /** Analysis without codegen: how much of the program compiles statically.
  * Unlike compile(), lowering diagnostics are data here, not failure. */
 export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeResult {
+  let ffi: FfiProfile | null = null;
+  if (opts.ffiProfilePath !== undefined) {
+    const loaded = loadFfiProfile(opts.ffiProfilePath);
+    if (!loaded.ok) {
+      return {
+        coverage: {
+          file: entryPath,
+          dynamic: opts.dynamic ?? false,
+          stats: { statementsTotal: 0, statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 },
+          diagnostics: loaded.diagnostics,
+          preflightFailed: true,
+        },
+        sourceTexts: new Map(),
+      };
+    }
+    ffi = loaded.profile;
+  }
   const fe = runFrontend(entryPath, opts.npmStatic);
   try {
     const emptyStats = { statementsTotal: 0, statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 };
@@ -543,6 +576,7 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
       dynamic: opts.dynamic ?? false,
       coverage: true,
       targetPlatform: buildTargetPlatform(),
+      ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
     });
     const provenance = provenanceSources();
     return {
@@ -575,6 +609,14 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
 
 /** The whole pipeline: load → preflight → lower → validate → emit C → clang. */
 export async function compile(entryPath: string, opts: CompileOptions): Promise<CompileResult> {
+  let ffi: FfiProfile | null = null;
+  if (opts.ffiProfilePath !== undefined) {
+    const loaded = loadFfiProfile(opts.ffiProfilePath);
+    if (!loaded.ok) {
+      return { ok: false, diagnostics: loaded.diagnostics, sourceTexts: new Map() };
+    }
+    ffi = loaded.profile;
+  }
   const fe = runFrontend(entryPath, opts.npmStatic);
   let lowered: LowerResult;
   let entryText: string;
@@ -594,6 +636,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       lowered = fe.lower({
         dynamic: opts.dynamic ?? false,
         targetPlatform: buildTargetPlatform(),
+        ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
       });
     } catch (e) {
       // The last-resort panic fence: an upstream tsgo panic that crossed a
@@ -736,6 +779,12 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     // cc.ts also compiles it under the tls gate (scr_tls.c consults the
     // unit's default-set override for its trust anchors).
     tlsCa: moduleUsesTlsCa(lowered.module),
+    ...(ffi !== null
+      ? {
+          linkInputs: ffi.libraries,
+          systemLibraries: ffi.systemLibraries,
+        }
+      : {}),
   });
   return {
     ok: true,

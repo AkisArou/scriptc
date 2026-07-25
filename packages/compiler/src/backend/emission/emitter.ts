@@ -24,6 +24,7 @@ import type {
   IrGlobal,
   IrRecordShape,
   IrExpr,
+  IrFfiImport,
   IrFunction,
   IrLocal,
   IrModule,
@@ -167,6 +168,8 @@ export class CEmitter {
    * programs with no async functions. */
   usesTimers = false;
   readonly fnByName = new Map<string, IrFunction>();
+  /** Manifest-bound native imports, used by ffiCall emission. */
+  readonly ffiByName = new Map<string, IrFfiImport>();
   readonly globalsById = new Map<string, IrGlobal>();
   readonly unionsById = new Map<string, IrUnionDef>();
   /** Active optional-chain bind temps, by chain id (chainRecv reads). */
@@ -319,6 +322,7 @@ export class CEmitter {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
     }
+    for (const entry of mod.ffiImports ?? []) this.ffiByName.set(entry.name, entry);
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
     this.indirectMayThrow = mt.indirect;
@@ -608,6 +612,34 @@ export class CEmitter {
       out.push(`static ${cDecl(g.type, mangleGlobal(g.id))}; /* ${g.name} */`);
     }
     if (globals.length > 0) out.push("");
+    // Outbound native FFI declarations. string/bytes each expand from one
+    // scriptc value to a borrowed pointer+length pair at the C boundary.
+    for (const entry of this.mod.ffiImports ?? []) {
+      const params = entry.params.flatMap((cls): string[] => {
+        switch (cls) {
+          case "f64":
+            return ["double"];
+          case "bool":
+          case "u8":
+            return ["uint8_t"];
+          case "u32":
+            return ["uint32_t"];
+          case "i32":
+            return ["int32_t"];
+          case "string":
+          case "bytes":
+            return ["const uint8_t *", "size_t"];
+        }
+      });
+      const ret =
+        entry.returns === "f64" ? "double"
+        : entry.returns === "bool" || entry.returns === "u8" ? "uint8_t"
+        : entry.returns === "u32" ? "uint32_t"
+        : entry.returns === "i32" ? "int32_t"
+        : "void";
+      out.push(`extern ${ret} ${entry.symbol}(${params.length > 0 ? params.join(", ") : "void"});`);
+    }
+    if ((this.mod.ffiImports?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
     // Class objects (classes as values): construct-thunk prototypes plus
     // the immortal statics that take their addresses — after the function

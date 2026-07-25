@@ -5,13 +5,13 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
-import { BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
-import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
+import { ffiBindingDiag, ffiSignatureDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
 import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
@@ -2466,6 +2466,114 @@ export function islandPrimitiveExit(L: Lowerer, call: ts.CallExpression, result:
       return { kind: "libCall", fn: "timers.clearImmediate", args: [handle], type: VOID, loc };
     }
     return null;
+  }
+
+/** A manifest-bound call of a signature-only ambient declaration. This
+ * recognition deliberately runs before ambientUndefVarRootOf: without the
+ * manifest the exact same source keeps Node's ReferenceError semantics;
+ * with it, only the resolved declaration binding (never a shadowing
+ * function with a body) becomes a direct native call. */
+export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
+    if (!ts.isIdentifier(expr.expression)) return null;
+    const binding = L.ffiImportsByName.get(expr.expression.text);
+    if (binding === undefined) return null;
+    const loc = locOf(expr);
+    const bindingError = (detail: string): never => {
+      L.pushDiag(ffiBindingDiag(binding.name, detail, loc));
+      throw new PoisonError();
+    };
+    const signatureError = (detail: string): never => {
+      L.pushDiag(ffiSignatureDiag(binding.name, detail, loc));
+      throw new PoisonError();
+    };
+    if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
+      signatureError("native bindings support direct, non-generic calls only");
+    }
+    const symbol =
+      L.resolveValueSymbol(expr.expression) ??
+      bindingError("the call has no resolved TypeScript symbol");
+    const declarations = L.checker.declarationsOf(symbol);
+    const functionDecls = declarations.filter(ts.isFunctionDeclaration);
+    if (
+      functionDecls.length === 0 ||
+      declarations.some((decl) => !ts.isFunctionDeclaration(decl)) ||
+      functionDecls.some((decl) => decl.body !== undefined)
+    ) {
+      bindingError(
+        "the configured name does not resolve exclusively to signature-only function declarations",
+      );
+    }
+    if (functionDecls.some((decl) => (decl.typeParameters?.length ?? 0) > 0)) {
+      signatureError("generic ambient declarations cannot describe one fixed C ABI");
+    }
+    const signatures = L.checker.getCallSignatures(L.typeOf(expr.expression));
+    if (signatures.length !== 1) {
+      signatureError(
+        `the ambient binding has ${signatures.length} call signatures; exactly one non-overloaded signature is required`,
+      );
+    }
+    const signature = signatures[0]!;
+    const params = signature.getParameters();
+    if (params.length !== binding.params.length) {
+      signatureError(
+        `the TypeScript declaration has ${params.length} parameter(s), but the manifest declares ${binding.params.length}`,
+      );
+    }
+    if (expr.arguments.some(ts.isSpreadElement)) {
+      signatureError("spread arguments do not have a fixed native ABI");
+    }
+    if (expr.arguments.length !== binding.params.length) {
+      signatureError(
+        `this call passes ${expr.arguments.length} argument(s), but the native ABI requires exactly ${binding.params.length}`,
+      );
+    }
+    const typeForClass = (
+      cls: (typeof binding.params)[number] | typeof binding.returns,
+    ): IrType => {
+      switch (cls) {
+        case "bool":
+          return BOOL;
+        case "string":
+          return STRING;
+        case "bytes":
+          return BYTES_U8;
+        case "void":
+          return VOID;
+        default:
+          return F64;
+      }
+    };
+    const expectedParams = binding.params.map(typeForClass);
+    params.forEach((param, i) => {
+      const paramType = L.checker.getTypeOfSymbol(param);
+      const mapped = L.mapTypeOf(paramType);
+      const expected = expectedParams[i]!;
+      if (mapped === null || !typeEquals(mapped, expected)) {
+        signatureError(
+          `parameter ${i + 1} maps to '${mapped === null ? L.checker.typeToString(paramType) : L.fmt(mapped)}', ` +
+            `which does not fit manifest class '${binding.params[i]}'`,
+        );
+      }
+    });
+    const returnType = L.checker.getReturnTypeOfSignature(signature);
+    const declaredReturn = L.mapTypeOf(returnType);
+    const expectedReturn = typeForClass(binding.returns);
+    if (declaredReturn === null || !typeEquals(declaredReturn, expectedReturn)) {
+      signatureError(
+        `the return maps to '${declaredReturn === null ? L.checker.typeToString(returnType) : L.fmt(declaredReturn)}', ` +
+          `which does not fit manifest class '${binding.returns}'`,
+      );
+    }
+    const args = expr.arguments.map((arg, i) =>
+      L.lowerExprExpecting(arg, expectedParams[i]!)
+    );
+    return {
+      kind: "ffiCall",
+      import: binding.name,
+      args,
+      type: expectedReturn,
+      loc,
+    };
   }
 
 export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {

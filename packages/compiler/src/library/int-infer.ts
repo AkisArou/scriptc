@@ -1134,6 +1134,7 @@ class FnAnalyzer {
       case "assignExpr":
       case "seqExpr":
       case "call":
+      case "ffiCall":
       case "callValue":
       case "new":
       case "newValue":

@@ -37,6 +37,12 @@ export interface CcOptions {
   outPath: string;
   /** Build with ASan + the runtime RC audit (test/debug lane). */
   sanitize?: boolean;
+  /** Additional native archives/objects, appended after the generated
+   * program TU so their symbols resolve outbound FFI calls. */
+  linkInputs?: readonly string[];
+  /** Driver-neutral system library names, emitted as `-l<name>` after
+   * linkInputs. */
+  systemLibraries?: readonly string[];
   /** Embed the dynamic-island engine (--dynamic): compiles scr_island.c,
    * defines SCR_DYNAMIC, and links the cached libqjs.a. Off = the static
    * default, byte-identical to builds predating the flag. */
@@ -1185,6 +1191,8 @@ export async function compileC(opts: CcOptions): Promise<void> {
     // command line cannot change by a byte.
     ...(opts.cPath.endsWith(".ll") ? ["-Wno-override-module"] : []),
     opts.cPath,
+    ...(opts.linkInputs ?? []),
+    ...(opts.systemLibraries ?? []).map((name) => `-l${name}`),
     "-o", opts.outPath,
   ];
   const ccName = driver.argv.join(" ");
@@ -1193,10 +1201,16 @@ export async function compileC(opts: CcOptions): Promise<void> {
       await execFileAsync(driver.argv[0] ?? "clang", [...driver.argv.slice(1), ...args]);
     } catch (err) {
       const stderr = (err as { stderr?: string }).stderr ?? String(err);
+      const guidance =
+        (opts.linkInputs?.length ?? 0) > 0 ||
+        (opts.systemLibraries?.length ?? 0) > 0
+          ? "This build includes native FFI link inputs. Check that every symbol and system library exists, " +
+            "that archive/object ordering is correct, and that each input matches the selected target."
+          : `This is a scriptc bug (generated C should always compile) unless ` +
+            `${ccName} itself is missing/broken.`;
       throw new Error(
         `${ccName} failed compiling ${opts.cPath}.\n` +
-          `This is a scriptc bug (generated C should always compile) unless ` +
-          `${ccName} itself is missing/broken.\n\n${stderr}`,
+          `${guidance}\n\n${stderr}`,
       );
     }
   };
@@ -1208,10 +1222,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
     return;
   }
 
-  const [cv, fingerprint, cBytes] = await Promise.all([
+  const [cv, fingerprint, cBytes, linkBytes] = await Promise.all([
     ccVersionOnce(driver.argv),
     runtimeFingerprint(rtDir),
     readFile(opts.cPath),
+    Promise.all((opts.linkInputs ?? []).map((path) => readFile(path))),
   ]);
   // The key sees the full command line with the two program-specific paths
   // normalized out (their CONTENT is what matters: the C bytes are hashed,
@@ -1229,10 +1244,12 @@ export async function compileC(opts: CcOptions): Promise<void> {
     .update(cv).update("\0")
     .update(fingerprint).update("\0")
     .update(identityArgs.join("\x1f")).update("\0")
-    .update(cBytes)
+    .update(cBytes);
+  for (const bytes of linkBytes) key.update("\0ffi-link\0").update(bytes);
+  const keyHex = key
     .digest("hex");
   const binDir = join(root, "bin");
-  const cachedBin = join(binDir, key);
+  const cachedBin = join(binDir, keyHex);
   try {
     // NEVER copy over outPath in place: overwriting an already-executed
     // signed binary invalidates the kernel's per-vnode code-signature cache
@@ -1284,7 +1301,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   await runClang(buildArgs((p) => objects?.get(p) ?? p));
   try {
     await mkdir(binDir, { recursive: true });
-    const tmp = join(binDir, `.tmp-${key.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+    const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
     await copyFile(opts.outPath, tmp);
     await chmod(tmp, 0o755);
     await rename(tmp, cachedBin);

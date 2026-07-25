@@ -5,6 +5,7 @@ export const PAGE_TITLES: Record<string, string> = {
   cli: "CLI Reference",
   coverage: "Coverage Reports",
   dependencies: "npm Dependencies",
+  ffi: "Native FFI",
   platforms: "Platform Support",
   "how-it-works": "How It Works",
   limitations: "Limitations",

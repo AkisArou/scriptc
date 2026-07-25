@@ -38,6 +38,7 @@ import {
 import type {
   IrClassDef,
   IrExpr,
+  IrFfiImport,
   IrFunction,
   IrGlobal,
   IrLocal,
@@ -89,7 +90,7 @@ import { CompoundOp, IslandFnEntry, boundaryIntoIslandMsg, boundaryOutOfIslandMs
 import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonImports, moduleArtifacts, collectGlobals, declSymbolOf, defaultExportSymbolOf, lowerFileInit, lowerDefaultExport, buildMain, appendDynamicImportModules } from "./lower-modules.js";
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
-import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction } from "./lower-calls.js";
+import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerFfiCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction } from "./lower-calls.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
@@ -344,6 +345,11 @@ export interface LowerOptions {
    * OUTSIDE the graph, so discovery seeds them alongside the init
    * bodies. Names are the entry file's unqualified declaration names. */
   libRoots?: readonly string[];
+  /** Outbound native FFI declarations from a validated format-1 manifest.
+   * Calls of their exact ambient TypeScript bindings lower to direct C ABI
+   * imports; without this option ambient declarations keep Node's ordinary
+   * ReferenceError behavior. */
+  ffiImports?: readonly IrFfiImport[];
 }
 
 /** The Lowerer's pass configuration (see lowerToIr). */
@@ -365,6 +371,8 @@ export interface LowererMode {
    * module init — Node refuses the whole graph before anything evaluates,
    * so nothing runs. */
   startupCrash?: StartupCrash | null;
+  /** The build's outbound native FFI declarations. */
+  ffiImports?: readonly IrFfiImport[];
 }
 
 /** Build lowering runs in two passes over the same ts.Program:
@@ -411,8 +419,17 @@ export function lowerToIr(
       );
     });
   }
-  const reachable = new Lowerer(program, entry, moduleOrder, dynamic, { targetPlatform }).discover(options.libRoots);
-  const emit = new Lowerer(program, entry, moduleOrder, dynamic, { reachable, targetPlatform, startupCrash });
+  const ffiImports = options.ffiImports ?? [];
+  const reachable = new Lowerer(program, entry, moduleOrder, dynamic, {
+    targetPlatform,
+    ffiImports,
+  }).discover(options.libRoots);
+  const emit = new Lowerer(program, entry, moduleOrder, dynamic, {
+    reachable,
+    targetPlatform,
+    startupCrash,
+    ffiImports,
+  });
   for (const d of dynamicCycleDiags) emit.pushDiag(d);
   const result = emit.run();
   if (options.coverage !== true) return result;
@@ -421,6 +438,7 @@ export function lowerToIr(
     remainder: true,
     alreadyFlushed: emit.flushedSymbols,
     targetPlatform,
+    ffiImports,
   });
   const rem = remainder.run();
   return { ...result, unreached: { diagnostics: rem.diagnostics, stats: rem.stats } };
@@ -1095,6 +1113,9 @@ export class Lowerer {
   readonly targetPlatform: string;
   /** LowererMode.startupCrash — buildMain opens %main with the throw. */
   readonly startupCrash: StartupCrash | null;
+  /** Outbound native bindings by their source-level ambient name. */
+  readonly ffiImports: readonly IrFfiImport[];
+  readonly ffiImportsByName: ReadonlyMap<string, IrFfiImport>;
   /** Symbols a POISONED declaration statement would have bound: the
    * declaration's own diagnostic is already recorded, and no local/global
    * registered, so later references fall through every resolution step —
@@ -1147,6 +1168,8 @@ export class Lowerer {
     this.alreadyFlushed = mode.alreadyFlushed ?? new Set();
     this.targetPlatform = mode.targetPlatform ?? process.platform;
     this.startupCrash = mode.startupCrash ?? null;
+    this.ffiImports = mode.ffiImports ?? [];
+    this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     this.checker = program.getTypeChecker();
     this.typeCtx = {
       checker: this.checker,
@@ -1804,7 +1827,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 1,
+            irVersion: 2,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,
@@ -1813,6 +1836,7 @@ export class Lowerer {
             globals: this.globalsList,
             ...(this.npmEmbedded ? { embedded: this.npmEmbedded } : {}),
             entry: ENTRY_NAME,
+            ...(this.ffiImports.length > 0 ? { ffiImports: [...this.ffiImports] } : {}),
           };
     return {
       module,
@@ -7031,6 +7055,7 @@ export class Lowerer {
     // have no lowering for a promise-returning ambient global, and
     // `import` is a keyword callee no identifier path matches).
     return (
+      lowerFfiCall(this, expr) ??
       lowerFetchCall(this, expr) ??
       lowerDynamicImportCall(this, expr) ??
       lowerCall(this, expr)

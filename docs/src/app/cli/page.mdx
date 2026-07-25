@@ -57,6 +57,9 @@ Analyzes the program without producing a binary and reports, statement by statem
   <dt><code>--dynamic</code></dt>
   <dd>Embed the dynamic engine (~620KB) so npm dependencies and <code>any</code>-typed code can run. Static stays the default — without this flag, dynamic-tier sites are per-site compile errors. See <a href="/dependencies">npm Dependencies</a>.</dd>
 
+  <dt><code>--ffi &lt;file&gt;</code></dt>
+  <dd>Bind signature-only TypeScript declarations to native C ABI symbols and link the manifest's archive, object, and system-library inputs. See <a href="/ffi">Native FFI</a>.</dd>
+
   <dt><code>--backend &lt;c|llvm&gt;</code></dt>
   <dd>Code generator: <code>llvm</code> (default — emits LLVM IR text, compiled by the same clang) or <code>c</code> (the readable reference backend). Unset, the build tries LLVM and falls back to the C backend when the program is outside the LLVM tier — a one-line stderr note says so, and program behavior is identical either way. An explicit <code>--backend llvm</code> fails with a diagnostic instead of falling back (the debugging/CI pin); <code>--backend c</code> pins the reference backend.</dd>
 

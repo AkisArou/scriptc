@@ -1082,6 +1082,23 @@ function callSiteReturnType(fn: IrFunction): IrType {
   return fn.returnType;
 }
 
+/** IR type carried by one native FFI marshalling class. Integer classes
+ * are represented as f64 inside scriptc and narrow only at the C edge. */
+function ffiClassType(cls: string): IrType {
+  switch (cls) {
+    case "bool":
+      return BOOL;
+    case "string":
+      return STRING;
+    case "bytes":
+      return BYTES_U8;
+    case "void":
+      return VOID;
+    default:
+      return F64;
+  }
+}
+
 export function validateModule(mod: IrModule): IrValidationError[] {
   const errors: IrValidationError[] = [];
   const functionsByName = new Map<string, IrFunction>();
@@ -1093,6 +1110,19 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       errors.push({ message: `function "${fn.name}" is both async and a generator (async generators are fenced)`, loc: fn.loc });
     }
     functionsByName.set(fn.name, fn);
+  }
+  const ffiByName = new Map<string, NonNullable<IrModule["ffiImports"]>[number]>();
+  const ffiSymbols = new Set<string>();
+  const moduleLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
+  for (const entry of mod.ffiImports ?? []) {
+    if (ffiByName.has(entry.name)) {
+      errors.push({ message: `duplicate FFI binding "${entry.name}"`, loc: moduleLoc });
+    }
+    if (ffiSymbols.has(entry.symbol)) {
+      errors.push({ message: `duplicate FFI symbol "${entry.symbol}"`, loc: moduleLoc });
+    }
+    ffiByName.set(entry.name, entry);
+    ffiSymbols.add(entry.symbol);
   }
   // The lib section (library mode): every mapped function exists, is
   // synchronous, and its IR signature fits the declared marshalling
@@ -1442,7 +1472,16 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
   }
   for (const fn of mod.functions) {
-    validateFunction(fn, functionsByName, classesByName, recordsById, unionsById, globalsById, errors);
+    validateFunction(
+      fn,
+      functionsByName,
+      ffiByName,
+      classesByName,
+      recordsById,
+      unionsById,
+      globalsById,
+      errors,
+    );
   }
   return errors;
 }
@@ -1450,6 +1489,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
 function validateFunction(
   fn: IrFunction,
   functions: Map<string, IrFunction>,
+  ffiByName: Map<string, NonNullable<IrModule["ffiImports"]>[number]>,
   classes: Map<string, IrClassDef>,
   records: Map<string, IrRecordShape>,
   unions: Map<string, IrUnionDef>,
@@ -2442,6 +2482,34 @@ function validateFunction(
         const expected = callSiteReturnType(callee);
         if (!typeEquals(e.type, expected)) {
           err(`call ${e.callee} type ${e.type.kind} != return ${expected.kind}`, e.loc);
+        }
+        break;
+      }
+      case "ffiCall": {
+        for (const arg of e.args) checkExpr(arg);
+        const entry = ffiByName.get(e.import);
+        if (!entry) {
+          err(`FFI call to undeclared import "${e.import}"`, e.loc);
+          break;
+        }
+        if (entry.params.length !== e.args.length) {
+          err(
+            `FFI call ${e.import}: ${e.args.length} args, expected ${entry.params.length}`,
+            e.loc,
+          );
+        }
+        e.args.forEach((arg, i) => {
+          const cls = entry.params[i];
+          if (cls !== undefined) {
+            expectType(arg, ffiClassType(cls), `FFI call ${e.import} arg ${i}`);
+          }
+        });
+        const expected = ffiClassType(entry.returns);
+        if (!typeEquals(e.type, expected)) {
+          err(
+            `FFI call ${e.import} type ${e.type.kind} != return class ${entry.returns}`,
+            e.loc,
+          );
         }
         break;
       }

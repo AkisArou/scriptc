@@ -1,0 +1,16 @@
+{
+  "ffi_format": 1,
+  "functions": [
+    { "name": "nativeScale", "symbol": "sf_scale", "params": ["f64"], "returns": "f64" },
+    { "name": "nativeInvert", "symbol": "sf_invert", "params": ["bool"], "returns": "bool" },
+    { "name": "nativeU8", "symbol": "sf_u8", "params": ["u8"], "returns": "u8" },
+    { "name": "nativeU32", "symbol": "sf_u32", "params": ["u32"], "returns": "u32" },
+    { "name": "nativeI32", "symbol": "sf_i32", "params": ["i32"], "returns": "i32" },
+    { "name": "nativeTextSum", "symbol": "sf_text_sum", "params": ["string"], "returns": "f64" },
+    { "name": "nativeBytesSum", "symbol": "sf_bytes_sum", "params": ["bytes"], "returns": "f64" },
+    { "name": "nativeNote", "symbol": "sf_note", "params": ["f64"], "returns": "void" },
+    { "name": "nativeLastNote", "symbol": "sf_last_note", "params": [], "returns": "f64" }
+  ],
+  "libraries": [],
+  "system_libraries": []
+}
