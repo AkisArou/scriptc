@@ -1,9 +1,9 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
+import { CcCompileError, compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
@@ -158,6 +158,23 @@ function llvmRefusalDiag(err: LlvmUnsupportedError, entryPath: string): ScrDiagn
     message: err.message,
     loc: err.loc ?? { file: entryPath, start: 0, end: 0 },
   };
+}
+
+/** Clang may print every warning from the generated/runtime translation
+ * units before the actionable linker failure. Keep the source diagnostic
+ * precise by starting at the first portable linker marker; if the driver
+ * supplied no recognizable marker, retain only its bounded tail. */
+function ffiNativeBuildDetail(err: CcCompileError): string {
+  const lines = err.stderr.trim().split(/\r?\n/);
+  const linkerMarker = lines.findIndex((line) =>
+    /(?:Undefined symbols|undefined reference to|unresolved external symbol|duplicate symbol|library not found for|cannot find -l|unable to find library|file format not recognized|linker command failed|fatal error LNK|lld-link: error)/i.test(line)
+  );
+  const relevant = linkerMarker >= 0 ? lines.slice(linkerMarker) : lines.slice(-40);
+  const output = relevant.join("\n").trim();
+  return (
+    `${err.driver} ${linkerMarker >= 0 ? "could not link the generated program" : "failed while building the generated program"}` +
+    (output.length > 0 ? `:\n${output}` : "")
+  );
 }
 
 export interface AnalyzeResult {
@@ -701,91 +718,107 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   }
 
   await mkdir(dirname(opts.outPath), { recursive: true });
-  await compileC({
-    cPath,
-    outPath: opts.outPath,
-    sanitize: opts.sanitize ?? false,
-    dynamic: opts.dynamic ?? false,
-    // The link switch for scr_regex.c + libregexp: detected on the IR, so
-    // regex-free programs keep the historical (pinned) command line.
-    regex: moduleUsesRegex(lowered.module),
-    // The link switch for scr_fetch.c (the native bridge over scr_net +
-    // scr_tls + scr_http's client parser + zlib — cc.ts implies those
-    // units into the link): embedded npm code that references fetch gets
-    // the bridge; everything else keeps its exact link line.
-    fetch: moduleUsesFetch(lowered.module),
-    // The island's node:http/https client bridge: embedded graphs that
-    // import those builtins pull scr_net_island.c + the socket units.
-    netIsland:
-      moduleEmbedsBuiltin(lowered.module, "node:http") ||
-      moduleEmbedsBuiltin(lowered.module, "node:https") ||
-      moduleEmbedsBuiltin(lowered.module, "node:net") ||
-      moduleEmbedsBuiltin(lowered.module, "node:tls"),
-    // The link switch for scr_zlib.c + libz: zlib.* libCalls on the IR,
-    // node:zlib in the embedded graph, or COMPRESSED embedded module text
-    // (emit-island.ts stores big npm sources as raw DEFLATE; the emitted
-    // main installs scr_zlib_inflate_exact on the same predicate).
-    zlib: moduleUsesZlib(lowered.module) || moduleEmbedsCompressedNpm(lowered.module),
-    // The link switch for scr_assert.c: assert.* libCalls on the IR (the
-    // regex switch also pulls it — scr_regex.c calls the assert helpers).
-    assert: moduleUsesAssert(lowered.module),
-    // The link switch for scr_inspect.c: insp.* libCalls on the IR.
-    inspect: moduleUsesInspect(lowered.module),
-    // The link switch for scr_dyn_invoke.c: dynInvoke nodes or
-    // dyn.defineProps libCalls on the IR.
-    dynInvoke: moduleUsesDynInvoke(lowered.module),
-    // The link switch for scr_dc.c: dc.* libCalls on the IR (the
-    // diagnostics_channel registry and pub/sub).
-    dc: moduleUsesDc(lowered.module),
-    // The link switch for scr_async_dyn.c: the checked-dynamic async
-    // surfaces (cc.ts also pulls it under the dynInvoke/dc gates).
-    dynAsync: moduleUsesDynAsync(lowered.module),
-    // The link switch for scr_events.c: process signal/exit listeners and
-    // the stdin event surface on the IR.
-    events: moduleUsesProcessEvents(lowered.module),
-    // The link switch for scr_events_emitter.c: the node:events
-    // EventEmitter surface on the IR (emitter.* libCalls or the
-    // %EventEmitter class def).
-    emitter: moduleUsesEmitter(lowered.module),
-    // The link switch for scr_symbol.c: sym.* libCalls or a symbol-kind
-    // type anywhere on the IR.
-    symbol: moduleUsesSymbol(lowered.module),
-    // The link switch for scr_url_params.c: sp.* libCalls, the
-    // url.searchParams getter, or a searchParams-kind type on the IR.
-    searchParams: moduleUsesSearchParams(lowered.module),
-    // The link switch for scr_qs.c: the qs.* libCalls that live there
-    // (parse/stringify/unescape; escape rides the always-linked encoder).
-    qs: moduleUsesQs(lowered.module),
-    // The link switch for scr_stream.c: the node:stream class surface on
-    // the IR (stream libCalls or the %Readable-family class defs).
-    stream: moduleUsesStream(lowered.module),
-    // The link switch for scr_net.c: net.* (or http.* — http rides on
-    // net) libCalls on the IR.
-    net: moduleUsesNet(lowered.module),
-    // The link switch for scr_http.c: http.* libCalls on the IR.
-    http: moduleUsesHttpServer(lowered.module),
-    http2: moduleUsesHttp2(lowered.module),
-    // The link switch for scr_dgram.c: dgram.* or dns.* libCalls on the IR.
-    dgram: moduleUsesDgram(lowered.module),
-    // The link switch for scr_watch.c: fs.watch/watcher.* libCalls on the IR.
-    watch: moduleUsesFsWatch(lowered.module),
-    // The link switch for scr_test.c: test.* libCalls on the IR.
-    nodeTest: moduleUsesNodeTest(lowered.module),
-    // The link switch for scr_tls.c + the vendored mbedTLS archive:
-    // tls.* or https.* libCalls on the IR.
-    tls: moduleUsesTls(lowered.module),
-    // The link switch for scr_tls_ca.c (the CA-store introspection unit
-    // — plain PEM bookkeeping, no mbedTLS): tlsca.* libCalls on the IR.
-    // cc.ts also compiles it under the tls gate (scr_tls.c consults the
-    // unit's default-set override for its trust anchors).
-    tlsCa: moduleUsesTlsCa(lowered.module),
-    ...(ffi !== null
-      ? {
-          linkInputs: ffi.libraries,
-          systemLibraries: ffi.systemLibraries,
-        }
-      : {}),
-  });
+  try {
+    await compileC({
+      cPath,
+      outPath: opts.outPath,
+      sanitize: opts.sanitize ?? false,
+      dynamic: opts.dynamic ?? false,
+      // The link switch for scr_regex.c + libregexp: detected on the IR, so
+      // regex-free programs keep the historical (pinned) command line.
+      regex: moduleUsesRegex(lowered.module),
+      // The link switch for scr_fetch.c (the native bridge over scr_net +
+      // scr_tls + scr_http's client parser + zlib — cc.ts implies those
+      // units into the link): embedded npm code that references fetch gets
+      // the bridge; everything else keeps its exact link line.
+      fetch: moduleUsesFetch(lowered.module),
+      // The island's node:http/https client bridge: embedded graphs that
+      // import those builtins pull scr_net_island.c + the socket units.
+      netIsland:
+        moduleEmbedsBuiltin(lowered.module, "node:http") ||
+        moduleEmbedsBuiltin(lowered.module, "node:https") ||
+        moduleEmbedsBuiltin(lowered.module, "node:net") ||
+        moduleEmbedsBuiltin(lowered.module, "node:tls"),
+      // The link switch for scr_zlib.c + libz: zlib.* libCalls on the IR,
+      // node:zlib in the embedded graph, or COMPRESSED embedded module text
+      // (emit-island.ts stores big npm sources as raw DEFLATE; the emitted
+      // main installs scr_zlib_inflate_exact on the same predicate).
+      zlib: moduleUsesZlib(lowered.module) || moduleEmbedsCompressedNpm(lowered.module),
+      // The link switch for scr_assert.c: assert.* libCalls on the IR (the
+      // regex switch also pulls it — scr_regex.c calls the assert helpers).
+      assert: moduleUsesAssert(lowered.module),
+      // The link switch for scr_inspect.c: insp.* libCalls on the IR.
+      inspect: moduleUsesInspect(lowered.module),
+      // The link switch for scr_dyn_invoke.c: dynInvoke nodes or
+      // dyn.defineProps libCalls on the IR.
+      dynInvoke: moduleUsesDynInvoke(lowered.module),
+      // The link switch for scr_dc.c: dc.* libCalls on the IR (the
+      // diagnostics_channel registry and pub/sub).
+      dc: moduleUsesDc(lowered.module),
+      // The link switch for scr_async_dyn.c: the checked-dynamic async
+      // surfaces (cc.ts also pulls it under the dynInvoke/dc gates).
+      dynAsync: moduleUsesDynAsync(lowered.module),
+      // The link switch for scr_events.c: process signal/exit listeners and
+      // the stdin event surface on the IR.
+      events: moduleUsesProcessEvents(lowered.module),
+      // The link switch for scr_events_emitter.c: the node:events
+      // EventEmitter surface on the IR (emitter.* libCalls or the
+      // %EventEmitter class def).
+      emitter: moduleUsesEmitter(lowered.module),
+      // The link switch for scr_symbol.c: sym.* libCalls or a symbol-kind
+      // type anywhere on the IR.
+      symbol: moduleUsesSymbol(lowered.module),
+      // The link switch for scr_url_params.c: sp.* libCalls, the
+      // url.searchParams getter, or a searchParams-kind type on the IR.
+      searchParams: moduleUsesSearchParams(lowered.module),
+      // The link switch for scr_qs.c: the qs.* libCalls that live there
+      // (parse/stringify/unescape; escape rides the always-linked encoder).
+      qs: moduleUsesQs(lowered.module),
+      // The link switch for scr_stream.c: the node:stream class surface on
+      // the IR (stream libCalls or the %Readable-family class defs).
+      stream: moduleUsesStream(lowered.module),
+      // The link switch for scr_net.c: net.* (or http.* — http rides on
+      // net) libCalls on the IR.
+      net: moduleUsesNet(lowered.module),
+      // The link switch for scr_http.c: http.* libCalls on the IR.
+      http: moduleUsesHttpServer(lowered.module),
+      http2: moduleUsesHttp2(lowered.module),
+      // The link switch for scr_dgram.c: dgram.* or dns.* libCalls on the IR.
+      dgram: moduleUsesDgram(lowered.module),
+      // The link switch for scr_watch.c: fs.watch/watcher.* libCalls on the IR.
+      watch: moduleUsesFsWatch(lowered.module),
+      // The link switch for scr_test.c: test.* libCalls on the IR.
+      nodeTest: moduleUsesNodeTest(lowered.module),
+      // The link switch for scr_tls.c + the vendored mbedTLS archive:
+      // tls.* or https.* libCalls on the IR.
+      tls: moduleUsesTls(lowered.module),
+      // The link switch for scr_tls_ca.c (the CA-store introspection unit
+      // — plain PEM bookkeeping, no mbedTLS): tlsca.* libCalls on the IR.
+      // cc.ts also compiles it under the tls gate (scr_tls.c consults the
+      // unit's default-set override for its trust anchors).
+      tlsCa: moduleUsesTlsCa(lowered.module),
+      ...(ffi !== null
+        ? {
+            linkInputs: ffi.libraries,
+            systemLibraries: ffi.systemLibraries,
+          }
+        : {}),
+    });
+  } catch (err) {
+    if (ffi !== null && err instanceof CcCompileError) {
+      return {
+        ok: false,
+        diagnostics: [
+          ffiNativeBuildDiag(
+            ffiNativeBuildDetail(err),
+            opts.ffiProfilePath ?? entryPath,
+          ),
+        ],
+        sourceTexts,
+      };
+    }
+    throw err;
+  }
   return {
     ok: true,
     binaryPath: opts.outPath,

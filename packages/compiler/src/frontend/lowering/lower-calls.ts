@@ -2536,6 +2536,17 @@ function ffiDeclarationDiagnostic(
   const expectedParams = binding.params.map(ffiTypeForClass);
   for (let i = 0; i < params.length; i++) {
     const paramType = L.checker.getTypeOfSymbol(params[i]!);
+    // `mapType` deliberately gives uninhabited value positions a cheap f64
+    // slot because no TypeScript value can ever reach them. An FFI
+    // declaration is different: it is a callable external contract, so a
+    // `never` slot cannot truthfully describe any native parameter.
+    if ((paramType.flags & ts.TypeFlags.Never) !== 0) {
+      return ffiSignatureDiag(
+        binding.name,
+        `parameter ${i + 1} is 'never', an uninhabited TypeScript type that cannot describe a native ABI parameter`,
+        loc,
+      );
+    }
     const mapped = L.mapTypeOf(paramType);
     const expected = expectedParams[i]!;
     if (mapped === null || !typeEquals(mapped, expected)) {
@@ -2548,6 +2559,16 @@ function ffiDeclarationDiagnostic(
     }
   }
   const returnType = L.checker.getReturnTypeOfSignature(signature);
+  // A native function is allowed to return. Accepting `never` here would
+  // let tsc erase all control flow after the call while the linked function
+  // continues, making the generated program disagree with TypeScript.
+  if ((returnType.flags & ts.TypeFlags.Never) !== 0) {
+    return ffiSignatureDiag(
+      binding.name,
+      "the return type is 'never', but a native ABI return cannot uphold TypeScript's non-returning contract",
+      loc,
+    );
+  }
   const declaredReturn = L.mapTypeOf(returnType);
   const expectedReturn = ffiTypeForClass(binding.returns);
   if (declaredReturn === null || !typeEquals(declaredReturn, expectedReturn)) {
@@ -2655,9 +2676,6 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       L.pushDiag(ffiSignatureDiag(binding.name, detail, loc));
       throw new PoisonError();
     };
-    if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
-      signatureError("native bindings support direct, non-generic calls only");
-    }
     const symbol =
       L.resolveValueSymbol(expr.expression) ??
       bindingError("the call has no resolved TypeScript symbol");
@@ -2667,9 +2685,10 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       // binding. Poison the statement without duplicating that diagnostic.
       if (validSymbols === undefined) throw new PoisonError();
       if (!validSymbols.has(symbol)) {
-        bindingError(
-          "the configured name does not resolve exclusively to a validated signature-only function declaration",
-        );
+        // TypeScript resolved this call to a distinct local declaration.
+        // The manifest owns only the exact validated ambient binding; a
+        // same-named function with a body remains ordinary scriptc code.
+        return null;
       }
     } else {
       const diagnostic = ffiDeclarationDiagnostic(L, binding, symbol, loc);
@@ -2677,6 +2696,9 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
         L.pushDiag(diagnostic);
         throw new PoisonError();
       }
+    }
+    if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
+      signatureError("native bindings support direct, non-generic calls only");
     }
     if (expr.arguments.some(ts.isSpreadElement)) {
       signatureError("spread arguments do not have a fixed native ABI");

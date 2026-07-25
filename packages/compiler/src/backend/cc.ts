@@ -188,6 +188,21 @@ export interface CcOptions {
   tlsCa?: boolean;
 }
 
+/** Structured compiler-driver failure. Most callers still let this surface
+ * as an internal build error; the TypeScript compiler pipeline recognizes it
+ * when an outbound FFI profile is active and turns user-controlled native
+ * link failures into SC5004. */
+export class CcCompileError extends Error {
+  constructor(
+    readonly driver: string,
+    readonly stderr: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CcCompileError";
+  }
+}
+
 export function runtimeSrcDir(): string {
   const require = createRequire(import.meta.url);
   return join(dirname(require.resolve("@scriptc/runtime/package.json")), "src");
@@ -1208,7 +1223,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
             "that archive/object ordering is correct, and that each input matches the selected target."
           : `This is a scriptc bug (generated C should always compile) unless ` +
             `${ccName} itself is missing/broken.`;
-      throw new Error(
+      throw new CcCompileError(
+        ccName,
+        stderr,
         `${ccName} failed compiling ${opts.cPath}.\n` +
           `${guidance}\n\n${stderr}`,
       );

@@ -423,11 +423,24 @@ export function lowerToIr(
     });
   }
   const ffiImports = options.ffiImports ?? [];
-  const discovery = new Lowerer(program, entry, moduleOrder, dynamic, {
+  const validation = new Lowerer(program, entry, moduleOrder, dynamic, {
     targetPlatform,
     ffiImports,
   });
-  const ffiValidation = validateFfiImports(discovery);
+  const ffiValidation = validateFfiImports(validation);
+  // Discovery must use the same exact-symbol ownership as emit. Otherwise a
+  // local function shadowing a configured ambient name is mistaken for FFI
+  // while computing reachability, even though emit would correctly lower it
+  // as ordinary TypeScript. FFI-free builds reuse the validation lowerer
+  // (validation is an immediate no-op there), retaining the historical
+  // two-pass construction cost.
+  const discovery = ffiImports.length === 0
+    ? validation
+    : new Lowerer(program, entry, moduleOrder, dynamic, {
+        targetPlatform,
+        ffiImports,
+        ffiBindingSymbols: ffiValidation.symbolsByName,
+      });
   const reachable = discovery.discover(options.libRoots);
   const emit = new Lowerer(program, entry, moduleOrder, dynamic, {
     reachable,

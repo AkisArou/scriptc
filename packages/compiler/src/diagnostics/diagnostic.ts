@@ -42,7 +42,8 @@
  *   SC5xxx  native FFI: malformed manifests (SC5001), a configured
  *            binding that is not an ambient function declaration
  *            (SC5002), and a TypeScript signature that does not match its
- *            declared native ABI classes (SC5003)
+ *            declared native ABI classes (SC5003), and native toolchain
+ *            failures while applying a valid profile (SC5004)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -100,6 +101,21 @@ export function ffiSignatureDiag(name: string, detail: string, loc: SrcLoc): Scr
     hint:
       "FFI parameter classes: f64/u8/u32/i32 (TypeScript number), bool, string, and bytes " +
       "(Uint8Array/Buffer); return classes: f64/u8/u32/i32, bool, and void",
+  };
+}
+
+/** SC5004 — the compiler driver could not build/link a valid outbound FFI
+ * profile. This is source-facing because missing symbols, incompatible
+ * archives, and unavailable system libraries are profile inputs rather than
+ * compiler crashes. */
+export function ffiNativeBuildDiag(detail: string, profilePath: string): ScrDiagnostic {
+  return {
+    code: "SC5004",
+    message: `FFI native build failed: ${detail}`,
+    loc: { file: profilePath, start: 0, end: 0 },
+    hint:
+      "check that every native symbol and system library exists, archive/object ordering is correct, " +
+      "and each input matches the selected target",
   };
 }
 

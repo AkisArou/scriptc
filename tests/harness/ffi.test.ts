@@ -4,8 +4,9 @@
  * result bytes must match. The fixture covers every format-1 ABI class,
  * integer coercion, embedded-NUL/UTF-8 string spans, byte spans, and a void
  * call with observable native state. */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compile, loadFfiProfile } from "@scriptc/compiler";
@@ -164,6 +165,28 @@ test.each([
     code: "SC5002",
     message: "signature-only",
   },
+  {
+    id: "never-parameter",
+    name: "an uninhabited TypeScript parameter presented as a native ABI slot",
+    source: [
+      "declare function nativeScale(value: never): number;",
+      "console.log('ok');",
+      "",
+    ].join("\n"),
+    code: "SC5003",
+    message: "parameter 1 is 'never'",
+  },
+  {
+    id: "never-return",
+    name: "a TypeScript never return that the native function cannot uphold",
+    source: [
+      "declare function nativeScale(value: number): never;",
+      "console.log('ok');",
+      "",
+    ].join("\n"),
+    code: "SC5003",
+    message: "return type is 'never'",
+  },
 ])("rejects $name", async ({ id, source, code, message }) => {
   const outDir = join(cacheRoot, `reject-${id}`);
   mkdirSync(outDir, { recursive: true });
@@ -193,5 +216,120 @@ test.each([
   if (!result.ok) {
     expect(result.diagnostics[0]?.code).toBe(code);
     expect(result.diagnostics[0]?.message).toContain(message);
+  }
+});
+
+describe.each(["c", "llvm"] as const)("FFI binding identity, %s backend", (backend) => {
+  test("a local same-named function remains ordinary TypeScript with Node-byte parity", async () => {
+    const outDir = join(cacheRoot, `shadow-${backend}`);
+    mkdirSync(outDir, { recursive: true });
+    // Node 24 deliberately refuses its built-in TypeScript stripping for
+    // files below node_modules, where this suite keeps compiler artifacts.
+    // Keep the reference input in the OS temp tree and only outputs/cache in
+    // node_modules.
+    const sourceDir = mkdtempSync(join(tmpdir(), "scriptc-ffi-shadow-"));
+    const entry = join(sourceDir, "main.ts");
+    const profilePath = join(outDir, "profile.json");
+    try {
+      writeFileSync(
+        entry,
+        [
+          "declare function nativeScale(value: number): number;",
+          "function localUse(): number {",
+          "  function nativeScale(value: number): number { return value + 1; }",
+          "  return nativeScale(21);",
+          "}",
+          "console.log(localUse());",
+          "",
+        ].join("\n"),
+      );
+      writeFileSync(
+        profilePath,
+        JSON.stringify({
+          ffi_format: 1,
+          functions: [
+            {
+              name: "nativeScale",
+              symbol: "sf_scale",
+              params: ["f64"],
+              returns: "f64",
+            },
+          ],
+          libraries: [nativeArchive()],
+        }),
+      );
+
+      const result = await compile(entry, {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        sanitize,
+        ffiProfilePath: profilePath,
+      });
+      if (!result.ok) {
+        throw new Error(
+          result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+        );
+      }
+
+      const node = spawnSync(process.execPath, [entry], { encoding: "utf8" });
+      const native = spawnSync(result.binaryPath, [], { encoding: "utf8" });
+      expect({
+        stdout: native.stdout,
+        stderr: native.stderr,
+        status: native.status,
+      }).toEqual({
+        stdout: node.stdout,
+        stderr: node.stderr,
+        status: node.status,
+      });
+    } finally {
+      rmSync(sourceDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a missing FFI symbol is an SC5004 diagnostic, not a rejected compile", async () => {
+  const outDir = join(cacheRoot, "missing-symbol");
+  mkdirSync(outDir, { recursive: true });
+  const entry = join(outDir, "main.ts");
+  const profilePath = join(outDir, "profile.json");
+  const missingSymbol = "sf_symbol_that_does_not_exist";
+  writeFileSync(
+    entry,
+    [
+      "declare function nativeScale(value: number): number;",
+      "console.log(nativeScale(21));",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    profilePath,
+    JSON.stringify({
+      ffi_format: 1,
+      functions: [
+        {
+          name: "nativeScale",
+          symbol: missingSymbol,
+          params: ["f64"],
+          returns: "f64",
+        },
+      ],
+      libraries: [nativeArchive()],
+    }),
+  );
+
+  const result = await compile(entry, {
+    outDir,
+    outPath: join(outDir, "program"),
+    sanitize,
+    ffiProfilePath: profilePath,
+  });
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0]?.code).toBe("SC5004");
+    expect(result.diagnostics[0]?.message).toContain(missingSymbol);
+    expect(result.diagnostics[0]?.message).not.toContain("CcCompileError");
   }
 });
