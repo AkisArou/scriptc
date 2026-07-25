@@ -2117,12 +2117,25 @@ declare module "http" {
     options: ServerOptions,
     requestListener?: (req: IncomingMessage, res: ServerResponse) => void,
   ): Server;
+  /* One signature with a UNION first parameter rather than Node's two
+   * overloads: `const requestFn = tls ? https.request : http.request`
+   * (the portless isProxyRunning shape) unions two function types, and
+   * resolving a call on that union collapses each constituent to a
+   * single signature — with an overload SET on both sides the options
+   * literal ends up checked against URL, in either declaration order.
+   * A union parameter has nothing to collapse. The lowering dispatches
+   * on the argument's own type, so it reads the same either way.
+   *
+   * `target` is a URL string or URL object (the spelling a from-scratch
+   * client reaches for first — dialed directly, with a non-http scheme
+   * an ERR_INVALID_PROTOCOL at runtime rather than a type error), or
+   * the options record. */
   export function request(
-    options: RequestOptions,
+    target: RequestOptions | string | URL,
     callback?: (res: IncomingMessage) => void,
   ): ClientRequest;
   export function get(
-    options: RequestOptions,
+    target: RequestOptions | string | URL,
     callback?: (res: IncomingMessage) => void,
   ): ClientRequest;
 }
@@ -2237,12 +2250,16 @@ declare module "https" {
     options: ServerOptions,
     requestListener: (req: IncomingMessage, res: ServerResponse) => void,
   ): Server;
+  /* One signature with a union first parameter, for the request-fn
+   * ternary's sake (see the http block). A URL target takes no options,
+   * which means Node's defaults — the certificate is verified against
+   * the default trust anchors. */
   export function request(
-    options: RequestOptions,
+    target: RequestOptions | string | URL,
     callback?: (res: IncomingMessage) => void,
   ): ClientRequest;
   export function get(
-    options: RequestOptions,
+    target: RequestOptions | string | URL,
     callback?: (res: IncomingMessage) => void,
   ): ClientRequest;
 }

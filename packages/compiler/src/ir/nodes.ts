@@ -2490,6 +2490,11 @@ export type IrLibFn =
   | "https.createServer"
   | "https.request"
   | "https.requestCb"
+  /** The URL-string first argument, the http.requestUrl row over TLS:
+   * no options means Node's defaults (verification on, default trust
+   * anchors), and a non-https scheme is ERR_INVALID_PROTOCOL. */
+  | "https.requestUrl"
+  | "https.requestUrlCb"
   /** A call through a `const requestFn = tls ? https.request :
    * http.request` binding — the module-function-as-value ternary between
    * the two known clients: the https.request row with a leading `secure`
@@ -6590,6 +6595,10 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "https.requestAgentCb",
   "https.request",
   "https.requestCb",
+  // The URL-string form's parse, exactly http.requestUrl's (an
+  // unparsable input, or a scheme that is not https).
+  "https.requestUrl",
+  "https.requestUrlCb",
   "https.requestFn",
   "https.requestFnCb",
   "rl.question",

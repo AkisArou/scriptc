@@ -1006,6 +1006,30 @@ ScrHttpClientReq *scr_https_request(ScrStr *host /*borrowed*/, double port,
                               fn, 443, &scr_tls_cli_wrap, cli);
 }
 
+/* https.get('https://host/path') — the URL-string spelling, sharing
+ * scr_http.c's parse (which rejects a non-https scheme here with Node's
+ * ERR_INVALID_PROTOCOL) and dialing through the same per-request client
+ * config as the options form. No options means Node's defaults: the
+ * certificate is verified against the default trust anchors. */
+ScrHttpClientReq *scr_https_request_url(ScrStr *url /*borrowed*/, ScrStr *method /*borrowed*/,
+                                         bool auto_end, ScrClosure *cb /*moves, nullable*/,
+                                         ScrHttpRespFn fn) {
+  ScrStr *host;
+  ScrStr *path;
+  double port;
+  if (!scr_http_url_parts(url, true, &host, &port, &path)) {
+    if (cb) scr_closure_release(cb);
+    return NULL; /* Invalid URL / ERR_INVALID_PROTOCOL pending */
+  }
+  ScrArr *pairs = scr_arr_new(SCR_ELEM_STR, 0);
+  ScrHttpClientReq *c = scr_https_request(host, port, path, method, 0, pairs, auto_end,
+                                           true /* rejectUnauthorized */, NULL, 0, cb, fn);
+  scr_arr_release(pairs);
+  scr_str_release(host);
+  scr_str_release(path);
+  return c;
+}
+
 ScrHttpClientReq *scr_https_request_agent(ScrStr *host /*borrowed*/, double port,
                                            ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
                                            double timeout_ms, ScrArr *header_pairs /*borrowed*/,

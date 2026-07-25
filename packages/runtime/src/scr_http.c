@@ -4496,41 +4496,54 @@ void scr_http_client_end_dynv(ScrHttpClientReq *c, const ScrDyn *d) {
  * result +1 or NULL with the exception pending. */
 #include "scr_url_internal.h"
 
-ScrHttpClientReq *scr_http_request_url(ScrStr *url /*borrowed*/, ScrStr *method /*borrowed*/,
-                                        bool auto_end, ScrClosure *cb /*moves, nullable*/,
-                                        ScrHttpRespFn fn) {
+bool scr_http_url_parts(ScrStr *url /*borrowed*/, bool secure, ScrStr **host_out /*+1*/,
+                         double *port_out, ScrStr **path_out /*+1*/) {
   ScrUrl *u = scr_url_new(url);
-  if (!u) {
-    if (cb) scr_closure_release(cb);
-    return NULL; /* Invalid URL pending */
-  }
-  if (!(u->scheme->len == 4 && memcmp(u->scheme->data, "http", 4) == 0)) {
+  if (!u) return false; /* Invalid URL pending */
+  /* The scheme is checked against the MODULE the call came from, not read
+   * off the URL: http.get('https://…') is Node's ERR_INVALID_PROTOCOL, not
+   * a silent upgrade. Hence `secure` as a parameter. */
+  const char *want = secure ? "https" : "http";
+  const size_t wantlen = secure ? 5 : 4;
+  if (!(u->scheme->len == wantlen && memcmp(u->scheme->data, want, wantlen) == 0)) {
     char msg[128];
-    int n = snprintf(msg, sizeof msg, "Protocol \"%.*s:\" not supported. Expected \"http:\"",
-                     (int)(u->scheme->len < 32 ? u->scheme->len : 32), u->scheme->data);
+    int n = snprintf(msg, sizeof msg, "Protocol \"%.*s:\" not supported. Expected \"%s:\"",
+                     (int)(u->scheme->len < 32 ? u->scheme->len : 32), u->scheme->data, want);
     scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)n, "ERR_INVALID_PROTOCOL");
     scr_url_release(u);
-    if (cb) scr_closure_release(cb);
-    return NULL;
+    return false;
   }
-  double port = 80;
+  double port = secure ? 443 : 80;
   if (u->port->len > 0) {
     port = 0;
     for (size_t i = 0; i < u->port->len; i++) port = port * 10 + (u->port->data[i] - '0');
   }
   /* IPv6 authority arrives bracketed ("[::1]") — the dial wants the bare
    * address, like Node's client strips them. */
-  ScrStr *host;
   if (u->host->len >= 2 && u->host->data[0] == '[' && u->host->data[u->host->len - 1] == ']') {
-    host = scr_str_new(u->host->data + 1, u->host->len - 2);
+    *host_out = scr_str_new(u->host->data + 1, u->host->len - 2);
   } else {
-    host = scr_str_retain(u->host);
+    *host_out = scr_str_retain(u->host);
   }
-  ScrStr *path;
   if (u->query->len > 0) {
-    path = scr_str_concat(u->path, u->query);
+    *path_out = scr_str_concat(u->path, u->query);
   } else {
-    path = u->path->len > 0 ? scr_str_retain(u->path) : scr_str_new("/", 1);
+    *path_out = u->path->len > 0 ? scr_str_retain(u->path) : scr_str_new("/", 1);
+  }
+  *port_out = port;
+  scr_url_release(u);
+  return true;
+}
+
+ScrHttpClientReq *scr_http_request_url(ScrStr *url /*borrowed*/, ScrStr *method /*borrowed*/,
+                                        bool auto_end, ScrClosure *cb /*moves, nullable*/,
+                                        ScrHttpRespFn fn) {
+  ScrStr *host;
+  ScrStr *path;
+  double port;
+  if (!scr_http_url_parts(url, false, &host, &port, &path)) {
+    if (cb) scr_closure_release(cb);
+    return NULL; /* Invalid URL / ERR_INVALID_PROTOCOL pending */
   }
   ScrArr *pairs = scr_arr_new(SCR_ELEM_STR, 0); /* request_impl reads the pairs array */
   ScrHttpClientReq *c = scr_http_request_ex(host, port, path, method, 0, pairs, auto_end,
@@ -4538,6 +4551,5 @@ ScrHttpClientReq *scr_http_request_url(ScrStr *url /*borrowed*/, ScrStr *method 
   scr_arr_release(pairs);
   scr_str_release(host);
   scr_str_release(path);
-  scr_url_release(u);
   return c;
 }

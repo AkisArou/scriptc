@@ -611,6 +611,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "http.requestConnCb": { argTypes: [null, STRING, STRING, F64, arrayOf(STRING), BOOL, null], result: HTTPCLIENTREQ_T },
   "https.request": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null], result: HTTPCLIENTREQ_T },
   "https.requestCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, null], result: HTTPCLIENTREQ_T },
+  "https.requestUrl": { argTypes: [STRING, STRING, BOOL], result: HTTPCLIENTREQ_T },
+  "https.requestUrlCb": { argTypes: [STRING, STRING, BOOL, null], result: HTTPCLIENTREQ_T },
   "https.requestAgent": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, DYN], result: HTTPCLIENTREQ_T },
   "https.requestAgentCb": { argTypes: [STRING, F64, STRING, STRING, F64, arrayOf(STRING), BOOL, BOOL, null, DYN, null], result: HTTPCLIENTREQ_T },
   // The requestFn binding's runtime-secure rows: https.request's shape
@@ -3452,11 +3454,12 @@ function validateFunction(
           break;
         }
         if (e.fn === "http.requestCb" || e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse" ||
-            e.fn === "http.requestAgentCb" || e.fn === "https.requestAgentCb") {
+            e.fn === "http.requestAgentCb" || e.fn === "https.requestAgentCb" ||
+            e.fn === "https.requestUrlCb") {
           // The response listener: void, no params or exactly (res: httpReq).
           const cbT = e.args[
             e.fn === "http.requestCb" ? 7
-            : e.fn === "http.requestUrlCb" ? 3
+            : e.fn === "http.requestUrlCb" || e.fn === "https.requestUrlCb" ? 3
             : e.fn === "http.requestAgentCb" ? 8
             : e.fn === "https.requestAgentCb" ? 10
             : 1]?.type;

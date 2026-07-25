@@ -3838,20 +3838,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             );
           }
           case "http.requestUrl":
-          case "http.requestUrlCb": {
+          case "http.requestUrlCb":
+          case "https.requestUrl":
+          case "https.requestUrlCb": {
             E.usesTimers = true; // an in-flight request holds the loop open
+            const tls = e.fn.startsWith("https.");
             let cbExpr = "NULL";
             let adapter = "NULL";
-            if (e.fn === "http.requestUrlCb") {
+            if (e.fn.endsWith("Cb")) {
               const cbT = e.args[3]!.type;
-              if (cbT.kind !== "func") throw new Error("emitter bug: http.requestUrlCb callback not a func");
+              if (cbT.kind !== "func") throw new Error(`emitter bug: ${e.fn} callback not a func`);
               const cb = args[3]!;
               E.moveTemp(cb);
               cbExpr = cb.name;
               adapter = cbT.params.length === 0 ? "&scr_http_resp_thunk0" : "&scr_http_resp_thunk_res";
             }
+            const entry = tls ? "scr_https_request_url" : "scr_http_request_url";
             return finish(
-              `scr_http_request_url(${arg(0)}, ${arg(1)}, ${arg(2)}, ${cbExpr}, ${adapter})`,
+              `${entry}(${arg(0)}, ${arg(1)}, ${arg(2)}, ${cbExpr}, ${adapter})`,
             );
           }
           case "http.requestConn":

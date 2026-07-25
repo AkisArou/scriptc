@@ -351,9 +351,11 @@ const LIB_FN_SYMS: Record<string, string> = {
   "text.decode": "scr_text_decode",
   "zlib.deflateSync": "scr_zlib_deflate",
   "zlib.inflateSync": "scr_zlib_inflate",
-  // The CA-store read (tlsca.get/set are may-throw seeds and refuse by
-  // omission — the C fallback carries them).
+  // The CA-store unit. get/set throw (an unknown type name, a
+  // certificate-free set) and take the generic path's pending check.
   "tlsca.root": "scr_tls_ca_root",
+  "tlsca.get": "scr_tls_ca_get",
+  "tlsca.set": "scr_tls_ca_set_default",
   "crypto.randomBytes": "scr_crypto_random_bytes",
   "crypto.randomBytesToString": "scr_crypto_random_string",
   "crypto.randomUUID": "scr_crypto_random_uuid",
@@ -773,6 +775,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "fs.existsChk",
   "http.createServer", "http.createServerEmpty",
   "http.request", "http.requestCb", "http.requestUrl", "http.requestUrlCb",
+  "https.requestUrl", "https.requestUrlCb",
   "http.requestConn", "http.requestConnCb",
   "http.agentNew", "http.requestAgent", "http.requestAgentCb",
   // The dyn-async slice (emit-exprs.ts's markings): fiber parks, the
@@ -11315,8 +11318,13 @@ class LlEmitter {
       return { name: "", type: e.type };
     }
     if (e.fn === "http.request" || e.fn === "http.requestCb" || e.fn === "http.requestUrl" || e.fn === "http.requestUrlCb" ||
-        e.fn === "http.requestAgent" || e.fn === "http.requestAgentCb") {
-      const isUrl = e.fn.startsWith("http.requestUrl");
+        e.fn === "http.requestAgent" || e.fn === "http.requestAgentCb" ||
+        e.fn === "https.requestUrl" || e.fn === "https.requestUrlCb") {
+      // The https URL row is the http one with the TLS entry point — same
+      // three arguments, same response-callback adapter. (The https
+      // OPTIONS forms are a separate, wider row and are not here yet.)
+      const isTls = e.fn.startsWith("https.");
+      const isUrl = isTls || e.fn.startsWith("http.requestUrl");
       const isAgent = e.fn.startsWith("http.requestAgent");
       const cbIdx = isUrl ? 3 : isAgent ? 8 : 7;
       const hasCb = e.fn.endsWith("Cb");
@@ -11334,7 +11342,9 @@ class LlEmitter {
       }
       const head = args.slice(0, cbIdx);
       const decls = head.map((a) => (this.llType(a.type) === "i1" ? "i1 zeroext" : this.llType(a.type)));
-      const entry = isUrl ? "scr_http_request_url" : isAgent ? "scr_http_request_agent" : "scr_http_request";
+      const entry = isTls ? "scr_https_request_url"
+        : isUrl ? "scr_http_request_url"
+        : isAgent ? "scr_http_request_agent" : "scr_http_request";
       this.declare(`declare ptr @${entry}(${[...decls, "ptr", "ptr"].join(", ")})`);
       const t = B.tmp();
       B.line(

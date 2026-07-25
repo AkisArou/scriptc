@@ -3525,8 +3525,8 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
  * object literal with string values, or any Record whose values are
  * strings / `string | undefined` — the env.pairs shape). Every other key
  * fences by name. The callback registers as once('response'); get() is
- * request() plus the eager end(). The url-string first argument has no
- * lowering (build the options object instead). `secure` is the https
+ * request() plus the eager end(). A URL-STRING first argument takes the
+ * requestUrl row instead (both schemes; see below). `secure` is the https
  * spelling: port defaults to 443 and the rejectUnauthorized (boolean)
  * and ca (PEM string/Buffer) options join the lowered set. A
  * HttpClientFnBinding as `secure` is the requestFn-binding mode: whether
@@ -3560,15 +3560,26 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
   const optsNode = args[0]!;
   if (!ts.isObjectLiteralExpression(optsNode)) {
     const t = L.mapTypeOf(L.typeOf(optsNode));
-    if (t?.kind === "string" && !secureish) {
-      // The URL-string form — http.get(`http://127.0.0.1:${port}/x`[, cb]):
-      // the runtime parses through the WHATWG unit and dials; unparsable
-      // inputs and non-http schemes throw catchably (may-throw seed).
-      const url = L.lowerExprExpecting(optsNode, STRING);
+    if ((t?.kind === "string" || t?.kind === "url") && binding === null) {
+      // The URL-string form — http.get(`http://127.0.0.1:${port}/x`[, cb])
+      // and its https spelling: the runtime parses through the WHATWG unit
+      // and dials; unparsable inputs and a scheme that is not the calling
+      // module's throw catchably (may-throw seed). No options means Node's
+      // defaults, which for https is verification against the default
+      // trust anchors. The requestFn binding has no URL row — whether the
+      // dial is TLS is only known at runtime there, and the two schemes
+      // reject each other's URLs.
+      // A URL OBJECT is its href through the same parse — Node's own
+      // reading of the argument, and the serialization round-trips.
+      const url: IrExpr = t.kind === "url"
+        ? { kind: "libCall", fn: "url.href", args: [L.lowerExpr(optsNode)], type: STRING, loc }
+        : L.lowerExprExpecting(optsNode, STRING);
       const methodLit: IrExpr = { kind: "strLit", value: "GET", type: STRING, loc };
       const autoEnd = boolLit(member === "get", loc);
+      const isTls = secure === true;
       if (args.length === 1) {
-        return { kind: "libCall", fn: "http.requestUrl", args: [url, methodLit, autoEnd], type: HTTPCLIENTREQ_T, loc };
+        const fn = isTls ? "https.requestUrl" as const : "http.requestUrl" as const;
+        return { kind: "libCall", fn, args: [url, methodLit, autoEnd], type: HTTPCLIENTREQ_T, loc };
       }
       const { cb } = lowerCallbackArg(
         L, args[1]!, "response callbacks", 1,
@@ -3576,14 +3587,19 @@ function lowerHttpClientCall(L: Lowerer, expr: ts.CallExpression, member: "reque
         "use (res) or ()",
         [HTTPREQ_T],
       );
-      return { kind: "libCall", fn: "http.requestUrlCb", args: [url, methodLit, autoEnd, cb], type: HTTPCLIENTREQ_T, loc };
+      const fn = isTls ? "https.requestUrlCb" as const : "http.requestUrlCb" as const;
+      return { kind: "libCall", fn, args: [url, methodLit, autoEnd, cb], type: HTTPCLIENTREQ_T, loc };
     }
     L.noLowering(
       t?.kind === "string"
-        ? `${member} with a URL-string first argument`
+        ? `a URL-string first argument through a request-function binding`
         : `${member} with a non-literal options argument`,
       optsNode,
-      "pass the options as an object literal: { hostname, port, path, method, timeout?, headers? }",
+      t?.kind === "string"
+        // Only the binding mode reaches here now: the scheme would have to
+        // agree with a dial chosen at runtime.
+        ? "call http.request / https.request directly for the URL-string form, or pass the options as an object literal"
+        : "pass the options as an object literal: { hostname, port, path, method, timeout?, headers? }",
     );
   }
   let host: IrExpr | null = null;

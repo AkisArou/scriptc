@@ -5327,6 +5327,12 @@ ScrHttpClientReq *scr_http_request_ex(ScrStr *host /*borrowed*/, double port,
 ScrHttpClientReq *scr_http_request_url(ScrStr *url /*borrowed*/, ScrStr *method /*borrowed*/,
                                         bool auto_end, ScrClosure *cb /*moves, nullable*/,
                                         ScrHttpRespFn fn); /* +1 */
+/* Its parse half, shared with scr_tls.c's https spelling: the scheme is
+ * checked against `secure` (the calling module), so a mismatch is Node's
+ * ERR_INVALID_PROTOCOL rather than a silent upgrade. false = the
+ * exception is pending and no out-parameter was written. */
+bool scr_http_url_parts(ScrStr *url /*borrowed*/, bool secure, ScrStr **host_out /*+1*/,
+                         double *port_out, ScrStr **path_out /*+1*/);
 /* ── the http Agent (new http.Agent(opts) — option surface, getName, and
  * the maxSockets queue over one-dial-per-request connections; keep-alive
  * POOLING is not modeled: keepAlive: true fences at construction).
@@ -5514,6 +5520,13 @@ ScrHttpClientReq *scr_https_request(ScrStr *host /*borrowed*/, double port,
                                      bool auto_end, bool reject_unauthorized,
                                      const char *ca /*borrowed, len 0 = none*/, size_t ca_len,
                                      ScrClosure *cb /*moves, nullable*/, ScrHttpRespFn fn); /* +1 */
+/* The URL-string form (https.get('https://host/path')): scr_http.c's
+ * shared parse, then the options form's dial with Node's no-options
+ * defaults (verification on, the default trust anchors). Throws
+ * catchably on an unparsable input or a non-https scheme. */
+ScrHttpClientReq *scr_https_request_url(ScrStr *url /*borrowed*/, ScrStr *method /*borrowed*/,
+                                         bool auto_end, ScrClosure *cb /*moves, nullable*/,
+                                         ScrHttpRespFn fn); /* +1 */
 /* The agent-threaded twin (the scr_http_request_agent story over TLS). */
 ScrHttpClientReq *scr_https_request_agent(ScrStr *host /*borrowed*/, double port,
                                            ScrStr *path /*borrowed*/, ScrStr *method /*borrowed*/,
