@@ -4,9 +4,28 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.12
+## 0.0.13
 
 <!-- release:start -->
+
+### Features
+
+- **Dyn values run the engine's own operations**: a value held in `unknown` that came from the embedded engine now answers keyed reads and writes, calls and method dispatch, the `Object` statics, and `??` by running them in the engine — so it answers exactly what Node answers instead of meeting a fence. Scalars normalize at the wrap, composites stay engine values by reference, and a value that crosses into the checked-dynamic tree and back is the same value it was.
+- **`http.Agent` and `https.Agent` compile**, with real connection accounting: literal option parsing, `getName`, `destroy`, the `sockets`/`requests`/`freeSockets` snapshots, a settable `defaultPort`, and `maxSockets` that actually holds — over-limit requests defer their dial and queue. The request path threads the agent on both emissions. `keepAlive: true` refuses with the pooling fence named.
+- **The HTTP and socket compatibility surface widens**: `flushHeaders`, `getHeaders`, `setTimeout`, `cork`/`uncork` with a real `writableCorked` counter and coalescing flush, `writeHead`'s raw-array form, `write`/`end` encodings and deferred callbacks, `pause`/`resume` with buffered drain, `destroySoon`, `end(cb)`, `setNoDelay`, and the `destroyed`/`readable`/`bytesWritten`/`res.req` reads — on both the typed lane and dyn receivers. Strict equality over runtime handles is pointer identity, as it is in JS.
+- **Crypto introspection, the TLS CA store, and the http2 tail**: `getFips` and the cipher/hash/curve name lists bake at the call site; `getCACertificates`/`rootCertificates`/`setDefaultCACertificates` land in their own unit behind their own link gate, so a binary that only reads the trust anchors never pulls mbedTLS; `http2.createSecureServer` grows the eager request handler and the runtime options record; `process.on`/`off` cover `unhandledRejection` and `rejectionHandled`.
+- **Library archives are verified across targets** (`SCRIPTC_CROSS=1`): every library profile cross-builds for aarch64-linux, x86_64-linux, x86_64-windows, and x86_64-macos on both emissions, and each archive is checked for symbol exactness, the ambient audit in both spellings, and probe linkability against the target's libc.
+
+### Fixes
+
+- `process.env.PORT || 3000` compiled and then threw at runtime. tsc builds a logical operator's result by dropping the left's falsy arms, so coercing the left into that result before the truthiness test retagged an arm the test was about to rule out; `||` now tests the left in its own type and retags only on the truthy branch, where those arms are gone. The left still evaluates exactly once and the right stays lazy.
+- Windows library archives carried undefined references no embedder link could resolve — the win32 libc shim unit now joins the archive for windows triples. Host archives are unchanged byte-for-byte.
+- Bytes written to a socket whose dial had not started — the agent's `maxSockets` queue, or a caller lookup still in flight — were silently dropped, hanging the exchange. They buffer and flush at establishment.
+- The CA-store surfaces demote the determinism attestation and can now be denied by a profile: three rows, one per Node spelling, since denying a read of the trust anchors is a different decision from denying their replacement.
+
+<!-- release:end -->
+
+## 0.0.12
 
 ### Features
 
@@ -20,8 +39,6 @@ All notable changes to scriptc will be documented in this file.
 - The 0.0.11 restore's written-binding decline was wider than its rationale, and two carve-outs bring the lost shapes back: a written binding whose declared type has no static mapping keeps the compiling no-storage trap claim, and a statement-position assignment whose right side provably throws before the write no longer counts against the claim.
 - A class extending a base the compiler itself rejected now fails the build eagerly with the base's real blocker — the deferred fence compiled a binary that refused at startup where Node runs on. Leaf rejected classes keep the runtime-deferral story.
 - A stale remnant of the island-literal fence answered `typeof` and `.length` wrongly for poisoned members; reads now fail with the captured diagnostic.
-
-<!-- release:end -->
 
 ## 0.0.11
 
