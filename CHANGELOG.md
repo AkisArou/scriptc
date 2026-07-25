@@ -4,17 +4,27 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.14
-
 <!-- release:start -->
+
+## 0.0.15
+
+### Features
+
+- **Outbound native FFI.** `scriptc build --ffi <manifest>` binds exact signature-only TypeScript declarations to C ABI symbols and links the manifest's archives, objects, and system libraries into the executable — no runtime symbol lookup and no dynamic engine at the boundary. The strict versioned manifest covers numeric, boolean, UTF-8 string, and byte-span parameters plus scalar and void returns; both backends lower the calls, and `scriptc coverage` recognizes the same bindings.
+
+### Fixes
+
+- FFI profiles validate every configured binding before emit, including unused and shadowed declarations, and reject uninhabited `never` slots instead of letting TypeScript's control-flow assumptions disagree with a returning native function. A same-named local function remains ordinary TypeScript, while missing symbols and other native link failures surface as bounded SC5004 diagnostics rather than internal compiler errors.
+
+<!-- release:end -->
+
+## 0.0.14
 
 ### Fixes
 
 - **Clients resolve hostnames.** The http, https, TLS and HTTP/2 clients resolved nothing before dialing, so a request to any name came back ENOTFOUND and only literal addresses worked. Only the dial takes the resolved address — the original name stays on the request, which is what the Host header carries and what SNI and certificate verification see. `net.connect(port, hostname)` still refuses to resolve: Node's async lookup semantics on that surface are their own piece of work.
 - **The URL-string form of the http and https clients compiles**, along with the URL-object form, which reads as its href through the same parse. The declarations only described the options record, so `http.get("http://host/path")` — the first thing a client written from scratch reaches for — was a type error rather than a request. An unparsable input is the WHATWG `Invalid URL` TypeError and a scheme that is not the calling module's is `ERR_INVALID_PROTOCOL`, both catchable, both matching Node instead of silently upgrading the dial. Both rows run on the LLVM backend, as do the TLS CA-store entries, which moves the CA-store corpus off the C lane with identical output.
 - **`scriptc -v` prints the version** instead of crashing on an attempt to read `-v` as an entry file, and an unknown flag or a missing flag value prints one line naming what was wrong followed by usage, in place of a Node stack trace.
-
-<!-- release:end -->
 
 ## 0.0.13
 
