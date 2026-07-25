@@ -219,6 +219,10 @@ describe("determinism attestation ↔ fence parity", () => {
       { path: "parity[4]", prefix: "stdlib.date." },
       { path: "parity[5]", prefix: "node-builtin.process." },
       { path: "parity[6]", prefix: "node-builtin.perf_hooks." },
+      // The host CA store (tlsca.*): the trust anchors are machine
+      // identity, so the attestation demotes on them like os.* — the
+      // family needs its own declaration here, not just manifest entries.
+      { path: "parity[7]", prefix: "node-builtin.tls." },
     ]);
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;

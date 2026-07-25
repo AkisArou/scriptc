@@ -1716,6 +1716,27 @@
       "note": "the lowered form is createSecureContext({ cert, key }) — an opaque SecureContext handle for SNI callbacks (http2.createSecureServer accepts SNICallback); other options fence by name"
     },
     {
+      "id": "node-builtin.tls.getCACertificates",
+      "kind": "node-builtin",
+      "name": "tls.getCACertificates",
+      "status": "static",
+      "note": "the per-type cached PEM bundle: 'default' and 'extra' additionally read NODE_EXTRA_CA_CERTS, 'system' the platform store"
+    },
+    {
+      "id": "node-builtin.tls.rootCertificates",
+      "kind": "node-builtin",
+      "name": "tls.rootCertificates",
+      "status": "static",
+      "note": "the value read; answers the same bundled array as getCACertificates('bundled'), but fenced under its own id — the spelling an author writes"
+    },
+    {
+      "id": "node-builtin.tls.setDefaultCACertificates",
+      "kind": "node-builtin",
+      "name": "tls.setDefaultCACertificates",
+      "status": "static",
+      "note": "replaces the default set and the client trust anchors for the rest of the process"
+    },
+    {
       "id": "node-builtin.tty",
       "kind": "node-builtin",
       "name": "tty",

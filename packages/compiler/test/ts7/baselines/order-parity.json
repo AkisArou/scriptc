@@ -4730,9 +4730,21 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2556-crypto-introspection.ts": {
+   "order": [
+    "<repo>/tests/corpus/2556-crypto-introspection.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2556-width-hybrid-shapes.ts": {
    "order": [
     "<repo>/tests/corpus/2556-width-hybrid-shapes.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2557-tls-ca-store.ts": {
+   "order": [
+    "<repo>/tests/corpus/2557-tls-ca-store.ts"
    ],
    "diags": []
   },
@@ -4745,6 +4757,12 @@
   "<repo>/tests/corpus/2558-index-signature-func-values.ts": {
    "order": [
     "<repo>/tests/corpus/2558-index-signature-func-values.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2558-rejection-events.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2558-rejection-events.cjs"
    ],
    "diags": []
   },
@@ -4892,15 +4910,39 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2582-jsval-routed-keyed-ops.js": {
+   "order": [
+    "<repo>/tests/corpus/2582-jsval-routed-keyed-ops.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2583-dyn-nullish-coalesce.js": {
    "order": [
     "<repo>/tests/corpus/2583-dyn-nullish-coalesce.js"
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2583-jsval-routed-calls.js": {
+   "order": [
+    "<repo>/tests/corpus/2583-jsval-routed-calls.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2584-jsval-object-statics.js": {
+   "order": [
+    "<repo>/tests/corpus/2584-jsval-object-statics.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2584-union-dyn-collapse.ts": {
    "order": [
     "<repo>/tests/corpus/2584-union-dyn-collapse.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2585-dyn-nullish-coalesce.js": {
+   "order": [
+    "<repo>/tests/corpus/2585-dyn-nullish-coalesce.js"
    ],
    "diags": []
   },

@@ -982,6 +982,35 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     fns: ["process.exit", "process.exiting"],
     note: "process.exit and the process._exiting flag read are one surface",
   },
+  // ── the tls CA store (lowerTlsCaCall / lowerTlsRootCertificates): the
+  // host's trust anchors, read and replaced. Dedicated paths, and
+  // rootCertificates is a VALUE read with no call form at all, so none of
+  // the three can hang off a lowering-table row. Split three ways rather
+  // than folded into one "CA store" surface: a library author who denies
+  // REPLACING the trust anchors is making a different decision from one
+  // who denies reading them, and each Node spelling is the name they will
+  // reach for when writing the fence.
+  {
+    id: "node-builtin.tls.getCACertificates",
+    kind: "node-builtin",
+    name: "tls.getCACertificates",
+    fns: ["tlsca.get"],
+    note: "the per-type cached PEM bundle: 'default' and 'extra' additionally read NODE_EXTRA_CA_CERTS, 'system' the platform store",
+  },
+  {
+    id: "node-builtin.tls.rootCertificates",
+    kind: "node-builtin",
+    name: "tls.rootCertificates",
+    fns: ["tlsca.root"],
+    note: "the value read; answers the same bundled array as getCACertificates('bundled'), but fenced under its own id — the spelling an author writes",
+  },
+  {
+    id: "node-builtin.tls.setDefaultCACertificates",
+    kind: "node-builtin",
+    name: "tls.setDefaultCACertificates",
+    fns: ["tlsca.set"],
+    note: "replaces the default set and the client trust anchors for the rest of the process",
+  },
 ];
 
 /** The win32-target overrides of the bare modules' constants: path's
