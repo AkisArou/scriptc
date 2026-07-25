@@ -21,6 +21,7 @@ export const navSections: NavSection[] = [
     items: [
       { name: "Coverage Reports", href: "/coverage" },
       { name: "npm Dependencies", href: "/dependencies" },
+      { name: "Native FFI", href: "/ffi" },
       { name: "Platform Support", href: "/platforms" },
     ],
   },

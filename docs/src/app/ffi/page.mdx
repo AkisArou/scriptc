@@ -1,0 +1,155 @@
+# Native FFI
+
+Outbound FFI lets statically compiled TypeScript call C ABI symbols directly. A strict JSON manifest connects a signature-only TypeScript declaration to a native symbol and supplies the archives or objects that resolve it at link time. There is no runtime symbol lookup and no JavaScript engine at the boundary.
+
+## A complete example
+
+Declare the native function in TypeScript. The declaration gives the type checker its ordinary source-level signature; it emits no JavaScript body.
+
+```ts:main.ts
+declare function nativeScale(value: number): number;
+
+console.log(nativeScale(21));
+```
+
+Implement a C ABI symbol with the matching native signature:
+
+```c:native.c
+double native_scale(double value) {
+  return value * 2.0;
+}
+```
+
+Bind the two names in an FFI manifest. Library paths are resolved relative to this file.
+
+```json:ffi.json
+{
+  "ffi_format": 1,
+  "functions": [
+    {
+      "name": "nativeScale",
+      "symbol": "native_scale",
+      "params": ["f64"],
+      "returns": "f64"
+    }
+  ],
+  "libraries": ["./libnative.a"],
+  "system_libraries": []
+}
+```
+
+Build the native archive, then pass the manifest to scriptc:
+
+```console
+$ clang -c native.c -o native.o
+$ ar rcs libnative.a native.o
+$ scriptc build main.ts --ffi ffi.json -o app
+$ ./app
+42
+```
+
+The FFI binding applies only to a direct call of that exact declaration. A function with a body, an overload, a generic declaration, an alias such as `const f = nativeScale`, or a shadowing local does not silently become a native call.
+
+## ABI classes
+
+The manifest is the native ABI authority. TypeScript has only `number`, so its declaration cannot distinguish a double from an integer-width parameter.
+
+<table>
+  <thead>
+    <tr>
+      <th>Manifest class</th>
+      <th>TypeScript type</th>
+      <th>C ABI type and behavior</th>
+      <th>Parameter</th>
+      <th>Return</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>f64</code></td>
+      <td><code>number</code></td>
+      <td><code>double</code></td>
+      <td>yes</td>
+      <td>yes</td>
+    </tr>
+    <tr>
+      <td><code>bool</code></td>
+      <td><code>boolean</code></td>
+      <td><code>uint8_t</code>; inputs are 0 or 1, any nonzero return becomes <code>true</code></td>
+      <td>yes</td>
+      <td>yes</td>
+    </tr>
+    <tr>
+      <td><code>u8</code></td>
+      <td><code>number</code></td>
+      <td><code>uint8_t</code>; inputs use JavaScript's modulo conversion</td>
+      <td>yes</td>
+      <td>yes</td>
+    </tr>
+    <tr>
+      <td><code>u32</code></td>
+      <td><code>number</code></td>
+      <td><code>uint32_t</code>; inputs use <code>ToUint32</code></td>
+      <td>yes</td>
+      <td>yes</td>
+    </tr>
+    <tr>
+      <td><code>i32</code></td>
+      <td><code>number</code></td>
+      <td><code>int32_t</code>; inputs use <code>ToInt32</code></td>
+      <td>yes</td>
+      <td>yes</td>
+    </tr>
+    <tr>
+      <td><code>string</code></td>
+      <td><code>string</code></td>
+      <td><code>const uint8_t *, size_t</code>; UTF-8 bytes, length-delimited</td>
+      <td>yes</td>
+      <td>no</td>
+    </tr>
+    <tr>
+      <td><code>bytes</code></td>
+      <td><code>Uint8Array</code> or <code>Buffer</code></td>
+      <td><code>const uint8_t *, size_t</code>; raw bytes, length-delimited</td>
+      <td>yes</td>
+      <td>no</td>
+    </tr>
+    <tr>
+      <td><code>void</code></td>
+      <td><code>void</code></td>
+      <td><code>void</code></td>
+      <td>no</td>
+      <td>yes</td>
+    </tr>
+  </tbody>
+</table>
+
+String and byte pointers are borrowed only for the duration of the call. Native code must not mutate, free, or retain them. Strings may contain embedded NUL bytes, so always use the supplied length; an empty span may have a null pointer. Format 1 deliberately has no pointer, string, or byte return because those need an explicit ownership and allocator contract.
+
+For C++, export the symbol with `extern "C"` so it keeps the manifest's unmangled C name.
+
+## Manifest fields
+
+<dl>
+  <dt><code>ffi_format</code></dt>
+  <dd>Required. Must be <code>1</code>.</dd>
+
+  <dt><code>functions</code></dt>
+  <dd>Required array. Every entry has exactly <code>name</code>, <code>symbol</code>, <code>params</code>, and <code>returns</code>. Binding names and symbols must be unique.</dd>
+
+  <dt><code>libraries</code></dt>
+  <dd>Optional array of archive or object paths. Relative paths are resolved from the manifest directory and appended after the generated program at link time.</dd>
+
+  <dt><code>system_libraries</code></dt>
+  <dd>Optional array of linker-neutral library names. For example, <code>["m"]</code> is emitted as <code>-lm</code>.</dd>
+</dl>
+
+Unknown fields, invalid ABI classes, duplicate names, and signature mismatches fail the build with an `SC5xxx` diagnostic. The same manifest can be passed to `scriptc coverage` so native call sites count as statically compiled.
+
+## Boundary rules and current limits
+
+- Native calls are synchronous and must return normally. Do not unwind C++ exceptions or `longjmp` across the boundary.
+- Native code is outside scriptc's exception, reference-counting, and sanitizer contracts. A bad pointer or mismatched C signature can still corrupt the process.
+- There are no callbacks, variadic calls, struct-by-value arguments, owned pointer returns, or runtime `dlopen`/`dlsym` handles yet.
+- The archive or object must match the build target. Cross-compilation does not translate native inputs.
+- Outbound FFI is currently available for executable builds, not `scriptc build --lib`.

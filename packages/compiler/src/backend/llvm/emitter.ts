@@ -62,6 +62,7 @@
  */
 import type {
   IrExpr,
+  IrFfiImport,
   IrFunction,
   IrGlobal,
   IrLocal,
@@ -885,6 +886,8 @@ class LlEmitter {
   private needsRetainBox = false;
 
   private readonly fnByName = new Map<string, IrFunction>();
+  /** Manifest-bound native imports, used by ffiCall emission. */
+  private readonly ffiByName = new Map<string, IrFfiImport>();
   private readonly globalTypes = new Map<string, IrType>();
   /** May-throw analysis (the C emitter's computeMayThrow, shared): pending
    * checks are emitted only after calls that can actually raise. */
@@ -975,6 +978,7 @@ class LlEmitter {
 
   constructor(private readonly mod: IrModule) {
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
+    for (const entry of mod.ffiImports ?? []) this.ffiByName.set(entry.name, entry);
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
     this.indirectMayThrow = mt.indirect;
@@ -4962,6 +4966,106 @@ class LlEmitter {
         const out = this.own({ name: t, type: e.type });
         if (this.mayThrow.has(e.callee)) this.emitPendingCheck();
         return out;
+      }
+      case "ffiCall": {
+        const entry = this.ffiByName.get(e.import);
+        if (!entry) throw new Error(`llvm emitter bug: unknown FFI import ${e.import}`);
+        const args = e.args.map((arg) => this.emitExpr(arg));
+        const nativeArgs: string[] = [];
+        const nativeParamTypes: string[] = [];
+        entry.params.forEach((cls, i) => {
+          const arg = args[i]!;
+          switch (cls) {
+            case "f64":
+              nativeParamTypes.push("double");
+              nativeArgs.push(`double ${arg.name}`);
+              break;
+            case "bool": {
+              const widened = B.tmp();
+              B.line(`${widened} = zext i1 ${arg.name} to i8`);
+              nativeParamTypes.push("i8");
+              nativeArgs.push(`i8 ${widened}`);
+              break;
+            }
+            case "u8":
+            case "u32": {
+              this.declare(`declare double @scr_bit_ushr(double, double)`);
+              const asDouble = B.tmp();
+              const asU32 = B.tmp();
+              B.line(`${asDouble} = call double @scr_bit_ushr(double ${arg.name}, double ${f64Lit(0)})`);
+              B.line(`${asU32} = fptoui double ${asDouble} to i32`);
+              if (cls === "u8") {
+                const asU8 = B.tmp();
+                B.line(`${asU8} = trunc i32 ${asU32} to i8`);
+                nativeParamTypes.push("i8");
+                nativeArgs.push(`i8 ${asU8}`);
+              } else {
+                nativeParamTypes.push("i32");
+                nativeArgs.push(`i32 ${asU32}`);
+              }
+              break;
+            }
+            case "i32": {
+              this.declare(`declare double @scr_bit_or(double, double)`);
+              const asDouble = B.tmp();
+              const asI32 = B.tmp();
+              B.line(`${asDouble} = call double @scr_bit_or(double ${arg.name}, double ${f64Lit(0)})`);
+              B.line(`${asI32} = fptosi double ${asDouble} to i32`);
+              nativeParamTypes.push("i32");
+              nativeArgs.push(`i32 ${asI32}`);
+              break;
+            }
+            case "string": {
+              const lenPtr = B.tmp();
+              const len = B.tmp();
+              const data = B.tmp();
+              B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 0, i32 1`);
+              B.line(`${len} = load i64, ptr ${lenPtr}`);
+              B.line(`${data} = getelementptr inbounds i8, ptr ${arg.name}, i64 24`);
+              nativeParamTypes.push("ptr", "i64");
+              nativeArgs.push(`ptr ${data}`, `i64 ${len}`);
+              break;
+            }
+            case "bytes": {
+              const lenPtr = B.tmp();
+              const len = B.tmp();
+              const dataPtr = B.tmp();
+              const data = B.tmp();
+              B.line(`${lenPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 8`);
+              B.line(`${len} = load i64, ptr ${lenPtr}`);
+              B.line(`${dataPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 24`);
+              B.line(`${data} = load ptr, ptr ${dataPtr}`);
+              nativeParamTypes.push("ptr", "i64");
+              nativeArgs.push(`ptr ${data}`, `i64 ${len}`);
+              break;
+            }
+          }
+        });
+        const retTy =
+          entry.returns === "f64" ? "double"
+          : entry.returns === "bool" || entry.returns === "u8" ? "i8"
+          : entry.returns === "u32" || entry.returns === "i32" ? "i32"
+          : "void";
+        this.declare(
+          `declare ${retTy} @${entry.symbol}(${nativeParamTypes.join(", ")})`,
+        );
+        const call = `call ${retTy} @${entry.symbol}(${nativeArgs.join(", ")})`;
+        if (entry.returns === "void") {
+          B.line(call);
+          return { name: "", type: e.type };
+        }
+        const raw = B.tmp();
+        B.line(`${raw} = ${call}`);
+        if (entry.returns === "f64") return { name: raw, type: e.type };
+        if (entry.returns === "bool") {
+          const value = B.tmp();
+          B.line(`${value} = icmp ne i8 ${raw}, 0`);
+          return { name: value, type: e.type };
+        }
+        const value = B.tmp();
+        const op = entry.returns === "i32" ? "sitofp" : "uitofp";
+        B.line(`${value} = ${op} ${retTy} ${raw} to double`);
+        return { name: value, type: e.type };
       }
       case "new": {
         // Allocate (fields zeroed, vt stamped), then run the ctor. The

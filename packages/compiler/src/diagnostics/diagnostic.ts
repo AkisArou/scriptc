@@ -39,6 +39,11 @@
  *            (SC4022 — may-be-NaN or may-be-fractional at a declared
  *            i64/u64 slot), and range (SC4023 — the proven interval does
  *            not fit ±(2^53 − 1), or is negative at a u64 slot)
+ *   SC5xxx  native FFI: malformed manifests (SC5001), a configured
+ *            binding that is not an ambient function declaration
+ *            (SC5002), and a TypeScript signature that does not match its
+ *            declared native ABI classes (SC5003), and native toolchain
+ *            failures while applying a valid profile (SC5004)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -60,6 +65,58 @@ export interface ScrDiagnostic {
    * recognizably the profile's. Only library-mode refusals carry one —
    * the text always arrives prefixed `from the '<profile name>' profile:`. */
   note?: string;
+}
+
+/* ── SC5xxx: native FFI ───────────────────────────────────────────────── */
+
+/** SC5001 — the outbound native-FFI manifest is malformed or unreadable. */
+export function ffiProfileDiag(detail: string, profilePath: string): ScrDiagnostic {
+  return {
+    code: "SC5001",
+    message: `FFI manifest invalid: ${detail}`,
+    loc: { file: profilePath, start: 0, end: 0 },
+  };
+}
+
+/** SC5002 — a manifest binding must resolve to a signature-only ambient
+ * function. A function with a body is ordinary scriptc code and must never
+ * silently turn into a native call because its name happened to match. */
+export function ffiBindingDiag(name: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC5002",
+    message: `FFI binding '${name}' cannot be resolved: ${detail}`,
+    loc,
+    hint:
+      `declare it as a signature-only ambient function, for example ` +
+      `'declare function ${name}(...): ...'; scriptc only replaces direct calls of that exact binding`,
+  };
+}
+
+/** SC5003 — the ambient TypeScript signature and manifest ABI disagree. */
+export function ffiSignatureDiag(name: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC5003",
+    message: `FFI binding '${name}' has an incompatible signature: ${detail}`,
+    loc,
+    hint:
+      "FFI parameter classes: f64/u8/u32/i32 (TypeScript number), bool, string, and bytes " +
+      "(Uint8Array/Buffer); return classes: f64/u8/u32/i32, bool, and void",
+  };
+}
+
+/** SC5004 — the compiler driver could not build/link a valid outbound FFI
+ * profile. This is source-facing because missing symbols, incompatible
+ * archives, and unavailable system libraries are profile inputs rather than
+ * compiler crashes. */
+export function ffiNativeBuildDiag(detail: string, profilePath: string): ScrDiagnostic {
+  return {
+    code: "SC5004",
+    message: `FFI native build failed: ${detail}`,
+    loc: { file: profilePath, start: 0, end: 0 },
+    hint:
+      "check that every native symbol and system library exists, archive/object ordering is correct, " +
+      "and each input matches the selected target",
+  };
 }
 
 interface UnsupportedEntry {

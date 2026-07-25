@@ -1434,6 +1434,52 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         if (E.mayThrow.has(e.callee)) E.emitPendingCheck();
         return t;
       }
+      case "ffiCall": {
+        const entry = E.ffiByName.get(e.import);
+        if (!entry) throw new Error(`emitter bug: unknown FFI import ${e.import}`);
+        const args = e.args.map((arg) => E.emitExpr(arg));
+        const nativeArgs: string[] = [];
+        entry.params.forEach((cls, i) => {
+          const arg = args[i]!;
+          switch (cls) {
+            case "f64":
+              nativeArgs.push(arg.name);
+              break;
+            case "bool":
+              nativeArgs.push(`(uint8_t)(${arg.name} ? 1 : 0)`);
+              break;
+            case "u8":
+              nativeArgs.push(`(uint8_t)(uint32_t)scr_bit_ushr(${arg.name}, 0.0)`);
+              break;
+            case "u32":
+              nativeArgs.push(`(uint32_t)scr_bit_ushr(${arg.name}, 0.0)`);
+              break;
+            case "i32":
+              nativeArgs.push(`(int32_t)scr_bit_or(${arg.name}, 0.0)`);
+              break;
+            case "string":
+              nativeArgs.push(`(const uint8_t *)${arg.name}->data`, `${arg.name}->len`);
+              break;
+            case "bytes":
+              nativeArgs.push(`(const uint8_t *)${arg.name}->data`, `${arg.name}->len`);
+              break;
+          }
+        });
+        const call = `${entry.symbol}(${nativeArgs.join(", ")})`;
+        switch (entry.returns) {
+          case "void":
+            E.line(`${call};${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          case "f64":
+            return E.newTemp(e.type, call);
+          case "bool":
+            return E.newTemp(e.type, `(${call} != 0)`);
+          case "u8":
+          case "u32":
+          case "i32":
+            return E.newTemp(e.type, `(double)${call}`);
+        }
+      }
       case "closure": {
         const target = E.fnByName.get(e.fnName);
         if (!target) throw new Error(`emitter bug: closure over unknown function ${e.fnName}`);

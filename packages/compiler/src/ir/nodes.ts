@@ -676,7 +676,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 1;
+  irVersion: 2;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -725,12 +725,31 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
+  /** Outbound native FFI declarations used by `ffiCall` expressions.
+   * These are link-time C ABI imports, not runtime dynamic-library handles:
+   * executable builds resolve their symbols from the manifest's archive
+   * and system-library inputs. Absent when the build has no FFI manifest. */
+  ffiImports?: IrFfiImport[];
   /** LIBRARY mode: the profile's resolved export map plus the
    * mode-provided symbol names, landed ON the IR so both backends emit the
    * external-linkage wrappers and entries from the same facts — the two
    * emissions stay conformance-identical by construction. Absent on every
    * executable build (the backends emit main() exactly as always). */
   lib?: IrLibSection;
+}
+
+/** One outbound native FFI declaration, copied from the validated format-1
+ * manifest onto the IR so both backends emit the same C ABI. `string` and
+ * `bytes` parameters each expand to `(const uint8_t *, size_t)`; their
+ * storage is borrowed only until the native call returns. Integer inputs
+ * use JavaScript's ToUint32/ToInt32 coercions before narrowing. */
+export interface IrFfiImport {
+  /** The signature-only ambient TypeScript binding name. */
+  name: string;
+  /** The external C symbol. */
+  symbol: string;
+  params: ("f64" | "bool" | "u8" | "u32" | "i32" | "string" | "bytes")[];
+  returns: "f64" | "bool" | "u8" | "u32" | "i32" | "void";
 }
 
 /** One export-map entry, resolved: the external ccc symbol, the IR
@@ -4180,6 +4199,13 @@ export type IrExpr =
     }
   /** Call of a user function declared in this module, by name. */
   | { kind: "call"; callee: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
+  /** Direct call of a manifest-bound native C symbol. Arguments are
+   * borrowed (native code may inspect but never retain string/bytes
+   * pointers); scalar results return by value. The import's ABI signature
+   * lives once on IrModule.ffiImports and the validator checks this call
+   * against it. Native code is outside scriptc's exception protocol: it
+   * must return normally and must not retain or mutate borrowed storage. */
+  | { kind: "ffiCall"; import: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
   /** Closure creation: a function value over `fnName` (a module function),
    * capturing the listed boxed locals of the CREATING function (localIds,
    * in the callee's captures[] order). The result is owned (+1); the closure
