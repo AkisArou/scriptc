@@ -4,9 +4,19 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
-## 0.0.13
+## 0.0.14
 
 <!-- release:start -->
+
+### Fixes
+
+- **Clients resolve hostnames.** The http, https, TLS and HTTP/2 clients resolved nothing before dialing, so a request to any name came back ENOTFOUND and only literal addresses worked. Only the dial takes the resolved address — the original name stays on the request, which is what the Host header carries and what SNI and certificate verification see. `net.connect(port, hostname)` still refuses to resolve: Node's async lookup semantics on that surface are their own piece of work.
+- **The URL-string form of the http and https clients compiles**, along with the URL-object form, which reads as its href through the same parse. The declarations only described the options record, so `http.get("http://host/path")` — the first thing a client written from scratch reaches for — was a type error rather than a request. An unparsable input is the WHATWG `Invalid URL` TypeError and a scheme that is not the calling module's is `ERR_INVALID_PROTOCOL`, both catchable, both matching Node instead of silently upgrading the dial. Both rows run on the LLVM backend, as do the TLS CA-store entries, which moves the CA-store corpus off the C lane with identical output.
+- **`scriptc -v` prints the version** instead of crashing on an attempt to read `-v` as an entry file, and an unknown flag or a missing flag value prints one line naming what was wrong followed by usage, in place of a Node stack trace.
+
+<!-- release:end -->
+
+## 0.0.13
 
 ### Features
 
@@ -22,8 +32,6 @@ All notable changes to scriptc will be documented in this file.
 - Windows library archives carried undefined references no embedder link could resolve — the win32 libc shim unit now joins the archive for windows triples. Host archives are unchanged byte-for-byte.
 - Bytes written to a socket whose dial had not started — the agent's `maxSockets` queue, or a caller lookup still in flight — were silently dropped, hanging the exchange. They buffer and flush at establishment.
 - The CA-store surfaces demote the determinism attestation and can now be denied by a profile: three rows, one per Node spelling, since denying a read of the trust anchors is a different decision from denying their replacement.
-
-<!-- release:end -->
 
 ## 0.0.12
 
