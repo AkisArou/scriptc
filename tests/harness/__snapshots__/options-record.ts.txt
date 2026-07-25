@@ -21,7 +21,7 @@ options-record.ts:22:22 - error SC2020: 'get with agent: false and a non-literal
   21 | const dynHeaders: Record<string, string> = { "x-a": "1" };
   22 | http.get({ port: 80, agent: false, headers: dynHeaders }, () => {});
      |                      ^~~~~~~~~~~~
-  23 |
+  23 | 
 
   hint: agent: false lowers by injecting Connection: close into a LITERAL headers object — add connection: "close" to the record instead, or write the headers inline
 
@@ -39,7 +39,7 @@ options-record.ts:26:22 - error SC2020: 'get option 'localAddress'' is part of t
   25 | http.get({ port: 80, socketPath: "/tmp/sock.s" }, () => {});
   26 | http.get({ port: 80, localAddress: "127.0.0.1" }, () => {});
      |                      ^~~~~~~~~~~~~~~~~~~~~~~~~
-  27 |
+  27 | 
 
   hint: hostname/host, port, path, method, timeout, headers, and agent are the supported options
 
@@ -48,7 +48,7 @@ options-record.ts:34:22 - error SC2020: 'the undocumented get option 'zorp' with
   33 | }
   34 | http.get({ port: 80, zorp: effect() }, () => {});
      |                      ^~~~~~~~~~~~~~
-  35 |
+  35 | 
 
   hint: Node ignores undocumented option keys and so does this compiler, but Node still evaluates the value — hoist it (const v = ...) or drop the entry
 
@@ -66,7 +66,7 @@ options-record.ts:38:41 - error SC2020: 'tls.createServer option 'ticketKeys'' i
   37 | tls.createServer({ cert: "c", key: "k", ciphers: "TLS_AES_128_GCM_SHA256" }, () => {});
   38 | tls.createServer({ cert: "c", key: "k", ticketKeys: new Uint8Array(48) }, () => {});
      |                                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  39 |
+  39 | 
 
   hint: cert and key (PEM strings or Buffers) are the supported options
 
@@ -84,7 +84,7 @@ options-record.ts:43:20 - error SC2020: 'fs.watch with persistent disabled' is p
   42 | fs.watch("/tmp", { recursive: true }, () => {});
   43 | fs.watch("/tmp", { persistent: false }, () => {});
      |                    ^~~~~~~~~~~~~~~~~
-  44 |
+  44 | 
 
   hint: an open watcher keeps the loop alive until close() — that IS the lowering; persistent: false (a watcher the process does not wait for) has no lowering
 
@@ -102,7 +102,7 @@ options-record.ts:47:38 - error SC2020: 'lookup option 'all'' is part of the sta
   46 | dns.lookup("localhost", { family: 4, hints: 32 }, () => {});
   47 | dns.lookup("localhost", { family: 4, all: true }, () => {});
      |                                      ^~~~~~~~~
-  48 |
+  48 | 
 
   hint: the all-addresses callback shape has no lowering — the lowered callback is (err, address, family) over one IPv4 answer
 
@@ -120,6 +120,6 @@ options-record.ts:52:74 - error SC2020: 'createInterface with a completer' is pa
   51 | readline.createInterface({ input: process.stdin, output: process.stdout, crlfDelay: 100 });
   52 | readline.createInterface({ input: process.stdin, output: process.stdout, completer: (l: string) => [[l], l] });
      |                                                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  53 |
+  53 | 
 
   hint: tab completion needs an interactive terminal — the lowered interface reads piped lines (terminal: false)
