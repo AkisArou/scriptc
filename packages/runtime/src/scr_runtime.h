@@ -1613,7 +1613,7 @@ ScrPromise *scr_sp_pipeline(double n, ScrStream **streams);
  * and settle at the terminal point (right after 'close', the eos timing
  * Node's consumers share) — text answers the utf8 decode, json parses
  * the text (malformed input rejects with the parse's SyntaxError; the
- * result is a +1 DOM tree), buffer the concatenated bytes. Stream
+ * result is a +1 dyn tree), buffer the concatenated bytes. Stream
  * errors reject; an early close rejects ERR_STREAM_PREMATURE_CLOSE; a
  * stream with no readable side rejects Node's async-iterable TypeError.
  * Streams borrowed; +1 promises. */

@@ -1258,7 +1258,7 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
     const recv = access.expression;
     // A CHECKED-DYNAMIC receiver whose checker type is a concrete stdlib
     // class mapped to dyn (the http Agent handle): its members dispatch
-    // at runtime through the DOM/handle machinery — the keyed-read claim
+    // at runtime through the dyn/handle machinery — the keyed-read claim
     // below this fence answers, member-or-refusal ladder, so no compile
     // fence belongs here.
     if (L.mapTypeOf(L.typeOf(recv))?.kind === "dyn") return;

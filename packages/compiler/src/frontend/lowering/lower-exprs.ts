@@ -8653,8 +8653,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       if (rIn) return rIn;
       // A runtime key over a CHECKED-DYNAMIC receiver (`name in
       // agent.sockets` — both sides computed; the checker may type the
-      // receiver as a Dict while the VALUE lives in the DOM, so the
-      // LOWERED type decides): the DOM presence answer, with the key
+      // receiver as a Dict while the VALUE lives in the checked-dynamic tree, so the
+      // LOWERED type decides): the dyn presence answer, with the key
       // stringified like every property key (o[k] is o[String(k)] in JS;
       // `in` shares the coercion).
       {

@@ -4891,7 +4891,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       if (httpServer) return httpServer;
     }
     // `new http.Agent(opts?)` / `new https.Agent(opts?)` — the Agent
-    // handle (lower-server): getName/destroy/counters through the DOM
+    // handle (lower-server): getName/destroy/counters through the dyn
     // handle ops, requests thread it via the agent option.
     {
       const agent = lowerHttpAgentNew(L, expr);

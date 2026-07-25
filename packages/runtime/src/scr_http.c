@@ -3670,7 +3670,7 @@ static ScrArr *scr_http_dynh_pairs(const ScrDyn *headers) {
   return pairs;
 }
 
-/* writeHead's RAW-array form over a DOM ARR: [k0, v0, k1, v1, ...]
+/* writeHead's RAW-array form over a dyn ARR: [k0, v0, k1, v1, ...]
  * flattens into the same pairs feed; an odd length throws Node's
  * ERR_INVALID_ARG_VALUE; value slots may be arrays (consecutive
  * same-name lines) or numbers (String(n)). NULL = exception pending. */
@@ -4275,7 +4275,7 @@ static const ScrDynHandleOps scr_http_dynh_client_ops = {
 
 /* ── Agent (SCR_DYNH_HTTP_AGENT) ─────────────────────────────────────── */
 
-/* A string-ish option field out of a DOM OBJ: STR answers its bytes,
+/* A string-ish option field out of a dyn OBJ: STR answers its bytes,
  * NUM formats (the port), everything else reads as absent. */
 static ScrStr *scr_http_dynh_opt_str(const ScrDyn *opts, const char *key) {
   if (opts == NULL || opts->kind != SCR_DYN_OBJ) return NULL;

@@ -2390,7 +2390,7 @@ export type IrLibFn =
    * numeric options arrive < 0 for "unset" (Infinity/256/none; port
    * seeds the settable defaultPort, Node's option merge). Returns the
    * Agent as a checked-dynamic HANDLE (getName/destroy and the
-   * sockets/requests/freeSockets counters dispatch through the DOM
+   * sockets/requests/freeSockets counters dispatch through the dyn
    * handle ops). keepAlive: true THROWS the named construction fence —
    * socket POOLING is not modeled (one dial per request); maxSockets
    * accounting is real: over-limit requests defer their dial and queue.
@@ -3273,7 +3273,7 @@ export type IrLibFn =
   /** node:stream/consumers — the promise consumers over the readable
    * machinery: (s) → a pending promise settled at the terminal point
    * with the accumulated result (sc.text: the utf8 decode, sc.json: the
-   * parsed DOM — malformed input rejects with the parse's SyntaxError,
+   * parsed dyn — malformed input rejects with the parse's SyntaxError,
    * sc.buffer: the concatenated bytes) or rejected with the stream's
    * error / ERR_STREAM_PREMATURE_CLOSE. */
   | "sc.text"

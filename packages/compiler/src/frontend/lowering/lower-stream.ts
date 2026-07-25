@@ -1316,7 +1316,7 @@ export function lowerStreamModuleCall(L: Lowerer, call: ts.CallExpression,
     const args = call.arguments;
     // text/json/buffer(stream) → a pending promise the accumulate-and-
     // settle machinery resolves at the terminal point (the utf8 decode / the parsed
-    // JSON DOM / the concatenated bytes) or rejects — with the stream's
+    // JSON dyn tree / the concatenated bytes) or rejects — with the stream's
     // error, ERR_STREAM_PREMATURE_CLOSE on an early close, or json's
     // SyntaxError on malformed text, Node's own rejection set.
     // arrayBuffer/blob return null here: neither value has a

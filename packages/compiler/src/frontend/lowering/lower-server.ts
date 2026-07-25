@@ -2366,7 +2366,7 @@ function lowerHttpCreateServerForms(L: Lowerer, expr: ts.CallExpression | ts.New
 /** `new http.Agent(opts?)` / `new https.Agent(opts?)` (property access or
  * named import): the Agent lowers to a checked-dynamic HANDLE —
  * getName/destroy and the sockets/requests/freeSockets counters dispatch
- * through the DOM handle ops, and the request path threads it (the
+ * through the dyn handle ops, and the request path threads it (the
  * requestAgent rows). Options parse at the LITERAL construction site:
  * keepAlive (a boolean value — TRUE throws the runtime's named pooling
  * fence: this client dials one connection per request), keepAliveMsecs /

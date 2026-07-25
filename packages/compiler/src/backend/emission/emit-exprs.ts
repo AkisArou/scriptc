@@ -2287,7 +2287,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // result the target (+1); throws catchably (may-throw seed).
             return finish(`scr_dyn_define_props(${arg(0)}, ${arg(1)})`);
           case "dyn.hasKey":
-            // `k in v` with a runtime key: the DOM presence answer (both
+            // `k in v` with a runtime key: the dyn presence answer (both
             // borrowed, no allocation, never throws).
             return finish(`scr_dyn_has_key(${arg(0)}, ${arg(1)})`);
           case "dyn.keySet":

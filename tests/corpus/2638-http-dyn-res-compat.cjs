@@ -1,5 +1,5 @@
 // The ServerResponse compat members on CHECKED-DYNAMIC handles (the
-// untyped-wrapper listener boxes req/res into the DOM): setHeader
+// untyped-wrapper listener boxes req/res into the dyn): setHeader
 // chaining + getHeaders snapshots, flushHeaders, the raw-array writeHead
 // form (per-name override of setHeader state, other names survive),
 // cork/uncork with the writableCorked counter (corked writes coalesce and

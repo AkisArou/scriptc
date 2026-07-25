@@ -1681,7 +1681,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     return { kind: "object", className: "%Error" };
   }
   // http.Agent / https.Agent — the Agent VALUE is a checked-dynamic
-  // handle (new http.Agent lowers to the DOM handle whose members
+  // handle (new http.Agent lowers to the dyn handle whose members
   // dispatch through the handle ops), so the TYPE maps to dyn: a typed
   // binding, parameter, or field carrying an Agent stays usable instead
   // of fencing at the declaration. Module-checked like the rest (https'

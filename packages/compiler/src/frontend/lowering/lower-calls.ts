@@ -4217,7 +4217,7 @@ export const DYN_DISPATCH_METHODS = new Set([
   "writeContinue", "writeEarlyHints", "cork", "uncork", "addTrailers",
   "ref", "unref", "address", "setNoDelay", "setKeepAlive", "connect",
   "resetAndDestroy", "destroySoon",
-  // The Agent handle's own member (no other DOM prototype declares it,
+  // The Agent handle's own member (no other dyn prototype declares it,
   // so the remainder keeps the stored-member answers).
   "getName",
   // The netServer half of the handle surface (`let server; server =
