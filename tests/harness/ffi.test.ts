@@ -122,6 +122,7 @@ test("manifest validation reports a missing native link input", () => {
 
 test.each([
   {
+    id: "called-signature",
     name: "a TypeScript signature that disagrees with the manifest",
     source: [
       "declare function nativeScale(value: string): number;",
@@ -132,6 +133,7 @@ test.each([
     message: "parameter 1",
   },
   {
+    id: "called-body",
     name: "an ordinary function body with a configured name",
     source: [
       "function nativeScale(value: number): number { return value; }",
@@ -141,8 +143,29 @@ test.each([
     code: "SC5002",
     message: "signature-only",
   },
-])("rejects $name", async ({ source, code, message }) => {
-  const outDir = join(cacheRoot, `reject-${code}`);
+  {
+    id: "unused-signature",
+    name: "an unused TypeScript signature that disagrees with the manifest",
+    source: [
+      "declare function nativeScale(value: string): number;",
+      "console.log('ok');",
+      "",
+    ].join("\n"),
+    code: "SC5003",
+    message: "parameter 1",
+  },
+  {
+    id: "unused-missing",
+    name: "an unused manifest binding with no source declaration",
+    source: [
+      "console.log('ok');",
+      "",
+    ].join("\n"),
+    code: "SC5002",
+    message: "signature-only",
+  },
+])("rejects $name", async ({ id, source, code, message }) => {
+  const outDir = join(cacheRoot, `reject-${id}`);
   mkdirSync(outDir, { recursive: true });
   const entry = join(outDir, "main.ts");
   const profilePath = join(outDir, "profile.json");

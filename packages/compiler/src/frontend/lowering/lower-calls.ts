@@ -6,12 +6,14 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
 import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import type { IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
 import { ffiBindingDiag, ffiSignatureDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
+import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
 import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
@@ -2468,6 +2470,173 @@ export function islandPrimitiveExit(L: Lowerer, call: ts.CallExpression, result:
     return null;
   }
 
+function ffiTypeForClass(
+  cls: IrFfiImport["params"][number] | IrFfiImport["returns"],
+): IrType {
+  switch (cls) {
+    case "bool":
+      return BOOL;
+    case "string":
+      return STRING;
+    case "bytes":
+      return BYTES_U8;
+    case "void":
+      return VOID;
+    default:
+      return F64;
+  }
+}
+
+/** The declaration half of an outbound FFI binding. Kept independent of
+ * call-site argument checks so the whole manifest can be validated even
+ * when a configured function is never called. */
+function ffiDeclarationDiagnostic(
+  L: Lowerer,
+  binding: IrFfiImport,
+  symbol: ts.Symbol,
+  loc: SrcLoc,
+): ScrDiagnostic | null {
+  const declarations = L.checker.declarationsOf(symbol);
+  const functionDecls = declarations.filter(ts.isFunctionDeclaration);
+  if (
+    functionDecls.length === 0 ||
+    declarations.some((decl) => !ts.isFunctionDeclaration(decl)) ||
+    functionDecls.some((decl) => decl.body !== undefined)
+  ) {
+    return ffiBindingDiag(
+      binding.name,
+      "the configured name does not resolve exclusively to signature-only function declarations",
+      loc,
+    );
+  }
+  if (functionDecls.some((decl) => (decl.typeParameters?.length ?? 0) > 0)) {
+    return ffiSignatureDiag(
+      binding.name,
+      "generic ambient declarations cannot describe one fixed C ABI",
+      loc,
+    );
+  }
+  const signatures = L.checker.getCallSignatures(L.checker.getTypeOfSymbol(symbol));
+  if (signatures.length !== 1) {
+    return ffiSignatureDiag(
+      binding.name,
+      `the ambient binding has ${signatures.length} call signatures; exactly one non-overloaded signature is required`,
+      loc,
+    );
+  }
+  const signature = signatures[0]!;
+  const params = signature.getParameters();
+  if (params.length !== binding.params.length) {
+    return ffiSignatureDiag(
+      binding.name,
+      `the TypeScript declaration has ${params.length} parameter(s), but the manifest declares ${binding.params.length}`,
+      loc,
+    );
+  }
+  const expectedParams = binding.params.map(ffiTypeForClass);
+  for (let i = 0; i < params.length; i++) {
+    const paramType = L.checker.getTypeOfSymbol(params[i]!);
+    const mapped = L.mapTypeOf(paramType);
+    const expected = expectedParams[i]!;
+    if (mapped === null || !typeEquals(mapped, expected)) {
+      return ffiSignatureDiag(
+        binding.name,
+        `parameter ${i + 1} maps to '${mapped === null ? L.checker.typeToString(paramType) : L.fmt(mapped)}', ` +
+          `which does not fit manifest class '${binding.params[i]}'`,
+        loc,
+      );
+    }
+  }
+  const returnType = L.checker.getReturnTypeOfSignature(signature);
+  const declaredReturn = L.mapTypeOf(returnType);
+  const expectedReturn = ffiTypeForClass(binding.returns);
+  if (declaredReturn === null || !typeEquals(declaredReturn, expectedReturn)) {
+    return ffiSignatureDiag(
+      binding.name,
+      `the return maps to '${declaredReturn === null ? L.checker.typeToString(returnType) : L.fmt(declaredReturn)}', ` +
+        `which does not fit manifest class '${binding.returns}'`,
+      loc,
+    );
+  }
+  return null;
+}
+
+export interface FfiValidationResult {
+  diagnostics: ScrDiagnostic[];
+  symbolsByName: ReadonlyMap<string, ReadonlySet<ts.Symbol>>;
+}
+
+/** Resolve and validate every configured outbound binding before emit.
+ * Candidate declarations are signature-only functions bearing the manifest
+ * name anywhere in the program. Multiple scoped declarations are all native
+ * bindings under the existing name-based call surface, so every candidate
+ * must fit the one manifest ABI. */
+export function validateFfiImports(L: Lowerer): FfiValidationResult {
+  const diagnostics: ScrDiagnostic[] = [];
+  const symbolsByName = new Map<string, ReadonlySet<ts.Symbol>>();
+  const configuredNames = new Set(L.ffiImports.map((binding) => binding.name));
+  const candidates = new Map<string, Map<ts.Symbol, ts.FunctionDeclaration>>();
+
+  if (configuredNames.size === 0) return { diagnostics, symbolsByName };
+
+  for (const file of L.program.getSourceFiles()) {
+    ts.walkPreorder(file, (node) => {
+      if (ts.isFunctionDeclaration(node)) {
+        if (
+          node.body === undefined &&
+          node.name !== undefined &&
+          configuredNames.has(node.name.text)
+        ) {
+          const symbol = L.checker.getSymbolAtLocation(node.name);
+          if (symbol !== undefined) {
+            let bySymbol = candidates.get(node.name.text);
+            if (bySymbol === undefined) {
+              bySymbol = new Map();
+              candidates.set(node.name.text, bySymbol);
+            }
+            if (!bySymbol.has(symbol)) bySymbol.set(symbol, node);
+          }
+        }
+        return "skip";
+      }
+      if (ts.isFunctionLike(node)) return "skip";
+    });
+  }
+
+  for (const binding of L.ffiImports) {
+    const bySymbol = candidates.get(binding.name);
+    if (bySymbol === undefined || bySymbol.size === 0) {
+      diagnostics.push(
+        ffiBindingDiag(
+          binding.name,
+          "the program has no signature-only function declaration with this name",
+          { file: L.entry.fileName, start: 0, end: 0 },
+        ),
+      );
+      continue;
+    }
+    const validSymbols = new Set<ts.Symbol>();
+    let valid = true;
+    for (const [symbol, declaration] of bySymbol) {
+      const diagnostic = ffiDeclarationDiagnostic(
+        L,
+        binding,
+        symbol,
+        locOf(declaration),
+      );
+      if (diagnostic === null) {
+        validSymbols.add(symbol);
+      } else {
+        diagnostics.push(diagnostic);
+        valid = false;
+      }
+    }
+    if (valid) symbolsByName.set(binding.name, validSymbols);
+  }
+
+  return { diagnostics, symbolsByName };
+}
+
 /** A manifest-bound call of a signature-only ambient declaration. This
  * recognition deliberately runs before ambientUndefVarRootOf: without the
  * manifest the exact same source keeps Node's ReferenceError semantics;
@@ -2492,32 +2661,22 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
     const symbol =
       L.resolveValueSymbol(expr.expression) ??
       bindingError("the call has no resolved TypeScript symbol");
-    const declarations = L.checker.declarationsOf(symbol);
-    const functionDecls = declarations.filter(ts.isFunctionDeclaration);
-    if (
-      functionDecls.length === 0 ||
-      declarations.some((decl) => !ts.isFunctionDeclaration(decl)) ||
-      functionDecls.some((decl) => decl.body !== undefined)
-    ) {
-      bindingError(
-        "the configured name does not resolve exclusively to signature-only function declarations",
-      );
-    }
-    if (functionDecls.some((decl) => (decl.typeParameters?.length ?? 0) > 0)) {
-      signatureError("generic ambient declarations cannot describe one fixed C ABI");
-    }
-    const signatures = L.checker.getCallSignatures(L.typeOf(expr.expression));
-    if (signatures.length !== 1) {
-      signatureError(
-        `the ambient binding has ${signatures.length} call signatures; exactly one non-overloaded signature is required`,
-      );
-    }
-    const signature = signatures[0]!;
-    const params = signature.getParameters();
-    if (params.length !== binding.params.length) {
-      signatureError(
-        `the TypeScript declaration has ${params.length} parameter(s), but the manifest declares ${binding.params.length}`,
-      );
+    if (L.ffiBindingSymbols !== null) {
+      const validSymbols = L.ffiBindingSymbols.get(binding.name);
+      // No entry means the program-level pass already diagnosed this
+      // binding. Poison the statement without duplicating that diagnostic.
+      if (validSymbols === undefined) throw new PoisonError();
+      if (!validSymbols.has(symbol)) {
+        bindingError(
+          "the configured name does not resolve exclusively to a validated signature-only function declaration",
+        );
+      }
+    } else {
+      const diagnostic = ffiDeclarationDiagnostic(L, binding, symbol, loc);
+      if (diagnostic !== null) {
+        L.pushDiag(diagnostic);
+        throw new PoisonError();
+      }
     }
     if (expr.arguments.some(ts.isSpreadElement)) {
       signatureError("spread arguments do not have a fixed native ABI");
@@ -2527,43 +2686,8 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
         `this call passes ${expr.arguments.length} argument(s), but the native ABI requires exactly ${binding.params.length}`,
       );
     }
-    const typeForClass = (
-      cls: (typeof binding.params)[number] | typeof binding.returns,
-    ): IrType => {
-      switch (cls) {
-        case "bool":
-          return BOOL;
-        case "string":
-          return STRING;
-        case "bytes":
-          return BYTES_U8;
-        case "void":
-          return VOID;
-        default:
-          return F64;
-      }
-    };
-    const expectedParams = binding.params.map(typeForClass);
-    params.forEach((param, i) => {
-      const paramType = L.checker.getTypeOfSymbol(param);
-      const mapped = L.mapTypeOf(paramType);
-      const expected = expectedParams[i]!;
-      if (mapped === null || !typeEquals(mapped, expected)) {
-        signatureError(
-          `parameter ${i + 1} maps to '${mapped === null ? L.checker.typeToString(paramType) : L.fmt(mapped)}', ` +
-            `which does not fit manifest class '${binding.params[i]}'`,
-        );
-      }
-    });
-    const returnType = L.checker.getReturnTypeOfSignature(signature);
-    const declaredReturn = L.mapTypeOf(returnType);
-    const expectedReturn = typeForClass(binding.returns);
-    if (declaredReturn === null || !typeEquals(declaredReturn, expectedReturn)) {
-      signatureError(
-        `the return maps to '${declaredReturn === null ? L.checker.typeToString(returnType) : L.fmt(declaredReturn)}', ` +
-          `which does not fit manifest class '${binding.returns}'`,
-      );
-    }
+    const expectedParams = binding.params.map(ffiTypeForClass);
+    const expectedReturn = ffiTypeForClass(binding.returns);
     const args = expr.arguments.map((arg, i) =>
       L.lowerExprExpecting(arg, expectedParams[i]!)
     );
