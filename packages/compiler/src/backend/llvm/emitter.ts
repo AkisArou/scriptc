@@ -4542,8 +4542,19 @@ class LlEmitter {
         const lj = B.newLabel("ord.j");
         B.condBr(truthy, lt, lf);
         B.startBlock(lt);
-        B.line(`store ${ty} ${this.unionExtract(l.name, e.type)}, ptr ${slot}`);
-        this.releaseValue(l.name, e.left.type);
+        if (e.retag !== undefined) {
+          // Retagged shape: the whole box goes to the union→union helper,
+          // which CONSUMES it (callees own their params) — no release on
+          // this side. The store precedes the pending check so an unwind
+          // leaves only the NULL dummy behind, in a slot nothing reads.
+          const t = B.tmp();
+          B.line(`${t} = call ${ty} @${this.callTarget(e.retag)}(${this.llType(e.left.type)} ${l.name})`);
+          B.line(`store ${ty} ${t}, ptr ${slot}`);
+          if (this.mayThrow.has(e.retag)) this.emitPendingCheck();
+        } else {
+          B.line(`store ${ty} ${this.unionExtract(l.name, e.type)}, ptr ${slot}`);
+          this.releaseValue(l.name, e.left.type);
+        }
         B.br(lj);
         B.startBlock(lf);
         this.releaseValue(l.name, e.left.type);

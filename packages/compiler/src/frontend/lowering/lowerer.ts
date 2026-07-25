@@ -2457,6 +2457,32 @@ export class Lowerer {
     return mapType(t, this.typeCtx);
   }
 
+  /** The one position where a contextual UNION must not be adopted over the
+   * expression's own: the LEFT operand of `&&`, `||`, or `??`. Adopting a
+   * contextual union is normally safe because tsc proved the value
+   * assignable to the slot; that proof does not exist here, because tsc
+   * builds a logical operator's result by DROPPING the left's falsy (or
+   * nullish) arms. `const s: string | null = (c ? env : undefined) || null`
+   * contextually types the ternary `string | null` while its value is
+   * `string | undefined` — adopting that strands the very arm the operator
+   * exists to answer, throwing where Node yields the default. Such operands
+   * represent by their own union; the operator's own lowering re-tags on
+   * the branch where the dropped arms are gone. Narrow by design: only the
+   * union choice is unsound here. A contextual ARRAY still types the
+   * element, and an unmappable own type still falls back to the context. */
+  inLogicalLeftPosition(node: ts.Expression): boolean {
+    let n: ts.Node = node;
+    while (n.parent && ts.isParenthesizedExpression(n.parent)) n = n.parent;
+    const p = n.parent;
+    if (!p || !ts.isBinaryExpression(p) || p.left !== n) return false;
+    const k = p.operatorToken.kind;
+    return (
+      k === ts.SyntaxKind.AmpersandAmpersandToken ||
+      k === ts.SyntaxKind.BarBarToken ||
+      k === ts.SyntaxKind.QuestionQuestionToken
+    );
+  }
+
   /** True when a ?. token blocks this lowering — i.e. it is NOT the one an
    * active optional-chain lowering is currently handling. Every receiver-
    * typed lowering that supports chained receivers guards with this

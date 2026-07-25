@@ -441,15 +441,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         E.line(`${cDecl(e.type, name)};`);
         E.line(`if (${E.unionTruthyHelper(e.left.type.unionId)}(${l.name})) {`);
         E.indent++;
-        const arm = e.type;
-        const read =
-          arm.kind === "f64"
-            ? `scr_union_get_f64(${l.name})`
-            : arm.kind === "bool"
-              ? `scr_union_get_bool(${l.name})`
-              : retainCallC(arm, `(${cType(arm).trim()})scr_union_peek(${l.name})`);
-        E.line(`${name} = ${read};`);
-        E.releaseValue(l.name, e.left.type);
+        if (e.retag !== undefined) {
+          // The helper CONSUMES the left box (callees own their params), so
+          // no release on this side — the falsy side still owns and frees it.
+          // An unwind here produces the NULL dummy and never reaches the
+          // frame push below, so the slot needs no early registration.
+          E.line(`${name} = ${E.callTargetC(e.retag)}(${l.name});`);
+          if (E.mayThrow.has(e.retag)) E.emitPendingCheck();
+        } else {
+          const arm = e.type;
+          const read =
+            arm.kind === "f64"
+              ? `scr_union_get_f64(${l.name})`
+              : arm.kind === "bool"
+                ? `scr_union_get_bool(${l.name})`
+                : retainCallC(arm, `(${cType(arm).trim()})scr_union_peek(${l.name})`);
+          E.line(`${name} = ${read};`);
+          E.releaseValue(l.name, e.left.type);
+        }
         E.indent--;
         E.line(`} else {`);
         E.indent++;

@@ -1914,6 +1914,19 @@ function validateFunction(
           err(`orDefault left references unknown union ${e.left.type.unionId}`, e.loc);
           break;
         }
+        // Retagged shape: the truthy side is a call to the named helper, so
+        // the arm count is free and the type rule is the helper's signature.
+        if (e.retag !== undefined) {
+          const helper = functions.get(e.retag);
+          if (!helper) {
+            err(`orDefault retag calls undeclared function "${e.retag}"`, e.loc);
+          } else if (helper.params.length !== 1 || !typeEquals(helper.params[0]!.type, e.left.type)) {
+            err(`orDefault retag ${e.retag} must take exactly the left union`, e.loc);
+          } else if (!typeEquals(callSiteReturnType(helper), e.type)) {
+            err(`orDefault retag ${e.retag} must return the node's type`, e.loc);
+          }
+          break;
+        }
         const rest = def.arms.filter((a) => !isUnitType(a));
         if (rest.length !== 1 || !typeEquals(e.type, rest[0]!)) {
           err("orDefault type must be the left union's single non-unit arm", e.loc);

@@ -3955,8 +3955,20 @@ export type IrExpr =
    * ""/0/NaN/false falsy, object arms truthy), extract the arm when
    * truthy (+1 for ref kinds — the only truthy values live in that arm),
    * evaluate d lazily otherwise. JS value semantics exactly; `nullish`'s
-   * sibling with truthiness in place of the unit-tag test. */
-  | { kind: "orDefault"; left: IrExpr; right: IrExpr; type: IrType; loc: SrcLoc }
+   * sibling with truthiness in place of the unit-tag test.
+   *
+   * `retag` widens that to the case where the checker types the result as
+   * ANOTHER UNION (`process.env.X || null` is `string | null`; `||
+   * 3000` is `string | number`): `type` is then that union and the truthy
+   * side hands the whole left box to the named union→union retag helper
+   * instead of extracting one arm, so u may have any number of non-unit
+   * arms. The helper's stranded-unit-arm throw is unreachable here BY
+   * CONSTRUCTION — the truthiness test has already ruled those arms out,
+   * which is exactly why the left cannot be coerced eagerly into a target
+   * the checker built by DROPPING them. The helper consumes its argument
+   * (the ordinary call convention), so the truthy side must not also
+   * release the left. */
+  | { kind: "orDefault"; left: IrExpr; right: IrExpr; retag?: string; type: IrType; loc: SrcLoc }
   /** Optional chaining `a?.b` / `a?.m(...)` / `f?.()` / `a?.[i]` — the
    * `nullish` test inverted: `receiver` is a unit-armed union with exactly
    * ONE non-unit arm, evaluated exactly once; when its runtime tag is a

@@ -79,10 +79,14 @@ fs.exists({}, (y) => console.log('cb invalid', y));
 (async () => {
   try { await promises.lchmod(__filename, {}); } catch (e) { console.log('rejected', e.code); }
   try { await promises.lchmod(__filename, -1); } catch (e) { console.log('rejected', e.code, e.message); }
-  // exists' real async answers, registered after both rejections so the
-  // completion order is deterministic under Node's threadpool AND the
-  // compiled runtime's settled promises (divergence 23).
-  fs.exists(__filename, (y) => console.log('cb file', y));
-  fs.exists(`${__filename}-NO`, (y) => console.log('cb missing', y));
+  // exists' real async answers. Registering after both rejections orders
+  // these against the rejections, but two in-flight threadpool stats have
+  // no order relative to EACH OTHER — Node itself returns them reversed
+  // about once in forty runs. Chained, so the pair is sequenced by the
+  // callback rather than by which worker thread finishes first.
+  fs.exists(__filename, (y) => {
+    console.log('cb file', y);
+    fs.exists(`${__filename}-NO`, (n) => console.log('cb missing', n));
+  });
 })();
 console.log('sync tail');

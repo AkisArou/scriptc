@@ -2012,7 +2012,8 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       const own = L.mapTypeOf(L.typeOf(expr));
       const useCtx =
         (ctxMapped?.kind === "record" || ctxMapped?.kind === "union" || ctxMapped?.kind === "object") &&
-        (own === null || (own.kind === "union" && !typeEquals(own, ctxMapped)));
+        (own === null ||
+          (own.kind === "union" && !typeEquals(own, ctxMapped) && !L.inLogicalLeftPosition(expr)));
       // Mixed dyn/unit arms under an unmappable own type (`typeof pkg.name
       // === "string" ? pkg.name : null` — the lowering world types the
       // unknown-receiver read `any`, which a static build cannot hold):
@@ -7145,6 +7146,30 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         // shapes lower through lowerCondition's bool descent instead.
         const target = L.mapTypeOf(L.typeOf(expr));
         if (target?.kind === "union") {
+          // `||` whose left does NOT fit the result union: the checker built
+          // that result by DROPPING the left's falsy arms (`process.env.X ||
+          // null` is `string | null`, `|| 3000` is `string | number` — the
+          // `undefined` is gone from both), so coercing the left eagerly, as
+          // the shared shape below does, retags an arm the test is about to
+          // rule out and throws where Node yields the default. Single-eval
+          // instead: test the left in its OWN union and retag only on the
+          // truthy side, where the dropped arms are unreachable. `&&` keeps
+          // the eager shape — there the falsy left IS the result, so the
+          // checker keeps those arms in the target and they must coerce.
+          if (op === ts.SyntaxKind.BarBarToken && left.type.kind === "union" && !typeEquals(left.type, target)) {
+            const retag = L.unionRetagHelper(left.type.unionId, target.unionId, loc);
+            if (retag) {
+              L.requireTruthyUnion(left.type.unionId, expr);
+              return {
+                kind: "orDefault",
+                left,
+                right: L.coerceInto(expr.right, right, target),
+                retag,
+                type: target,
+                loc,
+              };
+            }
+          }
           L.requireTruthyUnion(target.unionId, expr);
           return {
             kind: "logical",
