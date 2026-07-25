@@ -5216,6 +5216,36 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2638-http-dyn-res-compat.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2638-http-dyn-res-compat.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2639-http-dyn-req-pause.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2639-http-dyn-req-pause.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2640-net-dyn-socket-compat.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2640-net-dyn-socket-compat.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2641-http-agent-surface.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2641-http-agent-surface.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2642-http-agent-maxsockets.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2642-http-agent-maxsockets.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
