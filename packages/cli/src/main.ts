@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { analyze, compile, compileC, compileLibrary, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
 
@@ -21,12 +22,13 @@ Usage:
 
 Options:
   -o, --out <path>   output executable path (default: .scriptc/<name>)
-      --backend <b>  code generator: llvm (default — emits LLVM IR text,
-                     compiled by the same clang) or c (the readable reference
-                     backend). The default falls back to the C backend when a
-                     program is outside the LLVM tier (a one-line stderr note
-                     says so; program behavior is identical); an explicit
-                     --backend llvm fails loudly instead of falling back
+      --backend <b>  code generator. llvm is the default and the output that
+                     ships; c emits readable C for inspecting what the
+                     compiler produced, and program behavior is identical
+                     either way. A program outside the LLVM tier still
+                     builds — the default lane emits C for it and a one-line
+                     stderr note names the construct — while an explicit
+                     --backend llvm fails with that construct named
       --from-c       treat input as a C (or .ll) file (toolchain plumbing/debugging)
       --keep-c       keep the generated program TU next to the executable
                      (default; the .ll — or the .c under --backend=c or
@@ -49,7 +51,19 @@ Options:
                      usable attestation keep the island path (a note, never
                      a failure)
   -h, --help         show this help
+  -v, --version      print the version
 `;
+
+/** The version of the installed package. Read from the manifest rather than
+ * baked in by the build, so a stamped release and a source checkout answer
+ * the same way. */
+function version(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // dist/main.js at install time, src/main.ts under tsx: the manifest is
+  // one level up from either.
+  const manifest = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version?: string };
+  return manifest.version ?? "unknown";
+}
 
 /* The exit discipline: NEVER process.exit() after writing output. stdout/
  * stderr to a PIPE are async streams — process.exit() drops whatever libuv
@@ -68,27 +82,48 @@ function fail(msg: string): never {
   throw new CliExit(1);
 }
 
+/** parseArgs, with its throw turned into the CLI's own one-line error.
+ * Unparseable arguments are a USER error — an unknown flag or a missing
+ * value used to reach the top level as an uncaught ERR_PARSE_ARGS_* and
+ * print a Node stack trace over the user's terminal. */
+function parseCli(): ReturnType<typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>> {
+  try {
+    return parseArgs({ options: CLI_OPTIONS, allowPositionals: true, allowNegative: true });
+  } catch (err) {
+    // parseArgs appends a paragraph about `--` and positionals to the
+    // unknown-option message; the first sentence is the part that names
+    // what was wrong, and USAGE below already covers what was meant.
+    const raw = err instanceof Error ? err.message : String(err);
+    const msg = raw.split("\n")[0]!.split(". ")[0]!;
+    fail(`scriptc: ${msg}\n\n${USAGE}`);
+  }
+}
+
+const CLI_OPTIONS = {
+  out: { type: "string", short: "o" },
+  // No parseArgs default: unset means the compiler's default lane
+  // (LLVM with the transparent C fallback); an explicit value pins.
+  backend: { type: "string" },
+  "from-c": { type: "boolean", default: false },
+  "keep-c": { type: "boolean", default: true },
+  "emit-ir": { type: "boolean", default: false },
+  sanitize: { type: "boolean", default: false },
+  dynamic: { type: "boolean", default: false },
+  "npm-static": { type: "string", multiple: true },
+  "provenance-sources": { type: "boolean", default: false },
+  lib: { type: "boolean", default: false },
+  profile: { type: "string" },
+  help: { type: "boolean", short: "h", default: false },
+  version: { type: "boolean", short: "v", default: false },
+} as const;
+
 async function main(): Promise<number> {
-  const { values, positionals } = parseArgs({
-    options: {
-      out: { type: "string", short: "o" },
-      // No parseArgs default: unset means the compiler's default lane
-      // (LLVM with the transparent C fallback); an explicit value pins.
-      backend: { type: "string" },
-      "from-c": { type: "boolean", default: false },
-      "keep-c": { type: "boolean", default: true },
-      "emit-ir": { type: "boolean", default: false },
-      sanitize: { type: "boolean", default: false },
-      dynamic: { type: "boolean", default: false },
-      "npm-static": { type: "string", multiple: true },
-      "provenance-sources": { type: "boolean", default: false },
-      lib: { type: "boolean", default: false },
-      profile: { type: "string" },
-      help: { type: "boolean", short: "h", default: false },
-    },
-    allowPositionals: true,
-    allowNegative: true,
-  });
+  const { values, positionals } = parseCli();
+
+  if (values.version) {
+    process.stdout.write(`${version()}\n`);
+    return 0;
+  }
 
   if (values.help || positionals.length === 0) {
     process.stdout.write(USAGE);
