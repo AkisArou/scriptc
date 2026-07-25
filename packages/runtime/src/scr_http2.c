@@ -2303,6 +2303,55 @@ static ScrH2SrvCtx *scr_h2_server_ctx(ScrNetServer *s) {
   return ctx;
 }
 
+/* createSecureServer(options, handler): the eager COMPAT handler is the
+ * first 'request' listener over the ALPN=h2 server — the
+ * create_server_req route, secured. */
+ScrNetServer *scr_http2_create_secure_server_req(const char *cert, size_t cert_len,
+                                                  const char *key, size_t key_len,
+                                                  ScrClosure *handler /*moves, nullable*/,
+                                                  ScrHttpReqFn fn) {
+  ScrNetServer *s = scr_http2_create_secure_server(cert, cert_len, key, key_len);
+  if (handler != NULL) {
+    ScrH2SrvCtx *ctx = scr_h2_server_ctx(s);
+    if (ctx != NULL) scr_net_ls_add(&ctx->request_ls, handler, (void *)fn, false);
+    else scr_closure_release(handler);
+  }
+  return s;
+}
+
+/* createSecureServer with a RUNTIME options record (the divergence-66
+ * stance): allowHTTP1 picks the flavor — truthy is the https/HTTP-1.1
+ * compatibility server, absent or falsy the ALPN=h2 server — cert/key
+ * ride the shared TLS server walk (scr_tls.c: out-of-bounds members
+ * throw the catchable runtime fence), and the h2 session-tuning keys
+ * drop exactly like the literal walk ignores them. NULL + pending
+ * exception when the walk fences. */
+ScrNetServer *scr_http2_create_secure_server_dyn(const ScrDyn *opts /*borrowed*/,
+                                                  ScrClosure *handler /*moves, nullable*/,
+                                                  ScrHttpReqFn fn) {
+  bool allow_http1 = false;
+  if (opts != NULL && opts->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < opts->v.obj.len; i++) {
+      if (strcmp(opts->v.obj.entries[i].key, "allowHTTP1") == 0) {
+        allow_http1 = scr_dyn_truthy(opts->v.obj.entries[i].value);
+      }
+    }
+  }
+  ScrBytes *cert, *key;
+  if (!scr_tls_srv_opts_walk(opts, "http2.createSecureServer", &cert, &key)) {
+    scr_closure_release(handler);
+    return NULL;
+  }
+  ScrNetServer *s = allow_http1
+      ? scr_https_create_server((const char *)cert->data, cert->len,
+                                 (const char *)key->data, key->len, handler, fn)
+      : scr_http2_create_secure_server_req((const char *)cert->data, cert->len,
+                                            (const char *)key->data, key->len, handler, fn);
+  scr_bytes_release(cert);
+  scr_bytes_release(key);
+  return s;
+}
+
 void scr_http2_server_on_stream(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrH2StreamFn fn,
                                  bool once) {
   ScrH2SrvCtx *ctx = scr_h2_server_ctx(s);

@@ -93,9 +93,9 @@ import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassign
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
-import { builtinImportOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, stripTypeCasts, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerFsConstantsProperty, lowerHttp2ConstantsProperty, http2ConstantBindingOf, http2ConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
+import { builtinImportOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, stripTypeCasts, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerCryptoModuleCall, lowerFsConstantsProperty, lowerBuiltinConstantsProperty, builtinConstantBindingOf, builtinConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
 import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
-import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty } from "./lower-server.js";
+import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty, lowerTlsRootCertificates } from "./lower-server.js";
 import { lowerDgramDnsModuleCall, lowerDgramMethodCall } from "./lower-dgram.js";
 import { lowerNodeTestModuleCall, lowerTestDirectCall, lowerTestMethodCall, lowerTestCtxProperty } from "./lower-test.js";
 import { lowerAssertModuleCall, lowerAssertDirectCall } from "./lower-assert.js";
@@ -7429,6 +7429,10 @@ export class Lowerer {
     // of meeting the table fence.
     const fsLadder = this.lowerFsLadderCall(call, bi, locOf(access));
     if (fsLadder) return fsLadder;
+    // The crypto introspection statics (getFips and the name lists) bake
+    // at the call site — no runtime entry exists to table.
+    const cryptoServed = this.lowerCryptoModuleCall(call, bi, locOf(access));
+    if (cryptoServed) return cryptoServed;
     const builtinFn = builtinModuleFnOf(this, bi.module, bi.member);
     if (!builtinFn) {
       this.noLowering(
@@ -7479,6 +7483,12 @@ export class Lowerer {
     // Node v24 list, a fresh string[] per read.
     if (bi.module === "module" && bi.member === "builtinModules") {
       return builtinModulesArrayLit(loc);
+    }
+    // tls.rootCertificates through the namespace: the same runtime-valued
+    // constant the named-import read lowers to.
+    {
+      const roots = lowerTlsRootCertificates(this, bi, loc);
+      if (roots) return roots;
     }
     if (bi.member === "constants" && bi.module === "fs") {
       // A bare `fs.constants` read (not one of the baked bits above).
@@ -7701,16 +7711,20 @@ export class Lowerer {
     return lowerFsConstantsProperty(this, expr);
   }
 
-  lowerHttp2ConstantsProperty(expr: ts.PropertyAccessExpression): IrExpr | null {
-    return lowerHttp2ConstantsProperty(this, expr);
+  lowerBuiltinConstantsProperty(expr: ts.PropertyAccessExpression): IrExpr | null {
+    return lowerBuiltinConstantsProperty(this, expr);
   }
 
-  http2ConstantBindingOf(ident: ts.Identifier): IrExpr | null {
-    return http2ConstantBindingOf(this, ident);
+  builtinConstantBindingOf(ident: ts.Identifier): IrExpr | null {
+    return builtinConstantBindingOf(this, ident);
   }
 
-  http2ConstantsDestructureDecl(nameNode: ts.Node, init: ts.Expression | undefined): boolean {
-    return http2ConstantsDestructureDecl(this, nameNode, init);
+  builtinConstantsDestructureDecl(nameNode: ts.Node, init: ts.Expression | undefined): boolean {
+    return builtinConstantsDestructureDecl(this, nameNode, init);
+  }
+
+  lowerCryptoModuleCall(expr: ts.CallExpression, bi: { module: string; member: string }, loc: SrcLoc): IrExpr | null {
+    return lowerCryptoModuleCall(this, expr, bi, loc);
   }
 
   lowerProcessStreamProperty(expr: ts.PropertyAccessExpression): IrExpr | null {

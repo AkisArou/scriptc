@@ -351,6 +351,9 @@ const LIB_FN_SYMS: Record<string, string> = {
   "text.decode": "scr_text_decode",
   "zlib.deflateSync": "scr_zlib_deflate",
   "zlib.inflateSync": "scr_zlib_inflate",
+  // The CA-store read (tlsca.get/set are may-throw seeds and refuse by
+  // omission — the C fallback carries them).
+  "tlsca.root": "scr_tls_ca_root",
   "crypto.randomBytes": "scr_crypto_random_bytes",
   "crypto.randomBytesToString": "scr_crypto_random_string",
   "crypto.randomUUID": "scr_crypto_random_uuid",
@@ -689,6 +692,9 @@ const LIB_FN_SYMS: Record<string, string> = {
   "process.offWarning": "scr_process_off_warning",
   "process.emitWarning": "scr_process_emit_warning",
   "process.onUnhandledRejection": "scr_process_on_unhandled_rejection",
+  "process.offUnhandledRejection": "scr_process_off_unhandled_rejection",
+  "process.onRejectionHandled": "scr_process_on_rejection_handled",
+  "process.offRejectionHandled": "scr_process_off_rejection_handled",
   // The await lowering's loop hop and the dyn await (both park the
   // current fiber — USES_TIMERS_LIB_FNS marks the loop live).
   "async.hop": "scr_await_hop",
@@ -774,7 +780,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   // the loop-end unhandled-rejection report.
   "async.hop", "async.awaitDyn",
   "dc.tcTracePromise",
-  "process.onUnhandledRejection",
+  "process.onUnhandledRejection", "process.onRejectionHandled",
   "timers.queueMicrotaskDyn", "timers.setImmediateFnValue", "timers.immediatePromise",
 ]);
 

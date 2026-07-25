@@ -60,3 +60,12 @@ http2.createSecureServer({
 });
 http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", streamResetBurst: 1 + 0 });
 http2.connect("https://localhost");
+/* The crypto surface beyond the lowered slice (randomness, the hash
+ * chain, the introspection statics): asymmetric-key operations name the
+ * missing public-key stack, symmetric ciphers the missing cipher stack,
+ * KDFs their family, and setFips the FIPS truth (getFips() lowers to 0). */
+import { createCipheriv, generateKeyPair, pbkdf2Sync, setFips } from "node:crypto";
+generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
+createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+setFips(false);

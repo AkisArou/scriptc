@@ -146,53 +146,164 @@ ScrDyn *scr_als_exit_run(double id, ScrDyn *fn, ScrDyn *args) {
   return scr_als_call_in(scr_als_enter_absent(id), fn, args);
 }
 
-static ScrDyn **scr_urj_listeners = NULL;
+/* The two rejection-event registries share one shape: listeners with a
+ * `once` flag (auto-removed after one delivery, Node's once) and
+ * identity-based removal (the offWarning stance). */
+typedef struct {
+  ScrDyn *fn;
+  bool once;
+} ScrRejListener;
+
+static ScrRejListener *scr_urj_listeners = NULL;
 static size_t scr_nurj = 0, scr_urj_cap = 0;
+static ScrRejListener *scr_rjh_listeners = NULL;
+static size_t scr_nrjh = 0, scr_rjh_cap = 0;
 
 static void scr_urj_teardown(void) {
-  for (size_t i = 0; i < scr_nurj; i++) scr_dyn_release(scr_urj_listeners[i]);
+  for (size_t i = 0; i < scr_nurj; i++) scr_dyn_release(scr_urj_listeners[i].fn);
   free(scr_urj_listeners);
   scr_urj_listeners = NULL;
   scr_nurj = scr_urj_cap = 0;
 }
 
-static bool scr_urj_dispatch(ScrPromise *p);
+static void scr_rjh_teardown(void) {
+  for (size_t i = 0; i < scr_nrjh; i++) scr_dyn_release(scr_rjh_listeners[i].fn);
+  free(scr_rjh_listeners);
+  scr_rjh_listeners = NULL;
+  scr_nrjh = scr_rjh_cap = 0;
+}
 
-void scr_process_on_unhandled_rejection(ScrDyn *fn) {
-  if (fn->kind != SCR_DYN_FUNC) {
-    const char *msg = "The \"listener\" argument must be of type function";
-    scr_throw_error_msg_code(SCR_ERR_TYPE, msg, strlen(msg), "ERR_INVALID_ARG_TYPE");
-    return;
+static bool scr_urj_dispatch(ScrPromise *p);
+static void scr_rjh_dispatch(ScrPromise *p);
+
+/* Node's ERR_INVALID_ARG_TYPE for a non-function listener; true when the
+ * value is fine. */
+static bool scr_rej_check_listener(ScrDyn *fn) {
+  if (fn->kind == SCR_DYN_FUNC) return true;
+  const char *msg = "The \"listener\" argument must be of type function";
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, strlen(msg), "ERR_INVALID_ARG_TYPE");
+  return false;
+}
+
+static void scr_rej_push(ScrRejListener **list, size_t *n, size_t *cap, ScrDyn *fn, bool once) {
+  if (*n == *cap) {
+    *cap = *cap ? *cap * 2 : 4;
+    *list = realloc(*list, *cap * sizeof **list);
+    if (!*list) scr_ad_oom();
   }
-  if (scr_nurj == scr_urj_cap) {
-    scr_urj_cap = scr_urj_cap ? scr_urj_cap * 2 : 4;
-    scr_urj_listeners = realloc(scr_urj_listeners, scr_urj_cap * sizeof *scr_urj_listeners);
-    if (!scr_urj_listeners) scr_ad_oom();
+  (*list)[(*n)++] = (ScrRejListener){scr_dyn_retain(fn), once};
+}
+
+static void scr_rej_remove(ScrRejListener *list, size_t *n, ScrDyn *fn) {
+  for (size_t i = 0; i < *n; i++) {
+    ScrDyn *l = list[i].fn;
+    bool same = l == fn || (l->kind == SCR_DYN_FUNC && fn->kind == SCR_DYN_FUNC &&
+                            l->v.fn.clo == fn->v.fn.clo);
+    if (same) {
+      scr_dyn_release(l);
+      memmove(list + i, list + i + 1, (*n - i - 1) * sizeof *list);
+      (*n)--;
+      return;
+    }
   }
-  if (scr_nurj == 0) {
+}
+
+/* The hooks arm exactly while their registry is non-empty: Node with
+ * every listener removed (off, or once-consumed) reverts to the default
+ * report/silence, and the report loop consults the hook per promise. */
+static void scr_urj_sync_hook(void) {
+  scr_urj_deliver_fn = scr_nurj > 0 ? scr_urj_dispatch : NULL;
+}
+
+static void scr_rjh_sync_hook(void) {
+  scr_rjh_notify_fn = scr_nrjh > 0 ? scr_rjh_dispatch : NULL;
+}
+
+void scr_process_on_unhandled_rejection(ScrDyn *fn, bool once) {
+  if (!scr_rej_check_listener(fn)) return;
+  static bool teardown_armed = false;
+  if (!teardown_armed) {
+    teardown_armed = true;
     atexit(scr_urj_teardown);
-    scr_urj_deliver_fn = scr_urj_dispatch; /* arm the loop-end report */
   }
-  scr_urj_listeners[scr_nurj++] = scr_dyn_retain(fn);
+  scr_rej_push(&scr_urj_listeners, &scr_nurj, &scr_urj_cap, fn, once);
+  scr_urj_sync_hook();
+}
+
+void scr_process_off_unhandled_rejection(ScrDyn *fn) {
+  scr_rej_remove(scr_urj_listeners, &scr_nurj, fn);
+  scr_urj_sync_hook();
+}
+
+void scr_process_on_rejection_handled(ScrDyn *fn, bool once) {
+  if (!scr_rej_check_listener(fn)) return;
+  static bool teardown_armed = false;
+  if (!teardown_armed) {
+    teardown_armed = true;
+    atexit(scr_rjh_teardown);
+  }
+  scr_rej_push(&scr_rjh_listeners, &scr_nrjh, &scr_rjh_cap, fn, once);
+  scr_rjh_sync_hook();
+}
+
+void scr_process_off_rejection_handled(ScrDyn *fn) {
+  scr_rej_remove(scr_rjh_listeners, &scr_nrjh, fn);
+  scr_rjh_sync_hook();
+}
+
+/* One registry pass: call every listener with `args`, removing once-
+ * listeners BEFORE their call (Node's once removes at dispatch, so a
+ * re-registration inside the listener sticks). The registry is accessed
+ * THROUGH its pointers per step — a listener that registers can realloc
+ * the array mid-pass. Returns false when a listener threw (the caller's
+ * crash path). */
+static bool scr_rej_fire(ScrRejListener **list, size_t *n, ScrDyn **args, size_t argc) {
+  size_t i = 0;
+  bool ok = true;
+  while (i < *n && ok) {
+    /* Own +1 across the call: a once-removal (here) or the listener
+     * removing itself (off inside the body) must not free a running
+     * function. */
+    ScrDyn *fn = scr_dyn_retain((*list)[i].fn);
+    if ((*list)[i].once) {
+      scr_dyn_release((*list)[i].fn);
+      memmove(*list + i, *list + i + 1, (*n - i - 1) * sizeof **list);
+      (*n)--;
+    } else {
+      i++;
+    }
+    ScrDyn *r = scr_dyn_call(fn, args, argc, "listener");
+    if (r == NULL) ok = false;
+    else scr_dyn_release(r);
+    scr_dyn_release(fn);
+  }
+  return ok;
 }
 
 /* Dispatch one unhandled rejection to the registered listeners —
  * (reason, promise), Node's signature. A listener throw is an uncaught
- * exception (Node crashes there too): print it and exit 1. Returns
- * false on that crash path. */
+ * exception (Node crashes there too): the caller prints it and exits 1.
+ * A once-consumed-to-empty registry disarms the hook on the way out, so
+ * the report's NEXT promise takes the default print — Node's
+ * listener-less behavior. */
 static bool scr_urj_dispatch(ScrPromise *p) {
   ScrDyn *reason = scr_promise_reason_dyn(p);
   ScrDyn *boxed = scr_dyn_new_promise(p);
   ScrDyn *args[2] = {reason, boxed};
-  bool ok = true;
-  for (size_t i = 0; i < scr_nurj && ok; i++) {
-    ScrDyn *r = scr_dyn_call(scr_urj_listeners[i], args, 2, "listener");
-    if (r == NULL) ok = false;
-    else scr_dyn_release(r);
-  }
+  bool ok = scr_rej_fire(&scr_urj_listeners, &scr_nurj, args, 2);
   scr_dyn_release(reason);
   scr_dyn_release(boxed);
+  scr_urj_sync_hook();
   return ok;
+}
+
+/* 'rejectionHandled' delivery — (promise), Node's payload. A listener
+ * throw propagates as a pending exception through the attach site. */
+static void scr_rjh_dispatch(ScrPromise *p) {
+  ScrDyn *boxed = scr_dyn_new_promise(p);
+  (void)scr_rej_fire(&scr_rjh_listeners, &scr_nrjh, &boxed, 1);
+  scr_dyn_release(boxed);
+  scr_rjh_sync_hook(); /* a once-consumed-to-empty registry disarms */
 }
 
 /* `new Promise(setImmediate)` (the Node-suite early-exit shape): the
@@ -289,6 +400,11 @@ static void scr_dyn_then_entry(ScrFiber *self, void *ap) {
 }
 
 ScrDyn *scr_dyn_promise_then(ScrPromise *src, ScrDyn *onf, ScrDyn *onr, ScrDyn *onfin) {
+  /* A rejection HANDLER marks the source handled at attach (Node's
+   * moment; the reaction fiber's await re-marks harmlessly) — this is
+   * also what lets a .catch inside an 'unhandledRejection' listener fire
+   * 'rejectionHandled' when no fiber turn remains. */
+  if (onr != NULL) scr_promise_mark_handled(src);
   ScrDynThenPack *a = malloc(sizeof *a);
   if (!a) scr_ad_oom();
   a->src = scr_promise_retain(src);

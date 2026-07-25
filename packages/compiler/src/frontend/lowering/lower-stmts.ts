@@ -901,9 +901,9 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       }
       // `const { NGHTTP2_CANCEL } = http2.constants` — a destructure over
       // the baked constants table: alias plumbing, no storage (uses read
-      // their literals via http2ConstantBindingOf; collectGlobals skipped
+      // their literals via builtinConstantBindingOf; collectGlobals skipped
       // the globals by the same test).
-      if (L.http2ConstantsDestructureDecl(decl.name, decl.initializer)) return [];
+      if (L.builtinConstantsDestructureDecl(decl.name, decl.initializer)) return [];
       if (ts.isArrayBindingPattern(decl.name) || ts.isObjectBindingPattern(decl.name)) {
         // `const { createSign } = crypto` over a builtin NAMESPACE binding:
         // alias plumbing (builtinImportOf routes the reads) — no statement.
@@ -2813,9 +2813,9 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
 
     // `const { NGHTTP2_CANCEL } = http2.constants` — a destructure over
     // the baked constants table: alias plumbing, no storage (uses read
-    // their literals via http2ConstantBindingOf; collectGlobals skipped
+    // their literals via builtinConstantBindingOf; collectGlobals skipped
     // the globals by the same test).
-    if (L.http2ConstantsDestructureDecl(decl.name, decl.initializer)) return null;
+    if (L.builtinConstantsDestructureDecl(decl.name, decl.initializer)) return null;
 
     // `const Writable = stream.Writable` — a stream class through the
     // namespace binding: alias plumbing, no storage (uses resolve through

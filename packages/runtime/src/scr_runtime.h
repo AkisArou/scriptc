@@ -3383,16 +3383,37 @@ void scr_als_disable(double id);
 ScrDyn *scr_als_run(double id, ScrDyn *value, ScrDyn *fn, ScrDyn *args);
 ScrDyn *scr_als_exit_run(double id, ScrDyn *fn, ScrDyn *args);
 
-/* process.on('unhandledRejection', fn): dyn listeners dispatched per
- * never-observed rejection at loop end — (reason, promise), suppressing
- * the default report and the exit-1 (Node's handled-event contract; the
- * end-of-turn vs loop-end timing is a SEMANTICS.md divergence). Throws
- * Node's ERR_INVALID_ARG_TYPE on a non-function. */
-void scr_process_on_unhandled_rejection(ScrDyn *fn);
+/* process.on/once('unhandledRejection', fn): dyn listeners dispatched
+ * per never-observed rejection at loop end — (reason, promise),
+ * suppressing the default report and the exit-1 (Node's handled-event
+ * contract; the end-of-turn vs loop-end timing is a SEMANTICS.md
+ * divergence). `once` auto-removes after one delivery; off removes by
+ * closure identity (the warning registry's story). Throws Node's
+ * ERR_INVALID_ARG_TYPE on a non-function. */
+void scr_process_on_unhandled_rejection(ScrDyn *fn, bool once);
+void scr_process_off_unhandled_rejection(ScrDyn *fn);
+/* process.on/once/off('rejectionHandled', fn): the sibling registry.
+ * Under the loop-exhaustion model the event's ONE firing window is a
+ * handler attached DURING an unhandledRejection listener (a rejection
+ * handled any earlier never enters the report at all — the same
+ * documented divergence); dispatch is synchronous at the attach, with
+ * the promise, Node's payload. */
+void scr_process_on_rejection_handled(ScrDyn *fn, bool once);
+void scr_process_off_rejection_handled(ScrDyn *fn);
 /* The loop-end delivery hook the registration above installs
  * (scr_async_dyn.c → scr_report_unhandled_rejections; NULL = default
  * report). Runtime-internal. */
 extern bool (*scr_urj_deliver_fn)(ScrPromise *p);
+/* The late-handled hook (scr_async_dyn.c installs it when a
+ * 'rejectionHandled' listener registers): scr_async.c calls it when a
+ * promise the report already delivered as unhandled gains a handler.
+ * Runtime-internal. */
+extern void (*scr_rjh_notify_fn)(ScrPromise *p);
+/* The attach-time handled mark (a dyn then/catch carrying a rejection
+ * handler): marks an already-rejected source observed — Node's attach
+ * moment — firing the late-handled hook when the report already
+ * delivered it. Runtime-internal. */
+void scr_promise_mark_handled(ScrPromise *p);
 /* A rejected promise's reason as a dyn value (identity-preserving for
  * dyn payloads and %Error instances). +1. */
 ScrDyn *scr_promise_reason_dyn(const ScrPromise *p);
@@ -4866,6 +4887,7 @@ void scr_net_sock_unshift_bytes(ScrNetSocket *s, ScrBytes *data /*borrowed*/);
 void scr_net_server_emit_connection(ScrNetServer *srv, ScrNetSocket *sock /*borrowed*/);
 void scr_net_data_thunk0(ScrClosure *cb, ScrBytes *chunk);
 void scr_net_data_thunk_bytes(ScrClosure *cb, ScrBytes *chunk);
+void scr_net_data_thunk_str(ScrClosure *cb, ScrBytes *chunk);
 /* The dynCheck-adapted listener's flavor: boxes the chunk as a
  * Buffer-flavored dyn (toString decodes utf8, Node's 'data' payload). */
 void scr_net_data_thunk_dyn(ScrClosure *cb, ScrBytes *chunk);
@@ -5045,6 +5067,29 @@ void scr_tls_sni_answer(ScrClosure *self, bool has_err, ScrSecureCtx *ctx /*move
 #ifdef SCR_RC_AUDIT
 long scr_secure_ctx_live_count(void);
 #endif
+
+/* ── node:tls, the CA-store introspection slice (scr_tls_ca.c — its own
+ * unit and link gate; plain PEM-block bookkeeping, NO mbedTLS, so a
+ * getCACertificates-only binary never builds the archive; cc.ts also
+ * compiles it whenever scr_tls.c does). The HOST bundle (the
+ * /etc/ssl/cert.pem probe order scr_tls.c documents) stands in for both
+ * Node's compiled-in Mozilla roots ('bundled', rootCertificates) and the
+ * platform store ('system') — the established SEMANTICS divergence,
+ * extended to introspection; 'extra' reads NODE_EXTRA_CA_CERTS. Arrays
+ * are cached per type (+1 retained answers each call — Node's own
+ * caching, and the identity the suite pins with strictEqual). */
+ScrArr *scr_tls_ca_get(ScrStr *type); /* +1; throws ERR_INVALID_ARG_VALUE on unknown types */
+ScrArr *scr_tls_ca_root(void);        /* +1; === getCACertificates("bundled") */
+/* Replaces the 'default' set: entries filter to their PEM certificate
+ * blocks (deduped byte-exactly — Node dedupes by X509 identity); a
+ * non-empty array yielding no blocks throws Node's
+ * ERR_CRYPTO_OPERATION_FAILED and leaves the set unchanged. Borrows. */
+void scr_tls_ca_set_default(ScrArr *certs);
+/* scr_tls.c's anchor consult: true iff setDefaultCACertificates ran;
+ * *pem/*len then carry the concatenated NUL-terminated blocks (len 0 =
+ * the empty set — verification fails, Node's own consequence), and *gen
+ * a counter that bumps per set so the parsed chain re-parses on change. */
+bool scr_tls_ca_default_override(const char **pem, size_t *len, uint64_t *gen);
 
 /* ── node:http, the server slice (scr_http.c — compiled only when the
  * program uses it; rides scr_net.c wholesale, design note atop the
@@ -5350,6 +5395,19 @@ ScrNetServer *scr_http2_create_server_req(ScrClosure *handler /*moves*/, ScrHttp
  * the same session machinery behind an mbedTLS handshake whose ALPN
  * advertises h2 alone — protocol-identical after establishment. */
 ScrNetServer *scr_http2_create_secure_server(const char *cert, size_t cert_len, const char *key, size_t key_len); /* +1 */
+/* createSecureServer(options, handler): the eager COMPAT handler as the
+ * first 'request' listener over the ALPN=h2 server (the createServerReq
+ * route, secured). */
+ScrNetServer *scr_http2_create_secure_server_req(const char *cert, size_t cert_len, const char *key, size_t key_len, ScrClosure *handler /*moves, nullable*/, ScrHttpReqFn fn); /* +1 */
+/* createSecureServer with a RUNTIME options record (the divergence-66
+ * stance): allowHTTP1 picks the flavor at runtime, cert/key ride the
+ * shared TLS server walk (out-of-bounds members throw the catchable
+ * fence), h2 session-tuning keys drop like the literal walk ignores
+ * them. +1, or NULL with the exception pending. */
+ScrNetServer *scr_http2_create_secure_server_dyn(const struct ScrDyn *opts /*borrowed*/, ScrClosure *handler /*moves, nullable*/, ScrHttpReqFn fn);
+/* The TLS server-options walk (scr_tls.c) — runtime-internal, shared
+ * with scr_http2.c's createSecureServerDyn. */
+bool scr_tls_srv_opts_walk(const struct ScrDyn *opts, const char *api, ScrBytes **cert_out, ScrBytes **key_out);
 void scr_http2_server_on_stream(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrH2StreamFn fn, bool once);
 void scr_http2_server_on_session(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrH2SessionFn fn, bool once);
 

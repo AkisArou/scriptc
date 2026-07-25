@@ -520,12 +520,228 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.crypto.createCipheriv",
+      "kind": "node-builtin",
+      "name": "crypto.createCipheriv",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createDecipheriv",
+      "kind": "node-builtin",
+      "name": "crypto.createDecipheriv",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createDiffieHellman",
+      "kind": "node-builtin",
+      "name": "crypto.createDiffieHellman",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createDiffieHellmanGroup",
+      "kind": "node-builtin",
+      "name": "crypto.createDiffieHellmanGroup",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createECDH",
+      "kind": "node-builtin",
+      "name": "crypto.createECDH",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
       "id": "node-builtin.crypto.createHash",
       "kind": "node-builtin",
       "name": "crypto.createHash",
       "status": "unsupported",
       "code": "SC2020",
       "note": "the one lowered shape is the composed chain createHash(\"sha256\").update(data).digest(\"hex\") — the Hash handle itself has no lowering"
+    },
+    {
+      "id": "node-builtin.crypto.createHmac",
+      "kind": "node-builtin",
+      "name": "crypto.createHmac",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "HMAC has no lowering yet — the lowered crypto surface is randomUUID, randomBytes, the createHash(\"sha256\"|\"sha1\") chain, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createPrivateKey",
+      "kind": "node-builtin",
+      "name": "crypto.createPrivateKey",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createPublicKey",
+      "kind": "node-builtin",
+      "name": "crypto.createPublicKey",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createSecretKey",
+      "kind": "node-builtin",
+      "name": "crypto.createSecretKey",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createSign",
+      "kind": "node-builtin",
+      "name": "crypto.createSign",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.createVerify",
+      "kind": "node-builtin",
+      "name": "crypto.createVerify",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.diffieHellman",
+      "kind": "node-builtin",
+      "name": "crypto.diffieHellman",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.generateKey",
+      "kind": "node-builtin",
+      "name": "crypto.generateKey",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.generateKeyPair",
+      "kind": "node-builtin",
+      "name": "crypto.generateKeyPair",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.generateKeyPairSync",
+      "kind": "node-builtin",
+      "name": "crypto.generateKeyPairSync",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.generateKeySync",
+      "kind": "node-builtin",
+      "name": "crypto.generateKeySync",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.getCipherInfo",
+      "kind": "node-builtin",
+      "name": "crypto.getCipherInfo",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.getDiffieHellman",
+      "kind": "node-builtin",
+      "name": "crypto.getDiffieHellman",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.hash",
+      "kind": "node-builtin",
+      "name": "crypto.hash",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "the one-shot digest has no lowering — the composed chain createHash(\"sha256\").update(data).digest(\"hex\") is the lowered hashing surface"
+    },
+    {
+      "id": "node-builtin.crypto.hkdf",
+      "kind": "node-builtin",
+      "name": "crypto.hkdf",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.hkdfSync",
+      "kind": "node-builtin",
+      "name": "crypto.hkdfSync",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.pbkdf2",
+      "kind": "node-builtin",
+      "name": "crypto.pbkdf2",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.pbkdf2Sync",
+      "kind": "node-builtin",
+      "name": "crypto.pbkdf2Sync",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.privateDecrypt",
+      "kind": "node-builtin",
+      "name": "crypto.privateDecrypt",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.privateEncrypt",
+      "kind": "node-builtin",
+      "name": "crypto.privateEncrypt",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.publicDecrypt",
+      "kind": "node-builtin",
+      "name": "crypto.publicDecrypt",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.publicEncrypt",
+      "kind": "node-builtin",
+      "name": "crypto.publicEncrypt",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
     },
     {
       "id": "node-builtin.crypto.randomBytes",
@@ -538,6 +754,54 @@
       "kind": "node-builtin",
       "name": "crypto.randomUUID",
       "status": "static"
+    },
+    {
+      "id": "node-builtin.crypto.scrypt",
+      "kind": "node-builtin",
+      "name": "crypto.scrypt",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.scryptSync",
+      "kind": "node-builtin",
+      "name": "crypto.scryptSync",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.setFips",
+      "kind": "node-builtin",
+      "name": "crypto.setFips",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) in a non-FIPS build — getFips() answers 0 here"
+    },
+    {
+      "id": "node-builtin.crypto.sign",
+      "kind": "node-builtin",
+      "name": "crypto.sign",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.verify",
+      "kind": "node-builtin",
+      "name": "crypto.verify",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.webcrypto",
+      "kind": "node-builtin",
+      "name": "crypto.webcrypto",
+      "status": "unsupported",
+      "code": "SC2020",
+      "note": "the WebCrypto object has no lowering — the lowered crypto surface is randomUUID, randomBytes, and the createHash chain"
     },
     {
       "id": "node-builtin.dgram",

@@ -350,7 +350,30 @@ typedef struct ScrTlsCli {
 static mbedtls_x509_crt scr_tls_system_roots;
 static bool scr_tls_system_roots_loaded = false;
 
+/* setDefaultCACertificates' replacement anchors (scr_tls_ca.c — always
+ * compiled alongside this unit): parsed lazily per generation, so each
+ * set re-parses once and every later dial reuses the chain. An EMPTY
+ * replacement keeps an initialized, certificate-free chain — every
+ * verification fails, Node's own consequence of trusting nothing. */
+static mbedtls_x509_crt scr_tls_override_roots;
+static uint64_t scr_tls_override_parsed_gen = 0;
+
 static mbedtls_x509_crt *scr_tls_system_ca(void) {
+  const char *pem = NULL;
+  size_t pem_len = 0;
+  uint64_t gen = 0;
+  if (scr_tls_ca_default_override(&pem, &pem_len, &gen)) {
+    if (gen != scr_tls_override_parsed_gen) {
+      if (scr_tls_override_parsed_gen != 0) mbedtls_x509_crt_free(&scr_tls_override_roots);
+      mbedtls_x509_crt_init(&scr_tls_override_roots);
+      /* +1 for the NUL — mbedTLS's PEM mode wants it counted. A parse
+       * failure inside one block leaves the chain with the blocks that
+       * did parse (the scr_tls_ca.c divergence note). */
+      if (pem_len > 0) (void)mbedtls_x509_crt_parse(&scr_tls_override_roots, (const unsigned char *)pem, pem_len + 1);
+      scr_tls_override_parsed_gen = gen;
+    }
+    return &scr_tls_override_roots;
+  }
   if (!scr_tls_system_roots_loaded) {
     scr_tls_system_roots_loaded = true;
     mbedtls_x509_crt_init(&scr_tls_system_roots);
@@ -1231,9 +1254,11 @@ static bool scr_tls_opts_validate(const ScrDyn *opts) {
 }
 
 /* The server-options walk. Fills the cert/key out-params (+1 each) from a
- * dyn options record; false = exception pending (partial results released). */
-static bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
-                                   ScrBytes **key_out) {
+ * dyn options record; false = exception pending (partial results released).
+ * Exported runtime-internally: scr_http2.c's createSecureServerDyn rides
+ * the same walk (scr_http2.c always links alongside this unit). */
+bool scr_tls_srv_opts_walk(const ScrDyn *opts, const char *api, ScrBytes **cert_out,
+                            ScrBytes **key_out) {
   *cert_out = NULL;
   *key_out = NULL;
   if (opts == NULL || opts->kind != SCR_DYN_OBJ) {

@@ -172,6 +172,14 @@ export interface CcOptions {
    * moduleUsesHttpServer answer true for whenever this does. TLS-free
    * binaries keep their exact link line and never compile mbedTLS. */
   tls?: boolean;
+  /** The program uses the CA-store introspection surface (moduleUsesTlsCa
+   * on the IR — getCACertificates / rootCertificates /
+   * setDefaultCACertificates): compiles scr_tls_ca.c, plain PEM-block
+   * bookkeeping with NO mbedTLS dependency, so an introspection-only
+   * binary never builds the archive. The unit also compiles whenever
+   * `tls` does — scr_tls.c consults its default-set override for the
+   * client trust anchors. */
+  tlsCa?: boolean;
 }
 
 export function runtimeSrcDir(): string {
@@ -1113,6 +1121,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(opts.dgram ? [rt(join(rtDir, "scr_dgram.c"))] : []),
     ...(opts.watch ? [rt(join(rtDir, "scr_watch.c"))] : []),
     ...(opts.nodeTest ? [rt(join(rtDir, "scr_test.c"))] : []),
+    // The CA-store unit rides its own gate OR the tls one: scr_tls.c
+    // references its default-set override unconditionally.
+    ...(opts.tlsCa || tls ? [rt(join(rtDir, "scr_tls_ca.c"))] : []),
     ...(tlsArchive
       ? [
           "-I", join(vendorTlsDir(), "include"),

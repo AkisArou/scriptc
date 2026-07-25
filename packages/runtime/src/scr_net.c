@@ -2298,6 +2298,19 @@ void scr_net_data_thunk_dyn(ScrClosure *cb, ScrBytes *chunk) {
   ((void (*)(ScrClosure *, ScrDyn *))cb->fn)(cb, d);
 }
 
+/* The string-TYPED data listener ((chunk: string) => void — the
+ * setEncoding('utf8') shape): the chunk decodes as UTF-8 (WHATWG
+ * replacement, Buffer.toString's algorithm) into the string the
+ * annotation promises. Without setEncoding Node would hand a Buffer —
+ * a string-typed listener there mistypes its own input, and the decode
+ * is the honest reading of the annotation. */
+void scr_net_data_thunk_str(ScrClosure *cb, ScrBytes *chunk) {
+  ScrStr *enc = scr_str_new("utf8", 4);
+  ScrStr *text = scr_bytes_to_str(chunk, enc);
+  scr_str_release(enc);
+  ((void (*)(ScrClosure *, ScrStr *))cb->fn)(cb, text);
+}
+
 /* The connection-handler adapters: the socket arrives +1 from the firing
  * site; the zero-param shape releases it. */
 void scr_net_conn_thunk0(ScrClosure *cb, ScrNetSocket *sock) {

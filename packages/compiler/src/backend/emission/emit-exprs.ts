@@ -3265,6 +3265,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const adapter =
               cbT.params.length === 0 ? "scr_net_data_thunk0"
               : cbT.params[0]!.kind === "dyn" ? "scr_net_data_thunk_dyn"
+              : cbT.params[0]!.kind === "string" ? "scr_net_data_thunk_str"
               : "scr_net_data_thunk_bytes";
             E.line(`scr_net_sock_on_data(${arg(0)}, ${cb.name}, &${adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
@@ -3490,6 +3491,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const adapter =
               cbT.params.length === 0 ? "scr_net_data_thunk0"
               : cbT.params[0]!.kind === "dyn" ? "scr_net_data_thunk_dyn"
+              : cbT.params[0]!.kind === "string" ? "scr_net_data_thunk_str"
               : "scr_net_data_thunk_bytes";
             E.line(`scr_http_req_on_data(${arg(0)}, ${cb.name}, &${adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
@@ -4001,6 +4003,44 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               `scr_http2_create_secure_server((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len)`,
             );
+          case "http2.createSecureServerReq":
+          case "http2.createSecureServerH2Req": {
+            // createSecureServer(options, handler): the eager COMPAT
+            // handler is the first 'request' listener on either flavor
+            // (the createServerReq adapter family).
+            E.usesTimers = true;
+            const cbT = e.args[2]!.type;
+            if (cbT.kind !== "func") throw new Error(`emitter bug: ${e.fn} handler not a func`);
+            const cb = args[2]!;
+            E.moveTemp(cb);
+            const adapter =
+              cbT.params.length === 2 ? "scr_http_handler_thunk2"
+              : cbT.params.length === 1 ? "scr_http_handler_thunk1"
+              : "scr_http_handler_thunk0";
+            const certKey = `(const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len`;
+            return finish(
+              fn === "http2.createSecureServerReq"
+                ? `scr_https_create_server(${certKey}, ${cb.name}, &${adapter})`
+                : `scr_http2_create_secure_server_req(${certKey}, ${cb.name}, &${adapter})`,
+            );
+          }
+          case "http2.createSecureServerDyn":
+            // The runtime options record: allowHTTP1/cert/key read at
+            // runtime (may-throw — the divergence-66 walk).
+            E.usesTimers = true;
+            return finish(`scr_http2_create_secure_server_dyn(${arg(0)}, NULL, NULL)`);
+          case "http2.createSecureServerDynCb": {
+            E.usesTimers = true;
+            const cbT = e.args[1]!.type;
+            if (cbT.kind !== "func") throw new Error("emitter bug: createSecureServerDynCb handler not a func");
+            const cb = args[1]!;
+            E.moveTemp(cb);
+            const adapter =
+              cbT.params.length === 2 ? "scr_http_handler_thunk2"
+              : cbT.params.length === 1 ? "scr_http_handler_thunk1"
+              : "scr_http_handler_thunk0";
+            return finish(`scr_http2_create_secure_server_dyn(${arg(0)}, ${cb.name}, &${adapter})`);
+          }
           case "http2.createSecureServerSni": {
             // The SNI form: the runtime parses each connection's
             // ClientHello for server_name BEFORE the handshake, calls the
@@ -4057,6 +4097,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               `(scr_tls_ca_certs_chk(${arg(0)}, ${arg(1)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
             );
+          // The CA-store introspection unit (scr_tls_ca.c): cached
+          // per-type PEM string arrays (+1 retained answers), and the
+          // default-set replacement. get/set are may-throw seeds.
+          case "tlsca.get":
+            return finish(`scr_tls_ca_get(${arg(0)})`);
+          case "tlsca.root":
+            return finish(`scr_tls_ca_root()`);
+          case "tlsca.set":
+            return finish(`scr_tls_ca_set_default(${arg(0)})`);
           case "http.serverOnRequest": {
             const cbT = e.args[1]!.type;
             if (cbT.kind !== "func") throw new Error("emitter bug: http.serverOnRequest handler not a func");
@@ -4291,6 +4340,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const adapter =
               cbT.params.length === 0 ? "scr_net_data_thunk0"
               : cbT.params[0]!.kind === "dyn" ? "scr_net_data_thunk_dyn"
+              : cbT.params[0]!.kind === "string" ? "scr_net_data_thunk_str"
               : "scr_net_data_thunk_bytes";
             E.line(`scr_http2_stream_on_data(${arg(0)}, ${cb.name}, &${adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
@@ -4667,7 +4717,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "process.onUnhandledRejection":
             // The report at loop end dispatches the listeners.
             E.usesTimers = true;
-            return finish(`scr_process_on_unhandled_rejection(${arg(0)})`);
+            return finish(`scr_process_on_unhandled_rejection(${arg(0)}, ${arg(1)})`);
+          case "process.offUnhandledRejection":
+            return finish(`scr_process_off_unhandled_rejection(${arg(0)})`);
+          case "process.onRejectionHandled":
+            // Fires (if ever) during the loop-end report's listener
+            // dispatch — the loop must be live for the report to run.
+            E.usesTimers = true;
+            return finish(`scr_process_on_rejection_handled(${arg(0)}, ${arg(1)})`);
+          case "process.offRejectionHandled":
+            return finish(`scr_process_off_rejection_handled(${arg(0)})`);
           case "fsp.readFile":
             return finish(`scr_fsp_read_file(${arg(0)})`);
           case "fsp.writeFile":

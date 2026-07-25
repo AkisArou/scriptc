@@ -1175,6 +1175,47 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
     createHash:
       "the one lowered shape is the composed chain " +
       'createHash("sha256").update(data).digest("hex") — the Hash handle itself has no lowering',
+    hash:
+      "the one-shot digest has no lowering — the composed chain " +
+      'createHash("sha256").update(data).digest("hex") is the lowered hashing surface',
+    createHmac:
+      "HMAC has no lowering yet — the lowered crypto surface is randomUUID, randomBytes, " +
+      'the createHash("sha256"|"sha1") chain, and the introspection statics',
+    ...Object.fromEntries(
+      [
+        "generateKeyPair", "generateKeyPairSync", "generateKey", "generateKeySync",
+        "createPrivateKey", "createPublicKey", "createSecretKey",
+        "createSign", "createVerify", "sign", "verify",
+        "createDiffieHellman", "createDiffieHellmanGroup", "getDiffieHellman",
+        "createECDH", "diffieHellman",
+        "publicEncrypt", "publicDecrypt", "privateEncrypt", "privateDecrypt",
+      ].map((m) => [
+        m,
+        "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a " +
+          "KeyObject value model — neither exists in the static runtime, so no faithful lowering " +
+          "can be small; the lowered crypto surface is hashing, randomness, and the introspection statics",
+      ]),
+    ),
+    ...Object.fromEntries(
+      ["createCipheriv", "createDecipheriv", "getCipherInfo"].map((m) => [
+        m,
+        "symmetric ciphers need a cipher stack the static runtime does not vendor — " +
+          "the lowered crypto surface is hashing, randomness, and the introspection statics",
+      ]),
+    ),
+    ...Object.fromEntries(
+      ["pbkdf2", "pbkdf2Sync", "scrypt", "scryptSync", "hkdf", "hkdfSync"].map((m) => [
+        m,
+        "key-derivation functions have no lowering yet — the lowered crypto surface is " +
+          "hashing, randomness, and the introspection statics",
+      ]),
+    ),
+    setFips:
+      "a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) " +
+      "in a non-FIPS build — getFips() answers 0 here",
+    webcrypto:
+      "the WebCrypto object has no lowering — the lowered crypto surface is randomUUID, " +
+      "randomBytes, and the createHash chain",
   },
   zlib: {
     gzipSync: ZLIB_HINT,

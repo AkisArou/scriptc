@@ -250,17 +250,27 @@ declare var process: {
    * deprecation sites dispatch synchronously (SEMANTICS.md). */
   on(event: "warning", listener: (warning: Error & { code?: string }) => void): void;
   /* 'unhandledRejection' — dispatched per never-observed rejection at
-   * loop end (reason, promise), suppressing the default report. */
+   * loop end (reason, promise), suppressing the default report.
+   * 'rejectionHandled' — the sibling event: under the loop-exhaustion
+   * model its one firing window is a handler attached during an
+   * unhandledRejection listener (promise payload, Node's shape). */
   on(event: "unhandledRejection", listener: (reason: unknown, promise: unknown) => void): void;
+  on(event: "rejectionHandled", listener: (promise: unknown) => void): void;
   once(event: "SIGINT" | "SIGTERM", listener: () => void): void;
   once(event: "exit", listener: (code: number) => void): void;
+  once(event: "unhandledRejection", listener: (reason: unknown, promise: unknown) => void): void;
+  once(event: "rejectionHandled", listener: (promise: unknown) => void): void;
   off(event: "SIGINT" | "SIGTERM", listener: () => void): void;
   off(event: "exit", listener: (code: number) => void): void;
   off(event: "warning", listener: (warning: Error & { code?: string }) => void): void;
+  off(event: "unhandledRejection", listener: (reason: unknown, promise: unknown) => void): void;
+  off(event: "rejectionHandled", listener: (promise: unknown) => void): void;
   /* removeListener IS off — Node aliases them; both lower identically. */
   removeListener(event: "SIGINT" | "SIGTERM", listener: () => void): void;
   removeListener(event: "exit", listener: (code: number) => void): void;
   removeListener(event: "warning", listener: (warning: Error & { code?: string }) => void): void;
+  removeListener(event: "unhandledRejection", listener: (reason: unknown, promise: unknown) => void): void;
+  removeListener(event: "rejectionHandled", listener: (promise: unknown) => void): void;
   /* emitWarning — Node's full grammar (string or Error warning; type/
    * ctor/options second; code/ctor third). */
   emitWarning(warning: string | Error, ...args: any[]): void;
@@ -1226,6 +1236,76 @@ declare module "crypto" {
     readonly validFrom: string;
     readonly validTo: string;
   }
+  /* The crypto introspection statics: getFips() answers 0 (a compiled
+   * binary is never a FIPS build), the three name lists bake as fresh
+   * string[] literals of Node v24 answers, and constants (below) bakes
+   * per member like http2.constants. */
+  export function getFips(): 1 | 0;
+  export function getCiphers(): string[];
+  export function getHashes(): string[];
+  export function getCurves(): string[];
+  /* Node v24 crypto.constants, literal-typed (the Http2Constants
+   * stance). Every ACCESS bakes as its literal at lowering; the object
+   * itself never materializes (bare crypto.constants value uses fence). */
+  export interface CryptoConstants {
+    readonly OPENSSL_VERSION_NUMBER: 810549328;
+    readonly SSL_OP_ALL: 2147485776;
+    readonly SSL_OP_ALLOW_NO_DHE_KEX: 1024;
+    readonly SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION: 262144;
+    readonly SSL_OP_CIPHER_SERVER_PREFERENCE: 4194304;
+    readonly SSL_OP_CISCO_ANYCONNECT: 32768;
+    readonly SSL_OP_COOKIE_EXCHANGE: 8192;
+    readonly SSL_OP_CRYPTOPRO_TLSEXT_BUG: 2147483648;
+    readonly SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS: 2048;
+    readonly SSL_OP_LEGACY_SERVER_CONNECT: 4;
+    readonly SSL_OP_NO_COMPRESSION: 131072;
+    readonly SSL_OP_NO_ENCRYPT_THEN_MAC: 524288;
+    readonly SSL_OP_NO_QUERY_MTU: 4096;
+    readonly SSL_OP_NO_RENEGOTIATION: 1073741824;
+    readonly SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION: 65536;
+    readonly SSL_OP_NO_SSLv2: 0;
+    readonly SSL_OP_NO_SSLv3: 33554432;
+    readonly SSL_OP_NO_TICKET: 16384;
+    readonly SSL_OP_NO_TLSv1: 67108864;
+    readonly SSL_OP_NO_TLSv1_1: 268435456;
+    readonly SSL_OP_NO_TLSv1_2: 134217728;
+    readonly SSL_OP_NO_TLSv1_3: 536870912;
+    readonly SSL_OP_PRIORITIZE_CHACHA: 2097152;
+    readonly SSL_OP_TLS_ROLLBACK_BUG: 8388608;
+    readonly ENGINE_METHOD_RSA: 1;
+    readonly ENGINE_METHOD_DSA: 2;
+    readonly ENGINE_METHOD_DH: 4;
+    readonly ENGINE_METHOD_RAND: 8;
+    readonly ENGINE_METHOD_EC: 2048;
+    readonly ENGINE_METHOD_CIPHERS: 64;
+    readonly ENGINE_METHOD_DIGESTS: 128;
+    readonly ENGINE_METHOD_PKEY_METHS: 512;
+    readonly ENGINE_METHOD_PKEY_ASN1_METHS: 1024;
+    readonly ENGINE_METHOD_ALL: 65535;
+    readonly ENGINE_METHOD_NONE: 0;
+    readonly DH_CHECK_P_NOT_SAFE_PRIME: 2;
+    readonly DH_CHECK_P_NOT_PRIME: 1;
+    readonly DH_UNABLE_TO_CHECK_GENERATOR: 4;
+    readonly DH_NOT_SUITABLE_GENERATOR: 8;
+    readonly RSA_PKCS1_PADDING: 1;
+    readonly RSA_NO_PADDING: 3;
+    readonly RSA_PKCS1_OAEP_PADDING: 4;
+    readonly RSA_X931_PADDING: 5;
+    readonly RSA_PKCS1_PSS_PADDING: 6;
+    readonly RSA_PSS_SALTLEN_DIGEST: -1;
+    readonly RSA_PSS_SALTLEN_MAX_SIGN: -2;
+    readonly RSA_PSS_SALTLEN_AUTO: -2;
+    readonly defaultCoreCipherList: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA";
+    readonly TLS1_VERSION: 769;
+    readonly TLS1_1_VERSION: 770;
+    readonly TLS1_2_VERSION: 771;
+    readonly TLS1_3_VERSION: 772;
+    readonly POINT_CONVERSION_COMPRESSED: 2;
+    readonly POINT_CONVERSION_UNCOMPRESSED: 4;
+    readonly POINT_CONVERSION_HYBRID: 6;
+    readonly defaultCipherList: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA";
+  }
+  export const constants: CryptoConstants;
 }
 declare module "node:crypto" {
   export * from "crypto";
@@ -2105,6 +2185,18 @@ declare module "tls" {
    * (the value is a runtime handle; the members are runtime-internal). */
   export interface SecureContext {}
   export function createSecureContext(options: TlsOptions): SecureContext;
+  /** The CA-store introspection surface (scr_tls_ca.c): per-type cached
+   * PEM string arrays. The host bundle stands in for Node's compiled-in
+   * Mozilla roots ('bundled', and rootCertificates) AND the platform
+   * store ('system') — the /etc/ssl/cert.pem stance, documented;
+   * 'extra' reads NODE_EXTRA_CA_CERTS. An unknown type string throws
+   * Node's ERR_INVALID_ARG_VALUE TypeError. */
+  export function getCACertificates(type?: string): string[];
+  export const rootCertificates: readonly string[];
+  /** Replaces the 'default' set (deduped) and the trust anchors the TLS
+   * client verifies against; a certificate-free non-empty array throws
+   * Node's ERR_CRYPTO_OPERATION_FAILED Error. */
+  export function setDefaultCACertificates(certs: readonly string[]): void;
 }
 declare module "node:tls" {
   export * from "tls";
@@ -2521,7 +2613,13 @@ declare module "http2" {
     readonly HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED: 511;
   }
   export const constants: Http2Constants;
-  export function createSecureServer(options: SecureServerOptions): Http2SecureServer;
+  /* The eager handler is the first COMPAT 'request' listener — Node's
+   * route on either flavor (the allowHTTP1 server's HTTP/1.1 handles,
+   * the ALPN=h2 server's compat handles over streams). */
+  export function createSecureServer(
+    options: SecureServerOptions,
+    onRequestHandler?: (req: import("http").IncomingMessage, res: import("http").ServerResponse) => void,
+  ): Http2SecureServer;
 
   /* ── the REAL h2c surface (scr_http2.c: frame codec + HPACK over the
    * net loop) — createServer/connect and the session/stream handles the

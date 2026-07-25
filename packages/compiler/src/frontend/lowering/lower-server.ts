@@ -2838,6 +2838,36 @@ function lowerTlsModuleCall(L: Lowerer, expr: ts.CallExpression,
     }
     return { kind: "libCall", fn: "tls.createSecureContext", args: [opts.cert, opts.key], type: SECURECTX_T, loc };
   }
+  // The CA-store introspection pair (scr_tls_ca.c — its own link gate, no
+  // mbedTLS): getCACertificates(type?) answers the per-type cached PEM
+  // string array (an omitted type completes to "default", Node's own
+  // default; unknown strings throw Node's ERR_INVALID_ARG_VALUE at
+  // runtime), and setDefaultCACertificates(certs) replaces the default
+  // set and the client trust anchors. rootCertificates is a VALUE read —
+  // lowerTlsRootCertificates below.
+  if (bi.member === "getCACertificates") {
+    if (args.length > 1) {
+      L.noLowering(`getCACertificates with ${args.length} arguments`, expr);
+    }
+    const typeArg: IrExpr = args.length === 1
+      ? L.lowerExprExpecting(args[0]!, STRING)
+      : { kind: "strLit", value: "default", type: STRING, loc };
+    return { kind: "libCall", fn: "tlsca.get", args: [typeArg], type: arrayOf(STRING), loc };
+  }
+  if (bi.member === "setDefaultCACertificates") {
+    if (args.length !== 1) {
+      L.noLowering(`setDefaultCACertificates with ${args.length} arguments`, expr);
+    }
+    const certs = L.lowerExpr(args[0]!);
+    if (certs.type.kind !== "array" || certs.type.elem.kind !== "string") {
+      L.noLowering(
+        `setDefaultCACertificates of a '${L.fmt(certs.type)}' value`,
+        args[0]!,
+        "a string[] of PEM certificates is the lowered shape — decode Buffer/typed-array entries to strings first",
+      );
+    }
+    return { kind: "libCall", fn: "tlsca.set", args: [certs], type: VOID, loc };
+  }
   L.noLowering(
     `tls.${bi.member}`,
     expr,
@@ -2845,6 +2875,16 @@ function lowerTlsModuleCall(L: Lowerer, expr: ts.CallExpression,
       "createServer({ cert, key }, handler) and createSecureContext({ cert, key }) are the lowered tls module functions",
     L.resolveValueSymbol(expr.expression as ts.Identifier),
   );
+}
+
+/** The tls.rootCertificates VALUE read (any import spelling): the same
+ * cached array getCACertificates("bundled") answers — Node's own
+ * equality (test-tls-get-ca-certificates-bundled pins certs ===
+ * rootCertificates). Null for other members (the property chains keep
+ * trying). */
+export function lowerTlsRootCertificates(L: Lowerer, bi: { module: string; member: string }, loc: SrcLoc): IrExpr | null {
+  if (bi.module !== "tls" || bi.member !== "rootCertificates") return null;
+  return { kind: "libCall", fn: "tlsca.root", args: [], type: arrayOf(STRING), loc };
 }
 
 /** The `const requestFn = tls ? https.request : http.request` binding —
@@ -3211,20 +3251,43 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
     return { kind: "libCall", fn: "http2.getDefaultSettings", args: [], type: DYN, loc };
   }
   if (bi.member === "createSecureServer") {
-    if (args.length !== 1) {
+    if (args.length < 1 || args.length > 2) {
       L.noLowering(
         `createSecureServer with ${args.length} arguments`,
         expr,
-        "the supported form is createSecureServer({ allowHTTP1: true, cert, key }) — register the handler with server.on(\"request\", (req, res) => ...)",
+        "the supported forms are createSecureServer(options[, onRequestHandler]) with options { allowHTTP1?, cert, key }",
       );
     }
     const optsNode = args[0]!;
+    // The eager (req, res) handler — Node routes it as the first
+    // 'request' listener; both flavors' compat layers serve it (the
+    // allowHTTP1 server's HTTP/1.1 handles, the h2 server's compat
+    // handles over streams).
+    const handlerNode = args.length === 2 ? args[1]! : null;
     if (!ts.isObjectLiteralExpression(optsNode)) {
-      L.noLowering(
-        "createSecureServer with a non-literal options argument",
-        optsNode,
-        "pass the options as an object literal: { allowHTTP1: true, cert, key }",
-      );
+      // The RUNTIME options record (the divergence-66 stance, the
+      // tls/https.createServerDyn precedent): allowHTTP1/cert/key read
+      // at runtime, out-of-bounds TLS members throw the catchable
+      // runtime fence, h2 session-tuning keys drop exactly like the
+      // literal walk ignores them.
+      const v = L.lowerExpr(optsNode);
+      let dynOpts: IrExpr;
+      if (v.type.kind === "dyn") {
+        dynOpts = v;
+      } else if (canConvertToDyn(v.type, (id) => L.shapes.get(id), (id) => L.unions.get(id))) {
+        dynOpts = { kind: "dynFrom", value: v, type: DYN, loc: locOf(optsNode) };
+      } else {
+        L.noLowering(
+          "createSecureServer with a non-literal options argument",
+          optsNode,
+          "pass the options as an object literal ({ allowHTTP1: true, cert, key }) or a runtime record of those members",
+        );
+      }
+      if (handlerNode === null) {
+        return { kind: "libCall", fn: "http2.createSecureServerDyn", args: [dynOpts], type: NETSERVER_T, loc };
+      }
+      const cb = lowerRequestHandlerArg(L, handlerNode);
+      return { kind: "libCall", fn: "http2.createSecureServerDynCb", args: [dynOpts, cb], type: NETSERVER_T, loc };
     }
     let cert: IrExpr | null = null;
     let key: IrExpr | null = null;
@@ -3412,6 +3475,13 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
         "the supported options object is { allowHTTP1?, cert, key } (PEM strings or Buffers)",
       );
     }
+    if (sni !== null && handlerNode !== null) {
+      L.noLowering(
+        "createSecureServer with both an SNICallback and an eager handler",
+        expr,
+        "register the handler separately: server.on(\"request\", (req, res) => ...)",
+      );
+    }
     if (!allowHttp1) {
       // The REAL h2-over-TLS server (scr_http2.c + scr_tls.c): ALPN
       // advertises h2 alone and the h2 session attaches at establishment
@@ -3425,10 +3495,18 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
           "SNICallback lowers on the allowHTTP1 compatibility server — the ALPN=h2 server serves one cert/key pair",
         );
       }
+      if (handlerNode !== null) {
+        const cb = lowerRequestHandlerArg(L, handlerNode);
+        return { kind: "libCall", fn: "http2.createSecureServerH2Req", args: [cert, key, cb], type: NETSERVER_T, loc };
+      }
       return { kind: "libCall", fn: "http2.createSecureServerH2", args: [cert, key], type: NETSERVER_T, loc };
     }
     if (sni !== null) {
       return { kind: "libCall", fn: "http2.createSecureServerSni", args: [cert, key, sni], type: NETSERVER_T, loc };
+    }
+    if (handlerNode !== null) {
+      const cb = lowerRequestHandlerArg(L, handlerNode);
+      return { kind: "libCall", fn: "http2.createSecureServerReq", args: [cert, key, cb], type: NETSERVER_T, loc };
     }
     return { kind: "libCall", fn: "http2.createSecureServer", args: [cert, key], type: NETSERVER_T, loc };
   }

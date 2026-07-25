@@ -501,6 +501,10 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "tls.createServerDynCb": { argTypes: [DYN, null], result: NETSERVER_T },
   "https.createServerDyn": { argTypes: [DYN], result: NETSERVER_T },
   "https.createServerDynCb": { argTypes: [DYN, null], result: NETSERVER_T },
+  "http2.createSecureServerReq": { argTypes: [null, null, null], result: NETSERVER_T },
+  "http2.createSecureServerH2Req": { argTypes: [null, null, null], result: NETSERVER_T },
+  "http2.createSecureServerDyn": { argTypes: [DYN], result: NETSERVER_T },
+  "http2.createSecureServerDynCb": { argTypes: [DYN, null], result: NETSERVER_T },
   // tls.connect(port, host, opts[, cb]) — port -1 / host "" read the
   // options record; the callback fires post-handshake (secureConnect).
   "tls.connect": { argTypes: [F64, STRING, DYN], result: NETSOCKET_T },
@@ -515,6 +519,11 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "tls.createSecureContext": { argTypes: [null, null], result: SECURECTX_T },
   "tls.createSecureContextDyn": { argTypes: [DYN], result: SECURECTX_T },
   "tls.caCertsChk": { argTypes: [DYN, STRING], result: VOID },
+  // The CA-store introspection unit (scr_tls_ca.c): per-type cached PEM
+  // string arrays and the default-set replacement.
+  "tlsca.get": { argTypes: [STRING], result: arrayOf(STRING) },
+  "tlsca.root": { argTypes: [], result: arrayOf(STRING) },
+  "tlsca.set": { argTypes: [arrayOf(STRING)], result: VOID },
   "https.createServer": { argTypes: [null, null, null], result: NETSERVER_T },
   // http2's allowHTTP1 compatibility server (divergence 57): cert/key
   // like tls.createServer; the 'request' handler arrives separately via
@@ -1001,7 +1010,10 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "dc.tcTraceSync": { argTypes: [F64, DYN, DYN, DYN, DYN], result: DYN },
   "dc.tcTraceCallback": { argTypes: [F64, DYN, F64, DYN, DYN, DYN], result: DYN },
   "dc.tcTracePromise": { argTypes: [F64, DYN, DYN, DYN, DYN], result: { kind: "promise", inner: DYN } },
-  "process.onUnhandledRejection": { argTypes: [DYN], result: VOID },
+  "process.onUnhandledRejection": { argTypes: [DYN, BOOL], result: VOID },
+  "process.offUnhandledRejection": { argTypes: [DYN], result: VOID },
+  "process.onRejectionHandled": { argTypes: [DYN, BOOL], result: VOID },
+  "process.offRejectionHandled": { argTypes: [DYN], result: VOID },
   "process.onWarning": { argTypes: [DYN], result: VOID },
   "process.offWarning": { argTypes: [DYN], result: VOID },
   "process.emitWarning": { argTypes: [DYN], result: VOID },

@@ -2474,6 +2474,19 @@ export type IrLibFn =
    * set, then the trailing compiler-rendered fence — ALWAYS THROWS (the
    * error.nodeThrow polymorphic-result carve-out). May-throw seed. */
   | "tls.caCertsChk"
+  /** The CA-store introspection surface (scr_tls_ca.c — its own unit and
+   * link gate, "tlsca." NOT "tls.", so a getCACertificates-only binary
+   * never pulls mbedTLS): tlsca.get is tls.getCACertificates(type) — the
+   * cached per-type string[] of PEM blocks (identity-stable across calls,
+   * Node's caching; an unknown type throws Node's ERR_INVALID_ARG_VALUE
+   * TypeError); tlsca.root is the tls.rootCertificates value read;
+   * tlsca.set is tls.setDefaultCACertificates(certs) — replaces the
+   * default set (deduped) and the anchors the TLS client verifies
+   * against, throwing Node's ERR_CRYPTO_OPERATION_FAILED when no entry
+   * carries a certificate block. */
+  | "tlsca.get"
+  | "tlsca.root"
+  | "tlsca.set"
   | "https.createServer"
   | "https.request"
   | "https.requestCb"
@@ -2497,6 +2510,22 @@ export type IrLibFn =
    * serverOnSessionError evaluates and releases its callback — no h2
    * session ever exists, so the event NEVER fires. */
   | "http2.createSecureServer"
+  /** createSecureServer(options, handler) — the eager COMPAT handler as
+   * the first 'request' listener (Node's exact route), on both literal
+   * flavors: Req is the allowHTTP1 server (scr_https_create_server with
+   * the closure — HTTP/1.1 req/res handles), H2Req the ALPN=h2 server
+   * (the compat handles over h2 streams — scr_http2.c's layer). Args are
+   * (cert, key, cb). */
+  | "http2.createSecureServerReq"
+  | "http2.createSecureServerH2Req"
+  /** createSecureServer with a RUNTIME options record (the divergence-66
+   * stance): allowHTTP1/cert/key read at runtime — allowHTTP1 picks the
+   * flavor, the TLS server walk fences its out-of-bounds members with
+   * the catchable runtime fence, and h2 session-tuning keys drop exactly
+   * like the literal walk ignores them. May throw. The Cb form carries
+   * the eager compat handler. */
+  | "http2.createSecureServerDyn"
+  | "http2.createSecureServerDynCb"
   /** createSecureServer with an SNI callback: args are (cert, key, sniCb)
    * where sniCb is the JS SNICallback — a `(servername, cb) => void`
    * closure, or the `SNICallback | undefined` union from the conditional-
@@ -3589,11 +3618,24 @@ export type IrLibFn =
   | "process.onWarning"
   | "process.offWarning"
   | "process.emitWarning"
-  /** process.on('unhandledRejection', fn): registers a dyn listener the
-   * loop-end report dispatches per never-observed rejection — (reason,
-   * promise) — instead of printing and exiting 1 (scr_async.c). Throws
-   * Node's ERR_INVALID_ARG_TYPE on a non-function. */
+  /** process.on/once('unhandledRejection', fn): registers a dyn listener
+   * the loop-end report dispatches per never-observed rejection —
+   * (reason, promise) — instead of printing and exiting 1 (scr_async.c).
+   * The bool second arg is `once` (auto-removed after one delivery,
+   * Node's once); off/removeListener remove by closure identity, the
+   * offWarning stance. Throws Node's ERR_INVALID_ARG_TYPE on a
+   * non-function. */
   | "process.onUnhandledRejection"
+  | "process.offUnhandledRejection"
+  /** process.on/once/off('rejectionHandled', fn): the sibling registry.
+   * Under the loop-exhaustion rejection model the event has exactly ONE
+   * firing window — a handler attached DURING an unhandledRejection
+   * listener (Node's other windows, later turns, don't exist here: a
+   * rejection handled before exhaustion never enters the report at all —
+   * the documented end-of-turn divergence). Dispatch is synchronous at
+   * the attach, with the promise, Node's payload. */
+  | "process.onRejectionHandled"
+  | "process.offRejectionHandled"
   /** The Number statics with a static C implementation (scr_lib.c): one
    * f64 arg → bool, JS-exact BY CONSTRUCTION — Number.isFinite/isNaN/
    * isInteger/isSafeInteger never coerce, and the frontend routes only
@@ -5711,7 +5753,9 @@ export function moduleUsesDynInvoke(mod: IrModule): boolean {
 export function moduleUsesDynAsync(mod: IrModule): boolean {
   const fns = new Set([
     "async.awaitDyn", "timers.immediatePromise",
-    "process.onUnhandledRejection", "process.onWarning", "process.offWarning", "process.emitWarning",
+    "process.onUnhandledRejection", "process.offUnhandledRejection",
+    "process.onRejectionHandled", "process.offRejectionHandled",
+    "process.onWarning", "process.offWarning", "process.emitWarning",
     "als.new", "als.get", "als.run", "als.exitRun", "als.enterWith", "als.disable",
     "dc.chanBindStore", "dc.chanUnbindStore", "dc.chanRunStores",
   ]);
@@ -6084,6 +6128,32 @@ export function moduleUsesTls(mod: IrModule): boolean {
   return found;
 }
 
+/** True when the module contains any tlsca.* libCall — the link switch
+ * for scr_tls_ca.c, the CA-store introspection unit (getCACertificates /
+ * rootCertificates / setDefaultCACertificates). Deliberately SEPARATE
+ * from moduleUsesTls: the unit is plain PEM-block bookkeeping, so a
+ * program that only inspects the CA store never pulls mbedTLS. cc.ts
+ * also compiles the unit whenever TLS itself links — scr_tls.c consults
+ * the unit's default-set override for its trust anchors. */
+export function moduleUsesTlsCa(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (node.kind === "libCall" && typeof node.fn === "string" && node.fn.startsWith("tlsca.")) {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
 /* ── library mode's async_free gate ──────────────────────────────────────
  * v1 library mode REQUIRES an async_free module graph (ratified): no async
  * functions, no generators, no timers, no event-loop or ambient-process
@@ -6281,6 +6351,9 @@ export const LIB_NONDETERMINISTIC_PREFIXES: readonly [string, string][] = [
   ["process.exit", "process authority (exit)"],
   ["fs.", "the filesystem"],
   ["os.", "machine/OS identity"],
+  // The CA-store surface reads the host's certificate bundle (and the
+  // NODE_EXTRA_CA_CERTS environment) — machine identity by another name.
+  ["tlsca.", "the host CA store"],
 ];
 
 /** First ambient-nondeterminism or ambient-authority surface the module
@@ -6334,6 +6407,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dc.tcTraceCallback",
   "dc.tcTracePromise",
   "process.onUnhandledRejection",
+  "process.onRejectionHandled",
   "async.awaitDyn",
   "als.run",
   "als.exitRun",
@@ -6354,8 +6428,16 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "tls.createServerDynCb",
   "https.createServerDyn",
   "https.createServerDynCb",
+  "http2.createSecureServerDyn",
+  "http2.createSecureServerDynCb",
   "tls.connect",
   "tls.connectCb",
+  // The CA-store surface: an unknown getCACertificates type throws
+  // Node's ERR_INVALID_ARG_VALUE TypeError; setDefaultCACertificates
+  // throws Node's ERR_CRYPTO_OPERATION_FAILED on a certificate-free
+  // array.
+  "tlsca.get",
+  "tlsca.set",
   // EventEmitter dispatch runs user listeners synchronously (emit), and
   // the mutation forms fire the newListener/removeListener meta events —
   // any of them can throw. emitError additionally THROWS its payload when

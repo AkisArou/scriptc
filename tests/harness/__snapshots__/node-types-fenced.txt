@@ -157,3 +157,39 @@ fenced.ts:61:71 - error SC2020: 'createSecureServer option 'streamResetBurst' wi
   62 | http2.connect("https://localhost");
 
   hint: h2 session-tuning options are accepted with literal values (settings: a literal of literals) and ignored — the allowHTTP1 lowering serves HTTP/1.1 only, which has no h2 sessions to tune
+
+fenced.ts:68:1 - error SC2020: 'crypto.generateKeyPair' is typed by @types/node but has no scriptc lowering yet
+
+  67 | import { createCipheriv, generateKeyPair, pbkdf2Sync, setFips } from "node:crypto";
+  68 | generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  69 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+
+  hint: asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics
+
+fenced.ts:69:1 - error SC2020: 'crypto.createCipheriv' is typed by @types/node but has no scriptc lowering yet
+
+  68 | generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
+  69 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  70 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+
+  hint: symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics
+
+fenced.ts:70:1 - error SC2020: 'crypto.pbkdf2Sync' is typed by @types/node but has no scriptc lowering yet
+
+  69 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+  70 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  71 | setFips(false);
+
+  hint: key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics
+
+fenced.ts:71:1 - error SC2020: 'crypto.setFips' is typed by @types/node but has no scriptc lowering yet
+
+  70 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+  71 | setFips(false);
+     | ^~~~~~~~~~~~~~
+  72 | 
+
+  hint: a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) in a non-FIPS build — getFips() answers 0 here

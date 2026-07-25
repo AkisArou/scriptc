@@ -106,6 +106,10 @@ struct ScrPromise {
   size_t ncbs, cbs_cap;
   /* Unhandled-rejection tracking: set when rejected, cleared on await. */
   bool rejection_observed;
+  /* Set when the loop-end report delivered THIS promise to
+   * 'unhandledRejection' listeners — a handler attached after that is
+   * Node's 'rejectionHandled' moment (scr_prom_observe below). */
+  bool reported_unhandled;
 };
 
 #ifdef SCR_RC_AUDIT
@@ -185,6 +189,35 @@ ScrPromise *scr_promise_new(void) {
   scr_live_promises++;
 #endif
   return p;
+}
+
+/* The 'rejectionHandled' hook (scr_async_dyn.c installs it at listener
+ * registration — the scr_urj_deliver_fn pattern, so listener-free
+ * binaries keep their size class): called when a promise the loop-end
+ * report already delivered as unhandled gains a handler. */
+void (*scr_rjh_notify_fn)(ScrPromise *p) = NULL;
+
+/* Every handler attach funnels here: mark the rejection observed, and
+ * fire Node's 'rejectionHandled' when the attach arrived AFTER the
+ * report delivered this promise to 'unhandledRejection' listeners (the
+ * model's one late-handling window — earlier handling keeps the promise
+ * out of the report entirely). The flag clears on the first attach, so
+ * one report fires at most one 'rejectionHandled' — Node's pairing. */
+static void scr_prom_observe(ScrPromise *p) {
+  p->rejection_observed = true;
+  if (p->reported_unhandled) {
+    p->reported_unhandled = false;
+    if (scr_rjh_notify_fn != NULL) scr_rjh_notify_fn(p);
+  }
+}
+
+/* The attach-time handled mark (scr_async_dyn.c's dyn then/catch with a
+ * rejection handler): Node marks a rejection handled at ATTACH, not when
+ * the reaction runs — and the loop-exhaustion window (a .catch inside an
+ * 'unhandledRejection' listener) has no later fiber turn whose await
+ * could observe it. */
+void scr_promise_mark_handled(ScrPromise *p) {
+  if (p->state == SCR_PROM_REJECTED) scr_prom_observe(p);
 }
 
 ScrPromise *scr_promise_retain(ScrPromise *p) {
@@ -855,7 +888,7 @@ static void scr_promise_settle_from(ScrPromise *dst, ScrPromise *src) {
     }
     scr_promise_settle_wake(dst);
   }
-  if (src->state == SCR_PROM_REJECTED) src->rejection_observed = true;
+  if (src->state == SCR_PROM_REJECTED) scr_prom_observe(src);
 }
 
 /* The emitted same-type Promise.race adapter (see raceAdapterFor). */
@@ -1201,7 +1234,7 @@ void scr_await_hop(void) { scr_await_yield(); }
 static bool scr_await_settled(ScrPromise *p) {
   if (p->state != SCR_PROM_PENDING) scr_await_yield();
   while (p->state == SCR_PROM_PENDING) scr_await_park(p);
-  p->rejection_observed = true;
+  scr_prom_observe(p);
   if (p->state == SCR_PROM_REJECTED) {
     switch (p->payload_kind) {
     case SCR_EXC_F64: scr_throw_f64(p->f64); break;
@@ -2076,8 +2109,12 @@ bool scr_report_unhandled_rejections(void) {
       if (scr_urj_deliver_fn != NULL) {
         /* Listener dispatch (scr_async_dyn.c installed the hook at
          * registration): the event handles it, like Node — per entry,
-         * no report, exit 0. A listener throw is the uncaught crash. */
+         * no report, exit 0. A listener throw is the uncaught crash.
+         * reported_unhandled arms the 'rejectionHandled' window: a
+         * handler the listener itself attaches fires the sibling event
+         * (scr_prom_observe). */
         p->rejection_observed = true;
+        p->reported_unhandled = true;
         if (!scr_urj_deliver_fn(p)) crashed = true;
       } else if (!any) {
         any = true;
@@ -2117,6 +2154,14 @@ bool scr_report_unhandled_rejections(void) {
   if (scr_island_rejections_fn != NULL) {
     bool island = scr_island_rejections_fn(!any);
     any = any || island;
+  }
+  /* An 'unhandledRejection' listener can spawn fibers the exhausted loop
+   * will never run (a .catch attach mints a reaction fiber): they are
+   * abandoned by construction — re-note them so the RC audit's skip
+   * covers their parked state, exactly the loop-teardown accounting. */
+  if (scr_fibers_live > scr_fibers_abandoned) {
+    scr_fibers_abandoned = scr_fibers_live;
+    scr_note_abandoned_fibers(scr_fibers_abandoned);
   }
   /* main returns 1 on a reported rejection — the 'exit' listeners (atexit)
    * must see that code, like Node's. */

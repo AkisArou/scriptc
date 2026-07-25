@@ -28,6 +28,7 @@ import {
 } from "./surfaces.js";
 import { conditionalSpreadOf, lowerDynObjectLiteral } from "./lower-exprs.js";
 import { HTTP2_CONSTANTS } from "./http2-constants.js";
+import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "./crypto-tables.js";
 import { timerStyleCallback } from "./lower-calls.js";
 import { registerHttpClientFnBinding } from "./lower-server.js";
 import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
@@ -410,39 +411,56 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     };
   }
 
-/** True when `node` denotes the http2.constants OBJECT — any of its
-   * spellings: `http2.constants` through a namespace/require binding, a
-   * destructured or member-bound `constants` alias from the http2 module,
-   * or `require("http2").constants` inline. The object itself never
-   * materializes; each member read bakes as its literal. */
-  export function isHttp2ConstantsExpr(L: Lowerer, node: ts.Expression): boolean {
+/** The builtin modules whose `constants` object bakes as literals at
+   * every access site (the fs.constants precedent, scaled up): http2's
+   * full Node v24 table, and crypto's OpenSSL-constant table. The object
+   * itself never materializes at runtime. */
+  const BUILTIN_CONSTANTS_TABLES: Record<string, { table: Record<string, number | string>; hint: string } | undefined> = {
+    http2: {
+      table: HTTP2_CONSTANTS,
+      hint: "the table bakes Node v24's 240 members as literals — this name is not one of them",
+    },
+    crypto: {
+      table: CRYPTO_CONSTANTS,
+      hint: "the table bakes Node v24's crypto.constants members as literals — this name is not one of them",
+    },
+  };
+
+/** The module whose baked-constants OBJECT `node` denotes, or null — any
+   * of the spellings: `http2.constants`/`crypto.constants` through a
+   * namespace/require binding, a destructured or member-bound `constants`
+   * alias from the module, or `require("http2").constants` inline. The
+   * object itself never materializes; each member read bakes as its
+   * literal. */
+  export function builtinConstantsModuleOf(L: Lowerer, node: ts.Expression): string | null {
+    let module: string | null = null;
     if (ts.isPropertyAccessExpression(node) && !node.questionDotToken) {
-      if (node.name.text !== "constants") return false;
+      if (node.name.text !== "constants") return null;
       const bi = L.builtinMemberOf(node);
-      if (bi && bi.module === "http2") return true;
-      const spec = requireSpecOf(node.expression);
-      return spec !== null && canonicalBuiltinModule(spec) === "http2";
-    }
-    if (ts.isIdentifier(node)) {
+      if (bi) module = bi.module;
+      else {
+        const spec = requireSpecOf(node.expression);
+        module = spec !== null ? canonicalBuiltinModule(spec) : null;
+      }
+    } else if (ts.isIdentifier(node)) {
       const bi = builtinImportOf(L, node);
-      return bi !== null && bi.module === "http2" && bi.member === "constants";
+      if (bi !== null && bi.member === "constants") module = bi.module;
     }
-    return false;
+    return module !== null && own(BUILTIN_CONSTANTS_TABLES, module) !== undefined ? module : null;
   }
 
-/** `constants.NGHTTP2_CANCEL` (any http2.constants spelling) → the baked
-   * literal; unknown members fence by name. Null when the receiver is not
-   * the constants object (the property chain keeps trying). */
-  export function lowerHttp2ConstantsProperty(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
+/** `constants.NGHTTP2_CANCEL` / `constants.SSL_OP_NO_TICKET` (any baked-
+   * constants spelling) → the literal; unknown members fence by name.
+   * Null when the receiver is not a baked constants object (the property
+   * chain keeps trying). */
+  export function lowerBuiltinConstantsProperty(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
     if (expr.questionDotToken) return null;
-    if (!isHttp2ConstantsExpr(L, expr.expression)) return null;
-    const value = own(HTTP2_CONSTANTS, expr.name.text);
+    const module = builtinConstantsModuleOf(L, expr.expression);
+    if (module === null) return null;
+    const entry = BUILTIN_CONSTANTS_TABLES[module]!;
+    const value = own(entry.table, expr.name.text);
     if (value === undefined) {
-      L.noLowering(
-        `http2.constants.${expr.name.text}`,
-        expr,
-        "the table bakes Node v24's 240 members as literals — this name is not one of them",
-      );
+      L.noLowering(`${module}.constants.${expr.name.text}`, expr, entry.hint);
     }
     return builtinConstLit(value, locOf(expr));
   }
@@ -534,15 +552,18 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     return name;
   }
 
-/** True for `const { NGHTTP2_CANCEL, ... } = http2.constants` — a plain
-   * object destructure (identifier elements, renames allowed, no rest/
-   * defaults/nesting) over the constants object whose every name is in
-   * the table. The declaration is alias plumbing with no storage
-   * (lowerVarDecl and collectGlobals both skip it); each USE reads its
-   * baked literal (http2ConstantBindingOf). */
-  export function http2ConstantsDestructureDecl(L: Lowerer, nameNode: ts.Node, init: ts.Expression | undefined): boolean {
+/** True for `const { NGHTTP2_CANCEL, ... } = http2.constants` (and the
+   * crypto.constants twin) — a plain object destructure (identifier
+   * elements, renames allowed, no rest/defaults/nesting) over a baked
+   * constants object whose every name is in its table. The declaration is
+   * alias plumbing with no storage (lowerVarDecl and collectGlobals both
+   * skip it); each USE reads its baked literal
+   * (builtinConstantBindingOf). */
+  export function builtinConstantsDestructureDecl(L: Lowerer, nameNode: ts.Node, init: ts.Expression | undefined): boolean {
     if (!ts.isObjectBindingPattern(nameNode) || !init) return false;
-    if (!isHttp2ConstantsExpr(L, init)) return false;
+    const module = builtinConstantsModuleOf(L, init);
+    if (module === null) return false;
+    const table = BUILTIN_CONSTANTS_TABLES[module]!.table;
     return nameNode.elements.every(
       (el) =>
         !el.dotDotDotToken &&
@@ -550,25 +571,26 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
         el.name !== undefined &&
         ts.isIdentifier(el.name) &&
         (el.propertyName === undefined || ts.isIdentifier(el.propertyName)) &&
-        own(HTTP2_CONSTANTS, ((el.propertyName as ts.Identifier | undefined) ?? (el.name as ts.Identifier)).text) !== undefined,
+        own(table, ((el.propertyName as ts.Identifier | undefined) ?? (el.name as ts.Identifier)).text) !== undefined,
     );
   }
 
-/** Resolves an identifier bound by an http2ConstantsDestructureDecl to its
-   * baked literal value. Null for every other binding. */
-  export function http2ConstantBindingOf(L: Lowerer, ident: ts.Identifier): IrExpr | null {
+/** Resolves an identifier bound by a builtinConstantsDestructureDecl to
+   * its baked literal value. Null for every other binding. */
+  export function builtinConstantBindingOf(L: Lowerer, ident: ts.Identifier): IrExpr | null {
     const symbol = L.checker.getSymbolAtLocation(ident);
     const decl = symbol ? L.checker.declarationsOf(symbol)[0] : undefined;
     if (!decl || !ts.isBindingElement(decl) || decl.dotDotDotToken || decl.initializer) return null;
     if (!ts.isObjectBindingPattern(decl.parent)) return null;
     const varDecl = decl.parent.parent;
     if (!ts.isVariableDeclaration(varDecl) || varDecl.initializer === undefined) return null;
-    if (!isHttp2ConstantsExpr(L, varDecl.initializer)) return null;
+    const module = builtinConstantsModuleOf(L, varDecl.initializer);
+    if (module === null) return null;
     const key = decl.propertyName && ts.isIdentifier(decl.propertyName)
       ? decl.propertyName.text
       : decl.name !== undefined && ts.isIdentifier(decl.name) ? decl.name.text : null;
     if (key === null) return null;
-    const value = own(HTTP2_CONSTANTS, key);
+    const value = own(BUILTIN_CONSTANTS_TABLES[module]!.table, key);
     if (value === undefined) return null;
     return builtinConstLit(value, locOf(ident));
   }
@@ -3640,6 +3662,42 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     );
   }
 
+/** The node:crypto introspection statics — build-time constants of the
+   * compiled runtime, baked at the call site (the http2.constants stance
+   * extended to calls): getFips() answers 0 (no FIPS provider can ever
+   * load into a compiled binary — Node's own answer for a non-FIPS
+   * build), and getCiphers()/getHashes()/getCurves() answer Node v24's
+   * name lists as fresh string[] literals. The lists are INTROSPECTION
+   * data (Node's contract is "names the provider recognizes"); the
+   * operations behind the names keep their per-member fences — a program
+   * that probes the list and then constructs a cipher fences at the
+   * construction site, never here. Null for other members (the dispatch
+   * keeps trying). */
+  export function lowerCryptoModuleCall(L: Lowerer, expr: ts.CallExpression,
+    bi: { module: string; member: string },
+    loc: SrcLoc,): IrExpr | null {
+    if (bi.module !== "crypto") return null;
+    const LISTS: Record<string, readonly string[] | undefined> = {
+      getCiphers: CRYPTO_CIPHERS,
+      getHashes: CRYPTO_HASHES,
+      getCurves: CRYPTO_CURVES,
+    };
+    const list = own(LISTS, bi.member);
+    if (bi.member !== "getFips" && list === undefined) return null;
+    if (expr.arguments.length !== 0) {
+      L.noLowering(`crypto.${bi.member} with ${expr.arguments.length} arguments`, expr);
+    }
+    if (bi.member === "getFips") {
+      return { kind: "numLit", value: 0, type: F64, loc };
+    }
+    return {
+      kind: "arrayLit",
+      elems: list!.map((s): IrExpr => ({ kind: "strLit", value: s, type: STRING, loc })),
+      type: arrayOf(STRING),
+      loc,
+    };
+  }
+
 /** Method calls on URL-typed receivers: `u.toString()` is Node's href
    * serialization (the href getter's libCall). Everything else the lib
    * declares fences member-qualified. Null for non-URL receivers. */
@@ -5496,8 +5554,14 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       // the loop-end report dispatches it (reason, promise) per
       // never-observed rejection instead of printing and exiting 1
       // (scr_async.c; the end-of-turn timing is a SEMANTICS.md
-      // divergence). `once`/`off` forms have no removal story yet.
-      if (event === "unhandledRejection" && member === "on") {
+      // divergence). `once` auto-removes after one delivery and
+      // `off`/`removeListener` remove by closure identity — the warning
+      // registry's story. 'rejectionHandled' is the sibling registry:
+      // under the loop-exhaustion model its ONE firing window is a
+      // handler attached during an unhandledRejection listener (earlier
+      // handling never enters the report at all — the same documented
+      // divergence), dispatched synchronously with the promise.
+      if (event === "unhandledRejection" || event === "rejectionHandled") {
         if (!ts.isExpressionStatement(call.parent)) {
           L.unsupported(
             "SC1090",
@@ -5506,7 +5570,11 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
           );
         }
         const cb = dcSubscriberArg(L, call.arguments[1]!);
-        return { kind: "libCall", fn: "process.onUnhandledRejection", args: [cb], type: VOID, loc };
+        const onceArg: IrExpr = { kind: "boolLit", value: member === "once", type: BOOL, loc };
+        const fn: IrLibFn = event === "unhandledRejection"
+          ? (isOff ? "process.offUnhandledRejection" : "process.onUnhandledRejection")
+          : (isOff ? "process.offRejectionHandled" : "process.onRejectionHandled");
+        return { kind: "libCall", fn, args: isOff ? [cb] : [cb, onceArg], type: VOID, loc };
       }
       // 'warning': the listener crosses as a dyn function; emitWarning
       // and the runtime deprecation sites dispatch synchronously
@@ -5532,7 +5600,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         L.noLowering(
           `process.${member}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
           call.arguments[0]!,
-          '"SIGINT", "SIGTERM", "exit", "warning", and "unhandledRejection" (on) are the supported process events (as literals)',
+          '"SIGINT", "SIGTERM", "exit", "warning", "unhandledRejection", and "rejectionHandled" are the supported process events (as literals)',
         );
       }
       if (!ts.isExpressionStatement(call.parent)) {

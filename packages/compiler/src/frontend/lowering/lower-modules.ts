@@ -1236,7 +1236,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // destructure over the baked constants table — alias plumbing, no
         // global storage (the statement lowering skips it by the same
         // test).
-        if (L.http2ConstantsDestructureDecl(decl.name, decl.initializer)) continue;
+        if (L.builtinConstantsDestructureDecl(decl.name, decl.initializer)) continue;
         // `const Writable = stream.Writable` at file scope: a stream
         // class through the namespace binding — alias plumbing, no
         // global storage (the statement lowering skips it by the same

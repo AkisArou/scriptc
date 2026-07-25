@@ -18,7 +18,7 @@ import { unsupportedModuleFeatureOf } from "../shared.js";
 import { fenceEnumObjectValue, lowerEnumAccess } from "./lower-enums.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, contextualUndefReadType, fenceEarlyAliasUse, fenceEarlyNsMemberRef, lowerNsIdentifierValue, nsMemberIdentOf, nsUndefRead, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoMemberRead, expandoWritableTarget } from "./lower-expando.js";
-import { lowerSocketInstanceOf } from "./lower-server.js";
+import { lowerSocketInstanceOf, lowerTlsRootCertificates } from "./lower-server.js";
 import { findGenericMethodOn, lowerStaticFieldRead } from "./lower-classes.js";
 import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, nullishGenericBindingUnitOf, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
 import { mixinFnOfCallee } from "./lower-mixins.js";
@@ -770,10 +770,11 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         const acc = cjsExportAccessorRead(L, expr);
         if (acc) return acc;
       }
-      // A binding destructured from http2.constants: the baked literal
-      // (the declaration emitted nothing — http2ConstantsDestructureDecl).
+      // A binding destructured from a baked constants object
+      // (http2.constants / crypto.constants): the literal — the
+      // declaration emitted nothing (builtinConstantsDestructureDecl).
       {
-        const h2c = L.http2ConstantBindingOf(expr);
+        const h2c = L.builtinConstantBindingOf(expr);
         if (h2c) return h2c;
       }
       // Builtin-module import bindings: constants (path.sep, os.EOL) read
@@ -789,6 +790,13 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           // string[] per read.
           if (bi.module === "module" && bi.member === "builtinModules") {
             return builtinModulesArrayLit(loc);
+          }
+          // tls.rootCertificates: a runtime-valued module constant (the
+          // cached bundled-CA array) — the one member read that lowers
+          // to a libCall instead of a baked literal.
+          {
+            const roots = lowerTlsRootCertificates(L, bi, loc);
+            if (roots) return roots;
           }
           // JavaScript sources: a builtin member taken as a bare VALUE is
           // the same identity-token story as stdlib globals above (the
@@ -1549,7 +1557,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         L.lowerFsConstantsProperty(expr) ??
         // http2.constants.NGHTTP2_CANCEL (any constants-object spelling):
         // the baked-literal table.
-        L.lowerHttp2ConstantsProperty(expr) ??
+        L.lowerBuiltinConstantsProperty(expr) ??
         // Builtin namespace imports (`path.sep`, `os.EOL`,
         // `fs.constants.R_OK` where the root is `import * as ...`): the
         // same constants and per-member fences as named builtin imports.
