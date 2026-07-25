@@ -2440,7 +2440,12 @@ ScrH2Session *scr_http2_connect(ScrStr *url /*borrowed*/, bool reject_unauthoriz
   /* stash the authority in the session's hblock buf slot? No — its own
    * field: reuse rbuf? Neither: a dedicated malloc. */
   ScrStr *host_str = scr_str_new(host, hlen);
-  ScrNetSocket *sock = scr_net_connect(port, host_str, NULL);
+  /* Resolve for the dial only (the http client's rule): the TLS wrap below
+   * takes host_str, the NAME, because that is what SNI and verification
+   * must see. */
+  ScrStr *dial_addr = scr_net_blocking_lookup(host_str);
+  ScrNetSocket *sock = scr_net_connect(port, dial_addr, NULL);
+  scr_str_release(dial_addr);
   if (secure) scr_tls_h2_client_wrap(sock, host_str, reject_unauthorized, ca, ca_len);
   scr_str_release(host_str);
   s->sock = sock; /* scr_net_connect returned +1 — the session takes it */
