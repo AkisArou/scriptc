@@ -101,7 +101,7 @@ jobs:
       SCRIPTC_TARGET: x86_64-windows-gnu
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
       - uses: pnpm/action-setup@v4
