@@ -235,9 +235,10 @@ void scr_rl_question(double id, const ScrStr *query, ScrClosure *cb /*moves*/,
     scr_throw_error_msg(SCR_ERR_ERROR, "readline was closed", 19);
     return;
   }
-  /* The prompt writes to stdout under pipes too (Node's question does);
-   * same stream and buffer as console.log, so ordering holds. */
-  fwrite(query->data, 1, query->len, stdout);
+  /* The prompt writes to stdout under pipes too (Node's question does), and
+   * must be visible before input arrives even though it has no trailing
+   * newline. */
+  scr_stdio_write(1, query->data, query->len);
   if (rl->dead) {
     /* Created after stdin ended: pinned against Node — the prompt still
      * writes, but the DESTROYED stream delivers nothing and 'close'

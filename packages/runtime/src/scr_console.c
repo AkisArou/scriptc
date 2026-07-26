@@ -83,8 +83,11 @@ void scr_init(void) {
   _setmode(_fileno(stderr), _O_BINARY);
   _setmode(_fileno(stdin), _O_BINARY);
 #endif
-  /* Full buffering matches Node writing to a pipe (the differential harness
-   * never runs either side on a TTY) and makes output-heavy programs fast. */
+  /* A private formatting buffer coalesces the several stdio calls needed to
+   * render one console line. Every JavaScript-visible stdout write flushes
+   * before returning, so this buffer is never observable as delayed output:
+   * Node hands each console.log/process.stdout.write chunk to its backing
+   * stream immediately. */
   static char outbuf[1 << 16];
   setvbuf(stdout, outbuf, _IOFBF, sizeof outbuf);
   /* atexit is LIFO; registration order makes exit run: library cleanup
@@ -131,18 +134,36 @@ static void scr_console_write(FILE *out, size_t n, const ScrLogArg *args) {
     }
   }
   fputc('\n', out);
+  /* Console methods submit one formatted chunk to their backing stream.
+   * Keep the C buffer only as a formatter coalescing detail: a caller
+   * observing a live child must see this line before the next JS turn. */
+  fflush(out);
 }
 
 void scr_console_log(size_t n, const ScrLogArg *args) {
   scr_console_write(stdout, n, args);
 }
 
-/* console.error and console.warn. stderr is UNBUFFERED (C's default; Node
- * writes stderr synchronously too), and stdout FLUSHES first so a merged
- * redirection (2>&1) sees writes in source order despite stdout's full
- * buffering — Node's piped stdout/stderr preserve write order the same
- * way. */
+/* console.error and console.warn. Flush stdout first so runtime-internal
+ * output that is still being assembled cannot cross this stderr line under
+ * a merged redirection (2>&1); JavaScript-visible stdout writes have already
+ * flushed themselves. */
 void scr_console_error(size_t n, const ScrLogArg *args) {
   fflush(stdout);
   scr_console_write(stderr, n, args);
+}
+
+/* One JavaScript-visible raw write. Node's global console and process stream
+ * methods hand each chunk to the backing stream when called; they do not
+ * retain stdout until a later stderr write, a 64 KiB threshold, or process
+ * exit. The runtime remains synchronous internally, so its backpressure
+ * surface is still constantly true, but the bytes are observable promptly.
+ *
+ * stderr flushes any runtime-internal stdout fragment first to preserve the
+ * existing merged-fd ordering convention. */
+void scr_stdio_write(int fd, const void *data, size_t len) {
+  FILE *out = fd == 2 ? stderr : stdout;
+  if (fd == 2) fflush(stdout);
+  if (len > 0) fwrite(data, 1, len, out);
+  fflush(out);
 }

@@ -3049,7 +3049,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           case "procStream.write":
             // The receiver IS the fd scalar; dispatches onto the exact
-            // stdout/stderr write paths (buffering/ordering identical).
+            // promptly-submitted stdout/stderr paths (ordering identical).
             return finish(`scr_proc_stream_write(${arg(0)}, ${arg(1)})`);
           case "child.killed":
             return finish(`scr_child_killed(${arg(0)})`);

@@ -5357,10 +5357,10 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (call.questionDotToken) return null;
     // process.stdout.write(s) / process.stderr.write(s): the raw byte
     // write — no newline, no formatting. stdout shares console.log's
-    // stream and buffer (source order preserved); stderr is unbuffered.
-    // Node's boolean is a backpressure signal; the synchronous write is
-    // constantly true. @types/node's wider forms (Buffer data, encoding,
-    // callback) typecheck and fence here.
+    // promptly-submitted stream, preserving source order. Node's boolean
+    // is a backpressure signal; this synchronous write is constantly true.
+    // @types/node's wider forms (Buffer data, encoding, callback) typecheck
+    // and fence here.
     // process.stdin.destroy(): a deliberate no-op — no stream machinery
     // exists to tear down, and no other stdin surface observes the
     // destroyed state (SEMANTICS.md documents it).
@@ -5498,8 +5498,8 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         if (data.type.kind === "dyn" && isJsSourceFile(call.getSourceFile())) {
           data = { kind: "dynCheck", value: data, type: STRING, loc };
         }
-        // The Buffer overload writes the raw bytes through the same
-        // streams (and stdout's shared buffer).
+        // The Buffer overload writes raw bytes through the same promptly
+        // submitted streams.
         if (data.type.kind === "bytes" && data.type.elem === "u8") {
           return {
             kind: "libCall",

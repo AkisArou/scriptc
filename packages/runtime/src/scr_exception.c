@@ -307,8 +307,8 @@ int scr_exit_code_hint_get(void) { return scr_exit_code_hint; }
 
 void scr_exc_print_uncaught(void) {
   scr_exit_code_note(1);
-  /* Pre-throw stdout must land before the stderr line when both share a
-   * terminal; stdout is fully buffered (scr_init). */
+  /* Settle any runtime-internal stdout fragment before the stderr line when
+   * both share an fd. JavaScript-visible writes already flush themselves. */
   fflush(stdout);
   fputs("Uncaught ", stderr);
   switch (scr_exc_kind) {
