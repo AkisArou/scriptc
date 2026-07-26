@@ -88,7 +88,7 @@ jobs:
           pnpm test packages/compiler/test/cc-driver.test.ts
           --testNamePattern "host-native clang static build"
 
-  # Exercises the installed Windows toolchain and the built CLI end to end:
+  # Exercises the supported Windows GNU target and the built CLI end to end:
   # TS7 must open its synthetic project, ambient files must resolve across
   # slash styles, and the default executable must use the .exe suffix.
   windows_cli:
@@ -97,8 +97,13 @@ jobs:
     timeout-minutes: 15
     env:
       SCRIPTC_NO_CACHE: "1"
+      SCRIPTC_CC: zigcc
+      SCRIPTC_TARGET: x86_64-windows-gnu
     steps:
       - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -113,7 +118,7 @@ jobs:
       - name: Windows scriptc run smoke
         shell: pwsh
         run: |
-          clang --version
+          zig version
           $output = & node packages/cli/dist/main.js run tests/corpus/001-hello.ts --backend c
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
