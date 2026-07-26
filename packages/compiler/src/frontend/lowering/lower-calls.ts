@@ -3933,10 +3933,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // Object.prototype.toString's default answer on records and
         // override-free program classes — "[object Object]", folded.
         lowerDefaultToStringCall(L, expr, expr.expression) ??
-        // The remaining primitive prototype statics — toExponential()/
-        // toFixed() digit-free, hasOwnProperty over literal keys. Before
-        // the island path (its table claims the explicit-digits forms);
-        // optional-chain spellings keep the chain machinery's paths.
+        // The remaining primitive prototype statics — toExponential(),
+        // both toFixed() forms, hasOwnProperty over literal keys. Before
+        // the island path; optional-chain spellings keep the chain
+        // machinery's paths.
         (expr.expression.questionDotToken
           ? null
           : lowerPrimitiveProtoCall(L, expr, expr.expression.expression,
@@ -4781,10 +4781,10 @@ const inliningPredicates = new Set<ts.Symbol>();
    * member spellings (`x.hasOwnProperty(...)` and `x['hasOwnProperty'](...)`
    * — JS resolves the two identically, so the element spelling routes here
    * from lowerCall's element-access hook):
-   *   - `n.toExponential()` / `n.toFixed()` with the fraction digits
-   *     OMITTED — the static runtime formatters (num.toExponential's
-   *     shortest-mantissa form, num.toFixed0's ties-up integer). The
-   *     explicit-digits forms keep their island/fence story.
+   *   - `n.toExponential()` and both `n.toFixed()` forms — the static
+   *     runtime formatters (num.toExponential's shortest-mantissa form,
+   *     num.toFixed0's ties-up integer fast path, and num.toFixed's exact
+   *     binary-value rounding for an explicit fractionDigits).
    *   - `hasOwnProperty(lit)` on number/boolean receivers — the boxes own
    *     NOTHING, so any key answers false (a compile-time constant; the
    *     receiver must be effect-free since the constant elides it).
@@ -4814,6 +4814,18 @@ const inliningPredicates = new Set<ts.Symbol>();
       if (operand.type.kind !== "f64") return null;
       const fn = name === "toExponential" ? "num.toExponential" : "num.toFixed0";
       return { kind: "libCall", fn, args: [operand], type: STRING, loc };
+    }
+    if (name === "toFixed" && recvKind === "f64" && call.arguments.length === 1) {
+      const operand = L.lowerExpr(recv);
+      let digits = L.lowerExpr(call.arguments[0]!);
+      // The optional parameter also admits an explicit undefined. A
+      // side-effect-free unit literal is exactly the default 0; effectful
+      // `void e` has already fenced because the IR has no sequence expr.
+      if (digits.kind === "unitLit" && digits.unit === "undefined") {
+        digits = { kind: "numLit", value: 0, type: F64, loc: digits.loc };
+      }
+      if (operand.type.kind !== "f64" || digits.type.kind !== "f64") return null;
+      return { kind: "libCall", fn: "num.toFixed", args: [operand, digits], type: STRING, loc };
     }
     // Number.prototype.toLocaleString("en-US") — the spec makes it
     // NumberFormat(locale).format(this), so the en-US embedded formatter

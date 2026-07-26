@@ -3503,6 +3503,170 @@ ScrStr *scr_num_to_fixed0(double x) {
   return r;
 }
 
+/* The explicit-fraction-digits toFixed needs the exact binary value, not
+ * the shortest decimal that round-trips to it: (1.005).toFixed(2) is
+ * "1.00", for example. Represent abs(x) * 10^f as
+ *
+ *     mantissa * 5^f * 2^(binary_exponent + f)
+ *
+ * in a tiny base-2^32 integer, then shift right with the spec's
+ * round-half-up rule. The largest value handled here is below 1e21 with
+ * f=100, so the rounded integer is below 1e121 (402 bits); sixteen limbs
+ * leave comfortable headroom without heap allocation. */
+#define SCR_FIXED_LIMBS 16
+typedef struct {
+  uint32_t limb[SCR_FIXED_LIMBS]; /* little-endian */
+  int len;
+} ScrFixedInt;
+
+static void scr_fixed_normalize(ScrFixedInt *v) {
+  while (v->len > 1 && v->limb[v->len - 1] == 0) v->len--;
+}
+
+static void scr_fixed_mul5(ScrFixedInt *v) {
+  uint64_t carry = 0;
+  for (int i = 0; i < v->len; i++) {
+    uint64_t p = (uint64_t)v->limb[i] * 5 + carry;
+    v->limb[i] = (uint32_t)p;
+    carry = p >> 32;
+  }
+  if (carry != 0) v->limb[v->len++] = (uint32_t)carry;
+}
+
+static bool scr_fixed_bit(const ScrFixedInt *v, int bit) {
+  int word = bit / 32;
+  return word < v->len && ((v->limb[word] >> (bit % 32)) & 1u) != 0;
+}
+
+static void scr_fixed_shr(ScrFixedInt *v, int bits) {
+  int words = bits / 32;
+  int rem = bits % 32;
+  if (words >= v->len) {
+    v->limb[0] = 0;
+    v->len = 1;
+    return;
+  }
+  int n = v->len - words;
+  for (int i = 0; i < n; i++) {
+    uint32_t lo = v->limb[i + words] >> rem;
+    uint32_t hi =
+        rem != 0 && i + words + 1 < v->len
+            ? v->limb[i + words + 1] << (32 - rem)
+            : 0;
+    v->limb[i] = lo | hi;
+  }
+  v->len = n;
+  scr_fixed_normalize(v);
+}
+
+static void scr_fixed_shl(ScrFixedInt *v, int bits) {
+  uint32_t out[SCR_FIXED_LIMBS] = {0};
+  int words = bits / 32;
+  int rem = bits % 32;
+  for (int i = 0; i < v->len; i++) {
+    int at = i + words;
+    out[at] |= v->limb[i] << rem;
+    if (rem != 0) out[at + 1] |= v->limb[i] >> (32 - rem);
+  }
+  int n = v->len + words + (rem != 0 ? 1 : 0);
+  memcpy(v->limb, out, sizeof out);
+  v->len = n;
+  scr_fixed_normalize(v);
+}
+
+static void scr_fixed_inc(ScrFixedInt *v) {
+  uint64_t carry = 1;
+  for (int i = 0; i < v->len && carry != 0; i++) {
+    uint64_t s = (uint64_t)v->limb[i] + carry;
+    v->limb[i] = (uint32_t)s;
+    carry = s >> 32;
+  }
+  if (carry != 0) v->limb[v->len++] = (uint32_t)carry;
+}
+
+/* Divide in place by 1e9; each quotient limb still fits uint32_t because
+ * the carried remainder is below the divisor. Returns the remainder. */
+static uint32_t scr_fixed_div1e9(ScrFixedInt *v) {
+  uint64_t rem = 0;
+  for (int i = v->len - 1; i >= 0; i--) {
+    uint64_t cur = (rem << 32) | v->limb[i];
+    v->limb[i] = (uint32_t)(cur / 1000000000u);
+    rem = cur % 1000000000u;
+  }
+  scr_fixed_normalize(v);
+  return (uint32_t)rem;
+}
+
+/* Number.prototype.toFixed(fractionDigits), with the argument already
+ * number-typed by the frontend. ToIntegerOrInfinity validation precedes
+ * the receiver's non-finite arm, as ECMA-262 requires. Invalid precision
+ * raises V8's catchable RangeError text; otherwise the result is +1. */
+ScrStr *scr_num_to_fixed(double x, double fraction_digits) {
+  double fd = isnan(fraction_digits) ? 0 : trunc(fraction_digits);
+  if (!(fd >= 0 && fd <= 100)) {
+    static const char msg[] =
+        "toFixed() digits argument must be between 0 and 100";
+    scr_throw_error_msg(SCR_ERR_RANGE, msg, sizeof msg - 1);
+    return NULL;
+  }
+  int f = (int)fd;
+  if (!isfinite(x) || fabs(x) >= 1e21) return scr_f64_to_scrstr(x);
+
+  bool neg = x < 0; /* false for -0, exactly like the spec's sign arm */
+  double a = neg ? -x : x;
+  uint64_t bits;
+  memcpy(&bits, &a, sizeof bits);
+  uint64_t mantissa = bits & ((1ull << 52) - 1);
+  int ieee_exp = (int)((bits >> 52) & 0x7ffu);
+  int binary_exp;
+  if (ieee_exp == 0) {
+    binary_exp = -1074;
+  } else {
+    mantissa |= 1ull << 52;
+    binary_exp = ieee_exp - 1023 - 52;
+  }
+
+  ScrFixedInt n = {{(uint32_t)mantissa, (uint32_t)(mantissa >> 32)}, 2};
+  scr_fixed_normalize(&n);
+  for (int i = 0; i < f; i++) scr_fixed_mul5(&n);
+  int shift = binary_exp + f;
+  if (shift >= 0) {
+    scr_fixed_shl(&n, shift);
+  } else {
+    int right = -shift;
+    bool round_up = scr_fixed_bit(&n, right - 1);
+    scr_fixed_shr(&n, right);
+    if (round_up) scr_fixed_inc(&n);
+  }
+
+  /* Render the exact rounded integer through base-1e9 chunks, then place
+   * the decimal point f digits from the right (padding through zero). */
+  uint32_t chunks[SCR_FIXED_LIMBS];
+  int chunk_count = 0;
+  do {
+    chunks[chunk_count++] = scr_fixed_div1e9(&n);
+  } while (!(n.len == 1 && n.limb[0] == 0));
+
+  char digits[128];
+  int dlen = snprintf(digits, sizeof digits, "%u", chunks[chunk_count - 1]);
+  for (int i = chunk_count - 2; i >= 0; i--) {
+    dlen += snprintf(digits + dlen, sizeof digits - (size_t)dlen,
+                     "%09u", chunks[i]);
+  }
+
+  char out[128];
+  int o = 0;
+  if (neg) out[o++] = '-';
+  int padded = dlen > f + 1 ? dlen : f + 1;
+  int integer_digits = padded - f;
+  int leading_zeros = padded - dlen;
+  for (int i = 0; i < padded; i++) {
+    if (f != 0 && i == integer_digits) out[o++] = '.';
+    out[o++] = i < leading_zeros ? '0' : digits[i - leading_zeros];
+  }
+  return scr_str_new(out, (size_t)o);
+}
+
 /* Increment a decimal digit string in place. Returns true on overflow —
  * the value becomes 1 followed by len zeros (the caller folds the zeros
  * into its scale); an EMPTY string increments to "1" the same way (the

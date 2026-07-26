@@ -56,6 +56,7 @@ import {
   BUILTIN_MODULE_FNS,
   BUILTIN_MODULE_FN_ALIASES,
   STATIC_MATH_FNS,
+  STATIC_NUMBER_METHODS,
   STR_METHODS,
 } from "../frontend/lowering/surfaces.js";
 import type { IrModule, SrcLoc } from "../ir/nodes.js";
@@ -212,6 +213,14 @@ function classifySurface(entry: SurfaceManifestEntry, tax: FenceTaxonomy): Surfa
     if (family === "math") {
       const fn = Object.hasOwn(STATIC_MATH_FNS, member) ? STATIC_MATH_FNS[member] : undefined;
       if (fn !== undefined) return { kind: "detector", detector: { libFns: [fn.fn] } };
+    }
+    if (family === "number") {
+      const method = Object.hasOwn(STATIC_NUMBER_METHODS, member)
+        ? STATIC_NUMBER_METHODS[member]
+        : undefined;
+      if (method !== undefined) {
+        return { kind: "detector", detector: { libFns: method.fns } };
+      }
     }
     if (family === "string") {
       const m = Object.hasOwn(STR_METHODS, member) ? STR_METHODS[member] : undefined;

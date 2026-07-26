@@ -51,6 +51,7 @@ import {
   SET_COMBINE_METHODS,
   SET_METHODS,
   STATIC_MATH_FNS,
+  STATIC_NUMBER_METHODS,
   STR_METHODS,
   UNSUPPORTED_EXPR,
   UNSUPPORTED_STMT,
@@ -219,14 +220,31 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
   for (const name of Object.keys(ISLAND_SURFACE.math.props)) {
     add({ id: `stdlib.math.${name}`, kind: "stdlib", name: `Math.${name}`, status: "dynamic-only", code: "SC2012" });
   }
-  for (const name of Object.keys(ISLAND_SURFACE.number)) {
-    add({
-      id: `stdlib.number.${name}`,
-      kind: "stdlib",
-      name: `number.prototype.${name}`,
-      status: "dynamic-only",
-      code: "SC2012",
-    });
+  const numberNames = new Set([
+    ...Object.keys(STATIC_NUMBER_METHODS),
+    ...Object.keys(ISLAND_SURFACE.number),
+  ]);
+  for (const name of numberNames) {
+    const stat = Object.hasOwn(STATIC_NUMBER_METHODS, name)
+      ? STATIC_NUMBER_METHODS[name]
+      : undefined;
+    if (stat !== undefined) {
+      add({
+        id: `stdlib.number.${name}`,
+        kind: "stdlib",
+        name: `number.prototype.${name}`,
+        status: "static",
+        note: arityNote(stat.minArgs, stat.maxArgs),
+      });
+    } else {
+      add({
+        id: `stdlib.number.${name}`,
+        kind: "stdlib",
+        name: `number.prototype.${name}`,
+        status: "dynamic-only",
+        code: "SC2012",
+      });
+    }
   }
   for (const name of Object.keys(ISLAND_SURFACE.string)) {
     add({

@@ -579,8 +579,8 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
 
 /** Method calls on the island-backed ambient surface: `Math.<fn>(...)`
    * (the engine's own Math object executes) and the number/string methods
-   * the static runtime doesn't implement (`x.toFixed(2)`,
-   * `s.toUpperCase()`, ...). Each site is self-contained — the receiver
+   * the static runtime doesn't implement (`x.toPrecision(2)`,
+   * `s.replace("a", "b")`, ...). Each site is self-contained — the receiver
    * and arguments marshal in, the engine executes with JS-exact semantics,
    * and the result exits (validated) to the DECLARED static return type,
    * so no jsval leaks into the program's types. tsc has already checked

@@ -4243,12 +4243,14 @@ bool scr_num_is_finite(double x);
 bool scr_num_is_nan(double x);
 bool scr_num_is_integer(double x);
 bool scr_num_is_safe_integer(double x);
-/* The fraction-digits-free Number.prototype formatters: toExponential()
- * (shortest correctly-rounded mantissa, "7e+0" exponent shape) and
- * toFixed() (closest integer, ties toward +∞ on the magnitude, "-0" for
- * negative fractions, ToString at |x| ≥ 1e21). +1 results; never throw. */
+/* Number.prototype formatters: toExponential() is the fraction-digits-free
+ * shortest correctly-rounded mantissa; toFixed0 is the non-throwing omitted
+ * argument form. toFixed implements an explicit 0..100 fractionDigits with
+ * exact binary-value rounding and THROWS V8's catchable RangeError outside
+ * that range. All successful results are +1. */
 ScrStr *scr_num_to_exponential(double x);
 ScrStr *scr_num_to_fixed0(double x);
+ScrStr *scr_num_to_fixed(double x, double fraction_digits);
 
 /* Object.is over two numbers — the spec's SameValue on doubles: NaN
  * equals NaN, +0 differs from -0, everything else is ==. Never throws. */

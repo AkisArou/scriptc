@@ -2234,8 +2234,8 @@
       "id": "stdlib.number.toFixed",
       "kind": "stdlib",
       "name": "number.prototype.toFixed",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "the lowered call form takes 0 to 1 arguments"
     },
     {
       "id": "stdlib.number.toPrecision",

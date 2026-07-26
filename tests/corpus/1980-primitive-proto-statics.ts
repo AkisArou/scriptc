@@ -1,7 +1,7 @@
 // Primitive prototype surfaces with a static lowering: radix-free
 // toString on booleans and strings (numbers were already static), the
-// digit-free toExponential()/toFixed() formatters, hasOwnProperty over
-// literal keys (number/boolean boxes own nothing; string boxes own
+// digit-free toExponential() plus both toFixed() forms, hasOwnProperty
+// over literal keys (number/boolean boxes own nothing; string boxes own
 // "length" and their in-range indices), the trimLeft/trimRight aliases,
 // includes with a position, and the element-access spelling of each —
 // JS resolves x['m'](...) exactly like x.m(...). Node is the oracle.
@@ -23,9 +23,24 @@ const vals = [5e-324, 1.7976931348623157e308, 0.1 + 0.2, 123456789.123456789, 2 
 for (const v of vals) {
   console.log(v.toExponential(), (-v).toExponential(), v.toFixed(), (-v).toFixed());
 }
+console.log((1.005).toFixed(2), (1.015).toFixed(2), (2.25).toFixed(1), (-2.25).toFixed(1));
+console.log((0.1 + 0.2).toFixed(17), (1e20).toFixed(2), (1e21).toFixed(100));
+console.log((5e-324).toFixed(100), (-0.4).toFixed(0), (-0).toFixed(2));
+console.log((1.005).toFixed(50), (1.005).toFixed(100));
+const fractionDigits = 3;
+const ratio = 22 / 7;
+console.log(ratio.toFixed(fractionDigits), ratio.toFixed(3.9), ratio.toFixed(0 / 0), ratio.toFixed(undefined), ratio.toFixed(void 0));
+for (const badDigits of [-1, 101, 1 / 0]) {
+  try {
+    console.log((1).toFixed(badDigits));
+  } catch (e) {
+    console.log(e instanceof RangeError, (e as Error).message);
+  }
+}
 
 console.log(x.hasOwnProperty('toFixed'));
 console.log(x['toExponential']());
+console.log(x['toFixed'](2));
 console.log(x['hasOwnProperty']('toFixed'));
 console.log(true['toString']());
 var str2 = "hello";
