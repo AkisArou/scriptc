@@ -88,11 +88,51 @@ jobs:
           pnpm test packages/compiler/test/cc-driver.test.ts
           --testNamePattern "host-native clang static build"
 
+  # Exercises the supported Windows GNU target and the built CLI end to end:
+  # TS7 must open its synthetic project, ambient files must resolve across
+  # slash styles, and the default executable must use the .exe suffix.
+  windows_cli:
+    name: test (windows CLI smoke)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      SCRIPTC_NO_CACHE: "1"
+      SCRIPTC_CC: zigcc
+      SCRIPTC_TARGET: x86_64-windows-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Windows path regressions
+        run: pnpm exec vitest run packages/compiler/test/ts7/program.test.ts packages/cli/test/paths.test.ts
+      - name: Windows scriptc run smoke
+        shell: pwsh
+        run: |
+          zig version
+          $output = & node packages/cli/dist/main.js run tests/corpus/001-hello.ts --backend c
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $actual = ($output -join "`n").Trim()
+          if ($actual -ne "hello world") {
+            throw "unexpected scriptc output: $actual"
+          }
+
   # Aggregate gate with the pre-matrix job's name, so anything keyed on the
   # single "test" check (branch protection, badges) keeps resolving. Fails
-  # unless every matrix shard and the native Linux/glibc build succeeded.
+  # unless every matrix shard and both platform integration jobs succeeded.
   test:
-    needs: [tests, linux_host_clang]
+    needs: [tests, linux_host_clang, windows_cli]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -100,3 +140,4 @@ jobs:
         run: |
           test "${{ needs.tests.result }}" = success
           test "${{ needs.linux_host_clang.result }}" = success
+          test "${{ needs.windows_cli.result }}" = success

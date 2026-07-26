@@ -188,9 +188,9 @@ export interface AnalyzeResult {
  * and the path-module binding are compile-time constants); a malformed
  * SCRIPTC_CC/SCRIPTC_TARGET combination reports at compileC exactly as
  * before, so analysis falls back to the host here rather than throwing. */
-function buildTargetPlatform(): string {
+export function buildTargetPlatform(env: NodeJS.ProcessEnv = process.env): string {
   try {
-    return targetPlatform(resolveCc());
+    return targetPlatform(resolveCc(env));
   } catch {
     return process.platform;
   }

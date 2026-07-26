@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { analyze, compile, compileC, compileLibrary, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
+import { defaultExecutableName } from "./paths.js";
 
 const USAGE = `scriptc — TypeScript/JavaScript to native executables (experimental)
 
@@ -226,7 +227,7 @@ async function main(): Promise<number> {
 
   const outDir = values.out ? dirname(resolve(values.out)) : join(dirname(input), ".scriptc");
   const stem = basename(input).replace(/\.(ts|js|mjs|cjs|c|ll)$/, "");
-  const outPath = values.out ? resolve(values.out) : join(outDir, stem);
+  const outPath = values.out ? resolve(values.out) : join(outDir, defaultExecutableName(stem));
 
   const build = async (): Promise<string> => {
     if (values["from-c"]) {
