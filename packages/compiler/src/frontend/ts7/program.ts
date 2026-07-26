@@ -27,6 +27,7 @@ import type {
 import type { SourceFile } from "typescript/unstable/ast";
 import { CheckerFacade } from "./checker.js";
 import { enumKeyOf, ModuleKind, ModuleResolutionKind, ScriptTarget } from "./enums.js";
+import { tsgoPath } from "../shared.js";
 
 /** The compiler options our createProgram accepts: TS7's CompilerOptions
  * shape (numeric enums for target/module/moduleResolution — the enums module
@@ -110,19 +111,19 @@ export class Ts7Host {
         // string => virtual (or shadowed) hit; null => shadowed out of
         // existence; undefined => real-FS fallthrough.
         readFile: (fileName) => {
-          const virtual = virtualFiles.get(fileName);
+          const virtual = virtualFiles.get(tsgoPath(fileName));
           if (virtual !== undefined) return virtual;
           if (shadow === null) return undefined;
           if (shadow.hideFile(fileName)) return null;
           return shadow.readFile(fileName);
         },
         fileExists: (fileName) => {
-          if (virtualFiles.has(fileName)) return true;
+          if (virtualFiles.has(tsgoPath(fileName))) return true;
           if (shadow !== null && shadow.hideFile(fileName)) return false;
           return undefined;
         },
         directoryExists: () => undefined,
-        realpath: (path) => (virtualFiles.has(path) ? path : undefined),
+        realpath: (path) => (virtualFiles.has(tsgoPath(path)) ? path : undefined),
         getAccessibleEntries: () => undefined,
       },
     });
@@ -130,7 +131,7 @@ export class Ts7Host {
 
   /** Registers an in-memory file served to tsgo by the virtual-FS hooks. */
   addVirtualFile(path: string, content: string): void {
-    this.virtualFiles.set(path, content);
+    this.virtualFiles.set(tsgoPath(path), content);
   }
 
   /** tsgo's own tsconfig parser (extends chains resolved server-side) — the
