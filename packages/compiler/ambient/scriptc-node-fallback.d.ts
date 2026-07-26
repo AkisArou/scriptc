@@ -76,8 +76,8 @@ declare namespace NodeJS {
 
 /* log/info/debug write stdout (info and debug ARE log in Node); error and
  * warn are ONE stream (warn IS error under another name) and write stderr
- * with the exact same formatting. stderr is unbuffered (stdout flushes
- * first, so merged 2>&1 output keeps source order). Arguments take Node's
+ * with the exact same formatting. Each call submits its output promptly;
+ * stdout settles first under merged 2>&1 output. Arguments take Node's
  * console semantics: strings verbatim, everything else through the static
  * util.inspect rendering — so the parameters are unknown[], like stock
  * lib's console; values inspect cannot render statically (functions inside
@@ -203,9 +203,9 @@ declare var process: {
    * per queued unfired immediate; unmodeled kinds absent (SEMANTICS.md). */
   getActiveResourcesInfo(): string[];
   /* The raw byte writes — no newline, no formatting. stdout shares
-   * console.log's stream and buffer, so ordering is preserved; stderr is
-   * unbuffered like Node's. The boolean is Node's backpressure signal —
-   * these synchronous writes always return true. The Uint8Array overload
+   * console.log's stream, each call is submitted promptly, and ordering is
+   * preserved. The boolean is Node's backpressure signal — these synchronous
+   * writes always return true. The Uint8Array overload
    * and isTTY exist so real CLIs TYPECHECK (they are @types/node surface);
    * only the one-string form has a lowering — everything else fences at
    * its use site. */

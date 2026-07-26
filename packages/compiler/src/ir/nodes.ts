@@ -2788,8 +2788,8 @@ export type IrLibFn =
    * catchably. */
   | "zlib.deflateSync"
   | "zlib.inflateSync"
-  /** The Buffer overloads of the raw stream writes — same streams and
-   * buffering as process.stdoutWrite/stderrWrite, constantly true. */
+  /** The Buffer overloads of the raw stream writes — same promptly
+   * submitted streams as process.stdoutWrite/stderrWrite, constantly true. */
   | "process.stdoutWriteBytes"
   | "process.stderrWriteBytes"
   | "fsp.readFile"
@@ -2904,10 +2904,10 @@ export type IrLibFn =
    * whose fiber turns the throw into the rejection. */
   | "cp.execCapture"
   /** The raw byte writes: one borrowed string arg → bool (constantly true
-   * — Node's backpressure signal never fires on these synchronous writes).
-   * stdoutWrite shares console.log's stream AND buffer, so interleaved
-   * output keeps source order; stderrWrite is unbuffered like Node's
-   * stderr. No newline, no formatting, never throws. */
+   * — this synchronous runtime never queues backpressure). stdoutWrite
+   * shares console.log's stream, each call is submitted promptly, and
+   * interleaved output keeps source order. No newline, no formatting,
+   * never throws. */
   | "process.stdoutWrite"
   | "process.stderrWrite"
   | "timers.setTimeout"

@@ -2682,7 +2682,7 @@ static JSValue isl_host_write(JSContext *ctx, JSValueConst this_val, int argc,
   size_t len;
   const char *s = JS_ToCStringLen(ctx, &len, argv[1]);
   if (!s) return JS_EXCEPTION;
-  fwrite(s, 1, len, fd == 2 ? stderr : stdout);
+  scr_stdio_write(fd, s, len);
   JS_FreeCString(ctx, s);
   return JS_TRUE;
 }

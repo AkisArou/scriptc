@@ -35,8 +35,9 @@ char *strcasestr(const char *hay, const char *needle);
 
 /* ── process ──────────────────────────────────────────────────────────── */
 
-/* Called once at the top of main: stdout buffering to match piped Node,
- * flush-at-exit, RC audit registration (when built with -DSCR_RC_AUDIT). */
+/* Called once at the top of main: private stdout formatter buffer,
+ * flush-at-exit, RC audit registration (when built with -DSCR_RC_AUDIT).
+ * JavaScript-visible writes flush before returning. */
 void scr_init(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -1840,10 +1841,13 @@ int scr_lib_arg_count(void);
 const char *scr_lib_arg(int i);
 ScrStr *scr_process_platform(void); /* +1 interned ("darwin", "linux", ...) */
 ScrStr *scr_process_cwd(void);      /* +1 fresh (getcwd) */
-/* process.stdout/.stderr .write — the raw byte writes (no newline, no
- * formatting; data borrowed). stdout shares console.log's stream+buffer
- * (ordering preserved); stderr is unbuffered like Node's. Constantly true
- * (Node's backpressure boolean never fires on synchronous writes). */
+/* Submit one raw chunk to fd 1/2 and flush it before returning. Used by all
+ * JavaScript-visible console/process/readline/island output paths so the
+ * internal stdio formatting buffer never delays live output. */
+void scr_stdio_write(int fd, const void *data, size_t len);
+/* process.stdout/.stderr .write — raw bytes (no newline or formatting; data
+ * borrowed), promptly visible and ordered with console output. Constantly
+ * true (the synchronous runtime never queues backpressure). */
 bool scr_process_stdout_write(const ScrStr *data);
 bool scr_process_stderr_write(const ScrStr *data);
 /* The first-class WritableStream write: fd is the stream value itself
@@ -5835,11 +5839,11 @@ typedef struct {
   } v;
 } ScrLogArg;
 
-/* Space-joined args + '\n', single buffered write. Borrows string args. */
+/* Space-joined args + '\n', submitted before return. Borrows string args. */
 void scr_console_log(size_t n, const ScrLogArg *args);
 /* The stderr twin (console.error AND console.warn — one stream in Node):
- * identical formatting, unbuffered stderr, stdout flushed first so merged
- * (2>&1) output keeps source order. */
+ * identical formatting, with stdout settled first so merged (2>&1) output
+ * keeps source order. */
 void scr_console_error(size_t n, const ScrLogArg *args);
 
 #endif /* SCR_RUNTIME_H */

@@ -154,13 +154,12 @@ ScrBytes *scr_crypto_random_bytes(double n) {
 /* ── process.stdout/stderr.write(buf) ──────────────────────────────────── */
 
 bool scr_process_stdout_write_bytes(const ScrBytes *b) {
-  fwrite(b->data, 1, b->len * scr_bytes_elem_size(b->elem), stdout);
+  scr_stdio_write(1, b->data, b->len * scr_bytes_elem_size(b->elem));
   return true;
 }
 
 bool scr_process_stderr_write_bytes(const ScrBytes *b) {
-  fflush(stdout); /* merged 2>&1 output keeps source order (scr_lib.c) */
-  fwrite(b->data, 1, b->len * scr_bytes_elem_size(b->elem), stderr);
+  scr_stdio_write(2, b->data, b->len * scr_bytes_elem_size(b->elem));
   return true;
 }
 

@@ -584,21 +584,18 @@ ScrStr *scr_process_cwd(void) {
   return scr_str_new(buf, strlen(buf));
 }
 
-/* The raw byte writes. stdout goes through the SAME stdio stream and
- * buffer console.log uses (scr_init's setvbuf), so interleaved writes
- * keep source order; stderr is unbuffered, like Node's, and FLUSHES
- * stdout first (the console.error convention) so merged 2>&1 output
- * keeps source order despite stdout's full buffering. The boolean is
- * Node's backpressure signal — a synchronous fwrite has no backpressure,
- * so it is constantly true. */
+/* The raw byte writes use the SAME stdio stream as console, and each call
+ * flushes before returning so live consumers see Node's source order without
+ * an observable C buffering delay. The boolean is Node's backpressure signal
+ * — this synchronous runtime has no queued backpressure, so it is constantly
+ * true. */
 bool scr_process_stdout_write(const ScrStr *data) {
-  fwrite(data->data, 1, data->len, stdout);
+  scr_stdio_write(1, data->data, data->len);
   return true;
 }
 
 bool scr_process_stderr_write(const ScrStr *data) {
-  fflush(stdout);
-  fwrite(data->data, 1, data->len, stderr);
+  scr_stdio_write(2, data->data, data->len);
   return true;
 }
 
@@ -606,7 +603,7 @@ bool scr_process_stderr_write(const ScrStr *data) {
  * WritableStream-typed value — the prefixStream idiom): the value is the
  * stream's fd (1 or 2, minted by the process.stdout/stderr reads), and
  * the write dispatches onto the exact stdout/stderr paths above so
- * buffering and ordering stay identical. */
+ * prompt submission and ordering stay identical. */
 bool scr_proc_stream_write(double fd, const ScrStr *data) {
   return (int)fd == 2 ? scr_process_stderr_write(data) : scr_process_stdout_write(data);
 }
