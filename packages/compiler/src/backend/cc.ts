@@ -211,9 +211,9 @@ export function runtimeSrcDir(): string {
 /* ── alternate C compiler (SCRIPTC_CC) and cross target (SCRIPTC_TARGET) ──────────
  * SCRIPTC_CC=zigcc swaps the compiler driver to `zig cc` (clang underneath, with
  * zig's bundled sysroots — the door to cross-compiling). Unset or
- * SCRIPTC_CC=clang is the default and keeps the historical clang invocation byte
- * for byte: resolveCc returns ["clang"] with NO extra args, so every command
- * line below is exactly what it always was (pinned by cc-driver.test.ts).
+ * SCRIPTC_CC=clang is the default. Host Linux adds the two glibc requirements
+ * that macOS does not need: -D_GNU_SOURCE while compiling, and -lm after all
+ * link inputs. Other hosts keep the historical bare-clang command line.
  *
  * SCRIPTC_TARGET=<triple> (zigcc only — plain clang has no cross sysroots here)
  * adds `-target <triple>` to every compile. Linux-gnu triples also add
@@ -250,29 +250,45 @@ export interface CcDriver {
   argv: string[];
   /** The SCRIPTC_TARGET triple, or null for a host-native build. */
   target: string | null;
-  /** Extra compile args the target demands; ALWAYS [] on the default path. */
+  /** Extra compile args the produced platform demands. */
   targetArgs: string[];
+  /** Platform libraries appended after every object/archive input. */
+  linkArgs: string[];
 }
 
-export function resolveCc(env: NodeJS.ProcessEnv = process.env): CcDriver {
+/** Resolve native platform flags independently of the machine running tests,
+ * so the host-Linux contract remains pinned on every development host. */
+function nativePlatformArgs(platform: NodeJS.Platform): Pick<CcDriver, "targetArgs" | "linkArgs"> {
+  return platform === "linux"
+    ? { targetArgs: ["-D_GNU_SOURCE"], linkArgs: ["-lm"] }
+    : { targetArgs: [], linkArgs: [] };
+}
+
+export function resolveCc(
+  env: NodeJS.ProcessEnv = process.env,
+  hostPlatform: NodeJS.Platform = process.platform,
+): CcDriver {
   const cc = env["SCRIPTC_CC"] ?? "";
   const target = env["SCRIPTC_TARGET"] ?? "";
+  const hostArgs = nativePlatformArgs(hostPlatform);
   if (cc === "" || cc === "clang") {
     if (target !== "") {
       throw new Error(
         `SCRIPTC_TARGET=${target} requires SCRIPTC_CC=zigcc — the default clang path has no cross-target sysroots.`,
       );
     }
-    return { argv: ["clang"], target: null, targetArgs: [] };
+    return { argv: ["clang"], target: null, ...hostArgs };
   }
   if (cc !== "zigcc") {
     throw new Error(`unknown SCRIPTC_CC '${cc}' (supported: clang, zigcc)`);
   }
-  if (target === "") return { argv: ["zig", "cc"], target: null, targetArgs: [] };
+  if (target === "") return { argv: ["zig", "cc"], target: null, ...hostArgs };
+  const linux = target.includes("linux");
   return {
     argv: ["zig", "cc"],
     target,
-    targetArgs: ["-target", target, ...(target.includes("linux") ? ["-D_GNU_SOURCE"] : [])],
+    targetArgs: ["-target", target, ...(linux ? ["-D_GNU_SOURCE"] : [])],
+    linkArgs: linux ? ["-lm"] : [],
   };
 }
 
@@ -652,7 +668,7 @@ async function ensureTlsArchive(sanitize: boolean, driver: CcDriver): Promise<st
     const sources = (await readdir(join(vendor, "library"))).filter((n) => n.endsWith(".c")).sort();
     const cflags = [
       "-std=c11",
-      ...driver.targetArgs, // ALWAYS empty on host builds
+      ...driver.targetArgs,
       ...(sanitize ? ["-O1", "-fsanitize=address"] : ["-Os"]),
       "-I", join(vendor, "include"),
       "-I", join(vendor, "library"),
@@ -1059,7 +1075,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // the historical single invocation, cached-.o substitution on cache misses.
   const buildArgs = (rt: (path: string) => string): string[] => [
     "-std=c11",
-    ...driver.targetArgs, // ALWAYS empty on the default clang path
+    ...driver.targetArgs,
     ...(opts.sanitize
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
@@ -1183,7 +1199,10 @@ export async function compileC(opts: CcOptions): Promise<void> {
               : [rt(join(rtDir, "scr_fetch_curl.c")), "-lcurl"]
             : []),
           engineArchive,
-          "-lm",
+          // Linux's libm is appended after every input below for GNU ld's
+          // left-to-right archive resolution. Other dynamic targets keep
+          // the historical engine-adjacent spelling.
+          ...(driver.linkArgs.includes("-lm") ? [] : ["-lm"]),
           // ld64 dead-stripping claws back a chunk of the engine archive;
           // harmless elsewhere but only spelled this way on macOS. Keyed on
           // the TARGET platform (= the host on the default path, where this
@@ -1208,6 +1227,10 @@ export async function compileC(opts: CcOptions): Promise<void> {
     opts.cPath,
     ...(opts.linkInputs ?? []),
     ...(opts.systemLibraries ?? []).map((name) => `-l${name}`),
+    // glibc keeps libm separate from libc. This must trail the generated
+    // program and every native FFI input because GNU ld resolves archives
+    // from left to right.
+    ...driver.linkArgs,
     "-o", opts.outPath,
   ];
   const ccName = driver.argv.join(" ");
