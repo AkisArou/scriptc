@@ -5,7 +5,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --filter './packages/*' run build",
+    "build": "pnpm -r --filter \"./packages/*\" run build",
     "build:fresh": "rm -rf packages/compiler/dist packages/cli/dist node_modules/.cache/scriptc-tsc && pnpm build",
     "test": "vitest run",
     "test:cache-identity": "node tests/harness/cache-identity.mjs",
