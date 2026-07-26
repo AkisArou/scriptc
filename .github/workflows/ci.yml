@@ -61,13 +61,42 @@ jobs:
           tests/harness/npm.test.ts
           tests/harness/server.test.ts
 
+  # A real host-clang/glibc build, not the zig cross-target lane: catches
+  # Linux feature-test macro omissions at compile time and separate-libm
+  # omissions/order errors at link time.
+  linux_host_clang:
+    name: test (linux host clang/glibc)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # The verdict must come from a live clang invocation, never a cached
+      # binary copied from a previous build.
+      SCRIPTC_NO_CACHE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Host clang static-build regression
+        run: >-
+          pnpm test packages/compiler/test/cc-driver.test.ts
+          --testNamePattern "host-native clang static build"
+
   # Aggregate gate with the pre-matrix job's name, so anything keyed on the
   # single "test" check (branch protection, badges) keeps resolving. Fails
-  # unless every matrix shard succeeded.
+  # unless every matrix shard and the native Linux/glibc build succeeded.
   test:
-    needs: tests
+    needs: [tests, linux_host_clang]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: All shards green
-        run: test "${{ needs.tests.result }}" = success
+      - name: All lanes green
+        run: |
+          test "${{ needs.tests.result }}" = success
+          test "${{ needs.linux_host_clang.result }}" = success

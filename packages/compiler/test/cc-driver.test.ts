@@ -1,16 +1,18 @@
 /* The SCRIPTC_CC / SCRIPTC_TARGET driver contract (cc.ts):
  *
- * - The DEFAULT path is pinned: no SCRIPTC_CC (or SCRIPTC_CC=clang) resolves to the
- *   bare ["clang"] driver with ZERO extra args, so the historical command
- *   line cannot change by a byte. SCRIPTC_TARGET without zigcc is an error, not
- *   a silently different clang invocation.
+ * - The DEFAULT path is pinned: no SCRIPTC_CC (or SCRIPTC_CC=clang) resolves to
+ *   ["clang"]. macOS keeps zero extra args; host Linux adds glibc's
+ *   -D_GNU_SOURCE compile flag and trailing -lm link library.
+ *   SCRIPTC_TARGET without zigcc is an error, not a silently different clang
+ *   invocation.
  * - SCRIPTC_CC=zigcc drives `zig cc`. Host-native zigcc builds must produce a
  *   working binary (zig cc is clang underneath); SCRIPTC_TARGET cross builds
  *   must produce an ELF for linux triples and reject the features whose
  *   inputs are host-built (vendored archives, system libs, kqueue units).
  *
- * The zig-requiring legs skip when zig is not on PATH — the driver pins
- * above run everywhere.
+ * The native-clang leg runs everywhere (and is selected alone by the
+ * ubuntu/glibc CI job). The zig-requiring legs skip when zig is not on
+ * PATH — the driver pins above run everywhere.
  */
 import { execFile, execFileSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -31,12 +33,19 @@ function zigOnPath(): boolean {
   }
 }
 
-test("default driver is bare clang with no extra args (byte-identical contract)", () => {
+test("default driver keeps bare clang while selecting host platform flags", () => {
   for (const env of [{}, { SCRIPTC_CC: "clang" }, { SCRIPTC_CC: "" }]) {
-    const d = resolveCc(env);
+    const d = resolveCc(env, "darwin");
     expect(d.argv).toEqual(["clang"]);
     expect(d.target).toBeNull();
     expect(d.targetArgs).toEqual([]);
+    expect(d.linkArgs).toEqual([]);
+
+    const linux = resolveCc(env, "linux");
+    expect(linux.argv).toEqual(["clang"]);
+    expect(linux.target).toBeNull();
+    expect(linux.targetArgs).toEqual(["-D_GNU_SOURCE"]);
+    expect(linux.linkArgs).toEqual(["-lm"]);
   }
 });
 
@@ -50,21 +59,29 @@ test("unknown SCRIPTC_CC values are rejected", () => {
 });
 
 test("zigcc resolves to `zig cc`; linux triples add -target and -D_GNU_SOURCE", () => {
-  const native = resolveCc({ SCRIPTC_CC: "zigcc" });
+  const native = resolveCc({ SCRIPTC_CC: "zigcc" }, "darwin");
   expect(native.argv).toEqual(["zig", "cc"]);
   expect(native.targetArgs).toEqual([]);
+  expect(native.linkArgs).toEqual([]);
+
+  const nativeLinux = resolveCc({ SCRIPTC_CC: "zigcc" }, "linux");
+  expect(nativeLinux.targetArgs).toEqual(["-D_GNU_SOURCE"]);
+  expect(nativeLinux.linkArgs).toEqual(["-lm"]);
 
   const cross = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "aarch64-linux-gnu.2.36" });
   expect(cross.argv).toEqual(["zig", "cc"]);
   expect(cross.targetArgs).toEqual(["-target", "aarch64-linux-gnu.2.36", "-D_GNU_SOURCE"]);
+  expect(cross.linkArgs).toEqual(["-lm"]);
 
   // Non-linux triples get the -target but not glibc's visibility macro.
   const mac = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "aarch64-macos" });
   expect(mac.targetArgs).toEqual(["-target", "aarch64-macos"]);
+  expect(mac.linkArgs).toEqual([]);
 
   // Windows triples too: mingw-w64 headers expose everything by default.
   const win = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "x86_64-windows-gnu" });
   expect(win.targetArgs).toEqual(["-target", "x86_64-windows-gnu"]);
+  expect(win.linkArgs).toEqual([]);
 });
 
 /** Runs body with SCRIPTC_CC/SCRIPTC_TARGET set, restoring the previous values. */
@@ -84,6 +101,22 @@ async function withCcEnv(cc: string | undefined, target: string | undefined, bod
     else process.env["SCRIPTC_TARGET"] = prevTarget;
   }
 }
+
+const HOST_CLANG_C = '#include <stdio.h>\nint main(void) { printf("clang says hi\\n"); return 0; }\n';
+
+test("host-native clang static build compiles the runtime and runs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scr-host-clang-"));
+  const cPath = join(dir, "program.c");
+  await writeFile(cPath, HOST_CLANG_C);
+  const outPath = join(dir, "program");
+  // This exact default path caught both Linux regressions: without
+  // -D_GNU_SOURCE the glibc headers hide declarations used by the runtime;
+  // with the macro but no trailing -lm, the runtime's fmod/exp2 references
+  // fail to link. macOS keeps exercising its unchanged bare-clang path.
+  await withCcEnv(undefined, undefined, () => compileC({ cPath, outPath }));
+  const { stdout } = await execFileAsync(outPath);
+  expect(stdout).toBe("clang says hi\n");
+});
 
 const HELLO_C = '#include <stdio.h>\nint main(void) { printf("zigcc says hi\\n"); return 0; }\n';
 
