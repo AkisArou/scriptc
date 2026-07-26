@@ -6,6 +6,15 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.0.16
+
+### Fixes
+
+- **Console output is visible promptly.** `console.log`, `process.stdout.write`, readline prompts, and writes from dynamic islands now submit their bytes before returning instead of retaining piped stdout until a later flush or normal exit. Live consumers see output as it happens, and output written immediately before `SIGKILL` matches Node instead of disappearing.
+- **Native Linux builds link with host clang.** Linux host builds now expose the glibc declarations the runtime uses and place `libm` after every link input, fixing compile failures from missing declarations and link failures from GNU ld's left-to-right archive resolution. A native Ubuntu clang lane pins the complete static build.
+
+<!-- release:end -->
+
 ## 0.0.15
 
 ### Features
@@ -15,8 +24,6 @@ All notable changes to scriptc will be documented in this file.
 ### Fixes
 
 - FFI profiles validate every configured binding before emit, including unused and shadowed declarations, and reject uninhabited `never` slots instead of letting TypeScript's control-flow assumptions disagree with a returning native function. A same-named local function remains ordinary TypeScript, while missing symbols and other native link failures surface as bounded SC5004 diagnostics rather than internal compiler errors.
-
-<!-- release:end -->
 
 ## 0.0.14
 
