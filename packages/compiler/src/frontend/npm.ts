@@ -316,6 +316,10 @@ interface SpecifierUse {
  * its own. */
 interface ModuleSpecifiers {
   uses: SpecifierUse[];
+  /** Node 24's syntax detection for ambiguous .js/extensionless files:
+   * source that cannot run as CommonJS is intrinsically ESM even when the
+   * nearest package.json omits "type". */
+  esmSyntax: boolean;
   /** The specifier `__require` is IMPORTED from (`import { __require }
    * from "./chunk-X.js"` — esbuild's shared-helper chunk shape), else
    * null (locally defined or absent). */
@@ -414,7 +418,60 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
     else use.requireLocal = true;
   }
   for (const use of uses) use.require = use.requireLocal || use.requireViaHelper;
-  return { uses, requireHelperImport, requireHelperReexport };
+  return {
+    uses,
+    esmSyntax: nodeEsmSyntaxDetected(sf),
+    requireHelperImport,
+    requireHelperReexport,
+  };
+}
+
+/** Node 24 DETECT_MODULE_SYNTAX for an otherwise-ambiguous source file.
+ * TypeScript already marks import/export declarations and import.meta as
+ * external-module indicators. Node additionally detects top-level await
+ * and top-level lexical declarations that would redeclare one of the
+ * CommonJS wrapper parameters and therefore fail when parsed as CJS. */
+function nodeEsmSyntaxDetected(sf: ts.SourceFile): boolean {
+  if (ts.isExternalModule(sf)) return true;
+
+  const wrapperNames = new Set(["require", "module", "exports", "__dirname", "__filename"]);
+  const bindingRedeclaresWrapper = (name: ts.BindingName): boolean => {
+    if (ts.isIdentifier(name)) return wrapperNames.has(name.text);
+    return name.elements.some((el) =>
+      ts.isOmittedExpression(el) ? false : bindingRedeclaresWrapper(el.name)
+    );
+  };
+  for (const statement of sf.statements) {
+    if (
+      ts.isVariableStatement(statement) &&
+      (statement.declarationList.flags & ts.NodeFlags.BlockScoped) !== 0 &&
+      statement.declarationList.declarations.some((decl) => bindingRedeclaresWrapper(decl.name))
+    ) {
+      return true;
+    }
+    if (
+      ts.isClassDeclaration(statement) &&
+      statement.name !== undefined &&
+      wrapperNames.has(statement.name.text)
+    ) {
+      return true;
+    }
+  }
+
+  let topLevelAwait = false;
+  const visitTopLevel = (node: ts.Node): void => {
+    if (topLevelAwait || (node !== sf && ts.isFunctionLike(node))) return;
+    if (
+      ts.isAwaitExpression(node) ||
+      (ts.isForOfStatement(node) && node.awaitModifier !== undefined)
+    ) {
+      topLevelAwait = true;
+      return;
+    }
+    ts.forEachChild(node, visitTopLevel);
+  };
+  visitTopLevel(sf);
+  return topLevelAwait;
 }
 
 function builtinKeyOf(specifier: string): string | null {
@@ -703,16 +760,10 @@ export class NpmGraphBuilder {
   readonly errors: NpmGraphError[] = [];
   private readonly pkgJsonCache = new Map<string, PkgJson | null>();
   /** Modules whose format the RESOLUTION decided (the "module" field names
-   * an ESM graph regardless of the package's "type"). The entry is marked
-   * in resolvePackage; relative import/export edges propagate the mark in
-   * sweepEdges so a module-field barrel's `export { X } from "./leaf.js"`
-   * does not load leaf.js through a synthetic CommonJS facade. */
+   * an ESM entry regardless of the package's "type"). Relative ambiguous
+   * .js files use Node 24 syntax detection independently: ESM-syntax leaves
+   * stay ESM while same-scope CommonJS leaves retain their facade. */
   private readonly formatOverrides = new Map<string, EmbeddedFormat>();
-  /** The package scope whose "module" field caused each ESM override.
-   * Propagation stays inside this exact scope: a nested package.json (most
-   * importantly one declaring "type": "commonjs") resumes Node's normal
-   * target-file format rules. */
-  private readonly moduleFieldScopes = new Map<string, string>();
   /** Canonical "node:x" → packages whose code imports it. */
   private readonly builtinsSeen = new Map<string, Set<string>>();
   /** Canonical "node:x" keys some STATIC import reaches — those keep the
@@ -1072,9 +1123,11 @@ export class NpmGraphBuilder {
     return cached;
   }
 
-  /** The nearest package.json "type" above `file` — the .js format rule.
-   * Resolution-time overrides (the "module" field) win. */
-  private formatOf(file: string): EmbeddedFormat {
+  /** Node 24's file-format rule. Explicit extensions and a valid nearest
+   * package.json "type" win; an otherwise-ambiguous .js/extensionless file
+   * uses source syntax detection. Resolution-time "module" entry overrides
+   * remain the one deliberate bundler-convention input. */
+  private formatOf(file: string, source: string): EmbeddedFormat {
     const override = this.formatOverrides.get(file);
     if (override) return override;
     if (file.endsWith(".mjs")) return "esm";
@@ -1082,46 +1135,19 @@ export class NpmGraphBuilder {
     if (file.endsWith(".json")) return "json";
     for (let dir = dirname(file); ; ) {
       const pkg = this.pkgJsonOf(dir);
-      if (pkg) return pkg.type === "module" ? "esm" : "cjs";
+      if (pkg) {
+        if (pkg.type === "module") return "esm";
+        if (pkg.type === "commonjs") return "cjs";
+        break;
+      }
       const parent = dirname(dir);
-      if (parent === dir) return "cjs";
+      if (parent === dir) break;
       dir = parent;
     }
-  }
-
-  /** The nearest package.json scope containing `file`, or null. Node
-   * classifies a .js target from this scope, never from its importer. */
-  private packageScopeOf(file: string): string | null {
-    for (let dir = dirname(file); ; ) {
-      if (this.pkgJsonOf(dir) !== null) return dir;
-      const parent = dirname(dir);
-      if (parent === dir) return null;
-      dir = parent;
-    }
-  }
-
-  /** Carries a module-field ESM scope across one eligible relative edge.
-   * Returns true only when `to` learned new provenance, so an already-walked
-   * target can refresh its cached format and continue the propagation. */
-  private propagateModuleFieldFormat(from: string, to: string, use: SpecifierUse): boolean {
-    const scope = this.moduleFieldScopes.get(from);
-    if (
-      scope === undefined ||
-      (!use.static && !use.dynamicImport) ||
-      this.packageScopeOf(to) !== scope ||
-      to.endsWith(".mjs") ||
-      to.endsWith(".cjs") ||
-      to.endsWith(".json") ||
-      to.endsWith(".node")
-    ) {
-      return false;
-    }
-    const changed =
-      this.formatOverrides.get(to) !== "esm" ||
-      this.moduleFieldScopes.get(to) !== scope;
-    this.formatOverrides.set(to, "esm");
-    this.moduleFieldScopes.set(to, scope);
-    return changed;
+    const ext = extname(file);
+    return (ext === ".js" || ext === "") && this.specifiersOf(file, source)?.esmSyntax
+      ? "esm"
+      : "cjs";
   }
 
   /** Node-style file resolution: exact file, extension candidates
@@ -1254,7 +1280,6 @@ export class NpmGraphBuilder {
         const key = this.host.realpath(resolved);
         if (forceEsm && !key.endsWith(".mjs") && !key.endsWith(".cjs") && !key.endsWith(".json")) {
           this.formatOverrides.set(key, "esm");
-          this.moduleFieldScopes.set(key, pkgDir);
         }
         return key;
       }
@@ -1287,38 +1312,17 @@ export class NpmGraphBuilder {
    * so a failure five dependencies deep is attributable. `lazy` is the
    * REACHABILITY mode: true when every path from the user's import to this
    * module crosses a require()/dynamic-import() edge. */
-  private walk(
-    key: string,
-    chain: readonly string[],
-    lazy: boolean,
-    refreshModuleFieldScope = false,
-  ): void {
+  private walk(key: string, chain: readonly string[], lazy: boolean): void {
     const existing = this.modules.get(key);
     if (existing) {
-      const promote = !lazy && this.lazilyReached.has(key);
-      if (promote) {
+      if (!lazy && this.lazilyReached.has(key)) {
         // Promotion: a static path reached a module first seen behind a
         // lazy boundary — Node links it at the root now, so its edge
         // sweep re-runs eagerly (pushes dedupe through edgeSeen).
         this.lazilyReached.delete(key);
-      }
-      if (refreshModuleFieldScope) {
-        // A require-only path can discover this physical file before a
-        // module-field ESM path reaches it. The first walk classified it
-        // from package.json and cached that format; installing the override
-        // later must update the cached module and carry the newly-known
-        // scope through descendants already swept from it. The caller sets
-        // moduleFieldScopes before re-entering, which also breaks cycles.
-        const format = this.formatOf(key);
-        if (format !== existing.format) {
-          existing.format = format;
-          delete existing.esm;
+        if (existing.format !== "json") {
+          this.sweepEdges(key, existing.source, chain, false);
         }
-      }
-      if (promote && existing.format !== "json") {
-        this.sweepEdges(key, existing.source, chain, false);
-      } else if (refreshModuleFieldScope && existing.format !== "json") {
-        this.refreshModuleFieldEdges(key, chain, this.lazilyReached.has(key));
       }
       return;
     }
@@ -1342,7 +1346,7 @@ export class NpmGraphBuilder {
       });
       return;
     }
-    const format = this.formatOf(key);
+    const format = this.formatOf(key, source);
     this.modules.set(key, { key, source, format });
     if (lazy) this.lazilyReached.add(key);
     if (format === "json") return;
@@ -1360,32 +1364,6 @@ export class NpmGraphBuilder {
       this.specifiersCache.set(key, cached);
     }
     return cached;
-  }
-
-  /** Replays only relative ESM propagation after an existing module learns
-   * module-field provenance. Its original sweep already registered and
-   * walked every edge; repeating the full sweep would duplicate diagnostics
-   * and manufacture unused lazy-trap stubs for unresolved edges. */
-  private refreshModuleFieldEdges(
-    key: string,
-    chain: readonly string[],
-    lazy: boolean,
-  ): void {
-    for (const use of this.specifiersOf(key)?.uses ?? []) {
-      const spec = use.specifier;
-      if (
-        (!use.static && !use.dynamicImport) ||
-        (!spec.startsWith("./") && !spec.startsWith("../"))
-      ) {
-        continue;
-      }
-      const file = this.resolveFile(resolve(dirname(key), spec));
-      if (file === null) continue;
-      const to = this.host.realpath(file);
-      if (this.propagateModuleFieldFormat(key, to, use)) {
-        this.walk(to, chain, lazy || !use.static, true);
-      }
-    }
   }
 
   /** The module whose scope DEFINES the `__require` helper that `key`'s
@@ -1469,19 +1447,7 @@ export class NpmGraphBuilder {
         // about what the binary cannot reach.
         if (to.endsWith(".node")) this.noteLazyTrap(spec, use, pkgName, lazy, true);
         pushEdge(key, spec, to, "any");
-        // A package.json "module" field opts us into that package scope's
-        // ESM build even when the package has no "type": "module". Its
-        // relative STATIC imports/re-exports and dynamic import() targets
-        // inside the SAME scope are part of that ESM graph too. Without
-        // carrying the override, a `.js` leaf is misclassified as CommonJS;
-        // its synthesized facade then has no ESM-declared names and a valid
-        // named re-export fails only when the embedded engine links at
-        // startup. A nested package.json is a Node format boundary, and
-        // explicit .mjs/.cjs targets resume their own format rules.
-        // require() edges deliberately do not inherit this — they still
-        // name CJS modules.
-        const refreshModuleFieldScope = this.propagateModuleFieldFormat(key, to, use);
-        this.walk(to, chain, lazy || !use.static, refreshModuleFieldScope);
+        this.walk(to, chain, lazy || !use.static);
         continue;
       }
       const builtin = builtinKeyOf(spec);
