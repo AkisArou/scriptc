@@ -2655,12 +2655,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_btoa(${arg(0)})`);
           case "str.b64Missing":
             return finish(`scr_b64_missing_arg()`);
-          // The fraction-digits-free Number.prototype formatters
-          // (scr_lib.c). Borrow nothing; results +1; no throw.
+          // Number.prototype formatters (scr_lib.c). Borrow nothing;
+          // successful results +1; explicit toFixed may throw RangeError.
           case "num.toExponential":
             return finish(`scr_num_to_exponential(${arg(0)})`);
           case "num.toFixed0":
             return finish(`scr_num_to_fixed0(${arg(0)})`);
+          case "num.toFixed":
+            return finish(`scr_num_to_fixed(${arg(0)}, ${arg(1)})`);
           // Object.is over two numbers — SameValue on doubles. No throw.
           case "num.sameValue":
             return finish(`scr_num_same_value(${arg(0)}, ${arg(1)})`);

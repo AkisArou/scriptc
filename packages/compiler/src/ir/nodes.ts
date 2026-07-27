@@ -1828,17 +1828,15 @@ export type IrLibFn =
   | "str.atob"
   | "str.btoa"
   | "str.b64Missing"
-  /** The fraction-digits-free Number.prototype formatters (scr_lib.c),
-   * JS-exact: num.toExponential is toExponential() with the spec's
-   * "as many digits as necessary" — the shortest correctly-rounded
-   * mantissa, d[.ddd]e±X with no exponent zero-padding ("7e+0"); NaN and
-   * ±Infinity answer their texts. num.toFixed0 is toFixed() at 0 digits —
-   * the spec's closest-integer pick with ties toward +∞ on the magnitude
-   * ("-2.5" → "-3"), |x| ≥ 1e21 falling back to ToString, and the "-0"
-   * result for negative fractions rounding to zero. The explicit-digits
-   * forms keep their island lowering. Results +1; never throw. */
+  /** Number.prototype formatters (scr_lib.c), JS-exact:
+   * num.toExponential is toExponential() with the spec's "as many digits
+   * as necessary"; num.toFixed0 is the non-throwing omitted-argument
+   * toFixed() fast path; num.toFixed implements an explicit fractionDigits
+   * with exact binary-value rounding and THROWS RangeError outside 0..100.
+   * Successful results +1. */
   | "num.toExponential"
   | "num.toFixed0"
+  | "num.toFixed"
   /** Object.is over two numbers — the spec's SameValue on doubles: NaN
    * equals NaN, +0 differs from -0, everything else is `===`. Plain bool
    * result; never throws. (Union-armed operands take unionEq's sameValue
@@ -6434,6 +6432,7 @@ export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "num.toFixed",
   "insp.jsonDyn",
   // diagnostics_channel: publish runs subscribers synchronously (a throw
   // propagates — the documented divergence from triggerUncaughtException);

@@ -493,6 +493,16 @@ export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | un
   random: { fn: "math.random", arity: 0 },
 };
 
+/** Number prototype methods with dedicated STATIC lowering paths. The
+ * libCall spellings are also the compiled-graph witnesses used by library
+ * fences, while the arity range is the surface manifest's support claim. */
+export const STATIC_NUMBER_METHODS: Record<
+  string,
+  { fns: readonly IrLibFn[]; minArgs: number; maxArgs: number } | undefined
+> = {
+  toFixed: { fns: ["num.toFixed0", "num.toFixed"], minArgs: 0, maxArgs: 1 },
+};
+
 /** One lowerable builtin-module FUNCTION: `fn`'s libCall with `params`
  * completed exactly. `variadicPack` marks Node's rest-parameter functions
  * (path.join/resolve): every argument lowers as a string and the frontend

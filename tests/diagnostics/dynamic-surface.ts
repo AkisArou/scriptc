@@ -9,7 +9,7 @@
 // appear here.)
 const up = Math.sqrt(2);
 const tau = Math.PI * 2;
-const price = (19.99).toFixed(2);
+const price = (19.99).toPrecision(4);
 const swapped = "banana".replace("an", "AN");
 const ch = "hello".at(0);
 const n = Number.parseFloat("3.14");
