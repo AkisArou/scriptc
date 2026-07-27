@@ -79,7 +79,7 @@ Measured on Apple M-series against the same workloads in Node, Go, Rust, and Zig
 | memory (RSS) | 1–4MB typical | Node: 67–116MB |
 | runtime | JS-faithful f64 semantics; competitive with the systems languages on most workloads | integer inference and ownership analysis are on the roadmap |
 
-## Escape hatches, honestly priced
+## Escape hatches
 
 - **`comptime(() => ...)`** runs TypeScript at build time (in an isolated VM inside the compiler) and bakes the result into the binary as a literal.
 - **Native FFI (`--ffi`)** binds signature-only TypeScript declarations to direct C ABI calls and links manifest-declared archives, objects, and system libraries. The boundary is explicit and length-delimited; see the [Native FFI guide](https://scriptc.dev/ffi).
