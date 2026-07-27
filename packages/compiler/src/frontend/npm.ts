@@ -1100,6 +1100,30 @@ export class NpmGraphBuilder {
     }
   }
 
+  /** Carries a module-field ESM scope across one eligible relative edge.
+   * Returns true only when `to` learned new provenance, so an already-walked
+   * target can refresh its cached format and continue the propagation. */
+  private propagateModuleFieldFormat(from: string, to: string, use: SpecifierUse): boolean {
+    const scope = this.moduleFieldScopes.get(from);
+    if (
+      scope === undefined ||
+      (!use.static && !use.dynamicImport) ||
+      this.packageScopeOf(to) !== scope ||
+      to.endsWith(".mjs") ||
+      to.endsWith(".cjs") ||
+      to.endsWith(".json") ||
+      to.endsWith(".node")
+    ) {
+      return false;
+    }
+    const changed =
+      this.formatOverrides.get(to) !== "esm" ||
+      this.moduleFieldScopes.get(to) !== scope;
+    this.formatOverrides.set(to, "esm");
+    this.moduleFieldScopes.set(to, scope);
+    return changed;
+  }
+
   /** Node-style file resolution: exact file, extension candidates
    * (commander requires './suggestSimilar'; ".node" is in Node's require
    * probe list — the resolved addon embeds as a throwing dlopen stub),
@@ -1263,17 +1287,38 @@ export class NpmGraphBuilder {
    * so a failure five dependencies deep is attributable. `lazy` is the
    * REACHABILITY mode: true when every path from the user's import to this
    * module crosses a require()/dynamic-import() edge. */
-  private walk(key: string, chain: readonly string[], lazy: boolean): void {
+  private walk(
+    key: string,
+    chain: readonly string[],
+    lazy: boolean,
+    refreshModuleFieldScope = false,
+  ): void {
     const existing = this.modules.get(key);
     if (existing) {
-      if (!lazy && this.lazilyReached.has(key)) {
+      const promote = !lazy && this.lazilyReached.has(key);
+      if (promote) {
         // Promotion: a static path reached a module first seen behind a
         // lazy boundary — Node links it at the root now, so its edge
         // sweep re-runs eagerly (pushes dedupe through edgeSeen).
         this.lazilyReached.delete(key);
-        if (existing.format !== "json") {
-          this.sweepEdges(key, existing.source, chain, false);
+      }
+      if (refreshModuleFieldScope) {
+        // A require-only path can discover this physical file before a
+        // module-field ESM path reaches it. The first walk classified it
+        // from package.json and cached that format; installing the override
+        // later must update the cached module and carry the newly-known
+        // scope through descendants already swept from it. The caller sets
+        // moduleFieldScopes before re-entering, which also breaks cycles.
+        const format = this.formatOf(key);
+        if (format !== existing.format) {
+          existing.format = format;
+          delete existing.esm;
         }
+      }
+      if (promote && existing.format !== "json") {
+        this.sweepEdges(key, existing.source, chain, false);
+      } else if (refreshModuleFieldScope && existing.format !== "json") {
+        this.refreshModuleFieldEdges(key, chain, this.lazilyReached.has(key));
       }
       return;
     }
@@ -1315,6 +1360,32 @@ export class NpmGraphBuilder {
       this.specifiersCache.set(key, cached);
     }
     return cached;
+  }
+
+  /** Replays only relative ESM propagation after an existing module learns
+   * module-field provenance. Its original sweep already registered and
+   * walked every edge; repeating the full sweep would duplicate diagnostics
+   * and manufacture unused lazy-trap stubs for unresolved edges. */
+  private refreshModuleFieldEdges(
+    key: string,
+    chain: readonly string[],
+    lazy: boolean,
+  ): void {
+    for (const use of this.specifiersOf(key)?.uses ?? []) {
+      const spec = use.specifier;
+      if (
+        (!use.static && !use.dynamicImport) ||
+        (!spec.startsWith("./") && !spec.startsWith("../"))
+      ) {
+        continue;
+      }
+      const file = this.resolveFile(resolve(dirname(key), spec));
+      if (file === null) continue;
+      const to = this.host.realpath(file);
+      if (this.propagateModuleFieldFormat(key, to, use)) {
+        this.walk(to, chain, lazy || !use.static, true);
+      }
+    }
   }
 
   /** The module whose scope DEFINES the `__require` helper that `key`'s
@@ -1409,20 +1480,8 @@ export class NpmGraphBuilder {
         // explicit .mjs/.cjs targets resume their own format rules.
         // require() edges deliberately do not inherit this — they still
         // name CJS modules.
-        const moduleFieldScope = this.moduleFieldScopes.get(key);
-        if (
-          moduleFieldScope !== undefined &&
-          (use.static || use.dynamicImport) &&
-          this.packageScopeOf(to) === moduleFieldScope &&
-          !to.endsWith(".mjs") &&
-          !to.endsWith(".cjs") &&
-          !to.endsWith(".json") &&
-          !to.endsWith(".node")
-        ) {
-          this.formatOverrides.set(to, "esm");
-          this.moduleFieldScopes.set(to, moduleFieldScope);
-        }
-        this.walk(to, chain, lazy || !use.static);
+        const refreshModuleFieldScope = this.propagateModuleFieldFormat(key, to, use);
+        this.walk(to, chain, lazy || !use.static, refreshModuleFieldScope);
         continue;
       }
       const builtin = builtinKeyOf(spec);
