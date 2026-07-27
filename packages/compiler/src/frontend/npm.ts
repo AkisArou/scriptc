@@ -708,6 +708,11 @@ export class NpmGraphBuilder {
    * sweepEdges so a module-field barrel's `export { X } from "./leaf.js"`
    * does not load leaf.js through a synthetic CommonJS facade. */
   private readonly formatOverrides = new Map<string, EmbeddedFormat>();
+  /** The package scope whose "module" field caused each ESM override.
+   * Propagation stays inside this exact scope: a nested package.json (most
+   * importantly one declaring "type": "commonjs") resumes Node's normal
+   * target-file format rules. */
+  private readonly moduleFieldScopes = new Map<string, string>();
   /** Canonical "node:x" → packages whose code imports it. */
   private readonly builtinsSeen = new Map<string, Set<string>>();
   /** Canonical "node:x" keys some STATIC import reaches — those keep the
@@ -1084,6 +1089,17 @@ export class NpmGraphBuilder {
     }
   }
 
+  /** The nearest package.json scope containing `file`, or null. Node
+   * classifies a .js target from this scope, never from its importer. */
+  private packageScopeOf(file: string): string | null {
+    for (let dir = dirname(file); ; ) {
+      if (this.pkgJsonOf(dir) !== null) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+  }
+
   /** Node-style file resolution: exact file, extension candidates
    * (commander requires './suggestSimilar'; ".node" is in Node's require
    * probe list — the resolved addon embeds as a throwing dlopen stub),
@@ -1214,6 +1230,7 @@ export class NpmGraphBuilder {
         const key = this.host.realpath(resolved);
         if (forceEsm && !key.endsWith(".mjs") && !key.endsWith(".cjs") && !key.endsWith(".json")) {
           this.formatOverrides.set(key, "esm");
+          this.moduleFieldScopes.set(key, pkgDir);
         }
         return key;
       }
@@ -1381,22 +1398,29 @@ export class NpmGraphBuilder {
         // about what the binary cannot reach.
         if (to.endsWith(".node")) this.noteLazyTrap(spec, use, pkgName, lazy, true);
         pushEdge(key, spec, to, "any");
-        // A package.json "module" field opts us into the package's ESM
-        // build even when the package has no "type": "module". Its
+        // A package.json "module" field opts us into that package scope's
+        // ESM build even when the package has no "type": "module". Its
         // relative STATIC imports/re-exports and dynamic import() targets
-        // are part of that ESM graph too. Without carrying the override,
-        // a `.js` leaf is misclassified as CommonJS; its synthesized facade
-        // then has no ESM-declared names and a valid named re-export fails
-        // only when the embedded engine links at startup. require() edges
-        // deliberately do not inherit this — they still name CJS modules.
+        // inside the SAME scope are part of that ESM graph too. Without
+        // carrying the override, a `.js` leaf is misclassified as CommonJS;
+        // its synthesized facade then has no ESM-declared names and a valid
+        // named re-export fails only when the embedded engine links at
+        // startup. A nested package.json is a Node format boundary, and
+        // explicit .mjs/.cjs targets resume their own format rules.
+        // require() edges deliberately do not inherit this — they still
+        // name CJS modules.
+        const moduleFieldScope = this.moduleFieldScopes.get(key);
         if (
-          this.formatOverrides.get(key) === "esm" &&
+          moduleFieldScope !== undefined &&
           (use.static || use.dynamicImport) &&
+          this.packageScopeOf(to) === moduleFieldScope &&
+          !to.endsWith(".mjs") &&
           !to.endsWith(".cjs") &&
           !to.endsWith(".json") &&
           !to.endsWith(".node")
         ) {
           this.formatOverrides.set(to, "esm");
+          this.moduleFieldScopes.set(to, moduleFieldScope);
         }
         this.walk(to, chain, lazy || !use.static);
         continue;
