@@ -32,6 +32,11 @@ const ratio = 22 / 7;
 console.log(ratio.toFixed(fractionDigits), ratio.toFixed(3.9), ratio.toFixed(0 / 0), ratio.toFixed(undefined), ratio.toFixed(void 0));
 const missingDigits: undefined = undefined;
 console.log(ratio.toFixed(missingDigits));
+function effectfulMissingDigits(): undefined {
+  console.log("effectful missing digits");
+  return undefined;
+}
+console.log(ratio.toFixed(effectfulMissingDigits()));
 function formatWithOptionalDigits(value: number, digits?: number): string {
   return value.toFixed(digits);
 }

@@ -4816,20 +4816,27 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (name === "toFixed" && recvKind === "f64" && call.arguments.length === 1) {
       const operand = L.lowerExpr(recv);
       let digits = L.lowerExpr(call.arguments[0]!);
-      // The optional parameter also admits undefined. A standalone,
-      // side-effect-free undefined value is exactly the default 0; an
-      // optional number preserves its evaluation and selects 0 at runtime
-      // through the same narrowed nullish IR used by `digits ?? 0`.
+      // The optional parameter also admits undefined. Exact unit values
+      // become the default 0 after preserving any evaluation effects; an
+      // optional number selects 0 at runtime through the same narrowed
+      // nullish IR used by `digits ?? 0`.
       const zero: IrExpr = { kind: "numLit", value: 0, type: F64, loc: digits.loc };
-      if (
-        (digits.type.kind === "undefinedT" || digits.type.kind === "void") &&
-        droppableStatic(digits)
-      ) {
-        digits = zero;
+      const defaultUnitDigits = (value: IrExpr): IrExpr =>
+        droppableStatic(value)
+          ? zero
+          : {
+              kind: "seqExpr",
+              stmts: [{ kind: "exprStmt", expr: value, loc: value.loc }],
+              result: zero,
+              type: F64,
+              loc: value.loc,
+            };
+      if (digits.type.kind === "undefinedT" || digits.type.kind === "void") {
+        digits = defaultUnitDigits(digits);
       } else if (digits.type.kind === "union") {
         const def = L.unions.get(digits.type.unionId);
-        if (def?.arms.every(isUnitType) && droppableStatic(digits)) {
-          digits = zero;
+        if (def?.arms.every(isUnitType)) {
+          digits = defaultUnitDigits(digits);
         } else if (
           def?.arms.length === 2 &&
           def.arms.some((arm) => arm.kind === "f64") &&
