@@ -7523,6 +7523,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/fixtures/npm/cases/esm-named-reexport/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/esm-named-reexport/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/fixtures/npm/cases/fs-shims/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/fs-shims/main.ts"

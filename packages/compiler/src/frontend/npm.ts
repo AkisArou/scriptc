@@ -703,7 +703,10 @@ export class NpmGraphBuilder {
   readonly errors: NpmGraphError[] = [];
   private readonly pkgJsonCache = new Map<string, PkgJson | null>();
   /** Modules whose format the RESOLUTION decided (the "module" field names
-   * ESM sources regardless of the package's "type"). */
+   * an ESM graph regardless of the package's "type"). The entry is marked
+   * in resolvePackage; relative import/export edges propagate the mark in
+   * sweepEdges so a module-field barrel's `export { X } from "./leaf.js"`
+   * does not load leaf.js through a synthetic CommonJS facade. */
   private readonly formatOverrides = new Map<string, EmbeddedFormat>();
   /** Canonical "node:x" → packages whose code imports it. */
   private readonly builtinsSeen = new Map<string, Set<string>>();
@@ -1378,6 +1381,23 @@ export class NpmGraphBuilder {
         // about what the binary cannot reach.
         if (to.endsWith(".node")) this.noteLazyTrap(spec, use, pkgName, lazy, true);
         pushEdge(key, spec, to, "any");
+        // A package.json "module" field opts us into the package's ESM
+        // build even when the package has no "type": "module". Its
+        // relative STATIC imports/re-exports and dynamic import() targets
+        // are part of that ESM graph too. Without carrying the override,
+        // a `.js` leaf is misclassified as CommonJS; its synthesized facade
+        // then has no ESM-declared names and a valid named re-export fails
+        // only when the embedded engine links at startup. require() edges
+        // deliberately do not inherit this — they still name CJS modules.
+        if (
+          this.formatOverrides.get(key) === "esm" &&
+          (use.static || use.dynamicImport) &&
+          !to.endsWith(".cjs") &&
+          !to.endsWith(".json") &&
+          !to.endsWith(".node")
+        ) {
+          this.formatOverrides.set(to, "esm");
+        }
         this.walk(to, chain, lazy || !use.static);
         continue;
       }
