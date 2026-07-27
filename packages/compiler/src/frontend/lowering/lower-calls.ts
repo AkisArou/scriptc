@@ -3935,12 +3935,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         lowerDefaultToStringCall(L, expr, expr.expression) ??
         // The remaining primitive prototype statics — toExponential(),
         // both toFixed() forms, hasOwnProperty over literal keys. Before
-        // the island path; optional-chain spellings keep the chain
-        // machinery's paths.
-        (expr.expression.questionDotToken
-          ? null
-          : lowerPrimitiveProtoCall(L, expr, expr.expression.expression,
-              expr.expression.name.text, L.checker.getSymbolAtLocation(expr.expression.name))) ??
+        // the island path. Optional-chain spellings first enter the chain
+        // machinery above, then re-enter here with a narrowed chainRecv.
+        lowerPrimitiveProtoCall(L, expr, expr.expression.expression,
+          expr.expression.name.text, L.checker.getSymbolAtLocation(expr.expression.name)) ??
         // hasOwnProperty on a program class CONSTRUCTOR — own statics are
         // compile-time-known, so a literal key folds to a constant.
         lowerClassHasOwnPropertyCall(L, expr, expr.expression) ??
@@ -4818,11 +4816,27 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (name === "toFixed" && recvKind === "f64" && call.arguments.length === 1) {
       const operand = L.lowerExpr(recv);
       let digits = L.lowerExpr(call.arguments[0]!);
-      // The optional parameter also admits an explicit undefined. A
-      // side-effect-free unit literal is exactly the default 0; effectful
-      // `void e` has already fenced because the IR has no sequence expr.
-      if (digits.kind === "unitLit" && digits.unit === "undefined") {
-        digits = { kind: "numLit", value: 0, type: F64, loc: digits.loc };
+      // The optional parameter also admits undefined. A standalone,
+      // side-effect-free undefined value is exactly the default 0; an
+      // optional number preserves its evaluation and selects 0 at runtime
+      // through the same narrowed nullish IR used by `digits ?? 0`.
+      const zero: IrExpr = { kind: "numLit", value: 0, type: F64, loc: digits.loc };
+      if (
+        (digits.type.kind === "undefinedT" || digits.type.kind === "void") &&
+        droppableStatic(digits)
+      ) {
+        digits = zero;
+      } else if (digits.type.kind === "union") {
+        const def = L.unions.get(digits.type.unionId);
+        if (def?.arms.every(isUnitType) && droppableStatic(digits)) {
+          digits = zero;
+        } else if (
+          def?.arms.length === 2 &&
+          def.arms.some((arm) => arm.kind === "f64") &&
+          def.arms.some((arm) => arm.kind === "undefinedT")
+        ) {
+          digits = { kind: "nullish", left: digits, right: zero, type: F64, loc: digits.loc };
+        }
       }
       if (operand.type.kind !== "f64" || digits.type.kind !== "f64") return null;
       return { kind: "libCall", fn: "num.toFixed", args: [operand, digits], type: STRING, loc };

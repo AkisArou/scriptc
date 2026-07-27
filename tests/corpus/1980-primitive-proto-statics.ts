@@ -30,6 +30,16 @@ console.log((1.005).toFixed(50), (1.005).toFixed(100));
 const fractionDigits = 3;
 const ratio = 22 / 7;
 console.log(ratio.toFixed(fractionDigits), ratio.toFixed(3.9), ratio.toFixed(0 / 0), ratio.toFixed(undefined), ratio.toFixed(void 0));
+const missingDigits: undefined = undefined;
+console.log(ratio.toFixed(missingDigits));
+function formatWithOptionalDigits(value: number, digits?: number): string {
+  return value.toFixed(digits);
+}
+console.log(formatWithOptionalDigits(ratio), formatWithOptionalDigits(ratio, 3));
+function formatOptionalNumber(value: number | undefined): string | undefined {
+  return value?.toFixed(1);
+}
+console.log(formatOptionalNumber(1.25), formatOptionalNumber(undefined));
 for (const badDigits of [-1, 101, 1 / 0]) {
   try {
     console.log((1).toFixed(badDigits));
