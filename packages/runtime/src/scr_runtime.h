@@ -3424,14 +3424,17 @@ ScrDyn *scr_promise_reason_dyn(const ScrPromise *p);
 /* process warnings (scr_async_dyn.c — linked for the warning surface and
  * embedded typeless-package reports): dyn listeners plus Node's default
  * stderr report ("(node:pid) [CODE] Name: message" and a detail second
- * line). Emission is SYNCHRONOUS at the call (Node defers a tick —
- * SEMANTICS.md 138's precedent). scr_process_emit_warning takes the
- * ARGUMENT VECTOR as one dyn array and applies Node's full
- * grammar/TypeErrors; scr_emit_warning is the C-side entry. */
+ * line). Emission queues a process.nextTick entry: the default bootstrap
+ * report runs first, followed by user listeners. scr_process_emit_warning
+ * takes the ARGUMENT VECTOR as one dyn array and applies Node's full
+ * grammar/TypeErrors synchronously; scr_emit_warning is the C-side entry. */
 void scr_process_on_warning(ScrDyn *fn);
 void scr_process_off_warning(ScrDyn *fn);
 void scr_process_emit_warning(ScrDyn *args);
 void scr_emit_warning(const char *name, const char *code, ScrStr *message);
+void scr_emit_warning_deferred(const char *name, const char *code,
+                               ScrStr *message);
+void scr_flush_deferred_warnings(void);
 /* The promise-or-absent await's unit arm: one microtask hop, like JS's
  * await of any non-thenable (and like awaiting a settled promise). */
 void scr_await_hop(void);
@@ -3567,6 +3570,11 @@ void scr_next_tick(ScrClosure *cb);
  * nextTicks run in true FIFO order (in Node they are the same queue).
  * Teardown drops markers without running them. */
 void scr_next_tick_raw(void (*fn)(void));
+/* A raw nextTick discovered immediately before a compiled promise
+ * continuation becomes ready. It is promoted ahead of ticks created by
+ * that continuation, but only after the continuation's entire microtask
+ * checkpoint drains. Loader warnings use this Node ordering seam. */
+void scr_next_tick_raw_after_microtasks(void (*fn)(void));
 void scr_nticks_teardown(void);
 /* ── the events unit (scr_events.c — OPTIONAL, link-gated) ────────────
  * Process signal/exit events and the piped-stdin surface. The unit links
@@ -3872,12 +3880,15 @@ void scr_island_modules(const ScrIslandModule *mods, size_t nmods,
  * zlib reference of its own. */
 void scr_island_set_inflate(bool (*inflate)(const unsigned char *src, size_t src_len,
                                             unsigned char *dst, size_t dst_len));
-/* The shared process-warning dispatcher. Installed only when embedded
- * module metadata carries a typeless-package warning; the compiler links
- * scr_async_dyn.c on the same predicate, so warning-free island binaries
- * keep no dependency on that gated unit. */
+/* The shared deferred process-warning dispatcher. Installed only when
+ * embedded module metadata carries a typeless-package warning; the
+ * compiler links scr_async_dyn.c on the same predicate, so warning-free
+ * island binaries keep no dependency on that gated unit. The flush hook
+ * releases loader warnings at the static/dynamic module completion
+ * boundary rather than synchronously inside the loader. */
 void scr_island_set_warning_emitter(
-    void (*emit_warning)(const char *name, const char *code, ScrStr *message));
+    void (*emit_warning)(const char *name, const char *code, ScrStr *message),
+    void (*flush_warnings)(void));
 /* scr_zlib.c: one-shot raw-DEFLATE inflate into a caller-sized buffer;
  * true only when the stream ends exactly at dst_len. */
 bool scr_zlib_inflate_exact(const unsigned char *src, size_t src_len,

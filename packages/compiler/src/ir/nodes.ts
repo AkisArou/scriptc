@@ -3643,11 +3643,12 @@ export type IrLibFn =
   | "dc.chanBindStore"
   | "dc.chanUnbindStore"
   | "dc.chanRunStores"
-  /** process warnings (scr_lib.c): onWarning/offWarning register dyn
+  /** process warnings (scr_async_dyn.c): onWarning/offWarning register dyn
    * listeners; emitWarning applies Node's full argument grammar over the
    * call's dyn argument vector (ERR_INVALID_ARG_TYPE TypeErrors — MAY
-   * THROW; a listener throw propagates too) and always prints Node's
-   * stderr report. Emission is synchronous (SEMANTICS.md). */
+   * THROW) and queues Node's default stderr report followed by the user
+   * warning event on process.nextTick. A listener throw is uncaught from
+   * that tick, never a synchronous emitWarning throw. */
   | "process.onWarning"
   | "process.offWarning"
   | "process.emitWarning"

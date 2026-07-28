@@ -507,7 +507,29 @@ function sourcePhaseImportsOf(
     if (afterImport !== ts.SyntaxKind.Identifier || scanner.getTokenValue() !== "source") {
       continue;
     }
-    if (scanner.scan() !== ts.SyntaxKind.Identifier) continue;
+    // V8 accepts TS-only contextual words such as `from`, `as`, `type`,
+    // and `module` as BindingIdentifiers here. The TS scanner gives those
+    // keyword token kinds. Its contextual range also contains ECMAScript
+    // grammar words that V8 rejects in this position (accessor/async/await/
+    // get/of/set/using), so exclude those rather than accepting every
+    // keyword and misclassifying invalid JS as a source-phase import.
+    const binding = scanner.scan();
+    const contextualBinding =
+      binding >= ts.SyntaxKind.AbstractKeyword &&
+      binding <= ts.SyntaxKind.DeferKeyword &&
+      binding !== ts.SyntaxKind.AccessorKeyword &&
+      binding !== ts.SyntaxKind.AsyncKeyword &&
+      binding !== ts.SyntaxKind.AwaitKeyword &&
+      binding !== ts.SyntaxKind.GetKeyword &&
+      binding !== ts.SyntaxKind.OfKeyword &&
+      binding !== ts.SyntaxKind.SetKeyword &&
+      binding !== ts.SyntaxKind.UsingKeyword;
+    if (
+      binding !== ts.SyntaxKind.Identifier &&
+      !contextualBinding
+    ) {
+      continue;
+    }
     if (scanner.scan() !== ts.SyntaxKind.FromKeyword) continue;
     if (scanner.scan() === ts.SyntaxKind.StringLiteral) {
       imports.push({ specifier: scanner.getTokenValue(), dynamic: false });

@@ -63,34 +63,37 @@ describe("Node 24 ambiguous-module classification", () => {
     expect(builder.finish().errors).toEqual([]);
   });
 
-  test("source-phase imports fail explicitly instead of leaving an incomplete graph", () => {
-    const packageDir = join(appDir, "node_modules", "sourcepkg");
-    const packageJson = join(packageDir, "package.json");
-    const entry = join(packageDir, "index.js");
-    const builder = new NpmGraphBuilder(
-      hostOf(
-        {
-          [packageJson]: JSON.stringify({
-            name: "sourcepkg",
-            type: "module",
-            exports: "./index.js",
-          }),
-          [entry]: 'import source wasm from "./module.wasm";',
-        },
-        [packageDir],
-      ),
-    );
+  test.each(["wasm", "from", "as", "type", "module"])(
+    "source-phase binding '%s' fails explicitly instead of leaving an incomplete graph",
+    (binding) => {
+      const packageDir = join(appDir, "node_modules", "sourcepkg");
+      const packageJson = join(packageDir, "package.json");
+      const entry = join(packageDir, "index.js");
+      const builder = new NpmGraphBuilder(
+        hostOf(
+          {
+            [packageJson]: JSON.stringify({
+              name: "sourcepkg",
+              type: "module",
+              exports: "./index.js",
+            }),
+            [entry]: `import source ${binding} from "./module.wasm";`,
+          },
+          [packageDir],
+        ),
+      );
 
-    builder.addImport(mainFile, "sourcepkg");
-    expect(builder.finish().errors).toEqual([
-      {
-        message:
-          `package 'sourcepkg' uses unsupported Node source-phase import './module.wasm' in ${entry} ` +
-          `(the embedded engine has no source-phase/WebAssembly module implementation; ` +
-          `dependency chain: sourcepkg)`,
-      },
-    ]);
-  });
+      builder.addImport(mainFile, "sourcepkg");
+      expect(builder.finish().errors).toEqual([
+        {
+          message:
+            `package 'sourcepkg' uses unsupported Node source-phase import './module.wasm' in ${entry} ` +
+            `(the embedded engine has no source-phase/WebAssembly module implementation; ` +
+            `dependency chain: sourcepkg)`,
+        },
+      ]);
+    },
+  );
 
   test("dynamic source-phase imports fail explicitly instead of reaching the embedded parser", () => {
     const packageDir = join(appDir, "node_modules", "dynamic-sourcepkg");

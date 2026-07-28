@@ -5288,6 +5288,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2643-or-default-retag.ts": {
+   "order": [
+    "<repo>/tests/corpus/2643-or-default-retag.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2644-http-client-url-argument.ts": {
+   "order": [
+    "<repo>/tests/corpus/2644-http-client-url-argument.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2645-https-client-url-argument.ts": {
+   "order": [
+    "<repo>/tests/corpus/2645-https-client-url-argument.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -7636,6 +7654,12 @@
   "<repo>/tests/fixtures/npm/cases/promise-bridge/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/promise-bridge/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/require-detected-esm/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/require-detected-esm/main.ts"
    ],
    "diags": []
   },
