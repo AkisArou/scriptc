@@ -201,7 +201,7 @@ describe(`npm differential (${cases.length} programs${sanitize ? ", sanitized" :
       // parity (many .ts entries themselves trigger Node's typeless
       // warning from the repo package scope), so keep its established
       // stdout/exit contract rather than broadening this fix's surface.
-      if (c.name === "workspace-typeless" && nodeRes.exitCode === 0) {
+      if (c.name.startsWith("workspace-typeless") && nodeRes.exitCode === 0) {
         const nodeErr = comparableStderr(nodeRes.stderr);
         const nativeErr = comparableStderr(nativeRes.stderr);
         if (!nodeErr.equals(nativeErr)) {

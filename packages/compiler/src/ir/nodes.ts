@@ -1580,7 +1580,9 @@ export type IrLibFn =
   /** Load an embedded npm package's runtime entry in the island (cached by
    * the engine's module registry) and take one export: args are the entry
    * KEY (an embedded module's key, from IrModule.embedded) and the export
-   * name — "default" for default imports, "*" for the namespace object.
+   * name — "default" for default imports, "*" for the namespace object —
+   * followed by the written specifier and a bool selecting Node's
+   * typeless-package warning path (true for import, false for require).
    * --dynamic only, like island.eval; result is an owned jsval. May throw
    * (a package's top-level code can), bridged catchably. */
   | "island.import"
@@ -5669,6 +5671,20 @@ export function moduleUsesStream(mod: IrModule): boolean {
  * the first; the emitted main installs it before any island entry). */
 export function moduleEmbedsBuiltin(mod: IrModule, builtin: string): boolean {
   return mod.embedded !== undefined && mod.embedded.edges.some((e) => e.to === builtin);
+}
+
+/** True when an embedded module can emit Node's typeless-package warning.
+ * The report uses scr_async_dyn.c's shared process-warning dispatcher so
+ * listeners and the once-per-process trace hint match every other warning. */
+export function moduleEmbedsTypelessWarning(mod: IrModule): boolean {
+  return (
+    mod.embedded !== undefined &&
+    mod.embedded.modules.some(
+      (m) =>
+        m.typelessPackageJson !== undefined &&
+        m.typelessWarning !== undefined,
+    )
+  );
 }
 
 /** Embedded module texts at least this long are DEFLATE-compressed into

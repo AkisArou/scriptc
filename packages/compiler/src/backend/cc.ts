@@ -104,10 +104,11 @@ export interface CcOptions {
    * over the checked-dynamic tree (no loop hooks, no install), cross-compiles everywhere.
    * Channel-free binaries keep their exact size class. */
   dc?: boolean;
-  /** The program uses the checked-dynamic async surfaces
-   * (moduleUsesDynAsync on the IR, or the dynInvoke/dc gates — their TUs
-   * call into this one): compiles scr_async_dyn.c — dyn-promise
-   * reactions, AsyncLocalStorage, the unhandledRejection/warning
+  /** The program uses the checked-dynamic async surfaces or embeds a
+   * typeless-package warning (moduleUsesDynAsync/
+   * moduleEmbedsTypelessWarning on the IR, or the dynInvoke/dc gates —
+   * their TUs call into this one): compiles scr_async_dyn.c — dyn-promise
+   * reactions, AsyncLocalStorage, and the shared warning/rejection
    * process events. */
   dynAsync?: boolean;
   /** The program uses the process-events surface (signal/exit listeners,

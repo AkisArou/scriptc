@@ -76,6 +76,36 @@ describe("Node 24 ambiguous-module classification", () => {
     ]);
   });
 
+  test("dynamic source-phase imports fail explicitly instead of reaching the embedded parser", () => {
+    const packageDir = join(appDir, "node_modules", "dynamic-sourcepkg");
+    const packageJson = join(packageDir, "package.json");
+    const entry = join(packageDir, "index.js");
+    const builder = new NpmGraphBuilder(
+      hostOf(
+        {
+          [packageJson]: JSON.stringify({
+            name: "dynamic-sourcepkg",
+            type: "module",
+            exports: "./index.js",
+          }),
+          [entry]:
+            'export function load() { return import.source("./module.wasm"); }',
+        },
+        [packageDir],
+      ),
+    );
+
+    builder.addImport(mainFile, "dynamic-sourcepkg");
+    expect(builder.finish().errors).toEqual([
+      {
+        message:
+          `package 'dynamic-sourcepkg' uses unsupported Node dynamic source-phase import ` +
+          `'./module.wasm' in ${entry} (the embedded engine has no source-phase/WebAssembly ` +
+          `module implementation; dependency chain: dynamic-sourcepkg)`,
+      },
+    ]);
+  });
+
   test("an outer package type does not cross a node_modules boundary", () => {
     const packageJson = join(appDir, "package.json");
     const entry = join(appDir, "node_modules", "unscoped", "index.js");

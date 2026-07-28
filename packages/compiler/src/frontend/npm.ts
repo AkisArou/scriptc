@@ -324,10 +324,11 @@ interface SpecifierUse {
  * its own. */
 interface ModuleSpecifiers {
   uses: SpecifierUse[];
-  /** `import source binding from "specifier"` declarations. V8 recognizes
-   * this Node 24 syntax but TypeScript 5's AST does not, and the embedded
+  /** Static `import source binding from "specifier"` declarations and
+   * dynamic `import.source(specifier)` expressions. V8 recognizes this
+   * Node 24 syntax but TypeScript 5's AST does not, and the embedded
    * engine has no source-phase/WebAssembly module implementation. */
-  sourcePhaseImports: string[];
+  sourcePhaseImports: SourcePhaseImport[];
   /** Node 24's syntax detection for ambiguous .js/extensionless files:
    * source that cannot run as CommonJS is intrinsically ESM even when the
    * nearest package.json omits "type". */
@@ -439,28 +440,55 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
   };
 }
 
-/** Collects Node 24 source-phase import declarations lexically. The
- * TypeScript 5 parser predates this grammar and recovers without an
- * ImportDeclaration, while V8 still classifies the file as ESM. A scanner
- * keeps that parser-version seam explicit and distinguishes the ordinary
- * default import `import source from "x"` (only one identifier before
- * `from`) from `import source wasm from "x"`. */
-function sourcePhaseImportsOf(source: string): string[] {
+interface SourcePhaseImport {
+  /** Null for a computed dynamic `import.source(expr)` argument. */
+  specifier: string | null;
+  dynamic: boolean;
+}
+
+/** Collects Node 24 source-phase imports lexically. The TypeScript 5
+ * parser predates both the static `import source binding from "x"` and
+ * dynamic `import.source(expr)` grammars, while V8 still classifies them
+ * as ESM. A scanner keeps that parser-version seam explicit and
+ * distinguishes the ordinary default import `import source from "x"`
+ * (only one identifier before `from`) from the static source phase. */
+function sourcePhaseImportsOf(source: string): SourcePhaseImport[] {
   const scanner = ts.createScanner(
     ts.ScriptTarget.Latest,
     true,
     ts.LanguageVariant.Standard,
     source,
   );
-  const imports: string[] = [];
+  const imports: SourcePhaseImport[] = [];
   for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
     if (token !== ts.SyntaxKind.ImportKeyword) continue;
-    if (scanner.scan() !== ts.SyntaxKind.Identifier || scanner.getTokenValue() !== "source") {
+    const afterImport = scanner.scan();
+    if (afterImport === ts.SyntaxKind.DotToken) {
+      if (
+        scanner.scan() !== ts.SyntaxKind.Identifier ||
+        scanner.getTokenValue() !== "source" ||
+        scanner.scan() !== ts.SyntaxKind.OpenParenToken
+      ) {
+        continue;
+      }
+      const argument = scanner.scan();
+      imports.push({
+        specifier:
+          argument === ts.SyntaxKind.StringLiteral
+            ? scanner.getTokenValue()
+            : null,
+        dynamic: true,
+      });
+      continue;
+    }
+    if (afterImport !== ts.SyntaxKind.Identifier || scanner.getTokenValue() !== "source") {
       continue;
     }
     if (scanner.scan() !== ts.SyntaxKind.Identifier) continue;
     if (scanner.scan() !== ts.SyntaxKind.FromKeyword) continue;
-    if (scanner.scan() === ts.SyntaxKind.StringLiteral) imports.push(scanner.getTokenValue());
+    if (scanner.scan() === ts.SyntaxKind.StringLiteral) {
+      imports.push({ specifier: scanner.getTokenValue(), dynamic: false });
+    }
   }
   return imports;
 }
@@ -1424,10 +1452,17 @@ export class NpmGraphBuilder {
     if (format === "json") return;
     const sourcePhaseImport = this.specifiersOf(key, source)?.sourcePhaseImports[0];
     if (sourcePhaseImport !== undefined) {
+      const kind = sourcePhaseImport.dynamic
+        ? "dynamic source-phase import"
+        : "source-phase import";
+      const specifier =
+        sourcePhaseImport.specifier === null
+          ? ""
+          : ` '${sourcePhaseImport.specifier}'`;
       this.errors.push({
         message:
-          `package '${chain[chain.length - 1] ?? key}' uses unsupported Node source-phase import ` +
-          `'${sourcePhaseImport}' in ${key} (the embedded engine has no source-phase/WebAssembly ` +
+          `package '${chain[chain.length - 1] ?? key}' uses unsupported Node ${kind}${specifier} ` +
+          `in ${key} (the embedded engine has no source-phase/WebAssembly ` +
           `module implementation; dependency chain: ${NpmGraphBuilder.chainOf(chain)})`,
       });
       return;

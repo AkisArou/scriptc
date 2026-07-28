@@ -144,12 +144,18 @@ static size_t isl_nedges = 0;
  * inflater is installed by the emitted main exactly when some module
  * compressed at build time (scr_zlib.c links on the same predicate). */
 static bool (*isl_inflate)(const unsigned char *, size_t, unsigned char *, size_t) = NULL;
+static void (*isl_emit_warning)(const char *, const char *, ScrStr *) = NULL;
 static char **isl_text_cache = NULL; /* 2 slots per module: src, esm */
 static bool *isl_typeless_warned = NULL; /* one flag per module; pjson-deduped */
 
 void scr_island_set_inflate(bool (*inflate)(const unsigned char *src, size_t src_len,
                                             unsigned char *dst, size_t dst_len)) {
   isl_inflate = inflate;
+}
+
+void scr_island_set_warning_emitter(
+    void (*emit_warning)(const char *name, const char *code, ScrStr *message)) {
+  isl_emit_warning = emit_warning;
 }
 
 void scr_island_modules(const ScrIslandModule *mods, size_t nmods,
@@ -2337,13 +2343,21 @@ ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems) {
 
 static bool isl_booted = false;
 static JSValue isl_cjs_import; /* (key, name) → export, CJS/JSON entries */
+/* JS_LoadModule has no call-form parameter. The import boundary sets the
+ * requested root key around a require(esm) load: Node keeps that root's
+ * syntax detection silent, while typeless ESM dependencies loaded through
+ * its static graph still warn normally. */
+static const char *isl_silent_typeless_root = NULL;
 
 /* Node's ESM loader warning for an ambiguous .js file whose syntax forced
  * ESM and whose physical realpath belongs to a typeless workspace package.
  * A package with several such files warns once, keyed by its package.json.
- * require() reaches isl_host_source instead and stays silent, like Node. */
+ * The requested require(esm) root is silent, but its ESM dependencies are
+ * not. */
 static void isl_warn_typeless(const ScrIslandModule *m) {
-  if (!m->typeless_pjson || !m->typeless_warning) return;
+  if ((isl_silent_typeless_root &&
+       strcmp(m->key, isl_silent_typeless_root) == 0) ||
+      !m->typeless_pjson || !m->typeless_warning) return;
   if (!isl_typeless_warned) {
     isl_typeless_warned = calloc(isl_nmods, sizeof(bool));
   }
@@ -2357,10 +2371,14 @@ static void isl_warn_typeless(const ScrIslandModule *m) {
     }
     isl_typeless_warned[index] = true;
   }
-  fprintf(stderr,
-          "(node:%ld) [MODULE_TYPELESS_PACKAGE_JSON] Warning: %s\n"
-          "(Use `node --trace-warnings ...` to show where the warning was created)\n",
-          (long)getpid(), m->typeless_warning);
+  /* Use the shared warning channel: process 'warning' listeners observe
+   * the Error value and its code, and the default report's trace hint is
+   * emitted only once per process across warning kinds. */
+  if (isl_emit_warning) {
+    ScrStr *message = scr_str_new(m->typeless_warning, strlen(m->typeless_warning));
+    isl_emit_warning("Warning", "MODULE_TYPELESS_PACKAGE_JSON", message);
+    scr_str_release(message);
+  }
 }
 
 static char *isl_module_normalize(JSContext *ctx, const char *base,
@@ -9428,7 +9446,8 @@ static void isl_free_boot(void) {
 }
 
 /* The import boundary (libCall island.import). Borrows all args; +1 out. */
-ScrJsval *scr_jsval_import(const ScrStr *key, const ScrStr *name, const ScrStr *specifier) {
+ScrJsval *scr_jsval_import(const ScrStr *key, const ScrStr *name,
+                           const ScrStr *specifier, bool warn_typeless) {
   isl_entry();
   const ScrIslandModule *m = isl_mod_find(key->data);
   if (!m || !isl_booted) {
@@ -9454,8 +9473,15 @@ ScrJsval *scr_jsval_import(const ScrStr *key, const ScrStr *name, const ScrStr *
   }
   /* ESM entry: the engine loads the graph through the module loader; the
    * promise resolves with the namespace. Commander-class packages have no
-   * top-level await, so draining the job queue settles it synchronously. */
+   * top-level await, so draining the job queue settles it synchronously.
+   * Loading/compiling the static graph is synchronous inside
+   * JS_LoadModule: scope the silent root key to that operation so a
+   * dynamic import started later during evaluation keeps its own warning
+   * semantics. */
+  const char *previous_silent_root = isl_silent_typeless_root;
+  isl_silent_typeless_root = warn_typeless ? NULL : key->data;
   JSValue promise = JS_LoadModule(isl_ctx, ISL_IMPORT_BASE, key->data);
+  isl_silent_typeless_root = previous_silent_root;
   if (JS_IsException(promise)) {
     isl_bridge_exception();
     return NULL;
