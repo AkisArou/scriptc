@@ -30,6 +30,7 @@ const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
+const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : test;
 
 interface RunResult {
   stdout: string;
@@ -354,7 +355,7 @@ console.log(greet("world"), 6 * 7);
     expect(body(dyn)).toBe(body(stat));
   });
 
-  test("static hello-world stays in its size class; island use pays the engine", async () => {
+  platformTest("static hello-world stays in its size class; island use pays the engine", async () => {
     // The engine must NEVER leak into static builds: a default-built
     // hello-world is ~200KB today (page-granular — macOS segments round
     // to 16KB), and the embedded engine alone is ~620KB — a static binary

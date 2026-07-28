@@ -26,6 +26,7 @@ const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
+const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : test;
 
 interface BuildResult {
   binaryPath: string;
@@ -125,7 +126,7 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     expect(err.stderr).toContain("SyntaxError: Invalid regular expression:");
   });
 
-  test("regex-free programs never reference the regex runtime; regex use stays under 300KB", async () => {
+  platformTest("regex-free programs never reference the regex runtime; regex use stays under 300KB", async () => {
     // Measured on plain (non-ASan) builds. A regex-free program's C names
     // no ScrRegex symbol, so its link line is the historical one (the
     // <200KB static size class is pinned by island.test.ts). A regex-USING

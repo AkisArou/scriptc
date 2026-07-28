@@ -75,6 +75,7 @@ import { compileLibrary } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/library-mode");
+const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : test;
 /* The plain and SCRIPTC_SAN=1 suites may run concurrently by design (the
  * suite lock is per flavor) and this suite runs the same ordinary builds in
  * both, so the cache path carries the SUITE flavor — otherwise the two runs
@@ -506,7 +507,7 @@ survived, sink_calls=1
 
   /* ── K10: the sanitized lane (ASan + the RC audit's re-init seam) ────── */
 
-  test("K10: K4 under ASan + RC audit (zero live heap across re-init)", async () => {
+  platformTest("K10: K4 under ASan + RC audit (zero live heap across re-init)", async () => {
     const { archive, outDir } = await buildLibrary("reinit", emission, { sanitize: true });
     const probe = buildProbe("reinit", archive, outDir, { sanitize: true });
     const run = runProbe(probe);
@@ -515,7 +516,7 @@ survived, sink_calls=1
     expect(run.stdout).toBe(SESSION + SESSION + SESSION);
   });
 
-  test("K10: K5/K7 under ASan", async () => {
+  platformTest("K10: K5/K7 under ASan", async () => {
     const { archive, outDir } = await buildLibrary("traps", emission, { sanitize: true });
     const probe = buildProbe("traps", archive, outDir, { sanitize: true });
     const trap = runProbe(probe, ["trap"]);

@@ -66,6 +66,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { compile } from "@scriptc/compiler";
+import { shardSelect } from "./shard.js";
 import { jailEnv, refusedLoopbackUrl } from "./net-jail.js";
 import { MOCK_PROJECT_LINK, startMockVercelApi, type RecordedRequest } from "../fixtures/vercel-e2e/mock-vercel-api.js";
 
@@ -280,6 +281,77 @@ async function runCase(args: string[], opts: RunOptions = {}): Promise<void> {
   }
 }
 
+interface CliCase {
+  name: string;
+  args: string[];
+  opts?: RunOptions;
+}
+
+// The acceptance commands are platform-neutral and independent once the
+// shared driver and mock are ready. Sandbox runs split them locally because
+// the external Vercel CLI oracle is deliberately not uploaded; ordinary
+// `pnpm test` leaves SCRIPTC_TEST_SHARD unset and runs every command.
+const allCliCases: CliCase[] = [
+  { name: "whoami", args: ["whoami"] },
+  { name: "whoami with an invalid token", args: ["whoami"], opts: { tokenBase: "badfaketoken" } },
+  { name: "teams ls", args: ["teams", "ls"] },
+  { name: "ls (deployments)", args: ["ls"] },
+  { name: "project ls", args: ["project", "ls"] },
+  { name: "domains ls", args: ["domains", "ls"] },
+  { name: "dns ls", args: ["dns", "ls"] },
+  { name: "alias ls", args: ["alias", "ls"] },
+  { name: "certs ls", args: ["certs", "ls"] },
+  { name: "--version", args: ["--version"] },
+  { name: "help", args: ["help"] },
+  { name: "help alias", args: ["help", "alias"] },
+  { name: "env ls", args: ["env", "ls"], opts: { linked: true } },
+  { name: "env ls production", args: ["env", "ls", "production"], opts: { linked: true } },
+  {
+    name: "env ls --format json",
+    args: ["env", "ls", "--format", "json"],
+    opts: { linked: true },
+  },
+  { name: "env ls without a linked project", args: ["env", "ls"] },
+  {
+    name: "inspect a deployment",
+    args: ["inspect", "mock-app-abc123defg-mock-team.vercel.app"],
+  },
+  {
+    name: "logs for a deployment over a fixed window",
+    args: [
+      "logs",
+      "mock-app-abc123defg-mock-team.vercel.app",
+      "--since",
+      "2024-01-01T00:00:00.000Z",
+      "--until",
+      "2024-01-02T12:00:00.000Z",
+    ],
+  },
+  { name: "domains inspect", args: ["domains", "inspect", "mock-example.com"] },
+  { name: "teams switch", args: ["teams", "switch", "second-team"] },
+  {
+    name: "env add",
+    args: ["env", "add", "MOCK_API_TOKEN", "production", "--value", "supersecretvalue", "--yes"],
+    opts: { linked: true },
+  },
+  {
+    name: "env rm",
+    args: ["env", "rm", "NEXT_PUBLIC_BASE_URL", "production", "--yes"],
+    opts: { linked: true },
+  },
+  { name: "dns add", args: ["dns", "add", "mock-example.com", "api", "A", "76.76.21.42"] },
+  { name: "dns rm", args: ["dns", "rm", "rec_mock0000000000000000000002", "--yes"] },
+  {
+    name: "alias set",
+    args: ["alias", "set", "mock-app-abc123defg-mock-team.vercel.app", "staging-mock.vercel.app"],
+  },
+  { name: "alias rm", args: ["alias", "rm", "mock-app.vercel.app", "--yes"] },
+  { name: "project add", args: ["project", "add", "fresh-mock-project"] },
+];
+const selectedCliCases = new Set(
+  shardSelect<CliCase>(allCliCases, ({ name }) => name).map(({ name }) => name),
+);
+
 /* ── the suite ───────────────────────────────────────────────────────── */
 
 // The describe name is deliberately FLAVOR-FREE (unlike the real-CLI suite):
@@ -402,127 +474,15 @@ void go();
     expect(compiledLegProbe).toBe("loaded");
   }, 240_000);
 
-  test("whoami", async () => {
-    await runCase(["whoami"]);
-  }, 240_000);
-
-  test("whoami with an invalid token", async () => {
-    await runCase(["whoami"], { tokenBase: "badfaketoken" });
-  }, 240_000);
-
-  test("teams ls", async () => {
-    await runCase(["teams", "ls"]);
-  }, 240_000);
-
-  test("ls (deployments)", async () => {
-    await runCase(["ls"]);
-  }, 240_000);
-
-  test("project ls", async () => {
-    await runCase(["project", "ls"]);
-  }, 240_000);
-
-  test("domains ls", async () => {
-    await runCase(["domains", "ls"]);
-  }, 240_000);
-
-  test("dns ls", async () => {
-    await runCase(["dns", "ls"]);
-  }, 240_000);
-
-  test("alias ls", async () => {
-    await runCase(["alias", "ls"]);
-  }, 240_000);
-
-  test("certs ls", async () => {
-    await runCase(["certs", "ls"]);
-  }, 240_000);
-
-  /* ── no-network surfaces: the banner, the version pin, the full help
-   * tree (rendered against a non-TTY stderr in both lanes) ────────────── */
-
-  test("--version", async () => {
-    await runCase(["--version"]);
-  }, 240_000);
-
-  test("help", async () => {
-    await runCase(["help"]);
-  }, 240_000);
-
-  test("help alias", async () => {
-    await runCase(["help", "alias"]);
-  }, 240_000);
-
-  /* ── the linked-project env surface (the .vercel/project.json link) ─── */
-
-  test("env ls", async () => {
-    await runCase(["env", "ls"], { linked: true });
-  }, 240_000);
-
-  test("env ls production", async () => {
-    await runCase(["env", "ls", "production"], { linked: true });
-  }, 240_000);
-
-  test("env ls --format json", async () => {
-    await runCase(["env", "ls", "--format", "json"], { linked: true });
-  }, 240_000);
-
-  test("env ls without a linked project", async () => {
-    await runCase(["env", "ls"]);
-  }, 240_000);
-
-  /* ── single-deployment surfaces ──────────────────────────────────────── */
-
-  test("inspect a deployment", async () => {
-    await runCase(["inspect", "mock-app-abc123defg-mock-team.vercel.app"]);
-  }, 240_000);
-
-  // --since/--until pin the request-logs window to fixed epochs; without
-  // them the CLI queries wall-clock "now" and the endpoint trace (which
-  // embeds startDate/endDate) would never be snapshot-stable.
-  test("logs for a deployment over a fixed window", async () => {
-    await runCase(["logs", "mock-app-abc123defg-mock-team.vercel.app", "--since", "2024-01-01T00:00:00.000Z", "--until", "2024-01-02T12:00:00.000Z"]);
-  }, 240_000);
-
-  test("domains inspect", async () => {
-    await runCase(["domains", "inspect", "mock-example.com"]);
-  }, 240_000);
-
-  // A local-state mutation only: the switch validates against GET /v1/teams
-  // and then writes the run's own --global-config; no API mutation happens.
-  test("teams switch", async () => {
-    await runCase(["teams", "switch", "second-team"]);
-  }, 240_000);
-
-  /* ── mutations against the mock (the jail guarantees the CLI can never
-   * reach real infrastructure; every write lands in the mock and its JSON
-   * body is pinned in the endpoint trace) ─────────────────────────────── */
-
-  test("env add", async () => {
-    await runCase(["env", "add", "MOCK_API_TOKEN", "production", "--value", "supersecretvalue", "--yes"], { linked: true });
-  }, 240_000);
-
-  test("env rm", async () => {
-    await runCase(["env", "rm", "NEXT_PUBLIC_BASE_URL", "production", "--yes"], { linked: true });
-  }, 240_000);
-
-  test("dns add", async () => {
-    await runCase(["dns", "add", "mock-example.com", "api", "A", "76.76.21.42"]);
-  }, 240_000);
-
-  test("dns rm", async () => {
-    await runCase(["dns", "rm", "rec_mock0000000000000000000002", "--yes"]);
-  }, 240_000);
-
-  test("alias set", async () => {
-    await runCase(["alias", "set", "mock-app-abc123defg-mock-team.vercel.app", "staging-mock.vercel.app"]);
-  }, 240_000);
-
-  test("alias rm", async () => {
-    await runCase(["alias", "rm", "mock-app.vercel.app", "--yes"]);
-  }, 240_000);
-
-  test("project add", async () => {
-    await runCase(["project", "add", "fresh-mock-project"]);
-  }, 240_000);
+  /* The network jail guarantees every mutating command lands in the mock;
+   * its request body is pinned alongside stdout, stderr, and exit status. */
+  for (const { args, name, opts } of allCliCases) {
+    // Register the other shards as skipped so Vitest knows their snapshots
+    // are intentional; filtering the definitions entirely makes every
+    // partial run report the other shard's snapshots as obsolete.
+    const shardTest = selectedCliCases.has(name) ? test : test.skip;
+    shardTest(name, async () => {
+      await runCase(args, opts);
+    }, 240_000);
+  }
 });
