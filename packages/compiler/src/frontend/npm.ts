@@ -86,7 +86,7 @@
  * re-export hops).
  */
 import { readFileSync, realpathSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import ts from "typescript5";
 import { cjsLexedExportsOf } from "./cjs-lexer.js";
 
@@ -463,7 +463,11 @@ function nodeEsmSyntaxDetected(sf: ts.SourceFile): boolean {
     if (topLevelAwait || (node !== sf && ts.isFunctionLike(node))) return;
     if (
       ts.isAwaitExpression(node) ||
-      (ts.isForOfStatement(node) && node.awaitModifier !== undefined)
+      (ts.isForOfStatement(node) && node.awaitModifier !== undefined) ||
+      (
+        ts.isVariableDeclarationList(node) &&
+        (node.flags & ts.NodeFlags.AwaitUsing) === ts.NodeFlags.AwaitUsing
+      )
     ) {
       topLevelAwait = true;
       return;
@@ -1134,6 +1138,10 @@ export class NpmGraphBuilder {
     if (file.endsWith(".cjs")) return "cjs";
     if (file.endsWith(".json")) return "json";
     for (let dir = dirname(file); ; ) {
+      // LOOKUP_PACKAGE_SCOPE stops before a node_modules directory: an
+      // application's package.json never controls an unscoped file below
+      // its node_modules tree.
+      if (basename(dir) === "node_modules") break;
       const pkg = this.pkgJsonOf(dir);
       if (pkg) {
         if (pkg.type === "module") return "esm";
@@ -1315,6 +1323,15 @@ export class NpmGraphBuilder {
   private walk(key: string, chain: readonly string[], lazy: boolean): void {
     const existing = this.modules.get(key);
     if (existing) {
+      // A direct file edge can discover a package's physical module-field
+      // entry before a later bare import installs its deliberate ESM
+      // override. Refresh the cached classification so traversal order
+      // cannot decide the module format.
+      const override = this.formatOverrides.get(key);
+      if (override !== undefined && override !== existing.format) {
+        existing.format = override;
+        delete existing.esm;
+      }
       if (!lazy && this.lazilyReached.has(key)) {
         // Promotion: a static path reached a module first seen behind a
         // lazy boundary — Node links it at the root now, so its edge
