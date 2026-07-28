@@ -4,9 +4,11 @@ import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sandboxImageConfig } from "./sandbox-config.mjs";
+import { filterExistingWorktreePaths } from "./worktree-files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const vcpus = process.env.SCRIPTC_SANDBOX_VCPUS ?? "8";
@@ -61,6 +63,7 @@ const invariantRemoteFiles = [
   "tests/harness/smoke.test.ts",
   "tests/harness/surface-manifest.test.ts",
   "tests/harness/windows-differential.test.ts",
+  "tests/harness/worktree-files.test.ts",
 ];
 
 // Full native-oracle coverage stays on the host where the expected answer
@@ -105,7 +108,9 @@ const hostInvariantContractPattern = [
 ].join("|");
 
 // Logically portable acceptance suites whose oracle lives in an external
-// worktree that is intentionally not uploaded. Split their cases locally.
+// worktree that is intentionally not uploaded. Run them locally in both
+// flavors, sharding suites whose individual cases are independently addressable.
+const localLaneFiles = ["tests/harness/prettier-e2e.test.ts"];
 const localCaseShardedFiles = ["tests/harness/vercel-e2e.test.ts"];
 
 const { values } = parseArgs({
@@ -160,6 +165,7 @@ const specialFiles = [
   ...caseShardedFiles,
   ...invariantRemoteFiles,
   ...hostInvariantFiles,
+  ...localLaneFiles,
   ...localCaseShardedFiles,
 ];
 if (new Set(specialFiles).size !== specialFiles.length) {
@@ -369,7 +375,7 @@ async function createArchive(path) {
   });
   children.add(git);
   children.add(tar);
-  git.stdout.pipe(tar.stdin);
+  const pack = pipeline(git.stdout, filterExistingWorktreePaths(root), tar.stdin);
   const wait = (child, name) =>
     new Promise((resolve, reject) => {
       child.on("error", reject);
@@ -379,7 +385,7 @@ async function createArchive(path) {
         else reject(new Error(`${name} exited ${signal ?? code}`));
       });
     });
-  await Promise.all([wait(git, "git ls-files"), wait(tar, "tar")]);
+  await Promise.all([wait(git, "git ls-files"), wait(tar, "tar"), pack]);
 }
 
 async function createWorker(worker) {
@@ -580,9 +586,11 @@ try {
           [
             "test",
             "--reporter=dot",
+            "--passWithNoTests",
             `--shard=${worker.shard}/${shardCount}`,
             ...caseShardedFiles.map((file) => `--exclude=${file}`),
             ...hostInvariantFiles.map((file) => `--exclude=${file}`),
+            ...localLaneFiles.map((file) => `--exclude=${file}`),
             ...localCaseShardedFiles.map((file) => `--exclude=${file}`),
             ...(worker.lane === onceLane
               ? []
@@ -607,7 +615,7 @@ try {
     ? Promise.resolve()
     : (async () => {
         console.log(
-          `\nBuilding and testing ${hostInvariantFiles.length} Darwin-native files, compact platform contracts, and ${localCaseShardedFiles.length} case-sharded external suite locally...`,
+          `\nBuilding and testing ${hostInvariantFiles.length} Darwin-native files, compact platform contracts, and ${localLaneFiles.length + localCaseShardedFiles.length} external suites locally...`,
         );
         await run("pnpm", ["build"], { label: "local build" });
         const laneEnv = (lane) => ({
@@ -665,6 +673,20 @@ try {
             },
           ),
         );
+        const laneFileTasks = lanes.map((lane) =>
+          run(
+            "pnpm",
+            ["test", "--reporter=dot", ...localLaneFiles],
+            {
+              env: {
+                ...laneEnv(lane),
+                SCRIPTC_TEST_RUN_ID: nonce,
+                SCRIPTC_TEST_WORKERS: "1",
+              },
+              label: `local ${lane} external files`,
+            },
+          ),
+        );
         const caseTasks = lanes.flatMap((lane) =>
           Array.from({ length: localCaseShardCount }, (_, offset) => {
             const shard = offset + 1;
@@ -675,6 +697,7 @@ try {
                 env: {
                   ...laneEnv(lane),
                   SCRIPTC_TEST_SHARD: `${shard}/${localCaseShardCount}`,
+                  SCRIPTC_TEST_RUN_ID: nonce,
                   SCRIPTC_TEST_WORKERS: "1",
                 },
                 label: `local ${lane} external ${shard}/${localCaseShardCount}`,
@@ -683,7 +706,13 @@ try {
           }),
         );
         const results = await Promise.allSettled(
-          [invariantHostTask, invariantContractTask, ...laneContractTasks, ...caseTasks],
+          [
+            invariantHostTask,
+            invariantContractTask,
+            ...laneContractTasks,
+            ...laneFileTasks,
+            ...caseTasks,
+          ],
         );
         const failures = results.filter((result) => result.status === "rejected");
         if (failures.length) {

@@ -119,8 +119,9 @@ change under `SCRIPTC_SAN` run once; sanitizer-aware files and the differential
 corpus still run in both lanes. Full portable behavior runs on Linux, while a
 compact host contract retains the native ABI, Mach-O size, linker, libc,
 filesystem, and Apple-ASan checks that can genuinely differ on macOS.
-Acceptance suites whose oracle lives in an external worktree remain
-case-sharded locally. No assertion or sanitizer coverage is dropped.
+Acceptance suites whose oracle lives in an external worktree run locally;
+case-addressable suites are sharded there. No assertion or sanitizer coverage
+is dropped.
 Disposable sandboxes are removed when the run finishes. The remote sanitized
 lane disables Linux LeakSanitizer to match Apple ASan; ASan memory-safety
 checks and scriptc's RC audit remain enabled. Authenticate with Vercel, choose

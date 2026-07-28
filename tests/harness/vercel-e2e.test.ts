@@ -73,6 +73,13 @@ import { MOCK_PROJECT_LINK, startMockVercelApi, type RecordedRequest } from "../
 const repoRoot = join(import.meta.dirname, "../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
+const executionTag = [
+  sanitize ? "san" : "plain",
+  process.env["SCRIPTC_TEST_RUN_ID"] ?? `pid-${process.pid}`,
+  process.env["SCRIPTC_TEST_SHARD"] ?? "all",
+]
+  .join("-")
+  .replace(/[^a-zA-Z0-9_.-]+/g, "-");
 
 const vercelRoot = process.env["SCRIPTC_VERCEL_ROOT"] ?? join(homedir(), "Developer/vercel-scratch");
 const vercelEntry = join(vercelRoot, "node_modules/vercel/dist/index.js");
@@ -86,6 +93,7 @@ let refusedUrl = "";
 let jailCapture = "";
 let driverBinary = "";
 let probeBinary = "";
+const driverBuildPaths = new Set<string>();
 /** What the compiled leg reached in beforeAll: "loaded" once the island
  * serves the CLI's builtins, else the caught load error — today
  * "caught:ReferenceError: the island does not provide the 'node:https'
@@ -129,12 +137,14 @@ async function buildDriver(name: string, entrySource: (rel: string) => string): 
   // realpath: macOS's tmpdir is a symlink (/var → /private/var), and the
   // relative import back to the scratch install must survive Node
   // resolving the entry at its REAL path.
-  const dir = join(realpathSync(tmpdir()), `scriptc-vercel-e2e-${name}`);
+  const dir = join(realpathSync(tmpdir()), `scriptc-vercel-e2e-${name}-${executionTag}`);
+  driverBuildPaths.add(dir);
   mkdirSync(dir, { recursive: true });
   const rel = relative(dir, vercelEntry);
   const text = entrySource(rel.startsWith(".") ? rel : `./${rel}`);
   const key = hashInputs(text);
-  const outDir = join(cacheDir, `vercel-e2e-${name}-${key}`);
+  const outDir = join(cacheDir, `vercel-e2e-${name}-${key}-${executionTag}`);
+  driverBuildPaths.add(outDir);
   const entry = join(dir, "main.ts");
   writeFileSync(entry, text);
   writeFileSync(join(dir, "tsconfig.json"), DRIVER_TSCONFIG);
@@ -448,11 +458,15 @@ void go();
   }
 
   afterAll(async () => {
-    if (mockServer !== undefined) await new Promise<void>((resolve) => mockServer.close(() => resolve()));
-    // The endpoint-drift tripwire: every request any lane made resolved to
-    // a recorded route — a CLI/API drift 404s AND lands here, so it can
-    // never render as a silently-empty table (dns ls does exactly that).
-    expect(mockUnexpected.map((r) => `${r.method} ${r.path}${r.search}`)).toEqual([]);
+    try {
+      if (mockServer !== undefined) await new Promise<void>((resolve) => mockServer.close(() => resolve()));
+      // The endpoint-drift tripwire: every request any lane made resolved to
+      // a recorded route — a CLI/API drift 404s AND lands here, so it can
+      // never render as a silently-empty table (dns ls does exactly that).
+      expect(mockUnexpected.map((r) => `${r.method} ${r.path}${r.search}`)).toEqual([]);
+    } finally {
+      for (const path of driverBuildPaths) rmSync(path, { recursive: true, force: true });
+    }
   });
 
   test("the network jail was verified before any CLI ran", () => {
