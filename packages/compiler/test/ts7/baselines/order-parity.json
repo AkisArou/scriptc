@@ -7694,6 +7694,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/fixtures/npm/cases/workspace-typeless/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/workspace-typeless/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/fixtures/npm/cases/workspace-unclean/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/workspace-unclean/main.ts"

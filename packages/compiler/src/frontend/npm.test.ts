@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "vitest";
 import { NpmGraphBuilder } from "./npm.js";
 
@@ -46,6 +47,35 @@ describe("Node 24 ambiguous-module classification", () => {
     expect(fileFormat('import source wasm from "./module.wasm";')).toBe("esm");
   });
 
+  test("source-phase imports fail explicitly instead of leaving an incomplete graph", () => {
+    const packageDir = join(appDir, "node_modules", "sourcepkg");
+    const packageJson = join(packageDir, "package.json");
+    const entry = join(packageDir, "index.js");
+    const builder = new NpmGraphBuilder(
+      hostOf(
+        {
+          [packageJson]: JSON.stringify({
+            name: "sourcepkg",
+            type: "module",
+            exports: "./index.js",
+          }),
+          [entry]: 'import source wasm from "./module.wasm";',
+        },
+        [packageDir],
+      ),
+    );
+
+    builder.addImport(mainFile, "sourcepkg");
+    expect(builder.finish().errors).toEqual([
+      {
+        message:
+          `package 'sourcepkg' uses unsupported Node source-phase import './module.wasm' in ${entry} ` +
+          `(the embedded engine has no source-phase/WebAssembly module implementation; ` +
+          `dependency chain: sourcepkg)`,
+      },
+    ]);
+  });
+
   test("an outer package type does not cross a node_modules boundary", () => {
     const packageJson = join(appDir, "package.json");
     const entry = join(appDir, "node_modules", "unscoped", "index.js");
@@ -60,6 +90,53 @@ describe("Node 24 ambiguous-module classification", () => {
     );
     expect(key).not.toBeNull();
     expect(builder.moduleFormatOf(key!)).toBe("cjs");
+  });
+});
+
+describe("Node 24 typeless-package warnings", () => {
+  test("a syntax-detected workspace .js carries Node's runtime warning", () => {
+    const workspaceDir = join(appDir, "workspace", "typeless");
+    const packageJson = join(workspaceDir, "package.json");
+    const entry = join(workspaceDir, "index.js");
+    const builder = new NpmGraphBuilder(
+      hostOf({
+        [packageJson]: JSON.stringify({ name: "typeless" }),
+        [entry]: "export const value = 42;",
+      }),
+    );
+
+    expect(builder.addFileImport(mainFile, "./workspace/typeless/index.js")).toBe(entry);
+    expect(builder.finish().modules).toContainEqual({
+      key: entry,
+      source: "export const value = 42;",
+      format: "esm",
+      typelessPackageJson: packageJson,
+      typelessWarning:
+        `Module type of ${pathToFileURL(entry).href} is not specified and it doesn't parse as CommonJS.\n` +
+        `Reparsing as ES module because module syntax was detected. This incurs a performance overhead.\n` +
+        `To eliminate this warning, add "type": "module" to ${packageJson}.`,
+    });
+  });
+
+  test("the same typeless source is silent at a physical node_modules path", () => {
+    const packageDir = join(appDir, "node_modules", "typeless");
+    const packageJson = join(packageDir, "package.json");
+    const entry = join(packageDir, "index.js");
+    const builder = new NpmGraphBuilder(
+      hostOf({
+        [packageJson]: JSON.stringify({ name: "typeless" }),
+        [entry]: "export const value = 42;",
+      }),
+    );
+
+    expect(builder.addFileImport(mainFile, "./node_modules/typeless/index.js")).toBe(entry);
+    expect(builder.finish().modules).toEqual([
+      {
+        key: entry,
+        source: "export const value = 42;",
+        format: "esm",
+      },
+    ]);
   });
 });
 

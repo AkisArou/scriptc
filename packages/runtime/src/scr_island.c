@@ -145,6 +145,7 @@ static size_t isl_nedges = 0;
  * compressed at build time (scr_zlib.c links on the same predicate). */
 static bool (*isl_inflate)(const unsigned char *, size_t, unsigned char *, size_t) = NULL;
 static char **isl_text_cache = NULL; /* 2 slots per module: src, esm */
+static bool *isl_typeless_warned = NULL; /* one flag per module; pjson-deduped */
 
 void scr_island_set_inflate(bool (*inflate)(const unsigned char *src, size_t src_len,
                                             unsigned char *dst, size_t dst_len)) {
@@ -510,6 +511,8 @@ static void isl_teardown_at_exit(void) {
     free(isl_text_cache);
     isl_text_cache = NULL;
   }
+  free(isl_typeless_warned);
+  isl_typeless_warned = NULL;
 #ifdef SCR_RC_AUDIT
   if (isl_live_allocs != 0) {
     fflush(stdout);
@@ -2335,6 +2338,31 @@ ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems) {
 static bool isl_booted = false;
 static JSValue isl_cjs_import; /* (key, name) → export, CJS/JSON entries */
 
+/* Node's ESM loader warning for an ambiguous .js file whose syntax forced
+ * ESM and whose physical realpath belongs to a typeless workspace package.
+ * A package with several such files warns once, keyed by its package.json.
+ * require() reaches isl_host_source instead and stays silent, like Node. */
+static void isl_warn_typeless(const ScrIslandModule *m) {
+  if (!m->typeless_pjson || !m->typeless_warning) return;
+  if (!isl_typeless_warned) {
+    isl_typeless_warned = calloc(isl_nmods, sizeof(bool));
+  }
+  size_t index = (size_t)(m - isl_mods);
+  if (isl_typeless_warned) {
+    for (size_t i = 0; i < isl_nmods; i++) {
+      if (isl_typeless_warned[i] && isl_mods[i].typeless_pjson &&
+          strcmp(isl_mods[i].typeless_pjson, m->typeless_pjson) == 0) {
+        return;
+      }
+    }
+    isl_typeless_warned[index] = true;
+  }
+  fprintf(stderr,
+          "(node:%ld) [MODULE_TYPELESS_PACKAGE_JSON] Warning: %s\n"
+          "(Use `node --trace-warnings ...` to show where the warning was created)\n",
+          (long)getpid(), m->typeless_warning);
+}
+
 static char *isl_module_normalize(JSContext *ctx, const char *base,
                                   const char *name, void *opaque) {
   (void)opaque;
@@ -2531,6 +2559,7 @@ static JSModuleDef *isl_module_load(JSContext *ctx, const char *name, void *opaq
       return NULL;
     }
     if (m->format == 0) {
+      isl_warn_typeless(m);
       src = isl_mod_text(m, false, &len);
       if (!src) {
         JS_ThrowInternalError(ctx, "embedded module '%s' failed to inflate", name);

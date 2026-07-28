@@ -98,6 +98,13 @@ export interface EmbeddedModule {
   key: string;
   source: string;
   format: EmbeddedFormat;
+  /** Node's [MODULE_TYPELESS_PACKAGE_JSON] warning for a .js file whose
+   * realpath escapes node_modules (the workspace-symlink shape), nearest
+   * package.json omits a valid "type", and syntax detection chose ESM.
+   * The runtime emits this only when the ESM loader reaches the module and
+   * de-duplicates by packageJson, exactly like Node. */
+  typelessPackageJson?: string;
+  typelessWarning?: string;
   /** CommonJS only: the synthesized ESM facade the island's module loader
    * evaluates when an ES module imports this file — default plus the LEXED
    * named exports (cjsEsmFacadeSource). ESM sources compile natively and
@@ -317,6 +324,10 @@ interface SpecifierUse {
  * its own. */
 interface ModuleSpecifiers {
   uses: SpecifierUse[];
+  /** `import source binding from "specifier"` declarations. V8 recognizes
+   * this Node 24 syntax but TypeScript 5's AST does not, and the embedded
+   * engine has no source-phase/WebAssembly module implementation. */
+  sourcePhaseImports: string[];
   /** Node 24's syntax detection for ambiguous .js/extensionless files:
    * source that cannot run as CommonJS is intrinsically ESM even when the
    * nearest package.json omits "type". */
@@ -421,10 +432,37 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
   for (const use of uses) use.require = use.requireLocal || use.requireViaHelper;
   return {
     uses,
+    sourcePhaseImports: sourcePhaseImportsOf(source),
     esmSyntax: nodeEsmSyntaxDetected(source, fileName),
     requireHelperImport,
     requireHelperReexport,
   };
+}
+
+/** Collects Node 24 source-phase import declarations lexically. The
+ * TypeScript 5 parser predates this grammar and recovers without an
+ * ImportDeclaration, while V8 still classifies the file as ESM. A scanner
+ * keeps that parser-version seam explicit and distinguishes the ordinary
+ * default import `import source from "x"` (only one identifier before
+ * `from`) from `import source wasm from "x"`. */
+function sourcePhaseImportsOf(source: string): string[] {
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    true,
+    ts.LanguageVariant.Standard,
+    source,
+  );
+  const imports: string[] = [];
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    if (token !== ts.SyntaxKind.ImportKeyword) continue;
+    if (scanner.scan() !== ts.SyntaxKind.Identifier || scanner.getTokenValue() !== "source") {
+      continue;
+    }
+    if (scanner.scan() !== ts.SyntaxKind.Identifier) continue;
+    if (scanner.scan() !== ts.SyntaxKind.FromKeyword) continue;
+    if (scanner.scan() === ts.SyntaxKind.StringLiteral) imports.push(scanner.getTokenValue());
+  }
+  return imports;
 }
 
 interface ContextifyBinding {
@@ -1127,6 +1165,43 @@ export class NpmGraphBuilder {
       : "cjs";
   }
 
+  /** Node's typeless-package warning payload for a syntax-detected .js
+   * module, or null when that load is silent. Node warns only when a real
+   * nearest package.json exists, its "type" is absent/invalid, and the
+   * physical URL is outside node_modules. (That final condition is why
+   * linked workspace packages differ from ordinary installed packages.) */
+  private typelessWarningOf(
+    file: string,
+    source: string,
+  ): { packageJson: string; warning: string } | null {
+    if (
+      extname(file) !== ".js" ||
+      this.formatOverrides.has(file) ||
+      file.split("\\").join("/").includes("/node_modules/") ||
+      !this.specifiersOf(file, source)?.esmSyntax
+    ) {
+      return null;
+    }
+    for (let dir = dirname(file); ; ) {
+      if (basename(dir) === "node_modules") return null;
+      const pkg = this.pkgJsonOf(dir);
+      if (pkg) {
+        if (pkg.type === "module" || pkg.type === "commonjs") return null;
+        const packageJson = join(dir, "package.json");
+        return {
+          packageJson,
+          warning:
+            `Module type of ${pathToFileURL(file).href} is not specified and it doesn't parse as CommonJS.\n` +
+            `Reparsing as ES module because module syntax was detected. This incurs a performance overhead.\n` +
+            `To eliminate this warning, add "type": "module" to ${packageJson}.`,
+        };
+      }
+      const parent = dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+  }
+
   /** Node-style file resolution: exact file, extension candidates
    * (commander requires './suggestSimilar'; ".node" is in Node's require
    * probe list — the resolved addon embeds as a throwing dlopen stub),
@@ -1333,9 +1408,30 @@ export class NpmGraphBuilder {
       return;
     }
     const format = this.formatOf(key, source);
-    this.modules.set(key, { key, source, format });
+    const typeless = format === "esm" ? this.typelessWarningOf(key, source) : null;
+    this.modules.set(key, {
+      key,
+      source,
+      format,
+      ...(typeless === null
+        ? {}
+        : {
+            typelessPackageJson: typeless.packageJson,
+            typelessWarning: typeless.warning,
+          }),
+    });
     if (lazy) this.lazilyReached.add(key);
     if (format === "json") return;
+    const sourcePhaseImport = this.specifiersOf(key, source)?.sourcePhaseImports[0];
+    if (sourcePhaseImport !== undefined) {
+      this.errors.push({
+        message:
+          `package '${chain[chain.length - 1] ?? key}' uses unsupported Node source-phase import ` +
+          `'${sourcePhaseImport}' in ${key} (the embedded engine has no source-phase/WebAssembly ` +
+          `module implementation; dependency chain: ${NpmGraphBuilder.chainOf(chain)})`,
+      });
+      return;
+    }
     this.sweepEdges(key, source, chain, lazy);
   }
 

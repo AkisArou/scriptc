@@ -3839,6 +3839,11 @@ typedef struct ScrIslandModule {
   const char *esm;
   size_t esm_len;
   size_t esm_raw;
+  /* Syntax-detected typeless .js modules reached through workspace
+   * symlinks: Node warns when the ESM loader reaches one, once per
+   * controlling package.json. NULL for every silent module. */
+  const char *typeless_pjson;
+  const char *typeless_warning;
 } ScrIslandModule;
 
 typedef struct ScrIslandEdge {

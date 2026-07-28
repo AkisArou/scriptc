@@ -703,7 +703,16 @@ export interface IrModule {
      * island loader evaluates when an ES module imports the CJS file:
      * default plus the named exports LEXED from the source at build time
      * (cjs-lexer.ts — the compiler's port of Node's vendored CJS lexer). */
-    modules: { key: string; source: string; format: "esm" | "cjs" | "json"; esm?: string }[];
+    modules: {
+      key: string;
+      source: string;
+      format: "esm" | "cjs" | "json";
+      esm?: string;
+      /** Node's runtime warning for syntax-detected typeless workspace
+       * modules. The package path is the once-per-package dedupe key. */
+      typelessPackageJson?: string;
+      typelessWarning?: string;
+    }[];
     /** `kind` picks Node's "exports" condition set per CALL FORM: one
      * (from, specifier) can name a dual package's ESM entry behind an
      * "import" edge AND its CJS entry behind a "require" edge; "any"
