@@ -121,6 +121,9 @@ macOS, compact host contracts retain the native ABI, Mach-O size, linker,
 libc, kqueue network/dgram/watch/child/stdin behavior, and Apple-ASan checks
 that can genuinely differ there. Linux contributors run the supported native
 clang contracts locally; other hosts retain that coverage in the Sandboxes.
+Before extraction, each Sandbox clears image-seeded workspace files while
+retaining its dependency cache, so local deletions and renames cannot reappear
+from the image.
 Acceptance suites whose oracle lives in an external worktree run locally;
 case-addressable suites are sharded there. No assertion or sanitizer coverage
 is dropped.

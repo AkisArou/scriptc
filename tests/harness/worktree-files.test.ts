@@ -1,10 +1,14 @@
-import { writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, expect, test } from "vitest";
-import { filterExistingWorktreePaths } from "../../scripts/worktree-files.mjs";
+import {
+  filterExistingWorktreePaths,
+  workspaceResetCommand,
+} from "../../scripts/worktree-files.mjs";
 
 const roots: string[] = [];
 
@@ -29,4 +33,28 @@ test("archive path filtering omits unstaged deletions across stream chunks", asy
   }
 
   expect(Buffer.concat(chunks)).toEqual(Buffer.from("kept.ts\0"));
+});
+
+test("workspace reset removes image manifests but retains the dependency cache", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scriptc-worktree-reset-"));
+  roots.push(root);
+  mkdirSync(join(root, "packages", "cli"), { recursive: true });
+  mkdirSync(join(root, "node_modules", ".pnpm"), { recursive: true });
+  writeFileSync(join(root, "package.json"), "stale root manifest");
+  writeFileSync(join(root, "packages", "cli", "package.json"), "stale package manifest");
+  writeFileSync(join(root, "node_modules", ".pnpm", "cache"), "cached dependencies");
+
+  const { command, args } = workspaceResetCommand(root);
+  execFileSync(command, args);
+
+  expect(readdirSync(root)).toEqual(["node_modules"]);
+  expect(readFileSync(join(root, "node_modules", ".pnpm", "cache"), "utf8")).toBe(
+    "cached dependencies",
+  );
+});
+
+test("workspace reset refuses the filesystem root", () => {
+  expect(() => workspaceResetCommand(parse(process.cwd()).root)).toThrow(
+    "refusing to reset a filesystem root",
+  );
 });

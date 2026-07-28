@@ -1,5 +1,5 @@
 import { lstatSync } from "node:fs";
-import { sep } from "node:path";
+import { isAbsolute, parse, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
 
 const NUL = Buffer.from([0]);
@@ -48,4 +48,41 @@ export function filterExistingWorktreePaths(root) {
       }
     },
   });
+}
+
+/**
+ * Build the command that clears image-seeded worktree entries before an
+ * uploaded archive is extracted. The dependency tree is an image cache rather
+ * than worktree input, so retain it for pnpm to reconcile after extraction.
+ *
+ * Removing every other top-level entry makes absence meaningful: a manifest
+ * deleted or renamed in the uploaded worktree cannot survive from the image.
+ */
+export function workspaceResetCommand(workspaceRoot) {
+  if (!isAbsolute(workspaceRoot)) {
+    throw new Error("workspace reset root must be absolute");
+  }
+  const normalizedRoot = resolve(workspaceRoot);
+  if (normalizedRoot === parse(normalizedRoot).root) {
+    throw new Error("refusing to reset a filesystem root");
+  }
+  return {
+    command: "find",
+    args: [
+      normalizedRoot,
+      "-mindepth",
+      "1",
+      "-maxdepth",
+      "1",
+      "!",
+      "-name",
+      "node_modules",
+      "-exec",
+      "rm",
+      "-rf",
+      "--",
+      "{}",
+      "+",
+    ],
+  };
 }

@@ -9,7 +9,9 @@ export function sandboxHostSchedule(platform, invariantFiles) {
   const runsNative = platform === "darwin" || platform === "linux";
   return {
     darwinContracts: platform === "darwin",
+    localArtifactContracts: runsNative,
     localInvariantFiles: runsNative ? invariantFiles : [],
+    remoteArtifactContracts: !runsNative,
     remoteInvariantFiles: runsNative ? [] : invariantFiles,
   };
 }

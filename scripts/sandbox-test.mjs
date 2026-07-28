@@ -9,7 +9,10 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sandboxImageConfig } from "./sandbox-config.mjs";
 import { sandboxHostSchedule } from "./sandbox-platform.mjs";
-import { filterExistingWorktreePaths } from "./worktree-files.mjs";
+import {
+  filterExistingWorktreePaths,
+  workspaceResetCommand,
+} from "./worktree-files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const vcpus = process.env.SCRIPTC_SANDBOX_VCPUS ?? "8";
@@ -83,6 +86,7 @@ const hostInvariantFiles = [
 ];
 const hostSchedule = sandboxHostSchedule(process.platform, hostInvariantFiles);
 const nativeHostInvariantFiles = hostSchedule.localInvariantFiles;
+const remoteWorkspaceReset = workspaceResetCommand("/workspace");
 
 // The full portable behavior of these suites runs remotely. A compact
 // host-native contract additionally pins the places Darwin can disagree:
@@ -553,6 +557,14 @@ try {
     await allWorkers("Preparing worktree", async (worker) => {
       await execIn(
         worker,
+        remoteWorkspaceReset.command,
+        remoteWorkspaceReset.args,
+        {},
+        "reset",
+        2 * 60_000,
+      );
+      await execIn(
+        worker,
         "tar",
         ["-xzf", "/tmp/worktree.tar.gz", "-C", "/workspace"],
         {},
@@ -628,6 +640,31 @@ try {
         await Promise.all([cases(), files()]);
       }
     });
+
+    if (hostSchedule.remoteArtifactContracts) {
+      const contractWorker = workers.find(
+        (worker) => worker.lane === onceLane && worker.shard === 1,
+      );
+      if (!contractWorker) throw new Error("could not select a host artifact contract worker");
+      console.log("\nTesting host artifact contracts in a Linux Sandbox...");
+      await execIn(
+        contractWorker,
+        "pnpm",
+        [
+          "test",
+          "--reporter=dot",
+          "-t",
+          hostInvariantContractPattern,
+          ...hostInvariantContractFiles,
+        ],
+        {
+          CI: "1",
+          ASAN_OPTIONS: "detect_leaks=0",
+          SCRIPTC_TEST_WORKERS: fileWorkers,
+        },
+        "host artifact contracts",
+      );
+    }
   })();
 
   const local = values["remote-only"]
@@ -645,6 +682,9 @@ try {
             : []),
           ...(hostSchedule.darwinContracts
             ? ["compact Darwin platform contracts"]
+            : []),
+          ...(hostSchedule.localArtifactContracts
+            ? ["compact host artifact contracts"]
             : []),
           `${localLaneFiles.length + localCaseShardedFiles.length} external suites`,
         ];
@@ -675,8 +715,8 @@ try {
                   },
                 ),
               ];
-        const darwinContractTasks =
-          !hostSchedule.darwinContracts
+        const artifactContractTasks =
+          !hostSchedule.localArtifactContracts
             ? []
             : [
                 run(
@@ -691,31 +731,37 @@ try {
                   {
                     env: {
                       ...laneEnv(onceLane),
+                      ...(process.platform === "linux"
+                        ? { ASAN_OPTIONS: "detect_leaks=0" }
+                        : {}),
                       SCRIPTC_TEST_WORKERS: localTestWorkers,
                     },
-                    label: `local ${onceLane} Darwin contract`,
+                    label: `local ${onceLane} ${hostName} artifact contract`,
                   },
                 ),
-                ...lanes.map((lane) =>
-                  run(
-                    "pnpm",
-                    [
-                      "test",
-                      "--reporter=dot",
-                      "-t",
-                      hostLaneContractPattern,
-                      ...hostLaneContractFiles,
-                    ],
-                    {
-                      env: {
-                        ...laneEnv(lane),
-                        SCRIPTC_TEST_WORKERS: localTestWorkers,
-                      },
-                      label: `local ${lane} Darwin contract`,
-                    },
-                  ),
-                ),
               ];
+        const darwinContractTasks =
+          !hostSchedule.darwinContracts
+            ? []
+            : lanes.map((lane) =>
+                run(
+                  "pnpm",
+                  [
+                    "test",
+                    "--reporter=dot",
+                    "-t",
+                    hostLaneContractPattern,
+                    ...hostLaneContractFiles,
+                  ],
+                  {
+                    env: {
+                      ...laneEnv(lane),
+                      SCRIPTC_TEST_WORKERS: localTestWorkers,
+                    },
+                    label: `local ${lane} Darwin contract`,
+                  },
+                ),
+              );
         const laneFileTasks = lanes.map((lane) =>
           run(
             "pnpm",
@@ -751,6 +797,7 @@ try {
         const results = await Promise.allSettled(
           [
             ...nativeHostTasks,
+            ...artifactContractTasks,
             ...darwinContractTasks,
             ...laneFileTasks,
             ...caseTasks,
