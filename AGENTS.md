@@ -12,8 +12,10 @@ pnpm test:sandbox              # default full gate: plain + sanitized lanes (~4 
 Use focused local tests while iterating, then use `pnpm test:sandbox` whenever a
 full validation gate is required. It loads Sandbox configuration from the
 shell and `.env.local`, runs portable coverage across disposable Linux
-Sandboxes, and retains the Darwin-native contracts on the host. Both lanes
-green is the bar before shipping any change.
+Sandboxes, and retains the Darwin-native contracts on macOS. Linux hosts run
+their supported native-clang contracts locally; other hosts retain those
+checks in the Sandboxes. Both lanes green is the bar before shipping any
+change.
 
 Only when Vercel Sandbox credentials or `SCRIPTC_SANDBOX_IMAGE` are unavailable,
 run the slower local fallback:

@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sandboxImageConfig } from "./sandbox-config.mjs";
+import { sandboxHostSchedule } from "./sandbox-platform.mjs";
 import { filterExistingWorktreePaths } from "./worktree-files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -59,6 +60,8 @@ const invariantRemoteFiles = [
   "tests/harness/library-mode.test.ts",
   "tests/harness/library-profile.test.ts",
   "tests/harness/linux-differential.test.ts",
+  "tests/harness/oci-manifest.test.ts",
+  "tests/harness/sandbox-platform.test.ts",
   "tests/harness/shard.test.ts",
   "tests/harness/smoke.test.ts",
   "tests/harness/surface-manifest.test.ts",
@@ -78,19 +81,32 @@ const hostInvariantFiles = [
   "packages/runtime/test/tonumber.test.ts",
   "packages/runtime/test/url.test.ts",
 ];
+const hostSchedule = sandboxHostSchedule(process.platform, hostInvariantFiles);
+const nativeHostInvariantFiles = hostSchedule.localInvariantFiles;
 
 // The full portable behavior of these suites runs remotely. A compact
 // host-native contract additionally pins the places Darwin can disagree:
-// object/archive ABI, Mach-O size classes, linker diagnostics, and ucontext
-// behavior under both ordinary and Apple-ASan builds.
+// object/archive ABI, Mach-O size classes, linker diagnostics, ucontext,
+// and the kqueue event-loop arms under both ordinary and Apple-ASan builds.
+// Non-Darwin hosts retain the full portable remote suites without trying
+// to execute these macOS-specific contracts locally.
 const hostLaneContractFiles = [
   "tests/harness/ffi.test.ts",
   "tests/harness/island.test.ts",
+  "tests/harness/differential.test.ts",
+  "tests/harness/server.test.ts",
+  "tests/harness/dgram.test.ts",
+  "tests/harness/event-loop.test.ts",
 ];
 const hostLaneContractPattern = [
   "calls the manifest-bound archive across every v1 ABI class",
   "a missing FFI symbol is an SC5004 diagnostic",
   "deep island recursion on a fiber is a catchable RangeError",
+  "net-echo",
+  "udp-loopback-pair",
+  "1564-fs-watch.ts",
+  "1470-child-lifecycle.ts",
+  "read-all: chunked writes with delays, then EOF",
 ].join("|");
 const hostInvariantContractFiles = [
   "tests/harness/island.test.ts",
@@ -589,12 +605,15 @@ try {
             "--passWithNoTests",
             `--shard=${worker.shard}/${shardCount}`,
             ...caseShardedFiles.map((file) => `--exclude=${file}`),
-            ...hostInvariantFiles.map((file) => `--exclude=${file}`),
+            ...nativeHostInvariantFiles.map((file) => `--exclude=${file}`),
             ...localLaneFiles.map((file) => `--exclude=${file}`),
             ...localCaseShardedFiles.map((file) => `--exclude=${file}`),
             ...(worker.lane === onceLane
               ? []
-              : invariantRemoteFiles.map((file) => `--exclude=${file}`)),
+              : [
+                  ...invariantRemoteFiles,
+                  ...hostSchedule.remoteInvariantFiles,
+                ].map((file) => `--exclude=${file}`)),
           ],
           {
             ...sharedTestEnv,
@@ -614,65 +633,89 @@ try {
   const local = values["remote-only"]
     ? Promise.resolve()
     : (async () => {
+        const hostName =
+          process.platform === "darwin"
+            ? "Darwin"
+            : process.platform === "linux"
+              ? "Linux"
+              : process.platform;
+        const localWork = [
+          ...(nativeHostInvariantFiles.length > 0
+            ? [`${nativeHostInvariantFiles.length} ${hostName}-native files`]
+            : []),
+          ...(hostSchedule.darwinContracts
+            ? ["compact Darwin platform contracts"]
+            : []),
+          `${localLaneFiles.length + localCaseShardedFiles.length} external suites`,
+        ];
         console.log(
-          `\nBuilding and testing ${hostInvariantFiles.length} Darwin-native files, compact platform contracts, and ${localLaneFiles.length + localCaseShardedFiles.length} external suites locally...`,
+          `\nBuilding and testing ${localWork.join(", ")} locally...`,
         );
         await run("pnpm", ["build"], { label: "local build" });
         const laneEnv = (lane) => ({
           CI: "1",
           ...(lane === "san" ? { SCRIPTC_SAN: "1" } : {}),
         });
-        const invariantHostTask =
-          run(
-            "pnpm",
-            [
-              "test",
-              ...hostInvariantFiles,
-            ],
-            {
-              env: {
-                ...laneEnv(onceLane),
-                SCRIPTC_TEST_WORKERS: localTestWorkers,
-              },
-              label: `local ${onceLane} Darwin`,
-            },
-          );
-        const invariantContractTask = run(
-          "pnpm",
-          [
-            "test",
-            "--reporter=dot",
-            "-t",
-            hostInvariantContractPattern,
-            ...hostInvariantContractFiles,
-          ],
-          {
-            env: {
-              ...laneEnv(onceLane),
-              SCRIPTC_TEST_WORKERS: localTestWorkers,
-            },
-            label: `local ${onceLane} Darwin contract`,
-          },
-        );
-        const laneContractTasks = lanes.map((lane) =>
-          run(
-            "pnpm",
-            [
-              "test",
-              "--reporter=dot",
-              "-t",
-              hostLaneContractPattern,
-              ...hostLaneContractFiles,
-            ],
-            {
-              env: {
-                ...laneEnv(lane),
-                SCRIPTC_TEST_WORKERS: localTestWorkers,
-              },
-              label: `local ${lane} Darwin contract`,
-            },
-          ),
-        );
+        const nativeHostTasks =
+          nativeHostInvariantFiles.length === 0
+            ? []
+            : [
+                run(
+                  "pnpm",
+                  [
+                    "test",
+                    ...nativeHostInvariantFiles,
+                  ],
+                  {
+                    env: {
+                      ...laneEnv(onceLane),
+                      SCRIPTC_TEST_WORKERS: localTestWorkers,
+                    },
+                    label: `local ${onceLane} ${hostName}`,
+                  },
+                ),
+              ];
+        const darwinContractTasks =
+          !hostSchedule.darwinContracts
+            ? []
+            : [
+                run(
+                  "pnpm",
+                  [
+                    "test",
+                    "--reporter=dot",
+                    "-t",
+                    hostInvariantContractPattern,
+                    ...hostInvariantContractFiles,
+                  ],
+                  {
+                    env: {
+                      ...laneEnv(onceLane),
+                      SCRIPTC_TEST_WORKERS: localTestWorkers,
+                    },
+                    label: `local ${onceLane} Darwin contract`,
+                  },
+                ),
+                ...lanes.map((lane) =>
+                  run(
+                    "pnpm",
+                    [
+                      "test",
+                      "--reporter=dot",
+                      "-t",
+                      hostLaneContractPattern,
+                      ...hostLaneContractFiles,
+                    ],
+                    {
+                      env: {
+                        ...laneEnv(lane),
+                        SCRIPTC_TEST_WORKERS: localTestWorkers,
+                      },
+                      label: `local ${lane} Darwin contract`,
+                    },
+                  ),
+                ),
+              ];
         const laneFileTasks = lanes.map((lane) =>
           run(
             "pnpm",
@@ -707,9 +750,8 @@ try {
         );
         const results = await Promise.allSettled(
           [
-            invariantHostTask,
-            invariantContractTask,
-            ...laneContractTasks,
+            ...nativeHostTasks,
+            ...darwinContractTasks,
             ...laneFileTasks,
             ...caseTasks,
           ],

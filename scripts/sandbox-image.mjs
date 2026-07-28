@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { sandboxImageConfig } from "./sandbox-config.mjs";
+import { linuxAmd64ManifestDigest } from "./oci-manifest.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const { project, reference: image, repository, tag, team } = sandboxImageConfig();
@@ -49,13 +50,21 @@ await run("docker", [
   ".",
 ]);
 
-const rawManifest = JSON.parse(await run("docker", ["buildx", "imagetools", "inspect", image, "--raw"], { capture: true }));
-const amd64Digest =
-  rawManifest.manifests?.find(
-    (manifest) => manifest.platform?.os === "linux" && manifest.platform?.architecture === "amd64",
-  )?.digest ?? rawManifest.config?.digest;
-
-if (!amd64Digest) throw new Error(`could not find the linux/amd64 manifest for ${image}`);
+const inspection = JSON.parse(
+  await run(
+    "docker",
+    ["buildx", "imagetools", "inspect", image, "--format", "{{json .}}"],
+    { capture: true },
+  ),
+);
+let amd64Digest;
+try {
+  amd64Digest = linuxAmd64ManifestDigest(inspection);
+} catch (error) {
+  throw new Error(`could not find the linux/amd64 manifest for ${image}`, {
+    cause: error,
+  });
+}
 
 console.log("Waiting for VCR to prepare the image for Sandbox...");
 const deadline = Date.now() + 5 * 60_000;

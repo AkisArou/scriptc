@@ -116,9 +116,11 @@ The hybrid sandbox runner uploads the exact dirty worktree and case-shards the
 corpus-heavy harnesses across eight 8-vCPU sandboxes per lane. Portable test
 files are file-sharded over the same Sandboxes. Files whose behavior cannot
 change under `SCRIPTC_SAN` run once; sanitizer-aware files and the differential
-corpus still run in both lanes. Full portable behavior runs on Linux, while a
-compact host contract retains the native ABI, Mach-O size, linker, libc,
-filesystem, and Apple-ASan checks that can genuinely differ on macOS.
+corpus still run in both lanes. Full portable behavior runs on Linux. On
+macOS, compact host contracts retain the native ABI, Mach-O size, linker,
+libc, kqueue network/dgram/watch/child/stdin behavior, and Apple-ASan checks
+that can genuinely differ there. Linux contributors run the supported native
+clang contracts locally; other hosts retain that coverage in the Sandboxes.
 Acceptance suites whose oracle lives in an external worktree run locally;
 case-addressable suites are sharded there. No assertion or sanitizer coverage
 is dropped.
