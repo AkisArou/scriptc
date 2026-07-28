@@ -326,8 +326,9 @@ interface ModuleSpecifiers {
   uses: SpecifierUse[];
   /** Static `import source binding from "specifier"` declarations and
    * dynamic `import.source(specifier)` expressions. V8 recognizes this
-   * Node 24 syntax but TypeScript 5's AST does not, and the embedded
-   * engine has no source-phase/WebAssembly module implementation. */
+   * Node 24 syntax; TypeScript 5 represents the dynamic form as a
+   * MetaProperty but cannot parse the static form, and the embedded engine
+   * has no source-phase/WebAssembly module implementation. */
   sourcePhaseImports: SourcePhaseImport[];
   /** Node 24's syntax detection for ambiguous .js/extensionless files:
    * source that cannot run as CommonJS is intrinsically ESM even when the
@@ -355,6 +356,8 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
   const uses: SpecifierUse[] = [];
   const bySpec = new Map<string, SpecifierUse>();
+  const dynamicSourcePhaseImports = new Map<number, SourcePhaseImport>();
+  const regexRanges: { start: number; end: number }[] = [];
   let requireHelperImport: string | null = null;
   let requireHelperReexport: string | null = null;
   /** Uses with `__require(…)` sites — attributed local vs helper AFTER the
@@ -378,6 +381,9 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
     return use;
   };
   const visit = (n: ts.Node): void => {
+    if (n.kind === ts.SyntaxKind.RegularExpressionLiteral) {
+      regexRanges.push({ start: n.getStart(sf), end: n.end });
+    }
     if (
       (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) &&
       n.moduleSpecifier !== undefined &&
@@ -403,6 +409,18 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
     } else if (ts.isCallExpression(n)) {
       const arg = n.arguments[0];
       if (
+        ts.isMetaProperty(n.expression) &&
+        n.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+        n.expression.name.text === "source"
+      ) {
+        dynamicSourcePhaseImports.set(n.expression.getStart(sf), {
+          specifier:
+            arg !== undefined && ts.isStringLiteralLike(arg)
+              ? arg.text
+              : null,
+          dynamic: true,
+        });
+      } else if (
         n.expression.kind === ts.SyntaxKind.ImportKeyword &&
         arg !== undefined &&
         ts.isStringLiteralLike(arg)
@@ -433,7 +451,11 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
   for (const use of uses) use.require = use.requireLocal || use.requireViaHelper;
   return {
     uses,
-    sourcePhaseImports: sourcePhaseImportsOf(source),
+    sourcePhaseImports: sourcePhaseImportsOf(
+      source,
+      dynamicSourcePhaseImports,
+      regexRanges,
+    ),
     esmSyntax: nodeEsmSyntaxDetected(source, fileName),
     requireHelperImport,
     requireHelperReexport,
@@ -446,13 +468,18 @@ interface SourcePhaseImport {
   dynamic: boolean;
 }
 
-/** Collects Node 24 source-phase imports lexically. The TypeScript 5
- * parser predates both the static `import source binding from "x"` and
- * dynamic `import.source(expr)` grammars, while V8 still classifies them
- * as ESM. A scanner keeps that parser-version seam explicit and
- * distinguishes the ordinary default import `import source from "x"`
+/** Collects Node 24 source-phase imports. TypeScript 5 represents dynamic
+ * `import.source(expr)` as a MetaProperty, which preserves the grammar
+ * context needed to distinguish it from `obj.import.source(expr)`. Its
+ * parser predates static `import source binding from "x"`, so a scanner
+ * handles only that seam while excluding AST-recognized regex bodies and
+ * distinguishing the ordinary default import `import source from "x"`
  * (only one identifier before `from`) from the static source phase. */
-function sourcePhaseImportsOf(source: string): SourcePhaseImport[] {
+function sourcePhaseImportsOf(
+  source: string,
+  dynamicImports: ReadonlyMap<number, SourcePhaseImport>,
+  regexRanges: readonly { start: number; end: number }[],
+): SourcePhaseImport[] {
   const scanner = ts.createScanner(
     ts.ScriptTarget.Latest,
     true,
@@ -462,25 +489,21 @@ function sourcePhaseImportsOf(source: string): SourcePhaseImport[] {
   const imports: SourcePhaseImport[] = [];
   for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
     if (token !== ts.SyntaxKind.ImportKeyword) continue;
-    const afterImport = scanner.scan();
-    if (afterImport === ts.SyntaxKind.DotToken) {
-      if (
-        scanner.scan() !== ts.SyntaxKind.Identifier ||
-        scanner.getTokenValue() !== "source" ||
-        scanner.scan() !== ts.SyntaxKind.OpenParenToken
-      ) {
-        continue;
-      }
-      const argument = scanner.scan();
-      imports.push({
-        specifier:
-          argument === ts.SyntaxKind.StringLiteral
-            ? scanner.getTokenValue()
-            : null,
-        dynamic: true,
-      });
+    const importStart = scanner.getTokenPos();
+    // The raw TS scanner does not rescan slash tokens as regex literals,
+    // so regex bodies can otherwise look like source-phase grammar.
+    if (regexRanges.some((r) => importStart >= r.start && importStart < r.end)) {
       continue;
     }
+    // TS 5 already parses the real dynamic form as an import.source
+    // MetaProperty. Requiring that AST identity excludes ordinary member
+    // access such as `loader.import.source(...)`.
+    const dynamicImport = dynamicImports.get(importStart);
+    if (dynamicImport !== undefined) {
+      imports.push(dynamicImport);
+      continue;
+    }
+    const afterImport = scanner.scan();
     if (afterImport !== ts.SyntaxKind.Identifier || scanner.getTokenValue() !== "source") {
       continue;
     }
@@ -1400,9 +1423,17 @@ export class NpmGraphBuilder {
       // override. Refresh the cached classification so traversal order
       // cannot decide the module format.
       const override = this.formatOverrides.get(key);
-      if (override !== undefined && override !== existing.format) {
-        existing.format = override;
-        delete existing.esm;
+      if (override !== undefined) {
+        if (override !== existing.format) {
+          existing.format = override;
+          delete existing.esm;
+        }
+        // The module-field choice is an explicit format decision, not
+        // Node's syntax-detection path. Clear warning metadata even when
+        // the cached module was already classified as ESM, so discovery
+        // order cannot change stderr.
+        delete existing.typelessPackageJson;
+        delete existing.typelessWarning;
       }
       if (!lazy && this.lazilyReached.has(key)) {
         // Promotion: a static path reached a module first seen behind a

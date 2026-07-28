@@ -6,14 +6,18 @@ import { NpmGraphBuilder } from "./npm.js";
 const appDir = resolve("virtual-npm-app");
 const mainFile = join(appDir, "main.ts");
 
-function hostOf(files: Record<string, string>, directories: readonly string[] = []) {
+function hostOf(
+  files: Record<string, string>,
+  directories: readonly string[] = [],
+  realpaths: Readonly<Record<string, string>> = {},
+) {
   const fileMap = new Map(Object.entries(files));
   const directorySet = new Set(directories);
   return {
     readFile: (path: string): string | null => fileMap.get(path) ?? null,
     isFile: (path: string): boolean => fileMap.has(path),
     isDirectory: (path: string): boolean => directorySet.has(path),
-    realpath: (path: string): string => path,
+    realpath: (path: string): string => realpaths[path] ?? path,
   };
 }
 
@@ -45,6 +49,18 @@ describe("Node 24 ambiguous-module classification", () => {
 
   test("Node 24 source-phase import syntax is ESM", () => {
     expect(fileFormat('import source wasm from "./module.wasm";')).toBe("esm");
+  });
+
+  test.each([
+    'const loader = { import: { source(value) { return value; } } }; loader.import.source("ok");',
+    'const pattern = /import source wasm from "module"/;',
+  ])("valid CommonJS is not mistaken for a source-phase import: %s", (source) => {
+    const ambiguous = join(appDir, "ambiguous.js");
+    const builder = new NpmGraphBuilder(hostOf({ [ambiguous]: source }));
+    const key = builder.addFileImport(mainFile, "./ambiguous.js");
+    expect(key).not.toBeNull();
+    expect(builder.moduleFormatOf(key!)).toBe("cjs");
+    expect(builder.finish().errors).toEqual([]);
   });
 
   test("source-phase imports fail explicitly instead of leaving an incomplete graph", () => {
@@ -204,5 +220,48 @@ describe("module-field format overrides", () => {
       builder.addFileImport(mainFile, "./node_modules/pkg/index.js"),
     ).toBe(moduleEntry);
     expect(builder.moduleFormatOf(moduleEntry)).toBe("esm");
+  });
+
+  test("a late module-field override clears syntax-detection warning metadata", () => {
+    const workspaceDir = join(appDir, "workspace", "pkg");
+    const workspacePackageJson = join(workspaceDir, "package.json");
+    const workspaceEntry = join(workspaceDir, "index.js");
+    const linkedDir = join(appDir, "node_modules", "pkg");
+    const linkedEntry = join(linkedDir, "index.js");
+    const source = "export const value = 1;";
+    const workspaceFiles = {
+      [workspacePackageJson]: JSON.stringify({
+        name: "pkg",
+        module: "./index.js",
+      }),
+      [workspaceEntry]: source,
+      [linkedEntry]: source,
+    };
+    const realpaths = {
+      [linkedDir]: workspaceDir,
+      [linkedEntry]: workspaceEntry,
+    };
+
+    const fileFirst = new NpmGraphBuilder(
+      hostOf(workspaceFiles, [linkedDir], realpaths),
+    );
+    fileFirst.addFileImport(mainFile, "./node_modules/pkg/index.js");
+    fileFirst.addImport(mainFile, "pkg");
+
+    const bareFirst = new NpmGraphBuilder(
+      hostOf(workspaceFiles, [linkedDir], realpaths),
+    );
+    bareFirst.addImport(mainFile, "pkg");
+    bareFirst.addFileImport(mainFile, "./node_modules/pkg/index.js");
+
+    const fileFirstModules = fileFirst.finish().modules;
+    expect(fileFirstModules).toEqual(bareFirst.finish().modules);
+    expect(fileFirstModules).toEqual([
+      {
+        key: workspaceEntry,
+        source,
+        format: "esm",
+      },
+    ]);
   });
 });
