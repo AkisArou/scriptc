@@ -8,7 +8,10 @@ import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sandboxImageConfig } from "./sandbox-config.mjs";
-import { sandboxHostSchedule } from "./sandbox-platform.mjs";
+import {
+  sandboxHostSchedule,
+  sandboxLaneEnv,
+} from "./sandbox-platform.mjs";
 import {
   filterExistingWorktreePaths,
   workspaceResetCommand,
@@ -577,13 +580,12 @@ try {
 
     await allWorkers("Testing", async (worker) => {
       const sharedTestEnv = {
-        CI: "1",
+        ...sandboxLaneEnv(worker.lane),
         // Platform artifact contracts run against the native host below.
         // Remote lanes retain every portable behavior assertion.
         SCRIPTC_PORTABLE_ONLY: "1",
         ...(worker.lane === "san"
           ? {
-              SCRIPTC_SAN: "1",
               // Match the macOS shipping lane: Apple ASan has no
               // LeakSanitizer, while scriptc's RC audit owns leak
               // detection (including its intentional-abandonment rules).
@@ -692,10 +694,6 @@ try {
           `\nBuilding and testing ${localWork.join(", ")} locally...`,
         );
         await run("pnpm", ["build"], { label: "local build" });
-        const laneEnv = (lane) => ({
-          CI: "1",
-          ...(lane === "san" ? { SCRIPTC_SAN: "1" } : {}),
-        });
         const nativeHostTasks =
           nativeHostInvariantFiles.length === 0
             ? []
@@ -708,7 +706,7 @@ try {
                   ],
                   {
                     env: {
-                      ...laneEnv(onceLane),
+                      ...sandboxLaneEnv(onceLane),
                       SCRIPTC_TEST_WORKERS: localTestWorkers,
                     },
                     label: `local ${onceLane} ${hostName}`,
@@ -730,7 +728,7 @@ try {
                   ],
                   {
                     env: {
-                      ...laneEnv(onceLane),
+                      ...sandboxLaneEnv(onceLane),
                       ...(process.platform === "linux"
                         ? { ASAN_OPTIONS: "detect_leaks=0" }
                         : {}),
@@ -755,7 +753,7 @@ try {
                   ],
                   {
                     env: {
-                      ...laneEnv(lane),
+                      ...sandboxLaneEnv(lane),
                       SCRIPTC_TEST_WORKERS: localTestWorkers,
                     },
                     label: `local ${lane} Darwin contract`,
@@ -768,7 +766,7 @@ try {
             ["test", "--reporter=dot", ...localLaneFiles],
             {
               env: {
-                ...laneEnv(lane),
+                ...sandboxLaneEnv(lane),
                 SCRIPTC_TEST_RUN_ID: nonce,
                 SCRIPTC_TEST_WORKERS: "1",
               },
@@ -784,7 +782,7 @@ try {
               ["test", "--reporter=dot", ...localCaseShardedFiles],
               {
                 env: {
-                  ...laneEnv(lane),
+                  ...sandboxLaneEnv(lane),
                   SCRIPTC_TEST_SHARD: `${shard}/${localCaseShardCount}`,
                   SCRIPTC_TEST_RUN_ID: nonce,
                   SCRIPTC_TEST_WORKERS: "1",

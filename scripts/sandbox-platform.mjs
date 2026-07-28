@@ -15,3 +15,15 @@ export function sandboxHostSchedule(platform, invariantFiles) {
     remoteInvariantFiles: runsNative ? [] : invariantFiles,
   };
 }
+
+/**
+ * Pin lane identity even when the parent shell, .env.local, or Sandbox image
+ * already defines SCRIPTC_SAN. Tests enable sanitizers only for the exact
+ * string "1", so an empty value explicitly restores the plain lane.
+ */
+export function sandboxLaneEnv(lane) {
+  return {
+    CI: "1",
+    SCRIPTC_SAN: lane === "san" ? "1" : "",
+  };
+}

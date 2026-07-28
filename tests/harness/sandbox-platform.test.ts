@@ -1,5 +1,8 @@
 import { expect, test } from "vitest";
-import { sandboxHostSchedule } from "../../scripts/sandbox-platform.mjs";
+import {
+  sandboxHostSchedule,
+  sandboxLaneEnv,
+} from "../../scripts/sandbox-platform.mjs";
 
 const files = ["native-a.test.ts", "native-b.test.ts"];
 
@@ -30,5 +33,16 @@ test("other hosts retain native-file coverage in Linux Sandboxes", () => {
     localInvariantFiles: [],
     remoteArtifactContracts: true,
     remoteInvariantFiles: files,
+  });
+});
+
+test("lane environments override an inherited sanitizer setting", () => {
+  expect(sandboxLaneEnv("plain")).toEqual({
+    CI: "1",
+    SCRIPTC_SAN: "",
+  });
+  expect(sandboxLaneEnv("san")).toEqual({
+    CI: "1",
+    SCRIPTC_SAN: "1",
   });
 });
