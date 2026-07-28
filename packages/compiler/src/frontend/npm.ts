@@ -87,6 +87,7 @@
  */
 import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import ts from "typescript5";
 import { cjsLexedExportsOf } from "./cjs-lexer.js";
 
@@ -420,62 +421,30 @@ function moduleSpecifiersOf(source: string, fileName: string): ModuleSpecifiers 
   for (const use of uses) use.require = use.requireLocal || use.requireViaHelper;
   return {
     uses,
-    esmSyntax: nodeEsmSyntaxDetected(sf),
+    esmSyntax: nodeEsmSyntaxDetected(source, fileName),
     requireHelperImport,
     requireHelperReexport,
   };
 }
 
-/** Node 24 DETECT_MODULE_SYNTAX for an otherwise-ambiguous source file.
- * TypeScript already marks import/export declarations and import.meta as
- * external-module indicators. Node additionally detects top-level await
- * and top-level lexical declarations that would redeclare one of the
- * CommonJS wrapper parameters and therefore fail when parsed as CJS. */
-function nodeEsmSyntaxDetected(sf: ts.SourceFile): boolean {
-  if (ts.isExternalModule(sf)) return true;
+interface ContextifyBinding {
+  /** The V8-backed primitive Node 24's ESM loader calls from
+   * DETECT_MODULE_SYNTAX for ambiguous .js/extensionless sources. */
+  containsModuleSyntax(source: string, fileName: string, url: URL): boolean;
+}
 
-  const wrapperNames = new Set(["require", "module", "exports", "__dirname", "__filename"]);
-  const bindingRedeclaresWrapper = (name: ts.BindingName): boolean => {
-    if (ts.isIdentifier(name)) return wrapperNames.has(name.text);
-    return name.elements.some((el) =>
-      ts.isOmittedExpression(el) ? false : bindingRedeclaresWrapper(el.name)
-    );
-  };
-  for (const statement of sf.statements) {
-    if (
-      ts.isVariableStatement(statement) &&
-      (statement.declarationList.flags & ts.NodeFlags.BlockScoped) !== 0 &&
-      statement.declarationList.declarations.some((decl) => bindingRedeclaresWrapper(decl.name))
-    ) {
-      return true;
-    }
-    if (
-      ts.isClassDeclaration(statement) &&
-      statement.name !== undefined &&
-      wrapperNames.has(statement.name.text)
-    ) {
-      return true;
-    }
+const contextify = (
+  process as typeof process & {
+    binding(name: "contextify"): ContextifyBinding;
   }
+).binding("contextify");
 
-  let topLevelAwait = false;
-  const visitTopLevel = (node: ts.Node): void => {
-    if (topLevelAwait || (node !== sf && ts.isFunctionLike(node))) return;
-    if (
-      ts.isAwaitExpression(node) ||
-      (ts.isForOfStatement(node) && node.awaitModifier !== undefined) ||
-      (
-        ts.isVariableDeclarationList(node) &&
-        (node.flags & ts.NodeFlags.AwaitUsing) === ts.NodeFlags.AwaitUsing
-      )
-    ) {
-      topLevelAwait = true;
-      return;
-    }
-    ts.forEachChild(node, visitTopLevel);
-  };
-  visitTopLevel(sf);
-  return topLevelAwait;
+/** Node 24 DETECT_MODULE_SYNTAX for an otherwise-ambiguous source file.
+ * Use Node's own V8-backed classifier: a TypeScript AST approximation
+ * diverges on parser recovery, computed method names whose keys contain
+ * top-level await, and Node syntax newer than the legacy TS parser. */
+function nodeEsmSyntaxDetected(source: string, fileName: string): boolean {
+  return contextify.containsModuleSyntax(source, fileName, pathToFileURL(fileName));
 }
 
 function builtinKeyOf(specifier: string): string | null {

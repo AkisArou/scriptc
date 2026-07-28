@@ -32,6 +32,20 @@ describe("Node 24 ambiguous-module classification", () => {
     expect(fileFormat(source)).toBe("esm");
   });
 
+  test("top-level await in a computed method name is ESM", () => {
+    expect(
+      fileFormat('const value = { [await Promise.resolve("x")]() {} };'),
+    ).toBe("esm");
+  });
+
+  test("a CommonJS for-of target named await stays CommonJS", () => {
+    expect(fileFormat("var await; for (await of []);")).toBe("cjs");
+  });
+
+  test("Node 24 source-phase import syntax is ESM", () => {
+    expect(fileFormat('import source wasm from "./module.wasm";')).toBe("esm");
+  });
+
   test("an outer package type does not cross a node_modules boundary", () => {
     const packageJson = join(appDir, "package.json");
     const entry = join(appDir, "node_modules", "unscoped", "index.js");
