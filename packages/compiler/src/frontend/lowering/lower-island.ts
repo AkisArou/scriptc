@@ -364,7 +364,12 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     }
     const promiseCtor: IrExpr = { kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc };
     const resolved: IrExpr = { kind: "jsOp", op: "callMethod", name: "resolve", args: [promiseCtor], type: JSVAL, loc };
-    const builderFn: IrType & { kind: "func" } = { kind: "func", params: [], ret: JSVAL };
+    const builderAsync = dep !== null && L.asyncInitFiles.has(dep);
+    const builderFn: IrType & { kind: "func" } = {
+      kind: "func",
+      params: [],
+      ret: builderAsync ? { kind: "promise", inner: JSVAL } : JSVAL,
+    };
     const marshaled: IrExpr = {
       kind: "jsMarshal",
       value: { kind: "closure", fnName: builder, captures: [], type: builderFn, loc },
@@ -390,13 +395,31 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     const rawTag = L.fileTag.get(dep) ?? "";
     const name = `%dynns.${rawTag === "" ? "e." : rawTag.replace(/^%/, "")}`;
     L.dynNsBuilders.set(dep, name);
-    L.fnStack.push(newFnCtx(true, null, null, JSVAL));
+    const isAsync = L.asyncInitFiles.has(dep);
+    const fnCtx = newFnCtx(true, null, null, JSVAL);
+    fnCtx.isAsync = isAsync;
+    L.fnStack.push(fnCtx);
     try {
       const body: IrStmt[] = [];
-      if (dep !== L.entry) {
+      // A synchronous entry has no run-once guard, so its historical
+      // self-import path must not call %init again. An ASYNC entry does
+      // have the stronger evaluation-promise cache: awaiting that cached
+      // promise is essential for top-level `await import("./self")`,
+      // which deadlocks (and ultimately exits 13) in Node rather than
+      // exposing a half-evaluated namespace.
+      if (dep !== L.entry || isAsync) {
+        const call: IrExpr = {
+          kind: "call",
+          callee: initName,
+          args: [],
+          type: isAsync ? { kind: "promise", inner: VOID } : VOID,
+          loc,
+        };
         body.push({
           kind: "exprStmt",
-          expr: { kind: "call", callee: initName, args: [], type: VOID, loc },
+          expr: isAsync
+            ? { kind: "awaitExpr", value: call, type: VOID, loc }
+            : call,
           loc,
         });
       }
@@ -427,6 +450,7 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
         locals: ctx.locals,
         captures: ctx.captures ?? [],
         body,
+        ...(isAsync ? { async: true as const } : {}),
         loc,
       });
     } finally {

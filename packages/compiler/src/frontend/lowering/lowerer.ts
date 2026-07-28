@@ -65,6 +65,7 @@ import {
   isNodeEsmFile,
   isNodeTypesPath,
   locOf,
+  orderedImportsOf,
   overridesDtsPath,
   npmStaticDepSf7,
   requireSpecOf,
@@ -1033,6 +1034,18 @@ export class Lowerer {
    * none — %main calls it exactly once (a dependency edge back to the
    * entry would be a fenced cycle). */
   readonly moduleGuardOf = new Map<ts.SourceFile, string>();
+  /** Files whose module evaluation is asynchronous: direct top-level
+   * await/for-await modules plus their static ESM importers. Their %init
+   * bodies run on fibers and every async dependency edge awaits the
+   * dependency promise before the importer body starts. Synchronous files
+   * stay synchronous — adding even an already-settled await would insert
+   * an observable microtask hop. */
+  readonly asyncInitFiles = new Set<ts.SourceFile>();
+  /** Async module → its cached evaluation-promise global. The emitted
+   * spawn wrapper fills this on first evaluation and returns a retained
+   * reference on cache hits, matching Node's one ModuleJob promise per
+   * module even across diamonds and concurrent dynamic imports. */
+  readonly modulePromiseOf = new Map<ts.SourceFile, string>();
   /** Record-shape interner: canonical (name-sorted) field list → shapeId.
    * Threaded into every mapType call; its `shapes` array becomes
    * IrModule.records. */
@@ -1590,6 +1603,53 @@ export class Lowerer {
       this.moduleGuardOf.set(fp.sf, id);
       this.globalsList.push({ id, name: "%loaded", type: BOOL, mutable: true });
     }
+
+    // A module is intrinsically async when an await/for-await occurs
+    // outside every nested function-like boundary. Then propagate that
+    // status backwards through STATIC ESM edges: Node does not start an
+    // importer's body until each async dependency has completed. CJS
+    // import/require edges deliberately do not propagate — Node refuses
+    // require(esm) when the graph contains top-level await, and the call
+    // sites below keep that as a named unsupported boundary.
+    for (const fp of parts) {
+      let found = false;
+      ts.walkPreorder(fp.sf, (node) => {
+        if (node !== fp.sf && ts.isFunctionLike(node)) return "skip";
+        if (
+          ts.isAwaitExpression(node) ||
+          (ts.isForOfStatement(node) && node.awaitModifier !== undefined)
+        ) {
+          found = true;
+          return "stop";
+        }
+        return undefined;
+      });
+      if (found) this.asyncInitFiles.add(fp.sf);
+    }
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const fp of parts) {
+        if (this.asyncInitFiles.has(fp.sf) || !isNodeEsmFile(fp.sf)) continue;
+        if (orderedImportsOf(this.program, fp.sf).some(({ dep }) => dep !== null && this.asyncInitFiles.has(dep))) {
+          this.asyncInitFiles.add(fp.sf);
+          changed = true;
+        }
+      }
+    }
+    for (const fp of parts) {
+      if (!this.asyncInitFiles.has(fp.sf)) continue;
+      const rawTag = this.fileTag.get(fp.sf) ?? "";
+      const tag = rawTag === "" ? "e." : rawTag.replace(/^%/, "");
+      const id = `%g.${tag}%initPromise`;
+      this.modulePromiseOf.set(fp.sf, id);
+      this.globalsList.push({
+        id,
+        name: "%initPromise",
+        type: { kind: "promise", inner: VOID },
+        mutable: true,
+      });
+    }
   }
 
   /** The lowering of a CommonJS `require("./local")` occurrence: a call of
@@ -1612,6 +1672,13 @@ export class Lowerer {
       ? resolveImport(this.program, node.getSourceFile(), spec)
       : npmStaticDepSf7(this.program, node.getSourceFile(), spec);
     if (!dep || dep.fileName.endsWith(".json")) return null;
+    if (this.asyncInitFiles.has(dep)) {
+      this.unsupported(
+        "SC1090",
+        node,
+        `require() of '${spec}' (its ES-module graph uses top-level await; use import() instead)`,
+      );
+    }
     const initName = this.initNameOf.get(dep);
     if (initName === undefined) return null;
     const loc = locOf(node);

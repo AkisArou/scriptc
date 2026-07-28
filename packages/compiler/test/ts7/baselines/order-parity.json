@@ -5288,6 +5288,70 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2643-or-default-retag.ts": {
+   "order": [
+    "<repo>/tests/corpus/2643-or-default-retag.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2644-http-client-url-argument.ts": {
+   "order": [
+    "<repo>/tests/corpus/2644-http-client-url-argument.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2645-https-client-url-argument.ts": {
+   "order": [
+    "<repo>/tests/corpus/2645-https-client-url-argument.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2646-top-level-await.ts": {
+   "order": [
+    "<repo>/tests/corpus/2646-top-level-await.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2647-top-level-await-modules/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2647-top-level-await-modules/shared.ts",
+    "<repo>/tests/corpus/2647-top-level-await-modules/left.ts",
+    "<repo>/tests/corpus/2647-top-level-await-modules/sibling.ts",
+    "<repo>/tests/corpus/2647-top-level-await-modules/right.ts",
+    "<repo>/tests/corpus/2647-top-level-await-modules/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2648-top-level-await-rejection.ts": {
+   "order": [
+    "<repo>/tests/corpus/2648-top-level-await-rejection.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2649-top-level-await-pending.ts": {
+   "order": [
+    "<repo>/tests/corpus/2649-top-level-await-pending.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2650-top-level-await-self-import.ts": {
+   "order": [
+    "<repo>/tests/corpus/2650-top-level-await-self-import.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2651-top-level-await-pending-unhandled.ts": {
+   "order": [
+    "<repo>/tests/corpus/2651-top-level-await-pending-unhandled.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2652-top-level-await-dynamic/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2652-top-level-await-dynamic/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6286,12 +6350,6 @@
   "<repo>/tests/diagnostics/assert-fences.ts": {
    "order": [
     "<repo>/tests/diagnostics/assert-fences.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/diagnostics/async-await.ts": {
-   "order": [
-    "<repo>/tests/diagnostics/async-await.ts"
    ],
    "diags": []
   },

@@ -711,6 +711,7 @@ export class CEmitter {
       }
       out.push(`}`, ``);
     }
+    const asyncEntry = this.fnByName.get(this.mod.entry)?.async === true;
     const hasAsync = this.mod.functions.some((f) => f.async);
     // Generator programs run the loop too (an empty pass when nothing is
     // pending): its exit accounting notes still-suspended generator
@@ -738,10 +739,11 @@ export class CEmitter {
     const releaseGlobals = needsRelease
       ? `  ${runExitListeners}sc_release_globals();`
       : `  /* no refcounted globals */`;
-    const uncaught = (indent: string) => [
+    const uncaught = (indent: string, releaseTop = false) => [
       `${indent}if (scr_exc_pending()) {`,
       `${indent}  scr_exc_print_uncaught();`,
-      `${indent}  ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+      `${indent}  ${releaseTop ? "scr_promise_release(sc_top); " : ""}` +
+        `${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
       `${indent}}`,
     ];
     out.push(
@@ -827,19 +829,39 @@ export class CEmitter {
               `${embedded.edges.length > 0 ? "sc_npm_edges" : "NULL"}, ${embedded.edges.length});`,
           ]
         : []),
-      `  ${mangleFunction(this.mod.entry)}();`,
+      ...(asyncEntry
+        ? [`  ScrPromise *sc_top = ${mangleAsyncSpawn(this.mod.entry)}();`]
+        : [`  ${mangleFunction(this.mod.entry)}();`]),
       // Uncaught exception from top-level code: Node exits 1.
-      ...(this.mayThrow.has(this.mod.entry) ? uncaught("  ") : []),
+      ...(this.mayThrow.has(this.mod.entry) && !asyncEntry ? uncaught("  ") : []),
       // The event loop runs to exhaustion (microtasks before timers). A
       // throw escaping a timer callback and unhandled promise rejections
       // both exit 1, like Node.
       ...(hasAsync || hasGenerators || this.usesTimers || usesIsland
         ? [
             `  scr_loop_run();`,
-            ...uncaught("  "),
+            ...uncaught("  ", asyncEntry),
+            ...(asyncEntry
+              ? [
+                  `  int sc_top_status = scr_promise_finish_top_level(sc_top);`,
+                  `  scr_promise_release(sc_top);`,
+                  `  if (sc_top_status == 1) {`,
+                  `    scr_exc_print_uncaught();`,
+                  `    scr_discard_unhandled_rejections();`,
+                  `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+                  `  }`,
+                ]
+              : []),
             `  if (scr_report_unhandled_rejections()) {`,
             `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
             `  }`,
+            ...(asyncEntry
+              ? [
+                  `  if (sc_top_status == 13) {`,
+                  `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 13;`,
+                  `  }`,
+                ]
+              : []),
           ]
         : []),
       releaseGlobals,

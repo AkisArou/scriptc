@@ -1229,24 +1229,31 @@ static void scr_await_yield(void) {
  * turn — the same hop a settled promise takes. */
 void scr_await_hop(void) { scr_await_yield(); }
 
-/* Await result extraction. Rejection re-throws into the awaiter (payload
- * RETAINED, not moved — a promise can be awaited more than once). */
+/* Copies a rejection into the active execution context's exception cell.
+ * The payload is RETAINED, not moved — a promise can be awaited more than
+ * once, and the executable's top-level completion probe consumes the same
+ * settlement from the main stack after the loop drains. */
+static void scr_promise_rethrow(ScrPromise *p) {
+  switch (p->payload_kind) {
+  case SCR_EXC_F64: scr_throw_f64(p->f64); break;
+  case SCR_EXC_BOOL: scr_throw_bool(p->b); break;
+  case SCR_EXC_STR: scr_throw_str(scr_str_retain((ScrStr *)p->payload)); break;
+  case SCR_EXC_REF: scr_throw_ref(p->retain_fn(p->payload), p->retain_fn, p->release_fn, p->trace_fn); break;
+  case SCR_EXC_OBJ: scr_throw_obj(p->retain_fn(p->payload), p->retain_fn, p->release_fn, p->trace_fn); break;
+  case SCR_EXC_NONE:
+  case SCR_EXC_GENRET: /* unreachable: the sentinel never settles a promise */
+    scr_throw_str(scr_str_new("undefined", 9));
+    break;
+  }
+}
+
+/* Await result extraction. Rejection re-throws into the awaiter. */
 static bool scr_await_settled(ScrPromise *p) {
   if (p->state != SCR_PROM_PENDING) scr_await_yield();
   while (p->state == SCR_PROM_PENDING) scr_await_park(p);
   scr_prom_observe(p);
   if (p->state == SCR_PROM_REJECTED) {
-    switch (p->payload_kind) {
-    case SCR_EXC_F64: scr_throw_f64(p->f64); break;
-    case SCR_EXC_BOOL: scr_throw_bool(p->b); break;
-    case SCR_EXC_STR: scr_throw_str(scr_str_retain((ScrStr *)p->payload)); break;
-    case SCR_EXC_REF: scr_throw_ref(p->retain_fn(p->payload), p->retain_fn, p->release_fn, p->trace_fn); break;
-    case SCR_EXC_OBJ: scr_throw_obj(p->retain_fn(p->payload), p->retain_fn, p->release_fn, p->trace_fn); break;
-    case SCR_EXC_NONE:
-    case SCR_EXC_GENRET: /* unreachable: the sentinel never settles a promise */
-      scr_throw_str(scr_str_new("undefined", 9));
-      break;
-    }
+    scr_promise_rethrow(p);
     return false;
   }
   return true;
@@ -1262,6 +1269,22 @@ void *scr_await_ref(ScrPromise *p) {
   return scr_await_settled(p) && p->payload ? p->retain_fn(p->payload) : NULL;
 }
 void scr_await_void(ScrPromise *p) { scr_await_settled(p); }
+
+int scr_promise_finish_top_level(ScrPromise *p) {
+  if (p->state == SCR_PROM_PENDING) {
+    /* ECMAScript module evaluation is still pending, but Node's ref'd
+     * event-loop work is exhausted. Node exits with its dedicated
+     * unsettled-top-level-await status. */
+    scr_exit_code_note(13);
+    return 13;
+  }
+  scr_prom_observe(p);
+  if (p->state == SCR_PROM_REJECTED) {
+    scr_promise_rethrow(p);
+    return 1;
+  }
+  return 0;
+}
 
 
 
@@ -2167,6 +2190,21 @@ bool scr_report_unhandled_rejections(void) {
    * must see that code, like Node's. */
   if (any) scr_exit_code_note(1);
   return any;
+}
+
+void scr_discard_unhandled_rejections(void) {
+  /* Fatal module-evaluation rejection has already selected the process
+   * error. The promises in this ledger may all be observed (the root and
+   * each awaited dependency), but the ledger itself still owns one
+   * reference apiece until the normal reporter runs. Drop those exit-only
+   * references without printing a second failure. */
+  for (size_t i = 0; i < scr_nunhandled; i++) {
+    scr_promise_release(scr_maybe_unhandled[i]);
+  }
+  scr_nunhandled = 0;
+  if (scr_island_rejections_fn != NULL) {
+    (void)scr_island_rejections_fn(false);
+  }
 }
 
 /* ── new Promise(executor) ────────────────────────────────────────────── */

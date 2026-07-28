@@ -1501,6 +1501,30 @@ function validateFunction(
   const err = (message: string, loc: SrcLoc) =>
     errors.push({ message: `in ${fn.name}: ${message}`, loc });
 
+  if (fn.asyncCacheGlobal !== undefined) {
+    if (fn.async !== true) {
+      err("an asyncCacheGlobal is only valid on an async function", fn.loc);
+    }
+    if (fn.params.length !== 0 || (fn.captures?.length ?? 0) !== 0) {
+      err("a cached async function must have no parameters or captures", fn.loc);
+    }
+    const cache = globals.get(fn.asyncCacheGlobal);
+    if (cache === undefined) {
+      err(`async cache names undeclared global "${fn.asyncCacheGlobal}"`, fn.loc);
+    } else {
+      const expected: IrType = { kind: "promise", inner: fn.returnType };
+      if (!typeEquals(cache.type, expected)) {
+        err(
+          `async cache global "${fn.asyncCacheGlobal}" has type ${typeKey(cache.type)}, expected ${typeKey(expected)}`,
+          fn.loc,
+        );
+      }
+      if (!cache.mutable) {
+        err(`async cache global "${fn.asyncCacheGlobal}" is immutable`, fn.loc);
+      }
+    }
+  }
+
   // The class graph's two questions (upcast/downcast/instanceOf/virtualCall
   // legality): strict-descendant tests over the base links, and hierarchy
   // membership (a class that extends or is extended).

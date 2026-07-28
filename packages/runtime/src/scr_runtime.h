@@ -3338,6 +3338,16 @@ bool scr_await_bool(ScrPromise *p);
 ScrStr *scr_await_str(ScrPromise *p); /* +1 */
 void *scr_await_ref(ScrPromise *p);   /* +1 via the stored retain */
 void scr_await_void(ScrPromise *p);
+/* After the event loop drains, consume the executable's async module-root
+ * promise without another microtask hop: 0 = fulfilled, 1 = rejected (the
+ * rejection is re-thrown into main's exception cell), 13 = still pending
+ * with no ref'd work capable of settling it (Node's unsettled top-level
+ * await exit status). */
+int scr_promise_finish_top_level(ScrPromise *p);
+/* Fatal top-level module rejection bypasses the normal unhandled-
+ * rejection reporter. Release that reporter's retained promise entries
+ * (and the island ledger) without emitting a second error. */
+void scr_discard_unhandled_rejections(void);
 /* The checked-dynamic tree-crossing await (SCR_DYN_PROMISE's boundary contract): the
  * payload as a dyn value (+1; void fulfillments answer the undefined
  * value), or NULL with the rejection re-thrown into the awaiter. */

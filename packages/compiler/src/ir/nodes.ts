@@ -1042,6 +1042,11 @@ export interface IrFunction {
   /** Async: the body runs on a fiber; `returnType` is the INNER type T (a
    * `return v` fulfills with v) while call sites receive Promise<T>. */
   async?: true;
+  /** Async module initializers only: a module-global Promise<T> slot where
+   * the spawn wrapper caches its first evaluation promise. Every later
+   * static/dynamic import receives that same promise, including while the
+   * first evaluation is suspended. */
+  asyncCacheGlobal?: string;
   /** Generator (`function*`): the body runs on a fiber created SUSPENDED
    * (nothing runs until the first `.next()`); `returnType` is the
    * generator's TReturn (VOID when it carries no value — `return;`

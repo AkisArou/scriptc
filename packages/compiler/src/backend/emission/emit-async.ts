@@ -2,7 +2,7 @@
  * scaffolding, plus the interned resolve/child-exit thunks that adapt typed
  * payloads onto the runtime's promise and child-process machinery. */
 import type { CEmitter } from "./emitter.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
 import { cDecl, cType, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
@@ -73,13 +73,21 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
         ...(lifted ? ["ScrClosure *sc_env"] : []),
         ...fn.params.map((p) => cDecl(p.type, pname(p))),
       ];
+      const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
       out.push(
         `static ScrPromise *${mangleAsyncSpawn(fn.name)}(${spawnParams.join(", ") || "void"}) {`,
+        ...(cache !== null
+          ? [`  if (${cache}) return scr_promise_retain(${cache});`]
+          : []),
         `  ${pack} *sc_ap = malloc(sizeof *sc_ap);`,
         `  if (!sc_ap) { scr_trap("scriptc: out of memory\\n"); }`,
         ...(lifted ? [`  sc_ap->sc_env = scr_closure_retain(sc_env);`] : []),
         ...fn.params.map((p) => `  sc_ap->${pname(p)} = ${pname(p)};`),
-        `  return scr_async_spawn(&${mangleTrampoline(fn.name)}, sc_ap);`,
+        `  ScrPromise *sc_p = scr_async_spawn(&${mangleTrampoline(fn.name)}, sc_ap);`,
+        ...(cache !== null
+          ? [`  ${cache} = scr_promise_retain(sc_p);`]
+          : []),
+        `  return sc_p;`,
         `}`,
       );
     }

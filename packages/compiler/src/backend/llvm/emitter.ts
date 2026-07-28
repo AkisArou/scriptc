@@ -1204,6 +1204,7 @@ class LlEmitter {
       ];
     };
     const globalReleases = globalReleaseLines("g");
+    const asyncEntry = this.fnByName.get(this.mod.entry)?.async === true;
     const entryMayThrow = this.mayThrow.has(this.mod.entry);
     // The event loop runs when timers appeared OR any async/generator
     // function exists (the C main's hasAsync || hasGenerators ||
@@ -1214,9 +1215,11 @@ class LlEmitter {
     const runsLoop =
       this.usesTimers ||
       this.mod.functions.some((f) => f.async === true || f.generator !== undefined);
-    const uncaughtReleases = entryMayThrow ? globalReleaseLines("gu") : [];
+    const uncaughtReleases = entryMayThrow && !asyncEntry ? globalReleaseLines("gu") : [];
     const loopReleasesU = runsLoop ? globalReleaseLines("gl") : [];
     const loopReleasesR = runsLoop ? globalReleaseLines("gr") : [];
+    const topRejectReleases = asyncEntry ? globalReleaseLines("gt") : [];
+    const topPendingReleases = asyncEntry ? globalReleaseLines("gp") : [];
     // main's epilogues read the flag / the loop entry points — declared
     // HERE, before the extern block flushes (a pending check usually
     // declared the flag already; the Set dedupes).
@@ -1224,6 +1227,11 @@ class LlEmitter {
     if (runsLoop) {
       this.declare(`declare void @scr_loop_run()`);
       this.declare(`declare zeroext i1 @scr_report_unhandled_rejections()`);
+    }
+    if (asyncEntry) {
+      this.declare(`declare i32 @scr_promise_finish_top_level(ptr)`);
+      this.declare(`declare void @scr_promise_release(ptr)`);
+      this.declare(`declare void @scr_discard_unhandled_rejections()`);
     }
     // LIBRARY mode: the runtime entry points the generated library
     // symbols delegate to — declared before the extern block flushes.
@@ -1452,9 +1460,11 @@ class LlEmitter {
       ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),
       ...(usesStream ? [`  call void @scr_stream_install()`] : []),
       `  call void @scr_lib_init(i32 %argc, ptr %argv)`,
-      `  call void @${mangleFunction(this.mod.entry)}()`,
+      ...(asyncEntry
+        ? [`  %top = call ptr @${mangleAsyncSpawn(this.mod.entry)}()`]
+        : [`  call void @${mangleFunction(this.mod.entry)}()`]),
       // Uncaught exception from top-level code: Node exits 1.
-      ...(entryMayThrow
+      ...(entryMayThrow && !asyncEntry
         ? [
             `  %exc = call zeroext i1 @scr_exc_pending()`,
             `  br i1 %exc, label %uncaught, label %ok`,
@@ -1476,10 +1486,26 @@ class LlEmitter {
             `  br i1 %lexc, label %luncaught, label %lok`,
             `luncaught:`,
             `  call void @scr_exc_print_uncaught()`,
+            ...(asyncEntry ? [`  call void @scr_promise_release(ptr %top)`] : []),
             ...exitListenerLines("xl"),
             ...loopReleasesU,
             `  ret i32 1`,
             `lok:`,
+            ...(asyncEntry
+              ? [
+                  `  %tla_status = call i32 @scr_promise_finish_top_level(ptr %top)`,
+                  `  call void @scr_promise_release(ptr %top)`,
+                  `  %tla_rejected = icmp eq i32 %tla_status, 1`,
+                  `  br i1 %tla_rejected, label %tla_fail, label %tla_not_rejected`,
+                  `tla_fail:`,
+                  `  call void @scr_exc_print_uncaught()`,
+                  `  call void @scr_discard_unhandled_rejections()`,
+                  ...exitListenerLines("xt"),
+                  ...topRejectReleases,
+                  `  ret i32 1`,
+                  `tla_not_rejected:`,
+                ]
+              : []),
             `  %rej = call zeroext i1 @scr_report_unhandled_rejections()`,
             `  br i1 %rej, label %lrej, label %lrok`,
             `lrej:`,
@@ -1487,6 +1513,17 @@ class LlEmitter {
             ...loopReleasesR,
             `  ret i32 1`,
             `lrok:`,
+            ...(asyncEntry
+              ? [
+                  `  %tla_pending = icmp eq i32 %tla_status, 13`,
+                  `  br i1 %tla_pending, label %tla_stuck, label %tla_ok`,
+                  `tla_stuck:`,
+                  ...exitListenerLines("xp"),
+                  ...topPendingReleases,
+                  `  ret i32 13`,
+                  `tla_ok:`,
+                ]
+              : []),
           ]
         : []),
       ...exitListenerLines("xn"),
@@ -1948,9 +1985,22 @@ class LlEmitter {
 
       // Spawn wrapper: pack the args (+1 moves in), spawn the fiber.
       const params = fieldTys.map((ty, i) => `${ty} %a${i}`);
+      const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
+      if (cache !== null) this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
       const sp: string[] = [
         `define internal ptr @${mangleAsyncSpawn(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; spawn ${fn.name}`,
         `entry:`,
+        ...(cache !== null
+          ? [
+              `  %cached = load ptr, ptr @${cache}`,
+              `  %cache_hit = icmp ne ptr %cached, null`,
+              `  br i1 %cache_hit, label %cached_return, label %cache_miss`,
+              `cached_return:`,
+              `  %cached_owned = call ptr @scr_promise_retain_v(ptr %cached)`,
+              `  ret ptr %cached_owned`,
+              `cache_miss:`,
+            ]
+          : []),
         `  %ap = call ptr @malloc(i64 ${sizeOf})`,
         `  %isnull = icmp eq ptr %ap, null`,
         `  br i1 %isnull, label %oom, label %ok`,
@@ -1974,6 +2024,12 @@ class LlEmitter {
       });
       sp.push(
         `  %p = call ptr @scr_async_spawn(ptr @${mangleTrampoline(fn.name)}, ptr %ap)`,
+        ...(cache !== null
+          ? [
+              `  %cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
+              `  store ptr %cache_owned, ptr @${cache}`,
+            ]
+          : []),
         `  ret ptr %p`,
         `}`,
         ``,
