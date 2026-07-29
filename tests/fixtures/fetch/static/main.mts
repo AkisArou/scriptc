@@ -205,6 +205,13 @@ console.log(
   "early hints:",
   await (await fetch(`${process.argv[2]}/early-hints`)).text(),
 );
+try {
+  await fetch(`${process.argv[2]}/switching-protocols`);
+  console.log("switching protocols unexpectedly resolved");
+} catch (error) {
+  const caught = error as Error;
+  console.log("switching protocols:", caught.name, caught.message);
+}
 console.log(
   "invalid utf8:",
   JSON.stringify(await (await fetch(`${process.argv[2]}/invalid-utf8`)).text()),

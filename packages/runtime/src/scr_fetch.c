@@ -204,6 +204,12 @@ struct SfCancelWait {
   ScrPromise *result;
 };
 
+typedef struct SfThenState {
+  size_t rc;
+  bool called;
+  ScrPromise *promise;
+} SfThenState;
+
 struct SfStream {
   size_t rc;
   SfChunk *head;
@@ -215,6 +221,7 @@ struct SfStream {
   bool disturbed;
   bool internal_lock;
   bool initial_pull_pending;
+  bool enqueue_draining;
   bool pulling;
   bool pull_again;
   ScrDyn *error;
@@ -879,10 +886,8 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "addEventListener") == 0) {
-    if (argc < 2 || args[0]->kind != SCR_DYN_STR ||
-        !sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
-      sf_type_error(
-          "AbortSignal.addEventListener requires an 'abort' event");
+    if (argc < 2 || args[0]->kind != SCR_DYN_STR) {
+      sf_type_error("AbortSignal.addEventListener requires an event name");
       return NULL;
     }
     /* Web IDL's nullable EventListener argument: null is a no-op. */
@@ -902,6 +907,11 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     if (!sf_signal_listener_options(
             args, argc, &capture, &once, &option_signal)) {
       return NULL;
+    }
+    /* AbortSignal is an EventTarget: listeners for other event names are
+     * valid registrations even though this target only dispatches abort. */
+    if (!sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
+      return scr_dyn_retain(scr_dyn_undefined());
     }
     if (option_signal && option_signal->aborted) {
       return scr_dyn_retain(scr_dyn_undefined());
@@ -1254,11 +1264,13 @@ static void sf_stream_drain(SfStream *s) {
     return;
   }
   if (s->reader) {
+    bool dequeued = false;
     while (s->reader->pending_head && s->head) {
       SfChunk *c = s->head;
       s->head = c->next;
       if (!s->head) s->tail = NULL;
       s->queued--;
+      dequeued = true;
       sf_reader_fulfill_one(s->reader, false, c->value);
       sf_chunk_release(c);
     }
@@ -1269,6 +1281,13 @@ static void sf_stream_drain(SfStream *s) {
       while (s->reader->pending_head) {
         sf_reader_fulfill_one(s->reader, true, NULL);
       }
+    }
+    /* Consuming the last queued chunk raises desiredSize above zero even
+     * when no read request remains. That transition is fresh demand and
+     * must replenish the queue up to its default high-water mark. */
+    if (dequeued && !s->enqueue_draining && !s->head &&
+        !s->close_requested && !s->closed && !s->error) {
+      sf_stream_pull(s);
     }
     return;
   }
@@ -1287,7 +1306,10 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
   else s->head = c;
   s->tail = c;
   s->queued++;
+  bool was_enqueue_draining = s->enqueue_draining;
+  s->enqueue_draining = true;
   sf_stream_drain(s);
+  s->enqueue_draining = was_enqueue_draining;
   /* Enqueue is the event that can create fresh demand after a deferred
    * pull. Merely having a waiting reader/request is not: looping on that
    * state re-enters pull synchronously and starves timers. */
@@ -1326,6 +1348,152 @@ static void sf_stream_error(SfStream *s, ScrDyn *reason) {
   if (s->request_owner) {
     sf_transfer_stream_error(s->request_owner, reason);
   }
+}
+
+/* Web Streams adopts promise-like results from start/pull/cancel through
+ * PromiseResolve, not merely native Promise instances. Keep that adoption
+ * local to this surface: the checked-dynamic language intentionally does
+ * not otherwise assimilate arbitrary objects carrying a `then` member. */
+static SfThenState *sf_then_state_retain(SfThenState *state) {
+  state->rc++;
+  return state;
+}
+
+static void sf_then_state_release(SfThenState *state) {
+  if (--state->rc > 0) return;
+  scr_promise_release(state->promise);
+  free(state);
+}
+
+static void *sf_then_state_retain_v(void *ptr) {
+  return sf_then_state_retain((SfThenState *)ptr);
+}
+
+static void sf_then_state_release_v(void *ptr) {
+  sf_then_state_release((SfThenState *)ptr);
+}
+
+static ScrBox *sf_then_state_box(SfThenState *state) {
+  ScrBox *box = scr_box_new_obj(
+      &sf_then_state_retain_v, &sf_then_state_release_v, NULL);
+  scr_box_set_ref(box, sf_then_state_retain(state));
+  return box;
+}
+
+static void sf_then_adopt(ScrPromise *target, ScrDyn *value);
+
+static ScrDyn *sf_then_resolve_thunk(
+    ScrClosure *cb, ScrDyn *const *args, size_t argc) {
+  SfThenState *state = (SfThenState *)scr_box_get_ref(cb->caps[0]);
+  if (!state->called) {
+    state->called = true;
+    sf_then_adopt(
+        state->promise, argc ? args[0] : scr_dyn_undefined());
+  }
+  sf_then_state_release(state);
+  return scr_dyn_retain(scr_dyn_undefined());
+}
+
+static ScrDyn *sf_then_reject_thunk(
+    ScrClosure *cb, ScrDyn *const *args, size_t argc) {
+  SfThenState *state = (SfThenState *)scr_box_get_ref(cb->caps[0]);
+  if (!state->called) {
+    state->called = true;
+    sf_reject_promise_reason(
+        state->promise, argc ? args[0] : scr_dyn_undefined());
+  }
+  sf_then_state_release(state);
+  return scr_dyn_retain(scr_dyn_undefined());
+}
+
+static void sf_then_call_task(ScrClosure *cb) {
+  SfThenState *state = (SfThenState *)scr_box_get_ref(cb->caps[0]);
+  ScrDyn *thenable = (ScrDyn *)scr_box_get_ref(cb->caps[1]);
+  ScrDyn *then_fn = (ScrDyn *)scr_box_get_ref(cb->caps[2]);
+
+  ScrClosure *resolve_cb =
+      scr_closure_new((void *)&sf_then_resolve_thunk, 1);
+  resolve_cb->caps[0] = sf_then_state_box(state);
+  ScrDyn *resolve = scr_dyn_new_func(
+      resolve_cb, &sf_then_resolve_thunk, 1, "(value)", "resolve");
+
+  ScrClosure *reject_cb =
+      scr_closure_new((void *)&sf_then_reject_thunk, 1);
+  reject_cb->caps[0] = sf_then_state_box(state);
+  ScrDyn *reject = scr_dyn_new_func(
+      reject_cb, &sf_then_reject_thunk, 1, "(reason)", "reject");
+
+  ScrDyn *args[2] = {resolve, reject};
+  scr_dyn_this_push_dyn(thenable);
+  ScrDyn *result =
+      scr_dyn_call(then_fn, args, 2, "thenable.then");
+  scr_dyn_this_pop();
+  if (result) {
+    scr_dyn_release(result);
+  } else if (!state->called) {
+    state->called = true;
+    scr_promise_reject_pending(state->promise);
+  } else {
+    /* A throw after either resolving function ran is ignored. */
+    scr_exc_clear();
+  }
+
+  scr_dyn_release(resolve);
+  scr_dyn_release(reject);
+  scr_dyn_release(then_fn);
+  scr_dyn_release(thenable);
+  sf_then_state_release(state);
+}
+
+static void sf_then_schedule(
+    ScrPromise *target, ScrDyn *thenable, ScrDyn *then_fn) {
+  SfThenState *state = calloc(1, sizeof *state);
+  if (!state) sf_oom();
+  state->rc = 1;
+  state->promise = scr_promise_retain(target);
+
+  ScrClosure *task =
+      scr_closure_new((void *)&sf_then_call_task, 3);
+  task->caps[0] = sf_then_state_box(state);
+  task->caps[1] =
+      scr_box_new_obj(&scr_dyn_retain_v, &scr_dyn_release_v, NULL);
+  scr_box_set_ref(task->caps[1], scr_dyn_retain(thenable));
+  task->caps[2] =
+      scr_box_new_obj(&scr_dyn_retain_v, &scr_dyn_release_v, NULL);
+  scr_box_set_ref(task->caps[2], scr_dyn_retain(then_fn));
+  sf_then_state_release(state);
+  scr_queue_microtask(task);
+}
+
+static void sf_then_adopt(ScrPromise *target, ScrDyn *value) {
+  if (value->kind == SCR_DYN_PROMISE) {
+    scr_promise_race_add(
+        target, value->v.promise, &scr_promise_adapt_copy);
+    return;
+  }
+  if (value->kind == SCR_DYN_OBJ) {
+    const ScrDyn *then_fn = scr_dyn_obj_get(value, "then", 4);
+    if (then_fn && then_fn->kind == SCR_DYN_FUNC) {
+      sf_then_schedule(target, value, (ScrDyn *)then_fn);
+      return;
+    }
+  }
+  scr_promise_fulfill_ref(
+      target, scr_dyn_retain(value), &scr_dyn_retain_v,
+      &scr_dyn_release_v, NULL);
+}
+
+/* +1 when the callback result must be awaited; NULL for a plain value. */
+static ScrPromise *sf_stream_callback_promise(ScrDyn *value) {
+  if (value->kind == SCR_DYN_PROMISE) {
+    return scr_promise_retain(value->v.promise);
+  }
+  if (value->kind != SCR_DYN_OBJ) return NULL;
+  const ScrDyn *then_fn = scr_dyn_obj_get(value, "then", 4);
+  if (!then_fn || then_fn->kind != SCR_DYN_FUNC) return NULL;
+  ScrPromise *promise = scr_promise_new();
+  sf_then_schedule(promise, value, (ScrDyn *)then_fn);
+  return promise;
 }
 
 static void sf_stream_pull_wait_entry(ScrFiber *self, void *arg) {
@@ -1512,11 +1680,12 @@ static void sf_stream_pull(SfStream *s) {
       scr_caught_release(caught);
       return;
     }
-    if (r->kind == SCR_DYN_PROMISE) {
+    ScrPromise *callback_promise = sf_stream_callback_promise(r);
+    if (callback_promise) {
       SfPullWait *wait = malloc(sizeof *wait);
       if (!wait) sf_oom();
       wait->stream = sf_stream_retain(s);
-      wait->promise = scr_promise_retain(r->v.promise);
+      wait->promise = callback_promise;
       ScrPromise *watcher =
           scr_async_spawn(&sf_stream_pull_wait_entry, wait);
       scr_promise_release(watcher);
@@ -1653,10 +1822,11 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
       scr_promise_reject_pending(p);
       return p;
     }
-    if (r->kind == SCR_DYN_PROMISE) {
+    ScrPromise *callback_promise = sf_stream_callback_promise(r);
+    if (callback_promise) {
       SfCancelWait *wait = malloc(sizeof *wait);
       if (!wait) sf_oom();
-      wait->source = scr_promise_retain(r->v.promise);
+      wait->source = callback_promise;
       wait->result = scr_promise_retain(p);
       ScrPromise *watcher =
           scr_async_spawn(&sf_stream_cancel_wait_entry, wait);
@@ -1738,11 +1908,12 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
         sf_stream_release(s);
         return NULL;
       }
-      if (r->kind == SCR_DYN_PROMISE) {
+      ScrPromise *callback_promise = sf_stream_callback_promise(r);
+      if (callback_promise) {
         SfStartWait *wait = malloc(sizeof *wait);
         if (!wait) sf_oom();
         wait->stream = sf_stream_retain(s);
-        wait->promise = scr_promise_retain(r->v.promise);
+        wait->promise = callback_promise;
         ScrPromise *watcher =
             scr_async_spawn(&sf_stream_start_wait_entry, wait);
         scr_promise_release(watcher);
@@ -3290,6 +3461,19 @@ static void sf_on_client_error(ScrClosure *cb, ScrStr *message) {
   sf_release(t);
 }
 
+static void sf_on_upgrade(
+    ScrClosure *cb, ScrHttpReq *res, ScrNetSocket *socket,
+    ScrBytes *head) {
+  SfTransfer *t = sf_from(cb);
+  scr_http_req_release(res);
+  scr_bytes_release(head);
+  scr_net_sock_destroy(socket);
+  scr_net_sock_release(socket);
+  if (!t) return;
+  if (!t->done) sf_reject(t, "fetch failed");
+  sf_release(t);
+}
+
 static bool sf_body_is_stream(const ScrDyn *body) {
   return body &&
          ((body->kind == SCR_DYN_HANDLE &&
@@ -3434,6 +3618,9 @@ static bool sf_start_hop(SfTransfer *t) {
   scr_http_client_on_response(
       client, sf_closure(t, (void *)&sf_on_response),
       &sf_on_response, true);
+  scr_http_client_on_upgrade(
+      client, sf_closure(t, (void *)&sf_on_upgrade),
+      &sf_on_upgrade, true);
   scr_http_client_on_error(
       client, sf_closure(t, (void *)&sf_on_client_error),
       &sf_on_client_error, false);
@@ -4120,6 +4307,9 @@ static ScrStr *fx_dial_host(const ScrStr *host) {
 
 static void fx_on_response(ScrClosure *cb, ScrHttpReq *res /*+1*/);
 static void fx_on_client_error(ScrClosure *cb, ScrStr *msg /*borrowed*/);
+static void fx_on_upgrade(
+    ScrClosure *cb, ScrHttpReq *res, ScrNetSocket *socket,
+    ScrBytes *head);
 
 static void fx_start_hop(FxTransfer *t) {
   ScrUrl *u = t->url;
@@ -4206,6 +4396,7 @@ static void fx_start_hop(FxTransfer *t) {
 
   t->client = c; /* the constructor's +1 */
   scr_http_client_on_response(c, fx_closure(t, (void *)&fx_on_response), &fx_on_response, true);
+  scr_http_client_on_upgrade(c, fx_closure(t, (void *)&fx_on_upgrade), &fx_on_upgrade, true);
   scr_http_client_on_error(c, fx_closure(t, (void *)&fx_on_client_error), &fx_on_client_error, false);
   if (t->body != NULL) scr_http_client_end_bytes(c, t->body);
   else scr_http_client_end(c);
@@ -4471,6 +4662,23 @@ static void fx_on_client_error(ScrClosure *cb, ScrStr *msg /*borrowed*/) {
     code = "UND_ERR_SOCKET";
   }
   fx_error(t, detail, code);
+  fx_release(t);
+}
+
+static void fx_on_upgrade(
+    ScrClosure *cb, ScrHttpReq *res, ScrNetSocket *socket,
+    ScrBytes *head) {
+  FxTransfer *t = fx_from(cb);
+  scr_http_req_release(res);
+  scr_bytes_release(head);
+  scr_net_sock_destroy(socket);
+  scr_net_sock_release(socket);
+  if (t == NULL) return;
+  if (!t->done && !t->cancelled) {
+    fx_error(t, "unexpected server response", NULL);
+  } else {
+    fx_settle(t);
+  }
   fx_release(t);
 }
 

@@ -16,7 +16,7 @@
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
- * /redirect-fragment/path /early-hints /invalid-utf8 /slow /drip
+ * /redirect-fragment/path /early-hints /switching-protocols /invalid-utf8 /slow /drip
  * /chunked /gzip /gzip-concat /deflate /status-meta /no-content /sse,
  * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
@@ -137,6 +137,12 @@ export async function startFetchServers() {
         });
         res.writeHead(200, { "content-type": "text/plain" });
         res.end("final");
+      } else if (url === "/switching-protocols") {
+        res.writeHead(101, {
+          connection: "upgrade",
+          upgrade: "fixture",
+        });
+        res.end();
       } else if (url === "/invalid-utf8") {
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
         res.end(Buffer.from([0x61, 0xc3, 0x28, 0x62]));

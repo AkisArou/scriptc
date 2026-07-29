@@ -12,6 +12,27 @@ await Promise.resolve();
 console.log("initial pull checkpoint:", initialPullCalls);
 void initialPullStream;
 
+// Draining a pre-queued chunk creates demand even with no second read.
+let replenishingPulls = 0;
+const replenishingStream = new ReadableStream<number>({
+  start(controller) {
+    controller.enqueue(1);
+  },
+  pull(controller) {
+    replenishingPulls++;
+    controller.close();
+  },
+});
+const replenishingReader = replenishingStream.getReader();
+await Promise.resolve();
+const replenishedPart = await replenishingReader.read();
+await Promise.resolve();
+console.log(
+  "pull after queued read:",
+  replenishedPart.value,
+  replenishingPulls,
+);
+
 const requestBody = new ReadableStream<Uint8Array>({
   start(controller) {
     controller.enqueue(Buffer.from("stream-"));
@@ -50,6 +71,41 @@ await pullReader.read();
 await pullReader.read();
 await pullReader.closed;
 console.log("max active pulls:", maxActivePulls);
+
+let activeThenablePulls = 0;
+let maxActiveThenablePulls = 0;
+let thenablePullCount = 0;
+const thenablePullSource = {
+  pull(controller: ReadableStreamDefaultController<number>) {
+    activeThenablePulls++;
+    maxActiveThenablePulls = Math.max(
+      maxActiveThenablePulls,
+      activeThenablePulls,
+    );
+    const n = ++thenablePullCount;
+    controller.enqueue(n);
+    return {
+      then(resolve: () => void) {
+        setTimeout(() => {
+          activeThenablePulls--;
+          if (n === 2) controller.close();
+          resolve();
+        }, 5);
+      },
+    };
+  },
+};
+const thenablePulls = new ReadableStream<number>(thenablePullSource);
+const thenablePullReader = thenablePulls.getReader();
+async function readThenablePull(): Promise<ReadableStreamReadResult<number>> {
+  return await thenablePullReader.read();
+}
+const firstThenableRead = readThenablePull();
+const secondThenableRead = readThenablePull();
+await firstThenableRead;
+await secondThenableRead;
+await thenablePullReader.closed;
+console.log("max active thenable pulls:", maxActiveThenablePulls);
 
 let requestPull = 0;
 const promisedRequestBody = new ReadableStream<Uint8Array>({
@@ -179,6 +235,10 @@ for (;;) {
 console.log(new TextDecoder().decode(Buffer.concat(chunks)), streamed.bodyUsed);
 
 const signal = AbortSignal.any([AbortSignal.timeout(20)]);
+AbortSignal.abort().addEventListener("custom", () => {
+  console.log("custom abort event unexpectedly fired");
+});
+console.log("custom abort listener registered");
 let abortEvent = false;
 signal.addEventListener("abort", () => {
   abortEvent = true;
@@ -365,6 +425,25 @@ const asyncStart = new ReadableStream<Uint8Array>({
 });
 await asyncStart.getReader().read();
 
+let thenableStartReady = false;
+const thenableStart = new ReadableStream<Uint8Array>({
+  start() {
+    return {
+      then(resolve: () => void) {
+        setTimeout(() => {
+          thenableStartReady = true;
+          resolve();
+        }, 5);
+      },
+    };
+  },
+  pull(controller) {
+    console.log("pull after thenable start:", thenableStartReady);
+    controller.close();
+  },
+});
+await thenableStart.getReader().read();
+
 let cancelFinished = false;
 const asyncCancel = new ReadableStream<Uint8Array>({
   async cancel() {
@@ -374,6 +453,23 @@ const asyncCancel = new ReadableStream<Uint8Array>({
 });
 await asyncCancel.cancel();
 console.log("cancel awaited:", cancelFinished);
+
+let thenableCancelFinished = false;
+const thenableCancelSource = {
+  cancel() {
+    return {
+      then(resolve: () => void) {
+        setTimeout(() => {
+          thenableCancelFinished = true;
+          resolve();
+        }, 5);
+      },
+    };
+  },
+};
+const thenableCancel = new ReadableStream<Uint8Array>(thenableCancelSource);
+await thenableCancel.cancel();
+console.log("thenable cancel awaited:", thenableCancelFinished);
 
 const queued = ReadableStream.from([
   Buffer.from("one"),

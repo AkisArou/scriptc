@@ -53,6 +53,17 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     if (e instanceof Error) console.log("timeout:", e.name, e.message);
   }
 
+  // A 101 is handed to the HTTP client's upgrade path rather than its
+  // response path. fetch rejects it instead of leaving the promise pending.
+  try {
+    await fetch(`${baseUrl}/switching-protocols`);
+    console.log("switching protocols: resolved");
+  } catch (e) {
+    if (e instanceof Error) {
+      console.log("switching protocols:", e.name, e.message);
+    }
+  }
+
   // Connection refused: fetch REJECTS (TypeError, Node's message).
   try {
     await fetch(refusedUrl);
