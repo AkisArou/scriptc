@@ -76,9 +76,12 @@
 #include "scr_runtime.h"
 #include "scr_url_internal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <zlib.h>
 
 /*
  * The static tier is a small native Web-platform island of its own:
@@ -172,8 +175,10 @@ struct SfResponse {
   size_t rc;
   SfStream *body;
   ScrStr *url;
+  ScrStr *status_text;
   int status;
   bool redirected;
+  bool null_body;
 };
 
 struct SfTransfer {
@@ -190,6 +195,8 @@ struct SfTransfer {
   SfSignalWatch *signal_watch;
   SfStream *request_stream;  /* owned */
   SfStream *response_stream; /* owned */
+  z_stream zs;
+  bool inflating;
   bool response_sent;
   bool done;
   struct SfTransfer *next;
@@ -414,6 +421,23 @@ static void sf_signal_timer_fire(ScrClosure *cb) {
 }
 
 ScrDyn *scr_fetch_abort_timeout(double ms) {
+  if (!isfinite(ms) || trunc(ms) != ms || ms < 0 || ms > 4294967295.0) {
+    char received[48];
+    scr_num_received(ms, received);
+    const char *range =
+        !isfinite(ms) || trunc(ms) != ms
+            ? "an integer"
+            : ">= 0 && <= 4294967295";
+    char message[224];
+    int len = snprintf(
+        message, sizeof message,
+        "The value of \"delay\" is out of range. It must be %s. Received %s",
+        range, received);
+    if (len < 0 || (size_t)len >= sizeof message) sf_oom();
+    scr_throw_error_msg_code(SCR_ERR_RANGE, message, (size_t)len,
+                             "ERR_OUT_OF_RANGE");
+    return NULL;
+  }
   SfSignal *s = sf_signal_new();
   ScrClosure *cb = scr_closure_new((void *)&sf_signal_timer_fire, 1);
   ScrBox *box =
@@ -1146,6 +1170,7 @@ static void sf_response_release(SfResponse *r) {
   if (!r || --r->rc > 0) return;
   sf_stream_release(r->body);
   scr_str_release(r->url);
+  scr_str_release(r->status_text);
   free(r);
 }
 
@@ -1154,6 +1179,39 @@ static void *sf_response_retain_v(void *p) {
 }
 static void sf_response_release_v(void *p) {
   sf_response_release((SfResponse *)p);
+}
+
+static ScrPromise *sf_response_collect(SfResponse *r, int mode) {
+  if (!r->null_body) return sf_stream_collect(r->body, mode);
+
+  /*
+   * A null body is not a disturbed empty stream: body stays null,
+   * bodyUsed stays false, and the body readers may be called repeatedly.
+   * Each call therefore consumes its own empty payload.
+   */
+  ScrPromise *p = scr_promise_new();
+  ScrDyn *value = NULL;
+  if (mode == SF_COLLECT_JSON) {
+    ScrStr *empty = scr_str_new("", 0);
+    value = scr_json_parse(empty);
+    scr_str_release(empty);
+  } else if (mode == SF_COLLECT_TEXT) {
+    ScrStr *empty = scr_str_new("", 0);
+    value = scr_dyn_new_str(empty);
+    scr_str_release(empty);
+  } else {
+    ScrBytes *empty = scr_bytes_new(SCR_BYTES_U8, 0);
+    value = scr_dyn_new_bytes_copy(empty);
+    scr_bytes_release(empty);
+  }
+  if (scr_exc_pending()) {
+    scr_dyn_release(value);
+    scr_promise_reject_pending(p);
+  } else {
+    scr_promise_fulfill_ref(p, value, &scr_dyn_retain_v,
+                            &scr_dyn_release_v, NULL);
+  }
+  return p;
 }
 
 static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
@@ -1173,7 +1231,7 @@ static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
       sf_type_error("Response body readers take no arguments");
       return NULL;
     }
-    ScrPromise *p = sf_stream_collect(r->body, mode);
+    ScrPromise *p = sf_response_collect(r, mode);
     ScrDyn *out = scr_dyn_new_promise(p);
     scr_promise_release(p);
     return out;
@@ -1184,24 +1242,6 @@ static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
   return NULL;
 }
 
-static const char *sf_status_text(int status) {
-  switch (status) {
-  case 200: return "OK";
-  case 201: return "Created";
-  case 202: return "Accepted";
-  case 204: return "No Content";
-  case 301: return "Moved Permanently";
-  case 302: return "Found";
-  case 304: return "Not Modified";
-  case 400: return "Bad Request";
-  case 401: return "Unauthorized";
-  case 403: return "Forbidden";
-  case 404: return "Not Found";
-  case 500: return "Internal Server Error";
-  default: return "";
-  }
-}
-
 static ScrDyn *sf_response_get(void *ptr, const char *key, size_t len) {
   SfResponse *r = ptr;
   if (sf_name(key, len, "status")) return scr_dyn_new_num((double)r->status);
@@ -1209,21 +1249,19 @@ static ScrDyn *sf_response_get(void *ptr, const char *key, size_t len) {
     return scr_dyn_new_bool(r->status >= 200 && r->status <= 299);
   }
   if (sf_name(key, len, "bodyUsed")) {
-    return scr_dyn_new_bool(r->body->disturbed);
+    return scr_dyn_new_bool(!r->null_body && r->body->disturbed);
   }
   if (sf_name(key, len, "body")) {
-    return scr_dyn_new_handle(r->body, SCR_DYNH_WEB_STREAM);
+    return r->null_body
+               ? scr_dyn_new_null()
+               : scr_dyn_new_handle(r->body, SCR_DYNH_WEB_STREAM);
   }
   if (sf_name(key, len, "url")) return scr_dyn_new_str(r->url);
   if (sf_name(key, len, "redirected")) {
     return scr_dyn_new_bool(r->redirected);
   }
   if (sf_name(key, len, "statusText")) {
-    const char *text = sf_status_text(r->status);
-    ScrStr *value = scr_str_new(text, strlen(text));
-    ScrDyn *out = scr_dyn_new_str(value);
-    scr_str_release(value);
-    return out;
+    return scr_dyn_new_str(r->status_text);
   }
   if (sf_name(key, len, "headers")) return scr_dyn_new_obj();
   return NULL;
@@ -1237,7 +1275,7 @@ ScrPromise *scr_fetch_response_json(ScrDyn *response) {
                                    &scr_dyn_release_v, NULL);
   }
   SfResponse *r = response->v.handle.ptr;
-  return sf_stream_collect(r->body, SF_COLLECT_JSON);
+  return sf_response_collect(r, SF_COLLECT_JSON);
 }
 
 /* ── fetch transfer ──────────────────────────────────────────────── */
@@ -1255,6 +1293,7 @@ static void sf_release(SfTransfer *t) {
   scr_arr_release(t->headers);
   scr_dyn_release(t->body);
   if (t->client) scr_http_client_release(t->client);
+  if (t->inflating) inflateEnd(&t->zs);
   sf_watch_free(t->signal_watch);
   sf_signal_release(t->signal);
   sf_stream_release(t->request_stream);
@@ -1630,6 +1669,19 @@ static ScrStr *sf_method(const ScrDyn *init) {
     sf_type_error("fetch failed");
     return NULL;
   }
+  if (sf_eq_ci(method, "connect") || sf_eq_ci(method, "trace") ||
+      sf_eq_ci(method, "track")) {
+    size_t message_len = method->len + 31;
+    char *message = malloc(message_len + 1);
+    if (!message) sf_oom();
+    int len = snprintf(message, message_len + 1, "'%.*s' HTTP method is unsupported.",
+                       (int)method->len, method->data);
+    scr_str_release(method);
+    if (len < 0 || (size_t)len > message_len) sf_oom();
+    sf_type_error(message);
+    free(message);
+    return NULL;
+  }
   return method;
 }
 
@@ -1661,11 +1713,50 @@ static void sf_stream_request_flush(SfStream *s) {
 static bool sf_start_hop(SfTransfer *t);
 static bool sf_redirect(SfTransfer *t, int status, const ScrStr *location);
 
+static void sf_response_terminate(SfTransfer *t) {
+  if (!t || t->done || !t->response_stream) return;
+  if (t->client) scr_http_client_destroy(t->client);
+  ScrError *e = NULL;
+  ScrDyn *reason = sf_dom_reason("TypeError", "terminated", &e);
+  sf_stream_error(t->response_stream, reason);
+  scr_dyn_release(reason);
+  scr_error_release(e);
+  sf_settle(t);
+}
+
 static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
   SfTransfer *t = sf_from(cb);
   if (!t) return;
-  if (!t->done && t->response_stream) {
+  if (t->done || !t->response_stream) {
+    sf_release(t);
+    return;
+  }
+  if (!t->inflating) {
     sf_stream_enqueue_bytes(t->response_stream, chunk);
+    sf_release(t);
+    return;
+  }
+
+  t->zs.next_in = (Bytef *)chunk->data;
+  t->zs.avail_in = (uInt)chunk->len;
+  unsigned char out[16384];
+  while (t->zs.avail_in > 0 && !t->done) {
+    t->zs.next_out = out;
+    t->zs.avail_out = sizeof out;
+    int result = inflate(&t->zs, Z_NO_FLUSH);
+    size_t produced = sizeof out - t->zs.avail_out;
+    if (produced > 0) {
+      ScrBytes *decoded = scr_bytes_new(SCR_BYTES_U8, (double)produced);
+      memcpy(decoded->data, out, produced);
+      sf_stream_enqueue_bytes(t->response_stream, decoded);
+      scr_bytes_release(decoded);
+    }
+    if (result == Z_STREAM_END) break;
+    if (result != Z_OK && result != Z_BUF_ERROR) {
+      sf_response_terminate(t);
+      break;
+    }
+    if (result == Z_BUF_ERROR && produced == 0) break;
   }
   sf_release(t);
 }
@@ -1685,16 +1776,16 @@ static void sf_on_res_error(ScrClosure *cb, ScrStr *message) {
   SfTransfer *t = sf_from(cb);
   if (!t) return;
   if (!t->done && t->response_stream) {
-    ScrError *e = NULL;
-    ScrDyn *reason = sf_dom_reason("TypeError", "terminated", &e);
-    sf_stream_error(t->response_stream, reason);
-    scr_dyn_release(reason);
-    scr_error_release(e);
-    sf_settle(t);
+    sf_response_terminate(t);
   } else {
     sf_reject(t, "fetch failed");
   }
   sf_release(t);
+}
+
+static bool sf_response_has_null_body(const SfTransfer *t, int status) {
+  return sf_eq_ci(t->method, "head") || status == 101 || status == 103 ||
+         status == 204 || status == 205 || status == 304;
 }
 
 static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
@@ -1729,6 +1820,21 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
       return;
     }
   }
+  bool null_body = sf_response_has_null_body(t, status);
+  if (!null_body) {
+    ScrStr *name = scr_str_new("content-encoding", 16);
+    ScrStr *encoding = scr_http_req_header(res, name);
+    scr_str_release(name);
+    if (encoding) {
+      if (sf_eq_ci(encoding, "gzip") || sf_eq_ci(encoding, "x-gzip") ||
+          sf_eq_ci(encoding, "deflate")) {
+        memset(&t->zs, 0, sizeof t->zs);
+        if (inflateInit2(&t->zs, 15 + 32) != Z_OK) sf_oom();
+        t->inflating = true;
+      }
+      scr_str_release(encoding);
+    }
+  }
   SfStream *body = sf_stream_new_native();
   body->response_owner = t;
   t->response_stream = sf_stream_retain(body);
@@ -1737,8 +1843,11 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
   response->rc = 1;
   response->body = sf_stream_retain(body);
   response->url = sf_url_serialize(t->url);
+  response->status_text = scr_http_req_status_message(res);
+  if (!response->status_text) response->status_text = scr_str_new("", 0);
   response->status = status;
   response->redirected = t->redirected;
+  response->null_body = null_body;
   ScrDyn *boxed = scr_dyn_new_handle(response, SCR_DYNH_FETCH_RESPONSE);
   sf_response_release(response);
   sf_stream_release(body);
@@ -1761,12 +1870,7 @@ static void sf_on_client_error(ScrClosure *cb, ScrStr *message) {
   if (!t) return;
   if (!t->done) {
     if (t->response_sent && t->response_stream) {
-      ScrError *e = NULL;
-      ScrDyn *reason = sf_dom_reason("TypeError", "terminated", &e);
-      sf_stream_error(t->response_stream, reason);
-      scr_dyn_release(reason);
-      scr_error_release(e);
-      sf_settle(t);
+      sf_response_terminate(t);
     } else {
       sf_reject(t, "fetch failed");
     }
@@ -1995,11 +2099,34 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       ((body->kind == SCR_DYN_HANDLE &&
         body->v.handle.tag == SCR_DYNH_WEB_STREAM) ||
        body->kind == SCR_DYN_ARR);
+  const ScrDyn *duplex =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "duplex", 6)
+          : NULL;
+  bool duplex_present =
+      duplex && duplex->kind != SCR_DYN_UNDEF;
+  bool duplex_half =
+      duplex_present && duplex->kind == SCR_DYN_STR &&
+      duplex->v.str->len == 4 &&
+      memcmp(duplex->v.str->data, "half", 4) == 0;
+  if (duplex_present && !duplex_half) {
+    scr_str_release(method);
+    scr_url_release(u);
+    return sf_reject_now(
+        promise, "RequestInit.duplex must be 'half'");
+  }
   if (body_present && body->kind != SCR_DYN_STR &&
       body->kind != SCR_DYN_BYTES && !body_stream) {
     scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(promise, "fetch failed");
+  }
+  if (body_stream && !duplex_half) {
+    scr_str_release(method);
+    scr_url_release(u);
+    return sf_reject_now(
+        promise,
+        "RequestInit: duplex option is required when sending a body.");
   }
   if (body_present &&
       ((method->len == 3 && memcmp(method->data, "GET", 3) == 0) ||

@@ -6529,6 +6529,7 @@ export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "fetch.abortTimeout",
   "fetch.abortAny",
   "fetch.streamNew",
   "fetch.streamFrom",

@@ -50,3 +50,23 @@ try {
   const caught = error as Error;
   console.log(caught.name, caught.message);
 }
+
+for (const delay of [-1, Number.NaN, Number.POSITIVE_INFINITY, 4294967296]) {
+  try {
+    AbortSignal.timeout(delay);
+  } catch (error) {
+    const caught = error as Error;
+    console.log("invalid timeout:", caught.name, caught.message);
+  }
+}
+
+try {
+  const missingDuplex = ReadableStream.from([Buffer.from("no-duplex")]);
+  await fetch(`${process.argv[2]}/post-echo`, {
+    method: "POST",
+    body: missingDuplex,
+  });
+} catch (error) {
+  const caught = error as Error;
+  console.log("missing duplex:", caught.name, caught.message);
+}

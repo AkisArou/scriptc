@@ -14,8 +14,9 @@
  *   real proxy client sends) answers the current count.
  *
  * Routes: /text /json /post-echo /header-echo /redirect /slow /drip
- * /chunked /gzip /deflate /sse, 404 for the rest; the proxy relays absolute-URI requests
- * and CONNECT tunnels, counting one per proxied request either way. */
+ * /chunked /gzip /deflate /status-meta /no-content /sse, 404 for the rest;
+ * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
+ * per proxied request either way. */
 import { createServer, request } from "node:http";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -92,6 +93,12 @@ export async function startFetchServers() {
         const payload = deflateSync(Buffer.from("deflated wörld", "utf8"));
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-encoding": "deflate" });
         res.end(payload);
+      } else if (url === "/status-meta") {
+        res.writeHead(206, "Custom Partial", { "content-type": "text/plain" });
+        res.end("partial");
+      } else if (url === "/no-content") {
+        res.writeHead(204);
+        res.end();
       } else if (url === "/sse") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         const frames = [
