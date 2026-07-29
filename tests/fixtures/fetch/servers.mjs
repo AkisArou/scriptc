@@ -14,9 +14,10 @@
  *   real proxy client sends) answers the current count.
  *
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
- * /headers-reuse /request-defaults /redirect /redirect-fragment/path
- * /early-hints /invalid-utf8 /slow /drip /chunked /gzip /gzip-concat
- * /deflate /status-meta /no-content /sse, 404 for the rest;
+ * /headers-reuse /request-defaults /redirect /redirect-credentials
+ * /redirect-fragment/path /early-hints /invalid-utf8 /slow /drip
+ * /chunked /gzip /gzip-concat /deflate /status-meta /no-content /sse,
+ * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
 import { createServer, request } from "node:http";
@@ -87,6 +88,11 @@ export async function startFetchServers() {
         );
       } else if (url === "/redirect") {
         res.writeHead(302, { location: "/text" });
+        res.end();
+      } else if (url === "/redirect-credentials") {
+        res.writeHead(302, {
+          location: `http://user:pass@${req.headers.host}/text`,
+        });
         res.end();
       } else if (url === "/redirect-fragment/path") {
         const key = String(req.headers["x-redirect-key"] ?? "missing");

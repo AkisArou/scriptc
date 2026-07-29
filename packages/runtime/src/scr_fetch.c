@@ -118,6 +118,7 @@ struct SfReadRequest {
 typedef struct SfAbortListener {
   ScrDyn *fn;
   bool once;
+  size_t id;
   struct SfAbortListener *next;
 } SfAbortListener;
 
@@ -135,6 +136,7 @@ struct SfSignal {
   ScrError *error_reason;
   ScrDyn *onabort;
   SfAbortListener *listeners;
+  size_t next_listener_id;
   SfSignalWatch *watchers;
   SfSignal **sources;
   SfSignalWatch **source_watches;
@@ -240,6 +242,9 @@ struct SfTransfer {
   SfSignalWatch *signal_watch;
   SfStream *request_stream;  /* owned */
   SfStream *response_stream; /* owned */
+  bool request_has_content_length;
+  size_t request_content_length;
+  size_t request_body_sent;
   z_stream zs;
   bool inflating;
   bool inflate_member_end;
@@ -397,28 +402,76 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   scr_dyn_obj_set(event, "type", 4, scr_dyn_new_str(abort));
   scr_str_release(abort);
   if (s->onabort && s->onabort->kind == SCR_DYN_FUNC) {
+    /*
+     * A handler may clear or replace signal.onabort while it is running.
+     * Keep the invoked function alive across that setter's release.
+     */
+    ScrDyn *handler = scr_dyn_retain(s->onabort);
     ScrDyn *args[1] = {event};
     scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
-    ScrDyn *r = scr_dyn_call(s->onabort, args, 1, "signal.onabort");
+    ScrDyn *r = scr_dyn_call(handler, args, 1, "signal.onabort");
     scr_dyn_this_pop();
     scr_dyn_release(r);
+    scr_dyn_release(handler);
   }
-  SfAbortListener **at = &s->listeners;
-  while (*at) {
-    SfAbortListener *l = *at;
-    ScrDyn *args[1] = {event};
-    scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
-    ScrDyn *r = scr_dyn_call(l->fn, args, 1, "abort listener");
-    scr_dyn_this_pop();
-    scr_dyn_release(r);
-    if (l->once) {
+
+  /*
+   * EventTarget dispatch snapshots the listeners present at the start:
+   * additions wait for the next event, removals before a listener's turn
+   * suppress it, and a listener may remove itself safely. Holding raw list
+   * nodes across the user callback is not safe because removeEventListener
+   * frees those nodes.
+   */
+  size_t count = 0;
+  for (SfAbortListener *l = s->listeners; l; l = l->next) count++;
+  typedef struct {
+    ScrDyn *fn;
+    bool once;
+    size_t id;
+  } SfAbortDispatch;
+  SfAbortDispatch *dispatch =
+      count ? calloc(count, sizeof *dispatch) : NULL;
+  if (count && !dispatch) sf_oom();
+  size_t i = 0;
+  for (SfAbortListener *l = s->listeners; l; l = l->next) {
+    dispatch[i].fn = scr_dyn_retain(l->fn);
+    dispatch[i].once = l->once;
+    dispatch[i].id = l->id;
+    i++;
+  }
+
+  for (i = 0; i < count; i++) {
+    SfAbortListener **at = &s->listeners;
+    while (*at && (*at)->id != dispatch[i].id) {
+      at = &(*at)->next;
+    }
+    if (!*at) {
+      scr_dyn_release(dispatch[i].fn);
+      continue;
+    }
+    if (dispatch[i].once) {
+      SfAbortListener *l = *at;
       *at = l->next;
       scr_dyn_release(l->fn);
       free(l);
-    } else {
-      at = &l->next;
+    }
+    ScrDyn *args[1] = {event};
+    scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
+    ScrDyn *r =
+        scr_dyn_call(dispatch[i].fn, args, 1, "abort listener");
+    scr_dyn_this_pop();
+    scr_dyn_release(r);
+    scr_dyn_release(dispatch[i].fn);
+    if (scr_exc_pending()) {
+      i++;
+      break;
     }
   }
+  while (i < count) {
+    scr_dyn_release(dispatch[i].fn);
+    i++;
+  }
+  free(dispatch);
   scr_dyn_release(event);
 }
 
@@ -575,6 +628,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     SfAbortListener *l = calloc(1, sizeof *l);
     if (!l) sf_oom();
     l->fn = scr_dyn_retain(args[1]);
+    l->id = ++s->next_listener_id;
     if (argc >= 3) {
       if (args[2]->kind == SCR_DYN_BOOL) {
         l->once = args[2]->v.b;
@@ -1441,15 +1495,16 @@ static ScrDyn *sf_controller_invoke(void *ptr, ScrDyn *self,
                                     const char *what) {
   SfStream *s = ptr;
   if (strcmp(method, "enqueue") == 0) {
-    if (argc != 1) {
-      sf_type_error("ReadableStream controller.enqueue requires one chunk");
-      return NULL;
-    }
-    sf_stream_enqueue_value(s, args[0]);
+    sf_stream_enqueue_value(
+        s, argc ? args[0] : scr_dyn_undefined());
     if (scr_exc_pending()) return NULL;
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "close") == 0) {
+    if (s->close_requested || s->closed || s->error) {
+      sf_type_error("Invalid state: Controller is already closed");
+      return NULL;
+    }
     sf_stream_close(s);
     return scr_dyn_retain(scr_dyn_undefined());
   }
@@ -2264,6 +2319,65 @@ static void sf_strip_header(ScrArr **headers, const char *name) {
   *headers = out;
 }
 
+static bool sf_content_length(ScrArr *headers, bool *present_out,
+                              size_t *length_out) {
+  bool present = false;
+  size_t length = 0;
+  size_t n = (size_t)scr_arr_len(headers);
+  for (size_t i = 0; i + 1 < n; i += 2) {
+    ScrStr *name = scr_arr_get_ref(headers, (double)i);
+    ScrStr *value = scr_arr_get_ref(headers, (double)(i + 1));
+    if (!sf_eq_ci(name, "content-length")) {
+      scr_str_release(name);
+      scr_str_release(value);
+      continue;
+    }
+    if (present) {
+      scr_str_release(name);
+      scr_str_release(value);
+      sf_type_error("fetch failed");
+      return false;
+    }
+    size_t start = 0;
+    size_t end = value->len;
+    while (start < end &&
+           (value->data[start] == ' ' || value->data[start] == '\t')) {
+      start++;
+    }
+    while (end > start &&
+           (value->data[end - 1] == ' ' ||
+            value->data[end - 1] == '\t')) {
+      end--;
+    }
+    bool valid = start < end;
+    size_t parsed = 0;
+    for (size_t j = start; j < end && valid; j++) {
+      unsigned char c = (unsigned char)value->data[j];
+      if (c < '0' || c > '9') {
+        valid = false;
+        break;
+      }
+      size_t digit = (size_t)(c - '0');
+      if (parsed > (SIZE_MAX - digit) / 10) {
+        valid = false;
+        break;
+      }
+      parsed = parsed * 10 + digit;
+    }
+    scr_str_release(name);
+    scr_str_release(value);
+    if (!valid) {
+      sf_type_error("fetch failed");
+      return false;
+    }
+    present = true;
+    length = parsed;
+  }
+  *present_out = present;
+  *length_out = length;
+  return true;
+}
+
 static ScrStr *sf_method(const ScrDyn *init) {
   const ScrDyn *value =
       init && init->kind == SCR_DYN_OBJ
@@ -2370,6 +2484,11 @@ static ScrPromise *sf_reject_now(ScrPromise *promise, const char *message) {
   return promise;
 }
 
+static void sf_request_length_mismatch(SfTransfer *t) {
+  if (t->client) scr_http_client_destroy(t->client);
+  sf_reject(t, "fetch failed");
+}
+
 static void sf_stream_request_flush(SfStream *s) {
   SfTransfer *t = s->request_owner;
   if (!s->started || !t || t->done || !t->client) return;
@@ -2389,6 +2508,17 @@ static void sf_stream_request_flush(SfStream *s) {
       scr_caught_release(caught);
       return;
     }
+    if (t->request_has_content_length &&
+        (t->request_body_sent > t->request_content_length ||
+         bytes->len >
+             t->request_content_length - t->request_body_sent)) {
+      scr_bytes_release(bytes);
+      sf_chunk_release(c);
+      sf_stream_drop_chunks(s);
+      sf_request_length_mismatch(t);
+      return;
+    }
+    t->request_body_sent += bytes->len;
     scr_http_client_write_bytes(t->client, bytes);
     scr_bytes_release(bytes);
     sf_chunk_release(c);
@@ -2396,6 +2526,11 @@ static void sf_stream_request_flush(SfStream *s) {
   if (s->error) {
     sf_transfer_stream_error(t, s->error);
   } else if (s->close_requested) {
+    if (t->request_has_content_length &&
+        t->request_body_sent != t->request_content_length) {
+      sf_request_length_mismatch(t);
+      return;
+    }
     sf_stream_finish_close(s);
     scr_http_client_end(t->client);
   }
@@ -2615,7 +2750,8 @@ static bool sf_redirect(SfTransfer *t, int status,
   ScrUrl *next = sf_resolve_url(t->url, location);
   if (!next ||
       !(sf_eq_ci(next->scheme, "http") ||
-        sf_eq_ci(next->scheme, "https"))) {
+        sf_eq_ci(next->scheme, "https")) ||
+      next->userinfo->len > 0) {
     scr_url_release(next);
     sf_reject(t, "fetch failed");
     return false;
@@ -2905,6 +3041,28 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
     sf_push_header_text(headers, "content-type",
                         "text/plain;charset=UTF-8", 24);
   }
+  bool has_content_length = false;
+  size_t content_length = 0;
+  if (!sf_content_length(headers, &has_content_length, &content_length)) {
+    scr_arr_release(headers);
+    scr_str_release(method);
+    scr_url_release(u);
+    return sf_reject_now(promise, "fetch failed");
+  }
+  if (has_content_length && !body_stream) {
+    size_t body_length =
+        !body_present
+            ? 0
+            : body->kind == SCR_DYN_STR
+                ? body->v.str->len
+                : body->v.bytes->len;
+    if (body_length != content_length) {
+      scr_arr_release(headers);
+      scr_str_release(method);
+      scr_url_release(u);
+      return sf_reject_now(promise, "fetch failed");
+    }
+  }
   /*
    * Request construction validates URL/method/body/headers before fetch
    * observes an already-aborted signal. Undici does the same: abort wins
@@ -2927,6 +3085,8 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
   t->headers = headers;
   t->body = body_present ? scr_dyn_retain((ScrDyn *)body) : NULL;
   t->redirect_mode = redirect_mode;
+  t->request_has_content_length = has_content_length;
+  t->request_content_length = content_length;
   if (signal) {
     t->signal = sf_signal_retain(signal);
     t->signal_watch =

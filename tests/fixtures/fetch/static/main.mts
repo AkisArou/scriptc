@@ -70,6 +70,13 @@ const init: RequestInit = {
 const echoed = await fetch(`${process.argv[2]}/post-echo`, init);
 console.log(await echoed.json());
 
+const matchedLength = await fetch(`${process.argv[2]}/post-echo`, {
+  method: "POST",
+  headers: { "content-length": "2" },
+  body: "hi",
+});
+console.log("matched fixed content-length:", await matchedLength.json());
+
 const redirected = await fetch(`${process.argv[2]}/redirect`);
 console.log(
   "redirect:",
@@ -111,6 +118,13 @@ try {
 } catch (error) {
   const caught = error as Error;
   console.log("error redirect:", caught.name, caught.message);
+}
+
+try {
+  await fetch(`${process.argv[2]}/redirect-credentials`);
+} catch (error) {
+  const caught = error as Error;
+  console.log("credential redirect:", caught.name, caught.message);
 }
 
 try {
@@ -175,4 +189,15 @@ try {
 } catch (error) {
   const caught = error as Error;
   console.log("forbidden-method:", caught.name, caught.message);
+}
+try {
+  await fetch(`${process.argv[2]}/post-echo`, {
+    method: "POST",
+    headers: { "content-length": "5" },
+    body: "hi",
+    signal: AbortSignal.timeout(200),
+  });
+} catch (error) {
+  const caught = error as Error;
+  console.log("fixed content-length mismatch:", caught.name, caught.message);
 }

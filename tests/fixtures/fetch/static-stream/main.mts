@@ -185,6 +185,16 @@ identitySignal.removeEventListener("abort", identityListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("removed abort listener:", identityCalls);
 
+const mutationSignal = AbortSignal.timeout(0);
+let mutationCalls = 0;
+const selfRemovingListener = () => {
+  mutationCalls++;
+  mutationSignal.removeEventListener("abort", selfRemovingListener);
+};
+mutationSignal.addEventListener("abort", selfRemovingListener);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("self-removing abort listener:", mutationCalls);
+
 for (const delay of [-1, Number.NaN, Number.POSITIVE_INFINITY, 4294967296]) {
   try {
     AbortSignal.timeout(delay);
@@ -318,6 +328,27 @@ console.log(
   desiredSizeStream.locked,
 );
 
+const omittedChunk = new ReadableStream<undefined>({
+  start(controller) {
+    controller.enqueue();
+    controller.close();
+  },
+});
+const omittedPart = await omittedChunk.getReader().read();
+console.log("omitted enqueue:", omittedPart.done, omittedPart.value === undefined);
+
+try {
+  new ReadableStream<number>({
+    start(controller) {
+      controller.close();
+      controller.close();
+    },
+  });
+} catch (error) {
+  const caught = error as Error;
+  console.log("double close:", caught.name, caught.message);
+}
+
 let delayedRequestPullCount = 0;
 const delayedRequestBody = new ReadableStream<Uint8Array>({
   async start() {
@@ -346,3 +377,27 @@ console.log(
   await delayedRequestResponse.json(),
   delayedRequestPullCount,
 );
+
+const matchedStreamLength = await fetch(`${process.argv[2]}/post-echo`, {
+  method: "POST",
+  headers: { "content-length": "2" },
+  body: ReadableStream.from([Buffer.from("hi")]),
+  duplex: "half",
+});
+console.log(
+  "matched stream content-length:",
+  await matchedStreamLength.json(),
+);
+
+try {
+  await fetch(`${process.argv[2]}/post-echo`, {
+    method: "POST",
+    headers: { "content-length": "5" },
+    body: ReadableStream.from([Buffer.from("hi")]),
+    duplex: "half",
+    signal: AbortSignal.timeout(200),
+  });
+} catch (error) {
+  const caught = error as Error;
+  console.log("stream content-length mismatch:", caught.name, caught.message);
+}
