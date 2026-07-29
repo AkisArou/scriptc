@@ -72,6 +72,13 @@ try {
   console.log("invalid-method:", (error as Error).name);
 }
 try {
+  await fetch("not a url", {
+    signal: AbortSignal.abort(new Error("must not mask URL validation")),
+  });
+} catch (error) {
+  console.log("aborted invalid-url:", (error as Error).name);
+}
+try {
   await fetch(`${process.argv[2]}/text`, { method: "TRACE" });
 } catch (error) {
   const caught = error as Error;

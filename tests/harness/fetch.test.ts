@@ -120,12 +120,16 @@ async function build(entry: string): Promise<string> {
   return result.binaryPath;
 }
 
-async function buildStatic(entry: string, backend: "c" | "llvm"): Promise<string> {
+async function buildStatic(
+  entry: string,
+  backend: "c" | "llvm",
+  flavor = "",
+): Promise<string> {
   const hash = createHash("sha256");
   const key = hash
     .update(entry)
     .update(readFileSync(entry))
-    .update(`static-${backend}-${sanitize ? "san" : "plain"}`)
+    .update(`static-${backend}-${sanitize ? "san" : "plain"}-${flavor}`)
     .digest("hex")
     .slice(0, 16);
   const outDir = join(cacheDir, `fetch-${key}`);
@@ -165,6 +169,21 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
     ]);
     expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+  }, 120_000);
+
+  test("the dynamic curl comparison switch leaves static fetch native", async () => {
+    const previous = process.env["SCRIPTC_FETCH_CURL"];
+    process.env["SCRIPTC_FETCH_CURL"] = "1";
+    try {
+      const entry = join(fixturesRoot, "static/main.mts");
+      await buildStatic(entry, "c", "curl-env");
+    } finally {
+      if (previous === undefined) {
+        delete process.env["SCRIPTC_FETCH_CURL"];
+      } else {
+        process.env["SCRIPTC_FETCH_CURL"] = previous;
+      }
+    }
   }, 120_000);
 });
 

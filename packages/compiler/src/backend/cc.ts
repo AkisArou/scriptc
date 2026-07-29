@@ -1015,7 +1015,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // (scr_fetch_curl.c + system libcurl / the linux soname stub)
   // compilable for one release as the flip's reference.
   const fetchOn = opts.fetch ?? false;
-  const curlFetch = fetchOn && process.env["SCRIPTC_FETCH_CURL"] === "1";
+  // The retired curl bridge has only a SCR_DYNAMIC implementation.
+  // Static fetch always keeps the native runtime even when a developer
+  // has the comparison switch exported in their shell.
+  const curlFetch =
+    dynamic && fetchOn && process.env["SCRIPTC_FETCH_CURL"] === "1";
   const nativeFetch = fetchOn && !curlFetch;
   // The island's node:http/https client bridge: embedded graphs that
   // import those builtins get working clients over the same socket units

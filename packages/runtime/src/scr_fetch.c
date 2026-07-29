@@ -99,6 +99,7 @@ typedef struct SfStream SfStream;
 typedef struct SfReader SfReader;
 typedef struct SfResponse SfResponse;
 typedef struct SfCollector SfCollector;
+typedef struct SfPullWait SfPullWait;
 
 typedef struct SfChunk {
   ScrBytes *bytes;
@@ -154,6 +155,11 @@ struct SfCollector {
   int mode;
 };
 
+struct SfPullWait {
+  SfStream *stream;
+  ScrPromise *promise;
+};
+
 struct SfStream {
   size_t rc;
   SfChunk *head;
@@ -162,6 +168,7 @@ struct SfStream {
   bool disturbed;
   bool internal_lock;
   bool pulling;
+  bool pull_again;
   ScrDyn *error;
   SfReader *reader;       /* owned while locked */
   SfCollector *collector; /* owned while a body reader is active */
@@ -539,7 +546,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     }
     SfAbortListener **tail = &s->listeners;
     while (*tail) {
-      if ((*tail)->fn == args[1]) {
+      if (scr_dyn_strict_eq((*tail)->fn, args[1])) {
         scr_dyn_release(l->fn);
         free(l);
         return scr_dyn_retain(scr_dyn_undefined());
@@ -553,7 +560,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     if (argc >= 2 && args[0]->kind == SCR_DYN_STR &&
         sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
       for (SfAbortListener **at = &s->listeners; *at; at = &(*at)->next) {
-        if ((*at)->fn == args[1]) {
+        if (scr_dyn_strict_eq((*at)->fn, args[1])) {
           SfAbortListener *l = *at;
           *at = l->next;
           scr_dyn_release(l->fn);
@@ -845,19 +852,82 @@ static void sf_stream_error(SfStream *s, ScrDyn *reason) {
   }
 }
 
+static void sf_stream_pull(SfStream *s);
+
+static void sf_stream_pull_wait_entry(ScrFiber *self, void *arg) {
+  (void)self;
+  SfPullWait *wait = arg;
+  SfStream *s = wait->stream;
+  ScrDyn *value = scr_await_dyn(wait->promise);
+  bool rejected = scr_exc_pending();
+  ScrCaught *caught = rejected ? scr_exc_take() : NULL;
+  scr_dyn_release(value);
+  scr_promise_release(wait->promise);
+  free(wait);
+
+  s->pulling = false;
+  if (rejected) {
+    s->pull_again = false;
+    ScrDyn *reason = scr_caught_to_dyn(caught);
+    sf_stream_error(s, reason);
+    scr_dyn_release(reason);
+  } else {
+    bool again =
+        s->pull_again || s->request_owner ||
+        (s->reader && s->reader->pending);
+    s->pull_again = false;
+    if (again && !s->closed && !s->error) sf_stream_pull(s);
+  }
+  scr_caught_release(caught);
+  sf_stream_release(s);
+}
+
 static ScrDyn *sf_controller_box(SfStream *s) {
   return scr_dyn_new_handle(s, SCR_DYNH_WEB_CONTROLLER);
 }
 
 static void sf_stream_pull(SfStream *s) {
-  if (!s->pull_cb || s->pulling || s->closed || s->error) return;
-  s->pulling = true;
-  ScrDyn *controller = sf_controller_box(s);
-  ScrDyn *args[1] = {controller};
-  ScrDyn *r = scr_dyn_call(s->pull_cb, args, 1, "underlyingSource.pull");
-  scr_dyn_release(r);
-  scr_dyn_release(controller);
-  s->pulling = false;
+  if (!s->pull_cb || s->closed || s->error) return;
+  if (s->pulling) {
+    s->pull_again = true;
+    return;
+  }
+  for (;;) {
+    s->pulling = true;
+    ScrDyn *controller = sf_controller_box(s);
+    ScrDyn *args[1] = {controller};
+    ScrDyn *r =
+        scr_dyn_call(s->pull_cb, args, 1, "underlyingSource.pull");
+    scr_dyn_release(controller);
+    if (!r) {
+      s->pulling = false;
+      s->pull_again = false;
+      ScrCaught *caught = scr_exc_take();
+      ScrDyn *reason = scr_caught_to_dyn(caught);
+      sf_stream_error(s, reason);
+      scr_dyn_release(reason);
+      scr_caught_release(caught);
+      return;
+    }
+    if (r->kind == SCR_DYN_PROMISE) {
+      SfPullWait *wait = malloc(sizeof *wait);
+      if (!wait) sf_oom();
+      wait->stream = sf_stream_retain(s);
+      wait->promise = scr_promise_retain(r->v.promise);
+      ScrPromise *watcher =
+          scr_async_spawn(&sf_stream_pull_wait_entry, wait);
+      scr_promise_release(watcher);
+      scr_dyn_release(r);
+      return;
+    }
+    scr_dyn_release(r);
+    s->pulling = false;
+    if (!s->pull_again || s->closed || s->error) {
+      s->pull_again = false;
+      return;
+    }
+    s->pull_again = false;
+  }
 }
 
 static SfReader *sf_stream_get_reader(SfStream *s) {
@@ -2066,10 +2136,6 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
     signal = sf_signal_of(signal_dyn,
                           "Request init.signal must be an AbortSignal");
     if (!signal) return sf_reject_now(promise, "fetch failed");
-    if (signal->aborted) {
-      sf_reject_promise_reason(promise, signal->reason);
-      return promise;
-    }
   }
 
   ScrUrl *u = scr_url_new(url);
@@ -2152,6 +2218,18 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       !sf_pairs_have(headers, "content-type")) {
     sf_push_header_text(headers, "content-type",
                         "text/plain;charset=UTF-8", 24);
+  }
+  /*
+   * Request construction validates URL/method/body/headers before fetch
+   * observes an already-aborted signal. Undici does the same: abort wins
+   * over starting I/O, but never masks a RequestInit validation error.
+   */
+  if (signal && signal->aborted) {
+    scr_arr_release(headers);
+    scr_str_release(method);
+    scr_url_release(u);
+    sf_reject_promise_reason(promise, signal->reason);
+    return promise;
   }
 
   SfTransfer *t = calloc(1, sizeof *t);
