@@ -1698,7 +1698,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
     try {
       const loc0: SrcLoc = { file: sf.fileName, start: 0, end: 0 };
       const header: IrStmt[] = [];
-      const asyncDeps: { localId: string; loc: SrcLoc; cycleInternal: boolean }[] = [];
+      const asyncDeps: { completionId: string; loc: SrcLoc; cycleInternal: boolean }[] = [];
       const guardId = L.moduleGuardOf.get(sf);
       if (guardId !== undefined) {
         header.push({
@@ -1753,12 +1753,25 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
               // suspended; the importer body waits for all of them.
               const p = L.declareHiddenLocal("%depInit", { kind: "promise", inner: VOID });
               header.push({ kind: "varDecl", localId: p.id, init: call, loc });
+              const sfCycle = L.asyncCycleRepresentativeOf.get(sf);
+              const depCycle = L.asyncCycleRepresentativeOf.get(dep);
+              const cycleInternal = sfCycle !== undefined && sfCycle === depCycle;
+              // An importer outside the requested member's SCC waits for
+              // the SCC's RUNTIME root, not merely that member's promise.
+              // Another earlier sibling can already have entered the cycle
+              // through a different member; a non-root member may complete
+              // while the root remains suspended. The eager spawn above has
+              // published the root by the time it returns. Internal edges
+              // keep the member promise: their guard-hit completion is what
+              // breaks recursive evaluation without an await hop.
+              const completionId =
+                !cycleInternal && depCycle !== undefined
+                  ? L.asyncCyclePromiseOf.get(dep)!
+                  : p.id;
               asyncDeps.push({
-                localId: p.id,
+                completionId,
                 loc,
-                cycleInternal:
-                  L.asyncCycleRepresentativeOf.get(sf) !== undefined &&
-                  L.asyncCycleRepresentativeOf.get(sf) === L.asyncCycleRepresentativeOf.get(dep),
+                cycleInternal,
               });
             } else {
               header.push({ kind: "exprStmt", expr: call, loc });
@@ -1771,7 +1784,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         const promiseT: IrType = { kind: "promise", inner: VOID };
         const value: IrExpr = {
           kind: "varRef",
-          localId: dep.localId,
+          localId: dep.completionId,
           type: promiseT,
           loc: dep.loc,
         };
@@ -1789,7 +1802,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
           kind: "arrayLit",
           elems: asyncDeps.map((dep) => ({
             kind: "varRef",
-            localId: dep.localId,
+            localId: dep.completionId,
             type: promiseT,
             loc: dep.loc,
           })),
