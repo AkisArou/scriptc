@@ -282,6 +282,7 @@ export const ARRAY_METHODS = new Set([
   "includes",
   "join",
   "slice",
+  "toSorted",
 ]);
 
 /** The lowered Map<K, V> method surface. Like ARRAY_METHODS, membership is

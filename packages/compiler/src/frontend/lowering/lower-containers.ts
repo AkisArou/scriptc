@@ -110,7 +110,9 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
         elem = receiver.type.elem;
       }
     }
-    if (name === "sort") return lowerArraySortCall(L, call, access, elem, receiverIr);
+    if (name === "sort" || name === "toSorted") {
+      return lowerArraySortCall(L, call, access, elem, receiverIr);
+    }
 
     // The lib declares wider call forms than the lowered surface —
     // indexOf/includes take a fromIndex, join's separator is optional, the
@@ -1375,46 +1377,50 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     return name;
   }
 
-/** `a.sort(cmp)` — in-place, returns the receiver (JS's `this`), desugared
-   * to an interned synthetic function like the other array HOFs. The loop
-   * is a binary-free INSERTION sort: stable (equal-comparing elements keep
-   * their source order, which is what Node's stable TimSort produces for
-   * any consistent comparator) and JS-faithful on the comparator contract —
-   * an element moves left only while cmp(left, v) > 0, so a NaN or 0
-   * result holds position exactly like the spec's "treat as equal". The
-   * SEQUENCE of comparator calls differs from V8's TimSort (SEMANTICS.md);
-   * results are identical for consistent comparators. The comparator-less
-   * form lowers for STRING elements only — JS's default converts every
-   * element to string and compares UTF-16 units, which for strings is the
-   * relational operator the compiler already has (an interned synthesized
-   * comparator); for numbers that default is the notorious string sort
-   * ([10, 9, 1] → [1, 10, 9]), deliberately fenced toward an explicit
-   * comparator. */
+/** `a.sort(cmp)` / `a.toSorted(cmp)`, desugared to an interned synthetic
+   * function like the other array HOFs. sort mutates and returns the receiver;
+   * toSorted takes its shallow snapshot INSIDE the helper, after the receiver
+   * and comparator expressions have both been evaluated, then sorts and
+   * returns that copy without touching the receiver. The loop is a
+   * binary-free INSERTION sort: stable (equal-comparing elements keep their
+   * source order, which is what Node's stable TimSort produces for any
+   * consistent comparator) and JS-faithful on the comparator contract — an
+   * element moves left only while cmp(left, v) > 0, so a NaN or 0 result holds
+   * position exactly like the spec's "treat as equal". The SEQUENCE of
+   * comparator calls differs from V8's TimSort (SEMANTICS.md); results are
+   * identical for consistent comparators. The comparator-less form lowers for
+   * STRING elements only — JS's default converts every element to string and
+   * compares UTF-16 units, which for strings is the relational operator the
+   * compiler already has (an interned synthesized comparator); for numbers
+   * that default is the notorious string sort ([10, 9, 1] → [1, 10, 9]),
+   * deliberately fenced toward an explicit comparator. */
   export function lowerArraySortCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,
     elem: IrType,
     arrT: IrType & { kind: "array" },): IrExpr {
     const loc = locOf(call);
+    const method = access.name.text === "toSorted" ? "toSorted" : "sort";
+    const copyFirst = method === "toSorted";
     if (call.arguments.length === 0 && elem.kind === "string") {
       const receiver = L.lowerExpr(access.expression);
       const cmp = defaultStringCmpHelper(L, loc);
       const fnT = funcOf([STRING, STRING], F64);
-      const key = `sort:${typeKey(STRING)}:2`;
+      const key = `${method}:${typeKey(STRING)}:2`;
       let helper = L.arrHofHelpers.get(key);
       if (!helper) {
-        helper = `%arr.sort.${L.arrHofHelpers.size}`;
+        helper = `%arr.${method}.${L.arrHofHelpers.size}`;
         L.arrHofHelpers.set(key, helper);
-        L.liftedFns.push(buildArraySortFn(helper, STRING, 2, loc));
+        L.liftedFns.push(buildArraySortFn(helper, STRING, 2, copyFirst, loc));
       }
       const fnArg: IrExpr = { kind: "closure", fnName: cmp, captures: [], type: fnT, loc };
       return { kind: "call", callee: helper, args: [receiver, fnArg], type: arrT, loc };
     }
     if (call.arguments.length !== 1) {
       L.noLowering(
-        `.sort with ${call.arguments.length} arguments`,
+        `.${method} with ${call.arguments.length} arguments`,
         call,
         "the default string-conversion ordering lowers only for string[] — pass a comparator: " +
-          "sort((a, b) => a - b) for numbers",
+          `${method}((a, b) => a - b) for numbers`,
       );
     }
     const receiver = L.lowerExpr(access.expression);
@@ -1432,12 +1438,12 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
       L.badType(argNode, L.typeOf(argNode));
     }
     const arity = fnArg.type.params.length;
-    const key = `sort:${typeKey(elem)}:${arity}`;
+    const key = `${method}:${typeKey(elem)}:${arity}`;
     let helper = L.arrHofHelpers.get(key);
     if (!helper) {
-      helper = `%arr.sort.${L.arrHofHelpers.size}`;
+      helper = `%arr.${method}.${L.arrHofHelpers.size}`;
       L.arrHofHelpers.set(key, helper);
-      L.liftedFns.push(buildArraySortFn(helper, elem, arity, loc));
+      L.liftedFns.push(buildArraySortFn(helper, elem, arity, copyFirst, loc));
     }
     return { kind: "call", callee: helper, args: [receiver, fnArg], type: arrT, loc };
   }
@@ -1503,7 +1509,13 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
    *   }
    *   return a;
    */
-  function buildArraySortFn(name: string, elem: IrType, arity: number, loc: SrcLoc): IrFunction {
+  function buildArraySortFn(
+    name: string,
+    elem: IrType,
+    arity: number,
+    copyFirst: boolean,
+    loc: SrcLoc,
+  ): IrFunction {
     const arrT = arrayOf(elem);
     const fnT = funcOf([elem, elem].slice(0, arity), F64);
     const ref = (localId: string, type: IrType): IrExpr => ({ kind: "varRef", localId, type, loc });
@@ -1542,6 +1554,21 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
       loc,
     };
     const body: IrStmt[] = [
+      ...(copyFirst
+        ? [{
+            kind: "assign" as const,
+            localId: "a.0",
+            value: {
+              kind: "arrIntrinsic" as const,
+              method: "slice" as const,
+              receiver: ref("a.0", arrT),
+              args: [],
+              type: arrT,
+              loc,
+            },
+            loc,
+          }]
+        : []),
       readLenStmt(arrT, loc),
       {
         kind: "for",
