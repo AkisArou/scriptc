@@ -58,6 +58,78 @@ const promisedPost = await fetch(`${process.argv[2]}/post-echo`, {
 });
 console.log(await promisedPost.json());
 
+const temporaryRead = await new ReadableStream<Uint8Array>({
+  start(controller) {
+    controller.enqueue(Buffer.from("temporary"));
+    controller.close();
+  },
+}).getReader().read();
+console.log(
+  "temporary reader:",
+  temporaryRead.done ? "done" : new TextDecoder().decode(temporaryRead.value),
+);
+
+let concurrentValue = 0;
+const concurrentReader = new ReadableStream<number>({
+  async pull(controller) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    concurrentValue++;
+    controller.enqueue(concurrentValue);
+    if (concurrentValue === 2) controller.close();
+  },
+}).getReader();
+async function readConcurrent(): Promise<ReadableStreamReadResult<number>> {
+  return await concurrentReader.read();
+}
+const concurrentFirstPromise = readConcurrent();
+const concurrentSecondPromise = readConcurrent();
+const concurrentFirst = await concurrentFirstPromise;
+const concurrentSecond = await concurrentSecondPromise;
+console.log(
+  "concurrent reads:",
+  concurrentFirst.value,
+  concurrentSecond.value,
+);
+
+const releasedReader = new ReadableStream<number>({
+  async start() {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  },
+}).getReader();
+const releasedRead: unknown = releasedReader.read();
+const oldReleasedClosed: unknown = releasedReader.closed;
+releasedReader.releaseLock();
+const newReleasedClosed: unknown = releasedReader.closed;
+try {
+  await oldReleasedClosed;
+} catch (error) {
+  const caught = error as Error;
+  console.log("released old closed:", caught.name, caught.message);
+}
+try {
+  await releasedRead;
+} catch (error) {
+  const caught = error as Error;
+  console.log("released read:", caught.name, caught.message);
+}
+try {
+  await newReleasedClosed;
+} catch (error) {
+  const caught = error as Error;
+  console.log("released new closed:", caught.name, caught.message);
+}
+
+const stringReader = ReadableStream.from("😀a").getReader();
+const stringFirst = await stringReader.read();
+const stringSecond = await stringReader.read();
+const stringDone = await stringReader.read();
+console.log(
+  "stream from string:",
+  stringFirst.value,
+  stringSecond.value,
+  stringDone.done,
+);
+
 const streamed = await fetch(`${process.argv[2]}/chunked`);
 const reader = streamed.body!.getReader();
 const chunks: Uint8Array[] = [];

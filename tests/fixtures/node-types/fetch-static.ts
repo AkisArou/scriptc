@@ -11,6 +11,7 @@ const init: RequestInit = {
   method: "POST",
   body,
   duplex: "half",
+  redirect: "manual",
   signal: AbortSignal.timeout(100),
 };
 

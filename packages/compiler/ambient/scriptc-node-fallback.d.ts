@@ -690,6 +690,7 @@ interface RequestInit {
   headers?: Record<string, string>;
   body?: string | Uint8Array | ReadableStream<Uint8Array> | null;
   duplex?: "half";
+  redirect?: "follow" | "error" | "manual";
   signal?: AbortSignal;
 }
 declare function fetch(input: string | URL, init?: RequestInit): Promise<Response>;

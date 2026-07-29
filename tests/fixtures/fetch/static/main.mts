@@ -61,6 +61,43 @@ console.log(
   await redirected.text(),
 );
 
+const manualRedirect = await fetch(`${process.argv[2]}/redirect`, {
+  redirect: "manual",
+});
+console.log(
+  "manual redirect:",
+  manualRedirect.status,
+  manualRedirect.redirected,
+  manualRedirect.url.endsWith("/redirect"),
+  manualRedirect.headers.get("location"),
+  JSON.stringify(await manualRedirect.text()),
+);
+
+try {
+  await fetch(`${process.argv[2]}/redirect`, { redirect: "error" });
+} catch (error) {
+  const caught = error as Error;
+  console.log("error redirect:", caught.name, caught.message);
+}
+
+try {
+  const credentialUrl =
+    `http://user:pass@${process.argv[2].slice("http://".length)}/text`;
+  await fetch(credentialUrl);
+} catch (error) {
+  const caught = error as Error;
+  console.log("credential URL:", caught.name, caught.message);
+}
+
+console.log(
+  "early hints:",
+  await (await fetch(`${process.argv[2]}/early-hints`)).text(),
+);
+console.log(
+  "invalid utf8:",
+  JSON.stringify(await (await fetch(`${process.argv[2]}/invalid-utf8`)).text()),
+);
+
 const statusMeta = await fetch(`${process.argv[2]}/status-meta`);
 console.log("status text:", statusMeta.status, statusMeta.statusText);
 

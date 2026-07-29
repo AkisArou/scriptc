@@ -13,8 +13,9 @@
  *   form: a plain `GET /__count` to the proxy (a relative-path request no
  *   real proxy client sends) answers the current count.
  *
- * Routes: /text /json /post-echo /header-echo /request-defaults /redirect /slow /drip
- * /chunked /gzip /deflate /status-meta /no-content /sse, 404 for the rest;
+ * Routes: /text /json /post-echo /header-echo /request-defaults /redirect
+ * /early-hints /invalid-utf8 /slow /drip /chunked /gzip /deflate
+ * /status-meta /no-content /sse, 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
 import { createServer, request } from "node:http";
@@ -66,6 +67,15 @@ export async function startFetchServers() {
       } else if (url === "/redirect") {
         res.writeHead(302, { location: "/text" });
         res.end();
+      } else if (url === "/early-hints") {
+        res.writeEarlyHints({
+          link: "</style.css>; rel=preload; as=style",
+        });
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("final");
+      } else if (url === "/invalid-utf8") {
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+        res.end(Buffer.from([0x61, 0xc3, 0x28, 0x62]));
       } else if (url === "/slow") {
         // Answers after 1500ms: the abort/timeout cases cancel long before.
         setTimeout(() => {
