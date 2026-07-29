@@ -32,6 +32,10 @@ const signal = AbortSignal.any([AbortSignal.timeout(20)]);
 let abortEvent = false;
 signal.addEventListener("abort", () => {
   abortEvent = true;
+  console.log("abort-first");
+}, { once: true });
+signal.addEventListener("abort", () => {
+  console.log("abort-second");
 }, { once: true });
 try {
   await fetch(`${process.argv[2]}/slow`, { signal });

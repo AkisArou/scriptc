@@ -4,6 +4,9 @@
 const res = await fetch(`${process.argv[2]}/json`);
 console.log(await res.json());
 
+const urlResponse = await fetch(new URL(`${process.argv[2]}/json`));
+console.log("url:", urlResponse.status);
+
 const init: RequestInit = {
   method: "POST",
   headers: {
@@ -14,3 +17,18 @@ const init: RequestInit = {
 };
 const echoed = await fetch(`${process.argv[2]}/post-echo`, init);
 console.log(await echoed.json());
+
+const redirected = await fetch(`${process.argv[2]}/redirect`);
+console.log(
+  "redirect:",
+  redirected.status,
+  redirected.redirected,
+  redirected.url.endsWith("/text"),
+  await redirected.text(),
+);
+
+try {
+  await fetch(`${process.argv[2]}/json`, { method: "BAD METHOD" });
+} catch (error) {
+  console.log("invalid-method:", (error as Error).name);
+}

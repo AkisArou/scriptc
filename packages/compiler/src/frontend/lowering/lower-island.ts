@@ -260,7 +260,18 @@ import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
     if (call.arguments.length < 1 || call.arguments.length > 2) return null;
     const loc = locOf(call);
     if (!L.dynamic) {
-      const url = L.lowerExprExpecting(call.arguments[0]!, STRING);
+      const inputNode = call.arguments[0]!;
+      const input = L.lowerExpr(inputNode);
+      const url =
+        input.type.kind === "url"
+          ? {
+              kind: "libCall" as const,
+              fn: "url.href" as const,
+              args: [input],
+              type: STRING,
+              loc: locOf(inputNode),
+            }
+          : L.coerceInto(inputNode, input, STRING);
       const initNode = call.arguments[1];
       const init =
         initNode === undefined
