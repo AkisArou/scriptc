@@ -41,6 +41,19 @@ responseHeaders.forEach((value, name) => {
 });
 await headerResponse.text();
 
+const emptyHeaderResponse = await fetch(`${process.argv[2]}/header-empty`);
+console.log(
+  "empty duplicate header:",
+  JSON.stringify(emptyHeaderResponse.headers.get("x-empty")),
+);
+await emptyHeaderResponse.text();
+
+const headersSource = await fetch(`${process.argv[2]}/headers-source`);
+const reusedHeaders = await fetch(`${process.argv[2]}/headers-reuse`, {
+  headers: headersSource.headers,
+});
+console.log("reused headers:", await reusedHeaders.text());
+
 console.log(
   "request defaults:",
   await (await fetch(`${process.argv[2]}/request-defaults`)).json(),
@@ -64,6 +77,21 @@ console.log(
   redirected.redirected,
   redirected.url.endsWith("/text"),
   await redirected.text(),
+);
+
+const fragmentRedirect = await fetch(
+  `${process.argv[2]}/redirect-fragment/path`,
+  {
+    headers: {
+      "x-redirect-key": process.argv[3] ?? "static-fragment",
+    },
+  },
+);
+console.log(
+  "fragment redirect:",
+  fragmentRedirect.status,
+  fragmentRedirect.url.endsWith("/redirect-fragment/path"),
+  await fragmentRedirect.text(),
 );
 
 const manualRedirect = await fetch(`${process.argv[2]}/redirect`, {

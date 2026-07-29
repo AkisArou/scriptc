@@ -197,6 +197,7 @@ struct SfStream {
   bool closed;
   bool disturbed;
   bool internal_lock;
+  bool initial_pull_pending;
   bool pulling;
   bool pull_again;
   ScrDyn *error;
@@ -864,6 +865,7 @@ static void sf_stream_request_flush(SfStream *s);
 static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason);
 static void sf_settle(SfTransfer *t);
 static void sf_stream_pull(SfStream *s);
+static void sf_stream_schedule_initial_pull(SfStream *s);
 
 static void sf_stream_finish_close(SfStream *s) {
   if (!s->close_requested || s->head || s->closed || s->error) return;
@@ -1022,7 +1024,7 @@ static void sf_stream_start_wait_entry(ScrFiber *self, void *arg) {
     s->started = true;
     sf_stream_drain(s);
     if (!s->close_requested && !s->closed && !s->error &&
-        (s->request_owner || (s->reader && s->reader->pending_head))) {
+        s->queued == 0) {
       sf_stream_pull(s);
       sf_stream_drain(s);
     }
@@ -1035,9 +1037,36 @@ static ScrDyn *sf_controller_box(SfStream *s) {
   return scr_dyn_new_handle(s, SCR_DYNH_WEB_CONTROLLER);
 }
 
+static void sf_stream_initial_pull_task(ScrClosure *cb) {
+  SfStream *s = (SfStream *)scr_box_get_ref(cb->caps[0]);
+  if (!s) return;
+  s->initial_pull_pending = false;
+  if (s->started && !s->close_requested && !s->closed && !s->error &&
+      s->queued == 0) {
+    sf_stream_pull(s);
+    sf_stream_drain(s);
+  }
+  sf_stream_release(s);
+}
+
+static void sf_stream_schedule_initial_pull(SfStream *s) {
+  if (!s->pull_cb || s->initial_pull_pending || s->close_requested ||
+      s->closed || s->error) {
+    return;
+  }
+  s->initial_pull_pending = true;
+  ScrClosure *cb =
+      scr_closure_new((void *)&sf_stream_initial_pull_task, 1);
+  ScrBox *box =
+      scr_box_new_obj(&sf_stream_retain_v, &sf_stream_release_v, NULL);
+  scr_box_set_ref(box, sf_stream_retain(s));
+  cb->caps[0] = box;
+  scr_queue_microtask(cb);
+}
+
 static void sf_stream_pull(SfStream *s) {
-  if (!s->started || !s->pull_cb || s->close_requested || s->closed ||
-      s->error) {
+  if (!s->started || !s->pull_cb || s->initial_pull_pending ||
+      s->close_requested || s->closed || s->error) {
     return;
   }
   if (s->pulling) {
@@ -1301,6 +1330,7 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
       scr_dyn_release(r);
     }
   }
+  if (s->started) sf_stream_schedule_initial_pull(s);
   ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
   sf_stream_release(s);
   return out;
@@ -1517,19 +1547,21 @@ static ScrStr *sf_headers_get_value(SfHeaders *h, const ScrStr *name) {
   }
   if (count == 0) return NULL;
 
-  char *joined = malloc(total);
+  char *joined = malloc(total > 0 ? total : 1);
   if (!joined) sf_oom();
   size_t at = 0;
+  size_t emitted = 0;
   for (size_t i = 0; i + 1 < n; i += 2) {
     ScrStr *key = scr_arr_get_ref(h->pairs, (double)i);
     ScrStr *value = scr_arr_get_ref(h->pairs, (double)(i + 1));
     if (sf_headers_key_eq(key, name)) {
-      if (at > 0) {
+      if (emitted > 0) {
         joined[at++] = ',';
         joined[at++] = ' ';
       }
       memcpy(joined + at, value->data, value->len);
       at += value->len;
+      emitted++;
     }
     scr_str_release(key);
     scr_str_release(value);
@@ -1719,10 +1751,7 @@ static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
   int mode = -1;
   if (strcmp(method, "json") == 0) mode = SF_COLLECT_JSON;
   else if (strcmp(method, "text") == 0) mode = SF_COLLECT_TEXT;
-  else if (strcmp(method, "bytes") == 0 ||
-           strcmp(method, "arrayBuffer") == 0) {
-    mode = SF_COLLECT_BYTES;
-  }
+  else if (strcmp(method, "bytes") == 0) mode = SF_COLLECT_BYTES;
   if (mode >= 0) {
     if (argc != 0) {
       sf_type_error("Response body readers take no arguments");
@@ -2040,6 +2069,27 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
   scr_str_release(absolute);
   if (parsed) return parsed;
 
+  /*
+   * Empty and fragment-only references preserve the complete base path
+   * and query. The request serializer drops the resulting fragment, but
+   * resolving it first is significant: `Location: #next` re-requests
+   * `/a/start`, not its parent `/a/`.
+   */
+  if (location->len == 0 || location->data[0] == '#') {
+    ScrStr *base_text = sf_url_serialize(base);
+    size_t len = base_text->len + location->len;
+    char *joined = malloc(len);
+    if (!joined) sf_oom();
+    memcpy(joined, base_text->data, base_text->len);
+    memcpy(joined + base_text->len, location->data, location->len);
+    ScrStr *text = scr_str_new(joined, len);
+    free(joined);
+    scr_str_release(base_text);
+    ScrUrl *out = sf_url_parse_quiet(text);
+    scr_str_release(text);
+    return out;
+  }
+
   size_t cap = base->scheme->len + base->userinfo->len + base->host->len +
                base->port->len + base->path->len + base->query->len +
                location->len + 16;
@@ -2169,6 +2219,21 @@ static bool sf_add_headers(ScrArr *pairs, const ScrDyn *headers) {
         if (!scr_exc_pending()) sf_type_error("fetch failed");
         return false;
       }
+    }
+    return true;
+  }
+  if (headers->kind == SCR_DYN_HANDLE &&
+      headers->v.handle.tag == SCR_DYNH_FETCH_HEADERS) {
+    SfHeaders *source = (SfHeaders *)headers->v.handle.ptr;
+    size_t n = (size_t)scr_arr_len(source->pairs);
+    for (size_t i = 0; i + 1 < n; i += 2) {
+      ScrStr *name = scr_arr_get_ref(source->pairs, (double)i);
+      ScrStr *value =
+          scr_arr_get_ref(source->pairs, (double)(i + 1));
+      bool ok = sf_push_header(pairs, name->data, name->len, value);
+      scr_str_release(name);
+      scr_str_release(value);
+      if (!ok) return false;
     }
     return true;
   }

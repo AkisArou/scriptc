@@ -13,9 +13,10 @@
  *   form: a plain `GET /__count` to the proxy (a relative-path request no
  *   real proxy client sends) answers the current count.
  *
- * Routes: /text /json /post-echo /header-echo /request-defaults /redirect
- * /early-hints /invalid-utf8 /slow /drip /chunked /gzip /gzip-concat /deflate
- * /status-meta /no-content /sse, 404 for the rest;
+ * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
+ * /headers-reuse /request-defaults /redirect /redirect-fragment/path
+ * /early-hints /invalid-utf8 /slow /drip /chunked /gzip /gzip-concat
+ * /deflate /status-meta /no-content /sse, 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
 import { createServer, request } from "node:http";
@@ -24,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { deflateSync, gzipSync } from "node:zlib";
 
 export async function startFetchServers() {
+  const fragmentRedirects = new Set();
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
     const chunks = [];
@@ -53,6 +55,25 @@ export async function startFetchServers() {
           "set-cookie": ["first=1", "second=2"],
         });
         res.end(`one=${req.headers["x-echo-one"]} two=${req.headers["x-echo-two"]}`);
+      } else if (url === "/header-empty") {
+        res.writeHead(200, {
+          "content-type": "text/plain",
+          "x-empty": ["", "b"],
+        });
+        res.end("empty header");
+      } else if (url === "/headers-source") {
+        // `connection: close` keeps Node from minting its keep-alive
+        // response header, which undici correctly refuses as a request
+        // header when the response Headers object is reused below.
+        res.writeHead(200, {
+          connection: "close",
+          "content-length": "0",
+          "x-reuse": "yes",
+        });
+        res.end();
+      } else if (url === "/headers-reuse") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(String(req.headers["x-reuse"] ?? "missing"));
       } else if (url === "/request-defaults") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
@@ -67,6 +88,16 @@ export async function startFetchServers() {
       } else if (url === "/redirect") {
         res.writeHead(302, { location: "/text" });
         res.end();
+      } else if (url === "/redirect-fragment/path") {
+        const key = String(req.headers["x-redirect-key"] ?? "missing");
+        if (!fragmentRedirects.has(key)) {
+          fragmentRedirects.add(key);
+          res.writeHead(302, { location: "#next" });
+          res.end();
+        } else {
+          res.writeHead(200, { "content-type": "text/plain" });
+          res.end("fragment final");
+        }
       } else if (url === "/early-hints") {
         res.writeEarlyHints({
           link: "</style.css>; rel=preload; as=style",

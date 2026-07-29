@@ -674,18 +674,19 @@ interface Response {
   readonly bodyUsed: boolean;
   json(): Promise<unknown>;
   text(): Promise<string>;
-  /* The whole body as bytes: arrayBuffer() answers the engine's
-   * ArrayBuffer (a handle — read it through `new Uint8Array(...)` in
-   * island code or its byteLength directly); bytes() answers a
-   * Uint8Array, which exits to the static bytes tier at a typed
-   * boundary (`const b: Uint8Array = await r.bytes()` is a validated
-   * copy — divergence 44's aliasing stance). */
+  /* The whole body as bytes: bytes() answers a Uint8Array in both tiers.
+   * arrayBuffer() remains dynamic-only because static programs have no
+   * free-standing ArrayBuffer representation; the compiler diagnoses its
+   * direct use and points at bytes(). */
   arrayBuffer(): Promise<ArrayBuffer>;
   bytes(): Promise<Uint8Array>;
 }
 interface RequestInit {
   method?: string;
-  headers?: Record<string, string>;
+  headers?:
+    | Headers
+    | Record<string, string>
+    | readonly (readonly [string, string])[];
   body?: string | Uint8Array | ReadableStream<Uint8Array> | null;
   duplex?: "half";
   redirect?: "follow" | "error" | "manual";

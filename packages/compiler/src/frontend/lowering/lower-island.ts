@@ -308,10 +308,24 @@ import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
   if (L.dynamic || call.questionDotToken || !ts.isPropertyAccessExpression(call.expression)) return null;
   const access = call.expression;
-  if (access.questionDotToken || access.name.text !== "json" || call.arguments.length !== 0) return null;
+  if (
+    access.questionDotToken ||
+    (access.name.text !== "json" && access.name.text !== "arrayBuffer") ||
+    call.arguments.length !== 0
+  ) {
+    return null;
+  }
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
+  if (access.name.text === "arrayBuffer") {
+    L.noLowering(
+      "Response.arrayBuffer() in a static build",
+      call,
+      "use Response.bytes() for the native Uint8Array body; free-standing ArrayBuffer values have no static representation",
+      sym,
+    );
+  }
   const recv = L.lowerExpr(access.expression);
   if (recv.type.kind !== "dyn") return null;
   return {

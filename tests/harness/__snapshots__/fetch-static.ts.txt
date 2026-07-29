@@ -1,8 +1,17 @@
-fetch-static.ts:18:17 - error SC2020: 'new Headers' is part of the standard library types but has no scriptc lowering yet
+fetch-static.ts:20:9 - error SC2020: 'Response.arrayBuffer() in a static build' is part of the standard library types but has no scriptc lowering yet
 
-  17 | timed("http://localhost/b");
-  18 | const headers = new Headers();
+  19 | async function arrayBufferBody(url: string): Promise<void> {
+  20 |   await (await fetch(url)).arrayBuffer();
+     |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  21 | }
+
+  hint: use Response.bytes() for the native Uint8Array body; free-standing ArrayBuffer values have no static representation
+
+fetch-static.ts:23:17 - error SC2020: 'new Headers' is part of the standard library types but has no scriptc lowering yet
+
+  22 | arrayBufferBody("http://localhost/c");
+  23 | const headers = new Headers();
      |                 ^~~~~~~~~~~~~
-  19 | // The Headers constructor remains fenced even though response.headers is native.
+  24 | // The Headers constructor remains fenced even though response.headers is native.
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)

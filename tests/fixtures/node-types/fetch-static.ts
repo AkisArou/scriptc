@@ -24,4 +24,10 @@ async function consume(url: string): Promise<number> {
   return first.done ? 0 : first.value.length;
 }
 
+async function reuseHeaders(url: string): Promise<void> {
+  const response = await fetch(url);
+  await fetch(url, { headers: response.headers });
+}
+
 void consume;
+void reuseHeaders;

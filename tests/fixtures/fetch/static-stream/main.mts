@@ -1,6 +1,17 @@
 // Native AbortSignal + WHATWG readable-stream ownership coverage. The request body
 // is produced in two turns, the response body is consumed through the
 // default reader, and a timeout aborts a live native transfer.
+let initialPullCalls = 0;
+const initialPullStream = new ReadableStream<number>({
+  pull() {
+    initialPullCalls++;
+  },
+});
+console.log("initial pull sync:", initialPullCalls);
+await Promise.resolve();
+console.log("initial pull checkpoint:", initialPullCalls);
+void initialPullStream;
+
 const requestBody = new ReadableStream<Uint8Array>({
   start(controller) {
     controller.enqueue(Buffer.from("stream-"));

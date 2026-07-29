@@ -163,9 +163,10 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
   )("%s / %s backend", async ([name, backend]) => {
     const entry = join(fixturesRoot, `${name}/main.mts`);
     const binary = await buildStatic(entry, backend);
+    const redirectKey = `${name}-${backend}`;
     const [nodeRes, nativeRes] = await Promise.all([
-      runBinary("node", [entry, baseUrl]),
-      runBinary(binary, [baseUrl]),
+      runBinary("node", [entry, baseUrl, `${redirectKey}-node`]),
+      runBinary(binary, [baseUrl, `${redirectKey}-native`]),
     ]);
     expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);

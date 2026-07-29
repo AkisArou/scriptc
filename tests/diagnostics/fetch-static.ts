@@ -1,6 +1,7 @@
-// fetch(url), RequestInit, AbortSignal, readable bodies, and Response body
-// readers are native static surface. Constructing Headers remains in the
-// broader dynamic web tier and diagnoses cleanly at its use site.
+// fetch(url), RequestInit, AbortSignal, readable bodies, and the
+// Response json/text/bytes readers are native static surface.
+// arrayBuffer() and constructing Headers remain in the broader dynamic
+// web tier and diagnose cleanly at their use sites.
 async function probe(url: string): Promise<number> {
   const r = await fetch(url);
   return r.status;
@@ -15,5 +16,9 @@ async function timed(url: string): Promise<string> {
 }
 probe("http://localhost/a");
 timed("http://localhost/b");
+async function arrayBufferBody(url: string): Promise<void> {
+  await (await fetch(url)).arrayBuffer();
+}
+arrayBufferBody("http://localhost/c");
 const headers = new Headers();
 // The Headers constructor remains fenced even though response.headers is native.

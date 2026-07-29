@@ -4484,7 +4484,7 @@ export const DYN_DISPATCH_METHODS = new Set([
   // the http/net names above.
   "getReader", "cancel", "releaseLock", "enqueue", "error",
   "throwIfAborted", "addEventListener", "removeEventListener",
-  "json", "text", "bytes", "arrayBuffer",
+  "json", "text", "bytes",
   // Promise.prototype (SCR_DYN_PROMISE receivers): the reaction trio
   // rides the fiber machinery (scr_dyn_promise_then); on every other dyn
   // kind then/catch/finally answer the stored-member path (OBJ own
