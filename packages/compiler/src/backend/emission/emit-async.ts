@@ -88,6 +88,15 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
         `  ScrPromise *sc_p = scr_async_spawn(&${mangleTrampoline(fn.name)}, sc_ap);`,
         ...(cache !== null
           ? [
+              // Module evaluation promises are loader-owned from the
+              // moment evaluation starts. Mark even a pending promise
+              // handled before a later sibling initializer can throw and
+              // unwind past the dependency wait.
+              `  scr_promise_mark_handled(sc_p);`,
+            ]
+          : []),
+        ...(cache !== null
+          ? [
               // scr_async_spawn runs eagerly. An admitted async import
               // cycle can therefore re-enter this initializer after its
               // guard sets but before this outer spawn returns; that

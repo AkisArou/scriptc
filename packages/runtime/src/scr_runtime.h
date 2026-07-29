@@ -3425,9 +3425,10 @@ extern bool (*scr_urj_deliver_fn)(ScrPromise *p);
  * Runtime-internal. */
 extern void (*scr_rjh_notify_fn)(ScrPromise *p);
 /* The attach-time handled mark (a dyn then/catch carrying a rejection
- * handler): marks an already-rejected source observed — Node's attach
- * moment — firing the late-handled hook when the report already
- * delivered it. Runtime-internal. */
+ * handler, or the module loader taking ownership of an evaluation
+ * promise): marks pending and rejected sources observed at Node's attach
+ * moment, firing the late-handled hook when the report already delivered
+ * it. Runtime-internal. */
 void scr_promise_mark_handled(ScrPromise *p);
 /* A rejected promise's reason as a dyn value (identity-preserving for
  * dyn payloads and %Error instances). +1. */

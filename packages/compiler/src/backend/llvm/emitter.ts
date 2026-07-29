@@ -2006,6 +2006,9 @@ class LlEmitter {
         this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
         this.declare(`declare void @scr_promise_release(ptr)`);
       }
+      if (cache !== null) {
+        this.declare(`declare void @scr_promise_mark_handled(ptr)`);
+      }
       const sp: string[] = [
         `define internal ptr @${mangleAsyncSpawn(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; spawn ${fn.name}`,
         `entry:`,
@@ -2043,6 +2046,15 @@ class LlEmitter {
       });
       sp.push(
         `  %p = call ptr @scr_async_spawn(ptr @${mangleTrampoline(fn.name)}, ptr %ap)`,
+        ...(cache !== null
+          ? [
+              // The module loader owns this evaluation promise
+              // immediately. A later sibling can throw before the
+              // aggregate dependency wait is built, but this rejection
+              // must never become an unrelated unhandled rejection.
+              `  call void @scr_promise_mark_handled(ptr %p)`,
+            ]
+          : []),
         ...(cache !== null
           ? [
               `  %cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,

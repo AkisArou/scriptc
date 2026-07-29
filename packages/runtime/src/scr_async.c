@@ -212,12 +212,15 @@ static void scr_prom_observe(ScrPromise *p) {
 }
 
 /* The attach-time handled mark (scr_async_dyn.c's dyn then/catch with a
- * rejection handler): Node marks a rejection handled at ATTACH, not when
- * the reaction runs — and the loop-exhaustion window (a .catch inside an
- * 'unhandledRejection' listener) has no later fiber turn whose await
- * could observe it. */
+ * rejection handler, plus the module loader's ownership of every module
+ * evaluation promise): Node marks a promise handled at ATTACH, including
+ * while it is still pending, not when a later reaction runs. The pending
+ * mark is essential for a module dependency whose importer aborts while
+ * evaluating a later sibling — the loader still owns that dependency's
+ * eventual rejection, so it must never surface as an unrelated unhandled
+ * rejection. */
 void scr_promise_mark_handled(ScrPromise *p) {
-  if (p->state == SCR_PROM_REJECTED) scr_prom_observe(p);
+  scr_prom_observe(p);
 }
 
 ScrPromise *scr_promise_retain(ScrPromise *p) {
