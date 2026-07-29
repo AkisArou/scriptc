@@ -17,6 +17,8 @@ const init: RequestInit = {
 
 async function consume(url: string): Promise<number> {
   const response = await fetch(url, init);
+  const headers = response.headers;
+  headers.has("content-type");
   const reader = response.body!.getReader();
   const first = await reader.read();
   return first.done ? 0 : first.value.length;

@@ -15,6 +15,10 @@ console.log(
   "deflate:",
   await (await fetch(`${process.argv[2]}/deflate`)).text(),
 );
+console.log(
+  "concatenated gzip:",
+  await (await fetch(`${process.argv[2]}/gzip-concat`)).text(),
+);
 
 const urlResponse = await fetch(new URL(`${process.argv[2]}/json`));
 console.log("url:", urlResponse.status);
@@ -22,16 +26,17 @@ console.log("url:", urlResponse.status);
 const headerResponse = await fetch(`${process.argv[2]}/header-echo`, {
   headers: { "x-echo-one": "1", "x-echo-two": "2" },
 });
+const responseHeaders = headerResponse.headers;
 console.log(
   "headers:",
-  headerResponse.headers.get("content-type"),
-  headerResponse.headers.get("x-multi"),
-  headerResponse.headers.get("missing") ?? "none",
-  headerResponse.headers.has("x-multi"),
-  headerResponse.headers.has("missing"),
-  headerResponse.headers.getSetCookie().join("|"),
+  responseHeaders.get("content-type"),
+  responseHeaders.get("x-multi"),
+  responseHeaders.get("missing") ?? "none",
+  responseHeaders.has("x-multi"),
+  responseHeaders.has("missing"),
+  responseHeaders.getSetCookie().join("|"),
 );
-headerResponse.headers.forEach((value, name) => {
+responseHeaders.forEach((value, name) => {
   if (name.startsWith("x-")) console.log("header walk:", name, value);
 });
 await headerResponse.text();

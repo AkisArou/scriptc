@@ -16,4 +16,4 @@ async function timed(url: string): Promise<string> {
 probe("http://localhost/a");
 timed("http://localhost/b");
 const headers = new Headers();
-// Headers remains the dynamic-tier fence above.
+// The Headers constructor remains fenced even though response.headers is native.

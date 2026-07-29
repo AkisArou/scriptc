@@ -2368,11 +2368,10 @@ export class Lowerer {
       this.pushDiag(noLoweringDiag(this.checker.typeToString(type), locOf(node), undefined, true));
       throw new PoisonError();
     }
-    // Engine-backed ambient TYPES (currently Headers) in a STATIC build:
-    // the values live in the embedded engine, so the honest story is the
-    // per-site SC2012 rather than the generic supported-types recitation.
-    // Response, RequestInit, AbortSignal, and readable Web Streams map
-    // earlier to native checked-dynamic handles and do not reach here.
+    // Engine-backed ambient TYPES in a STATIC build report the per-site
+    // SC2012 rather than the generic supported-types recitation. Native
+    // fetch values map earlier to checked-dynamic handles and do not reach
+    // here; constructor objects such as Headers still can.
     if (
       !this.dynamic &&
       typeSym &&

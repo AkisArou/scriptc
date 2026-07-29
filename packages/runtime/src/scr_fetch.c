@@ -191,6 +191,7 @@ struct SfStream {
   size_t rc;
   SfChunk *head;
   SfChunk *tail;
+  size_t queued;
   bool started;
   bool close_requested;
   bool closed;
@@ -240,6 +241,7 @@ struct SfTransfer {
   SfStream *response_stream; /* owned */
   z_stream zs;
   bool inflating;
+  bool inflate_member_end;
   bool response_sent;
   bool done;
   struct SfTransfer *next;
@@ -700,6 +702,7 @@ static void sf_stream_drop_chunks(SfStream *s) {
     sf_chunk_release(c);
   }
   s->tail = NULL;
+  s->queued = 0;
 }
 
 static void sf_stream_release(SfStream *s) {
@@ -860,6 +863,7 @@ static void sf_collector_reject(SfStream *s, ScrDyn *reason) {
 static void sf_stream_request_flush(SfStream *s);
 static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason);
 static void sf_settle(SfTransfer *t);
+static void sf_stream_pull(SfStream *s);
 
 static void sf_stream_finish_close(SfStream *s) {
   if (!s->close_requested || s->head || s->closed || s->error) return;
@@ -878,6 +882,7 @@ static void sf_stream_drain(SfStream *s) {
       SfChunk *c = s->head;
       s->head = c->next;
       if (!s->head) s->tail = NULL;
+      s->queued--;
       ScrBytes *bytes = sf_chunk_bytes(c->value);
       if (!bytes) {
         sf_chunk_release(c);
@@ -900,6 +905,7 @@ static void sf_stream_drain(SfStream *s) {
       SfChunk *c = s->head;
       s->head = c->next;
       if (!s->head) s->tail = NULL;
+      s->queued--;
       sf_reader_fulfill_one(s->reader, false, c->value);
       sf_chunk_release(c);
     }
@@ -927,7 +933,20 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
   if (s->tail) s->tail->next = c;
   else s->head = c;
   s->tail = c;
+  s->queued++;
   sf_stream_drain(s);
+  /* Enqueue is the event that can create fresh demand after a deferred
+   * pull. Merely having a waiting reader/request is not: looping on that
+   * state re-enters pull synchronously and starves timers. */
+  if (
+    s->started &&
+    !s->close_requested &&
+    !s->closed &&
+    !s->error &&
+    (s->request_owner || (s->reader && s->reader->pending_head) || !s->head)
+  ) {
+    sf_stream_pull(s);
+  }
 }
 
 static void sf_stream_enqueue_bytes(SfStream *s, ScrBytes *bytes) {
@@ -956,8 +975,6 @@ static void sf_stream_error(SfStream *s, ScrDyn *reason) {
   }
 }
 
-static void sf_stream_pull(SfStream *s);
-
 static void sf_stream_pull_wait_entry(ScrFiber *self, void *arg) {
   (void)self;
   SfPullWait *wait = arg;
@@ -976,9 +993,7 @@ static void sf_stream_pull_wait_entry(ScrFiber *self, void *arg) {
     sf_stream_error(s, reason);
     scr_dyn_release(reason);
   } else {
-    bool again =
-        s->pull_again || s->request_owner ||
-        (s->reader && s->reader->pending_head);
+    bool again = s->pull_again;
     s->pull_again = false;
     if (again && !s->close_requested && !s->closed && !s->error) {
       sf_stream_pull(s);
@@ -1059,9 +1074,7 @@ static void sf_stream_pull(SfStream *s) {
     }
     scr_dyn_release(r);
     s->pulling = false;
-    bool again =
-        s->pull_again || s->request_owner ||
-        (s->reader && s->reader->pending_head);
+    bool again = s->pull_again;
     s->pull_again = false;
     if (!again || s->close_requested || s->closed || s->error) return;
   }
@@ -1160,6 +1173,16 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
   if (s->reader && !through_reader) {
     sf_type_error("Invalid state: cannot cancel a locked ReadableStream");
     scr_promise_reject_pending(p);
+    return p;
+  }
+  if (s->closed) {
+    /* WHATWG cancel is a no-op once the stream is closed. */
+    scr_promise_fulfill_void(p);
+    return p;
+  }
+  if (s->error) {
+    /* An errored stream preserves and rejects with its stored reason. */
+    sf_reject_promise_reason(p, s->error);
     return p;
   }
   s->disturbed = true;
@@ -1412,9 +1435,9 @@ static ScrDyn *sf_controller_invoke(void *ptr, ScrDyn *self,
 static ScrDyn *sf_controller_get(void *ptr, const char *key, size_t len) {
   SfStream *s = ptr;
   if (sf_name(key, len, "desiredSize")) {
-    return s->close_requested || s->closed || s->error
-               ? scr_dyn_new_null()
-               : scr_dyn_new_num(1);
+    if (s->error) return scr_dyn_new_null();
+    if (s->closed) return scr_dyn_new_num(0);
+    return scr_dyn_new_num(1.0 - (double)s->queued);
   }
   return NULL;
 }
@@ -2289,6 +2312,7 @@ static void sf_stream_request_flush(SfStream *s) {
     SfChunk *c = s->head;
     s->head = c->next;
     if (!s->head) s->tail = NULL;
+    s->queued--;
     ScrBytes *bytes = sf_chunk_bytes(c->value);
     if (!bytes) {
       sf_chunk_release(c);
@@ -2309,8 +2333,6 @@ static void sf_stream_request_flush(SfStream *s) {
   } else if (s->close_requested) {
     sf_stream_finish_close(s);
     scr_http_client_end(t->client);
-  } else {
-    sf_stream_pull(s);
   }
 }
 
@@ -2341,6 +2363,14 @@ static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
     return;
   }
 
+  if (t->inflate_member_end) {
+    if (inflateReset(&t->zs) != Z_OK) {
+      sf_response_terminate(t);
+      sf_release(t);
+      return;
+    }
+    t->inflate_member_end = false;
+  }
   t->zs.next_in = (Bytef *)chunk->data;
   t->zs.avail_in = (uInt)chunk->len;
   unsigned char out[16384];
@@ -2355,7 +2385,17 @@ static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
       sf_stream_enqueue_bytes(t->response_stream, decoded);
       scr_bytes_release(decoded);
     }
-    if (result == Z_STREAM_END) break;
+    if (result == Z_STREAM_END) {
+      /* A gzip representation can contain concatenated members. */
+      t->inflate_member_end = true;
+      if (t->zs.avail_in == 0) break;
+      if (inflateReset(&t->zs) != Z_OK) {
+        sf_response_terminate(t);
+        break;
+      }
+      t->inflate_member_end = false;
+      continue;
+    }
     if (result != Z_OK && result != Z_BUF_ERROR) {
       sf_response_terminate(t);
       break;
@@ -2672,6 +2712,10 @@ static bool sf_start_hop(SfTransfer *t) {
     stream->request_owner = t;
     t->request_stream = sf_stream_retain(stream);
     sf_stream_request_flush(stream);
+    if (stream->started && !stream->close_requested && !stream->closed &&
+        !stream->error && !t->done && t->client) {
+      sf_stream_pull(stream);
+    }
     scr_dyn_release(seeded);
   } else {
     scr_http_client_end(client);

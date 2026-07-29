@@ -235,3 +235,103 @@ await queuedReader.read();
 await queuedReader.read();
 await queuedReader.closed;
 console.log("closed after drain:", queuedClosed);
+
+// A pull that schedules its enqueue for later must not be re-entered merely
+// because a reader is waiting. Node makes one follow-up pull after the
+// delayed enqueue drains into that reader.
+let delayedPullCount = 0;
+const delayedReader = new ReadableStream<number>({
+  pull(controller) {
+    const call = ++delayedPullCount;
+    if (call === 1) {
+      setTimeout(() => {
+        controller.enqueue(7);
+        controller.close();
+      }, 5);
+    } else if (call === 3) {
+      controller.error(new Error("pull re-entered before enqueue"));
+    }
+  },
+}).getReader();
+const delayedRead = await delayedReader.read();
+console.log("delayed pull:", delayedRead.value, delayedPullCount);
+
+let closedCancelCalls = 0;
+const alreadyClosed = new ReadableStream<number>({
+  start(controller) {
+    controller.close();
+  },
+  cancel() {
+    closedCancelCalls++;
+  },
+});
+await alreadyClosed.cancel();
+console.log("closed cancel:", closedCancelCalls);
+
+let erroredCancelCalls = 0;
+const alreadyErrored = new ReadableStream<number>({
+  start(controller) {
+    controller.error(new Error("cancel boom"));
+  },
+  cancel() {
+    erroredCancelCalls++;
+  },
+});
+try {
+  await alreadyErrored.cancel();
+} catch (error) {
+  const caught = error as Error;
+  console.log(
+    "errored cancel:",
+    caught.name,
+    caught.message,
+    erroredCancelCalls,
+  );
+}
+
+const desiredSizes: Array<number | null> = [];
+const desiredSizeStream = new ReadableStream<number>({
+  start(controller) {
+    desiredSizes.push(controller.desiredSize);
+    controller.enqueue(1);
+    desiredSizes.push(controller.desiredSize);
+    controller.enqueue(2);
+    desiredSizes.push(controller.desiredSize);
+    controller.close();
+    desiredSizes.push(controller.desiredSize);
+  },
+});
+console.log(
+  "desired sizes:",
+  JSON.stringify(desiredSizes),
+  desiredSizeStream.locked,
+);
+
+let delayedRequestPullCount = 0;
+const delayedRequestBody = new ReadableStream<Uint8Array>({
+  async start() {
+    // Let fetch attach as the consumer before the first pull.
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  },
+  pull(controller) {
+    const call = ++delayedRequestPullCount;
+    if (call === 1) {
+      setTimeout(() => {
+        controller.enqueue(Buffer.from("delayed request"));
+        controller.close();
+      }, 5);
+    } else if (call === 3) {
+      controller.error(new Error("request pull re-entered before enqueue"));
+    }
+  },
+});
+const delayedRequestResponse = await fetch(`${process.argv[2]}/post-echo`, {
+  method: "POST",
+  body: delayedRequestBody,
+  duplex: "half",
+});
+console.log(
+  "delayed request pull:",
+  await delayedRequestResponse.json(),
+  delayedRequestPullCount,
+);

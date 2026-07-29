@@ -11,9 +11,10 @@ export { typeKey };
 
 /** The ambient TYPE names of the fetch slice. Under --dynamic their
  * values live in the embedded engine and map to island handles (jsval).
- * Static fetch gives Response, RequestInit, AbortSignal, and the readable
- * Web Streams slice native checked-dynamic handle representations;
- * Headers remains engine-backed.
+ * Static fetch gives Response, RequestInit, AbortSignal, response
+ * Headers, and the readable Web Streams slice native checked-dynamic
+ * handle representations. The Headers constructor itself remains
+ * dynamic-only even though response.headers is native.
  * Declaration provenance is checked in mapType so user types with the
  * same names keep their ordinary structural representation. */
 export const ISLAND_AMBIENT_TYPES = [
@@ -1342,10 +1343,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // narrower native representation: Response is an opaque checked-
   // dynamic capsule consumed only by the Response method lowerings, and
   // RequestInit is a checked-dynamic options object consumed by native
-  // fetch. AbortSignal and the readable Web Streams slice are native
-  // handles carried by that same checked-dynamic representation. Headers
-  // still needs the island. Provenance, not names: a user's own
-  // `interface Response` maps as a record like any other.
+  // fetch. AbortSignal, response Headers, and the readable Web Streams
+  // slice are native handles carried by that same checked-dynamic
+  // representation. Provenance, not names: a user's own `interface
+  // Response` maps as a record like any other.
   // Interface OR class declarations (the shipped fallback declares
   // interfaces; @types/node's undici-types declares Response as a class).
   if (
@@ -1363,11 +1364,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         ctx.isStdlibFile(d.getSourceFile()),
     )
   ) {
-    return ctx.dynamic
-      ? JSVAL
-      : psym.name !== "Headers"
-        ? DYN
-        : null;
+    return ctx.dynamic ? JSVAL : DYN;
   }
   // ReadonlyMap/ReadonlySet are the SAME runtime values as Map/Set — the
   // readonly-ness is a checker-only view (no mutating members on the

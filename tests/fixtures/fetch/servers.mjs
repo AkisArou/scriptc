@@ -14,7 +14,7 @@
  *   real proxy client sends) answers the current count.
  *
  * Routes: /text /json /post-echo /header-echo /request-defaults /redirect
- * /early-hints /invalid-utf8 /slow /drip /chunked /gzip /deflate
+ * /early-hints /invalid-utf8 /slow /drip /chunked /gzip /gzip-concat /deflate
  * /status-meta /no-content /sse, 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
@@ -109,6 +109,19 @@ export async function startFetchServers() {
         res.write(payload.subarray(0, Math.floor(payload.length / 2)));
         setTimeout(() => {
           res.end(payload.subarray(Math.floor(payload.length / 2)));
+        }, 15);
+      } else if (url === "/gzip-concat") {
+        // RFC 1952 permits multiple gzip members in one representation.
+        const firstMembers = Buffer.concat([
+          gzipSync(Buffer.from("member one ", "utf8")),
+          gzipSync(Buffer.from("member two", "utf8")),
+        ]);
+        const finalMember = gzipSync(Buffer.from(" member three", "utf8"));
+        const contentLength = firstMembers.length + finalMember.length;
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-encoding": "gzip", "content-length": String(contentLength) });
+        res.write(firstMembers);
+        setTimeout(() => {
+          res.end(finalMember);
         }, 15);
       } else if (url === "/deflate") {
         // zlib-wrapped deflate (Node servers' `deflate` spelling).

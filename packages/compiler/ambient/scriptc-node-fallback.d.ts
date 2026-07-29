@@ -646,12 +646,10 @@ declare var ReadableStream: {
  * optional init with the members CLI requests carry, and a Response
  * whose body is the same stream consumed by json(). json() returns
  * unknown — the same dynamic boundary as JSON.parse: cast and validate. */
-/* Headers — a response's header map (r.headers), island-backed like
- * Response itself: the value is the engine's real Headers (lowercase
- * names, combine-on-append, sorted iteration), member reads and calls are
- * engine ops with validated exits at typed boundaries. Declared to the
- * implemented surface; constructing one statically (`new Headers()`) keeps
- * the constructor fence. */
+/* Headers — a response's native header map (lowercase names,
+ * combine-on-append, sorted iteration). The value is a checked-dynamic
+ * native handle like Response itself; constructing one statically
+ * (`new Headers()`) keeps the constructor fence. */
 interface Headers {
   append(name: string, value: string): void;
   delete(name: string): void;
