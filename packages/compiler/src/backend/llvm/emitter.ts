@@ -8814,6 +8814,39 @@ class LlEmitter {
         B.line(`${t} = call ptr @scr_arr_slice(ptr ${r.name}, double ${start}, double ${end})`);
         return this.own({ name: t, type: e.type });
       }
+      case "toReversed": {
+        this.declare(`declare ptr @scr_arr_to_reversed(ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_arr_to_reversed(ptr ${r.name})`);
+        return this.own({ name: t, type: e.type });
+      }
+      case "toSpliced": {
+        const start = this.emitExpr(e.args[0]!);
+        const count = this.emitExpr(e.args[1]!);
+        const items = this.emitExpr(e.args[2]!);
+        this.declare(`declare ptr @scr_arr_to_spliced(ptr, double, double, ptr)`);
+        const t = B.tmp();
+        B.line(
+          `${t} = call ptr @scr_arr_to_spliced(ptr ${r.name}, double ${start.name}, ` +
+            `double ${count.name}, ptr ${items.name})`,
+        );
+        return this.own({ name: t, type: e.type });
+      }
+      case "with": {
+        const index = this.emitExpr(e.args[0]!);
+        const value = this.emitExpr(e.args[1]!);
+        this.declare(
+          `declare ptr @scr_arr_with_${acc}(ptr, double, ${accArg})`,
+        );
+        const t = B.tmp();
+        B.line(
+          `${t} = call ptr @scr_arr_with_${acc}(ptr ${r.name}, double ${index.name}, ` +
+            `${accTy} ${value.name})`,
+        );
+        const out = this.own({ name: t, type: e.type });
+        this.emitPendingCheck();
+        return out;
+      }
       case "splice": {
         // The removal splice: removed elements come back as a fresh +1
         // array, ownership MOVED out of the receiver. An omitted count
@@ -9261,6 +9294,38 @@ class LlEmitter {
           "scr_bytes_subarray",
           "ptr (ptr, double, double)",
           `ptr ${r.name}, double ${args[0]?.name ?? f64Lit(0)}, double ${args[1]?.name ?? F64_INF}`,
+          true,
+          false,
+        );
+      case "toReversed":
+        return call(
+          "scr_bytes_to_reversed",
+          "ptr (ptr)",
+          `ptr ${r.name}`,
+          true,
+          false,
+        );
+      case "with":
+        return call(
+          "scr_bytes_with",
+          "ptr (ptr, double, double)",
+          `ptr ${r.name}, double ${args[0]!.name}, double ${args[1]!.name}`,
+          true,
+          true,
+        );
+      case "join":
+        return call(
+          "scr_bytes_join",
+          "ptr (ptr, ptr)",
+          `ptr ${r.name}, ptr ${args[0]!.name}`,
+          true,
+          false,
+        );
+      case "toArray":
+        return call(
+          "scr_bytes_to_arr",
+          "ptr (ptr)",
+          `ptr ${r.name}`,
           true,
           false,
         );

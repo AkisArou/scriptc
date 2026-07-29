@@ -1281,7 +1281,30 @@ export type IrStmt =
  * from the end, clamping; omitted args omitted from `args` — backends fill
  * 0 / +Infinity, the strIntrinsic convention); ref elements retain into
  * the fresh array. */
-export type IrArrIntrinsicMethod = "length" | "push" | "pushSpread" | "pop" | "indexOf" | "includes" | "join" | "slice" | "shift" | "splice";
+export type IrArrIntrinsicMethod =
+  | "length"
+  | "push"
+  | "pushSpread"
+  | "pop"
+  | "indexOf"
+  | "includes"
+  | "join"
+  | "slice"
+  | "shift"
+  | "splice"
+  /** ES2023 copying methods. `toSpliced` receives [start, deleteCount,
+   * itemsArray], with omitted arguments completed by the frontend;
+   * `with` receives [index, value] and throws Node's catchable RangeError
+   * when the relative index is out of range. */
+  | "toReversed"
+  | "toSpliced"
+  | "with";
+
+/** Array intrinsics whose runtime implementation can raise a catchable
+ * exception (rather than the static tier's deliberate index traps). */
+export const MAY_THROW_ARR_METHODS: ReadonlySet<IrArrIntrinsicMethod> = new Set([
+  "with",
+]);
 
 /** The Map method/property surface (mirrors ambient/scriptc.d.ts) plus the
  * iteration primitives behind the forEach desugar. `forEach` itself is NOT
@@ -1420,6 +1443,16 @@ export type IrBytesIntrinsicMethod =
   | "get"
   | "slice"
   | "subarray"
+  /** Fresh Uint8Array copying methods. `with` takes [index, value] and
+   * throws a catchable RangeError for an invalid relative index. */
+  | "toReversed"
+  | "with"
+  /** Uint8Array.prototype.join(separator), with the omitted separator
+   * completed to "," by the frontend. */
+  | "join"
+  /** Drain numeric typed-array elements into a fresh number[]. Used by
+   * array spread and typed-array destructuring rest. */
+  | "toArray"
   | "setFrom"
   | "toString"
   | "readNum"
@@ -1487,6 +1520,7 @@ export type IrBytesIntrinsicMethod =
 /** The bytesIntrinsic methods that can raise a catchable error — backends'
  * may-throw analyses seed on these exactly like MAY_THROW_LIB_FNS. */
 export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new Set([
+  "with",
   "setFrom",
   "readNum",
   "writeNum",
@@ -5517,6 +5551,43 @@ export function moduleUsesRegex(mod: IrModule): boolean {
     // RegExp.escape lives in scr_regex.c too (needing no engine — it
     // keeps the always-linked string TU out of hello-world's size class).
     if (kind === "libCall" && (v as { fn?: unknown }).fn === "regexp.escape") {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** True when the module contains an intrinsic whose implementation lives
+ * in scr_copying.c. This is the link switch that keeps the optional
+ * Array-copying and typed-array bridge TU out of unrelated binaries. */
+export function moduleUsesCopying(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; method?: unknown };
+    if (
+      node.kind === "arrIntrinsic" &&
+      (node.method === "toReversed" ||
+        node.method === "toSpliced" ||
+        node.method === "with")
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      node.kind === "bytesIntrinsic" &&
+      (node.method === "toReversed" ||
+        node.method === "with" ||
+        node.method === "join" ||
+        node.method === "toArray")
+    ) {
       found = true;
       return;
     }

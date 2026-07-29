@@ -19,7 +19,7 @@ import {
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrType, type SrcLoc } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -727,6 +727,9 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       // The link switch for scr_regex.c + libregexp: detected on the IR, so
       // regex-free programs keep the historical (pinned) command line.
       regex: moduleUsesRegex(lowered.module),
+      // Array copying methods and the typed-array bridges live in one
+      // optional TU, linked only when one of their IR intrinsics survives.
+      copying: moduleUsesCopying(lowered.module),
       // The link switch for scr_fetch.c (the native bridge over scr_net +
       // scr_tls + scr_http's client parser + zlib — cc.ts implies those
       // units into the link): embedded npm code that references fetch gets
@@ -1341,6 +1344,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     searchParams: moduleUsesSearchParams(mod),
     emitter: moduleUsesEmitter(mod),
     zlib: moduleUsesZlib(mod),
+    copying: moduleUsesCopying(mod),
   });
 
   // The sidecar lands beside the compiled object, written by the same

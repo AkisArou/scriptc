@@ -1503,4 +1503,3 @@ double scr_bytes_write_var(ScrBytes *b, double value, double offset, double byte
   }
   return offset + (double)width;
 }
-

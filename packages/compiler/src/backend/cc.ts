@@ -54,6 +54,10 @@ export interface CcOptions {
    * JSContext there). Off = regex-free: the command line is exactly the
    * historical one, so regex-free binaries cannot change by a byte. */
   regex?: boolean;
+  /** The program uses one of the copying/typed-array bridge intrinsics
+   * implemented in scr_copying.c (index.ts detects them on the IR).
+   * Off keeps that optional TU out of unrelated binaries. */
+  copying?: boolean;
   /** The embedded npm graph references fetch (index.ts detects it on the
    * IR): compiles the NATIVE fetch bridge (scr_fetch.c over scr_net +
    * scr_tls + scr_http's client parser + zlib — the socket units join
@@ -737,6 +741,7 @@ export interface LibArchiveOptions {
   searchParams?: boolean;
   emitter?: boolean;
   zlib?: boolean;
+  copying?: boolean;
 }
 
 export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> {
@@ -764,6 +769,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.searchParams ? ["scr_url_params.c"] : []),
     ...(opts.emitter ? ["scr_events_emitter.c", "scr_dyn_handle.c"] : []),
     ...(opts.zlib ? ["scr_zlib.c"] : []),
+    ...(opts.copying ? ["scr_copying.c"] : []),
   ];
   const cflags = [
     "-std=c11",
@@ -1095,6 +1101,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     "-Wno-deprecated-declarations", // ucontext fibers (scr_async.c)
     "-I", rtDir,
     ...RUNTIME_SOURCES.map((f) => rt(join(rtDir, f))),
+    ...(opts.copying ? [rt(join(rtDir, "scr_copying.c"))] : []),
     // win32 targets compile the libc-shim TU (stpcpy, arc4random_buf,
     // gmtime_r, strcasestr — the _WIN32 block in scr_runtime.h declares
     // them) and link advapi32 (the CSPRNG RtlGenRandom/SystemFunction036,

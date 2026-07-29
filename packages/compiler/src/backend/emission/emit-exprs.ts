@@ -916,6 +916,27 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const end = e.args[1] ? E.emitExpr(e.args[1]).name : "INFINITY";
             return E.newTemp(e.type, `scr_arr_slice(${r.name}, ${start}, ${end})`);
           }
+          case "toReversed":
+            return E.newTemp(e.type, `scr_arr_to_reversed(${r.name})`);
+          case "toSpliced": {
+            const start = E.emitExpr(e.args[0]!);
+            const count = E.emitExpr(e.args[1]!);
+            const items = E.emitExpr(e.args[2]!);
+            return E.newTemp(
+              e.type,
+              `scr_arr_to_spliced(${r.name}, ${start.name}, ${count.name}, ${items.name})`,
+            );
+          }
+          case "with": {
+            const index = E.emitExpr(e.args[0]!);
+            const value = E.emitExpr(e.args[1]!);
+            const out = E.newTemp(
+              e.type,
+              `scr_arr_with_${acc}(${r.name}, ${index.name}, ${value.name})`,
+            );
+            E.emitPendingCheck();
+            return out;
+          }
           case "splice": {
             // The removal splice: the removed elements come back as a
             // fresh +1 array, their ownership MOVED out of the receiver
@@ -1036,6 +1057,23 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               e.type,
               `scr_bytes_subarray(${r.name}, ${args[0]?.name ?? "0"}, ${args[1]?.name ?? "INFINITY"})`,
             );
+          case "toReversed":
+            return E.newTemp(e.type, `scr_bytes_to_reversed(${r.name})`);
+          case "with": {
+            const out = E.newTemp(
+              e.type,
+              `scr_bytes_with(${r.name}, ${args[0]!.name}, ${args[1]!.name})`,
+            );
+            E.emitPendingCheck();
+            return out;
+          }
+          case "join":
+            return E.newTemp(
+              e.type,
+              `scr_bytes_join(${r.name}, ${args[0]!.name})`,
+            );
+          case "toArray":
+            return E.newTemp(e.type, `scr_bytes_to_arr(${r.name})`);
           case "setFrom": {
             // dst.set(src, offset?) — void; throws Node's RangeError on
             // overflow (may-throw seed).

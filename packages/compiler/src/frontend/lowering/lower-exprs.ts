@@ -3635,6 +3635,21 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         if (src.type.kind === "string") {
           src = strCharsCall(L, src, locOf(el));
         }
+        // `[...typedArray]`: represented typed arrays are dense numeric
+        // iterables, so drain their elements into the fresh number[] that
+        // the surrounding array literal will copy. In particular this is
+        // the Uint8Array-to-Array bridge (`[...u8]`), with element values
+        // read rather than backing bytes for the wider typed-array kinds.
+        if (src.type.kind === "bytes" && type.elem.kind === "f64") {
+          src = {
+            kind: "bytesIntrinsic",
+            method: "toArray",
+            receiver: src,
+            args: [],
+            type: arrayOf(F64),
+            loc: locOf(el),
+          };
+        }
         // A same-family array whose ELEMENT lifts (string[] into a
         // (string | symbol)[] literal — per-element wrap/width copy):
         // the interned width helper reshapes before the spread copies.

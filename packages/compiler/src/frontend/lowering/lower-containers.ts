@@ -13,6 +13,20 @@ import { DYN_DISPATCH_METHODS, islandPrimitiveExit } from "./lower-calls.js";
 import { typeKey } from "../types.js";
 import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
 
+/** True only for an `undefined`-typed identifier with the standard
+ * spelling (parentheses ignored). Optional builtin parameters use this to
+ * distinguish an explicit undefined from a numeric/string value; a user
+ * binding that shadows the spelling with another type does not match. */
+function stdlibUndefinedArg(L: Lowerer, node: ts.Expression): boolean {
+  let expr = node;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  return (
+    ts.isIdentifier(expr) &&
+    expr.text === "undefined" &&
+    (L.typeOf(expr).flags & ts.TypeFlags.Undefined) !== 0
+  );
+}
+
 /** Ambient array method calls. `push`/`pop`/`indexOf`/`includes`/`join`
    * lower to arrIntrinsic; the HOF family — `map`/`filter`/`forEach`/
    * `find`/`some`/`every`/`flatMap`/`reduce`/`reduceRight` — desugars to a
@@ -112,6 +126,68 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     }
     if (name === "sort" || name === "toSorted") {
       return lowerArraySortCall(L, call, access, elem, receiverIr);
+    }
+    if (name === "toReversed") {
+      if (call.arguments.length !== 0) {
+        L.noLowering(`.toReversed with ${call.arguments.length} arguments`, call);
+      }
+      return {
+        kind: "arrIntrinsic",
+        method: "toReversed",
+        receiver: L.lowerExpr(access.expression),
+        args: [],
+        type: receiverIr,
+        loc,
+      };
+    }
+    if (name === "with") {
+      if (call.arguments.length !== 2 || call.arguments.some(ts.isSpreadElement)) {
+        L.noLowering(`.with with ${call.arguments.length} arguments`, call);
+      }
+      const receiver = L.lowerExpr(access.expression);
+      const index = L.lowerExprExpecting(call.arguments[0]!, F64);
+      const value = L.coerceInto(
+        call.arguments[1]!,
+        L.lowerExpr(call.arguments[1]!),
+        elem,
+      );
+      return {
+        kind: "arrIntrinsic",
+        method: "with",
+        receiver,
+        args: [index, value],
+        type: receiverIr,
+        loc,
+      };
+    }
+    if (name === "toSpliced") {
+      if (call.arguments.some(ts.isSpreadElement)) {
+        L.unsupported("SC1090", call, "spread arguments to Array.toSpliced");
+      }
+      const receiver = L.lowerExpr(access.expression);
+      const start = call.arguments[0]
+        ? L.lowerExprExpecting(call.arguments[0], F64)
+        : { kind: "numLit" as const, value: 0, type: F64, loc };
+      const deleteCount = call.arguments[1]
+        ? stdlibUndefinedArg(L, call.arguments[1])
+          ? { kind: "numLit" as const, value: NaN, type: F64, loc }
+          : L.lowerExprExpecting(call.arguments[1], F64)
+        : { kind: "numLit" as const, value: Infinity, type: F64, loc };
+      const items: IrExpr = {
+        kind: "arrayLit",
+        elems: call.arguments.slice(2).map((arg) =>
+          L.coerceInto(arg, L.lowerExpr(arg), elem)),
+        type: receiverIr,
+        loc,
+      };
+      return {
+        kind: "arrIntrinsic",
+        method: "toSpliced",
+        receiver,
+        args: [start, deleteCount, items],
+        type: receiverIr,
+        loc,
+      };
     }
 
     // The lib declares wider call forms than the lowered surface —
@@ -1675,6 +1751,280 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
         { id: "v.0", name: "v", type: elem, mutable: false },
         { id: "j.0", name: "j", type: F64, mutable: true },
       ],
+      body,
+      loc,
+    };
+  }
+
+/** Uint8Array.prototype.toSorted. The receiver/comparator expressions are
+ * evaluated before entering the helper; the helper snapshots with
+ * TypedArray.prototype.slice before its first comparison, then performs
+ * the same stable insertion walk as Array.toSorted. Uint8Array's default
+ * comparator is numeric ascending, so its comparator-less form needs no
+ * string-conversion machinery. */
+  function lowerBytesToSortedCall(
+    L: Lowerer,
+    call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,
+    bytesT: IrType & { kind: "bytes" },
+  ): IrExpr {
+    const loc = locOf(call);
+    if (call.arguments.length > 1 || call.arguments.some(ts.isSpreadElement)) {
+      L.noLowering(`.toSorted with ${call.arguments.length} arguments on Uint8Array`, call);
+    }
+    const receiver = L.lowerExpr(access.expression);
+    if (
+      call.arguments.length === 0 ||
+      stdlibUndefinedArg(L, call.arguments[0]!)
+    ) {
+      const key = "bytes.toSorted:u8:default";
+      let helper = L.arrHofHelpers.get(key);
+      if (!helper) {
+        helper = `%bytes.toSorted.${L.arrHofHelpers.size}`;
+        L.arrHofHelpers.set(key, helper);
+        L.liftedFns.push(buildBytesSortFn(helper, 0, false, loc));
+      }
+      return { kind: "call", callee: helper, args: [receiver], type: bytesT, loc };
+    }
+    const argNode = call.arguments[0]!;
+    const fnArg = L.lowerExpr(argNode);
+    if (
+      fnArg.type.kind !== "func" ||
+      fnArg.type.params.length > 2 ||
+      !fnArg.type.params.every((p) => p.kind === "f64") ||
+      fnArg.type.ret.kind !== "f64"
+    ) {
+      L.badType(argNode, L.typeOf(argNode));
+    }
+    const arity = fnArg.type.params.length;
+    const key = `bytes.toSorted:u8:${arity}`;
+    let helper = L.arrHofHelpers.get(key);
+    if (!helper) {
+      helper = `%bytes.toSorted.${L.arrHofHelpers.size}`;
+      L.arrHofHelpers.set(key, helper);
+      L.liftedFns.push(buildBytesSortFn(helper, arity, true, loc));
+    }
+    return {
+      kind: "call",
+      callee: helper,
+      args: [receiver, fnArg],
+      type: bytesT,
+      loc,
+    };
+  }
+
+  function buildBytesSortFn(
+    name: string,
+    arity: number,
+    hasComparator: boolean,
+    loc: SrcLoc,
+  ): IrFunction {
+    const bytesT = BYTES_U8;
+    const fnT = funcOf([F64, F64].slice(0, arity), F64);
+    const ref = (localId: string, type: IrType): IrExpr => ({
+      kind: "varRef",
+      localId,
+      type,
+      loc,
+    });
+    const num = (value: number): IrExpr => ({
+      kind: "numLit",
+      value,
+      type: F64,
+      loc,
+    });
+    const j = ref("j.0", F64);
+    const at = (index: IrExpr): IrExpr => ({
+      kind: "bytesIntrinsic",
+      method: "get",
+      receiver: ref("a.0", bytesT),
+      args: [index],
+      type: F64,
+      loc,
+    });
+    const jPlus1: IrExpr = {
+      kind: "bin",
+      op: "+",
+      left: j,
+      right: num(1),
+      type: F64,
+      loc,
+    };
+    const compare: IrExpr = hasComparator
+      ? {
+          kind: "callValue",
+          callee: ref("f.0", fnT),
+          args: [at(j), ref("v.0", F64)].slice(0, arity),
+          type: F64,
+          loc,
+        }
+      : {
+          kind: "bin",
+          op: "-",
+          left: at(j),
+          right: ref("v.0", F64),
+          type: F64,
+          loc,
+        };
+    const shiftLoop: IrStmt = {
+      kind: "while",
+      cond: {
+        kind: "bin",
+        op: ">=",
+        left: j,
+        right: num(0),
+        type: BOOL,
+        loc,
+      },
+      body: [
+        {
+          kind: "if",
+          cond: {
+            kind: "bin",
+            op: ">",
+            left: compare,
+            right: num(0),
+            type: BOOL,
+            loc,
+          },
+          then: [
+            {
+              kind: "bytesSet",
+              arr: ref("a.0", bytesT),
+              index: jPlus1,
+              value: at(j),
+              loc,
+            },
+            {
+              kind: "assign",
+              localId: "j.0",
+              value: {
+                kind: "bin",
+                op: "-",
+                left: j,
+                right: num(1),
+                type: F64,
+                loc,
+              },
+              loc,
+            },
+          ],
+          else_: [{ kind: "break", loc }],
+          loc,
+        },
+      ],
+      loc,
+    };
+    const params: IrParam[] = [
+      { localId: "a.0", name: "a", type: bytesT },
+      ...(hasComparator
+        ? [{ localId: "f.0", name: "f", type: fnT }]
+        : []),
+    ];
+    const locals: IrLocal[] = [
+      { id: "a.0", name: "a", type: bytesT, mutable: true },
+      ...(hasComparator
+        ? [{ id: "f.0", name: "f", type: fnT, mutable: true }]
+        : []),
+      { id: "n.0", name: "n", type: F64, mutable: false },
+      { id: "i.0", name: "i", type: F64, mutable: true },
+      { id: "v.0", name: "v", type: F64, mutable: false },
+      { id: "j.0", name: "j", type: F64, mutable: true },
+    ];
+    const body: IrStmt[] = [
+      {
+        kind: "assign",
+        localId: "a.0",
+        value: {
+          kind: "bytesIntrinsic",
+          method: "slice",
+          receiver: ref("a.0", bytesT),
+          args: [],
+          type: bytesT,
+          loc,
+        },
+        loc,
+      },
+      {
+        kind: "varDecl",
+        localId: "n.0",
+        init: {
+          kind: "bytesIntrinsic",
+          method: "length",
+          receiver: ref("a.0", bytesT),
+          args: [],
+          type: F64,
+          loc,
+        },
+        loc,
+      },
+      {
+        kind: "for",
+        init: {
+          kind: "varDecl",
+          localId: "i.0",
+          init: num(1),
+          loc,
+        },
+        cond: {
+          kind: "bin",
+          op: "<",
+          left: ref("i.0", F64),
+          right: ref("n.0", F64),
+          type: BOOL,
+          loc,
+        },
+        update: {
+          kind: "assign",
+          localId: "i.0",
+          value: {
+            kind: "bin",
+            op: "+",
+            left: ref("i.0", F64),
+            right: num(1),
+            type: F64,
+            loc,
+          },
+          loc,
+        },
+        body: [
+          {
+            kind: "varDecl",
+            localId: "v.0",
+            init: at(ref("i.0", F64)),
+            loc,
+          },
+          {
+            kind: "varDecl",
+            localId: "j.0",
+            init: {
+              kind: "bin",
+              op: "-",
+              left: ref("i.0", F64),
+              right: num(1),
+              type: F64,
+              loc,
+            },
+            loc,
+          },
+          shiftLoop,
+          {
+            kind: "bytesSet",
+            arr: ref("a.0", bytesT),
+            index: jPlus1,
+            value: ref("v.0", F64),
+            loc,
+          },
+        ],
+        loc,
+      },
+      { kind: "return", value: ref("a.0", bytesT), loc },
+    ];
+    return {
+      name,
+      params,
+      returnType: bytesT,
+      locals,
       body,
       loc,
     };
@@ -3824,7 +4174,7 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     }
   }
 
-/** for-of over an ARRAY's keys()/entries() projections consumed directly
+/** for-of over an ARRAY/typed-array keys()/entries() projection consumed directly
    * by the head (`for (const [index, line] of lines.entries())` — the
    * dominant formatter idiom): the LIVE index walk — the length re-reads
    * every pass, exactly the array iterator's contract (elements appended
@@ -3837,11 +4187,15 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
    * [number, T] tuple record. Stored iterator OBJECTS keep their fence
    * (only the direct for-of position unwraps). */
   export function lowerForOfArrayIter(L: Lowerer, stmt: ts.ForOfStatement,
-    iterable: IrExpr & { type: IrType & { kind: "array" } },
+    iterable: IrExpr & {
+      type:
+        | (IrType & { kind: "array" })
+        | (IrType & { kind: "bytes" });
+    },
     proj: "keys" | "entries",): IrStmt {
     const loc = locOf(stmt);
     const arrT = iterable.type;
-    const elemT = arrT.elem;
+    const elemT = arrT.kind === "array" ? arrT.elem : F64;
     const yieldsPair = proj === "entries";
     if (!ts.isVariableDeclarationList(stmt.initializer)) {
       L.unsupported(
@@ -3865,7 +4219,23 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       const ref = (localId: string, type: IrType): IrExpr => ({ kind: "varRef", localId, type, loc });
       const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
       const keyRead = (): IrExpr => ref(i.id, F64);
-      const valRead = (): IrExpr => ({ kind: "arrayGet", arr: ref(arr.id, arrT), index: ref(i.id, F64), type: elemT, loc });
+      const valRead = (): IrExpr =>
+        arrT.kind === "array"
+          ? {
+              kind: "arrayGet",
+              arr: ref(arr.id, arrT),
+              index: ref(i.id, F64),
+              type: elemT,
+              loc,
+            }
+          : {
+              kind: "bytesIntrinsic",
+              method: "get",
+              receiver: ref(arr.id, arrT),
+              args: [ref(i.id, F64)],
+              type: F64,
+              loc,
+            };
 
       const binds: IrStmt[] = [];
       const isPlainIdent = (el: ts.ArrayBindingElement): el is ts.BindingElement & { name: ts.Identifier } =>
@@ -3953,7 +4323,24 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
           kind: "bin",
           op: "<",
           left: ref(i.id, F64),
-          right: { kind: "arrIntrinsic", method: "length", receiver: ref(arr.id, arrT), args: [], type: F64, loc },
+          right:
+            arrT.kind === "array"
+              ? {
+                  kind: "arrIntrinsic",
+                  method: "length",
+                  receiver: ref(arr.id, arrT),
+                  args: [],
+                  type: F64,
+                  loc,
+                }
+              : {
+                  kind: "bytesIntrinsic",
+                  method: "length",
+                  receiver: ref(arr.id, arrT),
+                  args: [],
+                  type: F64,
+                  loc,
+                },
           type: BOOL,
           loc,
         },
@@ -4858,6 +5245,56 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
     if (!L.isStdlibMember(access)) return null;
     const loc = locOf(call);
     const nArgs = call.arguments.length;
+    if (receiverIr.elem === "u8" && name === "toSorted") {
+      return lowerBytesToSortedCall(L, call, access, receiverIr);
+    }
+    if (receiverIr.elem === "u8" && name === "toReversed") {
+      if (nArgs !== 0) {
+        L.noLowering(`.toReversed with ${nArgs} arguments on Uint8Array`, call);
+      }
+      return {
+        kind: "bytesIntrinsic",
+        method: "toReversed",
+        receiver: L.lowerExpr(access.expression),
+        args: [],
+        type: receiverIr,
+        loc,
+      };
+    }
+    if (receiverIr.elem === "u8" && name === "with") {
+      if (nArgs !== 2 || call.arguments.some(ts.isSpreadElement)) {
+        L.noLowering(`.with with ${nArgs} arguments on Uint8Array`, call);
+      }
+      return {
+        kind: "bytesIntrinsic",
+        method: "with",
+        receiver: L.lowerExpr(access.expression),
+        args: [
+          L.lowerExprExpecting(call.arguments[0]!, F64),
+          L.lowerExprExpecting(call.arguments[1]!, F64),
+        ],
+        type: receiverIr,
+        loc,
+      };
+    }
+    if (receiverIr.elem === "u8" && name === "join") {
+      if (nArgs > 1 || call.arguments.some(ts.isSpreadElement)) {
+        L.noLowering(`.join with ${nArgs} arguments on Uint8Array`, call);
+      }
+      const separator = call.arguments[0]
+        ? stdlibUndefinedArg(L, call.arguments[0])
+          ? { kind: "strLit" as const, value: ",", type: STRING, loc }
+          : L.lowerExprExpecting(call.arguments[0], STRING)
+        : { kind: "strLit" as const, value: ",", type: STRING, loc };
+      return {
+        kind: "bytesIntrinsic",
+        method: "join",
+        receiver: L.lowerExpr(access.expression),
+        args: [separator],
+        type: STRING,
+        loc,
+      };
+    }
     if (name === "slice" || name === "subarray") {
       if (nArgs > 2) {
         L.noLowering(`.${name} with ${nArgs} arguments on typed arrays`, call);
