@@ -4092,11 +4092,12 @@ class LlEmitter {
       case "strCmp": {
         const l = this.emitExpr(e.left);
         const r = this.emitExpr(e.right);
-        this.declare(`declare i32 @scr_str_cmp(ptr, ptr)`);
+        const fn = e.utf16 === true ? "scr_str_cmp_u16" : "scr_str_cmp";
+        this.declare(`declare i32 @${fn}(ptr, ptr)`);
         const c = B.tmp();
         const t = B.tmp();
         const pred = { "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge" }[e.op];
-        B.line(`${c} = call i32 @scr_str_cmp(ptr ${l.name}, ptr ${r.name})`);
+        B.line(`${c} = call i32 @${fn}(ptr ${l.name}, ptr ${r.name})`);
         B.line(`${t} = icmp ${pred} i32 ${c}, 0`);
         return { name: t, type: e.type };
       }

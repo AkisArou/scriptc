@@ -5440,6 +5440,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2666-array-to-sorted.ts": {
+   "order": [
+    "<repo>/tests/corpus/2666-array-to-sorted.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2667-array-to-sorted-any.ts": {
+   "order": [
+    "<repo>/tests/corpus/2667-array-to-sorted-any.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

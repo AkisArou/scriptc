@@ -317,6 +317,10 @@ bool scr_str_eq(ScrStr *a, ScrStr *b);
  * <0, 0, >0. */
 int scr_str_cmp(ScrStr *a, ScrStr *b);
 
+/* ECMAScript string-list ordering: compare UTF-16 code units even though
+ * ScrStr stores well-formed UTF-8. Returns <0, 0, >0. */
+int scr_str_cmp_u16(ScrStr *a, ScrStr *b);
+
 /* ── class objects (classes as first-class values) ────────────────────
  * The class STATIC side as a runtime value: one emitted IMMORTAL static
  * per class the program takes as a value (`const X = C`, class

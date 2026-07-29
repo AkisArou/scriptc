@@ -566,7 +566,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "strCmp": {
         const l = E.emitExpr(e.left);
         const r = E.emitExpr(e.right);
-        return E.newTemp(e.type, `scr_str_cmp(${l.name}, ${r.name}) ${e.op} 0`);
+        const fn = e.utf16 === true ? "scr_str_cmp_u16" : "scr_str_cmp";
+        return E.newTemp(e.type, `${fn}(${l.name}, ${r.name}) ${e.op} 0`);
       }
       case "toString": {
         const v = E.emitExpr(e.operand);

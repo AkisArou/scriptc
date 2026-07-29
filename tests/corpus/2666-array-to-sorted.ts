@@ -32,6 +32,22 @@ console.log(words.join(","));
 const empty: string[] = [];
 console.log(empty.toSorted().length, ["only"].toSorted().join(","));
 
+// Default ordering is UTF-16 code-unit order: supplementary pairs sort
+// before U+E000..U+FFFF even though UTF-8/code-point order reverses them.
+const utf16Ordered = ["\uE000", "\u{10000}"].toSorted();
+console.log(utf16Ordered[0]!.charCodeAt(0), utf16Ordered[1]!.charCodeAt(0));
+
+// Undefined values sink to the end without ever reaching compareFn.
+let optionalCalls = 0;
+const optionals: (number | undefined)[] = [undefined, 2, 1, undefined];
+const sortedOptionals = optionals.toSorted((a, b) => {
+  optionalCalls++;
+  if (a === undefined || b === undefined) throw new Error("undefined reached compareFn");
+  return a - b;
+});
+console.log(sortedOptionals.join(","), optionalCalls);
+console.log(optionals.join(","));
+
 // Both the receiver expression and comparator expression are evaluated once,
 // left-to-right, before toSorted snapshots the receiver.
 const evaluationOrder: string[] = [];
