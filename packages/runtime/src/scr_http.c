@@ -2621,7 +2621,7 @@ static bool scr_http_client_parse_head(ScrHttpConn *conn, size_t head_len) {
     return true;
   }
 
-  /* framing: HEAD requests and 204/205/304 responses have NO body; chunked
+  /* framing: HEAD requests and 204/304 responses have NO body; chunked
    * wins over Content-Length; neither means EOF-delimited */
   bool chunked = false;
   long long content_length = -1;
@@ -2636,8 +2636,7 @@ static bool scr_http_client_parse_head(ScrHttpConn *conn, size_t head_len) {
     }
   }
   bool head_req = c->method->len == 4 && memcmp(c->method->data, "HEAD", 4) == 0;
-  bool no_body =
-      head_req || status == 204 || status == 205 || status == 304;
+  bool no_body = head_req || status == 204 || status == 304;
 
   /* 101 Switching Protocols: 'upgrade' fires INSTEAD of 'response' with
    * (res, socket, head) — the parser steps aside and the raw socket is

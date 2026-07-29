@@ -129,6 +129,13 @@ try {
   const caught = error as Error;
   console.log("released new closed:", caught.name, caught.message);
 }
+const releasedCancel: unknown = releasedReader.cancel();
+console.log("released cancel returned");
+try {
+  await releasedCancel;
+} catch (error) {
+  console.log("released cancel rejected:", (error as Error).name);
+}
 
 const liveValues = [1];
 const liveValuesReader = ReadableStream.from(liveValues).getReader();
@@ -247,6 +254,38 @@ const objectListener = {
 objectSignal.addEventListener("abort", objectListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("object abort listener:", objectCalls);
+
+const orderedSignal = AbortSignal.timeout(0);
+const orderedHandlers: string[] = [];
+orderedSignal.addEventListener("abort", () => {
+  orderedHandlers.push("listener");
+});
+orderedSignal.onabort = () => {
+  orderedHandlers.push("onabort");
+};
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("abort handler order:", orderedHandlers.join(","));
+
+const listenerGate = AbortSignal.timeout(0);
+const gatedTarget = AbortSignal.timeout(10);
+let gatedCalls = 0;
+gatedTarget.addEventListener(
+  "abort",
+  () => {
+    gatedCalls++;
+  },
+  { signal: listenerGate },
+);
+const preAbortedTarget = AbortSignal.timeout(0);
+preAbortedTarget.addEventListener(
+  "abort",
+  () => {
+    gatedCalls++;
+  },
+  { signal: AbortSignal.abort() },
+);
+await new Promise<void>((resolve) => setTimeout(resolve, 20));
+console.log("abort listener signal:", gatedCalls);
 
 for (const delay of [-1, Number.NaN, Number.POSITIVE_INFINITY, 4294967296]) {
   try {
@@ -430,6 +469,25 @@ console.log(
   await delayedRequestResponse.json(),
   delayedRequestPullCount,
 );
+
+try {
+  await fetch(`${process.argv[2]}/redirect-stream-302`, {
+    method: "POST",
+    body: ReadableStream.from([Buffer.from("redirected stream")]),
+    duplex: "half",
+  });
+  console.log("stream 302 redirect unexpectedly followed");
+} catch (error) {
+  const caught = error as Error;
+  console.log("stream 302 redirect:", caught.name, caught.message);
+}
+
+const stream303 = await fetch(`${process.argv[2]}/redirect-stream-303`, {
+  method: "POST",
+  body: ReadableStream.from([Buffer.from("redirected stream")]),
+  duplex: "half",
+});
+console.log("stream 303 redirect:", await stream303.json());
 
 const matchedStreamLength = await fetch(`${process.argv[2]}/post-echo`, {
   method: "POST",

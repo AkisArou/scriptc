@@ -120,6 +120,9 @@ typedef struct SfAbortListener {
   bool capture;
   bool once;
   size_t id;
+  SfSignal *target;        /* weak; the target owns this listener */
+  SfSignal *option_signal; /* owned unless it is the target */
+  SfSignalWatch *signal_watch;
   struct SfAbortListener *next;
 } SfAbortListener;
 
@@ -136,6 +139,7 @@ struct SfSignal {
   ScrDyn *reason;
   ScrError *error_reason;
   ScrDyn *onabort;
+  size_t onabort_order;
   SfAbortListener *listeners;
   size_t next_listener_id;
   SfSignalWatch *watchers;
@@ -350,6 +354,8 @@ static SfSignal *sf_signal_retain(SfSignal *s) {
   return s;
 }
 
+static void sf_signal_release(SfSignal *s);
+
 static void sf_watch_free(SfSignalWatch *w) {
   if (!w) return;
   if (w->source) {
@@ -363,6 +369,16 @@ static void sf_watch_free(SfSignalWatch *w) {
   free(w);
 }
 
+static void sf_abort_listener_free(SfAbortListener *l) {
+  if (!l) return;
+  sf_watch_free(l->signal_watch);
+  if (l->option_signal && l->option_signal != l->target) {
+    sf_signal_release(l->option_signal);
+  }
+  scr_dyn_release(l->listener);
+  free(l);
+}
+
 static void sf_signal_release(SfSignal *s) {
   if (!s || --s->rc > 0) return;
   for (size_t i = 0; i < s->source_count; i++) {
@@ -374,8 +390,7 @@ static void sf_signal_release(SfSignal *s) {
   while (s->listeners) {
     SfAbortListener *l = s->listeners;
     s->listeners = l->next;
-    scr_dyn_release(l->listener);
-    free(l);
+    sf_abort_listener_free(l);
   }
   scr_dyn_release(s->onabort);
   scr_dyn_release(s->reason);
@@ -403,6 +418,22 @@ static SfSignalWatch *sf_signal_watch(SfSignal *source, void *owner,
   return w;
 }
 
+static void sf_listener_signal_abort(SfSignalWatch *w,
+                                     SfSignal *source) {
+  (void)source;
+  SfAbortListener *listener = w->owner;
+  SfSignal *target = listener->target;
+  for (SfAbortListener **at = &target->listeners; *at;
+       at = &(*at)->next) {
+    if (*at == listener) {
+      *at = listener->next;
+      sf_abort_listener_free(listener);
+      return;
+    }
+  }
+  sf_watch_free(w);
+}
+
 static void sf_signal_dispatch_listeners(SfSignal *s) {
   ScrDyn *event = scr_dyn_new_obj();
   ScrStr *abort = scr_str_new("abort", 5);
@@ -419,46 +450,73 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   scr_dyn_obj_set(
       event, "currentTarget", 13,
       scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL));
-  if (s->onabort && s->onabort->kind == SCR_DYN_FUNC) {
-    /*
-     * A handler may clear or replace signal.onabort while it is running.
-     * Keep the invoked function alive across that setter's release.
-     */
-    ScrDyn *handler = scr_dyn_retain(s->onabort);
-    ScrDyn *args[1] = {event};
-    scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
-    ScrDyn *r = scr_dyn_call(handler, args, 1, "signal.onabort");
-    scr_dyn_this_pop();
-    scr_dyn_release(r);
-    scr_dyn_release(handler);
-  }
-
   /*
-   * EventTarget dispatch snapshots the listeners present at the start:
+   * EventTarget dispatch snapshots the handlers present at the start:
    * additions wait for the next event, removals before a listener's turn
-   * suppress it, and a listener may remove itself safely. Holding raw list
-   * nodes across the user callback is not safe because removeEventListener
-   * frees those nodes.
+   * suppress it, and a listener may remove itself safely. `onabort` occupies
+   * the position where it was first assigned, just like an event-handler
+   * attribute in the DOM. Holding raw list nodes across the user callback is
+   * not safe because removeEventListener frees those nodes.
    */
-  size_t count = 0;
+  size_t count = s->onabort && s->onabort->kind == SCR_DYN_FUNC ? 1 : 0;
   for (SfAbortListener *l = s->listeners; l; l = l->next) count++;
   typedef struct {
     ScrDyn *listener;
     bool once;
+    bool attribute;
     size_t id;
   } SfAbortDispatch;
   SfAbortDispatch *dispatch =
       count ? calloc(count, sizeof *dispatch) : NULL;
   if (count && !dispatch) sf_oom();
   size_t i = 0;
+  if (s->onabort && s->onabort->kind == SCR_DYN_FUNC) {
+    dispatch[i].listener = scr_dyn_retain(s->onabort);
+    dispatch[i].attribute = true;
+    dispatch[i].id = s->onabort_order;
+    i++;
+  }
   for (SfAbortListener *l = s->listeners; l; l = l->next) {
     dispatch[i].listener = scr_dyn_retain(l->listener);
     dispatch[i].once = l->once;
     dispatch[i].id = l->id;
     i++;
   }
+  for (i = 1; i < count; i++) {
+    SfAbortDispatch entry = dispatch[i];
+    size_t j = i;
+    while (j > 0 && dispatch[j - 1].id > entry.id) {
+      dispatch[j] = dispatch[j - 1];
+      j--;
+    }
+    dispatch[j] = entry;
+  }
 
   for (i = 0; i < count; i++) {
+    if (dispatch[i].attribute) {
+      if (!s->onabort || s->onabort_order != dispatch[i].id) {
+        scr_dyn_release(dispatch[i].listener);
+        continue;
+      }
+      /*
+       * Assignment replaces the handler without moving its registration
+       * position. Invoke the current value if an earlier callback replaced
+       * it during this dispatch.
+       */
+      ScrDyn *handler = scr_dyn_retain(s->onabort);
+      ScrDyn *args[1] = {event};
+      scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
+      ScrDyn *r = scr_dyn_call(handler, args, 1, "signal.onabort");
+      scr_dyn_this_pop();
+      scr_dyn_release(r);
+      scr_dyn_release(handler);
+      scr_dyn_release(dispatch[i].listener);
+      if (scr_exc_pending()) {
+        i++;
+        break;
+      }
+      continue;
+    }
     SfAbortListener **at = &s->listeners;
     while (*at && (*at)->id != dispatch[i].id) {
       at = &(*at)->next;
@@ -470,8 +528,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
     if (dispatch[i].once) {
       SfAbortListener *l = *at;
       *at = l->next;
-      scr_dyn_release(l->listener);
-      free(l);
+      sf_abort_listener_free(l);
     }
     ScrDyn *callable = dispatch[i].listener;
     if (callable->kind == SCR_DYN_OBJ) {
@@ -631,17 +688,19 @@ ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
   return boxed;
 }
 
-static void sf_signal_listener_options(
-    ScrDyn *const *args, size_t argc, bool *capture, bool *once) {
+static bool sf_signal_listener_options(
+    ScrDyn *const *args, size_t argc, bool *capture, bool *once,
+    SfSignal **option_signal) {
   *capture = false;
   *once = false;
-  if (argc < 3) return;
+  if (option_signal) *option_signal = NULL;
+  if (argc < 3) return true;
   if (args[2]->kind == SCR_DYN_BOOL) {
     /* EventTarget's boolean overload is `useCapture`, never `once`. */
     *capture = args[2]->v.b;
-    return;
+    return true;
   }
-  if (args[2]->kind != SCR_DYN_OBJ) return;
+  if (args[2]->kind != SCR_DYN_OBJ) return true;
   const ScrDyn *capture_value =
       scr_dyn_obj_get(args[2], "capture", 7);
   const ScrDyn *once_value = scr_dyn_obj_get(args[2], "once", 4);
@@ -649,6 +708,17 @@ static void sf_signal_listener_options(
              capture_value->v.b;
   *once = once_value && once_value->kind == SCR_DYN_BOOL &&
           once_value->v.b;
+  if (option_signal) {
+    const ScrDyn *signal_value =
+        scr_dyn_obj_get(args[2], "signal", 6);
+    if (signal_value && signal_value->kind != SCR_DYN_UNDEF) {
+      *option_signal = sf_signal_of(
+          signal_value,
+          "AddEventListenerOptions.signal must be an AbortSignal");
+      if (!*option_signal) return false;
+    }
+  }
+  return true;
 }
 
 static bool sf_abort_listener_value(const ScrDyn *listener) {
@@ -694,24 +764,38 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     }
     bool capture = false;
     bool once = false;
-    sf_signal_listener_options(args, argc, &capture, &once);
+    SfSignal *option_signal = NULL;
+    if (!sf_signal_listener_options(
+            args, argc, &capture, &once, &option_signal)) {
+      return NULL;
+    }
+    if (option_signal && option_signal->aborted) {
+      return scr_dyn_retain(scr_dyn_undefined());
+    }
+    SfAbortListener **tail = &s->listeners;
+    while (*tail) {
+      if ((*tail)->capture == capture &&
+          scr_dyn_strict_eq((*tail)->listener, args[1])) {
+        return scr_dyn_retain(scr_dyn_undefined());
+      }
+      tail = &(*tail)->next;
+    }
     SfAbortListener *l = calloc(1, sizeof *l);
     if (!l) sf_oom();
     l->listener = scr_dyn_retain(args[1]);
     l->capture = capture;
     l->once = once;
     l->id = ++s->next_listener_id;
-    SfAbortListener **tail = &s->listeners;
-    while (*tail) {
-      if ((*tail)->capture == capture &&
-          scr_dyn_strict_eq((*tail)->listener, args[1])) {
-        scr_dyn_release(l->listener);
-        free(l);
-        return scr_dyn_retain(scr_dyn_undefined());
-      }
-      tail = &(*tail)->next;
-    }
+    l->target = s;
+    l->option_signal =
+        option_signal && option_signal != s
+            ? sf_signal_retain(option_signal)
+            : option_signal;
     *tail = l;
+    if (option_signal) {
+      l->signal_watch =
+          sf_signal_watch(option_signal, l, &sf_listener_signal_abort);
+    }
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "removeEventListener") == 0) {
@@ -719,15 +803,15 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
         sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
       bool capture = false;
       bool once = false;
-      sf_signal_listener_options(args, argc, &capture, &once);
+      (void)sf_signal_listener_options(
+          args, argc, &capture, &once, NULL);
       (void)once;
       for (SfAbortListener **at = &s->listeners; *at; at = &(*at)->next) {
         if ((*at)->capture == capture &&
             scr_dyn_strict_eq((*at)->listener, args[1])) {
           SfAbortListener *l = *at;
           *at = l->next;
-          scr_dyn_release(l->listener);
-          free(l);
+          sf_abort_listener_free(l);
           break;
         }
       }
@@ -761,10 +845,15 @@ static bool sf_signal_set(void *ptr, const char *key, size_t len,
     sf_type_error("AbortSignal.onabort must be a function or null");
     return true;
   }
+  bool had_handler = s->onabort != NULL;
   scr_dyn_release(s->onabort);
-  s->onabort = value->kind == SCR_DYN_FUNC
-                   ? scr_dyn_retain((ScrDyn *)value)
-                   : NULL;
+  if (value->kind == SCR_DYN_FUNC) {
+    s->onabort = scr_dyn_retain((ScrDyn *)value);
+    if (!had_handler) s->onabort_order = ++s->next_listener_id;
+  } else {
+    s->onabort = NULL;
+    s->onabort_order = 0;
+  }
   return true;
 }
 
@@ -1654,12 +1743,15 @@ static ScrDyn *sf_reader_invoke(void *ptr, ScrDyn *self, const char *method,
     return out;
   }
   if (strcmp(method, "cancel") == 0) {
+    ScrPromise *p;
     if (!r->stream) {
       sf_type_error("This reader has been released");
-      return NULL;
+      p = scr_promise_new();
+      scr_promise_reject_pending(p);
+    } else {
+      p = sf_stream_cancel(
+          r->stream, argc ? args[0] : scr_dyn_undefined(), true);
     }
-    ScrPromise *p = sf_stream_cancel(
-        r->stream, argc ? args[0] : scr_dyn_undefined(), true);
     ScrDyn *out = scr_dyn_new_promise(p);
     scr_promise_release(p);
     return out;
@@ -2469,16 +2561,76 @@ static bool sf_request_header_ok(
       !sf_header_name_ci(name, name_len, "expect");
 }
 
+static ScrStr *sf_trim_header_value(const ScrStr *value) {
+  size_t start = 0;
+  size_t end = value->len;
+  while (start < end &&
+         (value->data[start] == ' ' || value->data[start] == '\t')) {
+    start++;
+  }
+  while (end > start &&
+         (value->data[end - 1] == ' ' || value->data[end - 1] == '\t')) {
+    end--;
+  }
+  return scr_str_new(value->data + start, end - start);
+}
+
 static bool sf_push_header(ScrArr *pairs, const char *name, size_t name_len,
                            ScrStr *value) {
   if (!sf_header_name_ok(name, name_len) ||
-      !sf_header_value_ok(value) ||
-      !sf_request_header_ok(name, name_len, value)) {
+      !sf_header_value_ok(value)) {
+    sf_type_error("fetch failed");
+    return false;
+  }
+  ScrStr *normalized = sf_trim_header_value(value);
+  if (!sf_header_name_ci(name, name_len, "set-cookie")) {
+    size_t n = (size_t)scr_arr_len(pairs);
+    for (size_t i = 0; i + 1 < n; i += 2) {
+      ScrStr *key = scr_arr_get_ref(pairs, (double)i);
+      bool match = key->len == name_len;
+      for (size_t j = 0; j < name_len && match; j++) {
+        unsigned char a = (unsigned char)key->data[j];
+        unsigned char b = (unsigned char)name[j];
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+        match = a == b;
+      }
+      scr_str_release(key);
+      if (!match) continue;
+
+      ScrStr *previous =
+          scr_arr_get_ref(pairs, (double)(i + 1));
+      const char *separator =
+          sf_header_name_ci(name, name_len, "cookie") ? "; " : ", ";
+      size_t separator_len = 2;
+      size_t joined_len =
+          previous->len + separator_len + normalized->len;
+      char *joined_data = malloc(joined_len ? joined_len : 1);
+      if (!joined_data) sf_oom();
+      memcpy(joined_data, previous->data, previous->len);
+      memcpy(joined_data + previous->len, separator, separator_len);
+      memcpy(joined_data + previous->len + separator_len,
+             normalized->data, normalized->len);
+      ScrStr *joined = scr_str_new(joined_data, joined_len);
+      free(joined_data);
+      scr_str_release(previous);
+      scr_str_release(normalized);
+      if (!sf_request_header_ok(name, name_len, joined)) {
+        scr_str_release(joined);
+        sf_type_error("fetch failed");
+        return false;
+      }
+      scr_arr_set_ref(pairs, (double)(i + 1), joined);
+      return true;
+    }
+  }
+  if (!sf_request_header_ok(name, name_len, normalized)) {
+    scr_str_release(normalized);
     sf_type_error("fetch failed");
     return false;
   }
   scr_arr_push_ref(pairs, scr_str_new(name, name_len));
-  scr_arr_push_ref(pairs, scr_str_retain(value));
+  scr_arr_push_ref(pairs, normalized);
   return true;
 }
 
@@ -2999,7 +3151,7 @@ static bool sf_redirect(SfTransfer *t, int status,
       (status == 303 && !is_get && !is_head) ||
       ((status == 301 || status == 302) &&
        sf_eq_ci(t->method, "post"));
-  if (sf_body_is_stream(t->body) && !rewrite) {
+  if (sf_body_is_stream(t->body) && status != 303) {
     scr_url_release(next);
     sf_reject(t, "fetch failed");
     return false;

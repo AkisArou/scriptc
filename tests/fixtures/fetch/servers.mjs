@@ -14,7 +14,8 @@
  *   real proxy client sends) answers the current count.
  *
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
- * /headers-reuse /request-defaults /raw-headers /redirect /redirect-credentials
+ * /headers-reuse /request-defaults /raw-headers /header-init-echo
+ * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
  * /redirect-fragment/path /early-hints /invalid-utf8 /slow /drip
  * /chunked /gzip /gzip-concat /deflate /status-meta /no-content /sse,
  * 404 for the rest;
@@ -69,7 +70,7 @@ export async function startFetchServers() {
         res.writeHead(200, {
           connection: "close",
           "content-length": "0",
-          "x-reuse": "yes",
+          "x-reuse": ["one", "two"],
         });
         res.end();
       } else if (url === "/headers-reuse") {
@@ -89,8 +90,31 @@ export async function startFetchServers() {
       } else if (url === "/raw-headers") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(req.rawHeaders));
+      } else if (url === "/header-init-echo") {
+        const count = (name) => {
+          let matches = 0;
+          for (let i = 0; i < req.rawHeaders.length; i += 2) {
+            if (req.rawHeaders[i].toLowerCase() === name) matches++;
+          }
+          return matches;
+        };
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            duplicate: req.headers["x-duplicate"] ?? null,
+            duplicateLines: count("x-duplicate"),
+            cookie: req.headers.cookie ?? null,
+            cookieLines: count("cookie"),
+          }),
+        );
       } else if (url === "/redirect") {
         res.writeHead(302, { location: "/text" });
+        res.end();
+      } else if (url === "/redirect-stream-302") {
+        res.writeHead(302, { location: "/post-echo" });
+        res.end();
+      } else if (url === "/redirect-stream-303") {
+        res.writeHead(303, { location: "/post-echo" });
         res.end();
       } else if (url === "/redirect-credentials") {
         res.writeHead(302, {
@@ -174,6 +198,9 @@ export async function startFetchServers() {
       } else if (url === "/no-content") {
         res.writeHead(204);
         res.end();
+      } else if (url === "/reset-content") {
+        res.writeHead(205, { "content-length": "4" });
+        res.end("body");
       } else if (url === "/sse") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         const frames = [

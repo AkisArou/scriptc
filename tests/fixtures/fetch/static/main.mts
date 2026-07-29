@@ -55,6 +55,33 @@ const reusedHeaders = await fetch(`${process.argv[2]}/headers-reuse`, {
 console.log("reused headers:", await reusedHeaders.text());
 
 console.log(
+  "normalized request headers:",
+  await (
+    await fetch(`${process.argv[2]}/header-init-echo`, {
+      headers: [
+        ["X-Duplicate", " one "],
+        ["x-duplicate", "\ttwo\t"],
+        ["Cookie", "a=1"],
+        ["cookie", "b=2"],
+      ],
+    })
+  ).json(),
+);
+
+try {
+  await fetch(`${process.argv[2]}/text`, {
+    headers: [
+      ["connection", "close"],
+      ["Connection", "keep-alive"],
+    ],
+  });
+  console.log("duplicate connection unexpectedly sent");
+} catch (error) {
+  const caught = error as Error;
+  console.log("duplicate connection:", caught.name, caught.message);
+}
+
+console.log(
   "request defaults:",
   await (await fetch(`${process.argv[2]}/request-defaults`)).json(),
 );
@@ -193,6 +220,12 @@ console.log(
   noContent.bodyUsed,
   JSON.stringify(await noContent.text()),
   noContent.bodyUsed,
+);
+const resetContent = await fetch(`${process.argv[2]}/reset-content`);
+console.log(
+  "reset-content body:",
+  resetContent.body === null,
+  JSON.stringify(await resetContent.text()),
 );
 
 try {
