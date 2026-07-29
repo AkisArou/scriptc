@@ -250,11 +250,15 @@ function run(
     let remoteExitCode;
     let timedOut = false;
     let timeoutReason = "";
+    let killTimeout;
     const stopForTimeout = (reason) => {
       if (timedOut) return;
       timedOut = true;
       timeoutReason = reason;
       child.kill("SIGTERM");
+      // A network-stalled CLI may not honor SIGTERM promptly. Escalate so a
+      // wall timeout also bounds the time spent waiting for the close event.
+      killTimeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
     };
     const timeout =
       timeoutMs === undefined
@@ -296,6 +300,7 @@ function run(
     child.on("close", (code, signal) => {
       if (timeout !== undefined) clearTimeout(timeout);
       if (idleTimeout !== undefined) clearTimeout(idleTimeout);
+      if (killTimeout !== undefined) clearTimeout(killTimeout);
       children.delete(child);
       stdout.end();
       stderr.end();
@@ -505,7 +510,11 @@ async function cleanup() {
       console.log(`\nRemoving ${created.size} disposable sandbox${created.size === 1 ? "" : "es"}...`);
       const results = await Promise.allSettled(
         [...created].map((name) =>
-          vercel(["sandbox", "remove", name], { label: name, quiet: true }).then(() => created.delete(name)),
+          vercel(["sandbox", "remove", name], {
+            label: name,
+            quiet: true,
+            timeoutMs: 60_000,
+          }).then(() => created.delete(name)),
         ),
       );
       const failures = results.filter((result) => result.status === "rejected");
