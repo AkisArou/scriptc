@@ -850,21 +850,21 @@ export class CEmitter {
       // both exit 1, like Node.
       ...(hasAsync || hasGenerators || this.usesTimers || usesIsland
         ? [
-            `  scr_loop_run(${asyncEntry ? "sc_top" : "NULL"});`,
+            `  bool sc_loop_rejection = scr_loop_run(${asyncEntry ? "sc_top" : "NULL"});`,
             ...uncaught("  ", asyncEntry),
+            `  if (sc_loop_rejection) {`,
+            `    scr_discard_unhandled_rejections();`,
+            ...(asyncEntry ? [`    scr_promise_release(sc_top);`] : []),
+            `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+            `  }`,
             ...(asyncEntry
               ? [
                   `  int sc_top_status = scr_promise_finish_top_level(sc_top);`,
                   `  if (sc_top_status == 1) {`,
-                  // finish_top_level has observed the module root, so the
-                  // ordinary reporter now sees only unrelated rejections.
-                  // A default report/listener crash that already selected
-                  // exit 1 wins; handled listener deliveries run before
-                  // the fatal module rejection, matching Node's turns.
-                  `    if (scr_report_unhandled_rejections()) {`,
-                  `      scr_promise_release(sc_top);`,
-                  `      ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
-                  `    }`,
+                  // Earlier-checkpoint rejections were decided inside the
+                  // loop. The fatal module verdict suppresses unrelated
+                  // rejections from THIS checkpoint, exactly Node's order.
+                  `    scr_discard_unhandled_rejections();`,
                   `    scr_promise_rethrow_top_level(sc_top);`,
                   `    scr_promise_release(sc_top);`,
                   `    scr_exc_print_uncaught();`,

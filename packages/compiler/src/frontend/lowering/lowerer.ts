@@ -1991,7 +1991,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 2,
+            irVersion: 3,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,

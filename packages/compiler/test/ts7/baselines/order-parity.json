@@ -5428,6 +5428,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2664-top-level-await-same-checkpoint-rejection.ts": {
+   "order": [
+    "<repo>/tests/corpus/2664-top-level-await-same-checkpoint-rejection.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2665-top-level-await-unhandled-listener-liveness.ts": {
+   "order": [
+    "<repo>/tests/corpus/2665-top-level-await-unhandled-listener-liveness.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

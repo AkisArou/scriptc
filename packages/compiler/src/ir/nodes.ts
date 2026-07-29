@@ -676,7 +676,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 2;
+  irVersion: 3;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -3652,7 +3652,7 @@ export type IrLibFn =
   | "process.offWarning"
   | "process.emitWarning"
   /** process.on/once('unhandledRejection', fn): registers a dyn listener
-   * the loop-end report dispatches per never-observed rejection —
+   * the checkpoint report dispatches per never-observed rejection —
    * (reason, promise) — instead of printing and exiting 1 (scr_async.c).
    * The bool second arg is `once` (auto-removed after one delivery,
    * Node's once); off/removeListener remove by closure identity, the
@@ -3661,12 +3661,9 @@ export type IrLibFn =
   | "process.onUnhandledRejection"
   | "process.offUnhandledRejection"
   /** process.on/once/off('rejectionHandled', fn): the sibling registry.
-   * Under the loop-exhaustion rejection model the event has exactly ONE
-   * firing window — a handler attached DURING an unhandledRejection
-   * listener (Node's other windows, later turns, don't exist here: a
-   * rejection handled before exhaustion never enters the report at all —
-   * the documented end-of-turn divergence). Dispatch is synchronous at
-   * the attach, with the promise, Node's payload. */
+   * A handler attached after unhandledRejection delivery fires the event
+   * once. Dispatch is synchronous at the attach, with the promise,
+   * Node's payload. */
   | "process.onRejectionHandled"
   | "process.offRejectionHandled"
   /** The Number statics with a static C implementation (scr_lib.c): one

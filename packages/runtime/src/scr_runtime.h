@@ -3345,8 +3345,9 @@ void scr_module_await(ScrPromise *p);
  * module-root promise without another microtask hop: 0 = fulfilled,
  * 1 = rejected, 13 = still pending with no ref'd work capable of settling
  * it (Node's unsettled top-level-await exit status). A rejected root is
- * marked observed here but re-thrown separately, after unrelated
- * unhandled rejections have had their normal reporting turn. */
+ * marked observed here but re-thrown separately; earlier-checkpoint
+ * rejections were already decided by the loop and same-checkpoint
+ * competitors are suppressed by the executable-module verdict. */
 int scr_promise_finish_top_level(ScrPromise *p);
 void scr_promise_rethrow_top_level(ScrPromise *p);
 /* The checked-dynamic tree-crossing await (SCR_DYN_PROMISE's boundary contract): the
@@ -3399,23 +3400,19 @@ ScrDyn *scr_als_run(double id, ScrDyn *value, ScrDyn *fn, ScrDyn *args);
 ScrDyn *scr_als_exit_run(double id, ScrDyn *fn, ScrDyn *args);
 
 /* process.on/once('unhandledRejection', fn): dyn listeners dispatched
- * per never-observed rejection at loop end — (reason, promise),
- * suppressing the default report and the exit-1 (Node's handled-event
- * contract; the end-of-turn vs loop-end timing is a SEMANTICS.md
- * divergence). `once` auto-removes after one delivery; off removes by
- * closure identity (the warning registry's story). Throws Node's
+ * per never-observed rejection at the end of its nextTick/microtask
+ * checkpoint — (reason, promise), suppressing the default report and the
+ * exit-1. `once` auto-removes after one delivery; off removes by closure
+ * identity (the warning registry's story). Throws Node's
  * ERR_INVALID_ARG_TYPE on a non-function. */
 void scr_process_on_unhandled_rejection(ScrDyn *fn, bool once);
 void scr_process_off_unhandled_rejection(ScrDyn *fn);
-/* process.on/once/off('rejectionHandled', fn): the sibling registry.
- * Under the loop-exhaustion model the event's ONE firing window is a
- * handler attached DURING an unhandledRejection listener (a rejection
- * handled any earlier never enters the report at all — the same
- * documented divergence); dispatch is synchronous at the attach, with
- * the promise, Node's payload. */
+/* process.on/once/off('rejectionHandled', fn): the sibling registry. A
+ * promise handled after its unhandledRejection delivery fires once, with
+ * the promise as Node's payload. */
 void scr_process_on_rejection_handled(ScrDyn *fn, bool once);
 void scr_process_off_rejection_handled(ScrDyn *fn);
-/* The loop-end delivery hook the registration above installs
+/* The checkpoint delivery hook the registration above installs
  * (scr_async_dyn.c → scr_report_unhandled_rejections; NULL = default
  * report). Runtime-internal. */
 extern bool (*scr_urj_deliver_fn)(ScrPromise *p);
@@ -3661,8 +3658,10 @@ double scr_now_ms(void); /* the loop's monotonic clock, in ms */
 /* Run to ordinary loop exhaustion, except that a non-NULL executable
  * module-root promise stops the loop as soon as it is rejected at a
  * microtask checkpoint. Fulfilled roots do not stop the loop: Node keeps
- * running ref'd work scheduled by a successfully evaluated module. */
-void scr_loop_run(ScrPromise *top_level);
+ * running ref'd work scheduled by a successfully evaluated module.
+ * Returns true when a default/listener-crashing unhandled rejection
+ * already selected and reported exit status 1. */
+bool scr_loop_run(ScrPromise *top_level);
 /* External I/O hook, polled at loop quiescence like the child registry:
  * `pending` keeps the loop alive; `poll` makes progress and may SLEEP up
  * to max_wait_ms (on real fds — socket readiness wakes it early), so the
@@ -3671,12 +3670,14 @@ void scr_loop_run(ScrPromise *top_level);
  * never set it. */
 void scr_loop_set_io(bool (*pending)(void), void (*poll)(double max_wait_ms));
 bool scr_report_unhandled_rejections(void); /* true = exit 1 */
+void scr_discard_unhandled_rejections(void);
 /* The island's unhandled-rejection ledger joins the report above (one
  * registrant, set at engine boot; static builds never set it): called with
  * print=true when the static ledger reported nothing, prints its FIRST
  * never-observed rejection in the same voice, frees the ledger either way,
  * and returns whether it had any. */
-void scr_loop_set_island_rejections(bool (*fn)(bool print));
+void scr_loop_set_island_rejections(bool (*fn)(bool print),
+                                    int (*drain_jobs)(void));
 /* The island's earliest armed timer deadline (scr_island_timers_deadline;
  * HUGE_VAL when none) joins the loop's sleep computation: an armed
  * AbortSignal.timeout must fire on time while the loop sleeps on socket

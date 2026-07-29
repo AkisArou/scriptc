@@ -690,7 +690,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "dc.chanRunStores": "scr_dc_chan_run_stores",
   // process warning/rejection events (scr_lib.c / scr_async_dyn.c):
   // dyn listeners are borrowed (the runtime retains its copy);
-  // onUnhandledRejection marks the loop live (the loop-end report
+  // onUnhandledRejection marks the loop live (the checkpoint report
   // dispatches the listeners).
   "process.onWarning": "scr_process_on_warning",
   "process.offWarning": "scr_process_off_warning",
@@ -782,7 +782,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "http.agentNew", "http.requestAgent", "http.requestAgentCb",
   // The dyn-async slice (emit-exprs.ts's markings): fiber parks, the
   // microtask/immediate mints, the tracing-promise reaction fiber, and
-  // the loop-end unhandled-rejection report.
+  // the checkpoint unhandled-rejection report.
   "async.hop", "async.awaitDyn",
   "dc.tcTracePromise",
   "process.onUnhandledRejection", "process.onRejectionHandled",
@@ -1219,15 +1219,16 @@ class LlEmitter {
     const loopReleasesU = runsLoop ? globalReleaseLines("gl") : [];
     const loopReleasesR = runsLoop ? globalReleaseLines("gr") : [];
     const topRejectReleases = asyncEntry ? globalReleaseLines("gt") : [];
-    const topOtherRejectReleases = asyncEntry ? globalReleaseLines("go") : [];
     const topPendingReleases = asyncEntry ? globalReleaseLines("gp") : [];
+    const loopReportedReleases = runsLoop ? globalReleaseLines("gq") : [];
     // main's epilogues read the flag / the loop entry points — declared
     // HERE, before the extern block flushes (a pending check usually
     // declared the flag already; the Set dedupes).
     if (entryMayThrow || runsLoop) this.declare(`declare zeroext i1 @scr_exc_pending()`);
     if (runsLoop) {
-      this.declare(`declare void @scr_loop_run(ptr)`);
+      this.declare(`declare zeroext i1 @scr_loop_run(ptr)`);
       this.declare(`declare zeroext i1 @scr_report_unhandled_rejections()`);
+      this.declare(`declare void @scr_discard_unhandled_rejections()`);
     }
     if (asyncEntry) {
       this.declare(`declare i32 @scr_promise_finish_top_level(ptr)`);
@@ -1482,7 +1483,7 @@ class LlEmitter {
       // both exit 1, like Node — the C main's loop block exactly.
       ...(runsLoop
         ? [
-            `  call void @scr_loop_run(ptr ${asyncEntry ? "%top" : "null"})`,
+            `  %loop_rejection = call zeroext i1 @scr_loop_run(ptr ${asyncEntry ? "%top" : "null"})`,
             `  %lexc = call zeroext i1 @scr_exc_pending()`,
             `  br i1 %lexc, label %luncaught, label %lok`,
             `luncaught:`,
@@ -1492,24 +1493,24 @@ class LlEmitter {
             ...loopReleasesU,
             `  ret i32 1`,
             `lok:`,
+            `  br i1 %loop_rejection, label %lreported, label %lclean`,
+            `lreported:`,
+            `  call void @scr_discard_unhandled_rejections()`,
+            ...(asyncEntry ? [`  call void @scr_promise_release(ptr %top)`] : []),
+            ...exitListenerLines("xq"),
+            ...loopReportedReleases,
+            `  ret i32 1`,
+            `lclean:`,
             ...(asyncEntry
               ? [
                   `  %tla_status = call i32 @scr_promise_finish_top_level(ptr %top)`,
                   `  %tla_rejected = icmp eq i32 %tla_status, 1`,
-                  `  br i1 %tla_rejected, label %tla_rejections, label %tla_not_rejected`,
-                  `tla_rejections:`,
-                  // The root is observed now. Report only unrelated
-                  // rejections first: a default report or listener crash
-                  // wins, while handled listener deliveries precede the
-                  // fatal module rejection.
-                  `  %tla_other_rej = call zeroext i1 @scr_report_unhandled_rejections()`,
-                  `  br i1 %tla_other_rej, label %tla_other_fail, label %tla_fail`,
-                  `tla_other_fail:`,
-                  `  call void @scr_promise_release(ptr %top)`,
-                  ...exitListenerLines("xo"),
-                  ...topOtherRejectReleases,
-                  `  ret i32 1`,
+                  `  br i1 %tla_rejected, label %tla_fail, label %tla_not_rejected`,
                   `tla_fail:`,
+                  // The loop already delivered every earlier-checkpoint
+                  // rejection. Drop same-checkpoint competitors before
+                  // surfacing the fatal module verdict.
+                  `  call void @scr_discard_unhandled_rejections()`,
                   `  call void @scr_promise_rethrow_top_level(ptr %top)`,
                   `  call void @scr_promise_release(ptr %top)`,
                   `  call void @scr_exc_print_uncaught()`,
