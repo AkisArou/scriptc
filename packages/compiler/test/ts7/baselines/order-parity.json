@@ -5452,6 +5452,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2668-stored-number-array-iterator.ts": {
+   "order": [
+    "<repo>/tests/corpus/2668-stored-number-array-iterator.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
