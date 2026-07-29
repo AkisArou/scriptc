@@ -596,6 +596,127 @@ describe("ask-4 sidecar-declared slots", () => {
     expect(r.diagnostics[0]!.message).toContain("range failed");
   });
 
+  test("a direct field guard proves and remains byte-exact to Node in both emissions", async () => {
+    const guarded = `${SIDECAR_ENTRY}
+export function guardedStep(v: number): number {
+  const m: Model = { total: v, label: "" };
+  if (m.total < 1000) { m.total = m.total + 1; }
+  return m.total;
+}
+`;
+    const inputs = [Number.MIN_SAFE_INTEGER, -1, 999, 1000, Number.MAX_SAFE_INTEGER];
+    const nodeOutput = inputs
+      .map((v) => String(v < 1000 ? v + 1 : v))
+      .join("\n") + "\n";
+
+    for (const emission of EMISSIONS) {
+      const r = await buildCase(
+        `sidecar-prove-model-field-guard-${emission}`,
+        guarded,
+        sidecarProfile(
+          [{ slot: "Model.total", class: "i64" }],
+          {
+            emission,
+            exports: [
+              { export: "guardedStep", symbol: "ks_guarded_step", params: ["i64"], returns: "f64" },
+            ],
+          },
+        ),
+      );
+      expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+      if (!r.ok) continue;
+
+      const probeSrc = join(r.outDir, "guarded-field-probe.c");
+      writeFileSync(probeSrc, `#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+
+extern void ks_init(void);
+extern double ks_guarded_step(int64_t v);
+
+int main(void) {
+  const int64_t inputs[] = {
+    -INT64_C(9007199254740991), -INT64_C(1), INT64_C(999),
+    INT64_C(1000), INT64_C(9007199254740991)
+  };
+  ks_init();
+  for (unsigned i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+    printf("%.17g\\n", ks_guarded_step(inputs[i]));
+  }
+  return 0;
+}
+`);
+      const run = runProbe(buildProbe(probeSrc, r.archive, r.outDir));
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe(nodeOutput);
+    }
+  });
+
+  test("a ternary guard and literal bracket spelling share the static field path", async () => {
+    const guarded = SIDECAR_ENTRY.replace(
+      "export function update(m: Model, msg: Msg): Model { return m; }",
+      `export function update(m: Model, msg: Msg): Model {
+  m.total = m["total"] < 1000 ? m.total + 1 : 0;
+  return m;
+}`,
+    );
+    const r = await buildCase(
+      "sidecar-prove-model-field-ternary",
+      guarded,
+      sidecarProfile([{ slot: "Model.total", class: "i64" }]),
+    );
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+  });
+
+  test("a call after a field guard kills the refinement with the same range refusal", async () => {
+    const guarded = SIDECAR_ENTRY.replace(
+      "export function update(m: Model, msg: Msg): Model { return m; }",
+      `function touch(): void {}
+export function update(m: Model, msg: Msg): Model {
+  if (m.total < 1000) {
+    touch();
+    m.total = m.total + 1;
+  }
+  return m;
+}`,
+    );
+    const r = await buildCase(
+      "sidecar-refuse-model-field-call-kill",
+      guarded,
+      sidecarProfile([{ slot: "Model.total", class: "i64" }]),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4023"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.total'");
+    expect(r.diagnostics[0]!.message).toContain("range failed");
+  });
+
+  test("a possible aliasing write after a field guard kills the refinement", async () => {
+    const guarded = SIDECAR_ENTRY.replace(
+      "export function update(m: Model, msg: Msg): Model { return m; }",
+      `export function update(m: Model, msg: Msg): Model {
+  const alias = m;
+  if (m.total < 1000) {
+    alias.label = "changed";
+    m.total = m.total + 1;
+  }
+  return m;
+}`,
+    );
+    const r = await buildCase(
+      "sidecar-refuse-model-field-write-kill",
+      guarded,
+      sidecarProfile([{ slot: "Model.total", class: "i64" }]),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4023"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.total'");
+    expect(r.diagnostics[0]!.message).toContain("range failed");
+  });
+
   test("guarded model-field writes prove and the build attests them", async () => {
     const guarded = SIDECAR_ENTRY.replace(
       "export function update(m: Model, msg: Msg): Model { return m; }",

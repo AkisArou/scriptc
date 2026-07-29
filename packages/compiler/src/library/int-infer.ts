@@ -43,6 +43,11 @@
  * short threshold list ONLY at loop headers, after a few plain joins;
  * precision lost to widening is recovered by the body-edge refinement,
  * so `for (let n = 0; n < 10; n = n + 1) send(n)` proves exactly [0, 9].
+ * Static field reads rooted at one binding carry the same guard facts as
+ * locals through a straight-line dominated region. Those facts are proof
+ * state only (the emitted program still performs every source read), and
+ * are discarded at calls/suspensions, heap writes, receiver rebindings,
+ * and control-flow joins. This is deliberately not alias analysis.
  *
  * INTERPROCEDURAL STRATEGY (v1, deliberate): intraprocedural with
  * declared-slot summaries at the boundaries. Every declared slot is both
@@ -455,17 +460,41 @@ export function classSeed(cls: string): AbsVal {
 }
 
 /* ── the environment ───────────────────────────────────────────────────────
- * Abstract state per program point: binding id → AbsVal, for f64-typed
- * locals AND module globals ("%g." ids). A missing LOCAL is bottom (not
- * yet bound on this path — tsc's definite-assignment analysis guarantees
- * no read precedes a binding); a missing GLOBAL is TOP (any prior entry
- * may have written it). `null` in place of an Env is the unreachable
- * state. */
+ * Abstract state per program point: binding/access key → AbsVal. Binding
+ * keys cover f64-typed locals and module globals ("%g." ids); reserved path
+ * keys carry temporary facts for declared integer fields. A missing LOCAL
+ * is bottom (not yet bound on this path — tsc's definite-assignment analysis
+ * guarantees no read precedes a binding); a missing GLOBAL is TOP (any prior
+ * entry may have written it). `null` in place of an Env is unreachable. */
 
 type Env = Map<string, AbsVal>;
 
+/** Static-access facts share Env's join/clone machinery but have their own
+ * missing-key value: the declared slot seed. A killed field fact therefore
+ * falls back to the same whole-in-class-range assumption a field read had
+ * before access-path refinement, preserving SC4023 rather than degrading
+ * to a spurious SC4022. */
+const PATH_I64_PREFIX = "%path.i64:";
+const PATH_U64_PREFIX = "%path.u64:";
+
+function pathClassOfKey(id: string): IntClass | null {
+  if (id.startsWith(PATH_I64_PREFIX)) return "i64";
+  if (id.startsWith(PATH_U64_PREFIX)) return "u64";
+  return null;
+}
+
+function clearPathFacts(env: Env): void {
+  for (const k of [...env.keys()]) {
+    if (pathClassOfKey(k) !== null) env.delete(k);
+  }
+}
+
 const isGlobalId = (id: string): boolean => id.startsWith("%g.");
-const defaultVal = (id: string): AbsVal => (isGlobalId(id) ? TOP : BOTTOM);
+const defaultVal = (id: string): AbsVal => {
+  const pathClass = pathClassOfKey(id);
+  if (pathClass !== null) return classSeed(pathClass);
+  return isGlobalId(id) ? TOP : BOTTOM;
+};
 
 function envGet(env: Env, id: string): AbsVal {
   return env.get(id) ?? defaultVal(id);
@@ -479,6 +508,10 @@ function joinEnv(a: Env | null, b: Env | null): Env | null {
   for (const k of keys) {
     out.set(k, join(a.get(k) ?? defaultVal(k), b.get(k) ?? defaultVal(k)));
   }
+  // A real flow join ends the cheap straight-line access-path proof even
+  // when both incoming facts happen to agree. A sole reachable edge
+  // (early return/throw on the other edge) retains its dominated fact.
+  clearPathFacts(out);
   return out;
 }
 
@@ -496,6 +529,7 @@ function widenEnv(prev: Env, next: Env): Env {
   for (const k of keys) {
     out.set(k, widen(prev.get(k) ?? defaultVal(k), next.get(k) ?? defaultVal(k)));
   }
+  clearPathFacts(out);
   return out;
 }
 
@@ -752,11 +786,13 @@ class FnAnalyzer {
       case "varDecl": {
         if (s.init === null) return env;
         const v = this.evalExpr(s.init, env);
+        this.clearPathsRootedAt(env, s.localId);
         if (this.bindingIsF64(s.localId)) env.set(s.localId, v);
         return env;
       }
       case "assign": {
         const v = this.evalExpr(s.value, env);
+        this.clearPathsRootedAt(env, s.localId);
         if (this.bindingIsF64(s.localId)) env.set(s.localId, v);
         return env;
       }
@@ -765,8 +801,9 @@ class FnAnalyzer {
         return env;
       case "if": {
         this.evalExpr(s.cond, env);
-        const thenEnv = this.refine(cloneEnv(env), s.cond, true);
-        const elseEnv = this.refine(cloneEnv(env), s.cond, false);
+        const allowPaths = this.stablePathGuard(s.cond);
+        const thenEnv = this.refine(cloneEnv(env), s.cond, true, allowPaths);
+        const elseEnv = this.refine(cloneEnv(env), s.cond, false, allowPaths);
         const a = thenEnv === null ? null : this.execStmts(s.then, thenEnv);
         const b = s.else_ === null ? elseEnv : elseEnv === null ? null : this.execStmts(s.else_, elseEnv);
         return joinEnv(a, b);
@@ -822,26 +859,34 @@ class FnAnalyzer {
         this.evalExpr(s.arr, env);
         this.evalExpr(s.index, env);
         this.evalExpr(s.value, env);
+        clearPathFacts(env);
         return env;
       case "fieldSet":
         this.evalExpr(s.obj, env);
         this.evalExpr(s.value, env);
+        clearPathFacts(env);
         return env;
       case "recordSet": {
         this.evalExpr(s.obj, env);
         const v = this.evalExpr(s.value, env);
         const slot = this.cfg.records.get(s.shapeId)?.get(s.field);
         if (slot !== undefined) this.emit(v, slot.path, slot.cls, s.loc);
+        // The RHS and its boundary obligation observe the pre-write value;
+        // only the completed heap write invalidates paths (JS evaluation
+        // order, and what lets `m.count = m.count + 1` prove).
+        clearPathFacts(env);
         return env;
       }
       case "recordKeySet":
         this.evalExpr(s.obj, env);
         this.evalExpr(s.key, env);
         this.evalExpr(s.value, env);
+        clearPathFacts(env);
         return env;
       case "recordKeyDelete":
         this.evalExpr(s.obj, env);
         this.evalExpr(s.key, env);
+        clearPathFacts(env);
         return env;
       case "return": {
         if (s.value !== null) {
@@ -961,6 +1006,7 @@ class FnAnalyzer {
     for (const k of [...out.keys()]) {
       if (isGlobalId(k)) out.delete(k); // absent global = TOP
     }
+    clearPathFacts(out);
     return out;
   }
 
@@ -978,6 +1024,9 @@ class FnAnalyzer {
       alwaysExits?: boolean;
     },
   ): Env | null {
+    // Loop headers/backedges are outside the deliberately straight-line
+    // access-path scope. Guards inside the body can establish fresh facts.
+    clearPathFacts(env);
     const savedCollect = this.collect;
     this.collect = false;
     let head = cloneEnv(env);
@@ -1013,9 +1062,9 @@ class FnAnalyzer {
     // (`for (;;)`) exits only through breaks.
     let exit: Env | null = null;
     if (opts.doWhile ?? false) {
-      exit = opts.cond !== undefined && final.postBody !== null ? this.refine(final.postBody, opts.cond, false) : null;
+      exit = opts.cond !== undefined && final.postBody !== null ? this.refine(final.postBody, opts.cond, false, false) : null;
     } else if (opts.cond !== undefined) {
-      exit = this.refine(cloneEnv(head), opts.cond, false);
+      exit = this.refine(cloneEnv(head), opts.cond, false, false);
     } else if (opts.alwaysExits ?? false) {
       exit = cloneEnv(head); // for-of ends when the array runs out
     }
@@ -1039,7 +1088,7 @@ class FnAnalyzer {
     let bodyIn: Env | null = cloneEnv(head);
     if (opts.cond !== undefined && !(opts.doWhile ?? false)) {
       this.evalExpr(opts.cond, bodyIn);
-      bodyIn = this.refine(bodyIn, opts.cond, true);
+      bodyIn = this.refine(bodyIn, opts.cond, true, false);
     }
     if (bodyIn !== null && opts.seedEachIteration !== undefined) {
       bodyIn.set(opts.seedEachIteration, { ...TOP });
@@ -1057,7 +1106,7 @@ class FnAnalyzer {
     if ((opts.doWhile ?? false) && opts.cond !== undefined && out !== null) {
       this.evalExpr(opts.cond, out);
       postBody = cloneEnv(out);
-      out = this.refine(out, opts.cond, true);
+      out = this.refine(out, opts.cond, true, false);
     }
     return { back: out, postBody };
   }
@@ -1069,23 +1118,28 @@ class FnAnalyzer {
    * false when either side is NaN, so the edge where one HELD proves both
    * operands NaN-free; on the failed edge NaN survives while the negated
    * comparison still refines the numeric members. */
-  private refine(env: Env | null, cond: IrExpr, branch: boolean): Env | null {
+  private refine(env: Env | null, cond: IrExpr, branch: boolean, allowPaths = false): Env | null {
     if (env === null) return null;
     switch (cond.kind) {
       case "boolLit":
         return cond.value === branch ? env : null;
       case "unary":
-        if (cond.op === "!") return this.refine(env, cond.operand, !branch);
+        if (cond.op === "!") return this.refine(env, cond.operand, !branch, allowPaths);
         return env;
       case "logical": {
         const isAnd = cond.op === "&&";
         if (isAnd === branch) {
           // (a && b) true  — both held; (a || b) false — both failed.
-          return this.refine(this.refine(env, cond.left, branch), cond.right, branch);
+          return this.refine(this.refine(env, cond.left, branch, allowPaths), cond.right, branch, allowPaths);
         }
         // (a && b) false — a failed, or a held and b failed; dually for ||.
-        const viaLeft = this.refine(cloneEnv(env), cond.left, branch);
-        const viaRight = this.refine(this.refine(cloneEnv(env), cond.left, !branch), cond.right, branch);
+        const viaLeft = this.refine(cloneEnv(env), cond.left, branch, allowPaths);
+        const viaRight = this.refine(
+          this.refine(cloneEnv(env), cond.left, !branch, allowPaths),
+          cond.right,
+          branch,
+          allowPaths,
+        );
         return joinEnv(viaLeft, viaRight);
       }
       case "bin": {
@@ -1100,24 +1154,28 @@ class FnAnalyzer {
         const a = this.evalPure(cond.left, env);
         const b = this.evalPure(cond.right, env);
         const out = cloneEnv(env);
-        if (cond.left.kind === "varRef") out.set(cond.left.localId, refineLhs(op, a, b, clearNaN));
-        if (cond.right.kind === "varRef") out.set(cond.right.localId, refineLhs(FLIP[op]!, b, a, clearNaN));
+        const leftKey = this.refinementKey(cond.left, allowPaths);
+        const rightKey = this.refinementKey(cond.right, allowPaths);
+        if (leftKey !== null) out.set(leftKey, refineLhs(op, a, b, clearNaN));
+        if (rightKey !== null) out.set(rightKey, refineLhs(FLIP[op]!, b, a, clearNaN));
         return out;
       }
       case "toBool": {
         const inner = cond.operand;
-        if (inner.type.kind !== "f64" || inner.kind !== "varRef" || !this.isPure(inner)) return env;
-        const v = envGet(env, inner.localId);
+        if (inner.type.kind !== "f64" || !this.isPure(inner)) return env;
+        const key = this.refinementKey(inner, allowPaths);
+        if (key === null) return env;
+        const v = this.evalPure(inner, env);
         const out = cloneEnv(env);
         if (branch) {
           // Truthy: not NaN, not zero — endpoint exclusion when whole.
           let r: AbsVal = { ...v, maybeNaN: false };
           if (r.whole && r.lo === 0 && r.hi >= 1) r = absVal(1, r.hi, r.whole, false, r.spelling);
           else if (r.whole && r.hi === 0 && r.lo <= -1) r = absVal(r.lo, -1, r.whole, false, r.spelling);
-          out.set(inner.localId, r);
+          out.set(key, r);
         } else {
           // Falsy: 0, -0, or NaN.
-          out.set(inner.localId, meetInterval(v, 0, 0, false));
+          out.set(key, meetInterval(v, 0, 0, false));
         }
         return out;
       }
@@ -1153,10 +1211,18 @@ class FnAnalyzer {
       case "boolLit":
       case "varRef":
       case "unitLit":
+      case "selfRef":
         return true;
+      case "recordGet":
+      case "fieldGet":
+        return this.staticAccessPath(e) !== null;
       case "bin":
         return this.isPure(e.left) && this.isPure(e.right);
       case "unary":
+        return this.isPure(e.operand);
+      case "logical":
+        return this.isPure(e.left) && this.isPure(e.right);
+      case "toBool":
         return this.isPure(e.operand);
       default:
         return false;
@@ -1170,6 +1236,12 @@ class FnAnalyzer {
         return constVal(e.value, e.spelling);
       case "varRef":
         return e.type.kind === "f64" ? envGet(env, e.localId) : { ...TOP };
+      case "recordGet": {
+        const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
+        if (slot === undefined || e.type.kind !== "f64") return { ...TOP };
+        const key = this.pathKey(e, slot.cls);
+        return key === null ? classSeed(slot.cls) : envGet(env, key);
+      }
       case "unary":
         if (e.op === "-") return transferNeg(this.evalPure(e.operand, env));
         if (e.op === "~") return transferBitNot(this.evalPure(e.operand, env));
@@ -1180,6 +1252,84 @@ class FnAnalyzer {
         return this.evalMath(e, env, false) ?? { ...TOP };
       default:
         return { ...TOP };
+    }
+  }
+
+  /** A canonical static data path. Source spellings that lower to the same
+   * IR access (`m.total`, `m["total"]`) intentionally share a key; distinct
+   * receiver bindings never do. Accessors/dynamic keys/computed receivers
+   * have different IR nodes and are excluded. */
+  private staticAccessPath(
+    e: IrExpr,
+  ): { rootId: string | null; steps: string[][] } | null {
+    switch (e.kind) {
+      case "varRef":
+        return { rootId: e.localId, steps: [["var", e.localId]] };
+      case "selfRef":
+        return { rootId: null, steps: [["self"]] };
+      case "recordGet": {
+        const base = this.staticAccessPath(e.obj);
+        if (base === null) return null;
+        return { rootId: base.rootId, steps: [...base.steps, ["record", e.shapeId, e.field]] };
+      }
+      case "fieldGet": {
+        const base = this.staticAccessPath(e.obj);
+        if (base === null) return null;
+        return { rootId: base.rootId, steps: [...base.steps, ["field", e.className, e.field]] };
+      }
+      default:
+        return null;
+    }
+  }
+
+  private readonly pathRoots = new Map<string, string | null>();
+
+  private pathKey(e: IrExpr, cls: IntClass): string | null {
+    const path = this.staticAccessPath(e);
+    if (path === null) return null;
+    const prefix = cls === "i64" ? PATH_I64_PREFIX : PATH_U64_PREFIX;
+    const key = `${prefix}${JSON.stringify(path.steps)}`;
+    this.pathRoots.set(key, path.rootId);
+    return key;
+  }
+
+  private refinementKey(e: IrExpr, allowPaths: boolean): string | null {
+    if (e.kind === "varRef") return e.localId;
+    if (!allowPaths || e.kind !== "recordGet" || e.type.kind !== "f64") return null;
+    const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
+    return slot === undefined ? null : this.pathKey(e, slot.cls);
+  }
+
+  /** Path facts are admitted only when the entire guard is synchronous,
+   * call-free, assignment-free static data access. This prevents a later
+   * subexpression from mutating a field and `refine` subsequently
+   * reconstructing a stale fact from the guard syntax. */
+  private stablePathGuard(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "numLit":
+      case "strLit":
+      case "boolLit":
+      case "unitLit":
+      case "varRef":
+      case "selfRef":
+        return true;
+      case "recordGet":
+      case "fieldGet":
+        return this.staticAccessPath(e) !== null;
+      case "bin":
+      case "logical":
+        return this.stablePathGuard(e.left) && this.stablePathGuard(e.right);
+      case "unary":
+      case "toBool":
+        return this.stablePathGuard(e.operand);
+      default:
+        return false;
+    }
+  }
+
+  private clearPathsRootedAt(env: Env, localId: string): void {
+    for (const k of [...env.keys()]) {
+      if (pathClassOfKey(k) !== null && this.pathRoots.get(k) === localId) env.delete(k);
     }
   }
 
@@ -1252,13 +1402,15 @@ class FnAnalyzer {
       }
       case "assignExpr": {
         const v = this.evalExpr(e.value, env);
+        this.clearPathsRootedAt(env, e.localId);
         if (this.bindingIsF64(e.localId)) env.set(e.localId, v);
         return v;
       }
       case "ternary": {
         this.evalExpr(e.cond, env);
-        const thenEnv = this.refine(cloneEnv(env), e.cond, true);
-        const elseEnv = this.refine(cloneEnv(env), e.cond, false);
+        const allowPaths = this.stablePathGuard(e.cond);
+        const thenEnv = this.refine(cloneEnv(env), e.cond, true, allowPaths);
+        const elseEnv = this.refine(cloneEnv(env), e.cond, false, allowPaths);
         const a = thenEnv === null ? BOTTOM : this.evalExpr(e.then, thenEnv);
         const b = elseEnv === null ? BOTTOM : this.evalExpr(e.else_, elseEnv);
         mergeInto(env, joinEnv(thenEnv, elseEnv));
@@ -1310,9 +1462,13 @@ class FnAnalyzer {
       }
       case "libCall": {
         const math = this.evalMath(e, env, true);
-        if (math !== null) return math;
+        if (math !== null) {
+          clearPathFacts(env);
+          return math;
+        }
         for (const a of e.args) this.evalExpr(a, env);
         if (e.args.some((a) => typeContainsFunc(a.type))) this.havocAllGlobals(env);
+        clearPathFacts(env);
         return { ...TOP };
       }
       case "callValue":
@@ -1324,6 +1480,14 @@ class FnAnalyzer {
       case "intrinsic": {
         for (const v of childExprs(e)) this.evalExpr(v, env);
         this.havocAllGlobals(env);
+        return { ...TOP };
+      }
+      case "ffiCall":
+      case "yieldExpr":
+      case "awaitExpr":
+      case "awaitUnionExpr": {
+        for (const v of childExprs(e)) this.evalExpr(v, env);
+        clearPathFacts(env);
         return { ...TOP };
       }
       case "recordLit": {
@@ -1344,17 +1508,28 @@ class FnAnalyzer {
         // — instead of a spurious may-be-NaN wholeness refusal).
         this.evalExpr(e.obj, env);
         const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
-        if (slot !== undefined && e.type.kind === "f64") return classSeed(slot.cls);
+        if (slot !== undefined && e.type.kind === "f64") {
+          const key = this.pathKey(e, slot.cls);
+          return key === null ? classSeed(slot.cls) : envGet(env, key);
+        }
         return { ...TOP };
       }
+      case "fieldGet":
+        this.evalExpr(e.obj, env);
+        return { ...TOP };
       default: {
         for (const v of childExprs(e)) this.evalExpr(v, env);
+        // Unmodeled expressions do not participate in the cheap
+        // straight-line proof. Some can invoke runtime/user machinery;
+        // refusing to carry a field fact through them is the safe verdict.
+        clearPathFacts(env);
         return { ...TOP };
       }
     }
   }
 
   private havocCall(callee: string, env: Env): void {
+    clearPathFacts(env);
     if (this.effects.havocAll.has(callee) || !this.effects.perFn.has(callee)) {
       this.havocAllGlobals(env);
       return;
@@ -1363,6 +1538,7 @@ class FnAnalyzer {
   }
 
   private havocAllGlobals(env: Env): void {
+    clearPathFacts(env);
     for (const k of [...env.keys()]) {
       if (isGlobalId(k)) env.delete(k);
     }
