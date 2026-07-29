@@ -7735,6 +7735,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-code/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-code/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/fixtures/npm/cases/typed-callbacks/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/typed-callbacks/main.ts"

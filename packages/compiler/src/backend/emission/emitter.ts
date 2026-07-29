@@ -723,6 +723,15 @@ export class CEmitter {
     // drains the engine's job queue at quiescence, so npm-importing
     // programs always run the loop, like Node always runs its own.
     const usesIsland = embedded !== undefined && embedded.modules.length > 0;
+    // A pending module root normally selects Node's exit status 13, but
+    // an already-failed node:test run or an embedded process.exitCode has
+    // higher precedence. Keep this expression shared with the ordinary
+    // successful epilogue so both paths consult the same program verdict.
+    const programExitCode = moduleUsesNodeTest(this.mod)
+      ? "scr_test_exit_code()"
+      : usesIsland
+        ? "scr_island_exit_code()"
+        : "0";
     // Exit listeners can read MODULE GLOBALS directly (test/common's
     // runCallChecks over its mustCallChecks ledger — an interned top-level
     // closure, no capture boxes keeping anything alive), so they must run
@@ -868,7 +877,13 @@ export class CEmitter {
             ...(asyncEntry
               ? [
                   `  if (sc_top_status == 13) {`,
-                  `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 13;`,
+                  `    int sc_exit_status = ${programExitCode};`,
+                  `    if (sc_exit_status == 0) sc_exit_status = sc_top_status;`,
+                  // finish_top_level initially notes 13; replace that hint
+                  // before exit listeners run when a higher-priority
+                  // verdict has already selected the process status.
+                  `    scr_exit_code_note(sc_exit_status);`,
+                  `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return sc_exit_status;`,
                   `  }`,
                 ]
               : []),
@@ -882,11 +897,7 @@ export class CEmitter {
       // Island programs exit with process.exitCode when the embedded
       // graph set it (Node's implicit exit status: set it, return
       // normally, exit with it) — 0 when never set.
-      ...(moduleUsesNodeTest(this.mod)
-        ? [`  return scr_test_exit_code();`]
-        : usesIsland
-          ? [`  return scr_island_exit_code();`]
-          : [`  return 0;`]),
+      `  return ${programExitCode};`,
       `}`,
       ``,
     );
