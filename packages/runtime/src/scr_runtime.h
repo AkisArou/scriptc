@@ -3338,6 +3338,9 @@ bool scr_await_bool(ScrPromise *p);
 ScrStr *scr_await_str(ScrPromise *p); /* +1 */
 void *scr_await_ref(ScrPromise *p);   /* +1 via the stored retain */
 void scr_await_void(ScrPromise *p);
+/* Internal ESM dependency wait: parks while pending but, unlike a
+ * JavaScript await expression, does not hop when already settled. */
+void scr_module_await(ScrPromise *p);
 /* After the root-aware event loop returns, inspect the executable's async
  * module-root promise without another microtask hop: 0 = fulfilled,
  * 1 = rejected, 13 = still pending with no ref'd work capable of settling
@@ -3886,8 +3889,10 @@ bool scr_zlib_inflate_exact(const unsigned char *src, size_t src_len,
 
 /* The island process shim's implicit exit status (process.exitCode):
  * Node's set-it-and-return-normally contract. The emitted main returns
- * this after the loop drains; 0 when never set. */
+ * this after the loop drains; 0 when never set. The version advances on
+ * every assignment so an exit listener can override a provisional status. */
 int scr_island_exit_code(void);
+size_t scr_island_exit_code_version(void);
 
 /* ── web-platform globals (scr_web.c) ─────────────────────────────────
  * The pure-JS prelude defining the island's WHATWG subset (streams et

@@ -390,7 +390,12 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
   function dynNsBuilderOf(L: Lowerer, dep: ts.SourceFile, loc: IrExpr["loc"]): string | null {
     const cached = L.dynNsBuilders.get(dep);
     if (cached !== undefined) return cached;
-    const initName = L.initNameOf.get(dep);
+    // Every member of an async evaluation cycle shares the cycle root's
+    // completion verdict. A member's own body promise can fulfill before
+    // the root finishes (or later rejects), so dynamic import must wait
+    // for the root before exposing this member's namespace.
+    const evalDep = L.asyncCycleRootOf.get(dep) ?? dep;
+    const initName = L.initNameOf.get(evalDep);
     if (initName === undefined) return null;
     const rawTag = L.fileTag.get(dep) ?? "";
     const name = `%dynns.${rawTag === "" ? "e." : rawTag.replace(/^%/, "")}`;

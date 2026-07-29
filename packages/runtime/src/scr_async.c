@@ -1270,6 +1270,17 @@ void *scr_await_ref(ScrPromise *p) {
 }
 void scr_await_void(ScrPromise *p) { scr_await_settled(p); }
 
+/* ECMAScript's INTERNAL module-dependency wait. Unlike a user-authored
+ * await, an already-completed dependency does not introduce a promise-job
+ * hop: the evaluator continues synchronously into the importer. A pending
+ * dependency still parks this module fiber, and rejection propagates into
+ * it exactly like an ordinary await. */
+void scr_module_await(ScrPromise *p) {
+  while (p->state == SCR_PROM_PENDING) scr_await_park(p);
+  scr_prom_observe(p);
+  if (p->state == SCR_PROM_REJECTED) scr_promise_rethrow(p);
+}
+
 int scr_promise_finish_top_level(ScrPromise *p) {
   if (p->state == SCR_PROM_PENDING) {
     /* ECMAScript module evaluation is still pending, but Node's ref'd

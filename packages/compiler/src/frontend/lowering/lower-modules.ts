@@ -1698,7 +1698,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
     try {
       const loc0: SrcLoc = { file: sf.fileName, start: 0, end: 0 };
       const header: IrStmt[] = [];
-      const asyncDeps: { localId: string; loc: SrcLoc }[] = [];
+      const asyncDeps: { localId: string; loc: SrcLoc; cycleInternal: boolean }[] = [];
       const guardId = L.moduleGuardOf.get(sf);
       if (guardId !== undefined) {
         header.push({
@@ -1731,6 +1731,12 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
           if (depInit !== undefined) {
             const loc = locOf(stmt);
             const depAsync = L.asyncInitFiles.has(dep);
+            // This edge closes the active DFS cycle. The ancestor's init
+            // is already running; calling its spawn wrapper would create
+            // a temporary fulfilled promise, and awaiting that cache hit
+            // would insert a microtask checkpoint that ECMAScript module
+            // evaluation does not have.
+            if (depAsync && L.asyncModuleBackEdges.get(sf)?.has(dep)) continue;
             if (depAsync && !isAsync) {
               L.unsupported(
                 "SC1090",
@@ -1753,7 +1759,13 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
               // suspended; the importer body waits for all of them.
               const p = L.declareHiddenLocal("%depInit", { kind: "promise", inner: VOID });
               header.push({ kind: "varDecl", localId: p.id, init: call, loc });
-              asyncDeps.push({ localId: p.id, loc });
+              asyncDeps.push({
+                localId: p.id,
+                loc,
+                cycleInternal:
+                  L.asyncCycleRootOf.get(sf) !== undefined &&
+                  L.asyncCycleRootOf.get(sf) === L.asyncCycleRootOf.get(dep),
+              });
             } else {
               header.push({ kind: "exprStmt", expr: call, loc });
             }
@@ -1763,14 +1775,17 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
       if (asyncDeps.length === 1) {
         const dep = asyncDeps[0]!;
         const promiseT: IrType = { kind: "promise", inner: VOID };
+        const value: IrExpr = {
+          kind: "varRef",
+          localId: dep.localId,
+          type: promiseT,
+          loc: dep.loc,
+        };
         header.push({
           kind: "exprStmt",
-          expr: {
-            kind: "awaitExpr",
-            value: { kind: "varRef", localId: dep.localId, type: promiseT, loc: dep.loc },
-            type: VOID,
-            loc: dep.loc,
-          },
+          expr: dep.cycleInternal
+            ? { kind: "intrinsic", name: "module.await", args: [value], type: VOID, loc: dep.loc }
+            : { kind: "awaitExpr", value, type: VOID, loc: dep.loc },
           loc: dep.loc,
         });
       } else if (asyncDeps.length > 1) {
@@ -1796,7 +1811,9 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         };
         header.push({
           kind: "exprStmt",
-          expr: { kind: "awaitExpr", value: all, type: VOID, loc },
+          expr: asyncDeps.every((dep) => dep.cycleInternal)
+            ? { kind: "intrinsic", name: "module.await", args: [all], type: VOID, loc }
+            : { kind: "awaitExpr", value: all, type: VOID, loc },
           loc,
         });
       }

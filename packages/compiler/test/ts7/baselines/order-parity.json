@@ -5371,6 +5371,39 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2656-top-level-await-cycle-order/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2656-top-level-await-cycle-order/a.ts",
+    "<repo>/tests/corpus/2656-top-level-await-cycle-order/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2657-top-level-await-cycle-dynamic/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2657-top-level-await-cycle-dynamic/b.ts",
+    "<repo>/tests/corpus/2657-top-level-await-cycle-dynamic/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2658-top-level-await-sync-completion/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2658-top-level-await-sync-completion/dep.ts",
+    "<repo>/tests/corpus/2658-top-level-await-sync-completion/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2659-top-level-await-dynamic-cycle/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2659-top-level-await-dynamic-cycle/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2660-top-level-await-cycle-rejection/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2660-top-level-await-cycle-rejection/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -7738,6 +7771,12 @@
   "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-code/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-code/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-listener/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/top-level-await-pending-exit-listener/main.ts"
    ],
    "diags": []
   },

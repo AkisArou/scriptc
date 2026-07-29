@@ -2143,6 +2143,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, `${E.caughtToDynHelper()}(${c.name})`);
       }
       case "intrinsic": {
+        if (e.name === "module.await") {
+          // The module evaluator's dependency wait: park only while the
+          // promise is pending. A settled dependency continues in this
+          // turn (no JavaScript-await hop); a rejection rethrows.
+          const p = E.emitExpr(e.args[0]!);
+          E.line(`scr_module_await(${p.name});${E.srcComment(e.loc)}`);
+          E.emitPendingCheck();
+          return { name: "", type: e.type };
+        }
         if (e.name === "promise.all") {
           // The runtime countdown combinator: a pre-sized values array
           // (filled per INPUT index by the per-kind store helper as

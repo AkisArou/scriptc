@@ -3287,6 +3287,17 @@ function validateFunction(
         break;
       }
       case "intrinsic":
+        if (e.name === "module.await") {
+          if (e.args.length !== 1) err("module.await takes exactly one argument", e.loc);
+          for (const a of e.args) {
+            checkExpr(a);
+            if (a.type.kind !== "promise" || a.type.inner.kind !== "void") {
+              err(`${typeKey(a.type)} argument to module.await (needs promise<void>)`, a.loc);
+            }
+          }
+          if (e.type.kind !== "void") err("module.await must be void", e.loc);
+          break;
+        }
         if (e.name === "promise.all") {
           // ONE argument: an array of promises whose inner type is the
           // result's array element (or void, collapsing to promise<void>).

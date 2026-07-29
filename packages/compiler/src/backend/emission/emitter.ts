@@ -727,7 +727,9 @@ export class CEmitter {
     // an already-failed node:test run or an embedded process.exitCode has
     // higher precedence. Keep this expression shared with the ordinary
     // successful epilogue so both paths consult the same program verdict.
-    const programExitCode = moduleUsesNodeTest(this.mod)
+    const usesNodeTest = moduleUsesNodeTest(this.mod);
+    const programExitUsesIsland = !usesNodeTest && usesIsland;
+    const programExitCode = usesNodeTest
       ? "scr_test_exit_code()"
       : usesIsland
         ? "scr_island_exit_code()"
@@ -879,11 +881,24 @@ export class CEmitter {
                   `  if (sc_top_status == 13) {`,
                   `    int sc_exit_status = ${programExitCode};`,
                   `    if (sc_exit_status == 0) sc_exit_status = sc_top_status;`,
+                  ...(programExitUsesIsland && runExitListeners !== ""
+                    ? [`    size_t sc_exit_code_version = scr_island_exit_code_version();`]
+                    : []),
                   // finish_top_level initially notes 13; replace that hint
                   // before exit listeners run when a higher-priority
                   // verdict has already selected the process status.
                   `    scr_exit_code_note(sc_exit_status);`,
-                  `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return sc_exit_status;`,
+                  ...(runExitListeners !== "" ? [`    ${runExitListeners.trim()}`] : []),
+                  ...(programExitUsesIsland && runExitListeners !== ""
+                    ? [
+                        `    if (scr_island_exit_code_version() != sc_exit_code_version) {`,
+                        `      sc_exit_status = scr_island_exit_code();`,
+                        `      scr_exit_code_note(sc_exit_status);`,
+                        `    }`,
+                      ]
+                    : []),
+                  ...(needsRelease ? [`    sc_release_globals();`] : []),
+                  `    return sc_exit_status;`,
                   `  }`,
                 ]
               : []),

@@ -1046,6 +1046,15 @@ export class Lowerer {
    * reference on cache hits, matching Node's one ModuleJob promise per
    * module even across diamonds and concurrent dynamic imports. */
   readonly modulePromiseOf = new Map<ts.SourceFile, string>();
+  /** Static ESM edges that close the module-order DFS back to an active
+   * ancestor. The dependency is already evaluating, so its body must not
+   * be called/awaited again: ECMAScript cycle evaluation treats this as a
+   * cache hit without inserting a promise-job checkpoint. */
+  readonly asyncModuleBackEdges = new Map<ts.SourceFile, Set<ts.SourceFile>>();
+  /** Async import-cycle member → the cycle's evaluation root for this
+   * program graph. Dynamic imports of any member wait for this root, not
+   * merely for that member's own body promise. */
+  readonly asyncCycleRootOf = new Map<ts.SourceFile, ts.SourceFile>();
   /** Record-shape interner: canonical (name-sorted) field list → shapeId.
    * Threaded into every mapType call; its `shapes` array becomes
    * IrModule.records. */
@@ -1649,6 +1658,79 @@ export class Lowerer {
         type: { kind: "promise", inner: VOID },
         mutable: true,
       });
+    }
+
+    const orderIndex = new Map(parts.map((fp, i) => [fp.sf, i] as const));
+    const partSet = new Set(parts.map((fp) => fp.sf));
+    const staticDeps = (sf: ts.SourceFile): ts.SourceFile[] =>
+      orderedImportsOf(this.program, sf)
+        .map(({ dep }) => dep)
+        .filter((dep): dep is ts.SourceFile => dep !== null && dep !== sf && partSet.has(dep));
+
+    // Tarjan SCCs over the same static graph. For each admitted async
+    // cycle, the last postorder member is the evaluation root selected by
+    // the graph's DFS. A dynamic import of any member must wait for that
+    // root; a member-local body promise can fulfill while the rest of the
+    // cycle is still evaluating (or before the root later rejects).
+    let nextIndex = 0;
+    const indexOf = new Map<ts.SourceFile, number>();
+    const lowOf = new Map<ts.SourceFile, number>();
+    const stack: ts.SourceFile[] = [];
+    const onStack = new Set<ts.SourceFile>();
+    const componentOf = new Map<ts.SourceFile, number>();
+    let nextComponent = 0;
+    const visit = (sf: ts.SourceFile): void => {
+      const at = nextIndex++;
+      indexOf.set(sf, at);
+      lowOf.set(sf, at);
+      stack.push(sf);
+      onStack.add(sf);
+      for (const dep of staticDeps(sf)) {
+        if (!indexOf.has(dep)) {
+          visit(dep);
+          lowOf.set(sf, Math.min(lowOf.get(sf)!, lowOf.get(dep)!));
+        } else if (onStack.has(dep)) {
+          lowOf.set(sf, Math.min(lowOf.get(sf)!, indexOf.get(dep)!));
+        }
+      }
+      if (lowOf.get(sf) !== indexOf.get(sf)) return;
+      const componentId = nextComponent++;
+      const component: ts.SourceFile[] = [];
+      for (;;) {
+        const member = stack.pop()!;
+        onStack.delete(member);
+        componentOf.set(member, componentId);
+        component.push(member);
+        if (member === sf) break;
+      }
+      if (component.length < 2 || !component.some((member) => this.asyncInitFiles.has(member))) return;
+      const root = component.reduce((a, b) => orderIndex.get(a)! > orderIndex.get(b)! ? a : b);
+      for (const member of component) {
+        if (this.asyncInitFiles.has(member)) this.asyncCycleRootOf.set(member, root);
+      }
+    };
+    for (const fp of parts) if (!indexOf.has(fp.sf)) visit(fp.sf);
+
+    // Within an SCC, moduleOrder is DFS postorder: ordinary dependency
+    // edges point to an earlier member, while the cycle-closing edge points
+    // to an active ancestor that appears later. Omit that recursive
+    // init/await entirely. Requiring SCC membership matters for dynamically
+    // reached modules whose static graph points back into the startup graph:
+    // that dependency is not a static cache-hit cycle and must still wait.
+    for (const fp of parts) {
+      const from = orderIndex.get(fp.sf)!;
+      for (const dep of staticDeps(fp.sf)) {
+        if (
+          !this.asyncInitFiles.has(dep) ||
+          componentOf.get(fp.sf) !== componentOf.get(dep) ||
+          orderIndex.get(dep)! <= from
+        ) {
+          continue;
+        }
+        let back = this.asyncModuleBackEdges.get(fp.sf);
+        if (!back) this.asyncModuleBackEdges.set(fp.sf, (back = new Set()));
+        back.add(dep);
+      }
     }
   }
 

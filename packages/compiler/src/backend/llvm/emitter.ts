@@ -5871,6 +5871,15 @@ class LlEmitter {
       case "libCall":
         return this.emitLibCall(e);
       case "intrinsic": {
+        if (e.name === "module.await") {
+          // Internal ESM dependency wait: pending promises park the module
+          // fiber, while settled ones continue synchronously.
+          const p = this.emitExpr(e.args[0]!);
+          this.declare(`declare void @scr_module_await(ptr)`);
+          B.line(`call void @scr_module_await(ptr ${p.name})`);
+          this.emitPendingCheck();
+          return { name: "", type: e.type };
+        }
         if (e.name === "promise.all") {
           // The runtime countdown combinator (emit-exprs.ts): a pre-sized
           // values array filled per INPUT index as entries fulfill, plus
