@@ -5315,13 +5315,12 @@ export function canConvertToDyn(
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
   if (isJsonSafeType(t, getRecord, getUnion)) return true;
-  // bytes<u8> is a dyn kind the walker boxes ANYWHERE (payload copied),
-  // including nested in records/arrays/unions — the tls/https options
-  // record's cert/key/ca Buffers. isJsonSafeType rejects nested bytes
-  // (no JSON-exact round trip), but dynFrom needs only that the walker
-  // can build the dyn value, which it can — so canConvertToDyn folds the
-  // bytes-bearing composites in beyond the JSON-safe core.
-  if (canBoxBytesComposite(t, getRecord, getUnion)) return true;
+  // bytes<u8> and boxable functions are dyn kinds the walker boxes
+  // ANYWHERE (bytes copied, functions held by identity), including nested
+  // in records/arrays/unions. isJsonSafeType rejects them, but dynFrom
+  // needs only that the walker can build the dyn value, so this composite
+  // fold extends the JSON-safe core.
+  if (canBoxDynComposite(t, getRecord, getUnion)) return true;
   if (t.kind === "bytes" && t.elem === "u8") return true;
   // %Error converts as the checked-dynamic tree's error encoding ({%error, name, message,
   // code?} — the caughtToDyn shape, scr_dyn_from_error): the dyn 'error'
@@ -5356,13 +5355,13 @@ export function canConvertToDyn(
   return false;
 }
 
-/** The bytes-bearing extension of the dynFrom domain: JSON-safe scalars
- * plus bytes<u8> anywhere, recursing through records (fields + index
- * value), arrays, and unit-armed unions — exactly the sc_td_* walker's
- * capability for the tls/https options-record shapes. Returns false for
- * a composite carrying any kind the walker cannot box (funcs, Maps,
- * handles nested in a record); those still fence. */
-function canBoxBytesComposite(
+/** The composite extension of the dynFrom domain: JSON-safe scalars plus
+ * bytes<u8> and boxable functions anywhere, recursing through records
+ * (fields + index value), arrays, and unit-armed unions — exactly the
+ * sc_td_* walker's capability. Returns false for a composite carrying a
+ * kind the walker cannot box (Maps or handles nested in a record); those
+ * still fence. */
+function canBoxDynComposite(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
@@ -5378,23 +5377,25 @@ function canBoxBytesComposite(
       return true;
     case "bytes":
       return t.elem === "u8";
+    case "func":
+      return canBoxFuncIntoDyn(t, getRecord, getUnion);
     case "array":
-      return canBoxBytesComposite(t.elem, getRecord, getUnion, visiting);
+      return canBoxDynComposite(t.elem, getRecord, getUnion, visiting);
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
       // Recursive shapes answer coinductively, like isJsonSafeType.
       if (visiting.has(t.shapeId)) return true;
       visiting.add(t.shapeId);
-      if (!shape.fields.every((f) => canBoxBytesComposite(f.type, getRecord, getUnion, visiting))) return false;
-      return !shape.indexValue || canBoxBytesComposite(shape.indexValue, getRecord, getUnion, visiting);
+      if (!shape.fields.every((f) => canBoxDynComposite(f.type, getRecord, getUnion, visiting))) return false;
+      return !shape.indexValue || canBoxDynComposite(shape.indexValue, getRecord, getUnion, visiting);
     }
     case "union": {
       const def = getUnion(t.unionId);
       if (!def) return false;
       if (visiting.has(t.unionId)) return true;
       visiting.add(t.unionId);
-      return def.arms.every((a) => canBoxBytesComposite(a, getRecord, getUnion, visiting));
+      return def.arms.every((a) => canBoxDynComposite(a, getRecord, getUnion, visiting));
     }
     default:
       return false;

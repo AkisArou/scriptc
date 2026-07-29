@@ -89,7 +89,10 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fetch.abortNow": { argTypes: [DYN], result: DYN },
   "fetch.abortAny": { argTypes: [DYN], result: DYN },
   "fetch.streamNew": { argTypes: [DYN], result: DYN },
-  "fetch.streamFrom": { argTypes: [DYN], result: DYN },
+  // Program-dependent iterable: typed arrays/bytes/string stay intact so
+  // the native stream can pull lazily; checked-dynamic values are the
+  // fallback. The libCall validator below checks the closed set.
+  "fetch.streamFrom": { argTypes: [null], result: DYN },
   "island.eval": { argTypes: [STRING], result: STRING },
   "island.import": { argTypes: [STRING, STRING, STRING], result: JSVAL },
   "island.importDyn": { argTypes: [STRING], result: JSVAL },
@@ -3447,6 +3450,26 @@ function validateFunction(
           const want = sig.argTypes[i];
           if (want) expectType(a, want, `libCall ${e.fn} arg ${i}`);
         });
+        if (e.fn === "fetch.streamFrom") {
+          const t = e.args[0]?.type;
+          const ok =
+            t?.kind === "string" ||
+            (t?.kind === "bytes" && t.elem === "u8") ||
+            (t?.kind === "array" &&
+              canConvertToDyn(
+                t.elem,
+                (id) => records.get(id),
+                (id) => unions.get(id),
+              )) ||
+            t?.kind === "dyn";
+          if (!ok) {
+            err(
+              `libCall fetch.streamFrom arg 0: expected a supported iterable, got ${t?.kind}`,
+              e.loc,
+            );
+          }
+          break;
+        }
         if (e.fn === "string.fromCharCode") {
           // One packed f64[] or one bytes value (the spread form).
           const t = e.args[0]?.type;

@@ -913,6 +913,9 @@ class LlEmitter {
    * typeKey → thunk symbol (CEmitter.resolveThunks). */
   private readonly resolveThunks = new Map<string, string>();
   private readonly resolveThunkDefs: string[] = [];
+  /** ReadableStream.from adapters keep typed arrays by reference and box
+   * one current element per pull. */
+  private readonly streamFromArrayAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
   readonly recordsById = new Map<string, IrRecordShape>();
   readonly tracedShapes: Set<string>;
@@ -9911,6 +9914,55 @@ class LlEmitter {
     B.terminate(`unreachable`);
   }
 
+  private streamFromArrayAdapter(
+    t: IrType & { kind: "array" },
+  ): string {
+    const elem = t.elem;
+    const key = typeKey(elem);
+    const existing = this.streamFromArrayAdapters.get(key);
+    if (existing) return existing;
+    const sym = `sc_sfa_${this.streamFromArrayAdapters.size}`;
+    this.streamFromArrayAdapters.set(key, sym);
+    const B = new BlockBuilder();
+    let value: string;
+    if (elem.kind === "f64") {
+      this.declare(`declare double @scr_arr_get_f64(ptr, double)`);
+      value = B.tmp();
+      B.line(
+        `${value} = call double @scr_arr_get_f64(ptr %a, double %i)`,
+      );
+    } else if (elem.kind === "bool") {
+      this.declare(`declare zeroext i1 @scr_arr_get_bool(ptr, double)`);
+      value = B.tmp();
+      B.line(
+        `${value} = call i1 @scr_arr_get_bool(ptr %a, double %i)`,
+      );
+    } else {
+      this.declare(`declare ptr @scr_arr_get_ref(ptr, double)`);
+      value = B.tmp();
+      B.line(
+        `${value} = call ptr @scr_arr_get_ref(ptr %a, double %i) ; +1`,
+      );
+    }
+    const boxed = B.tmp();
+    const valueTy =
+      elem.kind === "f64" ? "double" : elem.kind === "bool" ? "i1" : "ptr";
+    B.line(
+      `${boxed} = call ptr @${this.dyn.toDynHelper(elem)}(${valueTy} ${value})`,
+    );
+    if (isRefCounted(elem)) {
+      B.line(`call void ${releaseSym(this, elem)}(ptr ${value})`);
+    }
+    B.terminate(`ret ptr ${boxed}`);
+    this.resolveThunkDefs.push(
+      `define internal ptr @${sym}(ptr %a, double %i) ${FN_ATTRS} { ; ReadableStream.from array<${key}>`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return sym;
+  }
+
   /** The claimed libCall slice: args are BORROWED (owned temps of the
    * current frame), refcounted results come back +1. LLVM types derive
    * from the call site's IR types (exactly the contract the C prototypes
@@ -9922,6 +9974,27 @@ class LlEmitter {
     const B = this.B;
     // Loop liveness first (one table for generic and special shapes).
     if (USES_TIMERS_LIB_FNS.has(e.fn)) this.usesTimers = true;
+    if (e.fn === "fetch.streamFrom") {
+      const source = this.emitExpr(e.args[0]!);
+      let sym = "scr_fetch_stream_from";
+      let extra = "";
+      if (source.type.kind === "array") {
+        sym = "scr_fetch_stream_from_array";
+        extra = `, ptr @${this.streamFromArrayAdapter(source.type)}`;
+      } else if (source.type.kind === "bytes") {
+        sym = "scr_fetch_stream_from_bytes";
+      } else if (source.type.kind === "string") {
+        sym = "scr_fetch_stream_from_string";
+      }
+      this.declare(
+        `declare ptr @${sym}(ptr${source.type.kind === "array" ? ", ptr" : ""})`,
+      );
+      const raw = B.tmp();
+      B.line(`${raw} = call ptr @${sym}(ptr ${source.name}${extra})`);
+      const out = this.own({ name: raw, type: e.type });
+      this.emitPendingCheck();
+      return out;
+    }
     // The handful with non-generic shapes first.
     if (e.fn === "error.argTypeThrow") {
       // Always throws with the runtime-rendered Received tail (the

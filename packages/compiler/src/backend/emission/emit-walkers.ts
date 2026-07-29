@@ -1371,6 +1371,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // immutable-through-copies.
         d.push(`  return scr_dyn_retain(v);`);
         break;
+      case "func":
+        // Function-valued record/array fields (EventListenerObject's
+        // handleEvent method) box through the same identity-preserving
+        // closure bridge as a bare dynFrom function.
+        d.push(`  return ${dynFuncBoxHelper(E, t)}(v, NULL);`);
+        break;
       case "bytes":
         // bytes<u8> → the checked-dynamic tree's bytes kind, payload COPIED (the boundary
         // stance; stdin chunks into unknown-typed helpers).

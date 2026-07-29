@@ -4,7 +4,7 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
+import { DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canConvertToDyn, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
@@ -400,10 +400,29 @@ export function lowerStaticFetchCompanionCall(
     call.expression.name.text === "from" &&
     call.arguments.length === 1
   ) {
+    const source = L.lowerExpr(call.arguments[0]!);
+    const preserve =
+      source.type.kind === "string" ||
+      (source.type.kind === "bytes" && source.type.elem === "u8") ||
+      (source.type.kind === "array" &&
+        canConvertToDyn(
+          source.type.elem,
+          (id) => L.shapes.get(id),
+          (id) => L.unions.get(id),
+        )) ||
+      source.type.kind === "dyn";
     return {
       kind: "libCall",
       fn: "fetch.streamFrom",
-      args: [L.lowerExprExpecting(call.arguments[0]!, DYN)],
+      // Arrays and bytes must cross by reference: their iterators read each
+      // entry at pull time, so mutations after ReadableStream.from() remain
+      // observable just as they are in Node. Other supported iterable
+      // shapes retain the checked-dynamic fallback.
+      args: [
+        preserve
+          ? source
+          : L.coerceInto(call.arguments[0]!, source, DYN),
+      ],
       type: DYN,
       loc,
     };

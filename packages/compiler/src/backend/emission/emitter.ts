@@ -202,6 +202,11 @@ export class CEmitter {
    * read helpers (sc_rkg_*), per shapeId|result typeKey; dynamic-keyed
    * write helpers (sc_rks_*), per shapeId. */
   readonly toDynFns = new Map<string, string>();
+  /** ReadableStream.from typed-array element adapters, per element
+   * typeKey. The runtime retains the original array and calls one of these
+   * for each pull, preserving iterator-time reads without teaching the
+   * runtime the compiler's program-specific record/union layouts. */
+  readonly streamFromArrayAdapters = new Map<string, string>();
   /** The checked-dynamic function boundary's per-signature helpers (see
    * emit-walkers.ts): call thunks (sc_dfk_*), box builders (sc_dfb_*),
    * and dynCheck adapters (sc_dfa_*), each per func typeKey. */

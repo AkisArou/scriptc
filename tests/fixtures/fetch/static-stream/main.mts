@@ -130,6 +130,26 @@ try {
   console.log("released new closed:", caught.name, caught.message);
 }
 
+const liveValues = [1];
+const liveValuesReader = ReadableStream.from(liveValues).getReader();
+liveValues[0] = 2;
+liveValues.push(3);
+const liveFirst = await liveValuesReader.read();
+const liveSecond = await liveValuesReader.read();
+const liveDone = await liveValuesReader.read();
+console.log(
+  "stream from live array:",
+  liveFirst.value,
+  liveSecond.value,
+  liveDone.done,
+);
+
+const liveBytes = new Uint8Array([4]);
+const liveBytesReader = ReadableStream.from(liveBytes).getReader();
+liveBytes[0] = 5;
+const liveByte = await liveBytesReader.read();
+console.log("stream from live bytes:", liveByte.value);
+
 const stringReader = ReadableStream.from("😀a").getReader();
 const stringFirst = await stringReader.read();
 const stringSecond = await stringReader.read();
@@ -194,6 +214,39 @@ const selfRemovingListener = () => {
 mutationSignal.addEventListener("abort", selfRemovingListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("self-removing abort listener:", mutationCalls);
+
+const eventSignal = AbortSignal.timeout(0);
+eventSignal.addEventListener("abort", (event: Event) => {
+  console.log(
+    "abort event:",
+    event.type,
+    event.target === eventSignal,
+    event.currentTarget === eventSignal,
+  );
+});
+eventSignal.addEventListener("abort", null);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+const captureSignal = AbortSignal.timeout(0);
+let captureCalls = 0;
+const captureListener = () => {
+  captureCalls++;
+};
+captureSignal.addEventListener("abort", captureListener, false);
+captureSignal.addEventListener("abort", captureListener, true);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("capture listener identity:", captureCalls);
+
+const objectSignal = AbortSignal.timeout(0);
+let objectCalls = 0;
+const objectListener = {
+  handleEvent(event: Event) {
+    if (event.type === "abort") objectCalls++;
+  },
+};
+objectSignal.addEventListener("abort", objectListener);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("object abort listener:", objectCalls);
 
 for (const delay of [-1, Number.NaN, Number.POSITIVE_INFINITY, 4294967296]) {
   try {

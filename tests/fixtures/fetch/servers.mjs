@@ -14,7 +14,7 @@
  *   real proxy client sends) answers the current count.
  *
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
- * /headers-reuse /request-defaults /redirect /redirect-credentials
+ * /headers-reuse /request-defaults /raw-headers /redirect /redirect-credentials
  * /redirect-fragment/path /early-hints /invalid-utf8 /slow /drip
  * /chunked /gzip /gzip-concat /deflate /status-meta /no-content /sse,
  * 404 for the rest;
@@ -86,6 +86,9 @@ export async function startFetchServers() {
             acceptEncoding: req.headers["accept-encoding"] ?? null,
           }),
         );
+      } else if (url === "/raw-headers") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(req.rawHeaders));
       } else if (url === "/redirect") {
         res.writeHead(302, { location: "/text" });
         res.end();

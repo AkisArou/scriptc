@@ -58,6 +58,29 @@ console.log(
   "request defaults:",
   await (await fetch(`${process.argv[2]}/request-defaults`)).json(),
 );
+console.log(
+  "raw request headers:",
+  await (await fetch(`${process.argv[2]}/raw-headers`)).text(),
+);
+
+const forbiddenRequestHeaders: Array<
+  [string, Record<string, string>]
+> = [
+  ["connection", { connection: "x" }],
+  ["transfer-encoding", { "transfer-encoding": "chunked" }],
+  ["keep-alive", { "keep-alive": "timeout=5" }],
+  ["upgrade", { upgrade: "websocket" }],
+  ["expect", { expect: "100-continue" }],
+];
+for (const [name, headers] of forbiddenRequestHeaders) {
+  try {
+    await fetch(`${process.argv[2]}/text`, { headers });
+    console.log("forbidden request header unexpectedly sent:", name);
+  } catch (error) {
+    const caught = error as Error;
+    console.log("forbidden request header:", name, caught.name, caught.message);
+  }
+}
 
 const init: RequestInit = {
   method: "POST",

@@ -3840,6 +3840,13 @@ ScrDyn *scr_fetch_abort_now(ScrDyn *reason); /* borrowed reason; +1 handle */
 ScrDyn *scr_fetch_abort_any(ScrDyn *signals); /* borrowed array; +1 handle or NULL pending */
 ScrDyn *scr_fetch_stream_new(ScrDyn *source); /* borrowed source; +1 handle or NULL pending */
 ScrDyn *scr_fetch_stream_from(ScrDyn *iterable); /* borrowed iterable; +1 handle or NULL pending */
+ScrDyn *scr_fetch_stream_from_array(
+    ScrArr *iterable,
+    ScrDyn *(*item)(ScrArr *, double)); /* borrowed array/callback; +1 handle */
+ScrDyn *scr_fetch_stream_from_bytes(
+    ScrBytes *iterable); /* borrowed bytes; +1 handle */
+ScrDyn *scr_fetch_stream_from_string(
+    ScrStr *iterable); /* borrowed string; +1 handle */
 
 /* ── dynamic island (scr_island.c; --dynamic builds ONLY) ────────────
  * The embedded QuickJS-ng engine. Compiled and linked only under

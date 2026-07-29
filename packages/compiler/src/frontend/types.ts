@@ -20,6 +20,8 @@ export { typeKey };
 export const ISLAND_AMBIENT_TYPES = [
   "Response",
   "RequestInit",
+  "Event",
+  "EventTarget",
   "AbortSignal",
   "Headers",
   "ReadableStream",

@@ -2,12 +2,46 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
-import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
+
+function streamFromArrayAdapter(
+  E: CEmitter,
+  t: IrType & { kind: "array" },
+): string {
+  const elem = t.elem;
+  const key = typeKey(elem);
+  const existing = E.streamFromArrayAdapters.get(key);
+  if (existing) return existing;
+  const sym = `sc_sfa_${E.streamFromArrayAdapters.size}`;
+  E.streamFromArrayAdapters.set(key, sym);
+  const sig = `static ScrDyn *${sym}(ScrArr *sc_a, double sc_i)`;
+  E.walkerProtos.push(`${sig}; /* ReadableStream.from array<${key}> */`);
+  const d = [`${sig} { /* ReadableStream.from array<${key}> */`];
+  if (elem.kind === "f64") {
+    d.push(
+      `  return ${E.toDynHelper(elem)}(scr_arr_get_f64(sc_a, sc_i));`,
+    );
+  } else if (elem.kind === "bool") {
+    d.push(
+      `  return ${E.toDynHelper(elem)}(scr_arr_get_bool(sc_a, sc_i));`,
+    );
+  } else {
+    d.push(
+      `  ${cDecl(elem, "sc_v")} = (${cType(elem).trim()})scr_arr_get_ref(sc_a, sc_i);`,
+      `  ScrDyn *sc_d = ${E.toDynHelper(elem)}(sc_v);`,
+      `  ${releaseCallC(elem, "sc_v")};`,
+      `  return sc_d;`,
+    );
+  }
+  d.push(`}`, ``);
+  E.walkerDefs.push(...d);
+  return sym;
+}
 
 
 
@@ -2369,6 +2403,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fetch_stream_new(${arg(0)})`);
           case "fetch.streamFrom":
             E.usesTimers = true;
+            if (e.args[0]!.type.kind === "array") {
+              const adapter = streamFromArrayAdapter(E, e.args[0]!.type);
+              return finish(
+                `scr_fetch_stream_from_array(${arg(0)}, &${adapter})`,
+              );
+            }
+            if (e.args[0]!.type.kind === "bytes") {
+              return finish(`scr_fetch_stream_from_bytes(${arg(0)})`);
+            }
+            if (e.args[0]!.type.kind === "string") {
+              return finish(`scr_fetch_stream_from_string(${arg(0)})`);
+            }
             return finish(`scr_fetch_stream_from(${arg(0)})`);
           case "island.eval":
             // --dynamic builds only (the frontend fences the intrinsic, so

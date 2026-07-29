@@ -116,7 +116,8 @@ struct SfReadRequest {
 };
 
 typedef struct SfAbortListener {
-  ScrDyn *fn;
+  ScrDyn *listener;
+  bool capture;
   bool once;
   size_t id;
   struct SfAbortListener *next;
@@ -207,6 +208,12 @@ struct SfStream {
   SfCollector *collector; /* owned while a body reader is active */
   ScrDyn *pull_cb;
   ScrDyn *cancel_cb;
+  ScrDyn *from_dyn;
+  ScrArr *from_array;
+  ScrBytes *from_bytes;
+  ScrStr *from_string;
+  ScrDyn *(*from_array_item)(ScrArr *, double);
+  double from_index;
   SfTransfer *request_owner;  /* weak; transfer owns the stream */
   SfTransfer *response_owner; /* weak; transfer owns the stream */
 };
@@ -367,7 +374,7 @@ static void sf_signal_release(SfSignal *s) {
   while (s->listeners) {
     SfAbortListener *l = s->listeners;
     s->listeners = l->next;
-    scr_dyn_release(l->fn);
+    scr_dyn_release(l->listener);
     free(l);
   }
   scr_dyn_release(s->onabort);
@@ -401,6 +408,17 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   ScrStr *abort = scr_str_new("abort", 5);
   scr_dyn_obj_set(event, "type", 4, scr_dyn_new_str(abort));
   scr_str_release(abort);
+  scr_dyn_obj_set(event, "bubbles", 7, scr_dyn_new_bool(false));
+  scr_dyn_obj_set(event, "cancelable", 10, scr_dyn_new_bool(false));
+  scr_dyn_obj_set(event, "composed", 8, scr_dyn_new_bool(false));
+  scr_dyn_obj_set(event, "defaultPrevented", 16, scr_dyn_new_bool(false));
+  scr_dyn_obj_set(event, "eventPhase", 10, scr_dyn_new_num(2));
+  scr_dyn_obj_set(
+      event, "target", 6,
+      scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL));
+  scr_dyn_obj_set(
+      event, "currentTarget", 13,
+      scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL));
   if (s->onabort && s->onabort->kind == SCR_DYN_FUNC) {
     /*
      * A handler may clear or replace signal.onabort while it is running.
@@ -425,7 +443,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   size_t count = 0;
   for (SfAbortListener *l = s->listeners; l; l = l->next) count++;
   typedef struct {
-    ScrDyn *fn;
+    ScrDyn *listener;
     bool once;
     size_t id;
   } SfAbortDispatch;
@@ -434,7 +452,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   if (count && !dispatch) sf_oom();
   size_t i = 0;
   for (SfAbortListener *l = s->listeners; l; l = l->next) {
-    dispatch[i].fn = scr_dyn_retain(l->fn);
+    dispatch[i].listener = scr_dyn_retain(l->listener);
     dispatch[i].once = l->once;
     dispatch[i].id = l->id;
     i++;
@@ -446,29 +464,39 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
       at = &(*at)->next;
     }
     if (!*at) {
-      scr_dyn_release(dispatch[i].fn);
+      scr_dyn_release(dispatch[i].listener);
       continue;
     }
     if (dispatch[i].once) {
       SfAbortListener *l = *at;
       *at = l->next;
-      scr_dyn_release(l->fn);
+      scr_dyn_release(l->listener);
       free(l);
+    }
+    ScrDyn *callable = dispatch[i].listener;
+    if (callable->kind == SCR_DYN_OBJ) {
+      const ScrDyn *handle =
+          scr_dyn_obj_get(callable, "handleEvent", 11);
+      if (!handle || handle->kind != SCR_DYN_FUNC) {
+        scr_dyn_release(dispatch[i].listener);
+        continue;
+      }
+      callable = (ScrDyn *)handle;
     }
     ScrDyn *args[1] = {event};
     scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
     ScrDyn *r =
-        scr_dyn_call(dispatch[i].fn, args, 1, "abort listener");
+        scr_dyn_call(callable, args, 1, "abort listener");
     scr_dyn_this_pop();
     scr_dyn_release(r);
-    scr_dyn_release(dispatch[i].fn);
+    scr_dyn_release(dispatch[i].listener);
     if (scr_exc_pending()) {
       i++;
       break;
     }
   }
   while (i < count) {
-    scr_dyn_release(dispatch[i].fn);
+    scr_dyn_release(dispatch[i].listener);
     i++;
   }
   free(dispatch);
@@ -603,6 +631,34 @@ ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
   return boxed;
 }
 
+static void sf_signal_listener_options(
+    ScrDyn *const *args, size_t argc, bool *capture, bool *once) {
+  *capture = false;
+  *once = false;
+  if (argc < 3) return;
+  if (args[2]->kind == SCR_DYN_BOOL) {
+    /* EventTarget's boolean overload is `useCapture`, never `once`. */
+    *capture = args[2]->v.b;
+    return;
+  }
+  if (args[2]->kind != SCR_DYN_OBJ) return;
+  const ScrDyn *capture_value =
+      scr_dyn_obj_get(args[2], "capture", 7);
+  const ScrDyn *once_value = scr_dyn_obj_get(args[2], "once", 4);
+  *capture = capture_value && capture_value->kind == SCR_DYN_BOOL &&
+             capture_value->v.b;
+  *once = once_value && once_value->kind == SCR_DYN_BOOL &&
+          once_value->v.b;
+}
+
+static bool sf_abort_listener_value(const ScrDyn *listener) {
+  if (listener->kind == SCR_DYN_FUNC) return true;
+  if (listener->kind != SCR_DYN_OBJ) return false;
+  const ScrDyn *handle =
+      scr_dyn_obj_get(listener, "handleEvent", 11);
+  return handle && handle->kind == SCR_DYN_FUNC;
+}
+
 static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
                                 ScrDyn *const *args, size_t argc,
                                 const char *what) {
@@ -620,27 +676,36 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
   }
   if (strcmp(method, "addEventListener") == 0) {
     if (argc < 2 || args[0]->kind != SCR_DYN_STR ||
-        !sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort") ||
-        args[1]->kind != SCR_DYN_FUNC) {
-      sf_type_error("AbortSignal.addEventListener requires ('abort', function)");
+        !sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
+      sf_type_error(
+          "AbortSignal.addEventListener requires an 'abort' event");
       return NULL;
     }
+    /* Web IDL's nullable EventListener argument: null is a no-op. */
+    if (args[1]->kind == SCR_DYN_NULL ||
+        args[1]->kind == SCR_DYN_UNDEF) {
+      return scr_dyn_retain(scr_dyn_undefined());
+    }
+    if (!sf_abort_listener_value(args[1])) {
+      sf_type_error(
+          "AbortSignal.addEventListener listener must be a function, "
+          "an object with handleEvent, or null");
+      return NULL;
+    }
+    bool capture = false;
+    bool once = false;
+    sf_signal_listener_options(args, argc, &capture, &once);
     SfAbortListener *l = calloc(1, sizeof *l);
     if (!l) sf_oom();
-    l->fn = scr_dyn_retain(args[1]);
+    l->listener = scr_dyn_retain(args[1]);
+    l->capture = capture;
+    l->once = once;
     l->id = ++s->next_listener_id;
-    if (argc >= 3) {
-      if (args[2]->kind == SCR_DYN_BOOL) {
-        l->once = args[2]->v.b;
-      } else if (args[2]->kind == SCR_DYN_OBJ) {
-        const ScrDyn *once = scr_dyn_obj_get(args[2], "once", 4);
-        l->once = once && once->kind == SCR_DYN_BOOL && once->v.b;
-      }
-    }
     SfAbortListener **tail = &s->listeners;
     while (*tail) {
-      if (scr_dyn_strict_eq((*tail)->fn, args[1])) {
-        scr_dyn_release(l->fn);
+      if ((*tail)->capture == capture &&
+          scr_dyn_strict_eq((*tail)->listener, args[1])) {
+        scr_dyn_release(l->listener);
         free(l);
         return scr_dyn_retain(scr_dyn_undefined());
       }
@@ -652,11 +717,16 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
   if (strcmp(method, "removeEventListener") == 0) {
     if (argc >= 2 && args[0]->kind == SCR_DYN_STR &&
         sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
+      bool capture = false;
+      bool once = false;
+      sf_signal_listener_options(args, argc, &capture, &once);
+      (void)once;
       for (SfAbortListener **at = &s->listeners; *at; at = &(*at)->next) {
-        if (scr_dyn_strict_eq((*at)->fn, args[1])) {
+        if ((*at)->capture == capture &&
+            scr_dyn_strict_eq((*at)->listener, args[1])) {
           SfAbortListener *l = *at;
           *at = l->next;
-          scr_dyn_release(l->fn);
+          scr_dyn_release(l->listener);
           free(l);
           break;
         }
@@ -772,6 +842,10 @@ static void sf_stream_release(SfStream *s) {
   scr_dyn_release(s->error);
   scr_dyn_release(s->pull_cb);
   scr_dyn_release(s->cancel_cb);
+  scr_dyn_release(s->from_dyn);
+  scr_arr_release(s->from_array);
+  scr_bytes_release(s->from_bytes);
+  scr_str_release(s->from_string);
   free(s);
 }
 
@@ -1091,6 +1165,64 @@ static ScrDyn *sf_controller_box(SfStream *s) {
   return scr_dyn_new_handle(s, SCR_DYNH_WEB_CONTROLLER);
 }
 
+static bool sf_stream_has_from_source(const SfStream *s) {
+  return s->from_dyn || s->from_array || s->from_bytes || s->from_string;
+}
+
+static void sf_stream_pull_from_source(SfStream *s) {
+  ScrDyn *value = NULL;
+  if (s->from_array) {
+    if (s->from_index >= scr_arr_len(s->from_array)) {
+      sf_stream_close(s);
+      return;
+    }
+    value = s->from_array_item(s->from_array, s->from_index++);
+  } else if (s->from_bytes) {
+    if (s->from_index >= scr_bytes_len(s->from_bytes)) {
+      sf_stream_close(s);
+      return;
+    }
+    value = scr_dyn_new_num(
+        scr_bytes_get(s->from_bytes, s->from_index++));
+  } else if (s->from_string) {
+    double len = scr_str_utf16_len(s->from_string);
+    if (s->from_index >= len) {
+      sf_stream_close(s);
+      return;
+    }
+    ScrStr *cp = scr_str_cp_at(s->from_string, s->from_index);
+    s->from_index += scr_str_utf16_len(cp);
+    value = scr_dyn_new_str(cp);
+    scr_str_release(cp);
+  } else if (s->from_dyn->kind == SCR_DYN_ARR) {
+    if (s->from_index >= (double)s->from_dyn->v.arr.len) {
+      sf_stream_close(s);
+      return;
+    }
+    value = scr_dyn_retain(
+        s->from_dyn->v.arr.items[(size_t)s->from_index++]);
+  } else if (s->from_dyn->kind == SCR_DYN_BYTES) {
+    if (s->from_index >= scr_bytes_len(s->from_dyn->v.bytes)) {
+      sf_stream_close(s);
+      return;
+    }
+    value = scr_dyn_new_num(
+        scr_bytes_get(s->from_dyn->v.bytes, s->from_index++));
+  } else {
+    double len = scr_str_utf16_len(s->from_dyn->v.str);
+    if (s->from_index >= len) {
+      sf_stream_close(s);
+      return;
+    }
+    ScrStr *cp = scr_str_cp_at(s->from_dyn->v.str, s->from_index);
+    s->from_index += scr_str_utf16_len(cp);
+    value = scr_dyn_new_str(cp);
+    scr_str_release(cp);
+  }
+  sf_stream_enqueue_value(s, value);
+  scr_dyn_release(value);
+}
+
 static void sf_stream_initial_pull_task(ScrClosure *cb) {
   SfStream *s = (SfStream *)scr_box_get_ref(cb->caps[0]);
   if (!s) return;
@@ -1104,8 +1236,9 @@ static void sf_stream_initial_pull_task(ScrClosure *cb) {
 }
 
 static void sf_stream_schedule_initial_pull(SfStream *s) {
-  if (!s->pull_cb || s->initial_pull_pending || s->close_requested ||
-      s->closed || s->error) {
+  if ((!s->pull_cb && !sf_stream_has_from_source(s)) ||
+      s->initial_pull_pending || s->close_requested || s->closed ||
+      s->error) {
     return;
   }
   s->initial_pull_pending = true;
@@ -1119,13 +1252,25 @@ static void sf_stream_schedule_initial_pull(SfStream *s) {
 }
 
 static void sf_stream_pull(SfStream *s) {
-  if (!s->started || !s->pull_cb || s->initial_pull_pending ||
-      s->close_requested || s->closed || s->error) {
+  if (!s->started ||
+      (!s->pull_cb && !sf_stream_has_from_source(s)) ||
+      s->initial_pull_pending || s->close_requested || s->closed ||
+      s->error) {
     return;
   }
   if (s->pulling) {
     s->pull_again = true;
     return;
+  }
+  if (sf_stream_has_from_source(s)) {
+    for (;;) {
+      s->pulling = true;
+      sf_stream_pull_from_source(s);
+      s->pulling = false;
+      bool again = s->pull_again;
+      s->pull_again = false;
+      if (!again || s->close_requested || s->closed || s->error) return;
+    }
   }
   for (;;) {
     s->pulling = true;
@@ -1391,16 +1536,62 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
 }
 
 ScrDyn *scr_fetch_stream_from(ScrDyn *iterable) {
-  ScrDyn *packed = scr_dyn_iter_pack(iterable, NULL);
-  if (!packed) return NULL;
-  SfStream *s = sf_stream_new_native();
-  for (size_t i = 0; i < packed->v.arr.len; i++) {
-    sf_stream_enqueue_value(s, packed->v.arr.items[i]);
+  if (!iterable) {
+    sf_type_error("ReadableStream.from requires an iterable");
+    return NULL;
   }
-  sf_stream_close(s);
+  if (iterable->kind != SCR_DYN_ARR &&
+       iterable->kind != SCR_DYN_BYTES &&
+       iterable->kind != SCR_DYN_STR &&
+       iterable->kind != SCR_DYN_JSVAL) {
+    /* Reuse the checked-dynamic iterable error wording. */
+    ScrDyn *packed = scr_dyn_iter_pack(iterable, NULL);
+    scr_dyn_release(packed);
+    return NULL;
+  }
+  ScrDyn *source = iterable;
+  if (iterable->kind == SCR_DYN_JSVAL) {
+    /* Static builds do not normally carry engine values. If one reaches
+     * this fallback, validate/drain it through the engine once; native
+     * arrays/bytes/strings retain their live container below. */
+    source = scr_dyn_iter_pack(iterable, NULL);
+    if (!source) return NULL;
+  }
+  SfStream *s = sf_stream_new_native();
+  s->from_dyn = scr_dyn_retain(source);
+  sf_stream_schedule_initial_pull(s);
   ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
   sf_stream_release(s);
-  scr_dyn_release(packed);
+  if (source != iterable) scr_dyn_release(source);
+  return out;
+}
+
+ScrDyn *scr_fetch_stream_from_array(
+    ScrArr *iterable, ScrDyn *(*item)(ScrArr *, double)) {
+  SfStream *s = sf_stream_new_native();
+  s->from_array = scr_arr_retain(iterable);
+  s->from_array_item = item;
+  sf_stream_schedule_initial_pull(s);
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
+  sf_stream_release(s);
+  return out;
+}
+
+ScrDyn *scr_fetch_stream_from_bytes(ScrBytes *iterable) {
+  SfStream *s = sf_stream_new_native();
+  s->from_bytes = scr_bytes_retain(iterable);
+  sf_stream_schedule_initial_pull(s);
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
+  sf_stream_release(s);
+  return out;
+}
+
+ScrDyn *scr_fetch_stream_from_string(ScrStr *iterable) {
+  SfStream *s = sf_stream_new_native();
+  s->from_string = scr_str_retain(iterable);
+  sf_stream_schedule_initial_pull(s);
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
+  sf_stream_release(s);
   return out;
 }
 
@@ -2231,13 +2422,58 @@ static bool sf_header_name_ok(const char *s, size_t len) {
 }
 
 static bool sf_header_value_ok(const ScrStr *value) {
-  return memchr(value->data, '\r', value->len) == NULL &&
-         memchr(value->data, '\n', value->len) == NULL;
+  for (size_t i = 0; i < value->len; i++) {
+    unsigned char c = (unsigned char)value->data[i];
+    if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+  }
+  return true;
+}
+
+static bool sf_header_name_ci(
+    const char *name, size_t name_len, const char *want) {
+  size_t want_len = strlen(want);
+  if (name_len != want_len) return false;
+  for (size_t i = 0; i < name_len; i++) {
+    char c = name[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c != want[i]) return false;
+  }
+  return true;
+}
+
+static bool sf_header_value_ci(const ScrStr *value, const char *want) {
+  size_t start = 0;
+  size_t end = value->len;
+  while (start < end &&
+         (value->data[start] == ' ' || value->data[start] == '\t')) {
+    start++;
+  }
+  while (end > start &&
+         (value->data[end - 1] == ' ' || value->data[end - 1] == '\t')) {
+    end--;
+  }
+  return sf_header_name_ci(
+      value->data + start, end - start, want);
+}
+
+static bool sf_request_header_ok(
+    const char *name, size_t name_len, const ScrStr *value) {
+  if (sf_header_name_ci(name, name_len, "connection")) {
+    return sf_header_value_ci(value, "close") ||
+           sf_header_value_ci(value, "keep-alive");
+  }
+  return
+      !sf_header_name_ci(name, name_len, "transfer-encoding") &&
+      !sf_header_name_ci(name, name_len, "keep-alive") &&
+      !sf_header_name_ci(name, name_len, "upgrade") &&
+      !sf_header_name_ci(name, name_len, "expect");
 }
 
 static bool sf_push_header(ScrArr *pairs, const char *name, size_t name_len,
                            ScrStr *value) {
-  if (!sf_header_name_ok(name, name_len) || !sf_header_value_ok(value)) {
+  if (!sf_header_name_ok(name, name_len) ||
+      !sf_header_value_ok(value) ||
+      !sf_request_header_ok(name, name_len, value)) {
     sf_type_error("fetch failed");
     return false;
   }
@@ -2844,11 +3080,11 @@ static bool sf_start_hop(SfTransfer *t) {
   if (!sf_pairs_have(t->headers, "sec-fetch-mode")) {
     sf_push_header_text(headers, "sec-fetch-mode", "cors", 4);
   }
-  if (!sf_pairs_have(t->headers, "accept-encoding")) {
-    sf_push_header_text(headers, "accept-encoding", "gzip, deflate", 13);
-  }
   if (!sf_pairs_have(t->headers, "user-agent")) {
     sf_push_header_text(headers, "user-agent", "node", 4);
+  }
+  if (!sf_pairs_have(t->headers, "accept-encoding")) {
+    sf_push_header_text(headers, "accept-encoding", "gzip, deflate", 13);
   }
 
   ScrStr *bare =

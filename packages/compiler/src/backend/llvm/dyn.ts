@@ -1019,6 +1019,14 @@ export class LlDyn {
         B.terminate(`ret ptr ${r}`);
         break;
       }
+      case "func": {
+        const r = B.tmp();
+        B.line(
+          `${r} = call ptr @${this.dynFuncBoxHelper(t)}(ptr %v, ptr null)`,
+        );
+        B.terminate(`ret ptr ${r}`);
+        break;
+      }
       case "bytes": {
         if (t.elem !== "u8") throw new Error(`llvm emitter bug: to-dyn of bytes<${t.elem}>`);
         host.declare(`declare ptr @scr_dyn_new_bytes_copy(ptr)`);
