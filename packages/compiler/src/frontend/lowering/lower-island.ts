@@ -390,12 +390,7 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
   function dynNsBuilderOf(L: Lowerer, dep: ts.SourceFile, loc: IrExpr["loc"]): string | null {
     const cached = L.dynNsBuilders.get(dep);
     if (cached !== undefined) return cached;
-    // Every member of an async evaluation cycle shares the cycle root's
-    // completion verdict. A member's own body promise can fulfill before
-    // the root finishes (or later rejects), so dynamic import must wait
-    // for the root before exposing this member's namespace.
-    const evalDep = L.asyncCycleRootOf.get(dep) ?? dep;
-    const initName = L.initNameOf.get(evalDep);
+    const initName = L.initNameOf.get(dep);
     if (initName === undefined) return null;
     const rawTag = L.fileTag.get(dep) ?? "";
     const name = `%dynns.${rawTag === "" ? "e." : rawTag.replace(/^%/, "")}`;
@@ -420,13 +415,36 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
           type: isAsync ? { kind: "promise", inner: VOID } : VOID,
           loc,
         };
-        body.push({
-          kind: "exprStmt",
-          expr: isAsync
-            ? { kind: "awaitExpr", value: call, type: VOID, loc }
-            : call,
-          loc,
-        });
+        const cyclePromiseId = L.asyncCyclePromiseOf.get(dep);
+        if (isAsync && cyclePromiseId !== undefined) {
+          // Starting the REQUESTED member matters for dynamically-only
+          // cycles: build-time discovery may have encountered another
+          // member first, but Node roots evaluation at the first module
+          // actually imported at runtime. The spawn wrapper publishes
+          // that outermost promise in the SCC's shared slot after eager
+          // recursive spawning returns. Discard the member promise here
+          // and await the shared root before exposing any namespace.
+          body.push({ kind: "exprStmt", expr: call, loc });
+          const promiseT: IrType = { kind: "promise", inner: VOID };
+          body.push({
+            kind: "exprStmt",
+            expr: {
+              kind: "awaitExpr",
+              value: { kind: "varRef", localId: cyclePromiseId, type: promiseT, loc },
+              type: VOID,
+              loc,
+            },
+            loc,
+          });
+        } else {
+          body.push({
+            kind: "exprStmt",
+            expr: isAsync
+              ? { kind: "awaitExpr", value: call, type: VOID, loc }
+              : call,
+            loc,
+          });
+        }
       }
       // Node sorts module-namespace keys (code-unit order); tsc erases
       // type-only exports, so only VALUE exports appear.

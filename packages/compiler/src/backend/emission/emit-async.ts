@@ -74,6 +74,8 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
         ...fn.params.map((p) => cDecl(p.type, pname(p))),
       ];
       const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
+      const cycleCache =
+        fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
       out.push(
         `static ScrPromise *${mangleAsyncSpawn(fn.name)}(${spawnParams.join(", ") || "void"}) {`,
         ...(cache !== null
@@ -95,6 +97,16 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
               `  ScrPromise *sc_cache_owned = scr_promise_retain(sc_p);`,
               `  scr_promise_release(${cache});`,
               `  ${cache} = sc_cache_owned;`,
+            ]
+          : []),
+        ...(cycleCache !== null
+          ? [
+              // Every member of an async SCC publishes while eager spawn
+              // recursion unwinds. The outermost wrapper writes last, so
+              // this records the member that actually rooted evaluation.
+              `  ScrPromise *sc_cycle_cache_owned = scr_promise_retain(sc_p);`,
+              `  scr_promise_release(${cycleCache});`,
+              `  ${cycleCache} = sc_cycle_cache_owned;`,
             ]
           : []),
         `  return sc_p;`,

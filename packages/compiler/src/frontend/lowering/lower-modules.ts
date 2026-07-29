@@ -1731,12 +1731,6 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
           if (depInit !== undefined) {
             const loc = locOf(stmt);
             const depAsync = L.asyncInitFiles.has(dep);
-            // This edge closes the active DFS cycle. The ancestor's init
-            // is already running; calling its spawn wrapper would create
-            // a temporary fulfilled promise, and awaiting that cache hit
-            // would insert a microtask checkpoint that ECMAScript module
-            // evaluation does not have.
-            if (depAsync && L.asyncModuleBackEdges.get(sf)?.has(dep)) continue;
             if (depAsync && !isAsync) {
               L.unsupported(
                 "SC1090",
@@ -1763,8 +1757,8 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                 localId: p.id,
                 loc,
                 cycleInternal:
-                  L.asyncCycleRootOf.get(sf) !== undefined &&
-                  L.asyncCycleRootOf.get(sf) === L.asyncCycleRootOf.get(dep),
+                  L.asyncCycleRepresentativeOf.get(sf) !== undefined &&
+                  L.asyncCycleRepresentativeOf.get(sf) === L.asyncCycleRepresentativeOf.get(dep),
               });
             } else {
               header.push({ kind: "exprStmt", expr: call, loc });
@@ -1887,6 +1881,9 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         body,
         ...(isAsync ? { async: true as const } : {}),
         ...(isAsync ? { asyncCacheGlobal: L.modulePromiseOf.get(sf)! } : {}),
+        ...(L.asyncCyclePromiseOf.has(sf)
+          ? { asyncCycleCacheGlobal: L.asyncCyclePromiseOf.get(sf)! }
+          : {}),
         loc,
       };
     } finally {

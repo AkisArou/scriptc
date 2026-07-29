@@ -1046,15 +1046,18 @@ export class Lowerer {
    * reference on cache hits, matching Node's one ModuleJob promise per
    * module even across diamonds and concurrent dynamic imports. */
   readonly modulePromiseOf = new Map<ts.SourceFile, string>();
-  /** Static ESM edges that close the module-order DFS back to an active
-   * ancestor. The dependency is already evaluating, so its body must not
-   * be called/awaited again: ECMAScript cycle evaluation treats this as a
-   * cache hit without inserting a promise-job checkpoint. */
-  readonly asyncModuleBackEdges = new Map<ts.SourceFile, Set<ts.SourceFile>>();
-  /** Async import-cycle member → the cycle's evaluation root for this
-   * program graph. Dynamic imports of any member wait for this root, not
-   * merely for that member's own body promise. */
-  readonly asyncCycleRootOf = new Map<ts.SourceFile, ts.SourceFile>();
+  /** Async import-cycle member → the cycle's deterministic graph
+   * representative. Used to recognize internal SCC edges; this is NOT
+   * necessarily the runtime evaluation root, because a dynamically-only
+   * cycle can first be entered through any member. */
+  readonly asyncCycleRepresentativeOf = new Map<ts.SourceFile, ts.SourceFile>();
+  /** Async import-cycle member → the shared completion-promise global for
+   * its SCC. Every member's spawn wrapper temporarily publishes its own
+   * promise while eager recursive evaluation unwinds; the outermost
+   * wrapper (the member actually requested first at runtime) writes last
+   * and therefore becomes the cycle's evaluation root. Dynamic imports
+   * wait on this shared verdict rather than a build-time-selected member. */
+  readonly asyncCyclePromiseOf = new Map<ts.SourceFile, string>();
   /** Record-shape interner: canonical (name-sorted) field list → shapeId.
    * Threaded into every mapType call; its `shapes` array becomes
    * IrModule.records. */
@@ -1667,18 +1670,18 @@ export class Lowerer {
         .map(({ dep }) => dep)
         .filter((dep): dep is ts.SourceFile => dep !== null && dep !== sf && partSet.has(dep));
 
-    // Tarjan SCCs over the same static graph. For each admitted async
-    // cycle, the last postorder member is the evaluation root selected by
-    // the graph's DFS. A dynamic import of any member must wait for that
-    // root; a member-local body promise can fulfill while the rest of the
-    // cycle is still evaluating (or before the root later rejects).
+    // Tarjan SCCs over the same static graph. The last postorder member is
+    // a deterministic COMPONENT representative for internal-edge tests
+    // and global naming. The runtime evaluation root can differ: a cycle
+    // reached only through import() starts at whichever member is actually
+    // requested first, not whichever import() site preflight discovered
+    // first. The shared cycle-promise slot below is filled by the emitted
+    // spawn wrappers so it records that runtime choice.
     let nextIndex = 0;
     const indexOf = new Map<ts.SourceFile, number>();
     const lowOf = new Map<ts.SourceFile, number>();
     const stack: ts.SourceFile[] = [];
     const onStack = new Set<ts.SourceFile>();
-    const componentOf = new Map<ts.SourceFile, number>();
-    let nextComponent = 0;
     const visit = (sf: ts.SourceFile): void => {
       const at = nextIndex++;
       indexOf.set(sf, at);
@@ -1694,44 +1697,32 @@ export class Lowerer {
         }
       }
       if (lowOf.get(sf) !== indexOf.get(sf)) return;
-      const componentId = nextComponent++;
       const component: ts.SourceFile[] = [];
       for (;;) {
         const member = stack.pop()!;
         onStack.delete(member);
-        componentOf.set(member, componentId);
         component.push(member);
         if (member === sf) break;
       }
       if (component.length < 2 || !component.some((member) => this.asyncInitFiles.has(member))) return;
       const root = component.reduce((a, b) => orderIndex.get(a)! > orderIndex.get(b)! ? a : b);
+      const rawTag = this.fileTag.get(root) ?? "";
+      const tag = rawTag === "" ? "e." : rawTag.replace(/^%/, "");
+      const cyclePromiseId = `%g.${tag}%cyclePromise`;
+      this.globalsList.push({
+        id: cyclePromiseId,
+        name: "%cyclePromise",
+        type: { kind: "promise", inner: VOID },
+        mutable: true,
+      });
       for (const member of component) {
-        if (this.asyncInitFiles.has(member)) this.asyncCycleRootOf.set(member, root);
+        if (this.asyncInitFiles.has(member)) {
+          this.asyncCycleRepresentativeOf.set(member, root);
+          this.asyncCyclePromiseOf.set(member, cyclePromiseId);
+        }
       }
     };
     for (const fp of parts) if (!indexOf.has(fp.sf)) visit(fp.sf);
-
-    // Within an SCC, moduleOrder is DFS postorder: ordinary dependency
-    // edges point to an earlier member, while the cycle-closing edge points
-    // to an active ancestor that appears later. Omit that recursive
-    // init/await entirely. Requiring SCC membership matters for dynamically
-    // reached modules whose static graph points back into the startup graph:
-    // that dependency is not a static cache-hit cycle and must still wait.
-    for (const fp of parts) {
-      const from = orderIndex.get(fp.sf)!;
-      for (const dep of staticDeps(fp.sf)) {
-        if (
-          !this.asyncInitFiles.has(dep) ||
-          componentOf.get(fp.sf) !== componentOf.get(dep) ||
-          orderIndex.get(dep)! <= from
-        ) {
-          continue;
-        }
-        let back = this.asyncModuleBackEdges.get(fp.sf);
-        if (!back) this.asyncModuleBackEdges.set(fp.sf, (back = new Set()));
-        back.add(dep);
-      }
-    }
   }
 
   /** The lowering of a CommonJS `require("./local")` occurrence: a call of

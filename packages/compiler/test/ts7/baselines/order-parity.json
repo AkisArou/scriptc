@@ -5404,6 +5404,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2661-top-level-await-dynamic-runtime-root/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2661-top-level-await-dynamic-runtime-root/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

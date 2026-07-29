@@ -2000,7 +2000,9 @@ class LlEmitter {
       // Spawn wrapper: pack the args (+1 moves in), spawn the fiber.
       const params = fieldTys.map((ty, i) => `${ty} %a${i}`);
       const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
-      if (cache !== null) {
+      const cycleCache =
+        fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
+      if (cache !== null || cycleCache !== null) {
         this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
         this.declare(`declare void @scr_promise_release(ptr)`);
       }
@@ -2051,6 +2053,17 @@ class LlEmitter {
               `  %replaced_cache = load ptr, ptr @${cache}`,
               `  call void @scr_promise_release(ptr %replaced_cache)`,
               `  store ptr %cache_owned, ptr @${cache}`,
+            ]
+          : []),
+        ...(cycleCache !== null
+          ? [
+              // Eager recursive spawns publish from the inside out. The
+              // runtime-requested outermost member writes last and is the
+              // SCC's actual evaluation root.
+              `  %cycle_cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
+              `  %replaced_cycle_cache = load ptr, ptr @${cycleCache}`,
+              `  call void @scr_promise_release(ptr %replaced_cycle_cache)`,
+              `  store ptr %cycle_cache_owned, ptr @${cycleCache}`,
             ]
           : []),
         `  ret ptr %p`,
