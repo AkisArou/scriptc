@@ -34,16 +34,15 @@ console.log(empty.toSorted().length, ["only"].toSorted().join(","));
 
 // Both the receiver expression and comparator expression are evaluated once,
 // left-to-right, before toSorted snapshots the receiver.
-let receiverEvals = 0;
-let comparatorEvals = 0;
+const evaluationOrder: string[] = [];
 const evaluated = (() => {
-  receiverEvals++;
+  evaluationOrder.push("receiver");
   return [3, 2, 1];
 })().toSorted((() => {
-  comparatorEvals++;
+  evaluationOrder.push("comparator");
   return (a: number, b: number) => a - b;
 })());
-console.log(evaluated.join(","), receiverEvals, comparatorEvals);
+console.log(evaluated.join(","), evaluationOrder.join(","));
 
 // Argument evaluation precedes the method body and therefore the snapshot.
 const argumentSource = [3, 2, 1];
