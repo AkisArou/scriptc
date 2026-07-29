@@ -15,7 +15,7 @@ import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrS
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, isPromisifyCall } from "./lower-builtins.js";
 import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, deadUnmappableBinding, implicitLocalFnInfoOf, implicitLocalFnNodeOf, nullishGenericBindingUnitOf } from "./lower-calls.js";
-import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
+import { isVarDeclared, numericIteratorSourceOf, provenanceElidedConstDecl } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
 import { collectNamespaceStmt, nsPathPrefix, trapDeclRootOf } from "./lower-namespaces.js";
@@ -1068,6 +1068,19 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         // probes below would otherwise claim the call-initializer shape
         // and put its fences on the build.
         if (provenanceElidedConstDecl(L, decl)) continue;
+        // A stored built-in numeric value iterator has no first-class
+        // global representation. Its same-%init for-of uses are backed by
+        // hidden source/cursor/done locals registered when the declaration
+        // lowers; skip the unmappable iterator global here so collection
+        // does not fence that statically closed protocol path.
+        // Cross-function or exported uses still fence at reference sites.
+        if (
+          isConst &&
+          ts.isIdentifier(decl.name) &&
+          numericIteratorSourceOf(L, decl.initializer) !== null
+        ) {
+          continue;
+        }
         // The trap/nullish/dead classification probes below resolve
         // symbols INSIDE the initializer, and resolution can fence (the
         // cross-block merged-namespace SC1090, resolveValueSymbol →

@@ -958,6 +958,17 @@ export class Lowerer {
    * (the ctx guard keeps hidden locals out of closures — a cross-function
    * walk falls back to the plain array walk and the fence). */
   readonly matchAllDrainIndexes = new Map<ts.Symbol, { idxsLocalId: string; ctx: FnCtx }>();
+  /** STORED numeric value iterators: `const it = numbers.values()` (and
+   * the equivalent `[Symbol.iterator]()` spelling) over number[] or a
+   * represented typed array has no first-class IR value, so its statically
+   * known protocol state lives in hidden source/cursor/done locals. A
+   * later for-of in the SAME function reads and advances them.
+   * `doneLocalId` is sticky: once next() observes the end, later source
+   * changes do not revive the exhausted iterator, exactly like Node. */
+  readonly numericIterators = new Map<
+    ts.Symbol,
+    { sourceLocalId: string; sourceType: IrType; indexLocalId: string; doneLocalId: string; ctx: FnCtx }
+  >();
   chainCounter = 0;
   /** Keyed by program-wide qualified class name (what IR object types carry). */
   readonly classes = new Map<string, ClassInfo>();
