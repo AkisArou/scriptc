@@ -2,6 +2,7 @@ import { globSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import { analyze, renderCoverage } from "@scriptc/compiler";
+import { shardSelect, shardSuffix } from "./shard.js";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixture = (name: string) => join(repoRoot, "tests/coverage-fixtures", name);
@@ -147,7 +148,7 @@ test("a cycle whose top level calls a builtin with a builtin function value is a
   expect(out).toContain("statements analyzed");
 });
 
-test("every corpus program is 100% static (corpus and coverage agree)", async () => {
+test(`every corpus program is 100% static (corpus and coverage agree${shardSuffix()})`, async () => {
   // The differential corpus compiles by definition; coverage must agree.
   // `// @dynamic` programs compile under --dynamic, so analyze them that way.
   // The sweep runs minutes on slow machines and each analyze() blocks the
@@ -155,10 +156,13 @@ test("every corpus program is 100% static (corpus and coverage agree)", async ()
   // ("Timeout calling onTaskUpdate") even while every check passes, and the
   // default per-test timeout is far too small for a whole-corpus analysis.
   let n = 0;
-  const flatEntries = ["ts", "js", "mjs", "cjs"].flatMap((ext) =>
-    globSync(join(repoRoot, `tests/corpus/*.${ext}`)),
+  const flatEntries = shardSelect(
+    ["ts", "js", "mjs", "cjs"].flatMap((ext) =>
+      globSync(join(repoRoot, `tests/corpus/*.${ext}`)),
+    ).sort(),
+    (file) => file.slice(repoRoot.length + 1),
   );
-  for (const file of flatEntries.sort()) {
+  for (const file of flatEntries) {
     const firstLine = readFileSync(file, "utf8").split("\n", 1)[0] ?? "";
     // `// @deferred-fences: N` on the first line: a JS program that
     // DELIBERATELY carries N runtime-fence statements on untaken paths

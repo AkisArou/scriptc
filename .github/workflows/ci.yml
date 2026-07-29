@@ -24,12 +24,13 @@ jobs:
       SCRIPTC_TEST_WORKERS: "4"
       # san = ASan + RC audit over the same suite; anything but "1" is plain.
       SCRIPTC_SAN: ${{ matrix.flavor == 'san' && '1' || '' }}
-      # Within-file partition for the corpus-driven harnesses (differential,
-      # llvm-differential, npm, server): they hash stable case names into
-      # slice i of 3 (tests/harness/shard.ts), so the three shards' unions
-      # run every case exactly once. vitest's own --shard is FILE-granular
-      # and cannot split these monster files (differential.test.ts alone is
-      # ~9 min sequential), hence the second test step below.
+      # Within-file partition for the large case-driven harnesses
+      # (differential, llvm-differential, npm, server, coverage, and Vercel
+      # E2E): they hash stable case names into slice i of 3
+      # (tests/harness/shard.ts), so the three shards' unions run every case
+      # exactly once. vitest's own --shard is FILE-granular and cannot split
+      # these monster files (differential.test.ts alone is ~9 min
+      # sequential), hence the case-sharded steps below.
       SCRIPTC_TEST_SHARD: ${{ matrix.shard }}/3
     steps:
       - uses: actions/checkout@v4
@@ -42,24 +43,32 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # Two vitest invocations because the shard axes must not mix: a file
+      # Separate vitest invocations because the shard axes must not mix: a file
       # lands in exactly ONE --shard slice, so an env-sharded file behind
       # --shard would run only one of its three case slices and silently
       # drop the rest. Files split by --shard here; cases split by env below.
-      - name: Tests (file-sharded, corpus lanes excluded)
+      - name: Tests (file-sharded, case-sharded files excluded)
         run: >-
           pnpm test --shard=${{ matrix.shard }}/3
           --exclude=tests/harness/differential.test.ts
           --exclude=tests/harness/llvm-differential.test.ts
           --exclude=tests/harness/npm.test.ts
           --exclude=tests/harness/server.test.ts
-      - name: Tests (corpus lanes, case slice ${{ matrix.shard }}/3)
+          --exclude=tests/harness/coverage.test.ts
+          --exclude=tests/harness/vercel-e2e.test.ts
+      - name: Tests (case-sharded, slice ${{ matrix.shard }}/3)
         run: >-
           pnpm test
           tests/harness/differential.test.ts
           tests/harness/llvm-differential.test.ts
           tests/harness/npm.test.ts
           tests/harness/server.test.ts
+          tests/harness/vercel-e2e.test.ts
+      # Coverage analysis is frontend-only: SCRIPTC_SAN cannot change its
+      # result, so the three plain slices cover the full corpus once.
+      - name: Tests (coverage sweep, slice ${{ matrix.shard }}/3)
+        if: matrix.flavor == 'plain'
+        run: pnpm test tests/harness/coverage.test.ts
 
   # A real host-clang/glibc build, not the zig cross-target lane: catches
   # Linux feature-test macro omissions at compile time and separate-libm
@@ -115,6 +124,10 @@ jobs:
       - run: pnpm build
       - name: Windows path regressions
         run: pnpm exec vitest run packages/compiler/test/ts7/program.test.ts packages/cli/test/paths.test.ts
+      - name: Windows Sandbox path regression
+        run: >-
+          pnpm exec vitest run tests/harness/worktree-files.test.ts
+          --testNamePattern "workspace reset keeps Linux Sandbox paths POSIX"
       - name: Windows scriptc run smoke
         shell: pwsh
         run: |

@@ -106,7 +106,42 @@ flowchart LR
 $ pnpm install && pnpm build
 $ pnpm test                      # differential corpus + diagnostics snapshots
 $ SCRIPTC_SAN=1 pnpm test        # the same corpus under ASan + RC audit
+$ export SCRIPTC_SANDBOX_IMAGE=vcr.vercel.com/your-team/your-project/sandbox-tests:node24
+$ pnpm test:sandbox:image        # build + publish the custom Sandbox image
+$ pnpm test:sandbox              # fast Pro+ gate: 16 concurrent 8-vCPU Sandboxes
+$ SCRIPTC_SANDBOX_VCPUS=4 pnpm test:sandbox --shards 4
+                                  # Hobby gate: same coverage, 8 concurrent Sandboxes
 $ pnpm scriptc build x.ts --emit-ir   # keep .scriptc/x.c and x.ir.json
 ```
+
+The hybrid sandbox runner uploads the exact dirty worktree and case-shards the
+corpus-heavy harnesses across eight 8-vCPU sandboxes per lane. Portable test
+files are file-sharded over the same Sandboxes. Files whose behavior cannot
+change under `SCRIPTC_SAN` run once; sanitizer-aware files and the differential
+corpus still run in both lanes. Full portable behavior runs on Linux. On
+macOS, compact host contracts retain the native ABI, Mach-O size, linker,
+libc, kqueue network/dgram/watch/child/stdin behavior, and Apple-ASan checks
+that can genuinely differ there. Linux contributors run the supported native
+clang contracts locally; other hosts retain that coverage in the Sandboxes.
+Before extraction, each Sandbox clears image-seeded workspace files while
+retaining its dependency cache, so local deletions and renames cannot reappear
+from the image.
+Acceptance suites whose oracle lives in an external worktree run locally;
+case-addressable suites are sharded there. No assertion or sanitizer coverage
+is dropped.
+Disposable sandboxes are removed when the run finishes. The remote sanitized
+lane disables Linux LeakSanitizer to match Apple ASan; ASan memory-safety
+checks and scriptc's RC audit remain enabled. Authenticate with Vercel, choose
+a Vercel project you control, and set `SCRIPTC_SANDBOX_IMAGE` to a fully
+qualified image in that project's Vercel Container Registry. The fast default
+requires a Pro or Enterprise project because it allocates 16 concurrent 8-vCPU
+Sandboxes. Hobby projects use the 4-shard, 4-vCPU command above; it retains the
+same assertions and sanitizer coverage with lower parallelism. `pnpm install`
+provides the repository's pinned Vercel CLI, so no global CLI is required. Both
+sandbox commands load `.env.local` when it exists, including the
+`VERCEL_OIDC_TOKEN` written by `vercel env pull`; variables exported by the
+agent or shell take precedence. Re-run
+`pnpm test:sandbox:image` when the Dockerfile's Node, pnpm, or system
+dependencies change.
 
 Every feature lands with differential tests; both lanes green is the merge bar.
