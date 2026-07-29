@@ -1279,13 +1279,12 @@ int scr_promise_finish_top_level(ScrPromise *p) {
     return 13;
   }
   scr_prom_observe(p);
-  if (p->state == SCR_PROM_REJECTED) {
-    scr_promise_rethrow(p);
-    return 1;
-  }
-  return 0;
+  return p->state == SCR_PROM_REJECTED ? 1 : 0;
 }
 
+void scr_promise_rethrow_top_level(ScrPromise *p) {
+  if (p->state == SCR_PROM_REJECTED) scr_promise_rethrow(p);
+}
 
 
 
@@ -1727,7 +1726,7 @@ void scr_loop_set_stream(bool (*pending)(void), void (*dispatch)(void)) {
  * microtask checkpoints between macrotasks). */
 bool scr_loop_has_ready(void) { return scr_ready_len > 0; }
 
-void scr_loop_run(void) {
+void scr_loop_run(ScrPromise *top_level) {
   /* The FIRST checkpoint after the synchronous main body runs promise
    * jobs BEFORE the first tick drain: Node's main-module evaluation is
    * itself awaited (the runMain continuation is a microtask queued after
@@ -1736,6 +1735,7 @@ void scr_loop_run(void) {
    * pinned. Every later checkpoint drains ticks first. */
   bool first_checkpoint = true;
   for (;;) {
+    if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) break;
     /* process.nextTick callbacks BEFORE promise jobs (Node's checkpoint
      * order): the tick queue to exhaustion, then the microtask queue to
      * exhaustion, and back while either has work — a microtask's
@@ -1766,6 +1766,13 @@ void scr_loop_run(void) {
       scr_resume_fiber(f);
     }
     first_checkpoint = false;
+    /* The ESM loader observes a rejected entry evaluation at a promise-job
+     * checkpoint and terminates before later ref'd timers or I/O can run.
+     * Wait until this checkpoint's ready queue is drained — the root's
+     * rejection handler is itself promise-job ordered — then leave through
+     * the normal teardown below. A fulfilled root deliberately does not
+     * stop the loop. */
+    if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) break;
     if (scr_nt_head != NULL) continue;
     /* Quiescent between turns (microtasks drained, nothing running):
      * collect any cycles the turn left behind. No-op on an empty buffer. */
@@ -2071,6 +2078,7 @@ void scr_loop_run(void) {
           scr_ready_len--;
           scr_resume_fiber(f);
         }
+        if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) break;
       }
       /* Fully drained: reset the cursor so the array reuses its slots. */
       if (scr_immediates_head == scr_nimmediates) {
@@ -2190,21 +2198,6 @@ bool scr_report_unhandled_rejections(void) {
    * must see that code, like Node's. */
   if (any) scr_exit_code_note(1);
   return any;
-}
-
-void scr_discard_unhandled_rejections(void) {
-  /* Fatal module-evaluation rejection has already selected the process
-   * error. The promises in this ledger may all be observed (the root and
-   * each awaited dependency), but the ledger itself still owns one
-   * reference apiece until the normal reporter runs. Drop those exit-only
-   * references without printing a second failure. */
-  for (size_t i = 0; i < scr_nunhandled; i++) {
-    scr_promise_release(scr_maybe_unhandled[i]);
-  }
-  scr_nunhandled = 0;
-  if (scr_island_rejections_fn != NULL) {
-    (void)scr_island_rejections_fn(false);
-  }
 }
 
 /* ── new Promise(executor) ────────────────────────────────────────────── */

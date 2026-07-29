@@ -85,7 +85,17 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
         ...fn.params.map((p) => `  sc_ap->${pname(p)} = ${pname(p)};`),
         `  ScrPromise *sc_p = scr_async_spawn(&${mangleTrampoline(fn.name)}, sc_ap);`,
         ...(cache !== null
-          ? [`  ${cache} = scr_promise_retain(sc_p);`]
+          ? [
+              // scr_async_spawn runs eagerly. An admitted async import
+              // cycle can therefore re-enter this initializer after its
+              // guard sets but before this outer spawn returns; that
+              // guarded inner spawn temporarily fills the cache. Replace
+              // it ownership-safely when the real evaluation promise
+              // arrives.
+              `  ScrPromise *sc_cache_owned = scr_promise_retain(sc_p);`,
+              `  scr_promise_release(${cache});`,
+              `  ${cache} = sc_cache_owned;`,
+            ]
           : []),
         `  return sc_p;`,
         `}`,

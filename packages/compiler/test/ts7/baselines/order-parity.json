@@ -5352,6 +5352,25 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2653-top-level-await-rejection-stops-loop.ts": {
+   "order": [
+    "<repo>/tests/corpus/2653-top-level-await-rejection-stops-loop.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2654-top-level-await-unrelated-rejection.ts": {
+   "order": [
+    "<repo>/tests/corpus/2654-top-level-await-unrelated-rejection.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2655-top-level-await-cycle/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2655-top-level-await-cycle/b.ts",
+    "<repo>/tests/corpus/2655-top-level-await-cycle/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

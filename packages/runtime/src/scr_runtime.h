@@ -3338,16 +3338,14 @@ bool scr_await_bool(ScrPromise *p);
 ScrStr *scr_await_str(ScrPromise *p); /* +1 */
 void *scr_await_ref(ScrPromise *p);   /* +1 via the stored retain */
 void scr_await_void(ScrPromise *p);
-/* After the event loop drains, consume the executable's async module-root
- * promise without another microtask hop: 0 = fulfilled, 1 = rejected (the
- * rejection is re-thrown into main's exception cell), 13 = still pending
- * with no ref'd work capable of settling it (Node's unsettled top-level
- * await exit status). */
+/* After the root-aware event loop returns, inspect the executable's async
+ * module-root promise without another microtask hop: 0 = fulfilled,
+ * 1 = rejected, 13 = still pending with no ref'd work capable of settling
+ * it (Node's unsettled top-level-await exit status). A rejected root is
+ * marked observed here but re-thrown separately, after unrelated
+ * unhandled rejections have had their normal reporting turn. */
 int scr_promise_finish_top_level(ScrPromise *p);
-/* Fatal top-level module rejection bypasses the normal unhandled-
- * rejection reporter. Release that reporter's retained promise entries
- * (and the island ledger) without emitting a second error. */
-void scr_discard_unhandled_rejections(void);
+void scr_promise_rethrow_top_level(ScrPromise *p);
 /* The checked-dynamic tree-crossing await (SCR_DYN_PROMISE's boundary contract): the
  * payload as a dyn value (+1; void fulfillments answer the undefined
  * value), or NULL with the rejection re-thrown into the awaiter. */
@@ -3656,7 +3654,11 @@ int scr_exit_code_hint_get(void);
  * poll(2) sleep, or -1 when it can't wake for every pending child. */
 int scr_children_wake_fd(void);
 double scr_now_ms(void); /* the loop's monotonic clock, in ms */
-void scr_loop_run(void);
+/* Run to ordinary loop exhaustion, except that a non-NULL executable
+ * module-root promise stops the loop as soon as it is rejected at a
+ * microtask checkpoint. Fulfilled roots do not stop the loop: Node keeps
+ * running ref'd work scheduled by a successfully evaluated module. */
+void scr_loop_run(ScrPromise *top_level);
 /* External I/O hook, polled at loop quiescence like the child registry:
  * `pending` keeps the loop alive; `poll` makes progress and may SLEEP up
  * to max_wait_ms (on real fds — socket readiness wakes it early), so the
