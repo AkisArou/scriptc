@@ -19,6 +19,28 @@ console.log(
 const urlResponse = await fetch(new URL(`${process.argv[2]}/json`));
 console.log("url:", urlResponse.status);
 
+const headerResponse = await fetch(`${process.argv[2]}/header-echo`, {
+  headers: { "x-echo-one": "1", "x-echo-two": "2" },
+});
+console.log(
+  "headers:",
+  headerResponse.headers.get("content-type"),
+  headerResponse.headers.get("x-multi"),
+  headerResponse.headers.get("missing") ?? "none",
+  headerResponse.headers.has("x-multi"),
+  headerResponse.headers.has("missing"),
+  headerResponse.headers.getSetCookie().join("|"),
+);
+headerResponse.headers.forEach((value, name) => {
+  if (name.startsWith("x-")) console.log("header walk:", name, value);
+});
+await headerResponse.text();
+
+console.log(
+  "request defaults:",
+  await (await fetch(`${process.argv[2]}/request-defaults`)).json(),
+);
+
 const init: RequestInit = {
   method: "POST",
   headers: {

@@ -121,3 +121,45 @@ try {
   const caught = error as Error;
   console.log("missing duplex:", caught.name, caught.message);
 }
+
+let startReady = false;
+const asyncStart = new ReadableStream<Uint8Array>({
+  async start() {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    startReady = true;
+  },
+  pull(controller) {
+    console.log("pull after start:", startReady);
+    controller.close();
+  },
+});
+await asyncStart.getReader().read();
+
+let cancelFinished = false;
+const asyncCancel = new ReadableStream<Uint8Array>({
+  async cancel() {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    cancelFinished = true;
+  },
+});
+await asyncCancel.cancel();
+console.log("cancel awaited:", cancelFinished);
+
+const queued = ReadableStream.from([
+  Buffer.from("one"),
+  Buffer.from("two"),
+]);
+const queuedReader = queued.getReader();
+let queuedClosed = false;
+async function watchQueuedClose(): Promise<void> {
+  await queuedReader.closed;
+  queuedClosed = true;
+}
+void watchQueuedClose();
+await new Promise<void>((resolve) => setTimeout(resolve, 0));
+console.log("closed before drain:", queuedClosed);
+await queuedReader.read();
+await queuedReader.read();
+await queuedReader.read();
+await queuedReader.closed;
+console.log("closed after drain:", queuedClosed);

@@ -13,7 +13,7 @@
  *   form: a plain `GET /__count` to the proxy (a relative-path request no
  *   real proxy client sends) answers the current count.
  *
- * Routes: /text /json /post-echo /header-echo /redirect /slow /drip
+ * Routes: /text /json /post-echo /header-echo /request-defaults /redirect /slow /drip
  * /chunked /gzip /deflate /status-meta /no-content /sse, 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
@@ -49,8 +49,20 @@ export async function startFetchServers() {
         res.writeHead(200, {
           "content-type": "text/plain",
           "x-multi": ["a", "b"],
+          "set-cookie": ["first=1", "second=2"],
         });
         res.end(`one=${req.headers["x-echo-one"]} two=${req.headers["x-echo-two"]}`);
+      } else if (url === "/request-defaults") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            accept: req.headers["accept"] ?? null,
+            acceptLanguage: req.headers["accept-language"] ?? null,
+            secFetchMode: req.headers["sec-fetch-mode"] ?? null,
+            userAgent: req.headers["user-agent"] ?? null,
+            acceptEncoding: req.headers["accept-encoding"] ?? null,
+          }),
+        );
       } else if (url === "/redirect") {
         res.writeHead(302, { location: "/text" });
         res.end();

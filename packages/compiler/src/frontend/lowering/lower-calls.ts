@@ -4466,6 +4466,7 @@ export const DYN_DISPATCH_METHODS = new Set([
   "setEncoding", "setDefaultEncoding", "setTimeout", "read", "isPaused",
   "writeHead", "setHeader", "getHeader", "hasHeader", "removeHeader",
   "getHeaders", "getHeaderNames", "appendHeader", "flushHeaders",
+  "append", "delete", "get", "getSetCookie", "has", "set",
   "writeContinue", "writeEarlyHints", "cork", "uncork", "addTrailers",
   "ref", "unref", "address", "setNoDelay", "setKeepAlive", "connect",
   "resetAndDestroy", "destroySoon",

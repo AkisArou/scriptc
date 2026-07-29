@@ -201,6 +201,8 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
       NODE_USE_ENV_PROXY: "1",
       http_proxy: proxyUrl,
       HTTP_PROXY: proxyUrl,
+      no_proxy: "",
+      NO_PROXY: "",
     };
     const before = servers.proxiedRequests();
     const [nodeRes, nativeRes] = await Promise.all([
@@ -211,6 +213,31 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
     expect(servers.proxiedRequests() - before).toBe(2);
   }, 120_000);
+
+  test.for(["c", "llvm"] as const)(
+    "static fetch / %s backend routes through http_proxy",
+    async (backend) => {
+      const entry = join(fixturesRoot, "static-proxy/main.mts");
+      const binary = await buildStatic(entry, backend, "proxy-optin");
+      const env = {
+        ...process.env,
+        NODE_USE_ENV_PROXY: "1",
+        http_proxy: proxyUrl,
+        HTTP_PROXY: proxyUrl,
+        no_proxy: "",
+        NO_PROXY: "",
+      };
+      const before = servers.proxiedRequests();
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry, baseUrl], env),
+        runBinary(binary, [baseUrl], env),
+      ]);
+      expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      expect(servers.proxiedRequests() - before).toBe(2);
+    },
+    120_000,
+  );
 });
 
 describe(`fetch differential (${cases.length} programs${sanitize ? ", sanitized" : ""})`, () => {
