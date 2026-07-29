@@ -155,7 +155,7 @@ const cases = globSync(join(fixturesRoot, "cases/*/main.ts"))
   .map((entry) => ({ name: entry.split("/").at(-2)!, entry }));
 
 describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
-  const staticCases = ["static", "static-stream"] as const;
+  const staticCases = ["static", "static-stream", "static-abort-throw"] as const;
   test.for(
     staticCases.flatMap((name) =>
       (["c", "llvm"] as const).map((backend) => [name, backend] as const),

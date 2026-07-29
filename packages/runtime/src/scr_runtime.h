@@ -2707,6 +2707,7 @@ typedef enum {
   SCR_DYNH_WEB_CONTROLLER, /* native ReadableStreamDefaultController */
   SCR_DYNH_FETCH_RESPONSE, /* native static-fetch Response */
   SCR_DYNH_FETCH_HEADERS, /* native static-fetch response Headers */
+  SCR_DYNH_EVENT,          /* native static-fetch abort Event */
   SCR_DYNH_COUNT,
 } ScrDynHandleTag;
 

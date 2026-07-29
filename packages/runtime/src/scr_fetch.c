@@ -95,6 +95,7 @@
 typedef struct SfTransfer SfTransfer;
 typedef struct SfSignal SfSignal;
 typedef struct SfSignalWatch SfSignalWatch;
+typedef struct SfEvent SfEvent;
 typedef struct SfStream SfStream;
 typedef struct SfReader SfReader;
 typedef struct SfResponse SfResponse;
@@ -147,6 +148,15 @@ struct SfSignal {
   SfSignalWatch **source_watches;
   size_t source_count;
   double timer_id;
+};
+
+struct SfEvent {
+  size_t rc;
+  SfSignal *target;
+  double time_stamp;
+  bool dispatching;
+  bool stop_propagation;
+  bool stop_immediate;
 };
 
 struct SfReader {
@@ -405,6 +415,119 @@ static void sf_signal_release_v(void *p) {
   sf_signal_release((SfSignal *)p);
 }
 
+static SfEvent *sf_event_new(SfSignal *target) {
+  SfEvent *event = calloc(1, sizeof *event);
+  if (!event) sf_oom();
+  event->rc = 1;
+  event->target = sf_signal_retain(target);
+  event->time_stamp = scr_perf_now();
+  event->dispatching = true;
+  return event;
+}
+
+static SfEvent *sf_event_retain(SfEvent *event) {
+  event->rc++;
+  return event;
+}
+
+static void sf_event_release(SfEvent *event) {
+  if (!event || --event->rc > 0) return;
+  sf_signal_release(event->target);
+  free(event);
+}
+
+static void *sf_event_retain_v(void *ptr) {
+  return sf_event_retain((SfEvent *)ptr);
+}
+
+static void sf_event_release_v(void *ptr) {
+  sf_event_release((SfEvent *)ptr);
+}
+
+static ScrDyn *sf_event_invoke(void *ptr, ScrDyn *self,
+                               const char *method, ScrDyn *const *args,
+                               size_t argc, const char *what) {
+  SfEvent *event = ptr;
+  (void)self;
+  (void)args;
+  (void)argc;
+  if (strcmp(method, "preventDefault") == 0) {
+    /* Abort events are not cancelable. */
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "stopPropagation") == 0) {
+    event->stop_propagation = true;
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "stopImmediatePropagation") == 0) {
+    event->stop_propagation = true;
+    event->stop_immediate = true;
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "composedPath") == 0) {
+    ScrDyn *path = scr_dyn_new_arr();
+    if (event->dispatching) {
+      scr_dyn_arr_push(
+          path,
+          scr_dyn_new_handle(event->target, SCR_DYNH_ABORT_SIGNAL));
+    }
+    return path;
+  }
+  sf_not_function(what);
+  return NULL;
+}
+
+static ScrDyn *sf_event_get(void *ptr, const char *key, size_t len) {
+  SfEvent *event = ptr;
+  if (sf_name(key, len, "type")) {
+    ScrStr *type = scr_str_new("abort", 5);
+    ScrDyn *out = scr_dyn_new_str(type);
+    scr_str_release(type);
+    return out;
+  }
+  if (sf_name(key, len, "bubbles") ||
+      sf_name(key, len, "cancelable") ||
+      sf_name(key, len, "composed") ||
+      sf_name(key, len, "defaultPrevented")) {
+    return scr_dyn_new_bool(false);
+  }
+  if (sf_name(key, len, "eventPhase")) {
+    return scr_dyn_new_num(event->dispatching ? 2 : 0);
+  }
+  if (sf_name(key, len, "target") ||
+      sf_name(key, len, "srcElement")) {
+    return scr_dyn_new_handle(event->target, SCR_DYNH_ABORT_SIGNAL);
+  }
+  if (sf_name(key, len, "currentTarget")) {
+    return event->dispatching
+               ? scr_dyn_new_handle(event->target, SCR_DYNH_ABORT_SIGNAL)
+               : scr_dyn_new_null();
+  }
+  if (sf_name(key, len, "isTrusted")) return scr_dyn_new_bool(true);
+  if (sf_name(key, len, "timeStamp")) {
+    return scr_dyn_new_num(event->time_stamp);
+  }
+  if (sf_name(key, len, "cancelBubble")) {
+    return scr_dyn_new_bool(event->stop_propagation);
+  }
+  if (sf_name(key, len, "returnValue")) return scr_dyn_new_bool(true);
+  return NULL;
+}
+
+static bool sf_event_set(void *ptr, const char *key, size_t len,
+                         const ScrDyn *value) {
+  SfEvent *event = ptr;
+  if (sf_name(key, len, "cancelBubble")) {
+    if (scr_dyn_truthy(value)) event->stop_propagation = true;
+    return true;
+  }
+  if (sf_name(key, len, "returnValue")) {
+    /* Setting false only prevents a cancelable event's default action. */
+    return true;
+  }
+  return false;
+}
+
 static SfSignalWatch *sf_signal_watch(SfSignal *source, void *owner,
                                      void (*fire)(SfSignalWatch *,
                                                   SfSignal *)) {
@@ -435,21 +558,11 @@ static void sf_listener_signal_abort(SfSignalWatch *w,
 }
 
 static void sf_signal_dispatch_listeners(SfSignal *s) {
-  ScrDyn *event = scr_dyn_new_obj();
-  ScrStr *abort = scr_str_new("abort", 5);
-  scr_dyn_obj_set(event, "type", 4, scr_dyn_new_str(abort));
-  scr_str_release(abort);
-  scr_dyn_obj_set(event, "bubbles", 7, scr_dyn_new_bool(false));
-  scr_dyn_obj_set(event, "cancelable", 10, scr_dyn_new_bool(false));
-  scr_dyn_obj_set(event, "composed", 8, scr_dyn_new_bool(false));
-  scr_dyn_obj_set(event, "defaultPrevented", 16, scr_dyn_new_bool(false));
-  scr_dyn_obj_set(event, "eventPhase", 10, scr_dyn_new_num(2));
-  scr_dyn_obj_set(
-      event, "target", 6,
-      scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL));
-  scr_dyn_obj_set(
-      event, "currentTarget", 13,
-      scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL));
+  SfEvent *event_state = sf_event_new(s);
+  ScrDyn *event =
+      scr_dyn_new_handle(event_state, SCR_DYNH_EVENT);
+  sf_event_release(event_state);
+  ScrCaught *first_error = NULL;
   /*
    * EventTarget dispatch snapshots the handlers present at the start:
    * additions wait for the next event, removals before a listener's turn
@@ -512,6 +625,14 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
       scr_dyn_release(handler);
       scr_dyn_release(dispatch[i].listener);
       if (scr_exc_pending()) {
+        ScrCaught *caught = scr_exc_take();
+        if (!first_error) {
+          first_error = caught;
+        } else {
+          scr_caught_release(caught);
+        }
+      }
+      if (event_state->stop_immediate) {
         i++;
         break;
       }
@@ -548,6 +669,14 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
     scr_dyn_release(r);
     scr_dyn_release(dispatch[i].listener);
     if (scr_exc_pending()) {
+      ScrCaught *caught = scr_exc_take();
+      if (!first_error) {
+        first_error = caught;
+      } else {
+        scr_caught_release(caught);
+      }
+    }
+    if (event_state->stop_immediate) {
       i++;
       break;
     }
@@ -556,8 +685,13 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
     scr_dyn_release(dispatch[i].listener);
     i++;
   }
+  event_state->dispatching = false;
   free(dispatch);
   scr_dyn_release(event);
+  if (first_error) {
+    scr_rethrow(first_error);
+    scr_caught_release(first_error);
+  }
 }
 
 static void sf_signal_abort_full(SfSignal *s, ScrDyn *reason,
@@ -2521,6 +2655,33 @@ static bool sf_header_value_ok(const ScrStr *value) {
   return true;
 }
 
+static ScrStr *sf_header_value_bytestring(ScrStr *value) {
+  size_t len = (size_t)scr_str_utf16_len(value);
+  char *bytes = malloc(len ? len : 1);
+  if (!bytes) sf_oom();
+  for (size_t i = 0; i < len; i++) {
+    double code = scr_str_char_code_at(value, (double)i);
+    if (code > 255) {
+      char message[192];
+      int message_len = snprintf(
+          message, sizeof message,
+          "Cannot convert argument to a ByteString because the character "
+          "at index %zu has a value of %.0f which is greater than 255.",
+          i, code);
+      free(bytes);
+      if (message_len < 0 || (size_t)message_len >= sizeof message) {
+        sf_oom();
+      }
+      sf_type_error(message);
+      return NULL;
+    }
+    bytes[i] = (char)(unsigned char)code;
+  }
+  ScrStr *out = scr_str_new(bytes, len);
+  free(bytes);
+  return out;
+}
+
 static bool sf_header_name_ci(
     const char *name, size_t name_len, const char *want) {
   size_t want_len = strlen(want);
@@ -2577,12 +2738,19 @@ static ScrStr *sf_trim_header_value(const ScrStr *value) {
 
 static bool sf_push_header(ScrArr *pairs, const char *name, size_t name_len,
                            ScrStr *value) {
-  if (!sf_header_name_ok(name, name_len) ||
-      !sf_header_value_ok(value)) {
+  if (!sf_header_name_ok(name, name_len)) {
     sf_type_error("fetch failed");
     return false;
   }
-  ScrStr *normalized = sf_trim_header_value(value);
+  ScrStr *byte_value = sf_header_value_bytestring(value);
+  if (!byte_value) return false;
+  if (!sf_header_value_ok(byte_value)) {
+    scr_str_release(byte_value);
+    sf_type_error("fetch failed");
+    return false;
+  }
+  ScrStr *normalized = sf_trim_header_value(byte_value);
+  scr_str_release(byte_value);
   if (!sf_header_name_ci(name, name_len, "set-cookie")) {
     size_t n = (size_t)scr_arr_len(pairs);
     for (size_t i = 0; i + 1 < n; i += 2) {
@@ -3517,6 +3685,9 @@ static const ScrDynHandleOps sf_response_ops = {
 static const ScrDynHandleOps sf_headers_ops = {
     "Headers", &sf_headers_retain_v, &sf_headers_release_v,
     &sf_headers_invoke, &sf_headers_get, &sf_no_set, NULL};
+static const ScrDynHandleOps sf_event_ops = {
+    "Event", &sf_event_retain_v, &sf_event_release_v,
+    &sf_event_invoke, &sf_event_get, &sf_event_set, NULL};
 
 static void sf_teardown(void) {
   while (sf_live) {
@@ -3538,6 +3709,7 @@ void scr_fetch_install(void) {
   scr_dyn_handle_install(SCR_DYNH_WEB_CONTROLLER, &sf_controller_ops);
   scr_dyn_handle_install(SCR_DYNH_FETCH_RESPONSE, &sf_response_ops);
   scr_dyn_handle_install(SCR_DYNH_FETCH_HEADERS, &sf_headers_ops);
+  scr_dyn_handle_install(SCR_DYNH_EVENT, &sf_event_ops);
   atexit(sf_teardown);
 }
 

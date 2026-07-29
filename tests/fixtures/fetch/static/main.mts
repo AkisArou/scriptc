@@ -41,6 +41,21 @@ responseHeaders.forEach((value, name) => {
 });
 await headerResponse.text();
 
+const latin1HeaderResponse = await fetch(`${process.argv[2]}/header-echo`, {
+  headers: { "x-echo-one": "é", "x-echo-two": "latin1" },
+});
+console.log("latin1 request header:", await latin1HeaderResponse.text());
+
+try {
+  await fetch(`${process.argv[2]}/header-echo`, {
+    headers: { "x-echo-one": "😀" },
+  });
+  console.log("wide request header unexpectedly sent");
+} catch (error) {
+  const caught = error as Error;
+  console.log("wide request header:", caught.name);
+}
+
 const emptyHeaderResponse = await fetch(`${process.argv[2]}/header-empty`);
 console.log(
   "empty duplicate header:",

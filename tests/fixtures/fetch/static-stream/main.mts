@@ -229,10 +229,55 @@ eventSignal.addEventListener("abort", (event: Event) => {
     event.type,
     event.target === eventSignal,
     event.currentTarget === eventSignal,
+    event.srcElement === eventSignal,
+    event.bubbles,
+    event.cancelable,
+    event.composed,
+    event.defaultPrevented,
+    event.eventPhase,
+    event.isTrusted,
+    event.timeStamp >= 0,
+    event.cancelBubble,
+    event.returnValue,
+    event.composedPath().length,
   );
+  event.preventDefault();
+  event.stopPropagation();
+  console.log(
+    "abort event propagation:",
+    event.defaultPrevented,
+    event.cancelBubble,
+    event.returnValue,
+  );
+  setTimeout(() => {
+    console.log(
+      "abort event after dispatch:",
+      event.target === eventSignal,
+      event.currentTarget === null,
+      event.srcElement === eventSignal,
+      event.eventPhase,
+      event.cancelBubble,
+      event.composedPath().length,
+    );
+  }, 0);
+});
+eventSignal.addEventListener("abort", () => {
+  console.log("abort listener after stopPropagation");
 });
 eventSignal.addEventListener("abort", null);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+const immediateSignal = AbortSignal.timeout(0);
+const immediateHandlers: string[] = [];
+immediateSignal.addEventListener("abort", (event: Event) => {
+  immediateHandlers.push("first");
+  event.stopImmediatePropagation();
+});
+immediateSignal.addEventListener("abort", () => {
+  immediateHandlers.push("second");
+});
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("abort stop immediate:", immediateHandlers.join(","));
 
 const captureSignal = AbortSignal.timeout(0);
 let captureCalls = 0;
