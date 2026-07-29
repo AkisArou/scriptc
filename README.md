@@ -108,7 +108,9 @@ $ pnpm test                      # differential corpus + diagnostics snapshots
 $ SCRIPTC_SAN=1 pnpm test        # the same corpus under ASan + RC audit
 $ export SCRIPTC_SANDBOX_IMAGE=vcr.vercel.com/your-team/your-project/sandbox-tests:node24
 $ pnpm test:sandbox:image        # build + publish the custom Sandbox image
-$ pnpm test:sandbox              # both lanes, suite sharded over 16 Sandboxes
+$ pnpm test:sandbox              # fast Pro+ gate: 16 concurrent 8-vCPU Sandboxes
+$ SCRIPTC_SANDBOX_VCPUS=4 pnpm test:sandbox --shards 4
+                                  # Hobby gate: same coverage, 8 concurrent Sandboxes
 $ pnpm scriptc build x.ts --emit-ir   # keep .scriptc/x.c and x.ir.json
 ```
 
@@ -131,10 +133,14 @@ Disposable sandboxes are removed when the run finishes. The remote sanitized
 lane disables Linux LeakSanitizer to match Apple ASan; ASan memory-safety
 checks and scriptc's RC audit remain enabled. Authenticate with Vercel, choose
 a Vercel project you control, and set `SCRIPTC_SANDBOX_IMAGE` to a fully
-qualified image in that project's Vercel Container Registry. Both sandbox
-commands load `.env.local` when it exists, including the `VERCEL_OIDC_TOKEN`
-written by `vercel env pull`; variables exported by the agent or shell take
-precedence. Re-run
+qualified image in that project's Vercel Container Registry. The fast default
+requires a Pro or Enterprise project because it allocates 16 concurrent 8-vCPU
+Sandboxes. Hobby projects use the 4-shard, 4-vCPU command above; it retains the
+same assertions and sanitizer coverage with lower parallelism. `pnpm install`
+provides the repository's pinned Vercel CLI, so no global CLI is required. Both
+sandbox commands load `.env.local` when it exists, including the
+`VERCEL_OIDC_TOKEN` written by `vercel env pull`; variables exported by the
+agent or shell take precedence. Re-run
 `pnpm test:sandbox:image` when the Dockerfile's Node, pnpm, or system
 dependencies change.
 

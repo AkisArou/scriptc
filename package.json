@@ -22,6 +22,7 @@
     "tsx": "^4.19.0",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.24.0",
+    "vercel": "56.2.0",
     "vitest": "^3.0.0"
   }
 }
