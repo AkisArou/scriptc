@@ -477,6 +477,13 @@ const LIB_FN_SYMS: Record<string, string> = {
   // defineProps throw Node's TypeErrors (all in the may-throw seed set —
   // the generic path emits the standard pending check). typeof and the
   // ambient-this read never throw. The fs dyn read is the sync-fs story.
+  "fetch.start": "scr_fetch_static",
+  "fetch.responseJson": "scr_fetch_response_json",
+  "fetch.abortTimeout": "scr_fetch_abort_timeout",
+  "fetch.abortNow": "scr_fetch_abort_now",
+  "fetch.abortAny": "scr_fetch_abort_any",
+  "fetch.streamNew": "scr_fetch_stream_new",
+  "fetch.streamFrom": "scr_fetch_stream_from",
   "json.parse": "scr_json_parse",
   "dyn.keySet": "scr_dyn_key_set",
   "dyn.iterPack": "scr_dyn_iter_pack",
@@ -754,6 +761,8 @@ const STREAM_CANONICAL_CBS: Record<string, ("r" | "w" | "f" | "d" | "t" | "l")[]
  * the stream/emitter slice of emit-exprs.ts's markings, applied before
  * dispatch so generic and special shapes share one table. */
 const USES_TIMERS_LIB_FNS = new Set<string>([
+  "fetch.start",
+  "fetch.abortTimeout", "fetch.streamNew", "fetch.streamFrom",
   "readable.new", "writable.new", "duplex.new", "transform.new", "passthrough.new",
   "readable.init", "writable.init", "duplex.init", "transform.init", "passthrough.init",
   "readable.newDyn", "writable.newDyn", "duplex.newDyn", "transform.newDyn", "passthrough.newDyn",

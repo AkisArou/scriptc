@@ -4,12 +4,12 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
+import { DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
-import { pureReemittable } from "./lower-exprs.js";
-import { PoisonError, newFnCtx, own } from "./lowerer.js";
+import { lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
+import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 
 /** True iff the checker's type for this node maps to jsval ('any') —
    * the island test in front of every engine-op lowering (receivers,
@@ -229,8 +229,16 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     return entry;
   }
 
-/** USER-code `fetch(url)` / `fetch(url, init)` — the island-backed ambient
-   * global (provenance, not the name: a user's own `fetch` never matches).
+/** USER-code `fetch(url)` / `fetch(url, init)` — the ambient global
+   * (provenance, not the name: a user's own `fetch` never matches).
+   *
+   * The static tier owns URL requests directly: scr_fetch_static runs
+   * over the native net/http/tls stack, consumes a checked-dynamic
+   * RequestInit object, and returns a promise of an opaque native
+   * Response handle. AbortSignal and readable Web Streams are native
+   * checked-dynamic handles too, so cancellation and streaming bodies
+   * stay engine-free.
+   *
    * The engine's own fetch executes (the same one embedded npm code calls —
    * scr_fetch.c over the native net/tls stack): the url marshals in (strings; template
    * results), an init OBJECT LITERAL builds natively in the island through
@@ -241,8 +249,8 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
    * fiber like any await and resumes with the Response HANDLE. Member
    * reads/calls on the handle are engine ops; typed extraction happens at
    * the user's narrowing sites through the validated-exit machinery.
-   * Without --dynamic every call site is its own SC2012. Null for
-   * anything that isn't THE ambient fetch, so lowerCall keeps trying. */
+   * Null for anything that isn't THE ambient fetch, so lowerCall keeps
+   * trying. */
   export function lowerFetchCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
     const callee = call.expression;
     if (!ts.isIdentifier(callee) || callee.text !== "fetch") return null;
@@ -250,8 +258,24 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     const symbol = L.resolveValueSymbol(callee);
     if (!symbol || !L.isStdlibSymbol(symbol)) return null;
     if (call.arguments.length < 1 || call.arguments.length > 2) return null;
-    L.requireDynamicApi("'fetch'", call);
     const loc = locOf(call);
+    if (!L.dynamic) {
+      const url = L.lowerExprExpecting(call.arguments[0]!, STRING);
+      const initNode = call.arguments[1];
+      const init =
+        initNode === undefined
+          ? dynUndefinedExpr(loc)
+          : ts.isObjectLiteralExpression(initNode)
+            ? lowerDynObjectLiteral(L, initNode)
+            : L.lowerExprExpecting(initNode, DYN);
+      return {
+        kind: "libCall",
+        fn: "fetch.start",
+        args: [url, init],
+        type: { kind: "promise", inner: DYN },
+        loc,
+      };
+    }
     const fetchFn: IrExpr = { kind: "jsOp", op: "globalGet", name: "fetch", args: [], type: JSVAL, loc };
     // Init OBJECT LITERALS build natively in the island (the general
     // 'any'-contextual literal path can't claim them: the optional param's
@@ -266,6 +290,136 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     const raw: IrExpr = { kind: "jsOp", op: "callFn", args: [fetchFn, ...args], type: JSVAL, loc };
     return { kind: "jsBridgePromise", value: raw, type: { kind: "promise", inner: JSVAL }, loc };
   }
+
+/** Static Response.json(): consume the native Response's readable body
+ * stream and parse its UTF-8 payload into the ordinary checked-dynamic
+ * JSON tree. Syntax and stream failures reject at await like the web API. */
+export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
+  if (L.dynamic || call.questionDotToken || !ts.isPropertyAccessExpression(call.expression)) return null;
+  const access = call.expression;
+  if (access.questionDotToken || access.name.text !== "json" || call.arguments.length !== 0) return null;
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
+  const recv = L.lowerExpr(access.expression);
+  if (recv.type.kind !== "dyn") return null;
+  return {
+    kind: "libCall",
+    fn: "fetch.responseJson",
+    args: [recv],
+    type: { kind: "promise", inner: DYN },
+    loc: locOf(call),
+  };
+}
+
+/** Static AbortSignal constructors and ReadableStream.from(). These
+ * ambient globals have no first-class constructor-object representation;
+ * claim the direct calls by declaration provenance before the general
+ * member-call path tries to lower the receiver as a value. */
+export function lowerStaticFetchCompanionCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    !ts.isPropertyAccessExpression(call.expression) ||
+    call.expression.questionDotToken ||
+    !ts.isIdentifier(call.expression.expression)
+  ) {
+    return null;
+  }
+  const root = call.expression.expression;
+  const symbol = L.resolveValueSymbol(root);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const loc = locOf(call);
+  if (root.text === "AbortSignal") {
+    switch (call.expression.name.text) {
+      case "timeout":
+        if (call.arguments.length !== 1) return null;
+        return {
+          kind: "libCall",
+          fn: "fetch.abortTimeout",
+          args: [L.lowerExprExpecting(call.arguments[0]!, F64)],
+          type: DYN,
+          loc,
+        };
+      case "abort":
+        if (call.arguments.length > 1) return null;
+        return {
+          kind: "libCall",
+          fn: "fetch.abortNow",
+          args: [
+            call.arguments[0]
+              ? L.lowerExprExpecting(call.arguments[0], DYN)
+              : dynUndefinedExpr(loc),
+          ],
+          type: DYN,
+          loc,
+        };
+      case "any":
+        if (call.arguments.length !== 1) return null;
+        return {
+          kind: "libCall",
+          fn: "fetch.abortAny",
+          args: [L.lowerExprExpecting(call.arguments[0]!, DYN)],
+          type: DYN,
+          loc,
+        };
+      default:
+        return null;
+    }
+  }
+  if (
+    root.text === "ReadableStream" &&
+    call.expression.name.text === "from" &&
+    call.arguments.length === 1
+  ) {
+    return {
+      kind: "libCall",
+      fn: "fetch.streamFrom",
+      args: [L.lowerExprExpecting(call.arguments[0]!, DYN)],
+      type: DYN,
+      loc,
+    };
+  }
+  return null;
+}
+
+/** `new ReadableStream(source?)` in a static build. The source record is
+ * boxed into the checked-dynamic tree so start/pull/cancel callbacks can
+ * be retained by the native controller. Strategies and BYOB sources are
+ * deliberately left to the existing per-site fence. */
+export function lowerStaticReadableStreamNew(
+  L: Lowerer,
+  expr: ts.NewExpression,
+): IrExpr | null {
+  if (
+    L.dynamic ||
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "ReadableStream"
+  ) {
+    return null;
+  }
+  const symbol = L.resolveValueSymbol(expr.expression);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const args = expr.arguments ?? [];
+  if (args.length > 1) return null;
+  const loc = locOf(expr);
+  const source =
+    args.length === 0
+      ? dynUndefinedExpr(loc)
+      : ts.isObjectLiteralExpression(args[0]!)
+        ? lowerDynObjectLiteral(L, args[0]!)
+        : L.lowerExprExpecting(args[0]!, DYN);
+  return {
+    kind: "libCall",
+    fn: "fetch.streamNew",
+    args: [source],
+    type: DYN,
+    loc,
+  };
+}
 
 /** Dynamic `import(spec)` — the island's module system at a USER site.
    * Under --dynamic the call lowers to island.importDyn(key): the engine

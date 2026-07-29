@@ -1,4 +1,6 @@
-/* fetch for the dynamic island, over scriptc's OWN net stack — the
+/* fetch over scriptc's OWN net stack — the static tier below is entirely
+ * engine-free, while the dynamic tier exposes the same transport through
+ * the island's full web API. Both use the
  * scr_platform poller + scr_net sockets, scr_http's HTTP/1.1 client
  * parser, scr_tls (vendored mbedTLS) for https, and zlib for response
  * decompression. No libcurl anywhere: the architecture is Node's own
@@ -54,12 +56,11 @@
  *   undici tunnels CONNECT, but the fixture proxy counts either form
  *   identically), no_proxy exclusions honored. https-over-proxy
  *   (CONNECT) is out of the slice.
- * - AbortSignal is wired exactly as before (init.signal, or the
- *   Request's): an already-aborted signal rejects with its reason before
- *   any transfer starts; aborting a live transfer destroys the hop's
- *   connection through host.abort (silent on the C side — the glue owns
- *   the rejection); AbortSignal.timeout's TimeoutError rides the island
- *   timer machinery in scr_web.c.
+ * - AbortSignal is wired in both tiers: an already-aborted signal rejects
+ *   with its reason before any transfer starts and aborting a live
+ *   transfer destroys the hop's connection. The dynamic tier uses the
+ *   island's Web/timer glue; the static tier below uses native signal
+ *   handles and the runtime's unref'd timer heap.
  * - Error causes, Node's shapes: connect ECONNREFUSED ip:port /
  *   getaddrinfo ENOTFOUND host pass through from the net layer with
  *   their codes; a server that dies before the response head maps to
@@ -70,7 +71,1772 @@
  *   the engine callback object and the hop client, and teardown
  *   (registered with the island) frees whatever is still live before the
  *   engine goes down, so the island audit stays zero. */
-#ifdef SCR_DYNAMIC
+#ifndef SCR_DYNAMIC
+
+#include "scr_runtime.h"
+#include "scr_url_internal.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*
+ * The static tier is a small native Web-platform island of its own:
+ * AbortSignal, Response, ReadableStream, its default reader, and its
+ * controller are SCR_DYN_HANDLE values. That preserves identity and
+ * permits normal typed member syntax while every operation still lands
+ * in C. Response promises resolve at the response HEAD; body chunks flow
+ * into the same native stream consumed by reader.read() or json().
+ */
+
+typedef struct SfTransfer SfTransfer;
+typedef struct SfSignal SfSignal;
+typedef struct SfSignalWatch SfSignalWatch;
+typedef struct SfStream SfStream;
+typedef struct SfReader SfReader;
+typedef struct SfResponse SfResponse;
+typedef struct SfCollector SfCollector;
+
+typedef struct SfChunk {
+  ScrBytes *bytes;
+  struct SfChunk *next;
+} SfChunk;
+
+typedef struct SfAbortListener {
+  ScrDyn *fn;
+  bool once;
+  struct SfAbortListener *next;
+} SfAbortListener;
+
+struct SfSignalWatch {
+  SfSignal *source; /* weak; NULL after the source fires */
+  void *owner;      /* owner keeps source alive */
+  void (*fire)(SfSignalWatch *, SfSignal *);
+  SfSignalWatch *next;
+};
+
+struct SfSignal {
+  size_t rc;
+  bool aborted;
+  ScrDyn *reason;
+  ScrError *error_reason;
+  ScrDyn *onabort;
+  SfAbortListener *listeners;
+  SfSignalWatch *watchers;
+  SfSignal **sources;
+  SfSignalWatch **source_watches;
+  size_t source_count;
+  double timer_id;
+};
+
+struct SfReader {
+  size_t rc;
+  SfStream *stream; /* weak; the locked stream owns one reader ref */
+  ScrPromise *pending;
+  ScrPromise *closed;
+};
+
+enum {
+  SF_COLLECT_JSON,
+  SF_COLLECT_TEXT,
+  SF_COLLECT_BYTES,
+};
+
+struct SfCollector {
+  ScrPromise *promise;
+  SfStream *held_stream;
+  char *data;
+  size_t len;
+  size_t cap;
+  int mode;
+};
+
+struct SfStream {
+  size_t rc;
+  SfChunk *head;
+  SfChunk *tail;
+  bool closed;
+  bool disturbed;
+  bool internal_lock;
+  bool pulling;
+  ScrDyn *error;
+  SfReader *reader;       /* owned while locked */
+  SfCollector *collector; /* owned while a body reader is active */
+  ScrDyn *pull_cb;
+  ScrDyn *cancel_cb;
+  SfTransfer *request_owner;  /* weak; transfer owns the stream */
+  SfTransfer *response_owner; /* weak; transfer owns the stream */
+};
+
+struct SfResponse {
+  size_t rc;
+  SfStream *body;
+  ScrStr *url;
+  int status;
+  bool redirected;
+};
+
+struct SfTransfer {
+  size_t rc;                 /* live registry + one per listener closure */
+  ScrPromise *promise;       /* owned */
+  ScrUrl *url;               /* owned */
+  ScrStr *url_text;          /* owned */
+  ScrHttpClientReq *client;  /* owned */
+  SfSignal *signal;          /* owned */
+  SfSignalWatch *signal_watch;
+  SfStream *request_stream;  /* owned */
+  SfStream *response_stream; /* owned */
+  bool response_sent;
+  bool done;
+  struct SfTransfer *next;
+};
+
+static SfTransfer *sf_live;
+
+static void sf_oom(void) {
+  fputs("scriptc: out of memory\n", stderr);
+  abort();
+}
+
+static bool sf_name(const char *key, size_t len, const char *want) {
+  return strlen(want) == len && memcmp(key, want, len) == 0;
+}
+
+static void sf_type_error(const char *message) {
+  scr_throw_error_msg(SCR_ERR_TYPE, message, strlen(message));
+}
+
+static void sf_not_function(const char *what) {
+  size_t n = strlen(what);
+  char *message = malloc(n + 19);
+  if (!message) sf_oom();
+  memcpy(message, what, n);
+  memcpy(message + n, " is not a function", 19);
+  scr_throw_error_msg(SCR_ERR_TYPE, message, n + 18);
+  free(message);
+}
+
+static bool sf_is_error_dyn(const ScrDyn *d) {
+  if (!d || d->kind != SCR_DYN_OBJ) return false;
+  const ScrDyn *mark = scr_dyn_obj_get(d, "%error", 6);
+  return mark && mark->kind == SCR_DYN_BOOL && mark->v.b;
+}
+
+static void sf_throw_dyn_reason(ScrDyn *reason) {
+  if (sf_is_error_dyn(reason)) {
+    ScrError *e = scr_error_from_dyn(reason);
+    scr_throw_obj(e, &scr_error_retain_v, &scr_error_release_v,
+                  scr_error_trace_arg());
+    return;
+  }
+  switch (reason ? reason->kind : SCR_DYN_UNDEF) {
+  case SCR_DYN_NUM:
+    scr_throw_f64(reason->v.num);
+    return;
+  case SCR_DYN_BOOL:
+    scr_throw_bool(reason->v.b);
+    return;
+  case SCR_DYN_STR:
+    scr_throw_str(scr_str_retain(reason->v.str));
+    return;
+  default:
+    scr_throw_ref(scr_dyn_retain(reason ? reason : scr_dyn_undefined()),
+                  &scr_dyn_retain_v, &scr_dyn_release_v, NULL);
+    return;
+  }
+}
+
+static void sf_reject_promise_reason(ScrPromise *p, ScrDyn *reason) {
+  sf_throw_dyn_reason(reason);
+  scr_promise_reject_pending(p);
+}
+
+static ScrDyn *sf_dom_reason(const char *name, const char *message,
+                            ScrError **error_out) {
+  ScrStr *message_str = scr_str_new(message, strlen(message));
+  ScrStr *name_str = scr_str_new(name, strlen(name));
+  ScrDyn *m = scr_dyn_new_str(message_str);
+  ScrDyn *n = scr_dyn_new_str(name_str);
+  scr_str_release(message_str);
+  scr_str_release(name_str);
+  ScrError *e = scr_domex_new(m, n);
+  scr_dyn_release(m);
+  scr_dyn_release(n);
+  ScrDyn *d = scr_dyn_from_error(e);
+  *error_out = e; /* constructor +1 moves to the signal */
+  return d;
+}
+
+/* ── AbortSignal ─────────────────────────────────────────────────── */
+
+static SfSignal *sf_signal_new(void) {
+  SfSignal *s = calloc(1, sizeof *s);
+  if (!s) sf_oom();
+  s->rc = 1;
+  return s;
+}
+
+static SfSignal *sf_signal_retain(SfSignal *s) {
+  s->rc++;
+  return s;
+}
+
+static void sf_watch_free(SfSignalWatch *w) {
+  if (!w) return;
+  if (w->source) {
+    for (SfSignalWatch **at = &w->source->watchers; *at; at = &(*at)->next) {
+      if (*at == w) {
+        *at = w->next;
+        break;
+      }
+    }
+  }
+  free(w);
+}
+
+static void sf_signal_release(SfSignal *s) {
+  if (!s || --s->rc > 0) return;
+  for (size_t i = 0; i < s->source_count; i++) {
+    sf_watch_free(s->source_watches[i]);
+    sf_signal_release(s->sources[i]);
+  }
+  free(s->source_watches);
+  free(s->sources);
+  while (s->listeners) {
+    SfAbortListener *l = s->listeners;
+    s->listeners = l->next;
+    scr_dyn_release(l->fn);
+    free(l);
+  }
+  scr_dyn_release(s->onabort);
+  scr_dyn_release(s->reason);
+  scr_error_release(s->error_reason);
+  free(s);
+}
+
+static void *sf_signal_retain_v(void *p) {
+  return sf_signal_retain((SfSignal *)p);
+}
+static void sf_signal_release_v(void *p) {
+  sf_signal_release((SfSignal *)p);
+}
+
+static SfSignalWatch *sf_signal_watch(SfSignal *source, void *owner,
+                                     void (*fire)(SfSignalWatch *,
+                                                  SfSignal *)) {
+  SfSignalWatch *w = calloc(1, sizeof *w);
+  if (!w) sf_oom();
+  w->source = source;
+  w->owner = owner;
+  w->fire = fire;
+  w->next = source->watchers;
+  source->watchers = w;
+  return w;
+}
+
+static void sf_signal_dispatch_listeners(SfSignal *s) {
+  ScrDyn *event = scr_dyn_new_obj();
+  ScrStr *abort = scr_str_new("abort", 5);
+  scr_dyn_obj_set(event, "type", 4, scr_dyn_new_str(abort));
+  scr_str_release(abort);
+  if (s->onabort && s->onabort->kind == SCR_DYN_FUNC) {
+    ScrDyn *args[1] = {event};
+    scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
+    ScrDyn *r = scr_dyn_call(s->onabort, args, 1, "signal.onabort");
+    scr_dyn_this_pop();
+    scr_dyn_release(r);
+  }
+  SfAbortListener **at = &s->listeners;
+  while (*at) {
+    SfAbortListener *l = *at;
+    ScrDyn *args[1] = {event};
+    scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
+    ScrDyn *r = scr_dyn_call(l->fn, args, 1, "abort listener");
+    scr_dyn_this_pop();
+    scr_dyn_release(r);
+    if (l->once) {
+      *at = l->next;
+      scr_dyn_release(l->fn);
+      free(l);
+    } else {
+      at = &l->next;
+    }
+  }
+  scr_dyn_release(event);
+}
+
+static void sf_signal_abort_full(SfSignal *s, ScrDyn *reason,
+                                 ScrError *error_reason) {
+  if (s->aborted) return;
+  s->aborted = true;
+  s->reason = scr_dyn_retain(reason);
+  s->error_reason = error_reason ? scr_error_retain(error_reason) : NULL;
+  while (s->watchers) {
+    SfSignalWatch *w = s->watchers;
+    s->watchers = w->next;
+    w->source = NULL;
+    w->fire(w, s); /* the owner may free w */
+  }
+  sf_signal_dispatch_listeners(s);
+}
+
+static void sf_signal_abort_default(SfSignal *s, bool timeout) {
+  ScrError *e = NULL;
+  ScrDyn *reason = sf_dom_reason(
+      timeout ? "TimeoutError" : "AbortError",
+      timeout ? "The operation was aborted due to timeout"
+              : "This operation was aborted",
+      &e);
+  sf_signal_abort_full(s, reason, e);
+  scr_dyn_release(reason);
+  scr_error_release(e);
+}
+
+static SfSignal *sf_signal_of(const ScrDyn *d, const char *where) {
+  if (!d || d->kind != SCR_DYN_HANDLE ||
+      d->v.handle.tag != SCR_DYNH_ABORT_SIGNAL) {
+    sf_type_error(where);
+    return NULL;
+  }
+  return (SfSignal *)d->v.handle.ptr;
+}
+
+static void sf_signal_timer_fire(ScrClosure *cb) {
+  SfSignal *s = (SfSignal *)scr_box_get_ref(cb->caps[0]);
+  if (!s) return;
+  s->timer_id = 0;
+  sf_signal_abort_default(s, true);
+  sf_signal_release(s);
+}
+
+ScrDyn *scr_fetch_abort_timeout(double ms) {
+  SfSignal *s = sf_signal_new();
+  ScrClosure *cb = scr_closure_new((void *)&sf_signal_timer_fire, 1);
+  ScrBox *box =
+      scr_box_new_obj(&sf_signal_retain_v, &sf_signal_release_v, NULL);
+  scr_box_set_ref(box, sf_signal_retain(s));
+  cb->caps[0] = box;
+  s->timer_id = scr_set_timeout_handle(cb, ms);
+  scr_timer_unref(s->timer_id);
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL);
+  sf_signal_release(s);
+  return out;
+}
+
+ScrDyn *scr_fetch_abort_now(ScrDyn *reason) {
+  SfSignal *s = sf_signal_new();
+  if (!reason || reason->kind == SCR_DYN_UNDEF) {
+    sf_signal_abort_default(s, false);
+  } else {
+    ScrError *e = sf_is_error_dyn(reason) ? scr_error_from_dyn(reason) : NULL;
+    sf_signal_abort_full(s, reason, e);
+    scr_error_release(e);
+  }
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_ABORT_SIGNAL);
+  sf_signal_release(s);
+  return out;
+}
+
+static void sf_any_source_abort(SfSignalWatch *w, SfSignal *source) {
+  SfSignal *out = (SfSignal *)w->owner;
+  sf_signal_abort_full(out, source->reason, source->error_reason);
+}
+
+ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
+  if (!signals || signals->kind != SCR_DYN_ARR) {
+    sf_type_error("AbortSignal.any requires an array of AbortSignals");
+    return NULL;
+  }
+  SfSignal *out = sf_signal_new();
+  out->source_count = signals->v.arr.len;
+  if (out->source_count) {
+    out->sources = calloc(out->source_count, sizeof *out->sources);
+    out->source_watches =
+        calloc(out->source_count, sizeof *out->source_watches);
+    if (!out->sources || !out->source_watches) sf_oom();
+  }
+  for (size_t i = 0; i < out->source_count; i++) {
+    SfSignal *source =
+        sf_signal_of(signals->v.arr.items[i],
+                     "AbortSignal.any requires an array of AbortSignals");
+    if (!source) {
+      sf_signal_release(out);
+      return NULL;
+    }
+    out->sources[i] = sf_signal_retain(source);
+    if (source->aborted) {
+      sf_signal_abort_full(out, source->reason, source->error_reason);
+    } else {
+      out->source_watches[i] =
+          sf_signal_watch(source, out, &sf_any_source_abort);
+    }
+  }
+  ScrDyn *boxed = scr_dyn_new_handle(out, SCR_DYNH_ABORT_SIGNAL);
+  sf_signal_release(out);
+  return boxed;
+}
+
+static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
+                                ScrDyn *const *args, size_t argc,
+                                const char *what) {
+  SfSignal *s = ptr;
+  if (strcmp(method, "throwIfAborted") == 0) {
+    if (argc != 0) {
+      sf_type_error("AbortSignal.throwIfAborted takes no arguments");
+      return NULL;
+    }
+    if (s->aborted) {
+      sf_throw_dyn_reason(s->reason);
+      return NULL;
+    }
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "addEventListener") == 0) {
+    if (argc < 2 || args[0]->kind != SCR_DYN_STR ||
+        !sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort") ||
+        args[1]->kind != SCR_DYN_FUNC) {
+      sf_type_error("AbortSignal.addEventListener requires ('abort', function)");
+      return NULL;
+    }
+    SfAbortListener *l = calloc(1, sizeof *l);
+    if (!l) sf_oom();
+    l->fn = scr_dyn_retain(args[1]);
+    if (argc >= 3) {
+      if (args[2]->kind == SCR_DYN_BOOL) {
+        l->once = args[2]->v.b;
+      } else if (args[2]->kind == SCR_DYN_OBJ) {
+        const ScrDyn *once = scr_dyn_obj_get(args[2], "once", 4);
+        l->once = once && once->kind == SCR_DYN_BOOL && once->v.b;
+      }
+    }
+    l->next = s->listeners;
+    s->listeners = l;
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "removeEventListener") == 0) {
+    if (argc >= 2 && args[0]->kind == SCR_DYN_STR &&
+        sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
+      for (SfAbortListener **at = &s->listeners; *at; at = &(*at)->next) {
+        if ((*at)->fn == args[1]) {
+          SfAbortListener *l = *at;
+          *at = l->next;
+          scr_dyn_release(l->fn);
+          free(l);
+          break;
+        }
+      }
+    }
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  (void)self;
+  sf_not_function(what);
+  return NULL;
+}
+
+static ScrDyn *sf_signal_get(void *ptr, const char *key, size_t len) {
+  SfSignal *s = ptr;
+  if (sf_name(key, len, "aborted")) return scr_dyn_new_bool(s->aborted);
+  if (sf_name(key, len, "reason")) {
+    return s->aborted ? scr_dyn_retain(s->reason)
+                      : scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (sf_name(key, len, "onabort")) {
+    return s->onabort ? scr_dyn_retain(s->onabort) : scr_dyn_new_null();
+  }
+  return NULL;
+}
+
+static bool sf_signal_set(void *ptr, const char *key, size_t len,
+                          const ScrDyn *value) {
+  SfSignal *s = ptr;
+  if (!sf_name(key, len, "onabort")) return false;
+  if (value->kind != SCR_DYN_FUNC && value->kind != SCR_DYN_NULL &&
+      value->kind != SCR_DYN_UNDEF) {
+    sf_type_error("AbortSignal.onabort must be a function or null");
+    return true;
+  }
+  scr_dyn_release(s->onabort);
+  s->onabort = value->kind == SCR_DYN_FUNC
+                   ? scr_dyn_retain((ScrDyn *)value)
+                   : NULL;
+  return true;
+}
+
+/* ── ReadableStream ──────────────────────────────────────────────── */
+
+static SfStream *sf_stream_new_native(void) {
+  SfStream *s = calloc(1, sizeof *s);
+  if (!s) sf_oom();
+  s->rc = 1;
+  return s;
+}
+
+static SfStream *sf_stream_retain(SfStream *s) {
+  s->rc++;
+  return s;
+}
+
+static SfReader *sf_reader_retain(SfReader *r) {
+  r->rc++;
+  return r;
+}
+
+static void sf_reader_release(SfReader *r) {
+  if (!r || --r->rc > 0) return;
+  scr_promise_release(r->pending);
+  scr_promise_release(r->closed);
+  free(r);
+}
+
+static void *sf_reader_retain_v(void *p) {
+  return sf_reader_retain((SfReader *)p);
+}
+static void sf_reader_release_v(void *p) {
+  sf_reader_release((SfReader *)p);
+}
+
+static void sf_chunk_release(SfChunk *c) {
+  if (!c) return;
+  scr_bytes_release(c->bytes);
+  free(c);
+}
+
+static void sf_stream_release(SfStream *s) {
+  if (!s || --s->rc > 0) return;
+  while (s->head) {
+    SfChunk *c = s->head;
+    s->head = c->next;
+    sf_chunk_release(c);
+  }
+  if (s->reader) {
+    s->reader->stream = NULL;
+    if (s->reader->pending) {
+      sf_type_error("ReadableStream was released");
+      scr_promise_reject_pending(s->reader->pending);
+      scr_promise_release(s->reader->pending);
+      s->reader->pending = NULL;
+    }
+    sf_reader_release(s->reader);
+  }
+  scr_dyn_release(s->error);
+  scr_dyn_release(s->pull_cb);
+  scr_dyn_release(s->cancel_cb);
+  free(s);
+}
+
+static void *sf_stream_retain_v(void *p) {
+  return sf_stream_retain((SfStream *)p);
+}
+static void sf_stream_release_v(void *p) {
+  sf_stream_release((SfStream *)p);
+}
+
+static ScrBytes *sf_chunk_bytes(const ScrDyn *chunk) {
+  if (chunk && chunk->kind == SCR_DYN_BYTES) {
+    return scr_bytes_copy(chunk->v.bytes);
+  }
+  if (chunk && chunk->kind == SCR_DYN_STR) {
+    ScrBytes *b = scr_bytes_new(SCR_BYTES_U8, (double)chunk->v.str->len);
+    memcpy(b->data, chunk->v.str->data, chunk->v.str->len);
+    return b;
+  }
+  sf_type_error("ReadableStream chunks must be Uint8Array or string values");
+  return NULL;
+}
+
+static ScrDyn *sf_read_result(bool done, ScrBytes *bytes) {
+  ScrDyn *result = scr_dyn_new_obj();
+  scr_dyn_obj_set(result, "done", 4, scr_dyn_new_bool(done));
+  scr_dyn_obj_set(result, "value", 5,
+                  bytes ? scr_dyn_new_bytes_copy(bytes)
+                        : scr_dyn_retain(scr_dyn_undefined()));
+  return result;
+}
+
+static void sf_reader_fulfill(SfReader *r, bool done, ScrBytes *bytes) {
+  if (!r || !r->pending) return;
+  ScrPromise *p = r->pending;
+  r->pending = NULL;
+  scr_promise_fulfill_ref(p, sf_read_result(done, bytes),
+                          &scr_dyn_retain_v, &scr_dyn_release_v, NULL);
+  scr_promise_release(p);
+}
+
+static void sf_reader_reject(SfReader *r, ScrDyn *reason) {
+  if (!r || !r->pending) return;
+  ScrPromise *p = r->pending;
+  r->pending = NULL;
+  sf_reject_promise_reason(p, reason);
+  scr_promise_release(p);
+}
+
+static void sf_collector_append(SfCollector *c, const ScrBytes *bytes) {
+  if (bytes->len == 0) return;
+  if (c->len > SIZE_MAX - bytes->len) sf_oom();
+  size_t need = c->len + bytes->len;
+  if (need > c->cap) {
+    size_t cap = c->cap ? c->cap : 4096;
+    while (cap < need) {
+      if (cap > SIZE_MAX / 2) {
+        cap = need;
+        break;
+      }
+      cap *= 2;
+    }
+    char *next = realloc(c->data, cap);
+    if (!next) sf_oom();
+    c->data = next;
+    c->cap = cap;
+  }
+  memcpy(c->data + c->len, bytes->data, bytes->len);
+  c->len = need;
+}
+
+static void sf_collector_drop(SfStream *s) {
+  SfCollector *c = s->collector;
+  if (!c) return;
+  s->collector = NULL;
+  s->internal_lock = false;
+  scr_promise_release(c->promise);
+  free(c->data);
+  SfStream *held = c->held_stream;
+  free(c);
+  sf_stream_release(held);
+}
+
+static void sf_collector_finish(SfStream *s) {
+  SfCollector *c = s->collector;
+  if (!c) return;
+  ScrDyn *value = NULL;
+  if (c->mode == SF_COLLECT_JSON) {
+    ScrStr *text = scr_str_new(c->data ? c->data : "", c->len);
+    value = scr_json_parse(text);
+    scr_str_release(text);
+  } else if (c->mode == SF_COLLECT_TEXT) {
+    ScrStr *text = scr_str_new(c->data ? c->data : "", c->len);
+    value = scr_dyn_new_str(text);
+    scr_str_release(text);
+  } else {
+    ScrBytes *bytes = scr_bytes_new(SCR_BYTES_U8, (double)c->len);
+    if (c->len) memcpy(bytes->data, c->data, c->len);
+    value = scr_dyn_new_bytes_copy(bytes);
+    scr_bytes_release(bytes);
+  }
+  if (scr_exc_pending()) {
+    scr_dyn_release(value);
+    scr_promise_reject_pending(c->promise);
+  } else {
+    scr_promise_fulfill_ref(c->promise, value, &scr_dyn_retain_v,
+                            &scr_dyn_release_v, NULL);
+  }
+  sf_collector_drop(s);
+}
+
+static void sf_collector_reject(SfStream *s, ScrDyn *reason) {
+  if (!s->collector) return;
+  sf_reject_promise_reason(s->collector->promise, reason);
+  sf_collector_drop(s);
+}
+
+static void sf_stream_request_flush(SfStream *s);
+static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason);
+static void sf_settle(SfTransfer *t);
+
+static void sf_stream_drain(SfStream *s) {
+  if (s->request_owner) {
+    sf_stream_request_flush(s);
+    return;
+  }
+  if (s->collector) {
+    while (s->head) {
+      SfChunk *c = s->head;
+      s->head = c->next;
+      if (!s->head) s->tail = NULL;
+      sf_collector_append(s->collector, c->bytes);
+      sf_chunk_release(c);
+    }
+    if (s->error) sf_collector_reject(s, s->error);
+    else if (s->closed) sf_collector_finish(s);
+    return;
+  }
+  if (s->reader && s->reader->pending) {
+    if (s->head) {
+      SfChunk *c = s->head;
+      s->head = c->next;
+      if (!s->head) s->tail = NULL;
+      sf_reader_fulfill(s->reader, false, c->bytes);
+      sf_chunk_release(c);
+    } else if (s->error) {
+      sf_reader_reject(s->reader, s->error);
+    } else if (s->closed) {
+      sf_reader_fulfill(s->reader, true, NULL);
+    }
+  }
+}
+
+static void sf_stream_enqueue_bytes(SfStream *s, ScrBytes *bytes) {
+  if (s->closed || s->error) {
+    sf_type_error("Invalid state: the ReadableStream is already closed");
+    return;
+  }
+  SfChunk *c = calloc(1, sizeof *c);
+  if (!c) sf_oom();
+  c->bytes = scr_bytes_copy(bytes);
+  if (s->tail) s->tail->next = c;
+  else s->head = c;
+  s->tail = c;
+  sf_stream_drain(s);
+}
+
+static void sf_stream_close(SfStream *s) {
+  if (s->closed || s->error) return;
+  s->closed = true;
+  sf_stream_drain(s);
+  if (s->reader && !s->reader->pending) {
+    scr_promise_fulfill_void(s->reader->closed);
+  }
+}
+
+static void sf_stream_error(SfStream *s, ScrDyn *reason) {
+  if (s->closed || s->error) return;
+  s->error = scr_dyn_retain(reason);
+  sf_stream_drain(s);
+  if (s->reader) {
+    sf_reject_promise_reason(s->reader->closed, reason);
+  }
+  if (s->request_owner) {
+    sf_transfer_stream_error(s->request_owner, reason);
+  }
+}
+
+static ScrDyn *sf_controller_box(SfStream *s) {
+  return scr_dyn_new_handle(s, SCR_DYNH_WEB_CONTROLLER);
+}
+
+static void sf_stream_pull(SfStream *s) {
+  if (!s->pull_cb || s->pulling || s->closed || s->error) return;
+  s->pulling = true;
+  ScrDyn *controller = sf_controller_box(s);
+  ScrDyn *args[1] = {controller};
+  ScrDyn *r = scr_dyn_call(s->pull_cb, args, 1, "underlyingSource.pull");
+  scr_dyn_release(r);
+  scr_dyn_release(controller);
+  s->pulling = false;
+}
+
+static SfReader *sf_stream_get_reader(SfStream *s) {
+  if (s->reader || s->internal_lock) {
+    sf_type_error("Invalid state: ReadableStream is locked");
+    return NULL;
+  }
+  SfReader *r = calloc(1, sizeof *r);
+  if (!r) sf_oom();
+  r->rc = 1;
+  r->stream = s;
+  r->closed = scr_promise_new();
+  if (s->closed) scr_promise_fulfill_void(r->closed);
+  else if (s->error) sf_reject_promise_reason(r->closed, s->error);
+  s->reader = sf_reader_retain(r);
+  return r;
+}
+
+static ScrPromise *sf_reader_read(SfReader *r) {
+  ScrPromise *p = scr_promise_new();
+  SfStream *s = r->stream;
+  if (!s || s->reader != r) {
+    sf_type_error("This reader has been released");
+    scr_promise_reject_pending(p);
+    return p;
+  }
+  if (r->pending) {
+    sf_type_error("A read request is already pending");
+    scr_promise_reject_pending(p);
+    return p;
+  }
+  s->disturbed = true;
+  r->pending = scr_promise_retain(p);
+  sf_stream_drain(s);
+  if (r->pending && !s->head && !s->closed && !s->error) {
+    sf_stream_pull(s);
+    sf_stream_drain(s);
+  }
+  return p;
+}
+
+static void sf_reader_release_lock(SfReader *r) {
+  SfStream *s = r->stream;
+  if (!s || s->reader != r) return;
+  if (r->pending) {
+    sf_type_error("Cannot release a reader with a pending read");
+    return;
+  }
+  s->reader = NULL;
+  r->stream = NULL;
+  sf_reader_release(r); /* stream's ownership */
+}
+
+static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
+                                    bool through_reader) {
+  ScrPromise *p = scr_promise_new();
+  if (s->reader && !through_reader) {
+    sf_type_error("Invalid state: cannot cancel a locked ReadableStream");
+    scr_promise_reject_pending(p);
+    return p;
+  }
+  s->disturbed = true;
+  if (s->cancel_cb) {
+    ScrDyn *args[1] = {reason ? reason : scr_dyn_undefined()};
+    ScrDyn *r = scr_dyn_call(s->cancel_cb, args, 1,
+                             "underlyingSource.cancel");
+    scr_dyn_release(r);
+    if (scr_exc_pending()) {
+      scr_promise_reject_pending(p);
+      return p;
+    }
+  }
+  SfTransfer *response_owner = s->response_owner;
+  if (response_owner && response_owner->client) {
+    scr_http_client_destroy(response_owner->client);
+  }
+  sf_stream_close(s);
+  if (response_owner && !response_owner->done) sf_settle(response_owner);
+  scr_promise_fulfill_void(p);
+  return p;
+}
+
+static ScrPromise *sf_stream_collect(SfStream *s, int mode) {
+  ScrPromise *p = scr_promise_new();
+  if (s->disturbed || s->reader || s->internal_lock) {
+    sf_type_error("Body is unusable: Body has already been read");
+    scr_promise_reject_pending(p);
+    return p;
+  }
+  s->disturbed = true;
+  s->internal_lock = true;
+  SfCollector *c = calloc(1, sizeof *c);
+  if (!c) sf_oom();
+  c->promise = scr_promise_retain(p);
+  c->held_stream = sf_stream_retain(s);
+  c->mode = mode;
+  s->collector = c;
+  sf_stream_drain(s);
+  return p;
+}
+
+ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
+  if (source && source->kind != SCR_DYN_UNDEF &&
+      source->kind != SCR_DYN_NULL && source->kind != SCR_DYN_OBJ) {
+    sf_type_error("ReadableStream source must be an object");
+    return NULL;
+  }
+  SfStream *s = sf_stream_new_native();
+  if (source && source->kind == SCR_DYN_OBJ) {
+    const ScrDyn *type = scr_dyn_obj_get(source, "type", 4);
+    if (type && type->kind != SCR_DYN_UNDEF) {
+      sf_stream_release(s);
+      sf_type_error("byte streams are not supported by static ReadableStream");
+      return NULL;
+    }
+    const ScrDyn *pull = scr_dyn_obj_get(source, "pull", 4);
+    const ScrDyn *cancel = scr_dyn_obj_get(source, "cancel", 6);
+    const ScrDyn *start = scr_dyn_obj_get(source, "start", 5);
+    if (pull && pull->kind != SCR_DYN_UNDEF) {
+      if (pull->kind != SCR_DYN_FUNC) {
+        sf_stream_release(s);
+        sf_type_error("ReadableStream source.pull must be a function");
+        return NULL;
+      }
+      s->pull_cb = scr_dyn_retain((ScrDyn *)pull);
+    }
+    if (cancel && cancel->kind != SCR_DYN_UNDEF) {
+      if (cancel->kind != SCR_DYN_FUNC) {
+        sf_stream_release(s);
+        sf_type_error("ReadableStream source.cancel must be a function");
+        return NULL;
+      }
+      s->cancel_cb = scr_dyn_retain((ScrDyn *)cancel);
+    }
+    if (start && start->kind != SCR_DYN_UNDEF) {
+      if (start->kind != SCR_DYN_FUNC) {
+        sf_stream_release(s);
+        sf_type_error("ReadableStream source.start must be a function");
+        return NULL;
+      }
+      ScrDyn *controller = sf_controller_box(s);
+      ScrDyn *args[1] = {controller};
+      ScrDyn *r =
+          scr_dyn_call((ScrDyn *)start, args, 1, "underlyingSource.start");
+      scr_dyn_release(r);
+      scr_dyn_release(controller);
+      if (scr_exc_pending()) {
+        sf_stream_release(s);
+        return NULL;
+      }
+    }
+  }
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
+  sf_stream_release(s);
+  return out;
+}
+
+ScrDyn *scr_fetch_stream_from(ScrDyn *iterable) {
+  if (!iterable || iterable->kind != SCR_DYN_ARR) {
+    sf_type_error("ReadableStream.from currently requires an array");
+    return NULL;
+  }
+  SfStream *s = sf_stream_new_native();
+  for (size_t i = 0; i < iterable->v.arr.len; i++) {
+    ScrBytes *b = sf_chunk_bytes(iterable->v.arr.items[i]);
+    if (!b) {
+      sf_stream_release(s);
+      return NULL;
+    }
+    sf_stream_enqueue_bytes(s, b);
+    scr_bytes_release(b);
+  }
+  sf_stream_close(s);
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
+  sf_stream_release(s);
+  return out;
+}
+
+static SfStream *sf_stream_of(const ScrDyn *d) {
+  if (!d || d->kind != SCR_DYN_HANDLE ||
+      d->v.handle.tag != SCR_DYNH_WEB_STREAM) {
+    sf_type_error("Expected a ReadableStream");
+    return NULL;
+  }
+  return (SfStream *)d->v.handle.ptr;
+}
+
+static ScrDyn *sf_stream_invoke(void *ptr, ScrDyn *self, const char *method,
+                                ScrDyn *const *args, size_t argc,
+                                const char *what) {
+  SfStream *s = ptr;
+  if (strcmp(method, "getReader") == 0) {
+    if (argc != 0) {
+      sf_type_error("BYOB readers are not supported");
+      return NULL;
+    }
+    SfReader *r = sf_stream_get_reader(s);
+    if (!r) return NULL;
+    ScrDyn *out = scr_dyn_new_handle(r, SCR_DYNH_WEB_READER);
+    sf_reader_release(r);
+    return out;
+  }
+  if (strcmp(method, "cancel") == 0) {
+    ScrPromise *p =
+        sf_stream_cancel(s, argc ? args[0] : scr_dyn_undefined(), false);
+    ScrDyn *out = scr_dyn_new_promise(p);
+    scr_promise_release(p);
+    return out;
+  }
+  (void)self;
+  sf_not_function(what);
+  return NULL;
+}
+
+static ScrDyn *sf_stream_get(void *ptr, const char *key, size_t len) {
+  SfStream *s = ptr;
+  if (sf_name(key, len, "locked")) {
+    return scr_dyn_new_bool(s->reader != NULL || s->internal_lock);
+  }
+  return NULL;
+}
+
+static ScrDyn *sf_reader_invoke(void *ptr, ScrDyn *self, const char *method,
+                                ScrDyn *const *args, size_t argc,
+                                const char *what) {
+  SfReader *r = ptr;
+  if (strcmp(method, "read") == 0) {
+    if (argc != 0) {
+      sf_type_error("ReadableStreamDefaultReader.read takes no arguments");
+      return NULL;
+    }
+    ScrPromise *p = sf_reader_read(r);
+    ScrDyn *out = scr_dyn_new_promise(p);
+    scr_promise_release(p);
+    return out;
+  }
+  if (strcmp(method, "cancel") == 0) {
+    if (!r->stream) {
+      sf_type_error("This reader has been released");
+      return NULL;
+    }
+    ScrPromise *p = sf_stream_cancel(
+        r->stream, argc ? args[0] : scr_dyn_undefined(), true);
+    ScrDyn *out = scr_dyn_new_promise(p);
+    scr_promise_release(p);
+    return out;
+  }
+  if (strcmp(method, "releaseLock") == 0) {
+    sf_reader_release_lock(r);
+    if (scr_exc_pending()) return NULL;
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  (void)self;
+  sf_not_function(what);
+  return NULL;
+}
+
+static ScrDyn *sf_reader_get(void *ptr, const char *key, size_t len) {
+  SfReader *r = ptr;
+  if (sf_name(key, len, "closed")) return scr_dyn_new_promise(r->closed);
+  return NULL;
+}
+
+static ScrDyn *sf_controller_invoke(void *ptr, ScrDyn *self,
+                                    const char *method,
+                                    ScrDyn *const *args, size_t argc,
+                                    const char *what) {
+  SfStream *s = ptr;
+  if (strcmp(method, "enqueue") == 0) {
+    if (argc != 1) {
+      sf_type_error("ReadableStream controller.enqueue requires one chunk");
+      return NULL;
+    }
+    ScrBytes *bytes = sf_chunk_bytes(args[0]);
+    if (!bytes) return NULL;
+    sf_stream_enqueue_bytes(s, bytes);
+    scr_bytes_release(bytes);
+    if (scr_exc_pending()) return NULL;
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "close") == 0) {
+    sf_stream_close(s);
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "error") == 0) {
+    sf_stream_error(s, argc ? args[0] : scr_dyn_undefined());
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  (void)self;
+  sf_not_function(what);
+  return NULL;
+}
+
+static ScrDyn *sf_controller_get(void *ptr, const char *key, size_t len) {
+  SfStream *s = ptr;
+  if (sf_name(key, len, "desiredSize")) {
+    return s->closed || s->error ? scr_dyn_new_null() : scr_dyn_new_num(1);
+  }
+  return NULL;
+}
+
+/* ── Response ────────────────────────────────────────────────────── */
+
+static SfResponse *sf_response_retain(SfResponse *r) {
+  r->rc++;
+  return r;
+}
+
+static void sf_response_release(SfResponse *r) {
+  if (!r || --r->rc > 0) return;
+  sf_stream_release(r->body);
+  scr_str_release(r->url);
+  free(r);
+}
+
+static void *sf_response_retain_v(void *p) {
+  return sf_response_retain((SfResponse *)p);
+}
+static void sf_response_release_v(void *p) {
+  sf_response_release((SfResponse *)p);
+}
+
+static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
+                                  const char *method,
+                                  ScrDyn *const *args, size_t argc,
+                                  const char *what) {
+  SfResponse *r = ptr;
+  int mode = -1;
+  if (strcmp(method, "json") == 0) mode = SF_COLLECT_JSON;
+  else if (strcmp(method, "text") == 0) mode = SF_COLLECT_TEXT;
+  else if (strcmp(method, "bytes") == 0 ||
+           strcmp(method, "arrayBuffer") == 0) {
+    mode = SF_COLLECT_BYTES;
+  }
+  if (mode >= 0) {
+    if (argc != 0) {
+      sf_type_error("Response body readers take no arguments");
+      return NULL;
+    }
+    ScrPromise *p = sf_stream_collect(r->body, mode);
+    ScrDyn *out = scr_dyn_new_promise(p);
+    scr_promise_release(p);
+    return out;
+  }
+  (void)args;
+  (void)self;
+  sf_not_function(what);
+  return NULL;
+}
+
+static const char *sf_status_text(int status) {
+  switch (status) {
+  case 200: return "OK";
+  case 201: return "Created";
+  case 202: return "Accepted";
+  case 204: return "No Content";
+  case 301: return "Moved Permanently";
+  case 302: return "Found";
+  case 304: return "Not Modified";
+  case 400: return "Bad Request";
+  case 401: return "Unauthorized";
+  case 403: return "Forbidden";
+  case 404: return "Not Found";
+  case 500: return "Internal Server Error";
+  default: return "";
+  }
+}
+
+static ScrDyn *sf_response_get(void *ptr, const char *key, size_t len) {
+  SfResponse *r = ptr;
+  if (sf_name(key, len, "status")) return scr_dyn_new_num((double)r->status);
+  if (sf_name(key, len, "ok")) {
+    return scr_dyn_new_bool(r->status >= 200 && r->status <= 299);
+  }
+  if (sf_name(key, len, "bodyUsed")) {
+    return scr_dyn_new_bool(r->body->disturbed);
+  }
+  if (sf_name(key, len, "body")) {
+    return scr_dyn_new_handle(r->body, SCR_DYNH_WEB_STREAM);
+  }
+  if (sf_name(key, len, "url")) return scr_dyn_new_str(r->url);
+  if (sf_name(key, len, "redirected")) {
+    return scr_dyn_new_bool(r->redirected);
+  }
+  if (sf_name(key, len, "statusText")) {
+    const char *text = sf_status_text(r->status);
+    ScrStr *value = scr_str_new(text, strlen(text));
+    ScrDyn *out = scr_dyn_new_str(value);
+    scr_str_release(value);
+    return out;
+  }
+  if (sf_name(key, len, "headers")) return scr_dyn_new_obj();
+  return NULL;
+}
+
+ScrPromise *scr_fetch_response_json(ScrDyn *response) {
+  if (!response || response->kind != SCR_DYN_HANDLE ||
+      response->v.handle.tag != SCR_DYNH_FETCH_RESPONSE) {
+    sf_type_error("Illegal invocation");
+    return scr_promise_settled_ref(NULL, &scr_dyn_retain_v,
+                                   &scr_dyn_release_v, NULL);
+  }
+  SfResponse *r = response->v.handle.ptr;
+  return sf_stream_collect(r->body, SF_COLLECT_JSON);
+}
+
+/* ── fetch transfer ──────────────────────────────────────────────── */
+
+static SfTransfer *sf_retain(SfTransfer *t) {
+  t->rc++;
+  return t;
+}
+
+static void sf_release(SfTransfer *t) {
+  if (--t->rc > 0) return;
+  scr_promise_release(t->promise);
+  scr_url_release(t->url);
+  scr_str_release(t->url_text);
+  if (t->client) scr_http_client_release(t->client);
+  sf_watch_free(t->signal_watch);
+  sf_signal_release(t->signal);
+  sf_stream_release(t->request_stream);
+  sf_stream_release(t->response_stream);
+  free(t);
+}
+
+static void *sf_retain_v(void *p) { return sf_retain((SfTransfer *)p); }
+static void sf_release_v(void *p) { sf_release((SfTransfer *)p); }
+
+static ScrClosure *sf_closure(SfTransfer *t, void *fn) {
+  ScrClosure *cb = scr_closure_new(fn, 1);
+  ScrBox *box = scr_box_new_obj(&sf_retain_v, &sf_release_v, NULL);
+  scr_box_set_ref(box, sf_retain(t));
+  cb->caps[0] = box;
+  return cb;
+}
+
+static SfTransfer *sf_from(ScrClosure *cb) {
+  return (SfTransfer *)scr_box_get_ref(cb->caps[0]);
+}
+
+static void sf_settle(SfTransfer *t) {
+  if (t->done) return;
+  t->done = true;
+  if (t->signal_watch) {
+    sf_watch_free(t->signal_watch);
+    t->signal_watch = NULL;
+  }
+  if (t->request_stream && t->request_stream->request_owner == t) {
+    t->request_stream->request_owner = NULL;
+    t->request_stream->internal_lock = false;
+  }
+  if (t->response_stream && t->response_stream->response_owner == t) {
+    t->response_stream->response_owner = NULL;
+  }
+  if (t->client) {
+    scr_http_client_release(t->client);
+    t->client = NULL;
+  }
+  for (SfTransfer **link = &sf_live; *link; link = &(*link)->next) {
+    if (*link == t) {
+      *link = t->next;
+      sf_release(t); /* registry reference */
+      return;
+    }
+  }
+}
+
+static void sf_reject(SfTransfer *t, const char *message) {
+  if (t->done) return;
+  sf_type_error(message);
+  scr_promise_reject_pending(t->promise);
+  sf_settle(t);
+}
+
+static void sf_reject_reason(SfTransfer *t, ScrDyn *reason) {
+  if (t->done) return;
+  sf_reject_promise_reason(t->promise, reason);
+  sf_settle(t);
+}
+
+static void sf_transfer_abort_watch(SfSignalWatch *w, SfSignal *signal) {
+  SfTransfer *t = w->owner;
+  if (t->done) return;
+  if (t->client) scr_http_client_destroy(t->client);
+  if (t->response_sent && t->response_stream) {
+    sf_stream_error(t->response_stream, signal->reason);
+    sf_settle(t);
+  } else {
+    sf_reject_reason(t, signal->reason);
+  }
+}
+
+static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason) {
+  if (!t || t->done) return;
+  if (t->client) scr_http_client_destroy(t->client);
+  sf_reject_reason(t, reason);
+}
+
+static bool sf_eq_ci(const ScrStr *s, const char *lit) {
+  size_t n = strlen(lit);
+  if (s->len != n) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = s->data[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c != lit[i]) return false;
+  }
+  return true;
+}
+
+static ScrStr *sf_bare_host(const ScrStr *host) {
+  if (host->len >= 2 && host->data[0] == '[' &&
+      host->data[host->len - 1] == ']') {
+    return scr_str_new(host->data + 1, host->len - 2);
+  }
+  return scr_str_retain((ScrStr *)host);
+}
+
+static int sf_port(const ScrUrl *u, int dflt) {
+  if (u->port->len == 0) return dflt;
+  int p = 0;
+  for (size_t i = 0; i < u->port->len; i++) {
+    p = p * 10 + (u->port->data[i] - '0');
+  }
+  return p;
+}
+
+static ScrStr *sf_path(const ScrUrl *u) {
+  size_t plen = (u->path->len > 0 ? u->path->len : 1) + u->query->len;
+  char *buf = malloc(plen);
+  if (!buf) sf_oom();
+  size_t n = 0;
+  if (u->path->len > 0) {
+    memcpy(buf, u->path->data, u->path->len);
+    n = u->path->len;
+  } else {
+    buf[n++] = '/';
+  }
+  memcpy(buf + n, u->query->data, u->query->len);
+  n += u->query->len;
+  ScrStr *out = scr_str_new(buf, n);
+  free(buf);
+  return out;
+}
+
+static bool sf_pairs_have(ScrArr *pairs, const char *name) {
+  size_t n = (size_t)scr_arr_len(pairs);
+  size_t want = strlen(name);
+  for (size_t i = 0; i + 1 < n; i += 2) {
+    ScrStr *key = (ScrStr *)scr_arr_get_ref(pairs, (double)i);
+    bool same = key->len == want;
+    for (size_t j = 0; j < want && same; j++) {
+      char c = key->data[j];
+      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+      same = c == name[j];
+    }
+    scr_str_release(key);
+    if (same) return true;
+  }
+  return false;
+}
+
+static bool sf_header_name_ok(const char *s, size_t len) {
+  if (len == 0) return false;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') ||
+          strchr("!#$%&'*+-.^_`|~", c) != NULL)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool sf_header_value_ok(const ScrStr *value) {
+  return memchr(value->data, '\r', value->len) == NULL &&
+         memchr(value->data, '\n', value->len) == NULL;
+}
+
+static bool sf_push_header(ScrArr *pairs, const char *name, size_t name_len,
+                           ScrStr *value) {
+  if (!sf_header_name_ok(name, name_len) || !sf_header_value_ok(value)) {
+    sf_type_error("fetch failed");
+    return false;
+  }
+  scr_arr_push_ref(pairs, scr_str_new(name, name_len));
+  scr_arr_push_ref(pairs, scr_str_retain(value));
+  return true;
+}
+
+static bool sf_add_headers(ScrArr *pairs, const ScrDyn *headers) {
+  if (!headers || headers->kind == SCR_DYN_UNDEF ||
+      headers->kind == SCR_DYN_NULL) {
+    return true;
+  }
+  if (headers->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < headers->v.obj.len; i++) {
+      const ScrDynEntry *e = &headers->v.obj.entries[i];
+      if (e->value->kind != SCR_DYN_STR ||
+          !sf_push_header(pairs, e->key, e->key_len, e->value->v.str)) {
+        if (!scr_exc_pending()) sf_type_error("fetch failed");
+        return false;
+      }
+    }
+    return true;
+  }
+  if (headers->kind == SCR_DYN_ARR) {
+    for (size_t i = 0; i < headers->v.arr.len; i++) {
+      const ScrDyn *pair = headers->v.arr.items[i];
+      if (pair->kind != SCR_DYN_ARR || pair->v.arr.len != 2 ||
+          pair->v.arr.items[0]->kind != SCR_DYN_STR ||
+          pair->v.arr.items[1]->kind != SCR_DYN_STR ||
+          !sf_push_header(pairs, pair->v.arr.items[0]->v.str->data,
+                          pair->v.arr.items[0]->v.str->len,
+                          pair->v.arr.items[1]->v.str)) {
+        if (!scr_exc_pending()) sf_type_error("fetch failed");
+        return false;
+      }
+    }
+    return true;
+  }
+  sf_type_error("fetch failed");
+  return false;
+}
+
+static ScrStr *sf_method(const ScrDyn *init) {
+  const ScrDyn *value =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "method", 6)
+          : NULL;
+  if (!value || value->kind == SCR_DYN_UNDEF) return scr_str_new("GET", 3);
+  if (value->kind != SCR_DYN_STR) {
+    sf_type_error("fetch failed");
+    return NULL;
+  }
+  ScrStr *method = scr_str_retain(value->v.str);
+  static const char *normalized[] = {
+      "DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"};
+  for (size_t i = 0; i < sizeof normalized / sizeof normalized[0]; i++) {
+    const char *candidate = normalized[i];
+    size_t n = strlen(candidate);
+    if (method->len != n) continue;
+    bool same = true;
+    for (size_t j = 0; j < n && same; j++) {
+      char c = method->data[j];
+      if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+      same = c == candidate[j];
+    }
+    if (same) {
+      scr_str_release(method);
+      return scr_str_new(candidate, n);
+    }
+  }
+  return method;
+}
+
+static ScrPromise *sf_reject_now(ScrPromise *promise, const char *message) {
+  if (!scr_exc_pending()) sf_type_error(message);
+  scr_promise_reject_pending(promise);
+  return promise;
+}
+
+static void sf_stream_request_flush(SfStream *s) {
+  SfTransfer *t = s->request_owner;
+  if (!t || t->done || !t->client) return;
+  while (s->head) {
+    SfChunk *c = s->head;
+    s->head = c->next;
+    if (!s->head) s->tail = NULL;
+    scr_http_client_write_bytes(t->client, c->bytes);
+    sf_chunk_release(c);
+  }
+  if (s->error) {
+    sf_transfer_stream_error(t, s->error);
+  } else if (s->closed) {
+    scr_http_client_end(t->client);
+  } else {
+    sf_stream_pull(s);
+  }
+}
+
+static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
+  SfTransfer *t = sf_from(cb);
+  if (!t) return;
+  if (!t->done && t->response_stream) {
+    sf_stream_enqueue_bytes(t->response_stream, chunk);
+  }
+  sf_release(t);
+}
+
+static void sf_on_end(ScrClosure *cb) {
+  SfTransfer *t = sf_from(cb);
+  if (!t) return;
+  if (!t->done) {
+    if (t->response_stream) sf_stream_close(t->response_stream);
+    sf_settle(t);
+  }
+  sf_release(t);
+}
+
+static void sf_on_res_error(ScrClosure *cb, ScrStr *message) {
+  (void)message;
+  SfTransfer *t = sf_from(cb);
+  if (!t) return;
+  if (!t->done && t->response_stream) {
+    ScrError *e = NULL;
+    ScrDyn *reason = sf_dom_reason("TypeError", "terminated", &e);
+    sf_stream_error(t->response_stream, reason);
+    scr_dyn_release(reason);
+    scr_error_release(e);
+    sf_settle(t);
+  } else {
+    sf_reject(t, "fetch failed");
+  }
+  sf_release(t);
+}
+
+static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
+  SfTransfer *t = sf_from(cb);
+  if (!t) {
+    scr_http_req_release(res);
+    return;
+  }
+  if (t->done) {
+    scr_http_req_release(res);
+    sf_release(t);
+    return;
+  }
+  SfStream *body = sf_stream_new_native();
+  body->response_owner = t;
+  t->response_stream = sf_stream_retain(body);
+  SfResponse *response = calloc(1, sizeof *response);
+  if (!response) sf_oom();
+  response->rc = 1;
+  response->body = sf_stream_retain(body);
+  response->url = scr_str_retain(t->url_text);
+  response->status = (int)scr_http_req_status(res);
+  ScrDyn *boxed = scr_dyn_new_handle(response, SCR_DYNH_FETCH_RESPONSE);
+  sf_response_release(response);
+  sf_stream_release(body);
+
+  scr_http_req_on_data(res, sf_closure(t, (void *)&sf_on_data),
+                       &sf_on_data, false);
+  scr_http_req_on_end(res, sf_closure(t, (void *)&sf_on_end), false);
+  scr_http_req_on_error(res, sf_closure(t, (void *)&sf_on_res_error),
+                        &sf_on_res_error, false);
+  t->response_sent = true;
+  scr_promise_fulfill_ref(t->promise, boxed, &scr_dyn_retain_v,
+                          &scr_dyn_release_v, NULL);
+  scr_http_req_release(res);
+  sf_release(t);
+}
+
+static void sf_on_client_error(ScrClosure *cb, ScrStr *message) {
+  (void)message;
+  SfTransfer *t = sf_from(cb);
+  if (!t) return;
+  if (!t->done) {
+    if (t->response_sent && t->response_stream) {
+      ScrError *e = NULL;
+      ScrDyn *reason = sf_dom_reason("TypeError", "terminated", &e);
+      sf_stream_error(t->response_stream, reason);
+      scr_dyn_release(reason);
+      scr_error_release(e);
+      sf_settle(t);
+    } else {
+      sf_reject(t, "fetch failed");
+    }
+  }
+  sf_release(t);
+}
+
+ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
+  ScrPromise *promise = scr_promise_new();
+  if (init && init->kind != SCR_DYN_OBJ &&
+      init->kind != SCR_DYN_UNDEF && init->kind != SCR_DYN_NULL) {
+    return sf_reject_now(promise, "fetch failed");
+  }
+  const ScrDyn *signal_dyn =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "signal", 6)
+          : NULL;
+  SfSignal *signal = NULL;
+  if (signal_dyn && signal_dyn->kind != SCR_DYN_UNDEF &&
+      signal_dyn->kind != SCR_DYN_NULL) {
+    signal = sf_signal_of(signal_dyn,
+                          "Request init.signal must be an AbortSignal");
+    if (!signal) return sf_reject_now(promise, "fetch failed");
+    if (signal->aborted) {
+      sf_reject_promise_reason(promise, signal->reason);
+      return promise;
+    }
+  }
+
+  ScrUrl *u = scr_url_new(url);
+  if (!u) {
+    scr_promise_reject_pending(promise);
+    return promise;
+  }
+  bool https = sf_eq_ci(u->scheme, "https");
+  if (!https && !sf_eq_ci(u->scheme, "http")) {
+    scr_url_release(u);
+    return sf_reject_now(promise, "fetch failed");
+  }
+
+  ScrStr *method = sf_method(init);
+  if (!method) {
+    scr_url_release(u);
+    return sf_reject_now(promise, "fetch failed");
+  }
+  const ScrDyn *body =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "body", 4)
+          : NULL;
+  bool body_present =
+      body && body->kind != SCR_DYN_UNDEF && body->kind != SCR_DYN_NULL;
+  bool body_stream =
+      body_present &&
+      ((body->kind == SCR_DYN_HANDLE &&
+        body->v.handle.tag == SCR_DYNH_WEB_STREAM) ||
+       body->kind == SCR_DYN_ARR);
+  if (body_present && body->kind != SCR_DYN_STR &&
+      body->kind != SCR_DYN_BYTES && !body_stream) {
+    scr_str_release(method);
+    scr_url_release(u);
+    return sf_reject_now(promise, "fetch failed");
+  }
+  if (body_present &&
+      ((method->len == 3 && memcmp(method->data, "GET", 3) == 0) ||
+       (method->len == 4 && memcmp(method->data, "HEAD", 4) == 0))) {
+    scr_str_release(method);
+    scr_url_release(u);
+    return sf_reject_now(
+        promise, "Request with GET/HEAD method cannot have body.");
+  }
+
+  SfTransfer *t = calloc(1, sizeof *t);
+  if (!t) sf_oom();
+  t->rc = 1; /* registry */
+  t->promise = scr_promise_retain(promise);
+  t->url = u;
+  t->url_text = scr_str_retain(url);
+  if (signal) {
+    t->signal = sf_signal_retain(signal);
+    t->signal_watch =
+        sf_signal_watch(signal, t, &sf_transfer_abort_watch);
+  }
+  t->next = sf_live;
+  sf_live = t;
+
+  const int default_port = https ? 443 : 80;
+  const int port = sf_port(u, default_port);
+  ScrStr *bare = sf_bare_host(u->host);
+  ScrStr *dial = scr_net_blocking_lookup(bare);
+  ScrStr *path = sf_path(u);
+  ScrArr *headers = scr_arr_new(SCR_ELEM_STR, 24);
+  char authority[384];
+  int authority_len =
+      port == default_port
+          ? snprintf(authority, sizeof authority, "%.*s",
+                     (int)u->host->len, u->host->data)
+          : snprintf(authority, sizeof authority, "%.*s:%d",
+                     (int)u->host->len, u->host->data, port);
+  if (authority_len < 0 || (size_t)authority_len >= sizeof authority) {
+    sf_reject(t, "fetch failed");
+    scr_arr_release(headers);
+    scr_str_release(method);
+    scr_str_release(path);
+    scr_str_release(dial);
+    scr_str_release(bare);
+    return promise;
+  }
+  scr_arr_push_ref(headers, scr_str_new("host", 4));
+  scr_arr_push_ref(headers,
+                   scr_str_new(authority, (size_t)authority_len));
+  scr_arr_push_ref(headers, scr_str_new("connection", 10));
+  scr_arr_push_ref(headers, scr_str_new("keep-alive", 10));
+  const ScrDyn *init_headers =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "headers", 7)
+          : NULL;
+  if (!sf_add_headers(headers, init_headers)) {
+    sf_reject_now(promise, "fetch failed");
+    sf_settle(t);
+    scr_arr_release(headers);
+    scr_str_release(method);
+    scr_str_release(path);
+    scr_str_release(dial);
+    scr_str_release(bare);
+    return promise;
+  }
+  if (body && body->kind == SCR_DYN_STR &&
+      !sf_pairs_have(headers, "content-type")) {
+    scr_arr_push_ref(headers, scr_str_new("content-type", 12));
+    scr_arr_push_ref(headers,
+                     scr_str_new("text/plain;charset=UTF-8", 24));
+  }
+  if (!sf_pairs_have(headers, "accept")) {
+    scr_arr_push_ref(headers, scr_str_new("accept", 6));
+    scr_arr_push_ref(headers, scr_str_new("*/*", 3));
+  }
+  if (!sf_pairs_have(headers, "accept-encoding")) {
+    scr_arr_push_ref(headers, scr_str_new("accept-encoding", 15));
+    scr_arr_push_ref(headers, scr_str_new("identity", 8));
+  }
+  if (!sf_pairs_have(headers, "user-agent")) {
+    scr_arr_push_ref(headers, scr_str_new("user-agent", 10));
+    scr_arr_push_ref(headers, scr_str_new("node", 4));
+  }
+
+  void *tls_ctx = https ? scr_tls_fetch_client_ctx(bare, true) : NULL;
+  t->client = scr_http_request_ex(
+      dial, port, path, method, 0, headers, false, NULL, NULL,
+      default_port, https ? &scr_tls_fetch_client_wrap : NULL, tls_ctx);
+  scr_arr_release(headers);
+  scr_str_release(method);
+  scr_str_release(path);
+  scr_str_release(dial);
+  scr_str_release(bare);
+
+  scr_http_client_on_response(
+      t->client, sf_closure(t, (void *)&sf_on_response),
+      &sf_on_response, true);
+  scr_http_client_on_error(
+      t->client, sf_closure(t, (void *)&sf_on_client_error),
+      &sf_on_client_error, false);
+  if (body && body->kind == SCR_DYN_STR) {
+    scr_http_client_end_str(t->client, body->v.str);
+  } else if (body && body->kind == SCR_DYN_BYTES) {
+    scr_http_client_end_bytes(t->client, body->v.bytes);
+  } else if (body_stream) {
+    SfStream *stream = NULL;
+    ScrDyn *seeded = NULL;
+    if (body->kind == SCR_DYN_ARR) {
+      seeded = scr_fetch_stream_from((ScrDyn *)body);
+      if (!seeded) {
+        sf_reject_now(promise, "fetch failed");
+        sf_settle(t);
+        return promise;
+      }
+      stream = sf_stream_of(seeded);
+    } else {
+      stream = sf_stream_of(body);
+    }
+    if (!stream || stream->reader || stream->internal_lock ||
+        stream->disturbed) {
+      scr_dyn_release(seeded);
+      sf_reject(t, "Response body object should not be disturbed or locked");
+      return promise;
+    }
+    stream->disturbed = true;
+    stream->internal_lock = true;
+    stream->request_owner = t;
+    t->request_stream = sf_stream_retain(stream);
+    sf_stream_request_flush(stream);
+    scr_dyn_release(seeded);
+  } else {
+    scr_http_client_end(t->client);
+  }
+  return promise;
+}
+
+/* ── handle dispatch tables + teardown ───────────────────────────── */
+
+static bool sf_no_set(void *ptr, const char *key, size_t len,
+                      const ScrDyn *value) {
+  (void)ptr;
+  (void)key;
+  (void)len;
+  (void)value;
+  return false;
+}
+
+static const ScrDynHandleOps sf_signal_ops = {
+    "AbortSignal", &sf_signal_retain_v, &sf_signal_release_v,
+    &sf_signal_invoke, &sf_signal_get, &sf_signal_set, NULL};
+static const ScrDynHandleOps sf_stream_ops = {
+    "ReadableStream", &sf_stream_retain_v, &sf_stream_release_v,
+    &sf_stream_invoke, &sf_stream_get, &sf_no_set, NULL};
+static const ScrDynHandleOps sf_reader_ops = {
+    "ReadableStreamDefaultReader", &sf_reader_retain_v,
+    &sf_reader_release_v, &sf_reader_invoke, &sf_reader_get,
+    &sf_no_set, NULL};
+static const ScrDynHandleOps sf_controller_ops = {
+    "ReadableStreamDefaultController", &sf_stream_retain_v,
+    &sf_stream_release_v, &sf_controller_invoke, &sf_controller_get,
+    &sf_no_set, NULL};
+static const ScrDynHandleOps sf_response_ops = {
+    "Response", &sf_response_retain_v, &sf_response_release_v,
+    &sf_response_invoke, &sf_response_get, &sf_no_set, NULL};
+
+static void sf_teardown(void) {
+  while (sf_live) {
+    SfTransfer *t = sf_live;
+    if (t->client) scr_http_client_destroy(t->client);
+    if (t->response_stream) sf_stream_close(t->response_stream);
+    sf_settle(t);
+  }
+}
+
+void scr_fetch_install(void) {
+  static bool installed;
+  if (installed) return;
+  installed = true;
+  scr_net_install();
+  scr_dyn_handle_install(SCR_DYNH_ABORT_SIGNAL, &sf_signal_ops);
+  scr_dyn_handle_install(SCR_DYNH_WEB_STREAM, &sf_stream_ops);
+  scr_dyn_handle_install(SCR_DYNH_WEB_READER, &sf_reader_ops);
+  scr_dyn_handle_install(SCR_DYNH_WEB_CONTROLLER, &sf_controller_ops);
+  scr_dyn_handle_install(SCR_DYNH_FETCH_RESPONSE, &sf_response_ops);
+  atexit(sf_teardown);
+}
+
+#else
 
 #include "scr_runtime.h"
 #include "scr_url_internal.h"

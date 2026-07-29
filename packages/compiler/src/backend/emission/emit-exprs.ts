@@ -2352,6 +2352,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         };
         const fn = e.fn;
         switch (fn) {
+          case "fetch.start":
+            E.usesTimers = true;
+            return finish(`scr_fetch_static(${arg(0)}, ${arg(1)})`);
+          case "fetch.responseJson":
+            return finish(`scr_fetch_response_json(${arg(0)})`);
+          case "fetch.abortTimeout":
+            E.usesTimers = true;
+            return finish(`scr_fetch_abort_timeout(${arg(0)})`);
+          case "fetch.abortNow":
+            return finish(`scr_fetch_abort_now(${arg(0)})`);
+          case "fetch.abortAny":
+            return finish(`scr_fetch_abort_any(${arg(0)})`);
+          case "fetch.streamNew":
+            E.usesTimers = true;
+            return finish(`scr_fetch_stream_new(${arg(0)})`);
+          case "fetch.streamFrom":
+            E.usesTimers = true;
+            return finish(`scr_fetch_stream_from(${arg(0)})`);
           case "island.eval":
             // --dynamic builds only (the frontend fences the intrinsic, so
             // scr_island_eval is always linked when this emits). Borrows

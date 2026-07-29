@@ -1,7 +1,6 @@
-// USER-code fetch is island-backed ambient surface (the engine's own
-// fetch executes): in a static build every call site is its own SC2012
-// naming the flag — never an ICE, never a link error — and a bare
-// Response-typed value points at the same choice.
+// fetch(url), RequestInit, AbortSignal, readable bodies, and Response body
+// readers are native static surface. Constructing Headers remains in the
+// broader dynamic web tier and diagnoses cleanly at its use site.
 async function probe(url: string): Promise<number> {
   const r = await fetch(url);
   return r.status;
@@ -16,3 +15,5 @@ async function timed(url: string): Promise<string> {
 }
 probe("http://localhost/a");
 timed("http://localhost/b");
+const headers = new Headers();
+// Headers remains the dynamic-tier fence above.

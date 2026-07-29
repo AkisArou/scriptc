@@ -1612,6 +1612,17 @@ export type IrRegexIntrinsicMethod =
  * assume the island runtime is linked when they see it; island exceptions
  * bridge into the exception cell as catchable strings (may-throw). */
 export type IrLibFn =
+  /** Native static fetch and its Web-platform companions. fetch.start
+   * answers once the response head arrives; responseJson consumes the
+   * native body stream. AbortSignal and ReadableStream values are opaque
+   * checked-dynamic handles. */
+  | "fetch.start"
+  | "fetch.responseJson"
+  | "fetch.abortTimeout"
+  | "fetch.abortNow"
+  | "fetch.abortAny"
+  | "fetch.streamNew"
+  | "fetch.streamFrom"
   | "island.eval"
   /** Load an embedded npm package's runtime entry in the island (cached by
    * the engine's module registry) and take one export: args are the entry
@@ -5597,18 +5608,18 @@ export function moduleUsesCopying(mod: IrModule): boolean {
   return found;
 }
 
-/** True when the embedded npm graph references fetch — the link switch
- * that pulls scr_fetch.c + its socket/tls/zlib dependencies into the binary (cc.ts) and
- * has the emitted main call scr_fetch_install. A word-boundary scan over
- * the embedded SOURCES, erring toward linking: a false positive costs one
- * dylib reference; a false negative would leave embedded code without the
- * global at runtime. Static builds and fetch-free graphs keep their exact
- * historical link lines. */
+/** True when user code lowers static fetch or the embedded npm graph
+ * references dynamic fetch — the link switch that pulls scr_fetch.c +
+ * its socket/tls/zlib dependencies into the binary (cc.ts) and has the
+ * emitted main call scr_fetch_install. For embedded sources, use a
+ * word-boundary scan and err toward linking: a false positive costs one
+ * dylib reference; a false negative would leave embedded code without
+ * the global at runtime. Fetch-free graphs keep their exact historical
+ * link lines. */
 export function moduleUsesFetch(mod: IrModule): boolean {
   const embedded = mod.embedded;
   if (embedded && embedded.modules.some((m) => /\bfetch\b/.test(m.source))) return true;
-  // USER-code fetch (the island-backed ambient): its lowering reads the
-  // engine's fetch global — the same jsOp walk shape as moduleUsesZlib.
+  // User-code fetch is either the engine global or the static libCall pair.
   let found = false;
   const visit = (v: unknown): void => {
     if (found || v === null || typeof v !== "object") return;
@@ -5616,8 +5627,12 @@ export function moduleUsesFetch(mod: IrModule): boolean {
       for (const item of v) visit(item);
       return;
     }
-    const node = v as { kind?: unknown; op?: unknown; name?: unknown };
-    if (node.kind === "jsOp" && node.op === "globalGet" && node.name === "fetch") {
+    const node = v as { kind?: unknown; op?: unknown; name?: unknown; fn?: unknown };
+    if (
+      (node.kind === "jsOp" && node.op === "globalGet" && node.name === "fetch") ||
+      (node.kind === "libCall" &&
+        typeof node.fn === "string" && node.fn.startsWith("fetch."))
+    ) {
       found = true;
       return;
     }
@@ -6514,6 +6529,9 @@ export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "fetch.abortAny",
+  "fetch.streamNew",
+  "fetch.streamFrom",
   "num.toFixed",
   "insp.jsonDyn",
   // diagnostics_channel: publish runs subscribers synchronously (a throw

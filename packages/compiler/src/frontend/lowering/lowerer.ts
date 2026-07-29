@@ -96,7 +96,7 @@ import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowe
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
 import { builtinImportOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, stripTypeCasts, lowerBuiltinModuleCall, lowerFsToUnixTimestampCall, lowerFsLadderCall, lowerChildArgsArg, lowerSpawnSyncCall, lowerSpawnCall, lowerExecSyncCall, recordToEnvPairs, lowerJsonMethodCall, fencedBuiltinImportOf, lowerCryptoComposedCall, lowerUrlMethodCall, lowerSearchParamsMethodCall, lowerStatsMethodCall, lowerChildMethodCall, lowerAtomicsCall, lowerBuiltinExtraProperty, promisifiedExecFileDecl, lowerExecFileAsyncCall, execFileAsyncHelper, lowerStringDecoderMethodCall, strdecHelper, lowerReadlineMethodCall, lowerDcChannelMethodCall, lowerDcChannelProperty, lowerAlsMethodCall, lowerDcTracingChannelMethodCall, lowerDcTracingChannelProperty, lowerJsonProperty, lowerErrorCodeProperty, lowerProcessProperty, isProcessEnv, envValueType, lowerProcessEnvGet, lowerProcessMethodCall, lowerProcessOptionalMethodCall, lowerTimeoutMethodCall, envSnapshotHelper, isConsoleLog, consoleCallMember, lowerNumberStaticCall, lowerNumberStaticProperty, lowerDateCall, lowerTextCodecCall, lowerCryptoModuleCall, lowerFsConstantsProperty, lowerBuiltinConstantsProperty, builtinConstantBindingOf, builtinConstantsDestructureDecl, lowerProcessStreamProperty, lowerStringStaticCall, lowerStringLastIndexOfCall, lowerPromiseStaticCall } from "./lower-builtins.js";
-import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
+import { isIslandExpr, islandFuncValueFence, islandRegexpOf, jsvalIn, requireDynamicApi, islandGlobalFnOf, lowerDynamicImportCall, lowerFetchCall, lowerStaticFetchCompanionCall, lowerStaticReadableStreamNew, lowerStaticResponseCall, lowerIslandMethodCall, lowerMathProperty, npmPackageOf, npmMemberFence, npmPackageOfSymbol } from "./lower-island.js";
 import { lowerHttpHeadersElement, lowerNetModuleCall, lowerServerMethodCall, lowerServerProperty, lowerTlsRootCertificates } from "./lower-server.js";
 import { lowerDgramDnsModuleCall, lowerDgramMethodCall } from "./lower-dgram.js";
 import { lowerNodeTestModuleCall, lowerTestDirectCall, lowerTestMethodCall, lowerTestCtxProperty } from "./lower-test.js";
@@ -2368,10 +2368,11 @@ export class Lowerer {
       this.pushDiag(noLoweringDiag(this.checker.typeToString(type), locOf(node), undefined, true));
       throw new PoisonError();
     }
-    // Island-backed ambient TYPES (Response, AbortSignal, RequestInit) in a
-    // STATIC build: the values live in the embedded engine, so the honest
-    // story is the per-site SC2012 — the same one the fetch call itself
-    // reports — not the generic supported-types recitation.
+    // Engine-backed ambient TYPES (currently Headers) in a STATIC build:
+    // the values live in the embedded engine, so the honest story is the
+    // per-site SC2012 rather than the generic supported-types recitation.
+    // Response, RequestInit, AbortSignal, and readable Web Streams map
+    // earlier to native checked-dynamic handles and do not reach here.
     if (
       !this.dynamic &&
       typeSym &&
@@ -5667,15 +5668,23 @@ export class Lowerer {
       }
     }
     // An OBJECT LITERAL against a checked-dynamic slot in a JS file (the
-    // getSupportInfo options argument — a dyn-ABI param): the value's
-    // world IS the checked-dynamic tree — build the dyn literal directly, before the
-    // island gate could claim the checker's `any` context (an island
-    // build could never land in the slot: no engine→dyn crossing).
+    // getSupportInfo options argument — a dyn-ABI param), or against the
+    // standard RequestInit type in TypeScript: the value's world IS the
+    // checked-dynamic tree — build the dyn literal directly.
     if (expected?.kind === "dyn") {
       let x: ts.Expression = node;
       while (ts.isParenthesizedExpression(x)) x = x.expression;
-      if (ts.isObjectLiteralExpression(x) && isJsSourceFile(x.getSourceFile())) {
-        return lowerDynObjectLiteral(this, x);
+      if (ts.isObjectLiteralExpression(x)) {
+        const contextual = this.checker.getContextualType(x);
+        const widened = contextual
+          ? this.checker.getBaseTypeOfLiteralType(contextual)
+          : undefined;
+        const sym = widened?.getAliasSymbol() ?? widened?.getSymbol();
+        const requestInit =
+          sym?.name === "RequestInit" && this.isStdlibSymbol(sym);
+        if (isJsSourceFile(x.getSourceFile()) || requestInit) {
+          return lowerDynObjectLiteral(this, x);
+        }
       }
     }
     // An ARRAY LITERAL against a UNION slot whose own type has no static
@@ -7225,13 +7234,16 @@ export class Lowerer {
   }
 
   lowerCall(expr: ts.CallExpression): IrExpr {
-    // The island-backed ambient fetch and dynamic import() claim their
-    // calls before the general dispatch (the general identifier-call paths
-    // have no lowering for a promise-returning ambient global, and
-    // `import` is a keyword callee no identifier path matches).
+    // Ambient fetch (native in static builds, island-backed under
+    // --dynamic) and dynamic import() claim their calls before the general
+    // dispatch. The general identifier-call paths have no lowering for a
+    // promise-returning ambient global, and `import` is a keyword callee no
+    // identifier path matches.
     return (
       lowerFfiCall(this, expr) ??
       lowerFetchCall(this, expr) ??
+      lowerStaticFetchCompanionCall(this, expr) ??
+      lowerStaticResponseCall(this, expr) ??
       lowerDynamicImportCall(this, expr) ??
       lowerCall(this, expr)
     );
@@ -7419,7 +7431,7 @@ export class Lowerer {
       const arg = this.lowerExpr(expr.arguments[0]!);
       return { kind: "jsOp", op: "construct", args: [ctor, arg], type: JSVAL, loc };
     }
-    return lowerNew(this, expr);
+    return lowerStaticReadableStreamNew(this, expr) ?? lowerNew(this, expr);
   }
 
   lowerFieldRead(expr: ts.PropertyAccessExpression): IrExpr | null {

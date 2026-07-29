@@ -3882,11 +3882,15 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     const loc = locOf(expr);
     const fields: { key: IrExpr; value: IrExpr }[] = [];
     for (const prop of expr.properties) {
-      if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) {
+      if (
+        !ts.isPropertyAssignment(prop) &&
+        !ts.isShorthandPropertyAssignment(prop) &&
+        !ts.isMethodDeclaration(prop)
+      ) {
         L.unsupported(
           "SC1090",
           prop,
-          "spreads, accessors, and methods in a runtime-keyed (computed-key) object literal",
+          "spreads and accessors in a runtime-keyed (computed-key) object literal",
         );
       }
       const name = prop.name;
@@ -3916,16 +3920,24 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       } else {
         L.unsupported("SC1090", prop, "non-identifier property names");
       }
-      const valueExpr = ts.isShorthandPropertyAssignment(prop) ? (prop.name as ts.Identifier) : prop.initializer;
+      const valueExpr: ts.Node = ts.isMethodDeclaration(prop)
+        ? prop
+        : ts.isShorthandPropertyAssignment(prop)
+          ? (prop.name as ts.Identifier)
+          : prop.initializer;
       // Lambda values that fail to lower become trap closures (the
       // per-call fence granularity — fenceClosureProbe) so the object
       // still builds; everything else keeps the per-property fence below.
       let raw: IrExpr;
       const propDiagsBefore = L.diags.length;
       try {
+        const lowerValue = (): IrExpr =>
+          ts.isMethodDeclaration(prop)
+            ? (L.rejectThisInObjectMethod(prop.body ?? prop), L.lowerLambda(prop))
+            : L.lowerExpr(valueExpr as ts.Expression);
         raw =
-          fenceClosureProbe(L, valueExpr, undefined, () => L.lowerExpr(valueExpr)) ??
-          L.lowerExpr(valueExpr);
+          fenceClosureProbe(L, valueExpr, undefined, lowerValue) ??
+          lowerValue();
       } catch (err) {
         // A PURE member read a JS file cannot lower (a namespace object
         // in an export aggregate): the slot takes a boxed fence closure —

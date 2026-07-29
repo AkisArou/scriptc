@@ -9,13 +9,25 @@ import { accessorSlotProp } from "../ir/nodes.js";
 // import path.
 export { typeKey };
 
-/** The island-backed ambient TYPE names of the fetch slice: standard-
- * library interfaces whose VALUES live in the embedded engine (the
- * engine's fetch mints the Response; AbortSignal.timeout mints the
- * signal), so under --dynamic they map to island handles (jsval) exactly
- * like npm-declared types. Checked with declaration provenance in mapType;
- * consumed by the lowerer's badType for the static-build wording. */
-export const ISLAND_AMBIENT_TYPES = ["Response", "RequestInit", "AbortSignal", "Headers"] as const;
+/** The ambient TYPE names of the fetch slice. Under --dynamic their
+ * values live in the embedded engine and map to island handles (jsval).
+ * Static fetch gives Response, RequestInit, AbortSignal, and the readable
+ * Web Streams slice native checked-dynamic handle representations;
+ * Headers remains engine-backed.
+ * Declaration provenance is checked in mapType so user types with the
+ * same names keep their ordinary structural representation. */
+export const ISLAND_AMBIENT_TYPES = [
+  "Response",
+  "RequestInit",
+  "AbortSignal",
+  "Headers",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "ReadableStreamDefaultController",
+  "ReadableStreamReadResult",
+  "ReadableStreamReadValueResult",
+  "ReadableStreamReadDoneResult",
+] as const;
 
 /** The frontend's record-shape interner. Records are monomorphic structural
  * shapes: fields sorted by name form the canonical identity, and two types
@@ -1325,28 +1337,37 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // no-op cast, error-typed listener params accept it, and the `.code`
   // read has its own lowering (errno/syscall/path stay per-member fences).
   if (isStdlibInterface("ErrnoException")) return { kind: "object", className: "%Error" };
-  // The fetch ambient slice (Response, RequestInit, AbortSignal): island-
-  // backed ambient TYPES — the values behind them live in the embedded
-  // engine (fetch's Response, AbortSignal.timeout's signal), so under
-  // --dynamic they map to island handles exactly like npm-declared types,
-  // and every operation on them rides the engine ops with validated exits
-  // at typed boundaries. Provenance, not names: a user's own `interface
-  // Response` maps as a record like any other. Without the flag they stay
-  // unmapped; the use sites report the per-site requires-dynamic story
-  // (the fetch/AbortSignal.timeout lowerings' SC2012, badType's naming
-  // for a bare value of the type).
+  // The fetch ambient slice: under --dynamic these are island handles
+  // exactly like npm-declared types. Static fetch has one deliberately
+  // narrower native representation: Response is an opaque checked-
+  // dynamic capsule consumed only by the Response method lowerings, and
+  // RequestInit is a checked-dynamic options object consumed by native
+  // fetch. AbortSignal and the readable Web Streams slice are native
+  // handles carried by that same checked-dynamic representation. Headers
+  // still needs the island. Provenance, not names: a user's own
+  // `interface Response` maps as a record like any other.
   // Interface OR class declarations (the shipped fallback declares
   // interfaces; @types/node's undici-types declares Response as a class).
   if (
     psym &&
     (ISLAND_AMBIENT_TYPES as readonly string[]).includes(psym.name) &&
+    !(
+      psym.name === "ReadableStream" &&
+      checker.declarationsOf(psym).some(
+        (d) => ts.isInterfaceDeclaration(d) && isDeclaredInAmbientNamespace(d, "NodeJS"),
+      )
+    ) &&
     checker.declarationsOf(psym).some(
       (d) =>
         (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
         ctx.isStdlibFile(d.getSourceFile()),
     )
   ) {
-    return ctx.dynamic ? JSVAL : null;
+    return ctx.dynamic
+      ? JSVAL
+      : psym.name !== "Headers"
+        ? DYN
+        : null;
   }
   // ReadonlyMap/ReadonlySet are the SAME runtime values as Map/Set — the
   // readonly-ness is a checker-only view (no mutating members on the

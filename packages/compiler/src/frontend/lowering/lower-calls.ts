@@ -4478,6 +4478,12 @@ export const DYN_DISPATCH_METHODS = new Set([
   // server ops; no other dyn prototype declares either name, so the
   // remainder keeps the stored-member answers.
   "listen", "close",
+  // The native WHATWG readable-stream and AbortSignal handles used by
+  // static fetch. These route through SCR_DYN_HANDLE dispatch just like
+  // the http/net names above.
+  "getReader", "cancel", "releaseLock", "enqueue", "error",
+  "throwIfAborted", "addEventListener", "removeEventListener",
+  "json", "text", "bytes", "arrayBuffer",
   // Promise.prototype (SCR_DYN_PROMISE receivers): the reaction trio
   // rides the fiber machinery (scr_dyn_promise_then); on every other dyn
   // kind then/catch/finally answer the stored-member path (OBJ own

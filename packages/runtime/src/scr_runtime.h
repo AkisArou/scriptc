@@ -2701,6 +2701,11 @@ typedef enum {
   SCR_DYNH_H2_STREAM,  /* ScrH2Stream — Http2Stream (client & server) */
   SCR_DYNH_HTTP_CLIENT, /* ScrHttpClientReq — http.ClientRequest */
   SCR_DYNH_HTTP_AGENT,  /* ScrHttpAgent — http.Agent / https.Agent */
+  SCR_DYNH_ABORT_SIGNAL, /* native static-fetch AbortSignal */
+  SCR_DYNH_WEB_STREAM,   /* native WHATWG ReadableStream */
+  SCR_DYNH_WEB_READER,   /* native ReadableStreamDefaultReader */
+  SCR_DYNH_WEB_CONTROLLER, /* native ReadableStreamDefaultController */
+  SCR_DYNH_FETCH_RESPONSE, /* native static-fetch Response */
   SCR_DYNH_COUNT,
 } ScrDynHandleTag;
 
@@ -3819,6 +3824,22 @@ ScrGen *scr_gen_of_fiber(ScrFiber *f);
 long scr_promise_live_count(void);
 #endif
 
+/* ── fetch (scr_fetch.c) ──────────────────────────────────────────────
+ * The native bridge over scr_net + scr_tls + scr_http's client parser.
+ * Static fetch(url) resolves at the response head with native Response
+ * and ReadableStream handles; Response.json consumes that same stream.
+ * AbortSignal and streaming request bodies stay native too. Under
+ * --dynamic the same TU boots the broader engine web surface. The
+ * emitted main calls scr_fetch_install in either form. */
+void scr_fetch_install(void);
+ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init); /* +1 promise<Response handle> */
+ScrPromise *scr_fetch_response_json(ScrDyn *response); /* +1 promise<dyn> */
+ScrDyn *scr_fetch_abort_timeout(double ms); /* +1 AbortSignal handle */
+ScrDyn *scr_fetch_abort_now(ScrDyn *reason); /* borrowed reason; +1 handle */
+ScrDyn *scr_fetch_abort_any(ScrDyn *signals); /* borrowed array; +1 handle or NULL pending */
+ScrDyn *scr_fetch_stream_new(ScrDyn *source); /* borrowed source; +1 handle or NULL pending */
+ScrDyn *scr_fetch_stream_from(ScrDyn *iterable); /* borrowed iterable; +1 handle or NULL pending */
+
 /* ── dynamic island (scr_island.c; --dynamic builds ONLY) ────────────
  * The embedded QuickJS-ng engine. Compiled and linked only under
  * -DSCR_DYNAMIC; static builds never reference these symbols (nor the
@@ -3948,18 +3969,12 @@ bool scr_island_timers_due(void);
 bool scr_island_timers_fire_due(void); /* true = fired at least one */
 void scr_island_timers_teardown(void);
 
-/* ── fetch (scr_fetch.c) ──────────────────────────────────────────────
- * The native bridge behind the island's fetch (scr_net + scr_tls +
- * scr_http's client parser + zlib), compiled and linked ONLY into
- * --dynamic builds whose graph references fetch. The emitted main calls
- * scr_fetch_install BEFORE any island entry; install registers the
- * bridge's hooks with the island, which boots the fetch glue with the
- * engine. The native bridge registers NO pending/poll hooks (its
+/* ── dynamic fetch hooks ──────────────────────────────────────────────
+ * The native bridge registers NO pending/poll hooks (its
  * transfers live on real sockets the loop's poller sleeps on); the curl
  * reference implementation (scr_fetch_curl.c, SCRIPTC_FETCH_CURL=1 —
  * one release as the flip's reference) still registers all four so the
  * loop can sleep on curl's fds. */
-void scr_fetch_install(void);
 void scr_island_set_fetch(void (*boot)(void *jsctx), bool (*pending)(void),
                            void (*poll)(double max_wait_ms), void (*teardown)(void));
 

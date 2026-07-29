@@ -7967,6 +7967,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/fixtures/node-types/fetch-static.ts": {
+   "order": [
+    "<repo>/tests/fixtures/node-types/fetch-static.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/fixtures/node-types/import-fences.ts": {
    "order": [
     "<repo>/tests/fixtures/node-types/import-fences.ts"

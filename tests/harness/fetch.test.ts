@@ -120,9 +120,53 @@ async function build(entry: string): Promise<string> {
   return result.binaryPath;
 }
 
+async function buildStatic(entry: string, backend: "c" | "llvm"): Promise<string> {
+  const hash = createHash("sha256");
+  const key = hash
+    .update(entry)
+    .update(readFileSync(entry))
+    .update(`static-${backend}-${sanitize ? "san" : "plain"}`)
+    .digest("hex")
+    .slice(0, 16);
+  const outDir = join(cacheDir, `fetch-${key}`);
+  mkdirSync(outDir, { recursive: true });
+  const result = await compile(entry, {
+    outPath: join(outDir, "program"),
+    outDir,
+    sanitize,
+    dynamic: false,
+    backend,
+  });
+  if (!result.ok) {
+    throw new Error(
+      "static fetch fixture failed to compile:\n" +
+        result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+    );
+  }
+  return result.binaryPath;
+}
+
 const cases = globSync(join(fixturesRoot, "cases/*/main.ts"))
   .sort()
   .map((entry) => ({ name: entry.split("/").at(-2)!, entry }));
+
+describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
+  const staticCases = ["static", "static-stream"] as const;
+  test.for(
+    staticCases.flatMap((name) =>
+      (["c", "llvm"] as const).map((backend) => [name, backend] as const),
+    ),
+  )("%s / %s backend", async ([name, backend]) => {
+    const entry = join(fixturesRoot, `${name}/main.mts`);
+    const binary = await buildStatic(entry, backend);
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry, baseUrl]),
+      runBinary(binary, [baseUrl]),
+    ]);
+    expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+  }, 120_000);
+});
 
 describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`, () => {
   // The other half of the proxy parity: WITH NODE_USE_ENV_PROXY=1 both

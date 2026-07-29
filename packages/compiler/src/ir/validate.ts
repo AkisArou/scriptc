@@ -83,6 +83,13 @@ export const REGEX_INTRINSIC_SIGS: Record<
  * the libCall case checks it specially, like process.envGet's result.
  * Exported for the frontend's lib-boundary pass (lib-boundary.ts). */
 export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result: IrType }> = {
+  "fetch.start": { argTypes: [STRING, DYN], result: { kind: "promise", inner: DYN } },
+  "fetch.responseJson": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
+  "fetch.abortTimeout": { argTypes: [F64], result: DYN },
+  "fetch.abortNow": { argTypes: [DYN], result: DYN },
+  "fetch.abortAny": { argTypes: [DYN], result: DYN },
+  "fetch.streamNew": { argTypes: [DYN], result: DYN },
+  "fetch.streamFrom": { argTypes: [DYN], result: DYN },
   "island.eval": { argTypes: [STRING], result: STRING },
   "island.import": { argTypes: [STRING, STRING, STRING], result: JSVAL },
   "island.importDyn": { argTypes: [STRING], result: JSVAL },
