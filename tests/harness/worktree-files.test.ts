@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, parse } from "node:path";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, expect, test } from "vitest";
 import {
@@ -53,8 +53,13 @@ test("workspace reset removes image manifests but retains the dependency cache",
   );
 });
 
+test("workspace reset keeps Linux Sandbox paths POSIX on every host", () => {
+  const { command, args } = workspaceResetCommand("/workspace");
+
+  expect(command).toBe("find");
+  expect(args[0]).toBe("/workspace");
+});
+
 test("workspace reset refuses the filesystem root", () => {
-  expect(() => workspaceResetCommand(parse(process.cwd()).root)).toThrow(
-    "refusing to reset a filesystem root",
-  );
+  expect(() => workspaceResetCommand("/")).toThrow("refusing to reset a filesystem root");
 });

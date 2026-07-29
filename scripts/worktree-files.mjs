@@ -1,5 +1,5 @@
 import { lstatSync } from "node:fs";
-import { isAbsolute, parse, resolve, sep } from "node:path";
+import { posix, sep } from "node:path";
 import { Transform } from "node:stream";
 
 const NUL = Buffer.from([0]);
@@ -59,11 +59,11 @@ export function filterExistingWorktreePaths(root) {
  * deleted or renamed in the uploaded worktree cannot survive from the image.
  */
 export function workspaceResetCommand(workspaceRoot) {
-  if (!isAbsolute(workspaceRoot)) {
+  if (!posix.isAbsolute(workspaceRoot)) {
     throw new Error("workspace reset root must be absolute");
   }
-  const normalizedRoot = resolve(workspaceRoot);
-  if (normalizedRoot === parse(normalizedRoot).root) {
+  const normalizedRoot = posix.resolve(workspaceRoot);
+  if (normalizedRoot === posix.parse(normalizedRoot).root) {
     throw new Error("refusing to reset a filesystem root");
   }
   return {
