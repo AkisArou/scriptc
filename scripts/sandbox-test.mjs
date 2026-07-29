@@ -7,7 +7,10 @@ import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
-import { sandboxImageConfig } from "./sandbox-config.mjs";
+import {
+  sandboxImageConfig,
+  sandboxRunnerConfig,
+} from "./sandbox-config.mjs";
 import {
   sandboxHostSchedule,
   sandboxLaneEnv,
@@ -18,11 +21,6 @@ import {
 } from "./worktree-files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const vcpus = process.env.SCRIPTC_SANDBOX_VCPUS ?? "8";
-const testWorkers = process.env.SCRIPTC_TEST_WORKERS ?? "4";
-const localTestWorkers = process.env.SCRIPTC_LOCAL_TEST_WORKERS ?? "2";
-const localCaseShards = process.env.SCRIPTC_LOCAL_CASE_SHARDS ?? "2";
-const sandboxTimeout = process.env.SCRIPTC_SANDBOX_TIMEOUT ?? "45m";
 const laneCaseShardedFiles = [
   "tests/harness/differential.test.ts",
   "tests/harness/llvm-differential.test.ts",
@@ -67,6 +65,7 @@ const invariantRemoteFiles = [
   "tests/harness/library-profile.test.ts",
   "tests/harness/linux-differential.test.ts",
   "tests/harness/oci-manifest.test.ts",
+  "tests/harness/sandbox-config.test.ts",
   "tests/harness/sandbox-platform.test.ts",
   "tests/harness/shard.test.ts",
   "tests/harness/smoke.test.ts",
@@ -163,6 +162,13 @@ Environment:
 }
 
 const { project, sandboxImage: image, team } = sandboxImageConfig();
+const {
+  vcpus,
+  testWorkers,
+  localTestWorkers,
+  localCaseShards,
+  sandboxTimeout,
+} = sandboxRunnerConfig();
 
 if (!["plain", "san", "both"].includes(values.lane)) {
   throw new Error(`--lane must be plain, san, or both (got ${values.lane})`);

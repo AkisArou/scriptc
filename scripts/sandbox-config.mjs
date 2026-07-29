@@ -17,6 +17,18 @@ function loadLocalEnv() {
   }
 }
 
+export function sandboxRunnerConfig(env) {
+  loadLocalEnv();
+  const source = env ?? process.env;
+  return {
+    vcpus: source.SCRIPTC_SANDBOX_VCPUS ?? "8",
+    testWorkers: source.SCRIPTC_TEST_WORKERS ?? "4",
+    localTestWorkers: source.SCRIPTC_LOCAL_TEST_WORKERS ?? "2",
+    localCaseShards: source.SCRIPTC_LOCAL_CASE_SHARDS ?? "2",
+    sandboxTimeout: source.SCRIPTC_SANDBOX_TIMEOUT ?? "45m",
+  };
+}
+
 export function sandboxImageConfig() {
   loadLocalEnv();
   // Keep tenancy explicit: a public clone must use a Vercel project its
