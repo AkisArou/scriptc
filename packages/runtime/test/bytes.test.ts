@@ -46,6 +46,7 @@ beforeAll(async () => {
     join(testDir, "../src/scr_url.c"),
     "-Wno-deprecated-declarations",
     "-lz",
+    ...(process.platform === "linux" ? ["-D_GNU_SOURCE", "-lm"] : []),
   ]);
   scratch = await mkdtemp(join(tmpdir(), "scriptc-bytes-"));
 });

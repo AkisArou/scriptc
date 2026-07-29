@@ -9,6 +9,8 @@
     "build:fresh": "rm -rf packages/compiler/dist packages/cli/dist node_modules/.cache/scriptc-tsc && pnpm build",
     "test": "vitest run",
     "test:cache-identity": "node tests/harness/cache-identity.mjs",
+    "test:sandbox": "node scripts/sandbox-test.mjs",
+    "test:sandbox:image": "node scripts/sandbox-image.mjs",
     "test:watch": "vitest",
     "lint": "eslint packages/compiler/src packages/cli/src",
     "manifest": "tsx scripts/surface-manifest.mjs",
@@ -20,6 +22,7 @@
     "tsx": "^4.19.0",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.24.0",
+    "vercel": "58.1.0",
     "vitest": "^3.0.0"
   }
 }

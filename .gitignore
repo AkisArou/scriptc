@@ -29,3 +29,5 @@ packages/runtime/vendor/.cache/
 # fs corpus scratch directories (created in the test cwd, removed on clean runs)
 tmp-*/
 .claude/
+.vercel/
+.env.local

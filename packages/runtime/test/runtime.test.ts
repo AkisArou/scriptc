@@ -22,9 +22,11 @@ test("runtime smoke.c: output exact, ASan and RC audit clean", async () => {
   await execFileAsync("clang", [
     "-std=c11", "-O1", "-Wall", "-Wextra",
     "-fsanitize=address", "-DSCR_RC_AUDIT",
+    ...(process.platform === "linux" ? ["-D_GNU_SOURCE"] : []),
     "-o", bin,
     join(testDir, "smoke.c"),
     ...RUNTIME_SOURCES,
+    ...(process.platform === "linux" ? ["-lm"] : []),
   ]);
   const { stdout } = await execFileAsync(bin);
   expect(stdout).toBe(

@@ -5,12 +5,29 @@ Guidance for agents (and humans) working on this repository. These conventions a
 ## Build and test
 
 ```bash
-pnpm install && pnpm -r build      # build the workspace
-SCRIPTC_TEST_WORKERS=4 pnpm test   # plain lane: differential corpus + diagnostics snapshots
-SCRIPTC_SAN=1 pnpm test            # sanitized lane: the same corpus under ASan + refcount audit
+pnpm install && pnpm -r build   # build the workspace
+pnpm test:sandbox              # default full gate: plain + sanitized lanes (~4 minutes)
 ```
 
-Both lanes green is the bar before shipping any change. `SCRIPTC_TEST_WORKERS` caps the vitest worker pool so concurrent agents don't contend for cores; full-suite runs also queue behind an advisory lock per lane.
+Use focused local tests while iterating, then use `pnpm test:sandbox` whenever a
+full validation gate is required. It loads Sandbox configuration from the
+shell and `.env.local`, runs portable coverage across disposable Linux
+Sandboxes, and retains the Darwin-native contracts on macOS. Linux hosts run
+their supported native-clang contracts locally; other hosts retain those
+checks in the Sandboxes. Both lanes green is the bar before shipping any
+change.
+
+Only when Vercel Sandbox credentials or `SCRIPTC_SANDBOX_IMAGE` are unavailable,
+run the slower local fallback:
+
+```bash
+SCRIPTC_TEST_WORKERS=4 pnpm test                 # plain lane
+SCRIPTC_TEST_WORKERS=4 SCRIPTC_SAN=1 pnpm test  # sanitized lane
+```
+
+`SCRIPTC_TEST_WORKERS` caps the vitest worker pool so concurrent agents don't
+contend for cores; full local suites also queue behind an advisory lock per
+lane.
 
 Corpus programs are differential tests against Node: every program runs under Node and as a compiled native binary, and stdout, stderr, and exit codes must match byte-for-byte. A new feature lands with corpus programs that pin its behavior both ways.
 
