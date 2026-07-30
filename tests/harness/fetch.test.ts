@@ -368,6 +368,69 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
     120_000,
   );
 
+  test(
+    "all native fetch lanes reject an opted-in HTTPS proxy instead of dialing directly",
+    async () => {
+      const certs = join(fixturesRoot, "../server/certs");
+      let directRequests = 0;
+      const server = createHttpsServer(
+        {
+          key: readFileSync(join(certs, "localhost-key.pem")),
+          cert: readFileSync(join(certs, "localhost.pem")),
+        },
+        (_request, response) => {
+          directRequests++;
+          response.end("secure");
+        },
+      );
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          throw new Error("missing HTTPS address");
+        }
+        const entry = join(fixturesRoot, "static-network-error/main.mts");
+        const [dynamic, c, llvm] = await Promise.all([
+          build(entry),
+          buildStatic(entry, "c", "https-proxy-reject"),
+          buildStatic(entry, "llvm", "https-proxy-reject"),
+        ]);
+        const argv = [`https://localhost:${address.port}`];
+        const env = {
+          ...process.env,
+          NODE_EXTRA_CA_CERTS: join(certs, "ca.pem"),
+          NODE_USE_ENV_PROXY: "1",
+          https_proxy: refusedUrl,
+          HTTPS_PROXY: refusedUrl,
+          no_proxy: "",
+          NO_PROXY: "",
+        };
+        const [nodeRes, ...nativeResults] = await Promise.all([
+          runBinary("node", [entry, ...argv], env),
+          runBinary(dynamic, argv, env),
+          runBinary(c, argv, env),
+          runBinary(llvm, argv, env),
+        ]);
+        for (const nativeRes of nativeResults) {
+          expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+          expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+        }
+        expect(directRequests).toBe(0);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    },
+    120_000,
+  );
+
   test.for(["dynamic", "c", "llvm"] as const)(
     "%s fetch rejects an invalid opted-in proxy instead of dialing directly",
     async (lane) => {

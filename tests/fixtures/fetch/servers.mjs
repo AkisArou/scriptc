@@ -21,7 +21,8 @@
  * /switching-protocols /invalid-utf8 /slow /drip
  * /chunked /backpressure /backpressure-state /gzip /gzip-concat
  * /gzip-truncated /gzip-pressure /deflate
- * /status-meta /no-content /reset-content /reset-content-large /sse,
+ * /status-meta /no-content /reset-content /reset-content-large
+ * /truncated-response /upload-failure /sse,
  * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
@@ -36,6 +37,14 @@ export async function startFetchServers() {
   let gzipPressurePayload;
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
+    if (url === "/upload-failure") {
+      // The client-side body source fails after the request begins. Keep
+      // the peer quiet so fetch must settle from that upload error, and
+      // absorb the expected reset when fetch tears the socket down.
+      req.on("error", () => {});
+      req.resume();
+      return;
+    }
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -292,6 +301,13 @@ export async function startFetchServers() {
         const payload = Buffer.alloc(2 * 1024 * 1024, 0x61);
         res.writeHead(205, { "content-length": String(payload.length) });
         res.end(payload);
+      } else if (url === "/truncated-response") {
+        res.writeHead(200, {
+          "content-type": "text/plain",
+          "content-length": "100",
+        });
+        res.write("partial");
+        setTimeout(() => res.destroy(), 10);
       } else if (url === "/sse") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         const frames = [

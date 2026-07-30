@@ -867,6 +867,50 @@ try {
   console.log("stream content-length mismatch:", caught.name, caught.message);
 }
 
+let failingRequestPulls = 0;
+const failingRequestBody = new ReadableStream<Uint8Array>({
+  async pull(controller) {
+    failingRequestPulls++;
+    controller.enqueue(Buffer.from("partial upload"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    throw new Error("late upload failure");
+  },
+});
+try {
+  await fetch(`${process.argv[2]}/upload-failure`, {
+    method: "POST",
+    body: failingRequestBody,
+    duplex: "half",
+  });
+  console.log("failing request unexpectedly resolved");
+} catch (error) {
+  const caught = error as Error;
+  console.log(
+    "failing request:",
+    caught.name,
+    caught.message,
+    caught instanceof TypeError,
+    failingRequestPulls,
+  );
+}
+
+const truncatedResponse = await fetch(
+  `${process.argv[2]}/truncated-response`,
+);
+try {
+  await truncatedResponse.text();
+  console.log("truncated response unexpectedly read");
+} catch (error) {
+  const caught = error as Error;
+  console.log(
+    "truncated response:",
+    caught.name,
+    caught.message,
+    caught instanceof TypeError,
+    caught instanceof DOMException,
+  );
+}
+
 let selfCapturingStream: ReadableStream<number>;
 selfCapturingStream = new ReadableStream<number>({
   pull(controller) {

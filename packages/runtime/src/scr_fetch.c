@@ -55,7 +55,8 @@
  *   proxy as absolute-URI requests (the classic forward-proxy wire form;
  *   undici tunnels CONNECT, but the fixture proxy counts either form
  *   identically), no_proxy exclusions honored. https-over-proxy
- *   (CONNECT) is out of the slice.
+ *   (CONNECT) is out of the slice, so an opted-in HTTPS proxy rejects
+ *   instead of silently bypassing the configured policy.
  * - AbortSignal is wired in both tiers: an already-aborted signal rejects
  *   with its reason before any transfer starts and aborting a live
  *   transfer destroys the hop's connection. The dynamic tier uses the
@@ -363,6 +364,15 @@ static ScrDyn *sf_dom_reason(const char *name, const char *message,
   scr_dyn_release(n);
   ScrDyn *d = scr_dyn_from_error(e);
   *error_out = e; /* constructor +1 moves to the signal */
+  return d;
+}
+
+static ScrDyn *sf_type_reason(const char *message, ScrError **error_out) {
+  ScrStr *message_str = scr_str_new(message, strlen(message));
+  ScrError *e = scr_error_new(SCR_ERR_TYPE, message_str);
+  scr_str_release(message_str);
+  ScrDyn *d = scr_dyn_from_error(e);
+  *error_out = e;
   return d;
 }
 
@@ -2808,7 +2818,7 @@ static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason) {
     sf_stream_error(t->response_stream, reason);
     sf_settle(t);
   } else {
-    sf_reject_reason(t, reason);
+    sf_reject(t, "fetch failed");
   }
 }
 
@@ -3608,7 +3618,7 @@ static void sf_response_terminate(SfTransfer *t) {
   if (!t || t->done || !t->response_stream) return;
   if (t->client) scr_http_client_destroy(t->client);
   ScrError *e = NULL;
-  ScrDyn *reason = sf_dom_reason("TypeError", "terminated", &e);
+  ScrDyn *reason = sf_type_reason("terminated", &e);
   sf_stream_error(t->response_stream, reason);
   scr_dyn_release(reason);
   scr_error_release(e);
@@ -4023,9 +4033,9 @@ static bool sf_start_hop(SfTransfer *t) {
   int default_port = https ? 443 : 80;
   int port = sf_port(url, default_port);
   bool invalid_proxy = false;
-  ScrUrl *proxy =
-      https ? NULL : sf_proxy_for(url, false, port, &invalid_proxy);
-  if (invalid_proxy) {
+  ScrUrl *proxy = sf_proxy_for(url, https, port, &invalid_proxy);
+  if (invalid_proxy || (https && proxy)) {
+    scr_url_release(proxy);
     sf_reject(t, "fetch failed");
     return false;
   }
@@ -4935,9 +4945,9 @@ static void fx_start_hop(FxTransfer *t) {
   int default_port = https ? 443 : 80;
   int port = fx_url_port(u, default_port);
   bool invalid_proxy = false;
-  ScrUrl *proxy =
-      https ? NULL : fx_proxy_for(u, https, port, &invalid_proxy);
-  if (invalid_proxy) {
+  ScrUrl *proxy = fx_proxy_for(u, https, port, &invalid_proxy);
+  if (invalid_proxy || (https && proxy)) {
+    if (proxy) scr_url_release(proxy);
     fx_error(t, "fetch failed", NULL);
     return;
   }
