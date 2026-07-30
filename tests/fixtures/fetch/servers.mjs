@@ -17,7 +17,8 @@
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
  * /redirect-fragment/path /early-hints /switching-protocols /invalid-utf8 /slow /drip
- * /chunked /backpressure /backpressure-state /gzip /gzip-concat /deflate
+ * /chunked /backpressure /backpressure-state /gzip /gzip-concat
+ * /gzip-truncated /gzip-pressure /deflate
  * /status-meta /no-content /reset-content /reset-content-large /sse,
  * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
@@ -30,6 +31,7 @@ import { deflateSync, gzipSync } from "node:zlib";
 export async function startFetchServers() {
   const fragmentRedirects = new Set();
   const backpressureStates = new Map();
+  let gzipPressurePayload;
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
     const chunks = [];
@@ -228,6 +230,27 @@ export async function startFetchServers() {
         setTimeout(() => {
           res.end(finalMember);
         }, 15);
+      } else if (url === "/gzip-truncated") {
+        // Node fetch accepts a clean HTTP EOF with incomplete gzip framing
+        // and exposes the decoded prefix; pin that distinct fetch contract.
+        const complete = gzipSync(Buffer.from("truncated compressed body", "utf8"));
+        const payload = complete.subarray(0, Math.floor(complete.length / 2));
+        res.writeHead(200, {
+          "content-type": "text/plain; charset=utf-8",
+          "content-encoding": "gzip",
+          "content-length": String(payload.length),
+        });
+        res.end(payload);
+      } else if (url === "/gzip-pressure") {
+        // The representation fits in one 64 KiB socket read but expands to
+        // 64 MiB. An unread body must retain only one decoded stream chunk.
+        gzipPressurePayload ??= gzipSync(Buffer.alloc(64 * 1024 * 1024, 0x61));
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-encoding": "gzip",
+          "content-length": String(gzipPressurePayload.length),
+        });
+        res.end(gzipPressurePayload);
       } else if (url === "/deflate") {
         // zlib-wrapped deflate (Node servers' `deflate` spelling).
         const payload = deflateSync(Buffer.from("deflated wörld", "utf8"));

@@ -278,8 +278,12 @@ struct SfTransfer {
   size_t request_content_length;
   size_t request_body_sent;
   z_stream zs;
+  ScrBytes *inflate_pending;
   bool inflating;
   bool inflate_member_end;
+  bool inflate_needs_drain;
+  bool inflate_draining;
+  bool response_ended;
   bool response_sent;
   bool done;
   struct SfTransfer *next;
@@ -1099,6 +1103,13 @@ static void sf_response_discard_if_unobserved(SfStream *s) {
   s->discarded = true;
   sf_stream_drop_chunks(s);
   SfTransfer *t = s->response_owner;
+  scr_bytes_release(t->inflate_pending);
+  t->inflate_pending = NULL;
+  t->inflate_needs_drain = false;
+  if (!t->inflate_draining) {
+    t->zs.next_in = Z_NULL;
+    t->zs.avail_in = 0;
+  }
   if (!t->done && t->response_paused && t->response_socket) {
     t->response_paused = false;
     scr_net_sock_release(scr_net_sock_resume(t->response_socket));
@@ -1294,6 +1305,9 @@ static void sf_collector_reject(SfStream *s, ScrDyn *reason) {
 static void sf_stream_request_flush(SfStream *s);
 static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason);
 static void sf_settle(SfTransfer *t);
+static SfTransfer *sf_retain(SfTransfer *t);
+static void sf_release(SfTransfer *t);
+static void sf_inflate_resume(SfTransfer *t);
 static void sf_stream_pull(SfStream *s);
 static void sf_stream_schedule_initial_pull(SfStream *s);
 
@@ -1319,6 +1333,11 @@ static void sf_response_resume_if_ready(SfStream *s) {
   SfTransfer *t = s->response_owner;
   if (!t || t->done || !t->response_paused || !t->response_socket ||
       s->queued >= 1 || s->close_requested || s->closed || s->error) {
+    return;
+  }
+  if (t->inflate_draining) return;
+  if (t->inflating && (t->inflate_pending || t->inflate_needs_drain)) {
+    sf_inflate_resume(t);
     return;
   }
   t->response_paused = false;
@@ -2596,6 +2615,7 @@ static void sf_release(SfTransfer *t) {
   scr_dyn_release(t->body);
   if (t->client) scr_http_client_release(t->client);
   scr_net_sock_release(t->response_socket);
+  scr_bytes_release(t->inflate_pending);
   if (t->inflating) inflateEnd(&t->zs);
   sf_watch_free(t->signal_watch);
   sf_signal_release(t->signal);
@@ -3418,6 +3438,151 @@ static void sf_response_terminate(SfTransfer *t) {
   sf_settle(t);
 }
 
+static void sf_inflate_append(
+    SfTransfer *t, const unsigned char *data, size_t len) {
+  if (len == 0) return;
+  size_t prior = t->inflate_pending ? t->inflate_pending->len : 0;
+  if (len > SIZE_MAX - prior) sf_oom();
+  ScrBytes *combined =
+      scr_bytes_new(SCR_BYTES_U8, (double)(prior + len));
+  if (prior > 0) {
+    memcpy(combined->data, t->inflate_pending->data, prior);
+  }
+  memcpy(combined->data + prior, data, len);
+  scr_bytes_release(t->inflate_pending);
+  t->inflate_pending = combined;
+}
+
+/*
+ * Inflate only while the decoded stream has demand. zlib keeps a small
+ * amount of output internally, while the unconsumed compressed suffix lives
+ * in inflate_pending so the network callback's borrowed chunk can return.
+ */
+static void sf_inflate_process(SfTransfer *t) {
+  if (!t || t->done || t->inflate_draining || !t->response_stream ||
+      t->response_stream->discarded ||
+      (!t->inflate_pending && !t->inflate_needs_drain) ||
+      t->response_stream->queued >= 1) {
+    return;
+  }
+  t->inflate_draining = true;
+  ScrBytes *input = t->inflate_pending;
+  t->inflate_pending = NULL;
+  t->zs.next_in = input ? (Bytef *)input->data : Z_NULL;
+  t->zs.avail_in = input ? (uInt)input->len : 0;
+  bool drain_internal = t->inflate_needs_drain;
+  t->inflate_needs_drain = false;
+  unsigned char out[16384];
+
+  while (!t->done && !t->response_stream->discarded &&
+         t->response_stream->queued < 1 &&
+         (t->zs.avail_in > 0 || drain_internal)) {
+    if (t->inflate_member_end) {
+      if (t->zs.avail_in == 0) break;
+      if (inflateReset(&t->zs) != Z_OK) {
+        sf_response_terminate(t);
+        break;
+      }
+      t->inflate_member_end = false;
+    }
+
+    t->zs.next_out = out;
+    t->zs.avail_out = sizeof out;
+    int result = inflate(&t->zs, Z_NO_FLUSH);
+    size_t produced = sizeof out - t->zs.avail_out;
+    drain_internal = false;
+    if (produced > 0) {
+      ScrBytes *decoded = scr_bytes_new(SCR_BYTES_U8, (double)produced);
+      memcpy(decoded->data, out, produced);
+      sf_stream_enqueue_bytes(t->response_stream, decoded);
+      scr_bytes_release(decoded);
+    }
+    if (result == Z_STREAM_END) {
+      /* RFC 1952 permits concatenated gzip members. */
+      t->inflate_member_end = true;
+      if (t->zs.avail_in == 0) break;
+      continue;
+    }
+    if (result != Z_OK && result != Z_BUF_ERROR) {
+      sf_response_terminate(t);
+      break;
+    }
+    if (t->done || t->response_stream->discarded) break;
+    if (t->response_stream->queued >= 1) {
+      if (result == Z_OK && t->zs.avail_out == 0) {
+        t->inflate_needs_drain = true;
+      }
+      break;
+    }
+    if (result == Z_BUF_ERROR && produced == 0) break;
+    if (t->zs.avail_in == 0) {
+      if (result == Z_OK && t->zs.avail_out == 0) {
+        drain_internal = true;
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (!t->done && !t->response_stream->discarded &&
+      t->zs.avail_in > 0) {
+    sf_inflate_append(t, t->zs.next_in, t->zs.avail_in);
+  }
+  t->zs.next_in = Z_NULL;
+  t->zs.avail_in = 0;
+  if (t->response_stream->discarded) {
+    scr_bytes_release(t->inflate_pending);
+    t->inflate_pending = NULL;
+    t->inflate_needs_drain = false;
+  }
+  scr_bytes_release(input);
+  t->inflate_draining = false;
+}
+
+static void sf_inflate_finish_if_ended(SfTransfer *t) {
+  if (!t || t->done || !t->response_ended || t->inflate_draining ||
+      !t->response_stream) {
+    return;
+  }
+  if (t->response_stream->discarded) {
+    sf_stream_close(t->response_stream);
+    sf_settle(t);
+    return;
+  }
+  if (t->inflate_pending || t->inflate_needs_drain) {
+    if (t->response_stream->queued >= 1) return;
+    sf_inflate_process(t);
+    if (t->done) return;
+    if (t->inflate_pending || t->inflate_needs_drain) {
+      /*
+       * Node fetch accepts a clean HTTP EOF even when the compressed
+       * representation ends before zlib reaches Z_STREAM_END, exposing the
+       * decoded prefix. Discard the suffix that still needs wire input.
+       */
+      scr_bytes_release(t->inflate_pending);
+      t->inflate_pending = NULL;
+      t->inflate_needs_drain = false;
+    }
+  }
+  sf_stream_close(t->response_stream);
+  sf_settle(t);
+}
+
+static void sf_inflate_resume(SfTransfer *t) {
+  if (!t || t->done || t->inflate_draining) return;
+  sf_retain(t);
+  sf_inflate_process(t);
+  sf_inflate_finish_if_ended(t);
+  if (!t->done && t->response_paused && t->response_socket &&
+      t->response_stream && t->response_stream->queued < 1 &&
+      !t->response_stream->close_requested &&
+      !t->response_stream->closed && !t->response_stream->error) {
+    t->response_paused = false;
+    scr_net_sock_release(scr_net_sock_resume(t->response_socket));
+  }
+  sf_release(t);
+}
+
 static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
   SfTransfer *t = sf_from(cb);
   if (!t) return;
@@ -3445,45 +3610,8 @@ static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
     return;
   }
 
-  if (t->inflate_member_end) {
-    if (inflateReset(&t->zs) != Z_OK) {
-      sf_response_terminate(t);
-      sf_release(t);
-      return;
-    }
-    t->inflate_member_end = false;
-  }
-  t->zs.next_in = (Bytef *)chunk->data;
-  t->zs.avail_in = (uInt)chunk->len;
-  unsigned char out[16384];
-  while (t->zs.avail_in > 0 && !t->done) {
-    t->zs.next_out = out;
-    t->zs.avail_out = sizeof out;
-    int result = inflate(&t->zs, Z_NO_FLUSH);
-    size_t produced = sizeof out - t->zs.avail_out;
-    if (produced > 0) {
-      ScrBytes *decoded = scr_bytes_new(SCR_BYTES_U8, (double)produced);
-      memcpy(decoded->data, out, produced);
-      sf_stream_enqueue_bytes(t->response_stream, decoded);
-      scr_bytes_release(decoded);
-    }
-    if (result == Z_STREAM_END) {
-      /* A gzip representation can contain concatenated members. */
-      t->inflate_member_end = true;
-      if (t->zs.avail_in == 0) break;
-      if (inflateReset(&t->zs) != Z_OK) {
-        sf_response_terminate(t);
-        break;
-      }
-      t->inflate_member_end = false;
-      continue;
-    }
-    if (result != Z_OK && result != Z_BUF_ERROR) {
-      sf_response_terminate(t);
-      break;
-    }
-    if (result == Z_BUF_ERROR && produced == 0) break;
-  }
+  sf_inflate_append(t, chunk->data, chunk->len);
+  sf_inflate_process(t);
   sf_release(t);
 }
 
@@ -3491,8 +3619,14 @@ static void sf_on_end(ScrClosure *cb) {
   SfTransfer *t = sf_from(cb);
   if (!t) return;
   if (!t->done) {
-    if (t->response_stream) sf_stream_close(t->response_stream);
-    sf_settle(t);
+    if (t->inflating && t->response_stream &&
+        !t->response_stream->discarded) {
+      t->response_ended = true;
+      sf_inflate_finish_if_ended(t);
+    } else {
+      if (t->response_stream) sf_stream_close(t->response_stream);
+      sf_settle(t);
+    }
   }
   sf_release(t);
 }

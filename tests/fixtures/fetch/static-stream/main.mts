@@ -319,6 +319,17 @@ const pressureState = await (
 console.log("response backpressure:", pressureState);
 await pressured.body!.cancel();
 
+const gzipPressureBefore = process.resourceUsage().maxRSS;
+const gzipPressured = await fetch(`${process.argv[2]}/gzip-pressure`);
+await new Promise<void>((resolve) => setTimeout(resolve, 250));
+const gzipPressureGrowth =
+  process.resourceUsage().maxRSS - gzipPressureBefore;
+console.log(
+  "compressed response backpressure:",
+  gzipPressureGrowth < 32 * 1024,
+);
+await gzipPressured.body!.cancel();
+
 const signal = AbortSignal.any([AbortSignal.timeout(20)]);
 AbortSignal.abort().addEventListener("custom", () => {
   console.log("custom abort event unexpectedly fired");

@@ -19,6 +19,10 @@ console.log(
   "concatenated gzip:",
   await (await fetch(`${process.argv[2]}/gzip-concat`)).text(),
 );
+console.log(
+  "truncated gzip:",
+  JSON.stringify(await (await fetch(`${process.argv[2]}/gzip-truncated`)).text()),
+);
 
 const urlResponse = await fetch(new URL(`${process.argv[2]}/json`));
 console.log("url:", urlResponse.status);
