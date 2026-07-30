@@ -660,6 +660,33 @@ export function update(m: Model, msg: Msg): Model { return m; }
     expect(validateSidecar(doc)).toEqual([]);
   });
 
+  test("duplicate-name composed union arms keep a containing record integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; a: number }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; b: string }
+  | { kind: "secondOnly" };
+export type Nested = First | Second;
+export interface Model { value: number; nested: Nested; }
+export type Msg = { kind: "noop" } | { kind: "other" };
+export function init(): Model {
+  return { value: 0.5, nested: { kind: "dup", b: "" } };
+}
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const r = await buildCase(
+      "sidecar-int-composed-duplicate-arm-shape",
+      source,
+      sidecarProfile([{ slot: "Model.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.value'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
   test("null- and undefined-optional integer fields remain distinct IR shapes", async () => {
     const source = `export interface A { value: number | null; }
 export interface B { value: number | undefined; }

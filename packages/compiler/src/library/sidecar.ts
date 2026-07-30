@@ -454,6 +454,46 @@ class Projector {
     };
   }
 
+  /** Flatten a tagged union for IR identity, preserving every source
+   * constituent. This is deliberately separate from unionArms(): the
+   * sidecar's wire table is first-discriminant-name-wins, while the
+   * frontend's structural union interner retains later same-named arms
+   * whenever their payload shapes differ. irUnionPattern performs the
+   * frontend's structural deduplication after this walk. */
+  private irTaggedArmPatterns(unionName: string, loc: SrcLoc): SidecarIrRecordPattern[] {
+    const c = this.lookup(unionName, loc);
+    if (c.c !== "tagged") {
+      throw new SidecarError(`'${unionName}' is not a kind-tagged union of object literals`, c.decl.loc);
+    }
+    const out: SidecarIrRecordPattern[] = [];
+    for (const part of c.parts) {
+      if (part.p === "arm") {
+        out.push(this.irRecordPattern(part.fields, true));
+        continue;
+      }
+      const resolved = this.resolve(part.name, part.loc);
+      if (resolved.c.c !== "tagged") {
+        throw new SidecarError(
+          `constituent '${part.name}' of union '${unionName}' is not a kind-tagged union — only kind-tagged unions compose by reference`,
+          part.loc,
+        );
+      }
+      if (this.irPatterning.has(resolved.name)) {
+        throw new SidecarError(
+          `union composition is cyclic through '${resolved.name}' — a union cannot spread itself`,
+          part.loc,
+        );
+      }
+      this.irPatterning.add(resolved.name);
+      try {
+        out.push(...this.irTaggedArmPatterns(resolved.name, part.loc));
+      } finally {
+        this.irPatterning.delete(resolved.name);
+      }
+    }
+    return out;
+  }
+
   /** Convert a sidecar-supported syntactic type into the exact structural
    * IR pattern the frontend maps it to. Projection has already refused
    * unsupported shapes before an integer fact is recorded, so the default
@@ -490,9 +530,7 @@ class Projector {
         try {
           return resolved.c.c === "struct"
             ? this.irRecordPattern(resolved.c.fields)
-            : this.irUnionPattern(
-                this.unionArms(resolved.name, loc).map((arm) => this.irRecordPattern(arm.fields, true)),
-              );
+            : this.irUnionPattern(this.irTaggedArmPatterns(resolved.name, loc));
         } finally {
           this.irPatterning.delete(resolved.name);
         }
