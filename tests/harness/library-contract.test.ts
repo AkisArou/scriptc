@@ -843,6 +843,62 @@ export function boot(): number {
       { name: "inspect", params: [slice, slice], returns: slice, arena: true },
     ]);
   });
+
+  test.each(["Array", "ReadonlyArray"])("a local %s<T> alias is not mistaken for the global array type", async (name) => {
+    const diags = await sidecarRefusal(`export type ${name}<T> = { value: T };
+export interface Model { item: ${name}<number>; }
+export type Msg = { kind: "keep" } | { kind: "alsoKeep" };
+export function init(): Model { return { item: { value: 1 } }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+let state = init();
+export function boot(): number {
+  state = update(state, { kind: "keep" });
+  return state.item.value;
+}
+`);
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain(`${name}<number>`);
+  });
+
+  test("an imported ReadonlyArray binding is not mistaken for the global array type", async () => {
+    const diags = await sidecarRefusal(
+      `import type { Box as ReadonlyArray } from "./box.ts";
+export interface Model { item: ReadonlyArray<number>; }
+export type Msg = { kind: "keep" } | { kind: "alsoKeep" };
+export function init(): Model { return { item: { value: 1 } }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+let state = init();
+export function boot(): number {
+  state = update(state, { kind: "keep" });
+  return state.item.value;
+}
+`,
+      {},
+      { "box.ts": "export type Box<T> = { value: T };\n" },
+    );
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("ReadonlyArray<number>");
+  });
+
+  test("a local Uint8Array interface remains a named record", async () => {
+    const doc = await sidecarProjection(`export interface Uint8Array { value: number; }
+export interface Model { data: Uint8Array; }
+export type Msg = { kind: "keep" } | { kind: "alsoKeep" };
+export function init(): Model { return { data: { value: 1 } }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+let state = init();
+export function boot(): number {
+  state = update(state, { kind: "keep" });
+  return state.data.value;
+}
+`);
+    expect(doc.types.structs.find((s) => s.name === "Uint8Array")?.fields).toEqual([
+      { name: "value", type: { kind: "f64" } },
+    ]);
+    expect(doc.types.structs.find((s) => s.name === "Model")?.fields).toEqual([
+      { name: "data", type: { kind: "node", name: "Uint8Array" } },
+    ]);
+  });
 });
 
 describe("SC4009: contract sidecar refusals", () => {
