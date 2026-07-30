@@ -4,11 +4,15 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+<!-- release:start -->
+
+## 0.0.19
+
 ### Fixes
 
 - **Library integer slots compose with optional numbers.** A declared `number | null` or optional-number slot projects as `optional<i64>` and proves only its present numeric values across records, tagged-message payloads, and helper parameters/returns. When two sidecar paths collapse to the same structurally interned record field, the build now refuses with both paths instead of silently overwriting one proof obligation.
 
-<!-- release:start -->
+<!-- release:end -->
 
 ## 0.0.18
 
@@ -19,8 +23,6 @@ All notable changes to scriptc will be documented in this file.
 ### Fixes
 
 - **`https.request(options, responseCallback)` compiles on the LLVM backend.** The options-object row now lowers the TLS verification and CA arguments through the same runtime ABI as the C backend, including response-callback ownership and event-loop liveness. The already-supported `http.request(options, responseCallback)` row is pinned alongside it.
-
-<!-- release:end -->
 
 ## 0.0.17
 
