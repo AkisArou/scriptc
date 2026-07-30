@@ -20,9 +20,19 @@ const voidEffectDefault = source.toSpliced(
   1,
   void deleteOrder.push("void"),
 );
+const assertedVoidEffectDefault = source.toSpliced(
+  1,
+  (void deleteOrder.push("asserted")) as undefined,
+);
+const nestedVoidEffectDefault = source.toSpliced(
+  1,
+  void (void deleteOrder.push("nested")),
+);
 console.log(
   effectDefault.join(","),
   voidEffectDefault.join(","),
+  assertedVoidEffectDefault.join(","),
+  nestedVoidEffectDefault.join(","),
   deleteOrder.join(","),
 );
 console.log(source.toSpliced(NaN, 0, 6).join(","));

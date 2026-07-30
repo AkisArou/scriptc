@@ -18,9 +18,21 @@ const defaultSorted = (() => {
   return undefined;
 })());
 const voidDefaultSorted = source.toSorted(void sortOrder.push("void"));
+const assertedVoidDefaultSorted = source.toSorted(
+  (void sortOrder.push("asserted")) as undefined,
+);
+const satisfiesVoidDefaultSorted = source.toSorted(
+  (void sortOrder.push("satisfies")) satisfies undefined,
+);
+const nestedVoidDefaultSorted = source.toSorted(
+  void (void sortOrder.push("nested")),
+);
 console.log(
   defaultSorted.join(","),
   voidDefaultSorted.join(","),
+  assertedVoidDefaultSorted.join(","),
+  satisfiesVoidDefaultSorted.join(","),
+  nestedVoidDefaultSorted.join(","),
   sortOrder.join(","),
 );
 console.log(source.toReversed().join(","), source.join(","));
@@ -73,4 +85,16 @@ const defaultJoined = source.join((() => {
   return undefined;
 })());
 const voidDefaultJoined = source.join(void joinOrder.push("void"));
-console.log(defaultJoined, voidDefaultJoined, joinOrder.join(","));
+const assertedVoidDefaultJoined = source.join(
+  (void joinOrder.push("asserted")) as undefined,
+);
+const nestedVoidDefaultJoined = source.join(
+  void (void joinOrder.push("nested")),
+);
+console.log(
+  defaultJoined,
+  voidDefaultJoined,
+  assertedVoidDefaultJoined,
+  nestedVoidDefaultJoined,
+  joinOrder.join(","),
+);

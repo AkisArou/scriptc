@@ -20,6 +20,18 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
  * An effectful `void e` is exact in this context: evaluate e, then produce
  * undefined, instead of hitting value-position void's general fence. */
 function lowerStaticallyUndefinedArg(L: Lowerer, node: ts.Expression): IrExpr | null {
+  const peelErasableWrappers = (value: ts.Expression): ts.Expression => {
+    let expr = value;
+    while (
+      ts.isParenthesizedExpression(expr) ||
+      ts.isAsExpression(expr) ||
+      ts.isTypeAssertion(expr) ||
+      ts.isSatisfiesExpression(expr)
+    ) {
+      expr = expr.expression;
+    }
+    return expr;
+  };
   let expr = node;
   while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
   if (
@@ -29,11 +41,22 @@ function lowerStaticallyUndefinedArg(L: Lowerer, node: ts.Expression): IrExpr | 
   ) {
     return null;
   }
-  if (ts.isVoidExpression(expr)) {
+  // TypeScript erases `as`, angle-bracket assertions, and `satisfies`.
+  // Peel them only for the void recognition: a non-void assertion still
+  // lowers through the ordinary path below, preserving the checked-dynamic
+  // cast discipline. Nested voids add no effects of their own, so the one
+  // innermost operand carries the complete runtime evaluation.
+  expr = peelErasableWrappers(expr);
+  let sawVoid = false;
+  while (ts.isVoidExpression(expr)) {
+    sawVoid = true;
+    expr = peelErasableWrappers(expr.expression);
+  }
+  if (sawVoid) {
     // The caller discards this token before producing the parameter
     // default, so the operand itself carries exactly the required effects;
     // no bare undefined value needs to enter the IR.
-    return L.lowerExpr(expr.expression);
+    return L.lowerExpr(expr);
   }
   return L.lowerExpr(node);
 }
