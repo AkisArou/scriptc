@@ -76,6 +76,7 @@ import type {
   IrModule,
   IrNumBinOp,
   IrStmt,
+  IrType,
   SrcLoc,
 } from "../ir/nodes.js";
 
@@ -436,6 +437,25 @@ export interface IntSlotConfig {
   records: Map<string, Map<string, { cls: IntClass; path: string }>>;
 }
 
+/** The IR representations whose PRESENT values can carry one number slot.
+ * A bare f64 is plain; a union of exactly one f64 arm and one or more
+ * null/undefined arms is optional. The abstract interpreter tracks the
+ * possible f64 arm values and treats unit arms as the empty numeric set. */
+export function numberCarrierKind(t: IrType, mod: IrModule): "plain" | "optional" | null {
+  if (t.kind === "f64") return "plain";
+  if (t.kind !== "union") return null;
+  const def = mod.unions?.find((u) => u.id === t.unionId);
+  if (def === undefined) return null;
+  let numbers = 0;
+  let units = 0;
+  for (const arm of def.arms) {
+    if (arm.kind === "f64") numbers++;
+    else if (arm.kind === "nullT" || arm.kind === "undefinedT") units++;
+    else return null;
+  }
+  return numbers === 1 && units > 0 ? "optional" : null;
+}
+
 export function hasIntSlots(cfg: IntSlotConfig): boolean {
   if (cfg.records.size > 0) return true;
   for (const f of cfg.fns.values()) {
@@ -752,7 +772,7 @@ class FnAnalyzer {
     const env: Env = new Map();
     const slots = this.cfg.fns.get(fn.name);
     fn.params.forEach((p, i) => {
-      if (p.type.kind !== "f64") return;
+      if (!this.bindingCarriesNumber(p.localId)) return;
       const declared = slots?.params[i] ?? null;
       const seed = slots?.paramSeeds[i] ?? null;
       if (declared !== null) env.set(p.localId, classSeed(declared));
@@ -787,13 +807,13 @@ class FnAnalyzer {
         if (s.init === null) return env;
         const v = this.evalExpr(s.init, env);
         this.clearPathsRootedAt(env, s.localId);
-        if (this.bindingIsF64(s.localId)) env.set(s.localId, v);
+        if (this.bindingCarriesNumber(s.localId)) env.set(s.localId, v);
         return env;
       }
       case "assign": {
         const v = this.evalExpr(s.value, env);
         this.clearPathsRootedAt(env, s.localId);
-        if (this.bindingIsF64(s.localId)) env.set(s.localId, v);
+        if (this.bindingCarriesNumber(s.localId)) env.set(s.localId, v);
         return env;
       }
       case "exprStmt":
@@ -825,7 +845,7 @@ class FnAnalyzer {
         return this.execLoop(env, { cond: s.cond, body: s.body, labels: s.labels ?? [], doWhile: true });
       case "forOf": {
         this.evalExpr(s.iterable, env);
-        const elemF64 = this.bindingIsF64(s.localId);
+        const elemF64 = this.bindingCarriesNumber(s.localId);
         return this.execLoop(env, {
           body: s.body,
           labels: s.labels ?? [],
@@ -1000,7 +1020,7 @@ class FnAnalyzer {
     };
     tryBody.forEach(visitStmt);
     for (const id of assigned) {
-      if (this.bindingIsF64(id)) out.set(id, { ...TOP });
+      if (this.bindingCarriesNumber(id)) out.set(id, { ...TOP });
     }
     // Globals: any callee may have written before the throw.
     for (const k of [...out.keys()]) {
@@ -1216,6 +1236,8 @@ class FnAnalyzer {
       case "recordGet":
       case "fieldGet":
         return this.staticAccessPath(e) !== null;
+      case "unionNarrow":
+        return this.isPure(e.value);
       case "bin":
         return this.isPure(e.left) && this.isPure(e.right);
       case "unary":
@@ -1235,13 +1257,17 @@ class FnAnalyzer {
       case "numLit":
         return constVal(e.value, e.spelling);
       case "varRef":
-        return e.type.kind === "f64" ? envGet(env, e.localId) : { ...TOP };
+        return this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
       case "recordGet": {
         const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
-        if (slot === undefined || e.type.kind !== "f64") return { ...TOP };
+        if (slot === undefined || numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
         const key = this.pathKey(e, slot.cls);
         return key === null ? classSeed(slot.cls) : envGet(env, key);
       }
+      case "unionNarrow":
+        return e.type.kind === "f64" && numberCarrierKind(e.value.type, this.mod) === "optional"
+          ? this.evalPure(e.value, env)
+          : { ...TOP };
       case "unary":
         if (e.op === "-") return transferNeg(this.evalPure(e.operand, env));
         if (e.op === "~") return transferBitNot(this.evalPure(e.operand, env));
@@ -1272,6 +1298,8 @@ class FnAnalyzer {
         if (base === null) return null;
         return { rootId: base.rootId, steps: [...base.steps, ["record", e.shapeId, e.field]] };
       }
+      case "unionNarrow":
+        return this.staticAccessPath(e.value);
       case "fieldGet": {
         const base = this.staticAccessPath(e.obj);
         if (base === null) return null;
@@ -1295,7 +1323,10 @@ class FnAnalyzer {
 
   private refinementKey(e: IrExpr, allowPaths: boolean): string | null {
     if (e.kind === "varRef") return e.localId;
-    if (!allowPaths || e.kind !== "recordGet" || e.type.kind !== "f64") return null;
+    if (e.kind === "unionNarrow" && e.type.kind === "f64") {
+      return this.refinementKey(e.value, allowPaths);
+    }
+    if (!allowPaths || e.kind !== "recordGet" || numberCarrierKind(e.type, this.mod) === null) return null;
     const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
     return slot === undefined ? null : this.pathKey(e, slot.cls);
   }
@@ -1316,6 +1347,8 @@ class FnAnalyzer {
       case "recordGet":
       case "fieldGet":
         return this.staticAccessPath(e) !== null;
+      case "unionNarrow":
+        return this.stablePathGuard(e.value);
       case "bin":
       case "logical":
         return this.stablePathGuard(e.left) && this.stablePathGuard(e.right);
@@ -1350,15 +1383,19 @@ class FnAnalyzer {
     }
   }
 
-  private bindingIsF64(id: string): boolean {
-    return this.f64Bindings.has(id);
+  private bindingCarriesNumber(id: string): boolean {
+    return this.numberBindings.has(id);
   }
-  private f64Bindings = new Set<string>();
+  private numberBindings = new Set<string>();
 
   seedBindings(fn: IrFunction, mod: IrModule): void {
-    this.f64Bindings = new Set();
-    for (const l of fn.locals) if (l.type.kind === "f64" && l.boxed !== true) this.f64Bindings.add(l.id);
-    for (const g of mod.globals ?? []) if (g.type.kind === "f64") this.f64Bindings.add(g.id);
+    this.numberBindings = new Set();
+    for (const l of fn.locals) {
+      if (numberCarrierKind(l.type, mod) !== null && l.boxed !== true) this.numberBindings.add(l.id);
+    }
+    for (const g of mod.globals ?? []) {
+      if (numberCarrierKind(g.type, mod) !== null) this.numberBindings.add(g.id);
+    }
   }
 
   /** Evaluate an expression over the environment, applying the side
@@ -1380,7 +1417,7 @@ class FnAnalyzer {
       case "chainRecv":
         return { ...TOP };
       case "varRef":
-        return e.type.kind === "f64" && this.bindingIsF64(e.localId) ? envGet(env, e.localId) : { ...TOP };
+        return this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
       case "bin": {
         const a = this.evalExpr(e.left, env);
         const b = this.evalExpr(e.right, env);
@@ -1395,15 +1432,15 @@ class FnAnalyzer {
         return { ...TOP };
       }
       case "incDec": {
-        const old = this.bindingIsF64(e.localId) ? envGet(env, e.localId) : { ...TOP };
+        const old = this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
         const next = transferAdd(old, constVal(e.op === "+" ? 1 : -1));
-        if (this.bindingIsF64(e.localId)) env.set(e.localId, next);
+        if (this.bindingCarriesNumber(e.localId)) env.set(e.localId, next);
         return e.prefix ? next : old;
       }
       case "assignExpr": {
         const v = this.evalExpr(e.value, env);
         this.clearPathsRootedAt(env, e.localId);
-        if (this.bindingIsF64(e.localId)) env.set(e.localId, v);
+        if (this.bindingCarriesNumber(e.localId)) env.set(e.localId, v);
         return v;
       }
       case "ternary": {
@@ -1419,18 +1456,18 @@ class FnAnalyzer {
       case "logical":
       case "nullish":
       case "orDefault": {
-        this.evalExpr(e.left, env);
+        const left = this.evalExpr(e.left, env);
         const rightEnv = cloneEnv(env);
-        this.evalExpr(e.right, rightEnv);
+        const right = this.evalExpr(e.right, rightEnv);
         mergeInto(env, joinEnv(env, rightEnv));
-        return { ...TOP };
+        return numberCarrierKind(e.type, this.mod) !== null ? join(left, right) : { ...TOP };
       }
       case "optChain": {
         this.evalExpr(e.receiver, env);
         const bodyEnv = cloneEnv(env);
-        this.evalExpr(e.body, bodyEnv);
+        const body = this.evalExpr(e.body, bodyEnv);
         mergeInto(env, joinEnv(env, bodyEnv));
-        return { ...TOP };
+        return numberCarrierKind(e.type, this.mod) !== null ? body : { ...TOP };
       }
       case "seqExpr": {
         // Expression-position statements: no jumps can escape them.
@@ -1459,6 +1496,19 @@ class FnAnalyzer {
         this.havocCall(e.callee, env);
         if (slots?.ret != null) return classSeed(slots.ret);
         return { ...TOP };
+      }
+      case "unionWrap": {
+        const value = this.evalExpr(e.value, env);
+        if (numberCarrierKind(e.type, this.mod) !== "optional") return { ...TOP };
+        // Unit arms are absence, not an integer crossing. The one f64 arm
+        // contributes its abstract value unchanged.
+        return e.value.type.kind === "f64" ? value : BOTTOM;
+      }
+      case "unionNarrow": {
+        const value = this.evalExpr(e.value, env);
+        return e.type.kind === "f64" && numberCarrierKind(e.value.type, this.mod) === "optional"
+          ? value
+          : { ...TOP };
       }
       case "libCall": {
         const math = this.evalMath(e, env, true);
@@ -1495,7 +1545,9 @@ class FnAnalyzer {
         for (const f of e.fields) {
           const v = this.evalExpr(f.value, env);
           const slot = slotMap?.get(f.name);
-          if (slot !== undefined && f.value.type.kind === "f64") this.emit(v, slot.path, slot.cls, f.value.loc);
+          if (slot !== undefined && numberCarrierKind(f.value.type, this.mod) !== null) {
+            this.emit(v, slot.path, slot.cls, f.value.loc);
+          }
         }
         return { ...TOP };
       }
@@ -1508,7 +1560,7 @@ class FnAnalyzer {
         // — instead of a spurious may-be-NaN wholeness refusal).
         this.evalExpr(e.obj, env);
         const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
-        if (slot !== undefined && e.type.kind === "f64") {
+        if (slot !== undefined && numberCarrierKind(e.type, this.mod) !== null) {
           const key = this.pathKey(e, slot.cls);
           return key === null ? classSeed(slot.cls) : envGet(env, key);
         }

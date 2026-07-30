@@ -317,7 +317,10 @@ export function validateSidecar(doc: unknown): string[] {
         }
         case "scalar": {
           const t = d["type"];
-          walkRef(t, `msg arm '${armName}' scalar payload`, null, null);
+          // Scalar optionals can carry the msg arm's integer-classed number
+          // slot (optional<i64>); slices still clear the path in walkRef
+          // because format 1 has no slice-element slot grammar.
+          walkRef(t, `msg arm '${armName}' scalar payload`, null, `${msgName}.${armName}`);
           if (isDict(t) && (t["kind"] === "node" || t["kind"] === "value" || t["kind"] === "void")) {
             bad("V7", `msg arm '${armName}': scalar descriptors carry a non-record, non-void TypeRef`);
           }

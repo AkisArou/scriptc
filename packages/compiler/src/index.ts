@@ -3,8 +3,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CcCompileError, compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
-import { checkLibraryIntegerSlots, classSeed, hasIntSlots, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
+import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
@@ -1049,14 +1049,20 @@ function libraryIntSlotConfig(profile: LibraryProfile): IntSlotConfig {
 /** Merge the sidecar-resolved integer slots (ask 4) into the inference
  * config: helper slots key by function name and IR parameter index (the
  * projection already shifted past the model receiver); record-field
- * slots map onto every interned IR shape whose field-name set matches
- * the projected record's — shapes intern structurally, so a same-shaped
- * second type shares the obligation (a sound over-approximation). A
+ * slots map onto every interned IR shape whose field-name set and numeric
+ * optionality match the projected record's. Shapes intern structurally, so
+ * a same-shaped second type shares the obligation (a sound
+ * over-approximation); two DECLARED paths resolving to the same shape-field
+ * key refuse because overwriting either attestation would be unsound. A
  * record fact that matches no shape binds nothing: no compiled code
  * constructs the type (the contract surface — init/update/subscriptions
  * and every helper — is force-lowered whenever integer slots are
  * declared, so this is genuine vacuity, not dead-stripping). */
-function mergeSidecarIntSlots(cfg: IntSlotConfig, facts: SidecarIntegerSlotFacts, mod: IrModule): IntSlotConfig {
+function mergeSidecarIntSlots(
+  cfg: IntSlotConfig,
+  facts: SidecarIntegerSlotFacts,
+  mod: IrModule,
+): { ok: true; config: IntSlotConfig } | { ok: false; diagnostic: ScrDiagnostic } {
   for (const h of facts.helpers) {
     const fn = mod.functions.find((f) => f.name === h.fnName);
     const arity = Math.max(fn?.params.length ?? 0, (h.index ?? 0) + 1);
@@ -1100,16 +1106,27 @@ function mergeSidecarIntSlots(cfg: IntSlotConfig, facts: SidecarIntegerSlotFacts
         (names.length === wantedSansKind.size && names.every((n: string) => wantedSansKind.has(n)));
       if (!matches) continue;
       const target = shape.fields.find((f) => f.name === r.targetField);
-      if (target === undefined || target.type.kind !== "f64") continue;
+      if (target === undefined || numberCarrierKind(target.type, mod) !== (r.optional ? "optional" : "plain")) continue;
       let m = cfg.records.get(shape.id);
       if (m === undefined) {
         m = new Map();
         cfg.records.set(shape.id, m);
       }
+      const existing = m.get(r.targetField);
+      if (existing !== undefined && existing.path !== r.path) {
+        return {
+          ok: false,
+          diagnostic: libSidecarDiag(
+            `integer slots '${existing.path}' (${existing.cls}) and '${r.path}' (${r.cls}) collapse to the same lowered record field '${r.targetField}' — their proof obligations cannot be kept distinct`,
+            r.loc,
+            "kind-tagged union arms and structurally identical records may share one lowered shape — give the colliding payloads distinct structural shapes, or integer-class at most one of these slots",
+          ),
+        };
+      }
       m.set(r.targetField, { cls: r.cls, path: r.path });
     }
   }
-  return cfg;
+  return { ok: true, config: cfg };
 }
 
 export async function compileLibrary(opts: CompileLibraryOptions): Promise<CompileLibraryResult> {
@@ -1286,7 +1303,9 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       return fail(violations.map((v) => iceDiag(`sidecar self-check failed — ${v}`, { file: entryPath, start: 0, end: 0 })));
     }
     sidecarJson = built.json;
-    intCfg = mergeSidecarIntSlots(intCfg, built.integerSlotFacts, mod);
+    const merged = mergeSidecarIntSlots(intCfg, built.integerSlotFacts, mod);
+    if (!merged.ok) return fail([merged.diagnostic]);
+    intCfg = merged.config;
   }
 
   // Ask 4: the integer-boundary inference — every value that can reach a

@@ -560,6 +560,97 @@ describe("ask-4 sidecar-declared slots", () => {
     expect(validateSidecar(doc)).toEqual([]);
   });
 
+  test("optional numbers compose with integer classes across records, msg arms, and helpers", async () => {
+    const source = `export interface Model { maybeId: number | null; }
+export type Msg = { kind: "set"; id: number | null } | { kind: "clear" };
+export function init(): Model { return { maybeId: null }; }
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "clear") return { maybeId: null };
+  return { maybeId: msg.id };
+}
+export function normalize(m: Model, id: number | null): number | null { return id; }
+`;
+    const slots = [
+      { slot: "Model.maybeId", class: "u64" },
+      { slot: "Msg.set", class: "u64" },
+      { slot: "helpers.normalize.params[0]", class: "u64" },
+      { slot: "helpers.normalize.return", class: "u64" },
+    ];
+    const r = await buildCase("sidecar-optional-int", source, sidecarProfile(slots, { exports: [] }));
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+    if (!r.ok) return;
+    const doc = JSON.parse(readFileSync(r.sidecarPath!, "utf8")) as {
+      integer_slots: { slot: string; class: string }[];
+      types: { structs: { name: string; fields: { name: string; type: unknown }[] }[] };
+      msg: { arms: { name: string; payload: { kind: string; type?: unknown } }[] };
+      model_helpers: { name: string; params: unknown[]; returns: unknown }[];
+    };
+    const optionalI64 = { kind: "optional", inner: { kind: "i64" } };
+    expect(doc.integer_slots).toEqual(slots);
+    expect(doc.types.structs.find((s) => s.name === "Model")!.fields).toEqual([
+      { name: "maybeId", type: optionalI64 },
+    ]);
+    expect(doc.msg.arms.find((a) => a.name === "set")!.payload).toEqual({
+      kind: "scalar",
+      type: optionalI64,
+    });
+    const helper = doc.model_helpers.find((h) => h.name === "normalize")!;
+    expect(helper.params).toEqual([optionalI64]);
+    expect(helper.returns).toEqual(optionalI64);
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+
+  test("an optional record integer slot checks its present numeric arm", async () => {
+    const source = `export interface Model { maybeId: number | null; }
+export type Msg = { kind: "clear" } | { kind: "noop" };
+export function init(): Model { return { maybeId: null }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function replace(m: Model, id: number): Model {
+  if (id >= 0 && id <= 100) return { maybeId: id * 0.5 };
+  return { maybeId: null };
+}
+`;
+    const r = await buildCase(
+      "sidecar-optional-int-refuse",
+      source,
+      sidecarProfile([{ slot: "Model.maybeId", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(
+      r.diagnostics.map((d) => d.code),
+      r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+    ).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.maybeId'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("same-shaped tagged-union integer slots refuse instead of overwriting an obligation", async () => {
+    const source = `export interface Model { value: number; }
+export type Msg = { kind: "first"; id: number } | { kind: "second"; id: number };
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const r = await buildCase(
+      "sidecar-int-shape-collision",
+      source,
+      sidecarProfile(
+        [
+          { slot: "Msg.first", class: "u64" },
+          { slot: "Msg.second", class: "i64" },
+        ],
+        { exports: [] },
+      ),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4009"]);
+    expect(r.diagnostics[0]!.message).toContain("'Msg.first' (u64)");
+    expect(r.diagnostics[0]!.message).toContain("'Msg.second' (i64)");
+    expect(r.diagnostics[0]!.message).toContain("same lowered record field");
+    expect(r.diagnostics[0]!.hint).toContain("structurally identical");
+  });
+
   test("an unproven update write into a declared model field refuses by slot path", async () => {
     // The model-slot prove-or-refuse gate: a declared Model field class
     // obligates every write the contract surface performs — init and
@@ -762,7 +853,7 @@ export function update(m: Model, msg: Msg): Model {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4009"]);
-    expect(r.diagnostics[0]!.message).toContain("not a plain number slot");
+    expect(r.diagnostics[0]!.message).toContain("not a number or optional number slot");
   });
 
   test("a profile teaching rides an integer refusal as the attributed note", async () => {

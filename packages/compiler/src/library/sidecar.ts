@@ -30,9 +30,10 @@
  *
  * Integer slots (ask 4): the profile's `sidecar.integer_slots` declares
  * specific number slots i64/u64 by slot path; the projection spells each
- * declared slot's TypeRef/descriptor `i64` (the frozen format-1
- * vocabulary — u64 is the stricter compile-time obligation over the same
- * wire spelling), refuses paths that resolve to no plain number slot,
+ * declared slot's TypeRef/descriptor `i64`, nested under `optional` when
+ * the TypeScript slot is optional (the frozen format-1 vocabulary — u64 is
+ * the stricter compile-time obligation over the same wire spelling), and
+ * refuses paths that resolve to no bare or optional number slot,
  * and emits `integer_slots` as the resolved-decision list, in profile
  * declaration order, each entry recording the DECLARED class ({i64, u64}
  * — the flattening is TypeRef-only). The list is an ATTESTATION (schema
@@ -323,7 +324,7 @@ class Projector {
   /** The record-field slots' resolution facts for the inference: the
    * containing record's full projected field-name list plus the target
    * field (ir shapes intern structurally by field names). */
-  readonly intRecordFacts: { fieldNames: string[]; targetField: string; cls: "i64" | "u64"; path: string }[] = [];
+  readonly intRecordFacts: SidecarIntegerSlotFacts["records"] = [];
 
   constructor(
     readonly facts: ContractFacts,
@@ -338,22 +339,30 @@ class Projector {
   }
 
   /** Spell a projected slot i64 when the profile declared it (ask 4).
-   * Only a PLAIN NUMBER slot can be integer-declared: optionals, slices,
-   * and named types refuse — the declaration must match the wire shape
-   * the schema freezes. The document spells i64 for both classes (the
-   * frozen format-1 vocabulary has no u64; u64 is the stricter
-   * compile-time obligation over the same wire spelling). */
+   * A NUMBER slot may be bare or optional: optional<number> composes the
+   * schema's two existing constructors as optional<i64>, and the proof
+   * applies only to its present numeric arm. Slices and named types still
+   * refuse — the declaration must match the wire shape the schema freezes.
+   * The document spells i64 for both classes (the frozen format-1
+   * vocabulary has no u64; u64 is the stricter compile-time obligation
+   * over the same wire spelling). */
   intify(ref: TypeRef, slotPath: string, loc: SrcLoc): TypeRef {
     const cls = this.intDeclared.get(slotPath);
     if (cls === undefined) return ref;
-    if (ref.kind !== "f64") {
+    if (ref.kind === "f64") {
+      this.intConsumed.set(slotPath, cls);
+      return { kind: "i64" };
+    }
+    if (ref.kind === "optional" && ref.inner.kind === "f64") {
+      this.intConsumed.set(slotPath, cls);
+      return { kind: "optional", inner: { kind: "i64" } };
+    }
+    {
       throw new SidecarError(
-        `the profile declares integer slot '${slotPath}' (${cls}), but that slot is not a plain number slot (it projects as '${ref.kind}')`,
+        `the profile declares integer slot '${slotPath}' (${cls}), but that slot is not a number or optional number slot (it projects as '${ref.kind}')`,
         loc,
       );
     }
-    this.intConsumed.set(slotPath, cls);
-    return { kind: "i64" };
   }
 
   /** intify for a struct field (declared or synthesized), recording the
@@ -366,8 +375,10 @@ class Projector {
       this.intRecordFacts.push({
         fieldNames: allFields,
         targetField: field,
+        optional: out.kind === "optional",
         cls: this.intConsumed.get(slotPath)!,
         path: slotPath,
+        loc,
       });
     }
     return out;
@@ -612,8 +623,10 @@ class Projector {
           this.intRecordFacts.push({
             fieldNames: [...arm.fields.map((f) => f.name), "kind"],
             targetField: arm.fields[0]!.name,
+            optional: payload.kind === "optional",
             cls: this.intConsumed.get(slotPath)!,
             path: slotPath,
+            loc: arm.loc,
           });
         }
         entry.arms.push({ name: arm.name, payload });
@@ -685,8 +698,10 @@ class Projector {
           this.intRecordFacts.push({
             fieldNames: [first.name, second.name, "kind"],
             targetField: first.name,
+            optional: false,
             cls: this.intConsumed.get(slotPath)!,
             path: slotPath,
+            loc: first.loc,
           });
         }
         return { kind: "number_bytes", number_field: first.name, number_class: numRef.kind as "f64" | "i64", bytes_field: second.name };
@@ -694,19 +709,21 @@ class Projector {
     }
     if (fields.length === 1 && !fields[0]!.optional) {
       let ref = this.fieldRef(fields[0]!, msgName);
-      if (ref.kind === "f64") {
-        // A plain number payload is an ask-4 declarable slot: `<msg>.<arm>`.
-        const slotPath = `${msgName}.${arm.name}`;
-        const before = this.intConsumed.has(slotPath);
-        ref = this.intify(ref, slotPath, arm.loc);
-        if (!before && this.intConsumed.has(slotPath)) {
-          this.intRecordFacts.push({
-            fieldNames: [fields[0]!.name, "kind"],
-            targetField: fields[0]!.name,
-            cls: this.intConsumed.get(slotPath)!,
-            path: slotPath,
-          });
-        }
+      // A bare or optional number payload is an ask-4 declarable slot:
+      // `<msg>.<arm>`. Calling intify for every one-field family also makes
+      // a declaration targeting a non-number refuse at the precise arm.
+      const slotPath = `${msgName}.${arm.name}`;
+      const before = this.intConsumed.has(slotPath);
+      ref = this.intify(ref, slotPath, arm.loc);
+      if (!before && this.intConsumed.has(slotPath)) {
+        this.intRecordFacts.push({
+          fieldNames: [fields[0]!.name, "kind"],
+          targetField: fields[0]!.name,
+          optional: ref.kind === "optional",
+          cls: this.intConsumed.get(slotPath)!,
+          path: slotPath,
+          loc: arm.loc,
+        });
       }
       switch (ref.kind) {
         case "bytes":
@@ -766,7 +783,14 @@ export interface SidecarBuildInput {
  * field name, so the list is the join key). */
 export interface SidecarIntegerSlotFacts {
   helpers: { fnName: string; kind: "param" | "return"; index?: number; cls: "i64" | "u64"; path: string }[];
-  records: { fieldNames: string[]; targetField: string; cls: "i64" | "u64"; path: string }[];
+  records: {
+    fieldNames: string[];
+    targetField: string;
+    optional: boolean;
+    cls: "i64" | "u64";
+    path: string;
+    loc: SrcLoc;
+  }[];
 }
 
 export type SidecarBuildResult =

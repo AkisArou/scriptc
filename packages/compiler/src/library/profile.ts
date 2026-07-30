@@ -158,11 +158,12 @@ export interface LibrarySidecarConfig {
   sourceHash: "module-graph";
   /** Ask 4's declared integer boundary slots, keyed by the sidecar's slot
    * path grammar (`Msg.count`, `Point.x`, `helpers.clamp.params[0]`,
-   * `helpers.clamp.return`). Each named slot must resolve to a NUMBER
-   * slot of the projected contract (refused at sidecar build otherwise),
-   * is spelled i64 in the emitted document's TypeRef/descriptor (the
-   * frozen format-1 type vocabulary has no u64 — unsigned-ness is a
-   * boundary-slot refinement, not a type-table concept), joins
+   * `helpers.clamp.return`). Each named slot must resolve to a bare or
+   * optional NUMBER slot of the projected contract (refused at sidecar
+   * build otherwise), is spelled i64 (or optional<i64>) in the emitted
+   * document's TypeRef/descriptor (the frozen format-1 type vocabulary has
+   * no u64 — unsigned-ness is a boundary-slot refinement, not a type-table
+   * concept), joins
    * `integer_slots` with its DECLARED class ({i64, u64} — the u64
    * declaration is the stricter obligation, and the attestation records
    * the class whose proof was discharged), and obligates every
