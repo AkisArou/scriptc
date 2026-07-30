@@ -2842,6 +2842,61 @@ static const char *sf_env2(const char *lower, const char *upper) {
   return value && value[0] != '\0' ? value : NULL;
 }
 
+static int sf_hex_value(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+/* EnvHttpProxyAgent derives Basic proxy authentication from the proxy URL's
+ * decoded username/password. ScrUrl keeps the encoded userinfo as one string,
+ * so decode it here and add the empty-password separator when necessary. */
+static ScrStr *sf_proxy_authorization(const ScrStr *userinfo) {
+  char *plain = malloc(userinfo->len + 1);
+  if (!plain) sf_oom();
+  size_t plain_len = 0;
+  bool has_separator = false;
+  for (size_t i = 0; i < userinfo->len;) {
+    char c = userinfo->data[i];
+    if (c == '%' && i + 2 < userinfo->len) {
+      int hi = sf_hex_value(userinfo->data[i + 1]);
+      int lo = sf_hex_value(userinfo->data[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        plain[plain_len++] = (char)((hi << 4) | lo);
+        i += 3;
+        continue;
+      }
+    }
+    if (c == ':') has_separator = true;
+    plain[plain_len++] = c;
+    i++;
+  }
+  if (!has_separator) plain[plain_len++] = ':';
+
+  static const char b64[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  size_t encoded_len = ((plain_len + 2) / 3) * 4;
+  char *header = malloc(6 + encoded_len);
+  if (!header) sf_oom();
+  memcpy(header, "Basic ", 6);
+  size_t out = 6;
+  for (size_t i = 0; i < plain_len; i += 3) {
+    unsigned b0 = (unsigned char)plain[i];
+    unsigned b1 = i + 1 < plain_len ? (unsigned char)plain[i + 1] : 0;
+    unsigned b2 = i + 2 < plain_len ? (unsigned char)plain[i + 2] : 0;
+    unsigned triple = (b0 << 16) | (b1 << 8) | b2;
+    header[out++] = b64[(triple >> 18) & 63];
+    header[out++] = b64[(triple >> 12) & 63];
+    header[out++] = i + 1 < plain_len ? b64[(triple >> 6) & 63] : '=';
+    header[out++] = i + 2 < plain_len ? b64[triple & 63] : '=';
+  }
+  free(plain);
+  ScrStr *result = scr_str_new(header, out);
+  free(header);
+  return result;
+}
+
 static bool sf_no_proxy_match(const char *list, const ScrStr *host,
                               int port) {
   const char *p = list;
@@ -2854,11 +2909,20 @@ static bool sf_no_proxy_match(const char *list, const ScrStr *host,
     if (len == 1 && start[0] == '*') return true;
     size_t host_len = len;
     long entry_port = -1;
-    for (size_t i = 0; i < len; i++) {
-      if (start[i] == ':') {
-        host_len = i;
-        entry_port = strtol(start + i + 1, NULL, 10);
-        break;
+    if (start[0] == '[') {
+      size_t close = 1;
+      while (close < len && start[close] != ']') close++;
+      if (close < len && close + 1 < len && start[close + 1] == ':') {
+        host_len = close + 1;
+        entry_port = strtol(start + close + 2, NULL, 10);
+      }
+    } else {
+      for (size_t i = 0; i < len; i++) {
+        if (start[i] == ':') {
+          host_len = i;
+          entry_port = strtol(start + i + 1, NULL, 10);
+          break;
+        }
       }
     }
     if (host_len > 0 && start[0] == '.') {
@@ -3913,6 +3977,13 @@ static bool sf_start_hop(SfTransfer *t) {
     scr_arr_push_ref(headers,
                      scr_arr_get_ref(t->headers, (double)(i + 1)));
   }
+  if (proxy && proxy->userinfo->len > 0 &&
+      !sf_pairs_have(t->headers, "proxy-authorization")) {
+    ScrStr *authorization = sf_proxy_authorization(proxy->userinfo);
+    sf_push_header_text(headers, "proxy-authorization",
+                        authorization->data, authorization->len);
+    scr_str_release(authorization);
+  }
   if (!sf_pairs_have(t->headers, "accept")) {
     sf_push_header_text(headers, "accept", "*/*", 3);
   }
@@ -4563,6 +4634,58 @@ static const char *fx_env2(const char *lower, const char *upper) {
   return (v != NULL && v[0] != '\0') ? v : NULL;
 }
 
+static int fx_hex_value(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static ScrStr *fx_proxy_authorization(const ScrStr *userinfo) {
+  char *plain = malloc(userinfo->len + 1);
+  if (!plain) fx_oom();
+  size_t plain_len = 0;
+  bool has_separator = false;
+  for (size_t i = 0; i < userinfo->len;) {
+    char c = userinfo->data[i];
+    if (c == '%' && i + 2 < userinfo->len) {
+      int hi = fx_hex_value(userinfo->data[i + 1]);
+      int lo = fx_hex_value(userinfo->data[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        plain[plain_len++] = (char)((hi << 4) | lo);
+        i += 3;
+        continue;
+      }
+    }
+    if (c == ':') has_separator = true;
+    plain[plain_len++] = c;
+    i++;
+  }
+  if (!has_separator) plain[plain_len++] = ':';
+
+  static const char b64[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  size_t encoded_len = ((plain_len + 2) / 3) * 4;
+  char *header = malloc(6 + encoded_len);
+  if (!header) fx_oom();
+  memcpy(header, "Basic ", 6);
+  size_t out = 6;
+  for (size_t i = 0; i < plain_len; i += 3) {
+    unsigned b0 = (unsigned char)plain[i];
+    unsigned b1 = i + 1 < plain_len ? (unsigned char)plain[i + 1] : 0;
+    unsigned b2 = i + 2 < plain_len ? (unsigned char)plain[i + 2] : 0;
+    unsigned triple = (b0 << 16) | (b1 << 8) | b2;
+    header[out++] = b64[(triple >> 18) & 63];
+    header[out++] = b64[(triple >> 12) & 63];
+    header[out++] = i + 1 < plain_len ? b64[(triple >> 6) & 63] : '=';
+    header[out++] = i + 2 < plain_len ? b64[triple & 63] : '=';
+  }
+  free(plain);
+  ScrStr *result = scr_str_new(header, out);
+  free(header);
+  return result;
+}
+
 /* no_proxy: comma/space-separated host suffixes; "*" excludes everything;
  * a leading dot is stripped; entries match the host exactly or at a dot
  * boundary. Port qualifiers (host:port) require the port to match. */
@@ -4578,11 +4701,20 @@ static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
     /* split a :port qualifier */
     size_t hlen = len;
     long eport = -1;
-    for (size_t i = 0; i < len; i++) {
-      if (start[i] == ':') {
-        hlen = i;
-        eport = strtol(start + i + 1, NULL, 10);
-        break;
+    if (start[0] == '[') {
+      size_t close = 1;
+      while (close < len && start[close] != ']') close++;
+      if (close < len && close + 1 < len && start[close + 1] == ':') {
+        hlen = close + 1;
+        eport = strtol(start + close + 2, NULL, 10);
+      }
+    } else {
+      for (size_t i = 0; i < len; i++) {
+        if (start[i] == ':') {
+          hlen = i;
+          eport = strtol(start + i + 1, NULL, 10);
+          break;
+        }
       }
     }
     if (hlen > 0 && start[0] == '.') {
@@ -4678,6 +4810,13 @@ static void fx_start_hop(FxTransfer *t) {
   for (size_t i = 0; i + 1 < nuser; i += 2) {
     scr_arr_push_ref(pairs, scr_arr_get_ref(t->headers, (double)i));
     scr_arr_push_ref(pairs, scr_arr_get_ref(t->headers, (double)(i + 1)));
+  }
+  if (proxy && proxy->userinfo->len > 0 &&
+      !fx_pairs_have(t->headers, "proxy-authorization")) {
+    ScrStr *authorization = fx_proxy_authorization(proxy->userinfo);
+    fx_pairs_push(pairs, "proxy-authorization",
+                  authorization->data, authorization->len);
+    scr_str_release(authorization);
   }
   if (!fx_pairs_have(t->headers, "accept")) fx_pairs_push(pairs, "accept", "*/*", 3);
   if (!fx_pairs_have(t->headers, "accept-language")) fx_pairs_push(pairs, "accept-language", "*", 1);

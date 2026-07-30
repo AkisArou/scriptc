@@ -746,13 +746,17 @@ export class LlDyn {
           const m = this.objGetLit(B, "%d", f.name);
           if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
-            // one IS the undefined dyn value.
+            // one IS the undefined dyn value. Go through the dyn builder so
+            // a Web-stream typed-ref capsule cannot escape inside a checked
+            // record field.
             const has = B.tmp();
             B.line(`${has} = icmp ne ptr ${m}, null`);
             const sel = B.tmp();
             const u = this.undef(B);
             B.line(`${sel} = select i1 ${has}, ptr ${m}, ptr ${u}`);
-            storeInto(f.name, f.type, this.retainDyn(B, sel));
+            const value = B.tmp();
+            B.line(`${value} = call ptr @${this.dynCheckHelper(f.type)}(ptr ${sel}, ptr ${pathSlot})`);
+            storeInto(f.name, f.type, value);
           } else if (utag >= 0 && f.type.kind === "union") {
             const unit = host.unitInstanceRef(f.type.unionId, utag);
             const has = B.tmp();

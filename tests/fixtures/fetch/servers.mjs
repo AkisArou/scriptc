@@ -323,6 +323,7 @@ export async function startFetchServers() {
   // CONNECT tunnels (undici's ProxyAgent shape — it tunnels even plain
   // http) splice raw sockets. One count per proxied request either way.
   let proxiedRequests = 0;
+  const proxyAuthorizations = [];
   const proxy = createServer((req, res) => {
     // Relative-path requests are never proxy traffic — the standalone
     // form's count query rides one; anything else relative is a 404.
@@ -337,6 +338,7 @@ export async function startFetchServers() {
       return;
     }
     proxiedRequests++;
+    proxyAuthorizations.push(req.headers["proxy-authorization"] ?? "");
     const target = new URL(req.url ?? "");
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
@@ -361,6 +363,7 @@ export async function startFetchServers() {
   });
   proxy.on("connect", (req, clientSocket, head) => {
     proxiedRequests++;
+    proxyAuthorizations.push(req.headers["proxy-authorization"] ?? "");
     const [host, portStr] = (req.url ?? "").split(":");
     const upstream = connect(Number(portStr ?? "80"), host ?? "127.0.0.1", () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -381,6 +384,7 @@ export async function startFetchServers() {
     refusedUrl,
     proxyUrl,
     proxiedRequests: () => proxiedRequests,
+    proxyAuthorizations: () => proxyAuthorizations.slice(),
     close: async () => {
       await new Promise((resolve) => server.close(() => resolve()));
       await new Promise((resolve) => proxy.close(() => resolve()));

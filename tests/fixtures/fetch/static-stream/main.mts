@@ -253,6 +253,17 @@ console.log(
   streamIdentityBox.value,
 );
 
+const widenedRecordStream: ReadableStream<unknown> =
+  ReadableStream.from([{ value: 7 }]);
+const widenedRecordPart = await widenedRecordStream.getReader().read();
+console.log(
+  "stream from widened record:",
+  widenedRecordPart.done,
+  widenedRecordPart.done
+    ? "done"
+    : JSON.stringify(widenedRecordPart.value),
+);
+
 const liveBytes = new Uint8Array([4]);
 const liveBytesReader = ReadableStream.from(liveBytes).getReader();
 liveBytes[0] = 5;

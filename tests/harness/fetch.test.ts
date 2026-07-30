@@ -46,10 +46,15 @@ let servers: Awaited<ReturnType<typeof startFetchServers>>;
 let baseUrl = "";
 let refusedUrl = "";
 let proxyUrl = "";
+let authenticatedProxyUrl = "";
+const expectedProxyAuthorization =
+  `Basic ${Buffer.from("proxy-user:proxy-pass").toString("base64")}`;
 
 beforeAll(async () => {
   servers = await startFetchServers();
   ({ baseUrl, refusedUrl, proxyUrl } = servers);
+  authenticatedProxyUrl =
+    proxyUrl.replace("http://", "http://proxy-user:proxy-pass@");
 
   // Every child below inherits POISONED proxy env pointing at the refused
   // port: Node's fetch ignores http_proxy/https_proxy without the
@@ -220,7 +225,7 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
   );
 
   test.for(["c", "llvm"] as const)(
-    "static fetch / %s backend supports IPv6 URL literals",
+    "static fetch / %s backend supports IPv6 URL literals and NO_PROXY",
     async (backend) => {
       const server = createHttpServer(
         (_request, response) => response.end("ipv6"),
@@ -238,14 +243,24 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
         const entry = join(fixturesRoot, "static-network/main.mts");
         const binary = await buildStatic(entry, backend, "ipv6");
         const argv = [`http://[::1]:${address.port}`];
+        const env = {
+          ...process.env,
+          NODE_USE_ENV_PROXY: "1",
+          http_proxy: proxyUrl,
+          HTTP_PROXY: proxyUrl,
+          no_proxy: "[::1]",
+          NO_PROXY: "[::1]",
+        };
+        const before = servers.proxiedRequests();
         const [nodeRes, nativeRes] = await Promise.all([
-          runBinary("node", [entry, ...argv]),
-          runBinary(binary, argv),
+          runBinary("node", [entry, ...argv], env),
+          runBinary(binary, argv, env),
         ]);
         expect(nativeRes.stdout.toString("utf8")).toBe(
           nodeRes.stdout.toString("utf8"),
         );
         expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+        expect(servers.proxiedRequests() - before).toBe(0);
       } finally {
         await new Promise<void>((resolve, reject) => {
           server.close((error) => error ? reject(error) : resolve());
@@ -276,19 +291,20 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
   // lanes honor http_proxy and route through the local forward proxy —
   // outputs stay byte-identical AND the proxy sees exactly one relayed
   // request per lane.
-  test("both lanes route through http_proxy when opted in", async () => {
+  test("both lanes authenticate to http_proxy when opted in", async () => {
     const entry = join(fixturesRoot, "cases/proxy-optin/main.ts");
     const binary = await build(entry);
     const argv = [baseUrl, refusedUrl];
     const env = {
       ...process.env,
       NODE_USE_ENV_PROXY: "1",
-      http_proxy: proxyUrl,
-      HTTP_PROXY: proxyUrl,
+      http_proxy: authenticatedProxyUrl,
+      HTTP_PROXY: authenticatedProxyUrl,
       no_proxy: "",
       NO_PROXY: "",
     };
     const before = servers.proxiedRequests();
+    const authBefore = servers.proxyAuthorizations().length;
     const [nodeRes, nativeRes] = await Promise.all([
       runBinary("node", [entry, ...argv], env),
       runBinary(binary, argv, env),
@@ -296,22 +312,27 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
     expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
     expect(servers.proxiedRequests() - before).toBe(2);
+    expect(servers.proxyAuthorizations().slice(authBefore)).toEqual([
+      expectedProxyAuthorization,
+      expectedProxyAuthorization,
+    ]);
   }, 120_000);
 
   test.for(["c", "llvm"] as const)(
-    "static fetch / %s backend routes through http_proxy",
+    "static fetch / %s backend authenticates to http_proxy",
     async (backend) => {
       const entry = join(fixturesRoot, "static-proxy/main.mts");
       const binary = await buildStatic(entry, backend, "proxy-optin");
       const env = {
         ...process.env,
         NODE_USE_ENV_PROXY: "1",
-        http_proxy: proxyUrl,
-        HTTP_PROXY: proxyUrl,
+        http_proxy: authenticatedProxyUrl,
+        HTTP_PROXY: authenticatedProxyUrl,
         no_proxy: "",
         NO_PROXY: "",
       };
       const before = servers.proxiedRequests();
+      const authBefore = servers.proxyAuthorizations().length;
       const [nodeRes, nativeRes] = await Promise.all([
         runBinary("node", [entry, baseUrl], env),
         runBinary(binary, [baseUrl], env),
@@ -319,6 +340,10 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
       expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
       expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
       expect(servers.proxiedRequests() - before).toBe(2);
+      expect(servers.proxyAuthorizations().slice(authBefore)).toEqual([
+        expectedProxyAuthorization,
+        expectedProxyAuthorization,
+      ]);
     },
     120_000,
   );

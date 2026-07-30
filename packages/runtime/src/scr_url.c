@@ -148,7 +148,7 @@ static bool ub_append_ipv6(UrlBuf *out, const char *raw, size_t len) {
       i = compressed_end;
       continue;
     }
-    if (!first && i != compressed_end) ub_push(out, ':');
+    if (!first && (best_len == 0 || i != compressed_end)) ub_push(out, ':');
     char hex[5];
     int hex_len = snprintf(hex, sizeof hex, "%x", pieces[i]);
     if (hex_len <= 0 || (size_t)hex_len >= sizeof hex) return false;

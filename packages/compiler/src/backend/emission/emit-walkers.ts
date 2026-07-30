@@ -1195,8 +1195,9 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
             // one IS the undefined dyn value (JS's missing-property read).
-            d.push(`    (void)p;`);
-            d.push(`    r->${mangleField(f.name)} = scr_dyn_retain(m ? (ScrDyn *)m : scr_dyn_undefined());`);
+            // Go through the dyn builder so a Web-stream typed-ref capsule
+            // cannot escape inside a checked record field.
+            d.push(`    r->${mangleField(f.name)} = ${E.dynCheckHelper(f.type)}(m ? m : scr_dyn_undefined(), &p);`);
           } else if (utag >= 0 && f.type.kind === "union") {
             const unit = E.unitInstanceRef(f.type.unionId, utag);
             d.push(`    if (!m) {`);
