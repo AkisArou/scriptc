@@ -467,6 +467,17 @@ export class LlWalkers {
     this.putc(B, "%b", "44"); // ','
     B.br(lj);
     B.startBlock(lj);
+    host.declare(`declare zeroext i1 @scr_arr_has(ptr, double)`);
+    const present = B.tmp();
+    const lp = B.newLabel("jwa.p");
+    const lh = B.newLabel("jwa.h");
+    const ln = B.newLabel("jwa.n");
+    B.line(`${present} = call i1 @scr_arr_has(ptr %v, double ${i})`);
+    B.condBr(present, lp, lh);
+    B.startBlock(lh);
+    this.puts(B, "%b", "null");
+    B.br(ln);
+    B.startBlock(lp);
     if (cyclic) {
       const idx = B.tmp();
       B.line(`${idx} = fptoui double ${i} to i64`);
@@ -487,6 +498,8 @@ export class LlWalkers {
       B.line(`call void @${w}(ptr %b, ptr ${v})`);
       B.line(`call void ${releaseSym(host, elem)}(ptr ${v})`);
     }
+    B.br(ln);
+    B.startBlock(ln);
     const i2 = B.tmp();
     B.line(`${i2} = fadd double ${i}, ${f64Lit(1)}`);
     B.line(`store double ${i2}, ptr ${iSlot}`);

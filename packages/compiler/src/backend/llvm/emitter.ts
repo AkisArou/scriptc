@@ -1322,10 +1322,10 @@ class LlEmitter {
       `%ScrClosure = type { i64, ptr, i64, ptr }`,
       `%ScrRegex = type { i64, ptr, ptr, ptr }`,
       // ScrArr mirror { rc, len, cap, elem(i32+pad), elem_retain,
-      // elem_release, elem_trace, data } — the immortal tagged-template
-      // strings objects lay out through it (nothing GEPs into live heap
-      // arrays; those stay behind the runtime's own entry points).
-      `%ScrArr = type { i64, i64, i64, i32, ptr, ptr, ptr, ptr }`,
+      // elem_release, elem_trace, data, present } — the immortal tagged-
+      // template strings objects lay out through it (nothing GEPs into live
+      // heap arrays; those stay behind the runtime's own entry points).
+      `%ScrArr = type { i64, i64, i64, i32, ptr, ptr, ptr, ptr, ptr }`,
       // The runtime error prefix { rc, vt, name, message, code } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
       // builtin errors and classval loads GEP through these.
@@ -1398,7 +1398,7 @@ class LlEmitter {
       const n = inst.slots.length;
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-        `@${inst.sym} = internal global %ScrArr { i64 -1, i64 ${n}, i64 ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data }`,
+        `@${inst.sym} = internal global %ScrArr { i64 -1, i64 ${n}, i64 ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr null }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
@@ -3176,6 +3176,31 @@ class LlEmitter {
         B.line(`call void @scr_arr_set_${acc}(ptr ${arr.name}, double ${idx.name}, ${argTy} ${v.name})`);
         break;
       }
+      case "arrayDelete": {
+        const arr = this.emitExpr(s.arr);
+        const idx = this.emitExpr(s.index);
+        let fill = "null";
+        if (s.arr.type.kind === "array" && s.arr.type.elem.kind === "union") {
+          const tag = this.undefinedArmTag(s.arr.type.elem);
+          if (tag >= 0) fill = this.unitInstanceRef(s.arr.type.elem.unionId, tag);
+        }
+        this.declare(`declare zeroext i1 @scr_arr_delete(ptr, double, ptr)`);
+        B.line(`call i1 @scr_arr_delete(ptr ${arr.name}, double ${idx.name}, ptr ${fill})`);
+        break;
+      }
+      case "arraySetLength": {
+        const arr = this.emitExpr(s.arr);
+        const length = this.emitExpr(s.length);
+        let fill = "null";
+        if (s.arr.type.kind === "array" && s.arr.type.elem.kind === "union") {
+          const tag = this.undefinedArmTag(s.arr.type.elem);
+          if (tag >= 0) fill = this.unitInstanceRef(s.arr.type.elem.unionId, tag);
+        }
+        this.declare(`declare void @scr_arr_set_sparse_len(ptr, double, ptr)`);
+        B.line(`call void @scr_arr_set_sparse_len(ptr ${arr.name}, double ${length.name}, ptr ${fill})`);
+        this.emitPendingCheck();
+        break;
+      }
       case "bytesSet": {
         // Typed-array element write: same evaluation order as arraySet;
         // the value is a scalar (the runtime coerces JS-exactly), so no
@@ -4254,6 +4279,7 @@ class LlEmitter {
         const out = this.own({ name: arr, type: e.type });
         const acc = elemAccess(elem);
         const spreadSet = new Set(e.spreads ?? []);
+        const holeSet = new Set(e.holes ?? []);
         e.elems.forEach((el, i) => {
           const v = this.emitExpr(el);
           if (spreadSet.has(i)) {
@@ -4262,15 +4288,24 @@ class LlEmitter {
           }
           if (acc === "ref") this.moveTemp(v);
           this.arrPush(arr, acc, v.name);
+          if (holeSet.has(i)) {
+            this.declare(`declare double @scr_arr_len(ptr)`);
+            this.declare(`declare zeroext i1 @scr_arr_delete(ptr, double, ptr)`);
+            const len = B.tmp();
+            const idx = B.tmp();
+            B.line(`${len} = call double @scr_arr_len(ptr ${arr})`);
+            B.line(`${idx} = fsub double ${len}, ${f64Lit(1)}`);
+            let fill = "null";
+            if (elem.kind === "union") {
+              const tag = this.undefinedArmTag(elem);
+              if (tag >= 0) fill = this.unitInstanceRef(elem.unionId, tag);
+            }
+            B.line(`call i1 @scr_arr_delete(ptr ${arr}, double ${idx}, ptr ${fill})`);
+          }
         });
         return out;
       }
       case "arrayNewLen": {
-        // Mapper-less Array.from({ length: n }): a length-n array of
-        // ABSENT slots — the interned undefined arm for unions carrying
-        // one (immortal: pushing owes no retain), NULL for every other ref
-        // element kind. The `i <= n - 1` bound is ToLength for the lengths
-        // that terminate: fractions truncate, negative/NaN → empty.
         if (e.type.kind !== "array") throw new Error("llvm emitter bug: arrayNewLen of non-array type");
         const elem = e.type.elem;
         const n = this.emitExpr(e.length);
@@ -4283,29 +4318,43 @@ class LlEmitter {
           const tag = this.undefinedArmTag(elem);
           if (tag >= 0) fill = this.unitInstanceRef(elem.unionId, tag);
         }
-        const iSlot = B.slot();
-        B.entryAllocas.push(`${iSlot} = alloca double`);
-        B.line(`store double ${f64Lit(0)}, ptr ${iSlot}`);
-        const lc = B.newLabel("anl.c");
-        const lb = B.newLabel("anl.b");
-        const le = B.newLabel("anl.e");
-        const bound = B.tmp();
-        B.line(`${bound} = fsub double ${n.name}, ${f64Lit(1)}`);
-        B.br(lc);
-        B.startBlock(lc);
-        const i = B.tmp();
-        const cont = B.tmp();
-        B.line(`${i} = load double, ptr ${iSlot}`);
-        B.line(`${cont} = fcmp ole double ${i}, ${bound}`);
-        B.condBr(cont, lb, le);
-        B.startBlock(lb);
-        this.arrPush(arr, acc, fill);
-        const i2 = B.tmp();
-        B.line(`${i2} = fadd double ${i}, ${f64Lit(1)}`);
-        B.line(`store double ${i2}, ptr ${iSlot}`);
-        B.br(lc);
-        B.startBlock(le);
+        if (e.sparse) {
+          this.declare(`declare void @scr_arr_set_sparse_len(ptr, double, ptr)`);
+          B.line(`call void @scr_arr_set_sparse_len(ptr ${arr}, double ${n.name}, ptr ${acc === "ref" ? fill : "null"})`);
+          this.emitPendingCheck();
+        } else {
+          const iSlot = B.slot();
+          B.entryAllocas.push(`${iSlot} = alloca double`);
+          B.line(`store double ${f64Lit(0)}, ptr ${iSlot}`);
+          const lc = B.newLabel("anl.c");
+          const lb = B.newLabel("anl.b");
+          const le = B.newLabel("anl.e");
+          const bound = B.tmp();
+          B.line(`${bound} = fsub double ${n.name}, ${f64Lit(1)}`);
+          B.br(lc);
+          B.startBlock(lc);
+          const i = B.tmp();
+          const cont = B.tmp();
+          B.line(`${i} = load double, ptr ${iSlot}`);
+          B.line(`${cont} = fcmp ole double ${i}, ${bound}`);
+          B.condBr(cont, lb, le);
+          B.startBlock(lb);
+          this.arrPush(arr, acc, fill);
+          const i2 = B.tmp();
+          B.line(`${i2} = fadd double ${i}, ${f64Lit(1)}`);
+          B.line(`store double ${i2}, ptr ${iSlot}`);
+          B.br(lc);
+          B.startBlock(le);
+        }
         return out;
+      }
+      case "arrayHas": {
+        const arr = this.emitExpr(e.arr);
+        const idx = this.emitExpr(e.index);
+        this.declare(`declare zeroext i1 @scr_arr_has(ptr, double)`);
+        const t = B.tmp();
+        B.line(`${t} = call i1 @scr_arr_has(ptr ${arr.name}, double ${idx.name})`);
+        return { name: t, type: e.type };
       }
       case "arrayGet": {
         const arr = this.emitExpr(e.arr);
@@ -4315,9 +4364,9 @@ class LlEmitter {
         // the owned temp in the frame like any other.
         const acc = elemAccess(e.arr.type.elem);
         const accTy = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
-        this.declare(`declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_get_${acc}(ptr, double)`);
+        this.declare(`declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_get_${e.dense ? "dense_" : ""}${acc}(ptr, double)`);
         const t = B.tmp();
-        B.line(`${t} = call ${accTy} @scr_arr_get_${acc}(ptr ${arr.name}, double ${idx.name})`);
+        B.line(`${t} = call ${accTy} @scr_arr_get_${e.dense ? "dense_" : ""}${acc}(ptr ${arr.name}, double ${idx.name})`);
         return this.own({ name: t, type: e.type });
       }
       case "arrIntrinsic":
@@ -8839,6 +8888,19 @@ class LlEmitter {
         this.declare(`declare double @scr_arr_len(ptr)`);
         const t = B.tmp();
         B.line(`${t} = call double @scr_arr_len(ptr ${r.name})`);
+        return { name: t, type: e.type };
+      }
+      case "appendSparse": {
+        const src = this.emitExpr(e.args[0]!);
+        let fill = "null";
+        if (elem.kind === "union") {
+          const tag = this.undefinedArmTag(elem);
+          if (tag >= 0) fill = this.unitInstanceRef(elem.unionId, tag);
+        }
+        this.declare(`declare double @scr_arr_append_sparse(ptr, ptr, ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call double @scr_arr_append_sparse(ptr ${r.name}, ptr ${src.name}, ptr ${fill})`);
+        this.emitPendingCheck();
         return { name: t, type: e.type };
       }
       case "pop": {

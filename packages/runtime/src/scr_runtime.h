@@ -762,6 +762,9 @@ typedef struct ScrArr {
   void (*elem_release)(void *);
   ScrTraceFn elem_trace;
   uint64_t *data;
+  /* NULL for packed arrays. Sparse arrays carry one bit per capacity slot;
+   * a clear bit is a hole, independently of the slot's stored bits. */
+  uint8_t *present;
 } ScrArr;
 
 ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap); /* returns +1 */
@@ -773,6 +776,13 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap); /* returns +1 */
 ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
                          void (*elem_release)(void *),
                          ScrTraceFn elem_trace, size_t initial_cap);
+
+/* Grow an array to n with holes. fill is stored only as inert backing for
+ * representable hole reads (for example an undefined union singleton). */
+void scr_arr_set_sparse_len(ScrArr *a, double n, void *fill);
+bool scr_arr_has(ScrArr *a, double i);
+bool scr_arr_delete(ScrArr *a, double i, void *fill);
+double scr_arr_append_sparse(ScrArr *dst, ScrArr *src, void *fill);
 
 static inline ScrArr *scr_arr_retain(ScrArr *a) {
   if (a->rc != SIZE_MAX) {
@@ -810,6 +820,10 @@ double scr_math_random(void);
 double scr_arr_get_f64(ScrArr *a, double i); /* trap OOB */
 bool scr_arr_get_bool(ScrArr *a, double i);  /* trap OOB */
 void *scr_arr_get_ref(ScrArr *a, double i);  /* trap OOB; returns +1 */
+/* Compiler-proven packed receivers: still trap OOB, never inspect present. */
+double scr_arr_get_dense_f64(ScrArr *a, double i);
+bool scr_arr_get_dense_bool(ScrArr *a, double i);
+void *scr_arr_get_dense_ref(ScrArr *a, double i);
 
 /* i == len appends; the _ref variant releases the old element (when
  * replacing) and takes ownership of the new one. */

@@ -2,7 +2,8 @@ import { expect, test } from "vitest";
 import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
-import { BOOL, F64, type IrModule } from "../src/ir/nodes.js";
+import { arrayOf, BOOL, F64, type IrModule } from "../src/ir/nodes.js";
+import { markDenseArrayReads } from "../src/ir/dense-arrays.js";
 
 test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
@@ -79,4 +80,30 @@ test("serializer round-trips ±Infinity and refuses NaN", () => {
 test("deserializer enforces IR version", () => {
   const json = serializeModule(fibModule).replace('"irVersion": 3', '"irVersion": 99');
   expect(() => deserializeModule(json)).toThrow(/version mismatch/);
+});
+
+test("dense-array pass bypasses hole checks only for untouched packed locals", () => {
+  const loc = { file: "t.ts", start: 0, end: 0 };
+  const arr = arrayOf(F64);
+  const get = (id: string) => ({ kind: "arrayGet" as const, arr: { kind: "varRef" as const, localId: id, type: arr, loc }, index: { kind: "numLit" as const, value: 0, type: F64, loc }, type: F64, loc });
+  const mod: IrModule = {
+    irVersion: 3,
+    sourceFile: "t.ts",
+    entry: "dense",
+    functions: [
+      {
+        name: "dense", params: [], returnType: F64, locals: [{ id: "a.0", name: "a", type: arr, mutable: false }], loc,
+        body: [{ kind: "varDecl", localId: "a.0", init: { kind: "arrayLit", elems: [{ kind: "numLit", value: 1, type: F64, loc }], type: arr, loc }, loc }, { kind: "return", value: get("a.0"), loc }],
+      },
+      {
+        name: "holey", params: [], returnType: F64, locals: [{ id: "a.0", name: "a", type: arr, mutable: false }], loc,
+        body: [{ kind: "varDecl", localId: "a.0", init: { kind: "arrayLit", elems: [{ kind: "numLit", value: 1, type: F64, loc }], type: arr, loc }, loc }, { kind: "arrayDelete", arr: { kind: "varRef", localId: "a.0", type: arr, loc }, index: { kind: "numLit", value: 0, type: F64, loc }, loc }, { kind: "return", value: get("a.0"), loc }],
+      },
+    ],
+  };
+  markDenseArrayReads(mod);
+  const dense = mod.functions[0]!.body[1]!;
+  const holey = mod.functions[1]!.body[2]!;
+  expect(dense.kind === "return" && dense.value?.kind === "arrayGet" && dense.value.dense).toBe(true);
+  expect(holey.kind === "return" && holey.value?.kind === "arrayGet" && holey.value.dense).toBeFalsy();
 });

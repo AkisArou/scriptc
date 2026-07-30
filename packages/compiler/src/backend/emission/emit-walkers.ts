@@ -678,6 +678,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         d.push(`  scr_jb_putc(b, '[');`);
         d.push(`  for (size_t i = 0; i < v->len; i++) {`);
         d.push(`    if (i > 0) scr_jb_putc(b, ',');`);
+        d.push(`    if (!scr_arr_has(v, (double)i)) { scr_jb_puts(b, "null"); continue; }`);
         if (cyclic) d.push(`    scr_jb_edge_idx(b, i);`);
         if (elem.kind === "f64") {
           d.push(`    ${w}(b, scr_arr_get_f64(v, (double)i));`);

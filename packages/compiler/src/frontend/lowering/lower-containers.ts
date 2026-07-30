@@ -816,8 +816,9 @@ function lowerOptionalDefaultArg(
   }
 
 /** Interned synthetic function for one (elem, argument-shape) concat —
-   * `%arr.concat.<n>(a, x0, x1, ...)`: a fresh array takes a's elements
-   * (pushSpread), then each argument pushes (element) or spreads (array)
+   * `%arr.concat.<n>(a, x0, x1, ...)`: a fresh array takes a's indexed
+   * properties (preserving holes), then each argument pushes an element or
+   * appends an array with the same presence-preserving operation
    * in order; the receiver and array arguments are only READ. Rides
    * liftedFns like the HOF helpers (a plain function — no captures). */
   export function arrayConcatHelper(L: Lowerer, elem: IrType, shape: ("e" | "a")[], loc: SrcLoc): string {
@@ -841,7 +842,7 @@ function lowerOptionalDefaultArg(
       kind: "exprStmt",
       expr: {
         kind: "arrIntrinsic",
-        method: s === "a" ? "pushSpread" : "push",
+        method: s === "a" ? "appendSparse" : "push",
         receiver: ref("out.0", arrT),
         args: [src],
         type: F64,
@@ -904,6 +905,13 @@ function lowerOptionalDefaultArg(
       type: elem,
       loc,
     };
+    const hasElem: IrExpr = {
+      kind: "arrayHas",
+      arr: ref("a.0", arrT),
+      index: ref("i.0", F64),
+      type: BOOL,
+      loc,
+    };
     const push = (outT: IrType, value: IrExpr): IrStmt => ({
       kind: "exprStmt",
       expr: {
@@ -943,9 +951,15 @@ function lowerOptionalDefaultArg(
       locals.push({ id: "out.0", name: "out", type: outT, mutable: false });
       returnType = outT;
       body = [
-        { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: outT, loc }, loc },
         readLen,
-        forLoop([push(outT, callF(getElem))]),
+        { kind: "varDecl", localId: "out.0", init: { kind: "arrayNewLen", length: ref("n.0", F64), sparse: true, type: outT, loc }, loc },
+        forLoop([{
+          kind: "if",
+          cond: hasElem,
+          then: [{ kind: "arraySet", arr: ref("out.0", outT), index: ref("i.0", F64), value: callF(getElem), loc }],
+          else_: null,
+          loc,
+        }]),
         { kind: "return", value: ref("out.0", outT), loc },
       ];
     } else if (method === "filter") {
@@ -957,21 +971,27 @@ function lowerOptionalDefaultArg(
       body = [
         { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: arrT, loc }, loc },
         readLen,
-        forLoop([
-          { kind: "varDecl", localId: "v.0", init: getElem, loc },
-          {
-            kind: "if",
-            cond: callF(ref("v.0", elem)),
-            then: [push(arrT, ref("v.0", elem))],
-            else_: null,
-            loc,
-          },
-        ]),
+        forLoop([{
+          kind: "if",
+          cond: hasElem,
+          then: [
+            { kind: "varDecl", localId: "v.0", init: getElem, loc },
+            { kind: "if", cond: callF(ref("v.0", elem)), then: [push(arrT, ref("v.0", elem))], else_: null, loc },
+          ],
+          else_: null,
+          loc,
+        }]),
         { kind: "return", value: ref("out.0", arrT), loc },
       ];
     } else {
       returnType = VOID;
-      body = [readLen, forLoop([{ kind: "exprStmt", expr: callF(getElem), loc }])];
+      body = [readLen, forLoop([{
+        kind: "if",
+        cond: hasElem,
+        then: [{ kind: "exprStmt", expr: callF(getElem), loc }],
+        else_: null,
+        loc,
+      }])];
     }
     return { name, params, returnType, locals, body, loc };
   }
@@ -1213,15 +1233,19 @@ function lowerOptionalDefaultArg(
     });
     const body: IrStmt[] = [
       readLenStmt(arrT, loc),
-      countedForLoop(loc, [
-        {
+      countedForLoop(loc, [{
+        kind: "if",
+        cond: hasElemExpr(arrT, loc),
+        then: [{
           kind: "if",
           cond: method === "some" ? callF : { kind: "unary", op: "!", operand: callF, type: BOOL, loc },
           then: [{ kind: "return", value: bool(method === "some"), loc }],
           else_: null,
           loc,
-        },
-      ]),
+        }],
+        else_: null,
+        loc,
+      }]),
       { kind: "return", value: bool(method !== "some"), loc },
     ];
     L.liftedFns.push({
@@ -1313,8 +1337,10 @@ function lowerOptionalDefaultArg(
         value: { kind: "bin", op: "+", left: ref("j.0", F64), right: num(1), type: F64, loc },
         loc,
       },
-      body: [
-        {
+      body: [{
+        kind: "if",
+        cond: { kind: "arrayHas", arr: ref("r.0", fnRet), index: ref("j.0", F64), type: BOOL, loc },
+        then: [{
           kind: "exprStmt",
           expr: {
             kind: "arrIntrinsic",
@@ -1325,15 +1351,19 @@ function lowerOptionalDefaultArg(
             loc,
           },
           loc,
-        },
-      ],
+        }],
+        else_: null,
+        loc,
+      }],
       loc,
     };
     const body: IrStmt[] = [
       { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: fnRet, loc }, loc },
       readLenStmt(arrT, loc),
-      countedForLoop(loc, [
-        {
+      countedForLoop(loc, [{
+        kind: "if",
+        cond: hasElemExpr(arrT, loc),
+        then: [{
           kind: "varDecl",
           localId: "r.0",
           init: {
@@ -1344,15 +1374,15 @@ function lowerOptionalDefaultArg(
             loc,
           },
           loc,
-        },
-        {
+        }, {
           kind: "varDecl",
           localId: "m.0",
           init: { kind: "arrIntrinsic", method: "length", receiver: ref("r.0", fnRet), args: [], type: F64, loc },
           loc,
-        },
-        innerLoop,
-      ]),
+        }, innerLoop],
+        else_: null,
+        loc,
+      }]),
       { kind: "return", value: ref("out.0", fnRet), loc },
     ];
     L.liftedFns.push({
@@ -1445,61 +1475,63 @@ function lowerOptionalDefaultArg(
       { localId: "f.0", name: "f", type: fnT },
       ...(hasInit ? [{ localId: "z.0", name: "z", type: accT }] : []),
     ];
-    const seedStmts: IrStmt[] = hasInit
-      ? [{ kind: "varDecl", localId: "acc.0", init: ref("z.0", accT), loc }]
-      : [
-          {
-            kind: "if",
-            cond: { kind: "bin", op: "===", left: n, right: num(0), type: BOOL, loc },
-            then: [
-              {
+    const step = (): IrStmt => ({
+      kind: "assign",
+      localId: "i.0",
+      value: { kind: "bin", op: right ? "-" : "+", left: i, right: num(1), type: F64, loc },
+      loc,
+    });
+    const inBounds: IrExpr = right
+      ? { kind: "bin", op: ">=", left: i, right: num(0), type: BOOL, loc }
+      : { kind: "bin", op: "<", left: i, right: n, type: BOOL, loc };
+    const seedStmts: IrStmt[] = [
+      { kind: "varDecl", localId: "i.0", init: right ? { kind: "bin", op: "-", left: n, right: num(1), type: F64, loc } : num(0), loc },
+      ...(hasInit
+        ? [{ kind: "varDecl", localId: "acc.0", init: ref("z.0", accT), loc } as IrStmt]
+        : [
+            {
+              kind: "while",
+              cond: {
+                kind: "logical",
+                op: "&&",
+                left: inBounds,
+                right: { kind: "unary", op: "!", operand: hasElemExpr(arrT, loc), type: BOOL, loc },
+                type: BOOL,
+                loc,
+              },
+              body: [step()],
+              loc,
+            } as IrStmt,
+            {
+              kind: "if",
+              cond: { kind: "unary", op: "!", operand: inBounds, type: BOOL, loc },
+              then: [{
                 kind: "throw",
                 value: {
                   kind: "libCall",
                   fn: "error.new",
-                  args: [
-                    {
-                      kind: "strLit",
-                      value: "Reduce of empty array with no initial value",
-                      type: STRING,
-                      loc,
-                    },
-                  ],
+                  args: [{ kind: "strLit", value: "Reduce of empty array with no initial value", type: STRING, loc }],
                   type: { kind: "object", className: "%TypeError" },
                   loc,
                 },
                 loc,
-              },
-            ],
-            else_: null,
-            loc,
-          },
-          {
-            kind: "varDecl",
-            localId: "acc.0",
-            init: at(right ? { kind: "bin", op: "-", left: n, right: num(1), type: F64, loc } : num(0)),
-            loc,
-          },
-        ];
-    // Loop bounds: with init the walk covers every index; the seeded form
-    // starts one past the seed. reduce ascends, reduceRight descends.
-    const start: IrExpr = right
-      ? { kind: "bin", op: "-", left: n, right: num(hasInit ? 1 : 2), type: F64, loc }
-      : num(hasInit ? 0 : 1);
+              }],
+              else_: null,
+              loc,
+            } as IrStmt,
+            { kind: "varDecl", localId: "acc.0", init: at(i), loc } as IrStmt,
+            step(),
+          ]),
+    ];
     const loop: IrStmt = {
       kind: "for",
-      init: { kind: "varDecl", localId: "i.0", init: start, loc },
-      cond: right
-        ? { kind: "bin", op: ">=", left: i, right: num(0), type: BOOL, loc }
-        : { kind: "bin", op: "<", left: i, right: n, type: BOOL, loc },
-      update: {
-        kind: "assign",
-        localId: "i.0",
-        value: { kind: "bin", op: right ? "-" : "+", left: i, right: num(1), type: F64, loc },
-        loc,
-      },
-      body: [
-        {
+      init: null,
+      cond: inBounds,
+      update: step(),
+      body: [{
+        kind: "if",
+        cond: hasElemExpr(arrT, loc),
+        then: [{
           kind: "assign",
           localId: "acc.0",
           value: {
@@ -1510,8 +1542,10 @@ function lowerOptionalDefaultArg(
             loc,
           },
           loc,
-        },
-      ],
+        }],
+        else_: null,
+        loc,
+      }],
       loc,
     };
     const body: IrStmt[] = [
@@ -1558,7 +1592,7 @@ function lowerOptionalDefaultArg(
       if (!helper) {
         helper = `%arr.${method}.${L.arrHofHelpers.size}`;
         L.arrHofHelpers.set(key, helper);
-        L.liftedFns.push(buildArraySortFn(helper, STRING, 2, copyFirst, null, loc));
+        L.liftedFns.push(buildArraySortFn(helper, STRING, 2, copyFirst, null, null, loc));
       }
       const fnArg: IrExpr = { kind: "closure", fnName: cmp, captures: [], type: fnT, loc };
       return { kind: "call", callee: helper, args: [receiver, fnArg], type: arrT, loc };
@@ -1600,6 +1634,7 @@ function lowerOptionalDefaultArg(
           arity,
           copyFirst,
           undefinedTag >= 0 ? undefinedTag : null,
+          copyFirst ? L.wrappedUndefined(elem, loc) : null,
           loc,
         ),
       );
@@ -1656,7 +1691,14 @@ function lowerOptionalDefaultArg(
     return name;
   }
 
-/** The insertion-sort loop, from existing IR nodes:
+/** The insertion-sort loop, from existing IR nodes. Present elements compact
+   * to the front first; CompareArrayElements then sinks undefined past every
+   * value without calling the comparator, so the order is values, then
+   * undefineds. The tail beyond the present count is deleted for the
+   * in-place sort (holes land last, SortIndexedProperties' SKIP-HOLES) and
+   * assigned the interned undefined arm for toSorted (`undefExpr`, dense
+   * per READ-THROUGH-HOLES); a toSorted element type with no undefined arm
+   * cannot represent a read-through hole and keeps the holes.
    *
    *   n = a.length;
     *   for (i = 1; i < n; i++) {
@@ -1676,13 +1718,16 @@ function lowerOptionalDefaultArg(
     arity: number,
     copyFirst: boolean,
     undefinedTag: number | null,
+    undefExpr: IrExpr | null,
     loc: SrcLoc,
   ): IrFunction {
     const arrT = arrayOf(elem);
     const fnT = funcOf([elem, elem].slice(0, arity), F64);
     const ref = (localId: string, type: IrType): IrExpr => ({ kind: "varRef", localId, type, loc });
     const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
+    const i = ref("i.0", F64);
     const j = ref("j.0", F64);
+    const m = ref("m.0", F64);
     const at = (index: IrExpr): IrExpr => ({ kind: "arrayGet", arr: ref("a.0", arrT), index, type: elem, loc });
     const jPlus1: IrExpr = { kind: "bin", op: "+", left: j, right: num(1), type: F64, loc };
     const isUndefined = (value: IrExpr): IrExpr | null => {
@@ -1787,10 +1832,33 @@ function lowerOptionalDefaultArg(
           }]
         : []),
       readLenStmt(arrT, loc),
+      { kind: "varDecl", localId: "m.0", init: num(0), loc },
+      countedForLoop(loc, [{
+        kind: "if",
+        cond: hasElemExpr(arrT, loc),
+        then: [
+          { kind: "arraySet", arr: ref("a.0", arrT), index: m, value: at(i), loc },
+          { kind: "assign", localId: "m.0", value: { kind: "bin", op: "+", left: m, right: num(1), type: F64, loc }, loc },
+        ],
+        else_: null,
+        loc,
+      }]),
+      {
+        kind: "for",
+        init: { kind: "varDecl", localId: "i.0", init: m, loc },
+        cond: { kind: "bin", op: "<", left: i, right: ref("n.0", F64), type: BOOL, loc },
+        update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: i, right: num(1), type: F64, loc }, loc },
+        body: [
+          copyFirst && undefExpr !== null
+            ? { kind: "arraySet", arr: ref("a.0", arrT), index: i, value: undefExpr, loc }
+            : { kind: "arrayDelete", arr: ref("a.0", arrT), index: i, loc },
+        ],
+        loc,
+      },
       {
         kind: "for",
         init: { kind: "varDecl", localId: "i.0", init: num(1), loc },
-        cond: { kind: "bin", op: "<", left: ref("i.0", F64), right: ref("n.0", F64), type: BOOL, loc },
+        cond: { kind: "bin", op: "<", left: i, right: m, type: BOOL, loc },
         update: {
           kind: "assign",
           localId: "i.0",
@@ -1819,6 +1887,7 @@ function lowerOptionalDefaultArg(
         { id: "f.0", name: "f", type: fnT, mutable: true },
         { id: "n.0", name: "n", type: F64, mutable: false },
         { id: "i.0", name: "i", type: F64, mutable: true },
+        { id: "m.0", name: "m", type: F64, mutable: true },
         { id: "v.0", name: "v", type: elem, mutable: false },
         { id: "j.0", name: "j", type: F64, mutable: true },
       ],
@@ -2158,6 +2227,16 @@ function lowerOptionalDefaultArg(
     };
   }
 
+  function hasElemExpr(arrT: IrType, loc: SrcLoc): IrExpr {
+    return {
+      kind: "arrayHas",
+      arr: { kind: "varRef", localId: "a.0", type: arrT, loc },
+      index: { kind: "varRef", localId: "i.0", type: F64, loc },
+      type: BOOL,
+      loc,
+    };
+  }
+
 /** `for (i = 0; i < n; i++) { ...body }` over the conventional locals. */
   function countedForLoop(loc: SrcLoc, body: IrStmt[]): IrStmt {
     const i: IrExpr = { kind: "varRef", localId: "i.0", type: F64, loc };
@@ -2385,7 +2464,7 @@ function lowerOptionalDefaultArg(
               "pass a mapper (Array.from({ length: n }, () => init)) instead",
           );
         }
-        return { kind: "arrayNewLen", length: n, type: arrT, loc };
+        return { kind: "arrayNewLen", length: n, sparse: false, type: arrT, loc };
       }
     }
     // `Array.from(s)` on a STRING: the string iterator's code-point walk

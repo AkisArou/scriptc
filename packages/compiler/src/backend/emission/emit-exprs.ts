@@ -1250,6 +1250,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const arr = E.newTemp(e.type, E.arrNewC(elem, e.elems.length));
         const acc = elemAccess(elem);
         const spreadSet = new Set(e.spreads ?? []);
+        const holeSet = new Set(e.holes ?? []);
         e.elems.forEach((el, i) => {
           const v = E.emitExpr(el);
           if (spreadSet.has(i)) {
@@ -1263,16 +1264,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           if (acc === "ref") E.moveTemp(v);
           E.line(`scr_arr_push_${acc}(${arr.name}, ${v.name});`);
+          if (holeSet.has(i)) {
+            let fill = "NULL";
+            if (elem.kind === "union") {
+              const def = E.unionsById.get(elem.unionId);
+              const tag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
+              if (tag >= 0) fill = E.unitInstanceRef(elem.unionId, tag);
+            }
+            E.line(`scr_arr_delete(${arr.name}, scr_arr_len(${arr.name}) - 1, ${fill});`);
+          }
         });
         return arr;
       }
       case "arrayNewLen": {
-        // Mapper-less Array.from({ length: n }): a length-n array of
-        // ABSENT slots — the interned undefined arm for unions carrying
-        // one (immortal: pushing owes no retain), NULL for every other
-        // ref element kind (assign before reading — SEMANTICS.md 46). The
-        // `i <= n - 1` bound is ToLength for the lengths that terminate:
-        // fractions truncate, negative/NaN produce an empty array.
         if (e.type.kind !== "array") throw new Error("emitter bug: arrayNewLen of non-array type");
         const elem = e.type.elem;
         const n = E.emitExpr(e.length);
@@ -1283,13 +1287,23 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const tag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
           if (tag >= 0) fill = E.unitInstanceRef(elem.unionId, tag);
         }
-        const i = `sc_i${E.tempCounter++}`;
-        E.line(`for (double ${i} = 0; ${i} <= ${n.name} - 1; ${i} += 1) {`);
-        E.indent++;
-        E.line(`scr_arr_push_${elemAccess(elem)}(${arr.name}, ${fill});`);
-        E.indent--;
-        E.line(`}`);
+        if (e.sparse) {
+          E.line(`scr_arr_set_sparse_len(${arr.name}, ${n.name}, ${fill});`);
+          E.emitPendingCheck();
+        } else {
+          const i = `sc_i${E.tempCounter++}`;
+          E.line(`for (double ${i} = 0; ${i} <= ${n.name} - 1; ${i} += 1) {`);
+          E.indent++;
+          E.line(`scr_arr_push_${elemAccess(elem)}(${arr.name}, ${fill});`);
+          E.indent--;
+          E.line(`}`);
+        }
         return arr;
+      }
+      case "arrayHas": {
+        const arr = E.emitExpr(e.arr);
+        const idx = E.emitExpr(e.index);
+        return E.newTemp(e.type, `scr_arr_has(${arr.name}, ${idx.name})`);
       }
       case "arrayGet": {
         const arr = E.emitExpr(e.arr);
@@ -1298,7 +1312,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         // Ref-element reads return +1 (the runtime retains); newTemp
         // registers the owned temp in the frame like any other.
         const acc = elemAccess(e.arr.type.elem);
-        return E.newTemp(e.type, `scr_arr_get_${acc}(${arr.name}, ${idx.name})`);
+        return E.newTemp(e.type, `scr_arr_get_${e.dense ? "dense_" : ""}${acc}(${arr.name}, ${idx.name})`);
       }
       case "arrIntrinsic": {
         const r = E.emitExpr(e.receiver);
@@ -1338,6 +1352,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.indent--;
             E.line(`}`);
             return E.newTemp(e.type, `scr_arr_len(${r.name})`);
+          }
+          case "appendSparse": {
+            const src = E.emitExpr(e.args[0]!);
+            let fill = "NULL";
+            if (e.receiver.type.elem.kind === "union") {
+              const def = E.unionsById.get(e.receiver.type.elem.unionId);
+              const tag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
+              if (tag >= 0) fill = E.unitInstanceRef(e.receiver.type.elem.unionId, tag);
+            }
+            const result = E.newTemp(e.type, `scr_arr_append_sparse(${r.name}, ${src.name}, ${fill})`);
+            E.emitPendingCheck();
+            return result;
           }
           case "pop":
             // Ownership of a refcounted element moves OUT of the array to

@@ -2722,6 +2722,125 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
     };
   }
 
+export function refineJsArrayFillType(
+  L: Lowerer,
+  expr: ts.CallExpression | ts.NewExpression,
+  t: IrType | null,
+): IrType | null {
+  const ctx = L.checker.getContextualType(expr);
+  const contextual = ctx ? L.mapTypeOf(ctx) : null;
+  if (t?.kind !== "array" && contextual?.kind === "array") t = contextual;
+  const declaredElem = contextual?.kind === "array"
+    ? contextual.elem
+    : t?.kind === "array" ? t.elem : null;
+  const holesRepresentable = declaredElem?.kind === "union" &&
+    L.armTag(declaredElem.unionId, UNDEFINED_T) >= 0;
+  // Unannotated JS commonly allocates then fills by index (`var out =
+  // Array(n); for (...) out[i] = value`, Lodash's output-buffer idiom).
+  // The checker leaves the constructor at any[]; recover the element
+  // type only for an immediate canonical loop that fills every slot.
+  if (
+    isJsSourceFile(expr.getSourceFile()) &&
+    (t?.kind !== "array" || t.elem.kind === "jsval" || t.elem.kind === "dyn") &&
+    ts.isVariableDeclaration(expr.parent) && ts.isIdentifier(expr.parent.name) &&
+    !holesRepresentable
+  ) {
+    // An unresolvable binding would alias every other unresolvable
+    // indexed write (undefined === undefined) — require the symbol.
+    const binding = L.resolveValueSymbol(expr.parent.name);
+    const args = expr.arguments ?? [];
+    const lengthArg = args[0];
+    let inferredCompleteFill = false;
+    if (binding && args.length === 1 && lengthArg && ts.isIdentifier(lengthArg)) {
+      const declList = expr.parent.parent;
+      const declStmt = declList.parent;
+      const container = declStmt.parent;
+      if (
+        ts.isVariableDeclarationList(declList) && ts.isVariableStatement(declStmt) &&
+        declList.declarations.length === 1 &&
+        (ts.isBlock(container) || ts.isSourceFile(container))
+      ) {
+        const stmtIndex = container.statements.indexOf(declStmt);
+        const loop = container.statements[stmtIndex + 1];
+        const init = loop && ts.isForStatement(loop) && loop.initializer &&
+            ts.isVariableDeclarationList(loop.initializer) && loop.initializer.declarations.length === 1
+          ? loop.initializer.declarations[0]
+          : undefined;
+        const index = init && ts.isIdentifier(init.name) && init.initializer &&
+            ts.isNumericLiteral(init.initializer) && Number(init.initializer.text) === 0
+          ? L.resolveValueSymbol(init.name)
+          : undefined;
+        const condition = loop && ts.isForStatement(loop) ? loop.condition : undefined;
+        const increment = loop && ts.isForStatement(loop) ? loop.incrementor : undefined;
+        const bodyStmt = loop && ts.isForStatement(loop)
+          ? ts.isBlock(loop.statement) && loop.statement.statements.length === 1
+            ? loop.statement.statements[0]
+            : loop.statement
+          : undefined;
+        const write = bodyStmt && ts.isExpressionStatement(bodyStmt) &&
+            ts.isBinaryExpression(bodyStmt.expression) &&
+            bodyStmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          ? bodyStmt.expression
+          : undefined;
+        let mutatesLoopControl = false;
+        if (write && index) {
+          const visit = (n: ts.Node): void => {
+            if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
+              mutatesLoopControl = true;
+            }
+            const operand = ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)
+              ? n.operand
+              : undefined;
+            const target = ts.isBinaryExpression(n) &&
+                n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+                n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+              ? n.left
+              : operand;
+            if (
+              target && ts.isIdentifier(target) &&
+              (L.resolveValueSymbol(target) === index ||
+                L.resolveValueSymbol(target) === L.resolveValueSymbol(lengthArg) ||
+                L.resolveValueSymbol(target) === binding)
+            ) {
+              mutatesLoopControl = true;
+            }
+            ts.forEachChild(n, visit);
+          };
+          visit(write.right);
+        }
+        if (
+          index && condition && ts.isBinaryExpression(condition) &&
+          condition.operatorToken.kind === ts.SyntaxKind.LessThanToken &&
+          ts.isIdentifier(condition.left) && L.resolveValueSymbol(condition.left) === index &&
+          ts.isIdentifier(condition.right) &&
+          L.resolveValueSymbol(condition.right) === L.resolveValueSymbol(lengthArg) &&
+          increment && (ts.isPostfixUnaryExpression(increment) || ts.isPrefixUnaryExpression(increment)) &&
+          increment.operator === ts.SyntaxKind.PlusPlusToken && ts.isIdentifier(increment.operand) &&
+          L.resolveValueSymbol(increment.operand) === index && write && !mutatesLoopControl &&
+          ts.isElementAccessExpression(write.left) && ts.isIdentifier(write.left.expression) &&
+          L.resolveValueSymbol(write.left.expression) === binding &&
+          write.left.argumentExpression && ts.isIdentifier(write.left.argumentExpression) &&
+          L.resolveValueSymbol(write.left.argumentExpression) === index
+        ) {
+          const wt = L.mapTypeOf(L.typeOf(write.right));
+          if (wt && wt.kind !== "void" && !isUnitType(wt)) {
+            t = arrayOf(wt);
+            inferredCompleteFill = true;
+          }
+        }
+      }
+    }
+    if (!inferredCompleteFill) {
+      L.noLowering(
+        "Array whose indexed writes do not provably initialize every element",
+        expr,
+        "use an explicit element type that includes undefined",
+      );
+    }
+  }
+  return t;
+}
+
 export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     const loc = locOf(expr);
 
@@ -3129,6 +3248,26 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       L.isStdlibSymbol(L.resolveValueSymbol(expr.expression) ?? undefined)
     ) {
       return L.lowerComptime(expr);
+    }
+
+    // `Array(n)` is the constructor's sparse one-number form. Other call
+    // forms are ordinary packed element construction.
+    if (
+      ts.isIdentifier(expr.expression) &&
+      expr.expression.text === "Array" &&
+      L.isStdlibSymbol(L.resolveValueSymbol(expr.expression) ?? undefined)
+    ) {
+      if (expr.arguments.some(ts.isSpreadElement)) {
+        L.noLowering("Array with spread arguments", expr, "write the array literal: [...xs]");
+      }
+      let t = L.mapTypeOf(L.typeOf(expr));
+      t = refineJsArrayFillType(L, expr, t);
+      if (t?.kind !== "array") L.badType(expr, L.typeOf(expr));
+      if (expr.arguments.length === 1 && L.mapTypeOf(L.typeOf(expr.arguments[0]!))?.kind === "f64") {
+        return { kind: "arrayNewLen", length: L.lowerExpr(expr.arguments[0]!), sparse: true, type: t, loc };
+      }
+      const elems = expr.arguments.map((a) => L.lowerExprExpecting(a, t.elem));
+      return { kind: "arrayLit", elems, type: t, loc };
     }
 
     // The lib constructors-as-functions with STATIC conversion semantics:
@@ -7314,6 +7453,14 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
         if (key.type.kind !== "string") return null;
         return { kind: "libCall", fn: "dyn.hasOwn", args: [receiver, key], type: BOOL, loc };
       }
+      if (probed?.type.kind === "array") {
+        const receiver = L.lowerExpr(recvNode);
+        const index = L.lowerExpr(keyNode);
+        if (receiver.type.kind === "array" && index.type.kind === "f64") {
+          return { kind: "arrayHas", arr: receiver, index, type: BOOL, loc: locOf(call) };
+        }
+        return null;
+      }
       if (probed?.type.kind !== "record") return null;
       const shape = L.shapes.get(probed.type.shapeId);
       if (!shape || shape.tuple || shape.indexValue || shapeHasAccessorSlots(shape)) return null;
@@ -7352,6 +7499,51 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       }
     }
     let argIr = L.mapTypeOf(L.typeOf(argNode));
+    if (argIr?.kind === "array" && member === "keys") {
+      const loc = locOf(call);
+      const arrT = argIr;
+      const resultT = arrayOf(STRING);
+      const key = `arr.keys:${typeKey(arrT)}`;
+      let helper = L.arrHofHelpers.get(key);
+      if (!helper) {
+        helper = `%arr.keys.${L.arrHofHelpers.size}`;
+        L.arrHofHelpers.set(key, helper);
+        const ref = (id: string, type: IrType): IrExpr => ({ kind: "varRef", localId: id, type, loc });
+        const i = ref("i.0", F64);
+        const a = ref("a.0", arrT);
+        const out = ref("out.0", resultT);
+        L.liftedFns.push({
+          name: helper,
+          params: [{ localId: "a.0", name: "a", type: arrT }],
+          returnType: resultT,
+          locals: [
+            { id: "a.0", name: "a", type: arrT, mutable: true },
+            { id: "out.0", name: "out", type: resultT, mutable: false },
+            { id: "i.0", name: "i", type: F64, mutable: true },
+          ],
+          body: [
+            { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: resultT, loc }, loc },
+            {
+              kind: "for",
+              init: { kind: "varDecl", localId: "i.0", init: { kind: "numLit", value: 0, type: F64, loc }, loc },
+              cond: { kind: "bin", op: "<", left: i, right: { kind: "arrIntrinsic", method: "length", receiver: a, args: [], type: F64, loc }, type: BOOL, loc },
+              update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: i, right: { kind: "numLit", value: 1, type: F64, loc }, type: F64, loc }, loc },
+              body: [{
+                kind: "if",
+                cond: { kind: "arrayHas", arr: a, index: i, type: BOOL, loc },
+                then: [{ kind: "exprStmt", expr: { kind: "arrIntrinsic", method: "push", receiver: out, args: [{ kind: "toString", operand: i, type: STRING, loc }], type: F64, loc }, loc }],
+                else_: null,
+                loc,
+              }],
+              loc,
+            },
+            { kind: "return", value: out, loc },
+          ],
+          loc,
+        });
+      }
+      return { kind: "call", callee: helper, args: [L.lowerExpr(argNode)], type: resultT, loc };
+    }
     // JS: an unmappable CHECKER type over a value that lowered to a real
     // record (the narrowed export-table literal) — the lowered value's
     // shape is the honest dispatch key, exactly the identity-Set stance.

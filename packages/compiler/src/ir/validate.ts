@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -2147,9 +2147,15 @@ function validateFunction(
         }
         const elem = e.type.elem;
         const spreadSet = new Set(e.spreads ?? []);
+        const holeSet = new Set(e.holes ?? []);
         for (const i of spreadSet) {
           if (!Number.isInteger(i) || i < 0 || i >= e.elems.length) {
             err(`arrayLit spread index ${i} out of range`, e.loc);
+          }
+        }
+        for (const i of holeSet) {
+          if (!Number.isInteger(i) || i < 0 || i >= e.elems.length || spreadSet.has(i)) {
+            err(`arrayLit hole index ${i} invalid`, e.loc);
           }
         }
         e.elems.forEach((el, i) => {
@@ -2161,17 +2167,20 @@ function validateFunction(
         break;
       }
       case "arrayNewLen": {
-        // Mapper-less Array.from({length: n}): absent-slot fill exists
-        // only for refcounted element kinds (frontend fences scalars).
         if (e.type.kind !== "array") {
           err(`arrayNewLen must be array-typed, got ${e.type.kind}`, e.loc);
           break;
         }
-        if (!isRefCounted(e.type.elem)) {
-          err(`arrayNewLen with non-refcounted ${e.type.elem.kind} elements (no absent value)`, e.loc);
-        }
         checkExpr(e.length);
         expectType(e.length, F64, "arrayNewLen length");
+        break;
+      }
+      case "arrayHas": {
+        checkExpr(e.arr);
+        checkExpr(e.index);
+        if (e.arr.type.kind !== "array") err(`arrayHas on non-array ${e.arr.type.kind}`, e.loc);
+        expectType(e.index, F64, "arrayHas index");
+        expectType(e, BOOL, "arrayHas result");
         break;
       }
       case "arrayGet": {
@@ -2335,7 +2344,7 @@ function validateFunction(
         const sig =
           e.method === "push"
             ? { argTypes: e.args.map(() => elem), result: F64 }
-            : e.method === "pushSpread"
+            : e.method === "pushSpread" || e.method === "appendSparse"
               ? { argTypes: [e.receiver.type], result: F64 }
               : e.method === "pop"
               ? { argTypes: [], result: elem }
@@ -4979,6 +4988,20 @@ function validateFunction(
         } else {
           expectType(s.value, s.arr.type.elem, "arraySet value");
         }
+        break;
+      }
+      case "arrayDelete": {
+        checkExpr(s.arr);
+        checkExpr(s.index);
+        if (s.arr.type.kind !== "array") err(`arrayDelete on non-array ${s.arr.type.kind}`, s.loc);
+        expectType(s.index, F64, "arrayDelete index");
+        break;
+      }
+      case "arraySetLength": {
+        checkExpr(s.arr);
+        checkExpr(s.length);
+        if (s.arr.type.kind !== "array") err(`arraySetLength on non-array ${s.arr.type.kind}`, s.loc);
+        expectType(s.length, F64, "arraySetLength value");
         break;
       }
       case "bytesSet": {

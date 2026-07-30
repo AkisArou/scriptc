@@ -23,6 +23,7 @@ import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-expor
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
 import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
+import { markDenseArrayReads } from "./ir/dense-arrays.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
 import { npmStaticIneligibleReason, npmStaticOffenders, npmStaticPackageOfPath } from "./frontend/npm-static.js";
@@ -740,6 +741,8 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
     if (lowered.module === null) return fail(lowered.diagnostics);
 
+    markDenseArrayReads(lowered.module);
+
     const validation = validateModule(lowered.module);
     if (validation.length > 0) {
       return fail(validation.map((v) => iceDiag(v.message, v.loc)));
@@ -1398,6 +1401,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     fe.dispose();
   }
   const mod = lowered.module!;
+  markDenseArrayReads(mod);
 
   const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
     ok: false,

@@ -1160,6 +1160,10 @@ export type IrStmt =
    * scriptc traps instead, see SEMANTICS.md). Ownership of a refcounted
    * value MOVES into the array; the replaced element is released. */
   | { kind: "arraySet"; arr: IrExpr; index: IrExpr; value: IrExpr; loc: SrcLoc }
+  /** `delete a[i]`: clears presence without changing length. */
+  | { kind: "arrayDelete"; arr: IrExpr; index: IrExpr; loc: SrcLoc }
+  /** `a.length = n`: truncates or grows with holes. */
+  | { kind: "arraySetLength"; arr: IrExpr; length: IrExpr; loc: SrcLoc }
   /** Typed-array element write `b[i] = v` — arraySet's sibling for bytes
    * receivers: statement-only, receiver and index like bytesIntrinsic
    * `get` (any invalid index TRAPS — JS would ignore the write, a
@@ -1285,6 +1289,7 @@ export type IrArrIntrinsicMethod =
   | "length"
   | "push"
   | "pushSpread"
+  | "appendSparse"
   | "pop"
   | "indexOf"
   | "includes"
@@ -1303,6 +1308,7 @@ export type IrArrIntrinsicMethod =
 /** Array intrinsics whose runtime implementation can raise a catchable
  * exception (rather than the static tier's deliberate index traps). */
 export const MAY_THROW_ARR_METHODS: ReadonlySet<IrArrIntrinsicMethod> = new Set([
+  "appendSparse",
   "with",
 ]);
 
@@ -4122,21 +4128,16 @@ export type IrExpr =
    * untouched). Allocates; the result is owned (+1); ownership of
    * refcounted plain elements MOVES into the array, spread sources are
    * BORROWED (their elements copy in retained). */
-  | { kind: "arrayLit"; elems: IrExpr[]; spreads?: number[]; type: IrType; loc: SrcLoc }
-  /** Mapper-less `Array.from({ length: n })` — a length-n array of ABSENT
-   * slots: unions carrying an undefined arm hold the interned undefined
-   * instance (reads are JS-exact), every other refcounted element kind
-   * holds NULL — a slot that MUST be assigned before it is read (the
-   * pMap/allSettled fill-by-index pattern; reads of unassigned slots trap
-   * where Node yields undefined — SEMANTICS.md 46). Scalar elements have
-   * no absent value and are fenced by the frontend. The bound is ToLength
-   * via the `i <= n - 1` loop form (fractions truncate; negative/NaN give
-   * an empty array). Allocates; the result is owned (+1). */
-  | { kind: "arrayNewLen"; length: IrExpr; type: IrType; loc: SrcLoc }
+  | { kind: "arrayLit"; elems: IrExpr[]; spreads?: number[]; holes?: number[]; type: IrType; loc: SrcLoc }
+  /** A length-n sparse array. Every index begins as a hole; packed arrays
+   * remain the default for literals and push-built values. */
+  | { kind: "arrayNewLen"; length: IrExpr; sparse: boolean; type: IrType; loc: SrcLoc }
+  /** Own indexed-property presence (`i in a`), false for holes and OOB. */
+  | { kind: "arrayHas"; arr: IrExpr; index: IrExpr; type: IrType; loc: SrcLoc }
   /** Element read `a[i]`. Index is f64; a non-integer or out-of-bounds index
    * traps at runtime (JS returns undefined — documented divergence). For
    * refcounted elements the result is a fresh owned (+1) reference. */
-  | { kind: "arrayGet"; arr: IrExpr; index: IrExpr; type: IrType; loc: SrcLoc }
+  | { kind: "arrayGet"; arr: IrExpr; index: IrExpr; /** Proven packed local receiver: bypasses the hole check. */ dense?: true; type: IrType; loc: SrcLoc }
   /** Array method/property on an array receiver: `length` (f64), `push`
    * (VARIADIC like JS — zero or more elem-typed args; every argument
    * evaluates before any appends, then each appends in order; returns the

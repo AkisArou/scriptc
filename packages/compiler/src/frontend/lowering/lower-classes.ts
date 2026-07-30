@@ -6,7 +6,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, DYN, F64, bytesOf, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
-import { MAX_GENERIC_INSTANCES, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
+import { MAX_GENERIC_INSTANCES, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, refineJsArrayFillType, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { cjsClassExprWholeExportOf, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeTypesPath, locOf } from "../program.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
@@ -5128,13 +5128,6 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
         if (args.some(ts.isSpreadElement)) {
           L.noLowering("new Array with spread arguments", expr, "write the array literal: [...xs]");
         }
-        if (args.length === 1 && L.mapTypeOf(L.typeOf(args[0]!))?.kind === "f64") {
-          L.noLowering(
-            "new Array(count)",
-            expr,
-            "the one-number form allocates HOLES (reads answer undefined, which the element type cannot carry) — build and push, or use the elements form: new Array(a, b)",
-          );
-        }
         let t = L.mapTypeOf(L.typeOf(expr));
         // JS's `new Array()` types any[]; the contextual type carries the
         // annotation when one exists (the new Map() stance).
@@ -5143,7 +5136,12 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
           const ctxMapped = ctx ? L.mapTypeOf(ctx) : null;
           if (ctxMapped?.kind === "array") t = ctxMapped;
         }
+        t = refineJsArrayFillType(L, expr, t);
         if (t?.kind !== "array") L.badType(expr, L.typeOf(expr));
+        if (args.length === 1 && L.mapTypeOf(L.typeOf(args[0]!))?.kind === "f64") {
+          const length = L.lowerExpr(args[0]!);
+          return { kind: "arrayNewLen", length, sparse: true, type: t, loc };
+        }
         const elems = args.map((a) => L.lowerExprExpecting(a, t.elem));
         return { kind: "arrayLit", elems, type: t, loc };
       }

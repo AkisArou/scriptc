@@ -80,7 +80,42 @@ static void scr_arr_grow(ScrArr *a, size_t need) {
   uint64_t *data = realloc(a->data, cap * sizeof(uint64_t));
   if (!data) scr_arr_oom();
   a->data = data;
+  if (a->present) {
+    size_t old_bytes = (a->cap + 7) / 8;
+    size_t new_bytes = (cap + 7) / 8;
+    uint8_t *present = realloc(a->present, new_bytes);
+    if (!present) scr_arr_oom();
+    memset(present + old_bytes, 0, new_bytes - old_bytes);
+    a->present = present;
+  }
   a->cap = cap;
+}
+
+static bool scr_arr_present_at(const ScrArr *a, size_t i) {
+  return !a->present || (a->present[i >> 3] & (uint8_t)(1u << (i & 7))) != 0;
+}
+
+static void scr_arr_mark_present(ScrArr *a, size_t i, bool present) {
+  if (!a->present) {
+    if (present) return;
+    size_t bytes = (a->cap + 7) / 8;
+    a->present = malloc(bytes ? bytes : 1);
+    if (!a->present) scr_arr_oom();
+    memset(a->present, 0xff, bytes);
+    if (a->cap & 7) a->present[bytes - 1] &= (uint8_t)((1u << (a->cap & 7)) - 1u);
+  }
+  uint8_t mask = (uint8_t)(1u << (i & 7));
+  if (present) a->present[i >> 3] |= mask;
+  else a->present[i >> 3] &= (uint8_t)~mask;
+}
+
+static void scr_arr_pack_if_dense(ScrArr *a) {
+  if (!a->present) return;
+  for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) return;
+  }
+  free(a->present);
+  a->present = NULL;
 }
 
 ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
@@ -94,6 +129,7 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
   a->elem_release = NULL;
   a->elem_trace = NULL;
   a->data = NULL;
+  a->present = NULL;
   if (initial_cap > 0) scr_arr_grow(a, initial_cap);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
@@ -107,12 +143,15 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
  * below releases none — the complement contract in scr_runtime.h. */
 void scr_arr_trace_v(void *a0, ScrTraceVisit visit, void *ctx) {
   ScrArr *a = (ScrArr *)a0;
-  for (size_t i = 0; i < a->len; i++) visit(scr_slot_to_ptr(a->data[i]), ctx);
+  for (size_t i = 0; i < a->len; i++) {
+    if (scr_arr_present_at(a, i)) visit(scr_slot_to_ptr(a->data[i]), ctx);
+  }
 }
 
 static void scr_arr_gc_free(void *a0) {
   ScrArr *a = (ScrArr *)a0;
   free(a->data);
+  free(a->present);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays--;
 #endif
@@ -137,6 +176,7 @@ ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
   a->elem_release = elem_release;
   a->elem_trace = elem_trace;
   a->data = NULL;
+  a->present = NULL;
   if (initial_cap > 0) scr_arr_grow(a, initial_cap);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
@@ -149,12 +189,15 @@ void scr_arr_release(ScrArr *a) {
   if (--a->rc == 0) {
     if (a->elem_trace) scr_cyc_on_dead(a);
     if (scr_elem_is_ref(a->elem)) {
-      for (size_t i = 0; i < a->len; i++) scr_elem_release(a, a->data[i]);
+      for (size_t i = 0; i < a->len; i++) {
+        if (scr_arr_present_at(a, i)) scr_elem_release(a, a->data[i]);
+      }
     }
     if (a->elem_trace) {
       scr_arr_gc_free(a);
     } else {
       free(a->data);
+      free(a->present);
 #ifdef SCR_RC_AUDIT
       scr_live_arrays--;
 #endif
@@ -167,6 +210,82 @@ void scr_arr_release(ScrArr *a) {
 
 double scr_arr_len(ScrArr *a) { return (double)a->len; }
 
+void scr_arr_set_sparse_len(ScrArr *a, double n, void *fill) {
+  if (!(n >= 0) || n != trunc(n) || n > 4294967295.0) {
+    scr_throw_error_msg(SCR_ERR_RANGE, "Invalid array length", sizeof "Invalid array length" - 1);
+    return;
+  }
+  size_t len = (size_t)n;
+  if (len < a->len) {
+    /* Shrink len BEFORE releasing so a release-triggered cycle collection
+     * never traces the dropped tail; presence bits above len are dead (every
+     * grow path rewrites them), so packed arrays stay bitmap-free and a
+     * sparse array whose surviving prefix is dense drops its bitmap. */
+    size_t old_len = a->len;
+    a->len = len;
+    if (scr_elem_is_ref(a->elem)) {
+      for (size_t i = len; i < old_len; i++) {
+        if (scr_arr_present_at(a, i)) scr_elem_release(a, a->data[i]);
+      }
+    }
+    scr_arr_pack_if_dense(a);
+    return;
+  }
+  if (len == a->len) return;
+  scr_arr_grow(a, len);
+  if (!a->present) {
+    size_t bytes = (a->cap + 7) / 8;
+    a->present = calloc(bytes ? bytes : 1, 1);
+    if (!a->present) scr_arr_oom();
+    for (size_t i = 0; i < a->len; i++) scr_arr_mark_present(a, i, true);
+  }
+  uint64_t slot = scr_slot_from_ptr(fill);
+  for (size_t i = a->len; i < len; i++) {
+    a->data[i] = slot;
+    scr_arr_mark_present(a, i, false);
+  }
+  a->len = len;
+}
+
+bool scr_arr_has(ScrArr *a, double i) {
+  if (!(i >= 0) || i != trunc(i) || i >= (double)a->len) return false;
+  return scr_arr_present_at(a, (size_t)i);
+}
+
+bool scr_arr_delete(ScrArr *a, double i, void *fill) {
+  if (!(i >= 0) || i != trunc(i) || i >= (double)a->len) return true;
+  size_t idx = (size_t)i;
+  if (!scr_arr_present_at(a, idx)) return true;
+  uint64_t old = a->data[idx];
+  a->data[idx] = scr_slot_from_ptr(fill);
+  scr_arr_mark_present(a, idx, false);
+  if (scr_elem_is_ref(a->elem)) scr_elem_release(a, old);
+  return true;
+}
+
+double scr_arr_append_sparse(ScrArr *dst, ScrArr *src, void *fill) {
+  size_t src_len = src->len;
+  size_t start = dst->len;
+  scr_arr_set_sparse_len(dst, (double)(start + src_len), fill);
+  if (scr_exc_pending()) return (double)dst->len;
+  for (size_t i = 0; i < src_len; i++) {
+    if (!scr_arr_present_at(src, i)) continue;
+    uint64_t slot = src->data[i];
+    if (scr_elem_is_ref(dst->elem)) {
+      void *p = scr_slot_to_ptr(slot);
+      if (dst->elem == SCR_ELEM_STR) p = scr_str_retain((ScrStr *)p);
+      else if (dst->elem == SCR_ELEM_ARR) p = scr_arr_retain((ScrArr *)p);
+      else if (dst->elem == SCR_ELEM_BYTES) p = scr_bytes_retain((ScrBytes *)p);
+      else p = dst->elem_retain(p);
+      slot = scr_slot_from_ptr(p);
+    }
+    dst->data[start + i] = slot;
+    scr_arr_mark_present(dst, start + i, true);
+  }
+  scr_arr_pack_if_dense(dst);
+  return (double)dst->len;
+}
+
 /* ── Math.max/min over one spread number[] ─────────────────────────────
  * The JS fold exactly (ECMA Math.max/min applied to the elements): any
  * NaN poisons the result, +0 beats -0 for max (the reverse for min), and
@@ -174,6 +293,7 @@ double scr_arr_len(ScrArr *a) { return (double)a->len; }
 double scr_math_max_arr(ScrArr *a) {
   double best = -INFINITY;
   for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) return NAN;
     double v = scr_slot_to_f64(a->data[i]);
     if (isnan(v)) return v;
     if (v > best || (v == 0.0 && best == 0.0 && !signbit(v))) best = v;
@@ -184,6 +304,7 @@ double scr_math_max_arr(ScrArr *a) {
 double scr_math_min_arr(ScrArr *a) {
   double best = INFINITY;
   for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) return NAN;
     double v = scr_slot_to_f64(a->data[i]);
     if (isnan(v)) return v;
     if (v < best || (v == 0.0 && best == 0.0 && signbit(v))) best = v;
@@ -194,14 +315,43 @@ double scr_math_min_arr(ScrArr *a) {
 /* ── reads ─────────────────────────────────────────────────────────────── */
 
 double scr_arr_get_f64(ScrArr *a, double i) {
+  size_t idx = scr_arr_check_index(a, i, false);
+  if (!scr_arr_present_at(a, idx)) {
+    scr_trap("scriptc: TypeError: array hole cannot be represented by the element type\n");
+  }
+  return scr_slot_to_f64(a->data[idx]);
+}
+
+double scr_arr_get_dense_f64(ScrArr *a, double i) {
   return scr_slot_to_f64(a->data[scr_arr_check_index(a, i, false)]);
 }
 
 bool scr_arr_get_bool(ScrArr *a, double i) {
+  size_t idx = scr_arr_check_index(a, i, false);
+  if (!scr_arr_present_at(a, idx)) {
+    scr_trap("scriptc: TypeError: array hole cannot be represented by the element type\n");
+  }
+  return a->data[idx] != 0;
+}
+
+bool scr_arr_get_dense_bool(ScrArr *a, double i) {
   return a->data[scr_arr_check_index(a, i, false)] != 0;
 }
 
 void *scr_arr_get_ref(ScrArr *a, double i) {
+  size_t idx = scr_arr_check_index(a, i, false);
+  void *p = scr_slot_to_ptr(a->data[idx]);
+  if (!scr_arr_present_at(a, idx) && !p) {
+    scr_trap("scriptc: TypeError: array hole cannot be represented by the element type\n");
+  }
+  if (a->elem == SCR_ELEM_STR) scr_str_retain((ScrStr *)p);
+  else if (a->elem == SCR_ELEM_BYTES) scr_bytes_retain((ScrBytes *)p);
+  else if (a->elem == SCR_ELEM_REF) p = a->elem_retain(p);
+  else scr_arr_retain((ScrArr *)p);
+  return p;
+}
+
+void *scr_arr_get_dense_ref(ScrArr *a, double i) {
   void *p = scr_slot_to_ptr(a->data[scr_arr_check_index(a, i, false)]);
   if (a->elem == SCR_ELEM_STR) scr_str_retain((ScrStr *)p);
   else if (a->elem == SCR_ELEM_BYTES) scr_bytes_retain((ScrBytes *)p);
@@ -218,13 +368,17 @@ static void scr_arr_set_slot(ScrArr *a, double i, uint64_t slot) {
     scr_arr_grow(a, a->len + 1);
     a->len++;
     a->data[idx] = slot;
+    scr_arr_mark_present(a, idx, true);
     return;
   }
   /* Unlink-then-release: a release can trigger a cycle collection, which
    * must never see a heap edge whose count was already given up. */
+  bool had_old = scr_arr_present_at(a, idx);
   uint64_t old = a->data[idx];
   a->data[idx] = slot;
-  if (scr_elem_is_ref(a->elem)) scr_elem_release(a, old);
+  scr_arr_mark_present(a, idx, true);
+  if (!had_old && idx + 1 == a->len) scr_arr_pack_if_dense(a);
+  if (had_old && scr_elem_is_ref(a->elem)) scr_elem_release(a, old);
 }
 
 void scr_arr_set_f64(ScrArr *a, double i, double v) {
@@ -243,7 +397,9 @@ void scr_arr_set_ref(ScrArr *a, double i, void *v) {
 
 static double scr_arr_push_slot(ScrArr *a, uint64_t slot) {
   scr_arr_grow(a, a->len + 1);
-  a->data[a->len++] = slot;
+  a->data[a->len] = slot;
+  scr_arr_mark_present(a, a->len, true);
+  a->len++;
   return (double)a->len;
 }
 
@@ -263,7 +419,15 @@ static uint64_t scr_arr_pop_slot(ScrArr *a) {
   if (a->len == 0) {
     scr_trap("scriptc: RangeError: pop() on an empty array\n");
   }
-  return a->data[--a->len];
+  size_t idx = --a->len;
+  /* pop() on a hole is Get(len-1): undefined. A union element's backing
+   * slot carries the interned undefined arm (immortal — handing it out as
+   * owned is safe, its release is a no-op); a zero backing has no value
+   * the element type can represent. */
+  if (!scr_arr_present_at(a, idx) && a->data[idx] == 0) {
+    scr_trap("scriptc: TypeError: array hole cannot be represented by the element type\n");
+  }
+  return a->data[idx];
 }
 
 double scr_arr_pop_f64(ScrArr *a) { return scr_slot_to_f64(scr_arr_pop_slot(a)); }
@@ -281,9 +445,20 @@ static uint64_t scr_arr_shift_slot(ScrArr *a) {
   if (a->len == 0) {
     scr_trap("scriptc: internal error: shift() on an empty array\n");
   }
+  /* shift() on a hole is Get(0): undefined — representable only when the
+   * backing slot carries an interned undefined arm (pop's discipline). */
+  if (!scr_arr_present_at(a, 0) && a->data[0] == 0) {
+    scr_trap("scriptc: TypeError: array hole cannot be represented by the element type\n");
+  }
   uint64_t s = a->data[0];
   a->len--;
   memmove(a->data, a->data + 1, a->len * sizeof(uint64_t));
+  if (a->present) {
+    for (size_t i = 0; i < a->len; i++) {
+      scr_arr_mark_present(a, i, scr_arr_present_at(a, i + 1));
+    }
+    scr_arr_mark_present(a, a->len, false);
+  }
   return s;
 }
 
@@ -316,7 +491,17 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
   if (n > 0) {
     memcpy(out->data, a->data + from, n * sizeof(uint64_t));
     out->len = n;
+    if (a->present) {
+      for (size_t i = 0; i < n; i++) {
+        if (!scr_arr_present_at(a, from + i)) scr_arr_mark_present(out, i, false);
+      }
+    }
     memmove(a->data + from, a->data + from + n, (a->len - from - n) * sizeof(uint64_t));
+    if (a->present) {
+      for (size_t i = from; i + n < a->len; i++) {
+        scr_arr_mark_present(a, i, scr_arr_present_at(a, i + n));
+      }
+    }
     a->len -= n;
   }
   return out;
@@ -337,6 +522,7 @@ static bool scr_arr_ref_eq(const ScrArr *a, uint64_t slot, void *v) {
 
 double scr_arr_index_of_f64(ScrArr *a, double v) {
   for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) continue;
     if (scr_slot_to_f64(a->data[i]) == v) return (double)i; /* NaN: never */
   }
   return -1;
@@ -344,6 +530,7 @@ double scr_arr_index_of_f64(ScrArr *a, double v) {
 
 double scr_arr_index_of_bool(ScrArr *a, bool v) {
   for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) continue;
     if ((a->data[i] != 0) == v) return (double)i;
   }
   return -1;
@@ -351,6 +538,7 @@ double scr_arr_index_of_bool(ScrArr *a, bool v) {
 
 double scr_arr_index_of_ref(ScrArr *a, void *v) {
   for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) continue;
     if (scr_arr_ref_eq(a, a->data[i], v)) return (double)i;
   }
   return -1;
@@ -358,6 +546,7 @@ double scr_arr_index_of_ref(ScrArr *a, void *v) {
 
 bool scr_arr_includes_f64(ScrArr *a, double v) {
   for (size_t i = 0; i < a->len; i++) {
+    if (!scr_arr_present_at(a, i)) continue;
     double x = scr_slot_to_f64(a->data[i]);
     if (x == v || (x != x && v != v)) return true; /* SameValueZero: NaN hits */
   }
@@ -369,7 +558,14 @@ bool scr_arr_includes_bool(ScrArr *a, bool v) {
 }
 
 bool scr_arr_includes_ref(ScrArr *a, void *v) {
-  return scr_arr_index_of_ref(a, v) >= 0;
+  for (size_t i = 0; i < a->len; i++) {
+    /* Get treats a hole as undefined. Union-backed sparse arrays store the
+     * undefined singleton in the hole; NULL means this element type cannot
+     * represent undefined and therefore cannot match the needle. */
+    if (!scr_arr_present_at(a, i) && a->data[i] == 0) continue;
+    if (scr_arr_ref_eq(a, a->data[i], v)) return true;
+  }
+  return false;
 }
 
 /* ── join ──────────────────────────────────────────────────────────────── */
@@ -412,7 +608,8 @@ ScrArr *scr_arr_slice(ScrArr *a, double start, double end) {
           : scr_arr_new(a->elem, n ? n : 1);
   for (size_t i = 0; i < n; i++) {
     uint64_t slot = a->data[from + i];
-    if (scr_elem_is_ref(a->elem)) {
+    bool present = scr_arr_present_at(a, from + i);
+    if (present && scr_elem_is_ref(a->elem)) {
       void *pv = scr_slot_to_ptr(slot);
       if (a->elem == SCR_ELEM_STR) scr_str_retain((ScrStr *)pv);
       else if (a->elem == SCR_ELEM_ARR) scr_arr_retain((ScrArr *)pv);
@@ -421,6 +618,7 @@ ScrArr *scr_arr_slice(ScrArr *a, double start, double end) {
       slot = scr_slot_from_ptr(pv);
     }
     out->data[out->len++] = slot;
+    if (!present) scr_arr_mark_present(out, i, false);
   }
   return out;
 }
@@ -431,6 +629,7 @@ ScrStr *scr_arr_join(ScrArr *a, ScrStr *sep) {
   if (!buf) scr_arr_oom();
   for (size_t i = 0; i < a->len; i++) {
     if (i > 0) scr_join_append(&buf, &len, &cap, sep->data, sep->len);
+    if (!scr_arr_present_at(a, i)) continue;
     switch (a->elem) {
       case SCR_ELEM_F64: {
         char nb[32];

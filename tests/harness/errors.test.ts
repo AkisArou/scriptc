@@ -414,6 +414,107 @@ process.on('__proto__', () => {});
       /^Uncaught Error: 'process\.on\("__proto__", \.\.\.\)' is part of the standard library types but has no scriptc lowering yet \[SC2020 at .*process-on-proto\.cjs:2\]\n$/,
     );
   });
+
+  test("partial JavaScript Array fills retain the compile fence", async () => {
+    const r = await compileAndRun(
+      "partial-js-array-fill",
+      `function printPartial(length) {
+  var partial = Array(length);
+  partial[0] = 1;
+  console.log(partial[1]);
+}
+printPartial(2);
+`,
+      "js",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: 'Array whose indexed writes do not provably initialize every element' is part of the standard library types but has no scriptc lowering yet \[SC2020 at .*partial-js-array-fill\.js:2\]\n$/,
+    );
+  });
+
+  test("partial JavaScript new Array fills retain the compile fence", async () => {
+    const r = await compileAndRun(
+      "partial-js-new-array-fill",
+      `function printPartial(length) {
+  var partial = new Array(length);
+  partial[0] = 1;
+  console.log(partial[1]);
+}
+printPartial(2);
+`,
+      "js",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: 'Array whose indexed writes do not provably initialize every element' is part of the standard library types but has no scriptc lowering yet \[SC2020 at .*partial-js-new-array-fill\.js:2\]\n$/,
+    );
+  });
+
+  test("JavaScript Array fills with effectful values retain the compile fence", async () => {
+    const r = await compileAndRun(
+      "effectful-js-array-fill",
+      `let bound = 0;
+function shorten() { bound = 1; return 7; }
+function build(length) {
+  bound = length;
+  var result = Array(bound);
+  for (var i = 0; i < bound; i++) result[i] = shorten();
+  return result;
+}
+build(3);
+`,
+      "js",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: 'Array whose indexed writes do not provably initialize every element' is part of the standard library types but has no scriptc lowering yet \[SC2020 at .*effectful-js-array-fill\.js:5\]\n$/,
+    );
+  });
+
+  test("JavaScript Array fills with constructor effects retain the compile fence", async () => {
+    const r = await compileAndRun(
+      "constructor-effect-js-array-fill",
+      `let bound = 0;
+class Shortener { constructor() { bound = 1; } }
+function build(length) {
+  bound = length;
+  var result = Array(bound);
+  for (var i = 0; i < bound; i++) result[i] = (new Shortener(), i);
+  return result;
+}
+build(3);
+`,
+      "js",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: 'Array whose indexed writes do not provably initialize every element' is part of the standard library types but has no scriptc lowering yet \[SC2020 at .*constructor-effect-js-array-fill\.js:5\]\n$/,
+    );
+  });
+
+  test("JavaScript Array fills with later declarators retain the compile fence", async () => {
+    const r = await compileAndRun(
+      "multi-declarator-js-array-fill",
+      `function build(length) {
+  var result = Array(length), shortened = (length = 1);
+  for (var i = 0; i < length; i++) result[i] = i;
+  return result;
+}
+build(3);
+`,
+      "js",
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(
+      /^Uncaught Error: 'Array whose indexed writes do not provably initialize every element' is part of the standard library types but has no scriptc lowering yet \[SC2020 at .*multi-declarator-js-array-fill\.js:2\]\n$/,
+    );
+  });
 });
 
 // Node's CJS named-import LINK error: a named import of an export the CJS

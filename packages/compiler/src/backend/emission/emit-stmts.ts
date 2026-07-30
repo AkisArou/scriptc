@@ -365,6 +365,31 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         E.line(`scr_arr_set_${acc}(${arr.name}, ${idx.name}, ${v.name});${E.srcComment(s.loc)}`);
         break;
       }
+      case "arrayDelete": {
+        const arr = E.emitExpr(s.arr);
+        const idx = E.emitExpr(s.index);
+        let fill = "NULL";
+        if (s.arr.type.kind === "array" && s.arr.type.elem.kind === "union") {
+          const def = E.unionsById.get(s.arr.type.elem.unionId);
+          const tag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
+          if (tag >= 0) fill = E.unitInstanceRef(s.arr.type.elem.unionId, tag);
+        }
+        E.line(`scr_arr_delete(${arr.name}, ${idx.name}, ${fill});${E.srcComment(s.loc)}`);
+        break;
+      }
+      case "arraySetLength": {
+        const arr = E.emitExpr(s.arr);
+        const length = E.emitExpr(s.length);
+        let fill = "NULL";
+        if (s.arr.type.kind === "array" && s.arr.type.elem.kind === "union") {
+          const def = E.unionsById.get(s.arr.type.elem.unionId);
+          const tag = def ? def.arms.findIndex((a) => a.kind === "undefinedT") : -1;
+          if (tag >= 0) fill = E.unitInstanceRef(s.arr.type.elem.unionId, tag);
+        }
+        E.line(`scr_arr_set_sparse_len(${arr.name}, ${length.name}, ${fill});${E.srcComment(s.loc)}`);
+        E.emitPendingCheck();
+        break;
+      }
       case "bytesSet": {
         // Typed-array element write: same evaluation order as arraySet;
         // the value is a scalar (the runtime coerces JS-exactly), so no

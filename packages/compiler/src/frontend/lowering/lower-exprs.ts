@@ -3606,6 +3606,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     }
     const type = mapped as IrType & { kind: "array" };
     const spreads: number[] = [];
+    const holes: number[] = [];
     const elems = expr.elements.map((el, i) => {
       if (ts.isSpreadElement(el)) {
         // `[...xs, b]`: xs must be an array of the literal's own element
@@ -3682,14 +3683,16 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         spreads.push(i);
         return src;
       }
-      // A HOLE (`[,]` — an elision): the slot materializes the undefined
-      // arm — reads, length, and JSON answer exactly Node (JSON.stringify
-      // prints null for holes AND for undefined elements). Iteration
-      // methods do not skip the position the way JS skips holes — the
-      // documented sparse-literal divergence.
+      // A HOLE (`[,]` — an elision): the backing slot carries the undefined
+      // arm for hole-yielding reads/iteration while arrayLit's hole metadata
+      // keeps property presence distinct. HOFs consult that presence and
+      // skip the position like JavaScript.
       if (ts.isOmittedExpression(el)) {
         const hole = type.elem.kind === "union" ? L.wrappedUndefined(type.elem, locOf(el)) : null;
-        if (hole) return hole;
+        if (hole) {
+          holes.push(i);
+          return hole;
+        }
         L.unsupported("SC1090", el, "holes in array literals of this element type");
       }
       // An ARRAY-LITERAL element under a UNION element slot whose own type
@@ -3726,7 +3729,14 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       if (!typeEquals(lowered.type, type.elem)) L.badType(el, L.typeOf(el));
       return lowered;
     });
-    return { kind: "arrayLit", elems, ...(spreads.length > 0 ? { spreads } : {}), type, loc };
+    return {
+      kind: "arrayLit",
+      elems,
+      ...(spreads.length > 0 ? { spreads } : {}),
+      ...(holes.length > 0 ? { holes } : {}),
+      type,
+      loc,
+    };
   }
 
 /** `{ a: 1, b: "x" }` → recordLit. The record type comes from the
@@ -8718,22 +8728,16 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     // Compile-time-known STRING keys fold — literals, and the same
     // const/enum-literal and template folding computed property keys get
     // (foldedStringKeyOf); runtime-valued keys keep the fence.
-    // NUMERIC literal keys answer on ARRAY receivers: dense arrays hold
-    // exactly the indices [0, length), so `3 in xs` is a length test (and
-    // a negative/fractional literal is a constant miss — the receiver
-    // still evaluates once through its own length read).
+    // Numeric literal keys over arrays test own indexed-property presence,
+    // distinguishing holes from both values and out-of-bounds indices.
     {
       let kNode = expr.left;
       while (ts.isParenthesizedExpression(kNode)) kNode = kNode.expression;
       if (ts.isNumericLiteral(kNode) && L.mapTypeOf(L.typeOf(expr.right))?.kind === "array") {
         const recvArr = L.lowerExpr(expr.right);
         if (recvArr.type.kind === "array") {
-          const len: IrExpr = { kind: "arrIntrinsic", method: "length", receiver: recvArr, args: [], type: F64, loc };
           const n = Number(kNode.text);
-          if (Number.isInteger(n) && n >= 0) {
-            return { kind: "bin", op: "<", left: { kind: "numLit", value: n, type: F64, loc }, right: len, type: BOOL, loc };
-          }
-          return { kind: "bin", op: "<", left: len, right: { kind: "numLit", value: 0, type: F64, loc }, type: BOOL, loc };
+          return { kind: "arrayHas", arr: recvArr, index: { kind: "numLit", value: n, type: F64, loc }, type: BOOL, loc };
         }
       }
     }

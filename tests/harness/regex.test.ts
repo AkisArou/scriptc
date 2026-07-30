@@ -160,7 +160,8 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // re-based the static class by one more; the ambient-receiver stack,
     // the %j dyn stringify walk, and the runtime-encoding readFileSync
     // form (all in always-linked TUs) tipped the regex class one more
-    // page.
+    // page. Sparse-array presence tracking tipped the Mach-O static class
+    // by one 16KB page without changing regex linkage.
     // The canonical Ubuntu 24.04/clang Sandbox measures 387,600 bytes for
     // the plain binary and 540,232 with regex linked. The Linux bounds leave
     // roughly one ELF page of growth. Mach-O keeps its independently

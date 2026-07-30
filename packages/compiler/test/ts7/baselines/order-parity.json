@@ -5060,6 +5060,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2603-sparse-arrays.ts": {
+   "order": [
+    "<repo>/tests/corpus/2603-sparse-arrays.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2604-cycle-classes-mutual/main.ts": {
    "order": [
     "<repo>/tests/corpus/2604-cycle-classes-mutual/group.ts",
@@ -5473,6 +5479,12 @@
   "<repo>/tests/corpus/2671-array-copying-js.cjs": {
    "order": [
     "<repo>/tests/corpus/2671-array-copying-js.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2673-sparse-array-js.js": {
+   "order": [
+    "<repo>/tests/corpus/2673-sparse-array-js.js"
    ],
    "diags": []
   },

@@ -188,6 +188,17 @@ static void test_index_of_includes(void) {
   scr_arr_release(inner);
   scr_arr_release(other);
   scr_arr_release(outer);
+
+  /* includes performs Get and therefore sees a union-backed hole's stored
+   * undefined value; indexOf skips holes per HasProperty. An array pointer
+   * stands in for the runtime's immortal undefined singleton here. */
+  ScrArr *sparse = scr_arr_new(SCR_ELEM_ARR, 0);
+  ScrArr *undefined_fill = scr_arr_new(SCR_ELEM_F64, 0);
+  scr_arr_set_sparse_len(sparse, 1, undefined_fill);
+  check(scr_arr_includes_ref(sparse, undefined_fill), "includes reads a represented hole");
+  check_f64(scr_arr_index_of_ref(sparse, undefined_fill), -1, "indexOf skips a represented hole");
+  scr_arr_release(sparse);
+  scr_arr_release(undefined_fill);
 }
 
 /* ── SCR_ELEM_REF: a mock "record" the runtime cannot lay out ─────────
@@ -325,6 +336,22 @@ static void test_ref_cycle(void) {
   scr_arr_release(arr); /* external edge gone; the cycle keeps both alive */
   scr_collect_cycles();
   check(mock_live == 0, "cycle collected through the array element");
+
+  arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 0);
+  rec = mock_cyc_new(8);
+  rec->owner = (ScrArr *)scr_arr_retain(arr);
+  scr_arr_push_ref(arr, rec);
+  scr_arr_delete(arr, 0, NULL);
+  check(mock_live == 0, "cycle: delete unlinks before releasing element");
+  scr_arr_release(arr);
+
+  arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 0);
+  rec = mock_cyc_new(9);
+  rec->owner = (ScrArr *)scr_arr_retain(arr);
+  scr_arr_push_ref(arr, rec);
+  scr_arr_set_sparse_len(arr, 0, NULL);
+  check(mock_live == 0, "cycle: truncation unlinks before releasing element");
+  scr_arr_release(arr);
 #ifdef SCR_RC_AUDIT
   check(scr_arr_live_count() == arrays0, "cycle: no arrays leaked");
 #endif
@@ -378,6 +405,54 @@ static void test_join(void) {
 #endif
 }
 
+static void test_sparse(void) {
+#ifdef SCR_RC_AUDIT
+  long strings0 = scr_str_live_count();
+  long arrays0 = scr_arr_live_count();
+#endif
+  ScrArr *a = scr_arr_new(SCR_ELEM_STR, 0);
+  check(a->present == NULL, "packed arrays have no presence bitmap");
+  scr_arr_set_sparse_len(a, 4, NULL);
+  check_f64(scr_arr_len(a), 4, "sparse allocation sets length");
+  check(!scr_arr_has(a, 0) && !scr_arr_has(a, 3), "sparse allocation creates holes");
+  scr_arr_set_ref(a, 1, scr_str_new("x", 1));
+  scr_arr_set_ref(a, 3, scr_str_new("z", 1));
+  check(scr_arr_has(a, 1) && scr_arr_has(a, 3), "indexed writes mark slots present");
+  ScrStr *missing = scr_str_new("missing", 7);
+  check_f64(scr_arr_index_of_ref(a, missing), -1, "indexOf skips holes");
+  scr_str_release(missing);
+  ScrStr *sep = scr_str_new(",", 1);
+  ScrStr *joined = scr_arr_join(a, sep);
+  check(strcmp(joined->data, ",x,,z") == 0, "join renders holes as empty fields");
+  scr_str_release(joined);
+  scr_str_release(sep);
+
+  ScrArr *slice = scr_arr_slice(a, 1, 4);
+  check(scr_arr_has(slice, 0) && !scr_arr_has(slice, 1) && scr_arr_has(slice, 2),
+        "slice preserves holes");
+  scr_arr_delete(slice, 0, NULL);
+  check(!scr_arr_has(slice, 0) && scr_arr_len(slice) == 3,
+        "delete clears presence without changing length");
+  scr_arr_release(slice);
+  scr_arr_release(a);
+
+  ScrArr *dst = scr_arr_new(SCR_ELEM_F64, 0);
+  ScrArr *src = scr_arr_new(SCR_ELEM_F64, 1);
+  scr_arr_push_f64(src, 1);
+  dst->len = UINT32_MAX;
+  check_f64(scr_arr_append_sparse(dst, src, NULL), UINT32_MAX,
+            "sparse append leaves destination unchanged above max length");
+  check(scr_exc_pending(), "sparse append above max length throws");
+  scr_exc_clear();
+  dst->len = 0; /* The synthetic oversized length owns no slots. */
+  scr_arr_release(src);
+  scr_arr_release(dst);
+#ifdef SCR_RC_AUDIT
+  check(scr_str_live_count() == strings0, "sparse: no strings leaked");
+  check(scr_arr_live_count() == arrays0, "sparse: no arrays leaked");
+#endif
+}
+
 int main(int argc, char **argv) {
   if (argc > 1) {
     ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
@@ -407,6 +482,7 @@ int main(int argc, char **argv) {
   test_ref_elements();
   test_ref_cycle();
   test_join();
+  test_sparse();
 
   fprintf(stderr, "%ld/%ld cases passed\n", total - failed, total);
   return failed == 0 ? 0 : 1;

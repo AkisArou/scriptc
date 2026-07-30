@@ -171,6 +171,12 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           if (source && source.type?.kind === "f64") f.throws = true;
           break;
         }
+        case "arrayNewLen":
+          if (rec["sparse"] === true) f.throws = true;
+          break;
+        case "arraySetLength":
+          f.throws = true;
+          break;
         case "bytesIntrinsic":
           // setFrom and the numeric read/write families throw catchable
           // RangeErrors (Node's bounds discipline); the rest trap or

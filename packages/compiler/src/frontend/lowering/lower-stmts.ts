@@ -3676,6 +3676,13 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       };
     }
     const obj = L.lowerExpr(target.expression);
+    if (obj.type.kind === "array" && ts.isElementAccessExpression(target)) {
+      const index = L.lowerExpr(target.argumentExpression);
+      if (index.type.kind !== "f64") {
+        L.unsupported("SC1090", target.argumentExpression, "array delete with non-number indices");
+      }
+      return { kind: "arrayDelete", arr: obj, index, loc };
+    }
     if (obj.type.kind === "record") {
       const shape = L.shapes.get(obj.type.shapeId);
       if (shape?.indexValue && shape.fields.length === 0 && !shape.tuple) {
@@ -4198,6 +4205,21 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
               expr: { kind: "libCall", fn: "process.envSet", args: [key, value], type: VOID, loc },
               loc,
             };
+          }
+          // `xs.length = n` on an array receiver. Gate on the CHECKER type
+          // so a non-array receiver with a `length` field never lowers the
+          // LHS speculatively (a discarded lowering can still register
+          // helpers or diagnostics).
+          if (
+            !expr.left.questionDotToken && expr.left.name.text === "length" &&
+            L.mapTypeOf(L.typeOf(expr.left.expression))?.kind === "array"
+          ) {
+            const arr = L.lowerExpr(expr.left.expression);
+            if (arr.type.kind === "array") {
+              const length = L.lowerExpr(expr.right);
+              if (length.type.kind !== "f64") L.badType(expr.right, L.typeOf(expr.right));
+              return { kind: "arraySetLength", arr, length, loc: locOf(expr) };
+            }
           }
           if (expr.left.expression.kind === ts.SyntaxKind.SuperKeyword) {
             // `super.x = v`: the base chain's SETTER, called directly over
@@ -7201,13 +7223,12 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
    *
    *   { const %inarr = <expr>; const %inlen = %inarr.length;
    *     for (let %ini = 0; %ini < %inlen; %ini += 1) {
-   *       if (%ini < %inarr.length) { const k = String(%ini); <body> } } }
+   *       if (%ini in %inarr) { const k = String(%ini); <body> } } }
    *
    * The length SNAPSHOT bounds the walk (keys added during the body are
    * not visited — V8's own-keys snapshot, verified against Node) and the
-   * live-length guard is the per-visit presence check (keys removed by
-   * pops are skipped, exactly Node's HasProperty re-check; indices are
-   * dense, so `i < length` IS presence). */
+   * arrayHas guard is the per-visit HasProperty re-check, so holes and keys
+   * removed by the body are skipped exactly like Node. */
   function lowerForInArray(L: Lowerer, stmt: ts.ForInStatement, labels: string[] | undefined): IrStmt {
     const loc = locOf(stmt);
     const arrExpr = L.lowerExpr(stmt.expression);
@@ -7304,7 +7325,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
             body: [
               {
                 kind: "if",
-                cond: { kind: "bin", op: "<", left: iRef(), right: liveLen(), type: BOOL, loc },
+                cond: { kind: "arrayHas", arr: arrRef(), index: iRef(), type: BOOL, loc },
                 then: [keyDecl, ...writes, ...body],
                 else_: null,
                 loc,

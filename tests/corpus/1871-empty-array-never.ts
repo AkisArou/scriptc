@@ -18,10 +18,8 @@ console.log(none.length);
 const s: string[] | undefined = [];
 console.log(JSON.stringify(s));
 
-// Sparse literals: holes materialize the undefined arm — length and index
-// reads answer exactly Node. (Node's iteration methods SKIP holes; scriptc
-// visits the positions — the documented sparse divergence — so this
-// fixture pins only length/index/JSON-free surfaces.)
+// Sparse literals retain a distinct hole while their backing undefined arm
+// makes length and indexed reads answer exactly Node.
 var v1 = [,];
 console.log(v1.length);
 console.log(v1[0] === undefined);
