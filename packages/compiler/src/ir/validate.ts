@@ -3579,12 +3579,14 @@ function validateFunction(
           }
           break;
         }
-        if (e.fn === "http.requestCb" || e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse" ||
+        if (e.fn === "http.requestCb" || e.fn === "https.requestCb" ||
+            e.fn === "http.requestUrlCb" || e.fn === "http.clientOnResponse" ||
             e.fn === "http.requestAgentCb" || e.fn === "https.requestAgentCb" ||
             e.fn === "https.requestUrlCb") {
           // The response listener: void, no params or exactly (res: httpReq).
           const cbT = e.args[
             e.fn === "http.requestCb" ? 7
+            : e.fn === "https.requestCb" ? 9
             : e.fn === "http.requestUrlCb" || e.fn === "https.requestUrlCb" ? 3
             : e.fn === "http.requestAgentCb" ? 8
             : e.fn === "https.requestAgentCb" ? 10
