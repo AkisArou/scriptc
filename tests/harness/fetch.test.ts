@@ -347,15 +347,75 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
     },
     120_000,
   );
+
+  test("dynamic fetch honors wildcard no_proxy exclusions", async () => {
+    const entry = join(fixturesRoot, "cases/proxy-optin/main.ts");
+    const binary = await build(entry);
+    const argv = ["http://sub.example.invalid", refusedUrl];
+    const env = {
+      ...process.env,
+      NODE_USE_ENV_PROXY: "1",
+      http_proxy: proxyUrl,
+      HTTP_PROXY: proxyUrl,
+      no_proxy: "*.example.invalid",
+      NO_PROXY: "*.example.invalid",
+    };
+    const before = servers.proxiedRequests();
+    const [nodeRes, nativeRes] = await Promise.all([
+      runBinary("node", [entry, ...argv], env),
+      runBinary(binary, argv, env),
+    ]);
+    expect(nativeRes.stdout.toString("utf8")).toBe(
+      nodeRes.stdout.toString("utf8"),
+    );
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    expect(servers.proxiedRequests() - before).toBe(0);
+  }, 120_000);
+
+  test.for(["c", "llvm"] as const)(
+    "static fetch / %s backend honors wildcard no_proxy exclusions",
+    async (backend) => {
+      const entry = join(fixturesRoot, "static-network/main.mts");
+      const binary = await buildStatic(entry, backend, "proxy-wildcard");
+      const argv = ["http://sub.example.invalid/path"];
+      const env = {
+        ...process.env,
+        NODE_USE_ENV_PROXY: "1",
+        http_proxy: proxyUrl,
+        HTTP_PROXY: proxyUrl,
+        no_proxy: "*.example.invalid",
+        NO_PROXY: "*.example.invalid",
+      };
+      const before = servers.proxiedRequests();
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry, ...argv], env),
+        runBinary(binary, argv, env),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(
+        nodeRes.stdout.toString("utf8"),
+      );
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      expect(servers.proxiedRequests() - before).toBe(0);
+    },
+    120_000,
+  );
 });
 
 describe(`fetch differential (${cases.length} programs${sanitize ? ", sanitized" : ""})`, () => {
   test.for(cases.map((c) => [c.name, c] as const))("%s", async ([, c]) => {
     const binary = await build(c.entry);
     const argv = [baseUrl, refusedUrl];
+    const nodeArgv =
+      c.name === "redirect-resolution"
+        ? [...argv, "redirect-resolution-node"]
+        : argv;
+    const nativeArgv =
+      c.name === "redirect-resolution"
+        ? [...argv, "redirect-resolution-native"]
+        : argv;
     const [nodeRes, nativeRes] = await Promise.all([
-      runBinary("node", [c.entry, ...argv]),
-      runBinary(binary, argv),
+      runBinary("node", [c.entry, ...nodeArgv]),
+      runBinary(binary, nativeArgv),
     ]);
     if (!nodeRes.stdout.equals(nativeRes.stdout)) {
       expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));

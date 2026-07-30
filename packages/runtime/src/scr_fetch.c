@@ -2925,7 +2925,10 @@ static bool sf_no_proxy_match(const char *list, const ScrStr *host,
         }
       }
     }
-    if (host_len > 0 && start[0] == '.') {
+    if (host_len >= 2 && start[0] == '*' && start[1] == '.') {
+      start += 2;
+      host_len -= 2;
+    } else if (host_len > 0 && start[0] == '.') {
       start++;
       host_len--;
     }
@@ -3007,8 +3010,9 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
   memcpy(buf + n, base->scheme->data, base->scheme->len);
   n += base->scheme->len;
   buf[n++] = ':';
-  if (location->len >= 2 && location->data[0] == '/' &&
-      location->data[1] == '/') {
+  if (location->len >= 2 &&
+      (location->data[0] == '/' || location->data[0] == '\\') &&
+      (location->data[1] == '/' || location->data[1] == '\\')) {
     memcpy(buf + n, location->data, location->len);
     n += location->len;
   } else {
@@ -3026,7 +3030,8 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
       memcpy(buf + n, base->port->data, base->port->len);
       n += base->port->len;
     }
-    if (location->len > 0 && location->data[0] == '/') {
+    if (location->len > 0 &&
+        (location->data[0] == '/' || location->data[0] == '\\')) {
       memcpy(buf + n, location->data, location->len);
       n += location->len;
     } else if (location->len > 0 && location->data[0] == '?') {
@@ -4556,6 +4561,27 @@ static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
   ScrUrl *u = fx_url_parse(abs_try);
   scr_str_release(abs_try);
   if (u) return u;
+
+  /*
+   * Empty and fragment-only references preserve the complete base path
+   * and query. The request serializer omits the fragment, but resolving it
+   * first keeps the redirect on the current resource rather than its parent.
+   */
+  if (loc->len == 0 || loc->data[0] == '#') {
+    ScrStr *base_text = fx_url_serialize(base, false);
+    size_t len = base_text->len + loc->len;
+    char *joined = malloc(len);
+    if (!joined) fx_oom();
+    memcpy(joined, base_text->data, base_text->len);
+    memcpy(joined + base_text->len, loc->data, loc->len);
+    ScrStr *text = scr_str_new(joined, len);
+    free(joined);
+    scr_str_release(base_text);
+    ScrUrl *out = fx_url_parse(text);
+    scr_str_release(text);
+    return out;
+  }
+
   /* relative: assemble scheme://authority + resolved path/query */
   size_t cap = base->scheme->len + base->userinfo->len + base->host->len + base->port->len +
                base->path->len + base->query->len + loc->len + 16;
@@ -4565,7 +4591,9 @@ static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
   memcpy(buf + n, base->scheme->data, base->scheme->len);
   n += base->scheme->len;
   buf[n++] = ':';
-  if (loc->len >= 2 && loc->data[0] == '/' && loc->data[1] == '/') {
+  if (loc->len >= 2 &&
+      (loc->data[0] == '/' || loc->data[0] == '\\') &&
+      (loc->data[1] == '/' || loc->data[1] == '\\')) {
     memcpy(buf + n, loc->data, loc->len);
     n += loc->len;
   } else {
@@ -4583,7 +4611,7 @@ static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
       memcpy(buf + n, base->port->data, base->port->len);
       n += base->port->len;
     }
-    if (loc->len > 0 && loc->data[0] == '/') {
+    if (loc->len > 0 && (loc->data[0] == '/' || loc->data[0] == '\\')) {
       memcpy(buf + n, loc->data, loc->len);
       n += loc->len;
     } else if (loc->len > 0 && loc->data[0] == '?') {
@@ -4687,8 +4715,8 @@ static ScrStr *fx_proxy_authorization(const ScrStr *userinfo) {
 }
 
 /* no_proxy: comma/space-separated host suffixes; "*" excludes everything;
- * a leading dot is stripped; entries match the host exactly or at a dot
- * boundary. Port qualifiers (host:port) require the port to match. */
+ * a leading dot or "*." is stripped; entries match the host exactly or at
+ * a dot boundary. Port qualifiers (host:port) require the port to match. */
 static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
   const char *p = list;
   while (*p) {
@@ -4717,7 +4745,10 @@ static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
         }
       }
     }
-    if (hlen > 0 && start[0] == '.') {
+    if (hlen >= 2 && start[0] == '*' && start[1] == '.') {
+      start += 2;
+      hlen -= 2;
+    } else if (hlen > 0 && start[0] == '.') {
       start++;
       hlen--;
     }

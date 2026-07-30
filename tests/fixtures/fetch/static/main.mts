@@ -156,6 +156,16 @@ console.log(
   await redirected.text(),
 );
 
+const backslashRedirect = await fetch(
+  `${process.argv[2]}/redirect-backslash`,
+);
+console.log(
+  "backslash redirect:",
+  backslashRedirect.status,
+  backslashRedirect.url.endsWith("/text"),
+  await backslashRedirect.text(),
+);
+
 const fragmentRedirect = await fetch(
   `${process.argv[2]}/redirect-fragment/path`,
   {

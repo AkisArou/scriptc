@@ -16,7 +16,8 @@
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
- * /redirect-fragment/path /early-hints /switching-protocols /invalid-utf8 /slow /drip
+ * /redirect-fragment/path /redirect-backslash /early-hints
+ * /switching-protocols /invalid-utf8 /slow /drip
  * /chunked /backpressure /backpressure-state /gzip /gzip-concat
  * /gzip-truncated /gzip-pressure /deflate
  * /status-meta /no-content /reset-content /reset-content-large /sse,
@@ -157,6 +158,13 @@ export async function startFetchServers() {
       } else if (url === "/redirect-credentials") {
         res.writeHead(302, {
           location: `http://user:pass@${req.headers.host}/text`,
+        });
+        res.end();
+      } else if (url === "/redirect-backslash") {
+        // WHATWG special URLs treat backslashes as path separators. Two
+        // leading separators make this an authority-relative reference.
+        res.writeHead(302, {
+          location: `\\\\${req.headers.host}\\text`,
         });
         res.end();
       } else if (url === "/redirect-fragment/path") {
