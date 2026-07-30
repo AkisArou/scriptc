@@ -224,6 +224,7 @@ struct SfStream {
   bool enqueue_draining;
   bool pulling;
   bool pull_again;
+  bool discarded;
   ScrDyn *error;
   SfReader *reader;       /* owned while locked */
   SfCollector *collector; /* owned while a body reader is active */
@@ -1081,6 +1082,29 @@ static void sf_stream_drop_chunks(SfStream *s) {
   s->queued = 0;
 }
 
+/*
+ * The live transfer owns one stream reference. When every user-visible
+ * Response/body/reader/collector reference is gone, only that transfer
+ * reference remains. Stop queueing at that point and drain the wire so a
+ * paused unread response cannot keep the process alive forever.
+ *
+ * A pending read remains a consumer even if its reader handle was dropped:
+ * fulfill that request first, then reconsider from sf_stream_drain().
+ */
+static void sf_response_discard_if_unobserved(SfStream *s) {
+  if (s->rc != 1 || s->discarded || !s->response_owner ||
+      s->collector || (s->reader && s->reader->pending_head)) {
+    return;
+  }
+  s->discarded = true;
+  sf_stream_drop_chunks(s);
+  SfTransfer *t = s->response_owner;
+  if (!t->done && t->response_paused && t->response_socket) {
+    t->response_paused = false;
+    scr_net_sock_release(scr_net_sock_resume(t->response_socket));
+  }
+}
+
 static void sf_stream_drop_source_callbacks(
     SfStream *s, bool include_cancel) {
   ScrDyn *pull = s->pull_cb;
@@ -1094,7 +1118,11 @@ static void sf_stream_drop_source_callbacks(
 }
 
 static void sf_stream_release(SfStream *s) {
-  if (!s || --s->rc > 0) return;
+  if (!s) return;
+  if (--s->rc > 0) {
+    sf_response_discard_if_unobserved(s);
+    return;
+  }
   sf_stream_drop_chunks(s);
   if (s->reader) {
     s->reader->stream = NULL;
@@ -1278,7 +1306,8 @@ static void sf_stream_schedule_initial_pull(SfStream *s);
  */
 static void sf_response_pause_if_full(SfStream *s) {
   SfTransfer *t = s->response_owner;
-  if (!t || t->done || t->response_paused || !t->response_socket ||
+  if (s->discarded || !t || t->done || t->response_paused ||
+      !t->response_socket ||
       s->queued < 1) {
     return;
   }
@@ -1360,6 +1389,7 @@ static void sf_stream_drain(SfStream *s) {
       sf_stream_pull(s);
     }
     sf_response_resume_if_ready(s);
+    sf_response_discard_if_unobserved(s);
     return;
   }
   sf_stream_finish_close(s);
@@ -1897,7 +1927,8 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
   if (response_owner && response_owner->client) {
     scr_http_client_destroy(response_owner->client);
   }
-  sf_stream_close(s);
+  if (s->close_requested) sf_stream_finish_close(s);
+  else sf_stream_close(s);
   if (response_owner && !response_owner->done) sf_settle(response_owner);
 
   if (cancel_cb) {
@@ -2647,7 +2678,12 @@ static void sf_transfer_abort_watch(SfSignalWatch *w, SfSignal *signal) {
 static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason) {
   if (!t || t->done) return;
   if (t->client) scr_http_client_destroy(t->client);
-  sf_reject_reason(t, reason);
+  if (t->response_sent && t->response_stream) {
+    sf_stream_error(t->response_stream, reason);
+    sf_settle(t);
+  } else {
+    sf_reject_reason(t, reason);
+  }
 }
 
 static bool sf_eq_ci(const ScrStr *s, const char *lit) {
@@ -3399,6 +3435,10 @@ static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
     sf_release(t);
     return;
   }
+  if (t->response_stream->discarded) {
+    sf_release(t);
+    return;
+  }
   if (!t->inflating) {
     sf_stream_enqueue_bytes(t->response_stream, chunk);
     sf_release(t);
@@ -3558,8 +3598,11 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
   scr_http_req_on_error(res, sf_closure(t, (void *)&sf_on_res_error),
                         &sf_on_res_error, false);
   t->response_sent = true;
-  scr_promise_fulfill_ref(t->promise, boxed, &scr_dyn_retain_v,
+  ScrPromise *promise = t->promise;
+  t->promise = NULL;
+  scr_promise_fulfill_ref(promise, boxed, &scr_dyn_retain_v,
                           &scr_dyn_release_v, NULL);
+  scr_promise_release(promise);
   scr_http_req_release(res);
   sf_release(t);
 }

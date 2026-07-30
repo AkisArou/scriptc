@@ -411,6 +411,13 @@ export function lowerStaticFetchCompanionCall(
           (id) => L.unions.get(id),
         )) ||
       source.type.kind === "dyn";
+    if (!preserve) {
+      L.noLowering(
+        `ReadableStream.from() over ${L.checker.typeToString(L.typeOf(call.arguments[0]!))} iterables`,
+        call.arguments[0]!,
+        "arrays, Uint8Array, and strings are supported — spread other synchronous iterables into an array first: [...iterable]",
+      );
+    }
     return {
       kind: "libCall",
       fn: "fetch.streamFrom",
@@ -419,9 +426,7 @@ export function lowerStaticFetchCompanionCall(
       // observable just as they are in Node. Other supported iterable
       // shapes retain the checked-dynamic fallback.
       args: [
-        preserve
-          ? source
-          : L.coerceInto(call.arguments[0]!, source, DYN),
+        source,
       ],
       type: DYN,
       loc,

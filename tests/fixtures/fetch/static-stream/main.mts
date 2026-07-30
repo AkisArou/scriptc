@@ -607,6 +607,34 @@ const alreadyClosed = new ReadableStream<number>({
 await alreadyClosed.cancel();
 console.log("closed cancel:", closedCancelCalls);
 
+let cancelCloseController!: ReadableStreamDefaultController<number>;
+let cancelCloseCalls = 0;
+const cancelCloseRequested = new ReadableStream<number>({
+  start(controller) {
+    cancelCloseController = controller;
+    controller.enqueue(1);
+    controller.close();
+  },
+  cancel() {
+    cancelCloseCalls++;
+  },
+});
+await cancelCloseRequested.cancel();
+const cancelCloseReader = cancelCloseRequested.getReader();
+let cancelCloseReaderClosed = false;
+async function watchCancelCloseReader(): Promise<void> {
+  await cancelCloseReader.closed;
+  cancelCloseReaderClosed = true;
+}
+void watchCancelCloseReader();
+await new Promise<void>((resolve) => setTimeout(resolve, 0));
+console.log(
+  "cancel close-requested:",
+  cancelCloseController.desiredSize,
+  cancelCloseCalls,
+  cancelCloseReaderClosed,
+);
+
 let erroredCancelCalls = 0;
 const alreadyErrored = new ReadableStream<number>({
   start(controller) {
@@ -753,3 +781,10 @@ selfCapturingSignal.addEventListener("abort", () => {
   console.log("self-capturing abort:", selfCapturingSignal.aborted);
 });
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+// Dropping the only Response/body reference must not strand the transfer
+// behind the native stream's one-chunk backpressure pause.
+await fetch(
+  `${process.argv[2]}/backpressure?key=${pressureKey}-abandoned`,
+);
+console.log("abandoned response");

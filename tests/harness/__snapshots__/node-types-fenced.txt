@@ -68,119 +68,128 @@ fenced.ts:21:1 - error SC2020: 'AbortController.abort' is typed by @types/node b
 
   hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-fenced.ts:34:1 - error SC2020: 'fs.watchFile' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:28:21 - error SC2020: 'ReadableStream.from() over Set<number> iterables' is part of the standard library types but has no scriptc lowering yet
 
-  33 | import { win32 } from "path";
-  34 | watchFile("x", () => {});
+  27 | fetch("https://example.invalid/", fetchInit);
+  28 | ReadableStream.from(new Set([1, 2]));
+     |                     ^~~~~~~~~~~~~~~
+  29 | /* Members of SUPPORTED builtin modules beyond the lowered tables: they
+
+  hint: arrays, Uint8Array, and strings are supported — spread other synchronous iterables into an array first: [...iterable]
+
+fenced.ts:35:1 - error SC2020: 'fs.watchFile' is typed by @types/node but has no scriptc lowering yet
+
+  34 | import { win32 } from "path";
+  35 | watchFile("x", () => {});
      | ^~~~~~~~~~~~~~~~~~~~~~~~
-  35 | console.log(cpus().length);
+  36 | console.log(cpus().length);
 
   hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-fenced.ts:35:13 - error SC2020: 'CpuInfo[].length' is part of the standard library types but has no scriptc lowering yet
+fenced.ts:36:13 - error SC2020: 'CpuInfo[].length' is part of the standard library types but has no scriptc lowering yet
 
-  34 | watchFile("x", () => {});
-  35 | console.log(cpus().length);
+  35 | watchFile("x", () => {});
+  36 | console.log(cpus().length);
      |             ^~~~~~~~~~~~~
-  36 | console.log(win32.sep);
+  37 | console.log(win32.sep);
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-fenced.ts:36:13 - error SC2020: 'PlatformPath.sep' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:37:13 - error SC2020: 'PlatformPath.sep' is typed by @types/node but has no scriptc lowering yet
 
-  35 | console.log(cpus().length);
-  36 | console.log(win32.sep);
+  36 | console.log(cpus().length);
+  37 | console.log(win32.sep);
      |             ^~~~~~~~~
-  37 | /* URL members beyond the supported getters (protocol/pathname/href/
+  38 | /* URL members beyond the supported getters (protocol/pathname/href/
 
   hint: the type checker sees everything @types/node declares, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-fenced.ts:42:13 - error SC2020: 'URL.hash' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:43:13 - error SC2020: 'URL.hash' is typed by @types/node but has no scriptc lowering yet
 
-  41 | const u = new URL("https://example.com/x?a=1");
-  42 | console.log(u.hash);
+  42 | const u = new URL("https://example.com/x?a=1");
+  43 | console.log(u.hash);
      |             ^~~~~~
-  43 | u.searchParams.get("a");
+  44 | u.searchParams.get("a");
 
   hint: protocol, pathname, href, host, hostname, search, searchParams, and toString() are the supported URL members
 
-fenced.ts:49:13 - error SC2020: 'deflateSync of 'string' data' is part of the standard library types but has no scriptc lowering yet
+fenced.ts:50:13 - error SC2020: 'deflateSync of 'string' data' is part of the standard library types but has no scriptc lowering yet
 
-  48 | import { deflateSync, gzipSync } from "zlib";
-  49 | deflateSync("data");
+  49 | import { deflateSync, gzipSync } from "zlib";
+  50 | deflateSync("data");
      |             ^~~~~~
-  50 | gzipSync("data");
+  51 | gzipSync("data");
 
   hint: zlib works on Buffers: deflateSync(Buffer.from(s, "utf8"))
 
-fenced.ts:50:1 - error SC2020: 'zlib.gzipSync' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:51:1 - error SC2020: 'zlib.gzipSync' is typed by @types/node but has no scriptc lowering yet
 
-  49 | deflateSync("data");
-  50 | gzipSync("data");
+  50 | deflateSync("data");
+  51 | gzipSync("data");
      | ^~~~~~~~~~~~~~~~
-  51 | /* The http2 compatibility slice's @types/node-world fences (divergence
+  52 | /* The http2 compatibility slice's @types/node-world fences (divergence
 
   hint: deflateSync and inflateSync are the lowered zlib surface
 
-fenced.ts:59:71 - error SC2020: 'a createSecureServer SNICallback of 'undefined' values' is part of the standard library types but has no scriptc lowering yet
+fenced.ts:60:71 - error SC2020: 'a createSecureServer SNICallback of 'undefined' values' is part of the standard library types but has no scriptc lowering yet
 
-  58 | import * as http2 from "node:http2";
-  59 | http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", SNICallback: undefined });
+  59 | import * as http2 from "node:http2";
+  60 | http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", SNICallback: undefined });
      |                                                                       ^~~~~~~~~~~~~~~~~~~~~~
-  60 | http2.createSecureServer({
+  61 | http2.createSecureServer({
 
   hint: SNICallback lowers as a direct option or the conditional spread ...(x ? { SNICallback: x } : {}) — the callback is (servername, cb) => void with cb: (err: Error | null, ctx?: tls.SecureContext) => void
 
-fenced.ts:64:3 - error SC2020: 'createSecureServer options with a conditional spread' is part of the standard library types but has no scriptc lowering yet
+fenced.ts:65:3 - error SC2020: 'createSecureServer options with a conditional spread' is part of the standard library types but has no scriptc lowering yet
 
-  63 |   key: "pem",
-  64 |   ...(1 ? { SNICallback: undefined } : {}),
+  64 |   key: "pem",
+  65 |   ...(1 ? { SNICallback: undefined } : {}),
      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  65 | });
+  66 | });
 
   hint: the lowered conditional spread is exactly ...(x ? { SNICallback: x } : {}) — the included value must BE the condition
 
-fenced.ts:66:71 - error SC2020: 'createSecureServer option 'streamResetBurst' with a non-literal value' is part of the standard library types but has no scriptc lowering yet
+fenced.ts:67:71 - error SC2020: 'createSecureServer option 'streamResetBurst' with a non-literal value' is part of the standard library types but has no scriptc lowering yet
 
-  65 | });
-  66 | http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", streamResetBurst: 1 + 0 });
+  66 | });
+  67 | http2.createSecureServer({ allowHTTP1: true, cert: "pem", key: "pem", streamResetBurst: 1 + 0 });
      |                                                                       ^~~~~~~~~~~~~~~~~~~~~~~
-  67 | http2.connect("https://localhost");
+  68 | http2.connect("https://localhost");
 
   hint: h2 session-tuning options are accepted with literal values (settings: a literal of literals) and ignored — the allowHTTP1 lowering serves HTTP/1.1 only, which has no h2 sessions to tune
 
-fenced.ts:73:1 - error SC2020: 'crypto.generateKeyPair' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:74:1 - error SC2020: 'crypto.generateKeyPair' is typed by @types/node but has no scriptc lowering yet
 
-  72 | import { createCipheriv, generateKeyPair, pbkdf2Sync, setFips } from "node:crypto";
-  73 | generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
+  73 | import { createCipheriv, generateKeyPair, pbkdf2Sync, setFips } from "node:crypto";
+  74 | generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
      | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  74 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+  75 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
 
   hint: asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics
 
-fenced.ts:74:1 - error SC2020: 'crypto.createCipheriv' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:75:1 - error SC2020: 'crypto.createCipheriv' is typed by @types/node but has no scriptc lowering yet
 
-  73 | generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
-  74 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+  74 | generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
+  75 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
      | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  75 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+  76 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
 
   hint: symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics
 
-fenced.ts:75:1 - error SC2020: 'crypto.pbkdf2Sync' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:76:1 - error SC2020: 'crypto.pbkdf2Sync' is typed by @types/node but has no scriptc lowering yet
 
-  74 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
-  75 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+  75 | createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
+  76 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
      | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  76 | setFips(false);
+  77 | setFips(false);
 
   hint: key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics
 
-fenced.ts:76:1 - error SC2020: 'crypto.setFips' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:77:1 - error SC2020: 'crypto.setFips' is typed by @types/node but has no scriptc lowering yet
 
-  75 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
-  76 | setFips(false);
+  76 | pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
+  77 | setFips(false);
      | ^~~~~~~~~~~~~~
-  77 | // End of the declared-but-not-lowered surface.
+  78 | // End of the declared-but-not-lowered surface.
 
   hint: a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) in a non-FIPS build — getFips() answers 0 here

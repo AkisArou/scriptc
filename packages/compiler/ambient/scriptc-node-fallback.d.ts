@@ -638,7 +638,9 @@ interface ReadableStream<T = unknown> {
 }
 declare var ReadableStream: {
   new <T = unknown>(source?: UnderlyingSource<T>): ReadableStream<T>;
-  from<T>(iterable: Iterable<T>): ReadableStream<T>;
+  from<T>(iterable: readonly T[]): ReadableStream<T>;
+  from(iterable: Uint8Array): ReadableStream<number>;
+  from(iterable: string): ReadableStream<string>;
   readonly prototype: ReadableStream<unknown>;
 };
 
