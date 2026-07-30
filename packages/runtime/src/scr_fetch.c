@@ -675,10 +675,23 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
       sf_abort_listener_free(l);
     }
     ScrDyn *callable = dispatch[i].listener;
+    ScrDyn *current_listener = NULL;
     if (callable->kind == SCR_DYN_OBJ) {
+      /*
+       * EventListener is a Web IDL callback interface: handleEvent is read
+       * when the callback runs, not when it is registered. Typed records
+       * normally cross into dyn as value snapshots, so explicitly refresh
+       * an identity-carrying listener from its retained source here.
+       */
+      current_listener =
+          callable->v.obj.source_identity && callable->v.obj.source_access
+              ? callable->v.obj.source_access(
+                    callable->v.obj.source_identity, true)
+              : scr_dyn_retain(callable);
       const ScrDyn *handle =
-          scr_dyn_obj_get(callable, "handleEvent", 11);
+          scr_dyn_obj_get(current_listener, "handleEvent", 11);
       if (!handle || handle->kind != SCR_DYN_FUNC) {
+        scr_dyn_release(current_listener);
         scr_dyn_release(dispatch[i].listener);
         continue;
       }
@@ -690,6 +703,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
         scr_dyn_call(callable, args, 1, "abort listener");
     scr_dyn_this_pop();
     scr_dyn_release(r);
+    scr_dyn_release(current_listener);
     scr_dyn_release(dispatch[i].listener);
     if (scr_exc_pending()) {
       ScrCaught *caught = scr_exc_take();
@@ -3009,7 +3023,8 @@ static bool sf_no_proxy_match(const char *list, const ScrStr *host,
 }
 
 static ScrUrl *sf_proxy_for(const ScrUrl *target, bool https,
-                            int target_port) {
+                            int target_port, bool *invalid) {
+  *invalid = false;
   const char *optin = getenv("NODE_USE_ENV_PROXY");
   if (!optin || strcmp(optin, "1") != 0) return NULL;
   const char *proxy = https ? sf_env2("https_proxy", "HTTPS_PROXY")
@@ -3023,6 +3038,7 @@ static ScrUrl *sf_proxy_for(const ScrUrl *target, bool https,
   ScrStr *text = scr_str_new(proxy, strlen(proxy));
   ScrUrl *url = sf_url_parse_quiet(text);
   scr_str_release(text);
+  *invalid = url == NULL;
   return url;
 }
 
@@ -4006,7 +4022,13 @@ static bool sf_start_hop(SfTransfer *t) {
   bool https = sf_eq_ci(url->scheme, "https");
   int default_port = https ? 443 : 80;
   int port = sf_port(url, default_port);
-  ScrUrl *proxy = https ? NULL : sf_proxy_for(url, false, port);
+  bool invalid_proxy = false;
+  ScrUrl *proxy =
+      https ? NULL : sf_proxy_for(url, false, port, &invalid_proxy);
+  if (invalid_proxy) {
+    sf_reject(t, "fetch failed");
+    return false;
+  }
   size_t user_len = (size_t)scr_arr_len(t->headers);
   ScrArr *headers = scr_arr_new(SCR_ELEM_STR, user_len + 16);
 
@@ -4868,7 +4890,9 @@ static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
 }
 
 /* The proxy for this hop's target, parsed (+1), or NULL for direct. */
-static ScrUrl *fx_proxy_for(const ScrUrl *target, bool https, int target_port) {
+static ScrUrl *fx_proxy_for(const ScrUrl *target, bool https, int target_port,
+                            bool *invalid) {
+  *invalid = false;
   const char *optin = getenv("NODE_USE_ENV_PROXY");
   if (optin == NULL || strcmp(optin, "1") != 0) return NULL;
   const char *proxy = https ? fx_env2("https_proxy", "HTTPS_PROXY")
@@ -4879,6 +4903,7 @@ static ScrUrl *fx_proxy_for(const ScrUrl *target, bool https, int target_port) {
   ScrStr *ps = scr_str_new(proxy, strlen(proxy));
   ScrUrl *u = fx_url_parse(ps);
   scr_str_release(ps);
+  *invalid = u == NULL;
   return u;
 }
 
@@ -4909,7 +4934,13 @@ static void fx_start_hop(FxTransfer *t) {
   bool https = fx_str_is(u->scheme, "https");
   int default_port = https ? 443 : 80;
   int port = fx_url_port(u, default_port);
-  ScrUrl *proxy = https ? NULL : fx_proxy_for(u, https, port);
+  bool invalid_proxy = false;
+  ScrUrl *proxy =
+      https ? NULL : fx_proxy_for(u, https, port, &invalid_proxy);
+  if (invalid_proxy) {
+    fx_error(t, "fetch failed", NULL);
+    return;
+  }
 
   /* undici's request head, in undici's order: host, connection, the user
    * headers, then the fetch defaults for whatever the user left unset. */
@@ -5374,8 +5405,14 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
   t->next = fx_live;
   fx_live = t;
   fx_nlive++;
+  /*
+   * A configuration error can reject synchronously in fx_start_hop().
+   * That callback settles the transfer and releases the registry's last
+   * reference, so preserve the scalar result before the call.
+   */
+  int id = t->id;
   fx_start_hop(t);
-  return JS_NewInt32(ctx, t->id);
+  return JS_NewInt32(ctx, id);
 }
 
 /* host.abort(id): the island aborted the fetch or cancelled the response

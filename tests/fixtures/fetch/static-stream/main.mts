@@ -505,6 +505,20 @@ objectSignal.addEventListener("abort", objectListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("object abort listener:", objectCalls);
 
+const updatedObjectSignal = AbortSignal.timeout(0);
+let updatedObjectCalls = "";
+const updatedObjectListener = {
+  handleEvent(_event: Event) {
+    updatedObjectCalls += "old";
+  },
+};
+updatedObjectSignal.addEventListener("abort", updatedObjectListener);
+updatedObjectListener.handleEvent = (_event: Event) => {
+  updatedObjectCalls += "new";
+};
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("updated object abort listener:", updatedObjectCalls);
+
 const removedObjectSignal = AbortSignal.timeout(0);
 let removedObjectCalls = 0;
 const removedObjectListener = {

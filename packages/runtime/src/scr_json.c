@@ -334,7 +334,7 @@ static ScrDyn *scr_dyn_alloc(ScrDynKind kind) {
     } else if (kind == SCR_DYN_OBJ) {
       d->v.obj.len = 0; /* cap/entries preserved */
       d->v.obj.source_identity = NULL;
-      d->v.obj.source_release = NULL;
+      d->v.obj.source_access = NULL;
     } else {
       memset(&d->v, 0, sizeof d->v);
     }
@@ -372,7 +372,7 @@ void scr_dyn_release(ScrDyn *d) {
       scr_dyn_release(d->v.obj.entries[i].value);
     }
     if (d->v.obj.source_identity) {
-      d->v.obj.source_release(d->v.obj.source_identity);
+      d->v.obj.source_access(d->v.obj.source_identity, false);
     }
     break;
   case SCR_DYN_FUNC:
@@ -621,10 +621,10 @@ ScrDyn *scr_dyn_new_arr(void) { return scr_dyn_alloc(SCR_DYN_ARR); }
 ScrDyn *scr_dyn_new_obj(void) { return scr_dyn_alloc(SCR_DYN_OBJ); }
 ScrDyn *scr_dyn_new_obj_with_identity(
     void *source, void *(*source_retain)(void *),
-    void (*source_release)(void *)) {
+    ScrDyn *(*source_access)(void *, bool materialize)) {
   ScrDyn *d = scr_dyn_alloc(SCR_DYN_OBJ);
   d->v.obj.source_identity = source_retain(source);
-  d->v.obj.source_release = source_release;
+  d->v.obj.source_access = source_access;
   return d;
 }
 

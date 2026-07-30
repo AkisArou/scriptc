@@ -1360,6 +1360,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     const sig = `static ScrDyn *${name}(${cDecl(t, "v")})`;
     E.walkerProtos.push(`${sig}; /* to-dyn ${key} */`);
     const d: string[] = [`${sig} { /* to-dyn ${key} */`];
+    let sourceAccessor: { name: string; release: string } | null = null;
     switch (t.kind) {
       case "f64":
         d.push(`  return scr_dyn_new_num(v);`);
@@ -1427,8 +1428,15 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         );
         if (carriesListenerIdentity) {
           const rc = vAdapters(t);
+          sourceAccessor = {
+            name: `${name}_source_access`,
+            release: rc.release,
+          };
+          E.walkerProtos.push(
+            `static ScrDyn *${sourceAccessor.name}(void *v, bool materialize); /* live listener source ${key} */`,
+          );
           d.push(
-            `  ScrDyn *d = scr_dyn_new_obj_with_identity(v, &${rc.retain}, &${rc.release});`,
+            `  ScrDyn *d = scr_dyn_new_obj_with_identity(v, &${rc.retain}, &${sourceAccessor.name});`,
           );
         } else {
           d.push(`  ScrDyn *d = scr_dyn_new_obj();`);
@@ -1556,6 +1564,16 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     }
     d.push(`}`, ``);
     E.walkerDefs.push(...d);
+    if (sourceAccessor) {
+      E.walkerDefs.push(
+        `static ScrDyn *${sourceAccessor.name}(void *v, bool materialize) {`,
+        `  if (materialize) return ${name}((${cType(t).trim()})v);`,
+        `  ${sourceAccessor.release}(v);`,
+        `  return NULL;`,
+        `}`,
+        ``,
+      );
+    }
     return name;
   }
 

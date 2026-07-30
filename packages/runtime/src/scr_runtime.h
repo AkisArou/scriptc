@@ -2773,8 +2773,10 @@ struct ScrDyn {
        * deep-copy snapshot. EventTarget uses it to recognize the same
        * EventListenerObject across repeated static→dyn crossings without
        * changing generic dyn-object `===` semantics. */
-      void *source_identity; /* owned through source_release */
-      void (*source_release)(void *);
+      /* Owned through source_access(source_identity, false). Callback
+       * interfaces may request a fresh snapshot with the true arm. */
+      void *source_identity;
+      ScrDyn *(*source_access)(void *, bool materialize);
     } obj; /* owned */
     /* SCR_DYN_FUNC: the boxed closure (owned) + its call descriptor. `sig`
      * and `name` are static compiler-emitted literals (never freed); name
@@ -2874,12 +2876,13 @@ ScrDyn *scr_dyn_new_num(double n);
 ScrDyn *scr_dyn_new_str(ScrStr *s);
 ScrDyn *scr_dyn_new_arr(void);
 ScrDyn *scr_dyn_new_obj(void);
-/* The ordinary deep-copy object plus an identity-only retained source.
- * Member reads still observe the snapshot; generic dyn strict equality
- * remains node-based. */
+/* The ordinary deep-copy object plus a retained typed source. source_access
+ * releases that source when materialize=false and returns a fresh dyn snapshot
+ * when true. Generic dyn member reads and strict equality remain snapshot/node
+ * based; callback-interface consumers opt into the live arm explicitly. */
 ScrDyn *scr_dyn_new_obj_with_identity(
     void *source, void *(*source_retain)(void *),
-    void (*source_release)(void *));
+    ScrDyn *(*source_access)(void *, bool materialize));
 bool scr_dyn_obj_same_source(const ScrDyn *a, const ScrDyn *b);
 /* Object.create(null): the fresh null-prototype dictionary (see the
  * null_proto flavor flag above). */

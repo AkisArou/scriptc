@@ -1028,6 +1028,7 @@ export class LlDyn {
     this.toDynFns.set(key, name);
     const host = this.host;
     const B = new BlockBuilder();
+    let sourceAccessor: { name: string; release: string } | null = null;
     switch (t.kind) {
       case "f64": {
         host.declare(`declare ptr @scr_dyn_new_num(double)`);
@@ -1130,9 +1131,13 @@ export class LlDyn {
         );
         if (carriesListenerIdentity) {
           const rc = vAdapters(host, t);
+          sourceAccessor = {
+            name: `${name}_source_access`,
+            release: rc.release,
+          };
           host.declare(`declare ptr @scr_dyn_new_obj_with_identity(ptr, ptr, ptr)`);
           B.line(
-            `${d} = call ptr @scr_dyn_new_obj_with_identity(ptr %v, ptr ${rc.retain}, ptr ${rc.release})`,
+            `${d} = call ptr @scr_dyn_new_obj_with_identity(ptr %v, ptr ${rc.retain}, ptr @${sourceAccessor.name})`,
           );
         } else {
           host.declare(`declare ptr @scr_dyn_new_obj()`);
@@ -1406,6 +1411,21 @@ export class LlDyn {
       `}`,
       ``,
     );
+    if (sourceAccessor) {
+      this.defs.push(
+        `define internal ptr @${sourceAccessor.name}(ptr %v, i1 %materialize) ${FN_ATTRS} { ; live listener source ${key}`,
+        `entry:`,
+        `  br i1 %materialize, label %snapshot, label %release`,
+        `snapshot:`,
+        `  %d = call ptr @${name}(ptr %v)`,
+        `  ret ptr %d`,
+        `release:`,
+        `  call void ${sourceAccessor.release}(ptr %v)`,
+        `  ret ptr null`,
+        `}`,
+        ``,
+      );
+    }
     return name;
   }
 

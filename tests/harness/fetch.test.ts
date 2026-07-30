@@ -368,6 +368,33 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
     120_000,
   );
 
+  test.for(["dynamic", "c", "llvm"] as const)(
+    "%s fetch rejects an invalid opted-in proxy instead of dialing directly",
+    async (lane) => {
+      const entry = join(fixturesRoot, "static-proxy/main.mts");
+      const binary =
+        lane === "dynamic"
+          ? await build(entry)
+          : await buildStatic(entry, lane, "proxy-invalid");
+      const env = {
+        ...process.env,
+        NODE_USE_ENV_PROXY: "1",
+        http_proxy: "not a valid proxy URL",
+        HTTP_PROXY: "not a valid proxy URL",
+        no_proxy: "",
+        NO_PROXY: "",
+      };
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry, baseUrl], env),
+        runBinary(binary, [baseUrl], env),
+      ]);
+      expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      expect(nativeRes.exitCode).not.toBe(0);
+    },
+    120_000,
+  );
+
   test("dynamic fetch honors wildcard no_proxy exclusions", async () => {
     const entry = join(fixturesRoot, "cases/proxy-optin/main.ts");
     const binary = await build(entry);
