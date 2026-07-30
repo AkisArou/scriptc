@@ -24,9 +24,10 @@
  * pattern) is allowed with a pinned order: depth-first source order of
  * the constituent declarations (A's arms in A's own declaration order,
  * then B's), an arm name appearing in several constituents keeping its
- * FIRST occurrence. A type alias of a named type is transparent: the
- * table derives from the aliased declaration, the alias adds no entry
- * and no reordering.
+ * FIRST occurrence. Type aliases are transparent where the wire has no
+ * alias identity: a reference alias tables the target declaration, while
+ * a scalar alias projects as its underlying bool/number/string/bytes
+ * TypeRef. Neither alias adds a table entry or reorders the target.
  *
  * Integer slots (ask 4): the profile's `sidecar.integer_slots` declares
  * specific number slots i64/u64 by slot path; the projection spells each
@@ -238,10 +239,15 @@ type TaggedPart =
 
 type TaggedArm = { name: string; fields: ContractField[]; loc: SrcLoc };
 
+type ScalarContractShape = Extract<ContractTypeShape, { k: "bool" | "number" | "text" | "bytes" }>;
+
 type Classified =
   | { c: "struct"; storage: "node" | "value"; fields: ContractField[]; decl: ContractTypeDecl; index: number }
   | { c: "enum"; members: string[]; decl: ContractTypeDecl; index: number }
   | { c: "tagged"; parts: TaggedPart[]; decl: ContractTypeDecl; index: number }
+  /** A named scalar has no sidecar identity: references project as the
+   * underlying scalar and the alias contributes no table entry. */
+  | { c: "scalar"; shape: ScalarContractShape; decl: ContractTypeDecl; index: number }
   /** `type A = B` — transparent: projection follows to the aliased
    * declaration; the alias itself never joins the table. */
   | { c: "alias"; target: string; decl: ContractTypeDecl; index: number }
@@ -284,6 +290,12 @@ function classify(decl: ContractTypeDecl, index: number): Classified {
   }
   if (s.k === "object") {
     return { c: "struct", storage: decl.form === "interface" ? "node" : "value", fields: s.fields, decl, index };
+  }
+  if (
+    decl.form === "alias" &&
+    (s.k === "bool" || s.k === "number" || s.k === "text" || s.k === "bytes")
+  ) {
+    return { c: "scalar", shape: s, decl, index };
   }
   if (decl.form === "alias" && s.k === "ref") return { c: "alias", target: s.name, decl, index };
   if (decl.form === "alias" && s.k === "stringLit") return { c: "enum", members: [s.text], decl, index };
@@ -498,6 +510,7 @@ class Projector {
           : this.irRecordPattern(shape.fields);
       case "ref": {
         const resolved = this.resolve(shape.name, loc);
+        if (resolved.c.c === "scalar") return this.irTypePattern(resolved.c.shape, loc);
         if (resolved.c.c === "enum") return { kind: "string" };
         if (resolved.c.c === "struct" && resolved.c.fields.length === 0) {
           return { kind: "dyn" };
@@ -577,6 +590,17 @@ class Projector {
       if (c.c !== "alias") return { name: cur, c };
       cur = c.target;
     }
+  }
+
+  /** Resolve only aliases whose names have no wire identity. Named
+   * records/enums/unions return null and retain their table projection. */
+  private scalarShape(shape: ContractTypeShape, loc: SrcLoc): ScalarContractShape | null {
+    if (shape.k === "bool" || shape.k === "number" || shape.k === "text" || shape.k === "bytes") {
+      return shape;
+    }
+    if (shape.k !== "ref") return null;
+    const resolved = this.resolve(shape.name, loc);
+    return resolved.c.c === "scalar" ? resolved.c.shape : null;
   }
 
   /** A kind-tagged union's arms, its reference constituents flattened
@@ -740,6 +764,8 @@ class Projector {
     for (const arm of this.allUnionArms(unionName, loc)) {
       if (arm.name !== armName) continue;
       const [number, bytes] = arm.fields;
+      const numberShape = number === undefined ? null : this.scalarShape(number.shape, number.loc);
+      const bytesShape = bytes === undefined ? null : this.scalarShape(bytes.shape, bytes.loc);
       const compatible =
         arm.fields.length === 2 &&
         number !== undefined &&
@@ -748,8 +774,8 @@ class Projector {
         !bytes.optional &&
         number.name === numberField &&
         bytes.name === bytesField &&
-        number.shape.k === "number" &&
-        (bytes.shape.k === "text" || bytes.shape.k === "bytes");
+        numberShape?.k === "number" &&
+        (bytesShape?.k === "text" || bytesShape?.k === "bytes");
       if (!compatible) {
         throw new SidecarError(
           `integer slot '${path}' (${cls}) selects number_bytes payload fields '${numberField}' and '${bytesField}', but another composed '${armName}' arm does not have the same required number-then-bytes fields`,
@@ -804,9 +830,12 @@ class Projector {
         );
       }
       case "ref": {
-        // Aliases are transparent: the table entry (and its order) is the
-        // ALIASED declaration's, under the aliased declaration's name.
+        // Scalar aliases dissolve to their underlying TypeRef. Named-type
+        // aliases remain transparent to the aliased table declaration.
         const r = this.resolve(shape.name, loc);
+        if (r.c.c === "scalar") {
+          return this.shapeRef(r.c.shape, container, member, loc);
+        }
         if (r.c.c === "struct") {
           this.tableNamed(r.name, loc);
           return { kind: r.c.storage, name: r.name };
@@ -858,6 +887,11 @@ class Projector {
       // Callers table resolved names; a designation reaching here through
       // an alias still tables the aliased declaration, nothing else.
       this.tableNamed(this.resolve(name, loc).name, loc);
+      return;
+    }
+    if (c.c === "scalar") {
+      // Scalar aliases dissolve at their reference site and never have a
+      // type-table entry of their own.
       return;
     }
     this.inProgress.add(name);
@@ -958,14 +992,16 @@ class Projector {
     if (fields.length === 0) return { kind: "void" };
     if (fields.length === 2) {
       const [first, second] = [fields[0]!, fields[1]!];
+      const firstShape = this.scalarShape(first.shape, first.loc);
+      const secondShape = this.scalarShape(second.shape, second.loc);
       // Family 4 covers exactly the number-first two-field record; a
       // bytes-first spelling takes the record family instead
       // (declaration order is semantic everywhere — the clarified rule).
       if (
         !first.optional &&
         !second.optional &&
-        first.shape.k === "number" &&
-        (second.shape.k === "text" || second.shape.k === "bytes")
+        firstShape?.k === "number" &&
+        (secondShape?.k === "text" || secondShape?.k === "bytes")
       ) {
         // The number half is an ask-4 declarable slot:
         // `<msg>.<arm>.<numberField>` (the schema's number_bytes path).
