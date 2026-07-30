@@ -264,6 +264,15 @@ export interface SidecarIrRecordPattern {
   kindMayBeOmitted?: true;
 }
 
+interface PendingIntegerRecordFact {
+  fields: ContractField[];
+  tagged: boolean;
+  targetField: string;
+  cls: "i64" | "u64";
+  path: string;
+  loc: SrcLoc;
+}
+
 function classify(decl: ContractTypeDecl, index: number): Classified {
   const s = decl.shape;
   if (s.k === "unsupported") {
@@ -333,6 +342,7 @@ class Projector {
   private readonly inProgress = new Set<string>();
   private readonly flatArms = new Map<string, { name: string; fields: ContractField[]; loc: SrcLoc }[]>();
   private readonly flattening = new Set<string>();
+  private readonly irPatterning = new Set<string>();
   private synthCounter = 0;
   /** The profile's declared integer slots (ask 4), by slot path; entries
    * move to `intConsumed` as the projection spells them — a declared path
@@ -342,8 +352,10 @@ class Projector {
   readonly intConsumed = new Map<string, "i64" | "u64">();
   /** The record-field slots' resolution facts for the inference: the
    * containing record's complete projected IR shape plus the target field
-   * (IR shapes intern structurally by field names and field types). */
-  readonly intRecordFacts: SidecarIntegerSlotFacts["records"] = [];
+   * (IR shapes intern structurally by field names and field types). Pattern
+   * construction is deferred until the whole contract graph has projected,
+   * so an invalid later sibling still takes its ordinary SidecarError path. */
+  private readonly pendingIntRecordFacts: PendingIntegerRecordFact[] = [];
 
   constructor(
     readonly facts: ContractFacts,
@@ -391,8 +403,9 @@ class Projector {
     const before = this.intConsumed.has(slotPath);
     const out = this.intify(ref, slotPath, loc);
     if (!before && this.intConsumed.has(slotPath)) {
-      this.intRecordFacts.push({
-        shape: this.irRecordPattern(allFields),
+      this.pendingIntRecordFacts.push({
+        fields: allFields,
+        tagged: false,
         targetField: field,
         cls: this.intConsumed.get(slotPath)!,
         path: slotPath,
@@ -466,21 +479,31 @@ class Projector {
         return this.irRecordPattern(shape.fields);
       case "ref": {
         const resolved = this.resolve(shape.name, loc);
-        switch (resolved.c.c) {
-          case "struct":
-            return this.irRecordPattern(resolved.c.fields);
-          case "enum":
-            return { kind: "string" };
-          case "tagged":
-            return this.irUnionPattern(
-              this.unionArms(resolved.name, loc).map((arm) => this.irRecordPattern(arm.fields, true)),
-            );
+        if (resolved.c.c === "enum") return { kind: "string" };
+        if (this.irPatterning.has(resolved.name)) {
+          throw new SidecarError(
+            `the contract type graph is cyclic through '${resolved.name}' — recursive contract types cannot encode`,
+            loc,
+          );
+        }
+        this.irPatterning.add(resolved.name);
+        try {
+          return resolved.c.c === "struct"
+            ? this.irRecordPattern(resolved.c.fields)
+            : this.irUnionPattern(
+                this.unionArms(resolved.name, loc).map((arm) => this.irRecordPattern(arm.fields, true)),
+              );
+        } finally {
+          this.irPatterning.delete(resolved.name);
         }
       }
       case "void":
       case "tuple":
       case "unsupported":
-        throw new Error(`sidecar pattern bug: unsupported ${shape.k} shape reached an integer record fact`);
+        throw new SidecarError(
+          `an integer-slot record contains a shape outside the sidecar's structural vocabulary (${shape.k})`,
+          loc,
+        );
     }
   }
 
@@ -720,8 +743,9 @@ class Projector {
         if (!before && this.intConsumed.has(slotPath)) {
           // The one intifiable arm shape is a single number payload
           // field; its IR record carries the 'kind' discriminant too.
-          this.intRecordFacts.push({
-            shape: this.irRecordPattern(arm.fields, true),
+          this.pendingIntRecordFacts.push({
+            fields: arm.fields,
+            tagged: true,
             targetField: arm.fields[0]!.name,
             cls: this.intConsumed.get(slotPath)!,
             path: slotPath,
@@ -794,8 +818,9 @@ class Projector {
         const slotPath = `${msgName}.${arm.name}.${first.name}`;
         const numRef = this.intify({ kind: "f64" }, slotPath, first.loc);
         if (numRef.kind === "i64") {
-          this.intRecordFacts.push({
-            shape: this.irRecordPattern(fields, true),
+          this.pendingIntRecordFacts.push({
+            fields,
+            tagged: true,
             targetField: first.name,
             cls: this.intConsumed.get(slotPath)!,
             path: slotPath,
@@ -814,8 +839,9 @@ class Projector {
       const before = this.intConsumed.has(slotPath);
       ref = this.intify(ref, slotPath, arm.loc);
       if (!before && this.intConsumed.has(slotPath)) {
-        this.intRecordFacts.push({
-          shape: this.irRecordPattern(fields, true),
+        this.pendingIntRecordFacts.push({
+          fields,
+          tagged: true,
           targetField: fields[0]!.name,
           cls: this.intConsumed.get(slotPath)!,
           path: slotPath,
@@ -844,6 +870,15 @@ class Projector {
     // Everything else — bytes-first pairs, three-plus fields, optional
     // payload fields — tables a synthesized record (family 5).
     return { kind: "record", name: this.tableSynthesized(msgName, arm.name, fields, arm.loc) };
+  }
+
+  /** Materialize structural join patterns only after normal sidecar
+   * projection has validated every field reachable from these facts. */
+  finishedIntRecordFacts(): SidecarIntegerSlotFacts["records"] {
+    return this.pendingIntRecordFacts.map(({ fields, tagged, ...fact }) => ({
+      shape: this.irRecordPattern(fields, tagged),
+      ...fact,
+    }));
   }
 
   /** The finished type table, each array in declaration order (synthesized
@@ -1071,6 +1106,7 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     // Every declared integer slot must have been spelled by now — the
     // whole contract (model, msg, helpers, channels) is projected.
     projector.checkIntConsumed();
+    const intRecordFacts = projector.finishedIntRecordFacts();
 
     const doc: SidecarDoc = {
       format: SIDECAR_FORMAT,
@@ -1130,7 +1166,7 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
       ok: true,
       doc,
       json: JSON.stringify(doc, null, 2) + "\n",
-      integerSlotFacts: { helpers: helperIntFacts, records: projector.intRecordFacts },
+      integerSlotFacts: { helpers: helperIntFacts, records: intRecordFacts },
     };
   } catch (e) {
     if (e instanceof SidecarRefusal) {

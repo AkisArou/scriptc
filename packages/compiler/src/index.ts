@@ -1063,9 +1063,8 @@ function sidecarRecordMatcher(
   const recordMatches = (
     pattern: SidecarIrRecordPattern,
     shape: IrRecordShape,
-    depth: number,
   ): boolean => {
-    if (depth > 64 || shape.tuple === true || shape.indexValue !== undefined) return false;
+    if (shape.tuple === true || shape.indexValue !== undefined) return false;
     const variants = [pattern.fields];
     if (pattern.kindMayBeOmitted === true) {
       variants.push(pattern.fields.filter((field) => field.name !== "kind"));
@@ -1075,7 +1074,7 @@ function sidecarRecordMatcher(
         fields.length === shape.fields.length &&
         fields.every((field) => {
           const actual = shape.fields.find((candidate) => candidate.name === field.name);
-          return actual !== undefined && typeMatches(field.type, actual.type, depth + 1);
+          return actual !== undefined && typeMatches(field.type, actual.type);
         }),
     );
   };
@@ -1083,14 +1082,13 @@ function sidecarRecordMatcher(
   const unionMatches = (
     patterns: SidecarIrTypePattern[],
     actual: IrType[],
-    depth: number,
   ): boolean => {
     if (patterns.length !== actual.length) return false;
     const used = new Set<number>();
     const visit = (index: number): boolean => {
       if (index === patterns.length) return true;
       for (let i = 0; i < actual.length; i++) {
-        if (used.has(i) || !typeMatches(patterns[index]!, actual[i]!, depth + 1)) continue;
+        if (used.has(i) || !typeMatches(patterns[index]!, actual[i]!)) continue;
         used.add(i);
         if (visit(index + 1)) return true;
         used.delete(i);
@@ -1103,9 +1101,7 @@ function sidecarRecordMatcher(
   const typeMatches = (
     pattern: SidecarIrTypePattern,
     actual: IrType,
-    depth: number,
   ): boolean => {
-    if (depth > 64) return false;
     switch (pattern.kind) {
       case "f64":
       case "string":
@@ -1116,21 +1112,21 @@ function sidecarRecordMatcher(
       case "bytes":
         return actual.kind === "bytes" && actual.elem === pattern.elem;
       case "array":
-        return actual.kind === "array" && typeMatches(pattern.elem, actual.elem, depth + 1);
+        return actual.kind === "array" && typeMatches(pattern.elem, actual.elem);
       case "record": {
         if (actual.kind !== "record") return false;
         const shape = records.get(actual.shapeId);
-        return shape !== undefined && recordMatches(pattern, shape, depth + 1);
+        return shape !== undefined && recordMatches(pattern, shape);
       }
       case "union": {
         if (actual.kind !== "union") return false;
         const union = unions.get(actual.unionId);
-        return union !== undefined && unionMatches(pattern.arms, union.arms, depth + 1);
+        return union !== undefined && unionMatches(pattern.arms, union.arms);
       }
     }
   };
 
-  return (pattern, shape) => recordMatches(pattern, shape, 0);
+  return (pattern, shape) => recordMatches(pattern, shape);
 }
 
 /** Merge the sidecar-resolved integer slots (ask 4) into the inference

@@ -691,6 +691,64 @@ export function update(m: Model, msg: Msg): Model { return m; }
     expect(validateSidecar(doc)).toEqual([]);
   });
 
+  test("deep structural record matching keeps a live integer obligation", async () => {
+    const depth = 40;
+    const declarations = Array.from({ length: depth + 1 }, (_, i) =>
+      i === depth
+        ? `export interface N${i} { leaf: string }`
+        : `export interface N${i} { next: N${i + 1} }`,
+    ).join("\n");
+    let nested = `{ leaf: "" }`;
+    for (let i = depth - 1; i >= 0; i--) nested = `{ next: ${nested} }`;
+    const source = `${declarations}
+export interface Model { value: number; nested: N0 }
+export type Msg = { kind: "noop" } | { kind: "other" }
+export function init(): Model { return { value: 0.5, nested: ${nested} } }
+export function update(m: Model, msg: Msg): Model { return m }
+`;
+    const r = await buildCase(
+      "sidecar-int-deep-shape",
+      source,
+      sidecarProfile([{ slot: "Model.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.value'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test.each([
+    {
+      name: "an unsupported later sibling",
+      evidence: "tuple",
+      source: `export interface Model { value: number; pair: [number, number] }
+export type Msg = { kind: "noop" } | { kind: "other" }
+export function init(): Model { return { value: 0, pair: [1, 2] } }
+export function update(m: Model, msg: Msg): Model { return m }
+`,
+    },
+    {
+      name: "a recursive later sibling",
+      evidence: "cyclic",
+      source: `export interface Model { value: number; next: Model | null }
+export type Msg = { kind: "noop" } | { kind: "other" }
+export function init(): Model { throw new Error("unreachable") }
+export function update(m: Model, msg: Msg): Model { return m }
+`,
+    },
+  ])("integer pattern construction preserves the SC4009 refusal for $name", async ({ name, evidence, source }) => {
+    const r = await buildCase(
+      `sidecar-int-invalid-shape-${name.replaceAll(" ", "-")}`,
+      source,
+      sidecarProfile([{ slot: "Model.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4009"]);
+    expect(r.diagnostics[0]!.message).toContain(evidence);
+  });
+
   test("same-shaped tagged-union integer slots refuse instead of overwriting an obligation", async () => {
     const source = `export interface Model { value: number; }
 export type Msg = { kind: "first"; id: number } | { kind: "second"; id: number };
