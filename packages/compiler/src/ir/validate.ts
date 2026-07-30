@@ -2241,6 +2241,14 @@ function validateFunction(
               ? { argTypes: [F64], minArgs: 1, result: F64 }
               : e.method === "slice" || e.method === "subarray"
                 ? { argTypes: [F64, F64], minArgs: 0, result: bytesOf(recv.elem) }
+                : e.method === "toReversed"
+                  ? { argTypes: [], minArgs: 0, result: bytesOf(recv.elem) }
+                : e.method === "with"
+                  ? { argTypes: [F64, F64], minArgs: 2, result: bytesOf(recv.elem) }
+                  : e.method === "join"
+                    ? { argTypes: [STRING], minArgs: 1, result: STRING }
+                    : e.method === "toArray"
+                      ? { argTypes: [], minArgs: 0, result: arrayOf(F64) }
                 : e.method === "setFrom"
                   ? { argTypes: [bytesOf(recv.elem), F64], minArgs: 1, result: VOID }
                   : e.method === "toString"
@@ -2305,10 +2313,16 @@ function validateFunction(
                   ? { argTypes: [elem], result: BOOL }
                   : e.method === "join"
                     ? { argTypes: [STRING], result: STRING }
-                    : e.method === "slice"
-                      ? { argTypes: [F64, F64], result: e.receiver.type }
-                      : e.method === "splice"
-                        ? { argTypes: [F64, F64], result: e.receiver.type }
+                : e.method === "slice"
+                  ? { argTypes: [F64, F64], result: e.receiver.type }
+                  : e.method === "toReversed"
+                    ? { argTypes: [], result: e.receiver.type }
+                    : e.method === "toSpliced"
+                      ? { argTypes: [F64, F64, e.receiver.type], result: e.receiver.type }
+                      : e.method === "with"
+                        ? { argTypes: [F64, elem], result: e.receiver.type }
+                  : e.method === "splice"
+                    ? { argTypes: [F64, F64], result: e.receiver.type }
                         : e.method === "shift"
                           ? { argTypes: [], result: e.type } // union-checked below
                           : { argTypes: [], result: F64 }; // length

@@ -822,6 +822,16 @@ void scr_arr_set_ref(ScrArr *a, double i, void *v);
  * elements retain into the copy. Borrows a. */
 ScrArr *scr_arr_slice(ScrArr *a, double start, double end);
 
+/* ES2023 copying methods. All borrow their inputs and return fresh +1
+ * shallow copies. with() raises Node's catchable RangeError for an invalid
+ * relative index; the ref variant retains the borrowed replacement. */
+ScrArr *scr_arr_to_reversed(const ScrArr *a);
+ScrArr *scr_arr_to_spliced(const ScrArr *a, double start,
+                           double delete_count, const ScrArr *items);
+ScrArr *scr_arr_with_f64(ScrArr *a, double index, double value);
+ScrArr *scr_arr_with_bool(ScrArr *a, double index, bool value);
+ScrArr *scr_arr_with_ref(ScrArr *a, double index, void *value);
+
 /* push returns the new length (JS-exact); _ref takes ownership. */
 double scr_arr_push_f64(ScrArr *a, double v);
 double scr_arr_push_bool(ScrArr *a, bool v);
@@ -4463,6 +4473,17 @@ void scr_bytes_set(ScrBytes *b, double i, double v);
  * string/array slice (ToIntegerOrInfinity, negatives from the end); the
  * result is a fresh same-kind copy. Never throws. */
 ScrBytes *scr_bytes_slice(const ScrBytes *b, double start, double end); /* +1 */
+
+/* ES2023 typed-array copying methods. Both preserve the receiver's element
+ * kind and return a fresh +1 owner. with() raises Node's catchable
+ * "Invalid typed array index" RangeError for an invalid relative index. */
+ScrBytes *scr_bytes_to_reversed(const ScrBytes *b); /* +1 */
+ScrBytes *scr_bytes_with(const ScrBytes *b, double index, double value); /* +1 */
+
+/* Numeric typed-array iteration drained into number[], and Uint8Array.join.
+ * Inputs borrowed; results fresh +1. */
+ScrArr *scr_bytes_to_arr(const ScrBytes *b); /* +1 */
+ScrStr *scr_bytes_join(const ScrBytes *b, const ScrStr *separator); /* +1 */
 
 /* TypedArray.prototype.fill on non-u8 receivers: per-element fill with
  * the element write's coercion, slice-clamped relative indices; answers

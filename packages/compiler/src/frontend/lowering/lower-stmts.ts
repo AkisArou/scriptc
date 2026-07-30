@@ -1447,6 +1447,60 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         });
         return;
       }
+      // Represented typed arrays are dense numeric iterables. Destructuring
+      // reads their elements in index order; a rest binding drains to a
+      // fresh number[] (never another typed array), exactly the iterator
+      // protocol's Array accumulation.
+      if (srcType.kind === "bytes") {
+        pattern.elements.forEach((el, i) => {
+          if (ts.isOmittedExpression(el) || el.name === undefined) return;
+          const loc = locOf(el);
+          if (el.dotDotDotToken) {
+            if (el.initializer) {
+              L.unsupported("SC1031", el, "defaults on rest elements");
+            }
+            const all: IrExpr = {
+              kind: "bytesIntrinsic",
+              method: "toArray",
+              receiver: srcRef(),
+              args: [],
+              type: arrayOf(F64),
+              loc,
+            };
+            const value: IrExpr = {
+              kind: "arrIntrinsic",
+              method: "slice",
+              receiver: all,
+              args: [{ kind: "numLit", value: i, type: F64, loc }],
+              type: arrayOf(F64),
+              loc,
+            };
+            L.bindPatternTarget(el.name, value, isLet, out);
+            return;
+          }
+          let value: IrExpr = {
+            kind: "bytesIntrinsic",
+            method: "get",
+            receiver: srcRef(),
+            args: [{ kind: "numLit", value: i, type: F64, loc }],
+            type: F64,
+            loc,
+          };
+          if (el.initializer) {
+            value = arrayPositionDefault(
+              L,
+              el,
+              value,
+              srcRef,
+              i,
+              F64,
+              out,
+            );
+          }
+          L.bindPatternTarget(el.name, value, isLet, out);
+        });
+        return;
+      }
       if (srcType.kind !== "array") {
         L.unsupported(
           "SC1031",
@@ -2130,11 +2184,29 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     if (isUnitType(elemT)) {
       return L.lowerExprExpecting(init, bodyT);
     }
+    const source = srcRef();
+    const length: IrExpr = source.type.kind === "bytes"
+      ? {
+          kind: "bytesIntrinsic",
+          method: "length",
+          receiver: source,
+          args: [],
+          type: F64,
+          loc,
+        }
+      : {
+          kind: "arrIntrinsic",
+          method: "length",
+          receiver: source,
+          args: [],
+          type: F64,
+          loc,
+        };
     const inRange: IrExpr = {
       kind: "bin",
       op: "<",
       left: { kind: "numLit", value: index, type: F64, loc },
-      right: { kind: "arrIntrinsic", method: "length", receiver: srcRef(), args: [], type: F64, loc },
+      right: length,
       type: BOOL,
       loc,
     };
@@ -5529,8 +5601,8 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         loc,
       });
       elemsRef = () => ({ kind: "varRef", localId: iterTmp.id, type: srcType, loc });
-    } else if (srcType.kind !== "array" && !isTuple) {
-      if (elements.length === 0 && (srcType.kind === "string" || srcType.kind === "bytes" || srcType.kind === "map" || srcType.kind === "set")) {
+    } else if (srcType.kind !== "array" && srcType.kind !== "bytes" && !isTuple) {
+      if (elements.length === 0 && (srcType.kind === "string" || srcType.kind === "map" || srcType.kind === "set")) {
         // `[] = e` over a statically-iterable source: GetIterator +
         // immediate close — no user code can observe it, so evaluating
         // the RHS is the whole statement.
@@ -5557,6 +5629,16 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           L.unsupported("SC1031", at, `destructuring the element ${i} the source tuple does not carry`);
         }
         return { kind: "recordGet", obj: tmpRef(), shapeId: (srcType as IrType & { kind: "record" }).shapeId, field: String(i), type: fieldType, loc: locOf(at) };
+      }
+      if (srcType.kind === "bytes") {
+        return {
+          kind: "bytesIntrinsic",
+          method: "get",
+          receiver: tmpRef(),
+          args: [{ kind: "numLit", value: i, type: F64, loc: locOf(at) }],
+          type: F64,
+          loc: locOf(at),
+        };
       }
       // Plain arrays read by index — a pattern wider than the runtime
       // array traps (the arrayGet discipline, divergence 4's policy; JS
@@ -5592,6 +5674,24 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       // defaults on nested targets fence in the shared machinery).
       const readOf = (targetT: IrType | null): IrExpr => {
         if (isRest) {
+          if (srcType.kind === "bytes") {
+            const all: IrExpr = {
+              kind: "bytesIntrinsic",
+              method: "toArray",
+              receiver: tmpRef(),
+              args: [],
+              type: arrayOf(F64),
+              loc: locOf(el),
+            };
+            return {
+              kind: "arrIntrinsic",
+              method: "slice",
+              receiver: all,
+              args: [{ kind: "numLit", value: i, type: F64, loc: locOf(el) }],
+              type: arrayOf(F64),
+              loc: locOf(el),
+            };
+          }
           return isTuple
             ? tupleTailValue(L, el, tmpRef, srcType as IrType & { kind: "record" }, shape!, i, targetT)
             : { kind: "arrIntrinsic", method: "slice", receiver: tmpRef(), args: [{ kind: "numLit", value: i, type: F64, loc: locOf(el) }], type: srcType, loc: locOf(el) };
@@ -5630,7 +5730,19 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           } else if (targetT !== null) {
             read = isTuple
               ? undefArmDefault(L, el, defaultNode, read, targetT)
-              : arrayPositionDefaultValue(L, el, defaultNode, read, tmpRef, i, (srcType as IrType & { kind: "array" }).elem, targetT, out);
+              : arrayPositionDefaultValue(
+                  L,
+                  el,
+                  defaultNode,
+                  read,
+                  tmpRef,
+                  i,
+                  srcType.kind === "bytes"
+                    ? F64
+                    : (srcType as IrType & { kind: "array" }).elem,
+                  targetT,
+                  out,
+                );
           }
         }
         return read;
@@ -5748,6 +5860,20 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           const container = L.lowerExpr(src.expression.expression);
           if (container.type.kind === "array") {
             return lowerForOfArrayIter(L, stmt, container as IrExpr & { type: IrType & { kind: "array" } }, proj);
+          }
+        }
+        // Typed arrays expose the same live indexed iterator projections.
+        // Their fixed length makes the walk simpler, but the yielded keys
+        // and [key, numeric value] pairs are identical to Array's.
+        if (recv?.kind === "bytes" && (proj === "keys" || proj === "entries")) {
+          const container = L.lowerExpr(src.expression.expression);
+          if (container.type.kind === "bytes") {
+            return lowerForOfArrayIter(
+              L,
+              stmt,
+              container as IrExpr & { type: IrType & { kind: "bytes" } },
+              proj,
+            );
           }
         }
       }

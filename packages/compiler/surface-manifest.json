@@ -1985,9 +1985,27 @@
       "status": "static"
     },
     {
+      "id": "stdlib.array.toReversed",
+      "kind": "stdlib",
+      "name": "Array.prototype.toReversed",
+      "status": "static"
+    },
+    {
       "id": "stdlib.array.toSorted",
       "kind": "stdlib",
       "name": "Array.prototype.toSorted",
+      "status": "static"
+    },
+    {
+      "id": "stdlib.array.toSpliced",
+      "kind": "stdlib",
+      "name": "Array.prototype.toSpliced",
+      "status": "static"
+    },
+    {
+      "id": "stdlib.array.with",
+      "kind": "stdlib",
+      "name": "Array.prototype.with",
       "status": "static"
     },
     {
