@@ -464,8 +464,10 @@ export function grow(a: number): void {
  * proves every program-side write. Refusals are pre-emission and pinned
  * emission-invariant by the corpus above, so one lane suffices here. */
 
-const SIDECAR_ENTRY = `export interface Model { total: number; label: string; }
-export type Msg = { kind: "count"; n: number } | { kind: "clear" };
+const SIDECAR_ENTRY = `export type Scalar = number;
+export type Count = Scalar;
+export interface Model { total: Count; label: string; }
+export type Msg = { kind: "count"; n: Count } | { kind: "clear" };
 export function init(): Model { return { total: 0, label: "" }; }
 export function update(m: Model, msg: Msg): Model { return m; }
 let last: Msg = { kind: "clear" };
@@ -473,7 +475,7 @@ export function poke(v: number): void {
   if (v >= 0 && v <= 100) { last = { kind: "count", n: Math.trunc(v) }; }
 }
 export function lastN(): number { return last.kind === "count" ? last.n : -1; }
-export function clampIdx(m: Model, i: number): number { return i | 0; }
+export function clampIdx(m: Model, i: Count): Count { return i | 0; }
 `;
 
 function sidecarProfile(integerSlots: object[], patch: Record<string, unknown> = {}): object {
@@ -744,11 +746,14 @@ export function update(m: Model, msg: Msg): Model {
   });
 
   test("same-named composed number_bytes arms each keep the integer obligation live", async () => {
-    const source = `export type First =
-  | { kind: "dup"; n: number; payload: string }
+    const source = `export type Count = number;
+export type Text = string;
+export type Bytes = Uint8Array;
+export type First =
+  | { kind: "dup"; n: Count; payload: Text }
   | { kind: "firstOnly" };
 export type Second =
-  | { kind: "dup"; n: number; payload: Uint8Array }
+  | { kind: "dup"; n: Count; payload: Bytes }
   | { kind: "secondOnly" };
 export type Msg = First | Second;
 export interface Model { value: number; }

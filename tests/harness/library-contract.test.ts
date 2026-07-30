@@ -747,6 +747,89 @@ async function sidecarProjection(source: string): Promise<SidecarDoc> {
   return JSON.parse(readFileSync(result.sidecarPath!, "utf8")) as SidecarDoc;
 }
 
+describe("contract sidecar scalar aliases", () => {
+  test("aliases dissolve recursively across records, msg payloads, and helpers", async () => {
+    const doc = await sidecarProjection(`export type Scalar = number;
+export type Volume = Scalar;
+export type Label = string;
+export type Enabled = boolean;
+export type Bytes = Uint8Array;
+export interface Model {
+  volume: Volume;
+  label: Label;
+  enabled: Enabled;
+  data: Bytes;
+  maybe?: Scalar;
+  samples: Volume[];
+}
+export type Msg =
+  | { kind: "set"; value: Volume }
+  | { kind: "rename"; value: Label }
+  | { kind: "toggle"; value: Enabled }
+  | { kind: "upload"; value: Bytes }
+  | { kind: "packet"; size: Volume; body: Label }
+  | { kind: "noop" };
+export function init(): Model {
+  return {
+    volume: 1,
+    label: "one",
+    enabled: true,
+    data: new Uint8Array([1]),
+    samples: [1, 2],
+  };
+}
+export function update(m: Model, msg: Msg): Model { return m; }
+export function inspect(
+  m: Model,
+  volume: Volume,
+  label: Label,
+  enabled: Enabled,
+  data: Bytes,
+): Scalar {
+  return enabled ? volume + label.length + data.length : m.volume;
+}
+let state = init();
+export function boot(): number {
+  state = update(state, { kind: "noop" });
+  return state.volume;
+}
+`);
+
+    expect(validateSidecar(doc)).toEqual([]);
+    expect(doc.types.structs).toEqual([
+      {
+        name: "Model",
+        fields: [
+          { name: "volume", type: { kind: "f64" } },
+          { name: "label", type: { kind: "bytes" } },
+          { name: "enabled", type: { kind: "bool" } },
+          { name: "data", type: { kind: "bytes" } },
+          { name: "maybe", type: { kind: "optional", inner: { kind: "f64" } } },
+          { name: "samples", type: { kind: "slice", elem: { kind: "f64" } } },
+        ],
+      },
+    ]);
+    expect(doc.types.enums).toEqual([]);
+    expect(doc.types.unions).toEqual([]);
+    expect(doc.msg.arms).toEqual([
+      { name: "set", payload: { kind: "number", class: "f64" } },
+      { name: "rename", payload: { kind: "bytes" } },
+      { name: "toggle", payload: { kind: "scalar", type: { kind: "bool" } } },
+      { name: "upload", payload: { kind: "bytes" } },
+      { name: "packet", payload: { kind: "number_bytes", number_field: "size", number_class: "f64", bytes_field: "body" } },
+      { name: "noop", payload: { kind: "void" } },
+    ]);
+    expect(doc.model_helpers).toEqual([
+      {
+        name: "inspect",
+        params: [{ kind: "f64" }, { kind: "bytes" }, { kind: "bool" }, { kind: "bytes" }],
+        returns: { kind: "f64" },
+        arena: false,
+      },
+    ]);
+  });
+});
+
 /* ── SC4009: unprojectable designations refuse, never guess ────────────── */
 
 let refusalCounter = 0;
