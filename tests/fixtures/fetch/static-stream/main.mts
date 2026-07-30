@@ -49,6 +49,29 @@ const posted = await fetch(`${process.argv[2]}/post-echo`, {
   duplex: "half",
 });
 console.log(await posted.json());
+console.log("consumed request locked:", requestBody.locked);
+try {
+  requestBody.getReader();
+  console.log("consumed request reader unexpectedly acquired");
+} catch (error) {
+  console.log("consumed request reader:", (error as Error).name);
+}
+
+const prelockedRequestBody = ReadableStream.from([
+  Buffer.from("prelocked request"),
+]);
+const prelockedRequestReader = prelockedRequestBody.getReader();
+try {
+  await fetch(`${process.argv[2]}/post-echo`, {
+    method: "POST",
+    body: prelockedRequestBody,
+    duplex: "half",
+  });
+  console.log("prelocked request unexpectedly sent");
+} catch (error) {
+  console.log("prelocked request:", (error as Error).name);
+}
+prelockedRequestReader.releaseLock();
 
 // A promised pull stays serialized until that promise settles. The
 // second read queues demand while the first pull is still awaiting.

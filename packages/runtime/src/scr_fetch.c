@@ -2496,7 +2496,6 @@ static void sf_settle(SfTransfer *t) {
   }
   if (t->request_stream && t->request_stream->request_owner == t) {
     t->request_stream->request_owner = NULL;
-    t->request_stream->internal_lock = false;
   }
   if (t->response_stream && t->response_stream->response_owner == t) {
     t->response_stream->response_owner = NULL;
@@ -3636,6 +3635,7 @@ static bool sf_start_hop(SfTransfer *t) {
     if (body->kind == SCR_DYN_ARR) {
       seeded = scr_fetch_stream_from(body);
       if (!seeded) {
+        if (t->client) scr_http_client_destroy(t->client);
         sf_reject_now(t->promise, "fetch failed");
         sf_settle(t);
         return false;
@@ -3647,6 +3647,7 @@ static bool sf_start_hop(SfTransfer *t) {
     if (!stream || stream->reader || stream->internal_lock ||
         stream->disturbed) {
       scr_dyn_release(seeded);
+      if (t->client) scr_http_client_destroy(t->client);
       sf_reject(t,
                 "Response body object should not be disturbed or locked");
       return false;
