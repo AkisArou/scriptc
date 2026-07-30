@@ -31,8 +31,10 @@ async function main(baseUrl: string): Promise<void> {
     headers: { "x-echo-one": "1", "x-echo-two": "2" },
   });
   const multi = he.headers.get("x-multi");
+  const latin = he.headers.get("x-latin") ?? "";
   const echoed: string = await he.text();
   console.log("multi:", multi ?? "none");
+  console.log("latin:", latin, latin.charCodeAt(0));
   console.log("echo:", echoed);
 
   // arrayBuffer(): the whole body as an engine ArrayBuffer handle.

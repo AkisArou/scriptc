@@ -25,6 +25,12 @@ const fetchInit: RequestInit = {
   body: "{}",
 };
 fetch("https://example.invalid/", fetchInit);
+async function inspectResponse(url: string): Promise<void> {
+  const response = await fetch(url);
+  console.log(response.type);
+  response.clone();
+}
+void inspectResponse;
 ReadableStream.from(new Set([1, 2]));
 /* Members of SUPPORTED builtin modules beyond the lowered tables: they
  * typecheck under @types/node and fence with the module-qualified name —

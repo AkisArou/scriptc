@@ -4378,6 +4378,32 @@ static bool fx_eq_ci(const char *a, size_t alen, const char *b) {
   return true;
 }
 
+/* HTTP field values and reason phrases are ByteStrings: each wire octet
+ * becomes the same U+00XX code point in JavaScript. QuickJS string creation
+ * consumes UTF-8, so expand Latin-1 before crossing into the engine. */
+static ScrStr *fx_latin1_to_utf8(const ScrStr *raw) {
+  size_t extra = 0;
+  for (size_t i = 0; i < raw->len; i++) {
+    if ((unsigned char)raw->data[i] >= 0x80) extra++;
+  }
+  if (extra == 0) return scr_str_retain((ScrStr *)raw);
+  char *utf8 = malloc(raw->len + extra);
+  if (!utf8) fx_oom();
+  size_t at = 0;
+  for (size_t i = 0; i < raw->len; i++) {
+    unsigned char byte = (unsigned char)raw->data[i];
+    if (byte < 0x80) {
+      utf8[at++] = (char)byte;
+    } else {
+      utf8[at++] = (char)(0xc0 | (byte >> 6));
+      utf8[at++] = (char)(0x80 | (byte & 0x3f));
+    }
+  }
+  ScrStr *out = scr_str_new(utf8, at);
+  free(utf8);
+  return out;
+}
+
 static bool fx_str_is(const ScrStr *s, const char *lit) { return fx_eq_ci(s->data, s->len, lit); }
 
 static ScrStr *fx_location_to_utf8(const ScrStr *raw) {
@@ -4982,7 +5008,8 @@ static bool fx_redirect(FxTransfer *t, int status, const ScrStr *loc) {
   t->redirected = true;
   ScrUrl *next = fx_resolve(t->url, loc);
   if (next == NULL ||
-      !(fx_str_is(next->scheme, "http") || fx_str_is(next->scheme, "https"))) {
+      !(fx_str_is(next->scheme, "http") || fx_str_is(next->scheme, "https")) ||
+      next->userinfo->len > 0) {
     if (next) scr_url_release(next);
     fx_error(t, "invalid redirect URL", NULL);
     return false;
@@ -5153,20 +5180,27 @@ static void fx_on_response(ScrClosure *cb, ScrHttpReq *res /*+1*/) {
   JSValue hdrs = JS_NewArray(ctx);
   for (size_t i = 0; i < nraw; i++) {
     ScrStr *s = (ScrStr *)scr_arr_get_ref(raw, (double)i);
-    JS_SetPropertyUint32(ctx, hdrs, (uint32_t)i, JS_NewStringLen(ctx, s->data, s->len));
+    ScrStr *utf8 = fx_latin1_to_utf8(s);
+    JS_SetPropertyUint32(
+        ctx, hdrs, (uint32_t)i,
+        JS_NewStringLen(ctx, utf8->data, utf8->len));
+    scr_str_release(utf8);
     scr_str_release(s);
   }
   scr_arr_release(raw);
   ScrStr *stext = scr_http_req_status_message(res);
+  ScrStr *stext_utf8 =
+      stext ? fx_latin1_to_utf8(stext) : scr_str_new("", 0);
   ScrStr *final_url = fx_url_serialize(t->url, false);
   JSValue argv[5] = {
       JS_NewInt32(ctx, status),
-      JS_NewStringLen(ctx, stext ? stext->data : "", stext ? stext->len : 0),
+      JS_NewStringLen(ctx, stext_utf8->data, stext_utf8->len),
       hdrs,
       JS_NewStringLen(ctx, final_url->data, final_url->len),
       JS_NewBool(ctx, t->redirected),
   };
   if (stext) scr_str_release(stext);
+  scr_str_release(stext_utf8);
   scr_str_release(final_url);
   fx_call(t, "onResponse", 5, argv);
   for (int i = 0; i < 5; i++) JS_FreeValue(ctx, argv[i]);

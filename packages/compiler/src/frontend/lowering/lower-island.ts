@@ -337,6 +337,46 @@ export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): Ir
   };
 }
 
+const STATIC_RESPONSE_READS = new Set([
+  "ok",
+  "status",
+  "statusText",
+  "url",
+  "redirected",
+  "headers",
+  "body",
+  "bodyUsed",
+]);
+
+const STATIC_RESPONSE_CALLS = new Set(["json", "text", "bytes"]);
+
+/** The adopted undici Response declaration is wider than the native static
+ * handle. Keep the supported fallback slice on checked-dynamic dispatch, but
+ * fence every other declared member before the generic dyn keyed-read/call
+ * paths can turn a missing handle operation into a runtime TypeError. */
+export function fenceStaticResponseMember(
+  L: Lowerer,
+  access: ts.PropertyAccessExpression,
+  use: "read" | "call",
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
+  const member = access.name.text;
+  const supported =
+    use === "call"
+      ? STATIC_RESPONSE_CALLS.has(member)
+      : STATIC_RESPONSE_READS.has(member);
+  if (supported) return null;
+  L.noLowering(
+    `Response.${member} in a static build`,
+    access,
+    "the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API",
+    sym,
+  );
+}
+
 /** Static AbortSignal constructors and ReadableStream.from(). These
  * ambient globals have no first-class constructor-object representation;
  * claim the direct calls by declaration provenance before the general

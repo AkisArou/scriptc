@@ -1728,6 +1728,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // The lib fence's PROPERTY chokepoint: a stdlib-declared member that
       // no lowering above claimed ([1,2].entries, Math.SQRT2, Promise.all,
       // re.exec as a value, ...) reports SC2020 here.
+      L.fenceStaticResponseMember(expr, "read");
       L.stdlibMemberFence(expr);
       // The npm chokepoint: a member on a package-typed receiver in a
       // static build — attributed to the package, like every other site.

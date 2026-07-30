@@ -3943,6 +3943,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // compile-time-known, so a literal key folds to a constant.
         lowerClassHasOwnPropertyCall(L, expr, expr.expression) ??
         L.lowerIslandMethodCall(expr, expr.expression) ??
+        // Static fetch responses are checked-dynamic handles, but the
+        // adopted undici declaration exposes a wider API than that handle.
+        // Fence the unimplemented members before the generic dyn receiver
+        // path would compile them into a runtime missing-method failure.
+        L.fenceStaticResponseMember(expr.expression, "call") ??
         // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
         // validated-extract, then the static machinery. After the island
         // path (jsval receivers belong there), before the fences.

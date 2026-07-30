@@ -30,6 +30,13 @@ async function main(baseUrl: string, redirectKey: string): Promise<void> {
     `${invalidUtf8.url.endsWith("/caf%EF%BF%BD")}`,
     invalidUtf8Body,
   );
+
+  try {
+    await fetch(`${baseUrl}/redirect-credentials`);
+    console.log("credential redirect: resolved");
+  } catch {
+    console.log("credential redirect: rejected");
+  }
 }
 
 main(process.argv[2], process.argv[4]);
