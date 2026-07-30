@@ -236,6 +236,8 @@ type TaggedPart =
   | { p: "arm"; name: string; fields: ContractField[]; loc: SrcLoc }
   | { p: "ref"; name: string; loc: SrcLoc };
 
+type TaggedArm = { name: string; fields: ContractField[]; loc: SrcLoc };
+
 type Classified =
   | { c: "struct"; storage: "node" | "value"; fields: ContractField[]; decl: ContractTypeDecl; index: number }
   | { c: "enum"; members: string[]; decl: ContractTypeDecl; index: number }
@@ -340,8 +342,10 @@ class Projector {
   private readonly multiSite = new Map<string, string[]>();
   private readonly table = new Map<string, TableEntry>();
   private readonly inProgress = new Set<string>();
-  private readonly flatArms = new Map<string, { name: string; fields: ContractField[]; loc: SrcLoc }[]>();
+  private readonly flatArms = new Map<string, TaggedArm[]>();
+  private readonly allFlatArms = new Map<string, TaggedArm[]>();
   private readonly flattening = new Set<string>();
+  private readonly allFlattening = new Set<string>();
   private readonly irPatterning = new Set<string>();
   private synthCounter = 0;
   /** The profile's declared integer slots (ask 4), by slot path; entries
@@ -461,37 +465,7 @@ class Projector {
    * whenever their payload shapes differ. irUnionPattern performs the
    * frontend's structural deduplication after this walk. */
   private irTaggedArmPatterns(unionName: string, loc: SrcLoc): SidecarIrRecordPattern[] {
-    const c = this.lookup(unionName, loc);
-    if (c.c !== "tagged") {
-      throw new SidecarError(`'${unionName}' is not a kind-tagged union of object literals`, c.decl.loc);
-    }
-    const out: SidecarIrRecordPattern[] = [];
-    for (const part of c.parts) {
-      if (part.p === "arm") {
-        out.push(this.irRecordPattern(part.fields, true));
-        continue;
-      }
-      const resolved = this.resolve(part.name, part.loc);
-      if (resolved.c.c !== "tagged") {
-        throw new SidecarError(
-          `constituent '${part.name}' of union '${unionName}' is not a kind-tagged union — only kind-tagged unions compose by reference`,
-          part.loc,
-        );
-      }
-      if (this.irPatterning.has(resolved.name)) {
-        throw new SidecarError(
-          `union composition is cyclic through '${resolved.name}' — a union cannot spread itself`,
-          part.loc,
-        );
-      }
-      this.irPatterning.add(resolved.name);
-      try {
-        out.push(...this.irTaggedArmPatterns(resolved.name, part.loc));
-      } finally {
-        this.irPatterning.delete(resolved.name);
-      }
-    }
-    return out;
+    return this.allUnionArms(unionName, loc).map((arm) => this.irRecordPattern(arm.fields, true));
   }
 
   /** Convert a sidecar-supported syntactic type into the exact structural
@@ -649,6 +623,97 @@ class Projector {
     }
   }
 
+  /** Every source constituent of a composed tagged union, including later
+   * occurrences of an already-seen discriminant name. The wire table keeps
+   * first occurrence, but structural matching and integer obligations must
+   * retain all shapes the frontend can lower under that discriminant. */
+  private allUnionArms(unionName: string, loc: SrcLoc): TaggedArm[] {
+    const memo = this.allFlatArms.get(unionName);
+    if (memo !== undefined) return memo;
+    if (this.allFlattening.has(unionName)) {
+      throw new SidecarError(`union composition is cyclic through '${unionName}' — a union cannot spread itself`, loc);
+    }
+    const c = this.lookup(unionName, loc);
+    if (c.c !== "tagged") {
+      throw new SidecarError(`'${unionName}' is not a kind-tagged union of object literals`, c.decl.loc);
+    }
+    this.allFlattening.add(unionName);
+    try {
+      const out: TaggedArm[] = [];
+      for (const part of c.parts) {
+        if (part.p === "arm") {
+          out.push({ name: part.name, fields: part.fields, loc: part.loc });
+          continue;
+        }
+        const r = this.resolve(part.name, part.loc);
+        if (r.c.c !== "tagged") {
+          throw new SidecarError(
+            `constituent '${part.name}' of union '${unionName}' is not a kind-tagged union — only kind-tagged unions compose by reference`,
+            part.loc,
+          );
+        }
+        out.push(...this.allUnionArms(r.name, part.loc));
+      }
+      this.allFlatArms.set(unionName, out);
+      return out;
+    } finally {
+      this.allFlattening.delete(unionName);
+    }
+  }
+
+  /** Record one integer obligation for every lowered structural arm carrying
+   * the wire-selected discriminant. A composed union can repeat an arm name
+   * with a different payload field name; the sidecar's scalar descriptor
+   * omits that source name, so each compatible record shape must prove the
+   * same boundary slot. Incompatible later payloads refuse rather than let a
+   * non-integer value ride an integer-attested wire arm. */
+  private recordIntegerUnionArmFacts(
+    unionName: string,
+    armName: string,
+    intifiedRef: TypeRef,
+    cls: "i64" | "u64",
+    path: string,
+    loc: SrcLoc,
+  ): void {
+    const selectedOptional =
+      intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
+    if (intifiedRef.kind !== "i64" && !selectedOptional) {
+      throw new Error(`sidecar pattern bug: integer arm '${path}' has ref '${intifiedRef.kind}'`);
+    }
+    for (const arm of this.allUnionArms(unionName, loc)) {
+      if (arm.name !== armName) continue;
+      if (arm.fields.length !== 1) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects a scalar ${selectedOptional ? "optional " : ""}number payload, but another composed '${armName}' arm has ${arm.fields.length === 0 ? "no payload" : `${arm.fields.length} payload fields`}`,
+          arm.loc,
+        );
+      }
+      const field = arm.fields[0]!;
+      const ref = this.fieldRef(field, unionName);
+      const candidateOptional = ref.kind === "optional" && ref.inner.kind === "f64";
+      if (ref.kind !== "f64" && !candidateOptional) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects a scalar ${selectedOptional ? "optional " : ""}number payload, but another composed '${armName}' arm projects as '${ref.kind}'`,
+          arm.loc,
+        );
+      }
+      if (!selectedOptional && candidateOptional) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects a required number payload, but another composed '${armName}' arm makes that payload optional`,
+          arm.loc,
+        );
+      }
+      this.pendingIntRecordFacts.push({
+        fields: arm.fields,
+        tagged: true,
+        targetField: field.name,
+        cls,
+        path,
+        loc: arm.loc,
+      });
+    }
+  }
+
   /** Project a syntactic field to a TypeRef, tabling every named type it
    * references. `container`/`member` seed synthesized names. */
   fieldRef(field: ContractField, container: string): TypeRef {
@@ -779,16 +844,14 @@ class Projector {
         const before = this.intConsumed.has(slotPath);
         payload = this.intify(payload, slotPath, arm.loc);
         if (!before && this.intConsumed.has(slotPath)) {
-          // The one intifiable arm shape is a single number payload
-          // field; its IR record carries the 'kind' discriminant too.
-          this.pendingIntRecordFacts.push({
-            fields: arm.fields,
-            tagged: true,
-            targetField: arm.fields[0]!.name,
-            cls: this.intConsumed.get(slotPath)!,
-            path: slotPath,
-            loc: arm.loc,
-          });
+          this.recordIntegerUnionArmFacts(
+            name,
+            arm.name,
+            payload,
+            this.intConsumed.get(slotPath)!,
+            slotPath,
+            arm.loc,
+          );
         }
         entry.arms.push({ name: arm.name, payload });
       }
@@ -877,14 +940,14 @@ class Projector {
       const before = this.intConsumed.has(slotPath);
       ref = this.intify(ref, slotPath, arm.loc);
       if (!before && this.intConsumed.has(slotPath)) {
-        this.pendingIntRecordFacts.push({
-          fields,
-          tagged: true,
-          targetField: fields[0]!.name,
-          cls: this.intConsumed.get(slotPath)!,
-          path: slotPath,
-          loc: arm.loc,
-        });
+        this.recordIntegerUnionArmFacts(
+          msgName,
+          arm.name,
+          ref,
+          this.intConsumed.get(slotPath)!,
+          slotPath,
+          arm.loc,
+        );
       }
       switch (ref.kind) {
         case "bytes":

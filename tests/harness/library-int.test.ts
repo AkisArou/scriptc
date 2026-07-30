@@ -687,6 +687,65 @@ export function update(m: Model, msg: Msg): Model { return m; }
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("same-named composed optional-number arms each keep the integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; a: number | null }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; b: number | null }
+  | { kind: "secondOnly" };
+export type Nested = First | Second;
+export interface Model { nested: Nested; }
+export type Msg = { kind: "fractional" } | { kind: "noop" };
+export function init(): Model {
+  return { nested: { kind: "dup", a: 1 } };
+}
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "fractional") {
+    return { nested: { kind: "dup", b: 0.5 } };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-int-composed-duplicate-optional-arm",
+      source,
+      sidecarProfile([{ slot: "Nested.dup", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Nested.dup'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("computed record writes check every optional integer field they can select", async () => {
+    const source = `export interface Model {
+  maybe: number | null;
+  other: number | null;
+}
+export type Msg = { kind: "fractional" } | { kind: "noop" };
+export function init(): Model { return { maybe: null, other: null }; }
+function write(m: Model, key: keyof Model, value: number | null): void {
+  m[key] = value;
+}
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "fractional") write(m, "maybe", 0.5);
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-optional-int-computed-write",
+      source,
+      sidecarProfile([{ slot: "Model.maybe", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.maybe'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
   test("null- and undefined-optional integer fields remain distinct IR shapes", async () => {
     const source = `export interface A { value: number | null; }
 export interface B { value: number | undefined; }

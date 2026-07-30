@@ -897,12 +897,23 @@ class FnAnalyzer {
         clearPathFacts(env);
         return env;
       }
-      case "recordKeySet":
+      case "recordKeySet": {
         this.evalExpr(s.obj, env);
         this.evalExpr(s.key, env);
-        this.evalExpr(s.value, env);
+        const v = this.evalExpr(s.value, env);
+        // A runtime key can dispatch to any declared field of the shape.
+        // overflowOnly proves a literal key names no declared field; every
+        // other keyed write must therefore discharge every integer slot it
+        // could select. Multiple classified fields intentionally emit
+        // independent obligations (their classes and paths may differ).
+        if (s.overflowOnly !== true) {
+          for (const slot of this.cfg.records.get(s.shapeId)?.values() ?? []) {
+            this.emit(v, slot.path, slot.cls, s.loc);
+          }
+        }
         clearPathFacts(env);
         return env;
+      }
       case "recordKeyDelete":
         this.evalExpr(s.obj, env);
         this.evalExpr(s.key, env);
