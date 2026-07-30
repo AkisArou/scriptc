@@ -333,6 +333,8 @@ static ScrDyn *scr_dyn_alloc(ScrDynKind kind) {
       d->v.arr.len = 0; /* cap/items preserved from the node's last life */
     } else if (kind == SCR_DYN_OBJ) {
       d->v.obj.len = 0; /* cap/entries preserved */
+      d->v.obj.source_identity = NULL;
+      d->v.obj.source_release = NULL;
     } else {
       memset(&d->v, 0, sizeof d->v);
     }
@@ -368,6 +370,9 @@ void scr_dyn_release(ScrDyn *d) {
     for (size_t i = 0; i < d->v.obj.len; i++) {
       free(d->v.obj.entries[i].key);
       scr_dyn_release(d->v.obj.entries[i].value);
+    }
+    if (d->v.obj.source_identity) {
+      d->v.obj.source_release(d->v.obj.source_identity);
     }
     break;
   case SCR_DYN_FUNC:
@@ -614,6 +619,21 @@ ScrDyn *scr_dyn_new_str(ScrStr *s) {
 
 ScrDyn *scr_dyn_new_arr(void) { return scr_dyn_alloc(SCR_DYN_ARR); }
 ScrDyn *scr_dyn_new_obj(void) { return scr_dyn_alloc(SCR_DYN_OBJ); }
+ScrDyn *scr_dyn_new_obj_with_identity(
+    void *source, void *(*source_retain)(void *),
+    void (*source_release)(void *)) {
+  ScrDyn *d = scr_dyn_alloc(SCR_DYN_OBJ);
+  d->v.obj.source_identity = source_retain(source);
+  d->v.obj.source_release = source_release;
+  return d;
+}
+
+bool scr_dyn_obj_same_source(const ScrDyn *a, const ScrDyn *b) {
+  return a && b && a->kind == SCR_DYN_OBJ && b->kind == SCR_DYN_OBJ &&
+         a->v.obj.source_identity && b->v.obj.source_identity &&
+         a->v.obj.source_identity == b->v.obj.source_identity;
+}
+
 ScrDyn *scr_dyn_new_obj_null_proto(void) {
   ScrDyn *d = scr_dyn_alloc(SCR_DYN_OBJ);
   d->null_proto = true;

@@ -225,6 +225,7 @@ struct SfStream {
   bool pulling;
   bool pull_again;
   bool discarded;
+  bool request_discarding;
   ScrDyn *error;
   SfReader *reader;       /* owned while locked */
   SfCollector *collector; /* owned while a body reader is active */
@@ -889,6 +890,11 @@ static bool sf_abort_listener_value(const ScrDyn *listener) {
   return handle && handle->kind == SCR_DYN_FUNC;
 }
 
+static bool sf_abort_listener_equal(
+    const ScrDyn *a, const ScrDyn *b) {
+  return scr_dyn_strict_eq(a, b) || scr_dyn_obj_same_source(a, b);
+}
+
 static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
                                 ScrDyn *const *args, size_t argc,
                                 const char *what) {
@@ -942,7 +948,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     SfAbortListener **tail = &s->listeners;
     while (*tail) {
       if ((*tail)->capture == capture &&
-          scr_dyn_strict_eq((*tail)->listener, args[1])) {
+          sf_abort_listener_equal((*tail)->listener, args[1])) {
         return scr_dyn_retain(scr_dyn_undefined());
       }
       tail = &(*tail)->next;
@@ -975,7 +981,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
       (void)once;
       for (SfAbortListener **at = &s->listeners; *at; at = &(*at)->next) {
         if ((*at)->capture == capture &&
-            scr_dyn_strict_eq((*at)->listener, args[1])) {
+            sf_abort_listener_equal((*at)->listener, args[1])) {
           SfAbortListener *l = *at;
           *at = l->next;
           sf_abort_listener_free(l);
@@ -1369,6 +1375,14 @@ static void sf_stream_drain(SfStream *s) {
     sf_stream_request_flush(s);
     return;
   }
+  if (s->request_discarding) {
+    /* Fetch keeps a reader attached to an upload body after aborting the
+     * transfer. Its chunks are no longer written, but demand continues
+     * until the source closes/errors; notably, source.cancel is not run. */
+    sf_stream_drop_chunks(s);
+    sf_stream_finish_close(s);
+    return;
+  }
   if (s->collector) {
     while (s->head) {
       SfChunk *c = s->head;
@@ -1451,7 +1465,8 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
     !s->close_requested &&
     !s->closed &&
     !s->error &&
-    (s->request_owner || (s->reader && s->reader->pending_head) || !s->head)
+    (s->request_owner || s->request_discarding ||
+     (s->reader && s->reader->pending_head) || !s->head)
   ) {
     sf_stream_pull(s);
   }
@@ -2754,6 +2769,15 @@ static void sf_reject_reason(SfTransfer *t, ScrDyn *reason) {
 static void sf_transfer_abort_watch(SfSignalWatch *w, SfSignal *signal) {
   SfTransfer *t = w->owner;
   if (t->done) return;
+  if (t->request_stream && t->request_stream->request_owner == t) {
+    SfStream *request = t->request_stream;
+    request->request_owner = NULL;
+    if (!request->close_requested && !request->closed && !request->error) {
+      request->request_discarding = true;
+      sf_stream_drain(request);
+      sf_stream_pull(request);
+    }
+  }
   if (t->client) scr_http_client_destroy(t->client);
   if (t->response_sent && t->response_stream) {
     sf_stream_error(t->response_stream, signal->reason);

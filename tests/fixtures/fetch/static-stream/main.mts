@@ -155,6 +155,37 @@ const promisedPost = await fetch(`${process.argv[2]}/post-echo`, {
 });
 console.log(await promisedPost.json());
 
+let abortedRequestPulls = 0;
+let abortedRequestCancels = 0;
+const abortedRequestBody = new ReadableStream<Uint8Array>({
+  async pull(controller) {
+    const call = ++abortedRequestPulls;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    controller.enqueue(Buffer.from("late"));
+    if (call === 2) controller.close();
+  },
+  cancel() {
+    abortedRequestCancels++;
+  },
+});
+try {
+  await fetch(`${process.argv[2]}/slow`, {
+    method: "POST",
+    body: abortedRequestBody,
+    duplex: "half",
+    signal: AbortSignal.timeout(5),
+  });
+} catch (error) {
+  console.log("aborted request:", (error as Error).name);
+}
+await new Promise<void>((resolve) => setTimeout(resolve, 70));
+console.log(
+  "aborted request source:",
+  abortedRequestPulls,
+  abortedRequestCancels,
+  abortedRequestBody.locked,
+);
+
 const temporaryRead = await new ReadableStream<Uint8Array>({
   start(controller) {
     controller.enqueue(Buffer.from("temporary"));
@@ -473,6 +504,32 @@ const objectListener = {
 objectSignal.addEventListener("abort", objectListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("object abort listener:", objectCalls);
+
+const removedObjectSignal = AbortSignal.timeout(0);
+let removedObjectCalls = 0;
+const removedObjectListener = {
+  handleEvent() {
+    removedObjectCalls++;
+  },
+};
+removedObjectSignal.addEventListener("abort", removedObjectListener);
+removedObjectSignal.addEventListener("abort", removedObjectListener);
+removedObjectSignal.removeEventListener("abort", removedObjectListener);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("removed object abort listener:", removedObjectCalls);
+
+const distinctObjectSignal = AbortSignal.timeout(0);
+let distinctObjectCalls = 0;
+const sharedObjectHandler = () => {
+  distinctObjectCalls++;
+};
+const firstObjectListener = { handleEvent: sharedObjectHandler };
+const secondObjectListener = { handleEvent: sharedObjectHandler };
+distinctObjectSignal.addEventListener("abort", firstObjectListener);
+distinctObjectSignal.addEventListener("abort", secondObjectListener);
+distinctObjectSignal.removeEventListener("abort", firstObjectListener);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("distinct object abort listener:", distinctObjectCalls);
 
 const orderedSignal = AbortSignal.timeout(0);
 const orderedHandlers: string[] = [];

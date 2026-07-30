@@ -1422,7 +1422,17 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`  return d;`);
           break;
         }
-        d.push(`  ScrDyn *d = scr_dyn_new_obj();`);
+        const carriesListenerIdentity = shape.fields.some(
+          (f) => f.name === "handleEvent" && f.type.kind === "func",
+        );
+        if (carriesListenerIdentity) {
+          const rc = vAdapters(t);
+          d.push(
+            `  ScrDyn *d = scr_dyn_new_obj_with_identity(v, &${rc.retain}, &${rc.release});`,
+          );
+        } else {
+          d.push(`  ScrDyn *d = scr_dyn_new_obj();`);
+        }
         // Keys insert in DECLARED order — the dyn object's insertion order
         // is observable (Object.keys/for-in over checked-dynamic values,
         // dyn JSON), so it must be JS's (SEMANTICS.md 36's stance, same as

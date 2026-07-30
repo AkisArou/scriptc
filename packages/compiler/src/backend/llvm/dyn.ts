@@ -1124,9 +1124,20 @@ export class LlDyn {
           B.terminate(`ret ptr ${d}`);
           break;
         }
-        host.declare(`declare ptr @scr_dyn_new_obj()`);
         const d = B.tmp();
-        B.line(`${d} = call ptr @scr_dyn_new_obj()`);
+        const carriesListenerIdentity = shape.fields.some(
+          (f) => f.name === "handleEvent" && f.type.kind === "func",
+        );
+        if (carriesListenerIdentity) {
+          const rc = vAdapters(host, t);
+          host.declare(`declare ptr @scr_dyn_new_obj_with_identity(ptr, ptr, ptr)`);
+          B.line(
+            `${d} = call ptr @scr_dyn_new_obj_with_identity(ptr %v, ptr ${rc.retain}, ptr ${rc.release})`,
+          );
+        } else {
+          host.declare(`declare ptr @scr_dyn_new_obj()`);
+          B.line(`${d} = call ptr @scr_dyn_new_obj()`);
+        }
         // Keys insert in DECLARED order (JS insertion order); internal
         // '%'-fields follow so a record→dyn→record round trip keeps them.
         const byName = new Map(shape.fields.map((f) => [f.name, f]));

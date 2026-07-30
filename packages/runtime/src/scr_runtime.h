@@ -2765,7 +2765,17 @@ struct ScrDyn {
     ScrStr *str; /* owned */
     ScrBytes *bytes; /* owned (SCR_DYN_BYTES) */
     struct { size_t len; size_t cap; ScrDyn **items; } arr;      /* owned */
-    struct { size_t len; size_t cap; ScrDynEntry *entries; } obj; /* owned */
+    struct {
+      size_t len;
+      size_t cap;
+      ScrDynEntry *entries;
+      /* Optional identity of the typed record that produced this ordinary
+       * deep-copy snapshot. EventTarget uses it to recognize the same
+       * EventListenerObject across repeated static→dyn crossings without
+       * changing generic dyn-object `===` semantics. */
+      void *source_identity; /* owned through source_release */
+      void (*source_release)(void *);
+    } obj; /* owned */
     /* SCR_DYN_FUNC: the boxed closure (owned) + its call descriptor. `sig`
      * and `name` are static compiler-emitted literals (never freed); name
      * may be NULL (anonymous — inspect prints [Function (anonymous)]).
@@ -2864,6 +2874,13 @@ ScrDyn *scr_dyn_new_num(double n);
 ScrDyn *scr_dyn_new_str(ScrStr *s);
 ScrDyn *scr_dyn_new_arr(void);
 ScrDyn *scr_dyn_new_obj(void);
+/* The ordinary deep-copy object plus an identity-only retained source.
+ * Member reads still observe the snapshot; generic dyn strict equality
+ * remains node-based. */
+ScrDyn *scr_dyn_new_obj_with_identity(
+    void *source, void *(*source_retain)(void *),
+    void (*source_release)(void *));
+bool scr_dyn_obj_same_source(const ScrDyn *a, const ScrDyn *b);
 /* Object.create(null): the fresh null-prototype dictionary (see the
  * null_proto flavor flag above). */
 ScrDyn *scr_dyn_new_obj_null_proto(void);
