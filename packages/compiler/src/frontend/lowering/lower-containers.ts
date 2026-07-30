@@ -6,25 +6,61 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrBytesElem, IrBytesIntrinsicMethod, IrExpr, IrFunction, IrLocal, IrMapIntrinsicMethod, IrParam, IrRecordShape, IrSetIntrinsicMethod, IrStmt, IrType, JSVAL, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, bytesOf, funcOf, isRefCounted, isSupportedIndexValue, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { ARRAY_METHODS, MAP_METHODS, SET_COMBINE_METHODS, SET_METHODS, STR_METHODS } from "./surfaces.js";
-import { isRequireMainFilename, lowerDynObjectLiteral, probeLower, pureReemittable } from "./lower-exprs.js";
+import { droppableStatic, isRequireMainFilename, lowerDynObjectLiteral, probeLower, pureReemittable } from "./lower-exprs.js";
 import { forOfVarTarget, lowerDestructuringAssign } from "./lower-stmts.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { DYN_DISPATCH_METHODS, islandPrimitiveExit } from "./lower-calls.js";
 import { typeKey } from "../types.js";
 import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
 
-/** True only for an `undefined`-typed identifier with the standard
- * spelling (parentheses ignored). Optional builtin parameters use this to
- * distinguish an explicit undefined from a numeric/string value; a user
- * binding that shadows the spelling with another type does not match. */
-function stdlibUndefinedArg(L: Lowerer, node: ts.Expression): boolean {
+/** Lower an expression whose checker type is statically `undefined`/`void`.
+ * Optional builtin arguments use this before their ordinary expected-type
+ * coercion so every equivalent spelling (`undefined`, `void 0`, a typed
+ * binding, or an effectful call returning undefined) selects the default.
+ * An effectful `void e` is exact in this context: evaluate e, then produce
+ * undefined, instead of hitting value-position void's general fence. */
+function lowerStaticallyUndefinedArg(L: Lowerer, node: ts.Expression): IrExpr | null {
   let expr = node;
   while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
-  return (
-    ts.isIdentifier(expr) &&
-    expr.text === "undefined" &&
-    (L.typeOf(expr).flags & ts.TypeFlags.Undefined) !== 0
-  );
+  if (
+    (L.typeOf(expr).flags &
+      (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) ===
+    0
+  ) {
+    return null;
+  }
+  if (ts.isVoidExpression(expr)) {
+    // The caller discards this token before producing the parameter
+    // default, so the operand itself carries exactly the required effects;
+    // no bare undefined value needs to enter the IR.
+    return L.lowerExpr(expr.expression);
+  }
+  return L.lowerExpr(node);
+}
+
+/** Preserve a statically-undefined argument's effects, then answer the
+ * optional parameter's already-lowered default value. */
+function defaultAfterUndefined(value: IrExpr, defaultValue: IrExpr): IrExpr {
+  if (droppableStatic(value)) return defaultValue;
+  return {
+    kind: "seqExpr",
+    stmts: [{ kind: "exprStmt", expr: value, loc: value.loc }],
+    result: defaultValue,
+    type: defaultValue.type,
+    loc: value.loc,
+  };
+}
+
+function lowerOptionalDefaultArg(
+  L: Lowerer,
+  node: ts.Expression,
+  expected: IrType,
+  defaultValue: IrExpr,
+): IrExpr {
+  const undefinedArg = lowerStaticallyUndefinedArg(L, node);
+  return undefinedArg
+    ? defaultAfterUndefined(undefinedArg, defaultValue)
+    : L.lowerExprExpecting(node, expected);
 }
 
 /** Ambient array method calls. `push`/`pop`/`indexOf`/`includes`/`join`
@@ -168,10 +204,19 @@ function stdlibUndefinedArg(L: Lowerer, node: ts.Expression): boolean {
       const start = call.arguments[0]
         ? L.lowerExprExpecting(call.arguments[0], F64)
         : { kind: "numLit" as const, value: 0, type: F64, loc };
+      const deleteCountDefault: IrExpr = {
+        kind: "numLit",
+        value: NaN,
+        type: F64,
+        loc,
+      };
       const deleteCount = call.arguments[1]
-        ? stdlibUndefinedArg(L, call.arguments[1])
-          ? { kind: "numLit" as const, value: NaN, type: F64, loc }
-          : L.lowerExprExpecting(call.arguments[1], F64)
+        ? lowerOptionalDefaultArg(
+            L,
+            call.arguments[1],
+            F64,
+            deleteCountDefault,
+          )
         : { kind: "numLit" as const, value: Infinity, type: F64, loc };
       const items: IrExpr = {
         kind: "arrayLit",
@@ -1773,10 +1818,10 @@ function stdlibUndefinedArg(L: Lowerer, node: ts.Expression): boolean {
       L.noLowering(`.toSorted with ${call.arguments.length} arguments on Uint8Array`, call);
     }
     const receiver = L.lowerExpr(access.expression);
-    if (
-      call.arguments.length === 0 ||
-      stdlibUndefinedArg(L, call.arguments[0]!)
-    ) {
+    const undefinedArg = call.arguments[0]
+      ? lowerStaticallyUndefinedArg(L, call.arguments[0])
+      : null;
+    if (call.arguments.length === 0 || undefinedArg) {
       const key = "bytes.toSorted:u8:default";
       let helper = L.arrHofHelpers.get(key);
       if (!helper) {
@@ -1784,7 +1829,35 @@ function stdlibUndefinedArg(L: Lowerer, node: ts.Expression): boolean {
         L.arrHofHelpers.set(key, helper);
         L.liftedFns.push(buildBytesSortFn(helper, 0, false, loc));
       }
-      return { kind: "call", callee: helper, args: [receiver], type: bytesT, loc };
+      if (!undefinedArg || droppableStatic(undefinedArg)) {
+        return { kind: "call", callee: helper, args: [receiver], type: bytesT, loc };
+      }
+      // The default helper takes no comparator argument. Snapshot the
+      // receiver into a hidden local so the discarded undefined argument
+      // still evaluates after the receiver and before the helper call.
+      const saved = L.declareHiddenLocal("%bytesSortRecv", bytesT);
+      const savedRef: IrExpr = {
+        kind: "varRef",
+        localId: saved.id,
+        type: bytesT,
+        loc,
+      };
+      return {
+        kind: "seqExpr",
+        stmts: [
+          { kind: "varDecl", localId: saved.id, init: receiver, loc },
+          { kind: "exprStmt", expr: undefinedArg, loc: undefinedArg.loc },
+        ],
+        result: {
+          kind: "call",
+          callee: helper,
+          args: [savedRef],
+          type: bytesT,
+          loc,
+        },
+        type: bytesT,
+        loc,
+      };
     }
     const argNode = call.arguments[0]!;
     const fnArg = L.lowerExpr(argNode);
@@ -5281,11 +5354,20 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
       if (nArgs > 1 || call.arguments.some(ts.isSpreadElement)) {
         L.noLowering(`.join with ${nArgs} arguments on Uint8Array`, call);
       }
+      const separatorDefault: IrExpr = {
+        kind: "strLit",
+        value: ",",
+        type: STRING,
+        loc,
+      };
       const separator = call.arguments[0]
-        ? stdlibUndefinedArg(L, call.arguments[0])
-          ? { kind: "strLit" as const, value: ",", type: STRING, loc }
-          : L.lowerExprExpecting(call.arguments[0], STRING)
-        : { kind: "strLit" as const, value: ",", type: STRING, loc };
+        ? lowerOptionalDefaultArg(
+            L,
+            call.arguments[0],
+            STRING,
+            separatorDefault,
+          )
+        : separatorDefault;
       return {
         kind: "bytesIntrinsic",
         method: "join",

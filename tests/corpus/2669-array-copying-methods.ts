@@ -8,6 +8,23 @@ console.log(source.toSpliced(1, 2, 8, 9).join(","));
 console.log(source.toSpliced(-2, 1, 7).join(","));
 console.log(source.toSpliced(2).join(","));
 console.log(source.toSpliced(1, undefined).join(","));
+const missingDeleteCount: undefined = undefined;
+console.log(source.toSpliced(1, void 0).join(","));
+console.log(source.toSpliced(1, missingDeleteCount).join(","));
+const deleteOrder: string[] = [];
+const effectDefault = source.toSpliced(1, (() => {
+  deleteOrder.push("call");
+  return undefined;
+})());
+const voidEffectDefault = source.toSpliced(
+  1,
+  void deleteOrder.push("void"),
+);
+console.log(
+  effectDefault.join(","),
+  voidEffectDefault.join(","),
+  deleteOrder.join(","),
+);
 console.log(source.toSpliced(NaN, 0, 6).join(","));
 console.log(source.join(","));
 

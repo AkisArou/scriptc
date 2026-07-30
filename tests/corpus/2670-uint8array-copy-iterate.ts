@@ -6,6 +6,23 @@ const ascending = source.toSorted((a, b) => a - b);
 console.log(ascending.join(","), source.join(","));
 console.log(source.toSorted().join(","));
 console.log(source.toSorted(undefined).join(","));
+const missing: undefined = undefined;
+console.log(source.toSorted(void 0).join(","));
+console.log(source.toSorted(missing).join(","));
+const sortOrder: string[] = [];
+const defaultSorted = (() => {
+  sortOrder.push("receiver");
+  return source;
+})().toSorted((() => {
+  sortOrder.push("argument");
+  return undefined;
+})());
+const voidDefaultSorted = source.toSorted(void sortOrder.push("void"));
+console.log(
+  defaultSorted.join(","),
+  voidDefaultSorted.join(","),
+  sortOrder.join(","),
+);
 console.log(source.toReversed().join(","), source.join(","));
 console.log(source.with(1, -1).join(","), source.join(","));
 console.log(source.with(-1, 260).join(","));
@@ -46,3 +63,11 @@ console.log("sum", sum);
 
 console.log(new Uint8Array().join("-"));
 console.log(source.join(), source.join(undefined), source.join("-"), source.join(""));
+console.log(source.join(void 0), source.join(missing));
+const joinOrder: string[] = [];
+const defaultJoined = source.join((() => {
+  joinOrder.push("call");
+  return undefined;
+})());
+const voidDefaultJoined = source.join(void joinOrder.push("void"));
+console.log(defaultJoined, voidDefaultJoined, joinOrder.join(","));
