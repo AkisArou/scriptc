@@ -2683,9 +2683,15 @@ typedef enum {
    * a silent wrong answer. The dyn→cell edge is NOT visible to the cycle
    * collector (the dyn→closure stance): a cycle dyn → cell → engine
    * object → host closure → dyn is merely never collected (the
-   * documented cross-boundary-cycle divergence). Enum position: LAST —
-   * the LLVM backend hardcodes the preceding kind numbers. */
+   * documented cross-boundary-cycle divergence). */
   SCR_DYN_JSVAL,
+  /* A compiler-owned typed reference in transit through a native Web
+   * stream. Unlike an ordinary typed→unknown conversion, this capsule
+   * retains the original value so a statically typed reader can recover
+   * its identity. `materialize` supplies the ordinary deep-copy view for
+   * consumers such as fetch request bodies that need a dyn chunk. Enum
+   * position: LAST — LLVM hardcodes every preceding kind number. */
+  SCR_DYN_TYPED_REF,
 } ScrDynKind;
 
 /* The handle-type tags the checked-dynamic tree can carry. The set is deliberately the
@@ -2774,6 +2780,16 @@ struct ScrDyn {
      * so a listener capturing its own boxed handle never cycles past the
      * settle — the settle-releases-listeners story. */
     struct { void *ptr; ScrDynHandleTag tag; } handle;
+    /* SCR_DYN_TYPED_REF: original static value + its compiler-emitted
+     * identity tag, RC adapters, and ordinary dyn snapshot adapter. */
+    struct {
+      void *ptr;
+      void *(*retain)(void *);
+      void (*release)(void *);
+      const char *type_key;
+      size_t type_key_len;
+      ScrDyn *(*materialize)(void *);
+    } typed_ref;
     /* SCR_DYN_PROMISE: the retained promise. The boundary contract: it
      * settles with a dyn payload (SCR_EXC_REF ScrDyn fulfillment or a
      * void fulfillment awaiters read as the undefined value) — the
@@ -2857,6 +2873,17 @@ ScrDyn *scr_dyn_new_bytes_copy(const ScrBytes *b);
 /* The Buffer-flavored twin (stream chunks): string coercion/toString
  * decode utf8 instead of joining elements. */
 ScrDyn *scr_dyn_new_buffer_copy(const ScrBytes *b);
+/* Identity-preserving transit capsule used by ReadableStream.from over
+ * typed arrays. The constructor retains `ptr`; matching unbox returns +1.
+ * materialize returns the ordinary owned dyn snapshot. */
+ScrDyn *scr_dyn_new_typed_ref(
+    void *ptr, void *(*retain)(void *), void (*release)(void *),
+    const char *type_key, size_t type_key_len,
+    ScrDyn *(*materialize)(void *));
+bool scr_dyn_typed_ref_is(
+    const ScrDyn *d, const char *type_key, size_t type_key_len);
+void *scr_dyn_typed_ref_unbox(const ScrDyn *d); /* +1 */
+ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d); /* +1 */
 /* A fresh u8 COPY of a SCR_DYN_BYTES payload (+1) — the dynCheck
  * extraction (`u as Uint8Array`). */
 ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d);
@@ -3848,6 +3875,7 @@ ScrDyn *scr_fetch_stream_from_bytes(
     ScrBytes *iterable); /* borrowed bytes; +1 handle */
 ScrDyn *scr_fetch_stream_from_string(
     ScrStr *iterable); /* borrowed string; +1 handle */
+ScrPromise *scr_fetch_reader_read(ScrDyn *reader); /* borrowed handle; +1 */
 
 /* ── dynamic island (scr_island.c; --dynamic builds ONLY) ────────────
  * The embedded QuickJS-ng engine. Compiled and linked only under

@@ -399,6 +399,17 @@ static void sf_abort_listener_free(SfAbortListener *l) {
   free(l);
 }
 
+static void sf_signal_drop_listeners(SfSignal *s) {
+  SfAbortListener *listeners = s->listeners;
+  s->listeners = NULL; /* unlink before callback releases can re-enter */
+  while (listeners) {
+    SfAbortListener *next = listeners->next;
+    listeners->next = NULL;
+    sf_abort_listener_free(listeners);
+    listeners = next;
+  }
+}
+
 static void sf_signal_release(SfSignal *s) {
   if (!s || --s->rc > 0) return;
   for (size_t i = 0; i < s->source_count; i++) {
@@ -407,11 +418,7 @@ static void sf_signal_release(SfSignal *s) {
   }
   free(s->source_watches);
   free(s->sources);
-  while (s->listeners) {
-    SfAbortListener *l = s->listeners;
-    s->listeners = l->next;
-    sf_abort_listener_free(l);
-  }
+  sf_signal_drop_listeners(s);
   scr_dyn_release(s->onabort);
   scr_dyn_release(s->reason);
   scr_error_release(s->error_reason);
@@ -698,6 +705,10 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   event_state->dispatching = false;
   free(dispatch);
   scr_dyn_release(event);
+  /* Abort is one-shot. Registrations cannot fire again, so retaining them
+   * after dispatch only creates EventTarget→listener→EventTarget cycles
+   * that the checked-dynamic boundary cannot trace. */
+  sf_signal_drop_listeners(s);
   if (first_error) {
     scr_rethrow(first_error);
     scr_caught_release(first_error);
@@ -919,6 +930,10 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     if (option_signal && option_signal->aborted) {
       return scr_dyn_retain(scr_dyn_undefined());
     }
+    if (s->aborted) {
+      /* An already-aborted signal never dispatches another abort event. */
+      return scr_dyn_retain(scr_dyn_undefined());
+    }
     SfAbortListener **tail = &s->listeners;
     while (*tail) {
       if ((*tail)->capture == capture &&
@@ -1066,6 +1081,18 @@ static void sf_stream_drop_chunks(SfStream *s) {
   s->queued = 0;
 }
 
+static void sf_stream_drop_source_callbacks(
+    SfStream *s, bool include_cancel) {
+  ScrDyn *pull = s->pull_cb;
+  ScrDyn *cancel = include_cancel ? s->cancel_cb : NULL;
+  s->pull_cb = NULL;
+  if (include_cancel) s->cancel_cb = NULL;
+  /* Unlink both edges before either closure release can re-enter through a
+   * captured stream handle. */
+  scr_dyn_release(pull);
+  scr_dyn_release(cancel);
+}
+
 static void sf_stream_release(SfStream *s) {
   if (!s || --s->rc > 0) return;
   sf_stream_drop_chunks(s);
@@ -1116,6 +1143,12 @@ static void sf_reader_handle_release_v(void *p) {
 }
 
 static ScrBytes *sf_chunk_bytes(const ScrDyn *chunk) {
+  if (chunk && chunk->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(chunk);
+    ScrBytes *bytes = sf_chunk_bytes(materialized);
+    scr_dyn_release(materialized);
+    return bytes;
+  }
   if (chunk && chunk->kind == SCR_DYN_BYTES) {
     return scr_bytes_copy(chunk->v.bytes);
   }
@@ -1266,6 +1299,7 @@ static void sf_response_resume_if_ready(SfStream *s) {
 static void sf_stream_finish_close(SfStream *s) {
   if (!s->close_requested || s->head || s->closed || s->error) return;
   s->closed = true;
+  sf_stream_drop_source_callbacks(s, true);
   if (s->reader) scr_promise_fulfill_void(s->reader->closed);
 }
 
@@ -1372,6 +1406,9 @@ static void sf_stream_enqueue_bytes(SfStream *s, ScrBytes *bytes) {
 static void sf_stream_close(SfStream *s) {
   if (s->close_requested || s->closed || s->error) return;
   s->close_requested = true;
+  /* pull can never run again once close is requested. Keep cancel until
+   * the queued tail drains because cancel() may still invoke it. */
+  sf_stream_drop_source_callbacks(s, false);
   sf_stream_drain(s);
   sf_stream_finish_close(s);
 }
@@ -1387,6 +1424,7 @@ static void sf_stream_error(SfStream *s, ScrDyn *reason) {
   if (s->request_owner) {
     sf_transfer_stream_error(s->request_owner, reason);
   }
+  sf_stream_drop_source_callbacks(s, true);
 }
 
 /* Web Streams adopts promise-like results from start/pull/cancel through
@@ -1706,8 +1744,10 @@ static void sf_stream_pull(SfStream *s) {
     s->pulling = true;
     ScrDyn *controller = sf_controller_box(s);
     ScrDyn *args[1] = {controller};
+    ScrDyn *pull_cb = scr_dyn_retain(s->pull_cb);
     ScrDyn *r =
-        scr_dyn_call(s->pull_cb, args, 1, "underlyingSource.pull");
+        scr_dyn_call(pull_cb, args, 1, "underlyingSource.pull");
+    scr_dyn_release(pull_cb);
     scr_dyn_release(controller);
     if (!r) {
       s->pulling = false;
@@ -1850,6 +1890,8 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
     sf_reject_promise_reason(p, s->error);
     return p;
   }
+  ScrDyn *cancel_cb =
+      s->cancel_cb ? scr_dyn_retain(s->cancel_cb) : NULL;
   sf_stream_drop_chunks(s);
   SfTransfer *response_owner = s->response_owner;
   if (response_owner && response_owner->client) {
@@ -1858,10 +1900,11 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
   sf_stream_close(s);
   if (response_owner && !response_owner->done) sf_settle(response_owner);
 
-  if (s->cancel_cb) {
+  if (cancel_cb) {
     ScrDyn *args[1] = {reason ? reason : scr_dyn_undefined()};
     ScrDyn *r =
-        scr_dyn_call(s->cancel_cb, args, 1, "underlyingSource.cancel");
+        scr_dyn_call(cancel_cb, args, 1, "underlyingSource.cancel");
+    scr_dyn_release(cancel_cb);
     if (!r) {
       scr_promise_reject_pending(p);
       return p;
@@ -1879,6 +1922,8 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
       return p;
     }
     scr_dyn_release(r);
+  } else {
+    scr_dyn_release(cancel_cb);
   }
   scr_promise_fulfill_void(p);
   return p;
@@ -2031,6 +2076,17 @@ ScrDyn *scr_fetch_stream_from_string(ScrStr *iterable) {
   ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
   sf_stream_release(s);
   return out;
+}
+
+ScrPromise *scr_fetch_reader_read(ScrDyn *reader) {
+  if (!reader || reader->kind != SCR_DYN_HANDLE ||
+      reader->v.handle.tag != SCR_DYNH_WEB_READER) {
+    sf_type_error("Expected a ReadableStreamDefaultReader");
+    ScrPromise *p = scr_promise_new();
+    scr_promise_reject_pending(p);
+    return p;
+  }
+  return sf_reader_read((SfReader *)reader->v.handle.ptr);
 }
 
 static SfStream *sf_stream_of(const ScrDyn *d) {

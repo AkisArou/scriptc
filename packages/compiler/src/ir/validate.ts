@@ -93,6 +93,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // the native stream can pull lazily; checked-dynamic values are the
   // fallback. The libCall validator below checks the closed set.
   "fetch.streamFrom": { argTypes: [null], result: DYN },
+  // The chunk/result record depends on ReadableStream<T>; validated below.
+  "fetch.readerRead": { argTypes: [DYN], result: VOID },
   "island.eval": { argTypes: [STRING], result: STRING },
   "island.import": { argTypes: [STRING, STRING, STRING], result: JSVAL },
   "island.importDyn": { argTypes: [STRING], result: JSVAL },
@@ -3465,6 +3467,15 @@ function validateFunction(
           if (!ok) {
             err(
               `libCall fetch.streamFrom arg 0: expected a supported iterable, got ${t?.kind}`,
+              e.loc,
+            );
+          }
+          break;
+        }
+        if (e.fn === "fetch.readerRead") {
+          if (e.type.kind !== "promise" || e.type.inner.kind !== "record") {
+            err(
+              `libCall fetch.readerRead must return a promise of a read-result record`,
               e.loc,
             );
           }

@@ -1623,6 +1623,7 @@ export type IrLibFn =
   | "fetch.abortAny"
   | "fetch.streamNew"
   | "fetch.streamFrom"
+  | "fetch.readerRead"
   | "island.eval"
   /** Load an embedded npm package's runtime entry in the island (cached by
    * the engine's module registry) and take one export: args are the entry

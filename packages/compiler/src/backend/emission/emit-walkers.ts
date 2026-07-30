@@ -744,6 +744,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     const sig = `static bool ${name}(const ScrDyn *d)`;
     E.walkerProtos.push(`${sig}; /* matches ${key} */`);
     const d: string[] = [`${sig} { /* matches ${key} */`];
+    if (isRefCounted(t) && t.kind !== "dyn") {
+      const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
+      d.push(
+        `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${Buffer.byteLength(key, "utf8")})) return true;`,
+      );
+    }
     switch (t.kind) {
       case "f64":
         d.push(`  return d->kind == SCR_DYN_NUM;`);
@@ -1093,6 +1099,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     E.walkerProtos.push(`${sig}; /* check ${key} */`);
     const want = cStringLiteral(Buffer.from(E.dynDesc(t), "utf8"));
     const d: string[] = [`${sig} { /* check ${key} */`];
+    if (isRefCounted(t) && t.kind !== "dyn") {
+      const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
+      d.push(
+        `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${Buffer.byteLength(key, "utf8")})) {`,
+        `    return (${cType(t).trim()})scr_dyn_typed_ref_unbox(d);`,
+        `  }`,
+      );
+    }
     switch (t.kind) {
       case "f64":
         d.push(`  if (d->kind != SCR_DYN_NUM) { scr_dyn_check_fail(path, ${want}, d); return 0; }`);
@@ -1108,9 +1122,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         break;
       case "dyn":
         // An `unknown` slot (a dyn record field): the checked-dynamic tree subtree passes
-        // through as-is — nothing to validate, nothing to build.
+        // through as-is — except for the Web-stream transport capsule, whose
+        // public unknown view remains the ordinary detached dyn snapshot.
         d.push(`  (void)path;`);
-        d.push(`  return scr_dyn_retain((ScrDyn *)d);`);
+        d.push(
+          `  return d->kind == SCR_DYN_TYPED_REF`,
+          `    ? scr_dyn_typed_ref_materialize(d)`,
+          `    : scr_dyn_retain((ScrDyn *)d);`,
+        );
         break;
       case "bytes":
         // `u as Uint8Array`: kind check, then a fresh COPY out (the

@@ -51,6 +51,7 @@ export const DK = {
   HANDLE: 9,
   PROMISE: 10,
   JSVAL: 11, /* SCR_DYN_JSVAL — island values held by reference */
+  TYPED_REF: 12, /* SCR_DYN_TYPED_REF — static Web-stream transit capsule */
 } as const;
 
 /** What the dyn helpers need beyond the walker host: interned immortal
@@ -335,6 +336,19 @@ export class LlDyn {
     const name = `sc_dm_${this.dynMatchers.size}`;
     this.dynMatchers.set(key, name);
     const B = new BlockBuilder();
+    if (isRefCounted(t) && t.kind !== "dyn") {
+      this.host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, i64)`);
+      const matched = B.tmp();
+      B.line(
+        `${matched} = call zeroext i1 @scr_dyn_typed_ref_is(ptr %d, ptr ${this.host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`,
+      );
+      const lRef = B.newLabel("dm.tr");
+      const lNext = B.newLabel("dm.nt");
+      B.condBr(matched, lRef, lNext);
+      B.startBlock(lRef);
+      B.terminate(`ret i1 true`);
+      B.startBlock(lNext);
+    }
     const kindIs = (k: number): void => {
       const kd = this.kindOf(B, "%d");
       const r = B.tmp();
@@ -536,6 +550,22 @@ export class LlDyn {
     host.declare(`declare void @scr_dyn_check_fail(ptr, ptr, ptr)`);
     const want = host.cstr(this.dynDesc(t));
     const B = new BlockBuilder();
+    if (isRefCounted(t) && t.kind !== "dyn") {
+      host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, i64)`);
+      host.declare(`declare ptr @scr_dyn_typed_ref_unbox(ptr)`);
+      const matched = B.tmp();
+      B.line(
+        `${matched} = call zeroext i1 @scr_dyn_typed_ref_is(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`,
+      );
+      const lRef = B.newLabel("dc.tr");
+      const lNext = B.newLabel("dc.nt");
+      B.condBr(matched, lRef, lNext);
+      B.startBlock(lRef);
+      const ref = B.tmp();
+      B.line(`${ref} = call ptr @scr_dyn_typed_ref_unbox(ptr %d)`);
+      B.terminate(`ret ptr ${ref}`);
+      B.startBlock(lNext);
+    }
     /** kind test with the standard fail path (got = %d). */
     const requireKind = (k: number, hint: string): void => {
       const kd = this.kindOf(B, "%d");
@@ -572,9 +602,22 @@ export class LlDyn {
         break;
       }
       case "dyn": {
-        // An `unknown` slot: the checked-dynamic tree subtree passes through as-is.
-        const r = this.retainDyn(B, "%d");
-        B.terminate(`ret ptr ${r}`);
+        // Preserve the ordinary detached snapshot at an unknown boundary;
+        // the typed-ref capsule is only observable to an exact static type.
+        host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+        const kind = this.kindOf(B, "%d");
+        const capsule = B.tmp();
+        B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
+        const lCapsule = B.newLabel("dc.dyn.tr");
+        const lPlain = B.newLabel("dc.dyn.plain");
+        B.condBr(capsule, lCapsule, lPlain);
+        B.startBlock(lCapsule);
+        const materialized = B.tmp();
+        B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+        B.terminate(`ret ptr ${materialized}`);
+        B.startBlock(lPlain);
+        const retained = this.retainDyn(B, "%d");
+        B.terminate(`ret ptr ${retained}`);
         break;
       }
       case "bytes": {

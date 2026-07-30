@@ -484,6 +484,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fetch.abortAny": "scr_fetch_abort_any",
   "fetch.streamNew": "scr_fetch_stream_new",
   "fetch.streamFrom": "scr_fetch_stream_from",
+  "fetch.readerRead": "scr_fetch_reader_read",
   "json.parse": "scr_json_parse",
   "dyn.keySet": "scr_dyn_key_set",
   "dyn.iterPack": "scr_dyn_iter_pack",
@@ -916,6 +917,7 @@ class LlEmitter {
   /** ReadableStream.from adapters keep typed arrays by reference and box
    * one current element per pull. */
   private readonly streamFromArrayAdapters = new Map<string, string>();
+  private readonly streamReadAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
   readonly recordsById = new Map<string, IrRecordShape>();
   readonly tracedShapes: Set<string>;
@@ -9914,6 +9916,50 @@ class LlEmitter {
     B.terminate(`unreachable`);
   }
 
+  private streamReadAdapter(
+    inner: IrType & { kind: "record" },
+  ): string {
+    const key = typeKey(inner);
+    const existing = this.streamReadAdapters.get(key);
+    if (existing) return existing;
+    const sym = `sc_sra_${this.streamReadAdapters.size}`;
+    this.streamReadAdapters.set(key, sym);
+    const rc = vAdapters(this, inner);
+    this.declare(`declare ptr @scr_promise_payload_ref(ptr)`);
+    this.declare(`declare void @scr_dyn_release_v(ptr)`);
+    this.declare(`declare zeroext i1 @scr_exc_pending()`);
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+    const B = new BlockBuilder();
+    const dyn = B.tmp();
+    const value = B.tmp();
+    const pending = B.tmp();
+    B.line(`${dyn} = call ptr @scr_promise_payload_ref(ptr %src)`);
+    B.line(
+      `${value} = call ptr @${this.dyn.dynCheckHelper(inner)}(ptr ${dyn}, ptr null)`,
+    );
+    B.line(`call void @scr_dyn_release_v(ptr ${dyn})`);
+    B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+    const fail = B.newLabel("sra.fail");
+    const ok = B.newLabel("sra.ok");
+    B.condBr(pending, fail, ok);
+    B.startBlock(fail);
+    B.line(`call void @scr_promise_reject_pending(ptr %dst)`);
+    B.terminate(`ret void`);
+    B.startBlock(ok);
+    B.line(
+      `call void @scr_promise_fulfill_ref(ptr %dst, ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this, inner)})`,
+    );
+    B.terminate(`ret void`);
+    this.resolveThunkDefs.push(
+      `define internal void @${sym}(ptr %dst, ptr %src) ${FN_ATTRS} { ; typed Web-stream read ${key}`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return sym;
+  }
+
   private streamFromArrayAdapter(
     t: IrType & { kind: "array" },
   ): string {
@@ -9924,6 +9970,8 @@ class LlEmitter {
     const sym = `sc_sfa_${this.streamFromArrayAdapters.size}`;
     this.streamFromArrayAdapters.set(key, sym);
     const B = new BlockBuilder();
+    const typedRef = isRefCounted(elem) && elem.kind !== "dyn";
+    const snapshot = `${sym}_materialize`;
     let value: string;
     if (elem.kind === "f64") {
       this.declare(`declare double @scr_arr_get_f64(ptr, double)`);
@@ -9947,9 +9995,28 @@ class LlEmitter {
     const boxed = B.tmp();
     const valueTy =
       elem.kind === "f64" ? "double" : elem.kind === "bool" ? "i1" : "ptr";
-    B.line(
-      `${boxed} = call ptr @${this.dyn.toDynHelper(elem)}(${valueTy} ${value})`,
-    );
+    if (typedRef) {
+      const rc = vAdapters(this, elem);
+      const keyPtr = this.cstr(key);
+      this.declare(
+        `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr)`,
+      );
+      B.line(
+        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot})`,
+      );
+      this.resolveThunkDefs.push(
+        `define internal ptr @${snapshot}(ptr %p) ${FN_ATTRS} { ; materialize stream element ${key}`,
+        `entry:`,
+        `  %d = call ptr @${this.dyn.toDynHelper(elem)}(ptr %p)`,
+        `  ret ptr %d`,
+        `}`,
+        ``,
+      );
+    } else {
+      B.line(
+        `${boxed} = call ptr @${this.dyn.toDynHelper(elem)}(${valueTy} ${value})`,
+      );
+    }
     if (isRefCounted(elem)) {
       B.line(`call void ${releaseSym(this, elem)}(ptr ${value})`);
     }
@@ -9974,6 +10041,30 @@ class LlEmitter {
     const B = this.B;
     // Loop liveness first (one table for generic and special shapes).
     if (USES_TIMERS_LIB_FNS.has(e.fn)) this.usesTimers = true;
+    if (e.fn === "fetch.readerRead") {
+      if (e.type.kind !== "promise" || e.type.inner.kind !== "record") {
+        throw new Error("llvm emitter bug: fetch.readerRead result");
+      }
+      const reader = this.emitExpr(e.args[0]!);
+      this.declare(`declare ptr @scr_fetch_reader_read(ptr)`);
+      this.declare(`declare ptr @scr_promise_new()`);
+      this.declare(`declare void @scr_promise_race_add(ptr, ptr, ptr)`);
+      const sourceRaw = B.tmp();
+      B.line(
+        `${sourceRaw} = call ptr @scr_fetch_reader_read(ptr ${reader.name})`,
+      );
+      const source = this.own({
+        name: sourceRaw,
+        type: { kind: "promise", inner: DYN },
+      });
+      const resultRaw = B.tmp();
+      B.line(`${resultRaw} = call ptr @scr_promise_new()`);
+      const result = this.own({ name: resultRaw, type: e.type });
+      B.line(
+        `call void @scr_promise_race_add(ptr ${result.name}, ptr ${source.name}, ptr @${this.streamReadAdapter(e.type.inner)})`,
+      );
+      return result;
+    }
     if (e.fn === "fetch.streamFrom") {
       const source = this.emitExpr(e.args[0]!);
       let sym = "scr_fetch_stream_from";

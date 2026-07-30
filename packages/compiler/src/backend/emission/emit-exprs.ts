@@ -21,7 +21,20 @@ function streamFromArrayAdapter(
   E.streamFromArrayAdapters.set(key, sym);
   const sig = `static ScrDyn *${sym}(ScrArr *sc_a, double sc_i)`;
   E.walkerProtos.push(`${sig}; /* ReadableStream.from array<${key}> */`);
-  const d = [`${sig} { /* ReadableStream.from array<${key}> */`];
+  const typedRef = isRefCounted(elem) && elem.kind !== "dyn";
+  const snapshot = `${sym}_materialize`;
+  const d: string[] = [];
+  if (typedRef) {
+    const snapshotSig = `static ScrDyn *${snapshot}(void *sc_p)`;
+    E.walkerProtos.push(`${snapshotSig}; /* materialize stream element ${key} */`);
+    d.push(
+      `${snapshotSig} {`,
+      `  return ${E.toDynHelper(elem)}((${cType(elem).trim()})sc_p);`,
+      `}`,
+      ``,
+    );
+  }
+  d.push(`${sig} { /* ReadableStream.from array<${key}> */`);
   if (elem.kind === "f64") {
     d.push(
       `  return ${E.toDynHelper(elem)}(scr_arr_get_f64(sc_a, sc_i));`,
@@ -31,15 +44,52 @@ function streamFromArrayAdapter(
       `  return ${E.toDynHelper(elem)}(scr_arr_get_bool(sc_a, sc_i));`,
     );
   } else {
+    d.push(`  ${cDecl(elem, "sc_v")} = (${cType(elem).trim()})scr_arr_get_ref(sc_a, sc_i);`);
+    if (typedRef) {
+      const rc = vAdapters(elem);
+      const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
+      const keyLen = Buffer.byteLength(key, "utf8");
+      d.push(
+        `  ScrDyn *sc_d = scr_dyn_new_typed_ref(sc_v, &${rc.retain}, &${rc.release}, ${keyLit}, ${keyLen}, &${snapshot});`,
+      );
+    } else {
+      d.push(`  ScrDyn *sc_d = ${E.toDynHelper(elem)}(sc_v);`);
+    }
     d.push(
-      `  ${cDecl(elem, "sc_v")} = (${cType(elem).trim()})scr_arr_get_ref(sc_a, sc_i);`,
-      `  ScrDyn *sc_d = ${E.toDynHelper(elem)}(sc_v);`,
       `  ${releaseCallC(elem, "sc_v")};`,
       `  return sc_d;`,
     );
   }
   d.push(`}`, ``);
   E.walkerDefs.push(...d);
+  return sym;
+}
+
+function streamReadAdapter(
+  E: CEmitter,
+  inner: IrType & { kind: "record" },
+): string {
+  const key = typeKey(inner);
+  const existing = E.streamReadAdapters.get(key);
+  if (existing) return existing;
+  const sym = `sc_sra_${E.streamReadAdapters.size}`;
+  E.streamReadAdapters.set(key, sym);
+  const sig = `static void ${sym}(ScrPromise *sc_dst, ScrPromise *sc_src)`;
+  E.walkerProtos.push(`${sig}; /* typed Web-stream read ${key} */`);
+  const rc = vAdapters(inner);
+  E.walkerDefs.push(
+    `${sig} { /* typed Web-stream read ${key} */`,
+    `  ScrDyn *sc_d = (ScrDyn *)scr_promise_payload_ref(sc_src);`,
+    `  ${cDecl(inner, "sc_v")} = ${E.dynCheckHelper(inner)}(sc_d, NULL);`,
+    `  scr_dyn_release(sc_d);`,
+    `  if (scr_exc_pending()) {`,
+    `    scr_promise_reject_pending(sc_dst);`,
+    `    return;`,
+    `  }`,
+    `  scr_promise_fulfill_ref(sc_dst, sc_v, &${rc.retain}, &${rc.release}, ${E.traceArgC(inner)});`,
+    `}`,
+    ``,
+  );
   return sym;
 }
 
@@ -2416,6 +2466,21 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return finish(`scr_fetch_stream_from_string(${arg(0)})`);
             }
             return finish(`scr_fetch_stream_from(${arg(0)})`);
+          case "fetch.readerRead": {
+            if (e.type.kind !== "promise" || e.type.inner.kind !== "record") {
+              throw new Error("emitter bug: fetch.readerRead result");
+            }
+            const source = E.newTemp(
+              { kind: "promise", inner: DYN },
+              `scr_fetch_reader_read(${arg(0)})`,
+            );
+            const result = E.newTemp(e.type, `scr_promise_new()`);
+            const adapter = streamReadAdapter(E, e.type.inner);
+            E.line(
+              `scr_promise_race_add(${result.name}, ${source.name}, &${adapter});${E.srcComment(e.loc)}`,
+            );
+            return result;
+          }
           case "island.eval":
             // --dynamic builds only (the frontend fences the intrinsic, so
             // scr_island_eval is always linked when this emits). Borrows

@@ -230,6 +230,22 @@ console.log(
   liveDone.done,
 );
 
+const streamIdentityBox = { value: 1 };
+const streamIdentityReader =
+  ReadableStream.from([streamIdentityBox]).getReader();
+const streamIdentityPart = await streamIdentityReader.read();
+if (!streamIdentityPart.done) {
+  streamIdentityPart.value.value = 2;
+}
+console.log(
+  "stream from record identity:",
+  streamIdentityPart.done,
+  streamIdentityPart.done
+    ? false
+    : streamIdentityPart.value === streamIdentityBox,
+  streamIdentityBox.value,
+);
+
 const liveBytes = new Uint8Array([4]);
 const liveBytesReader = ReadableStream.from(liveBytes).getReader();
 liveBytes[0] = 5;
@@ -722,3 +738,18 @@ try {
   const caught = error as Error;
   console.log("stream content-length mismatch:", caught.name, caught.message);
 }
+
+let selfCapturingStream: ReadableStream<number>;
+selfCapturingStream = new ReadableStream<number>({
+  pull(controller) {
+    console.log("self-capturing stream:", selfCapturingStream.locked);
+    controller.close();
+  },
+});
+await selfCapturingStream.getReader().read();
+
+const selfCapturingSignal = AbortSignal.timeout(0);
+selfCapturingSignal.addEventListener("abort", () => {
+  console.log("self-capturing abort:", selfCapturingSignal.aborted);
+});
+await new Promise<void>((resolve) => setTimeout(resolve, 5));

@@ -465,6 +465,52 @@ export function lowerStaticReadableStreamNew(
   };
 }
 
+/** A static default reader's read() exits the native checked-dynamic
+ * transport into the checker's concrete chunk type. The result adapter
+ * preserves ReadableStream.from(array)'s element identity instead of
+ * routing the chunk through the ordinary typed→unknown deep-copy boundary. */
+export function lowerStaticReadableStreamReaderCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length !== 0 ||
+    !ts.isPropertyAccessExpression(call.expression) ||
+    call.expression.questionDotToken ||
+    call.expression.name.text !== "read"
+  ) {
+    return null;
+  }
+  const receiverTs = L.typeOf(call.expression.expression);
+  const symbol = receiverTs.getSymbol();
+  if (
+    symbol?.name !== "ReadableStreamDefaultReader" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const type = L.mapTypeOf(L.typeOf(call));
+  if (
+    type?.kind !== "promise" ||
+    type.inner.kind !== "record"
+  ) {
+    return null;
+  }
+  return {
+    kind: "libCall",
+    fn: "fetch.readerRead",
+    args: [L.lowerExprExpecting(call.expression.expression, DYN)],
+    type,
+    loc: locOf(call),
+  };
+}
+
 /** Dynamic `import(spec)` — the island's module system at a USER site.
    * Under --dynamic the call lowers to island.importDyn(key): the engine
    * loads the module (embedded npm graph, a shipped local .js/.mjs the

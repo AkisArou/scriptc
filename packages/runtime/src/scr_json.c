@@ -387,6 +387,9 @@ void scr_dyn_release(ScrDyn *d) {
      * only producer) — same story as the promise arm. */
     scr_dyn_jsval_ops()->release(d->v.jsval.cell);
     break;
+  case SCR_DYN_TYPED_REF:
+    d->v.typed_ref.release(d->v.typed_ref.ptr);
+    break;
   default:
     break; /* null/bool/num have no children */
   }
@@ -629,6 +632,35 @@ ScrDyn *scr_dyn_new_buffer_copy(const ScrBytes *b) {
   return d;
 }
 
+ScrDyn *scr_dyn_new_typed_ref(
+    void *ptr, void *(*retain)(void *), void (*release)(void *),
+    const char *type_key, size_t type_key_len,
+    ScrDyn *(*materialize)(void *)) {
+  ScrDyn *d = scr_dyn_alloc(SCR_DYN_TYPED_REF);
+  d->v.typed_ref.ptr = retain(ptr);
+  d->v.typed_ref.retain = retain;
+  d->v.typed_ref.release = release;
+  d->v.typed_ref.type_key = type_key;
+  d->v.typed_ref.type_key_len = type_key_len;
+  d->v.typed_ref.materialize = materialize;
+  return d;
+}
+
+bool scr_dyn_typed_ref_is(
+    const ScrDyn *d, const char *type_key, size_t type_key_len) {
+  return d && d->kind == SCR_DYN_TYPED_REF &&
+         d->v.typed_ref.type_key_len == type_key_len &&
+         memcmp(d->v.typed_ref.type_key, type_key, type_key_len) == 0;
+}
+
+void *scr_dyn_typed_ref_unbox(const ScrDyn *d) {
+  return d->v.typed_ref.retain(d->v.typed_ref.ptr);
+}
+
+ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d) {
+  return d->v.typed_ref.materialize(d->v.typed_ref.ptr);
+}
+
 ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d) {
   return scr_bytes_copy(d->v.bytes); /* extraction copies too (+1) */
 }
@@ -760,6 +792,14 @@ const char *scr_dyn_specific_type(const ScrDyn *cb, char *detail, size_t cap) {
      * normalization — pick by the engine's typeof. */
     d = scr_dyn_isl_typeof_is(cb, "function") ? "function" : "an instance of Object";
     break;
+  case SCR_DYN_TYPED_REF: {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(cb);
+    const char *specific = scr_dyn_specific_type(materialized, detail, cap);
+    if (specific != detail) snprintf(detail, cap, "%s", specific);
+    scr_dyn_release(materialized);
+    d = detail;
+    break;
+  }
   case SCR_DYN_BOOL:
     snprintf(detail, cap, "type boolean (%s)", cb->v.b ? "true" : "false");
     break;
@@ -1103,7 +1143,8 @@ bool scr_dyn_truthy(const ScrDyn *d) {
   case SCR_DYN_BYTES:
   case SCR_DYN_FUNC:
   case SCR_DYN_HANDLE:
-  case SCR_DYN_PROMISE: return true;
+  case SCR_DYN_PROMISE:
+  case SCR_DYN_TYPED_REF: return true;
   case SCR_DYN_JSVAL:
     /* Route to the engine's ToBoolean: objects/arrays/functions are
      * true, but the symbol/bigint edge (0n is falsy) needs the engine. */
@@ -1127,7 +1168,8 @@ ScrStr *scr_dyn_typeof(const ScrDyn *d) {
   case SCR_DYN_ARR:
   case SCR_DYN_BYTES:
   case SCR_DYN_HANDLE:
-  case SCR_DYN_PROMISE: s = "object"; break;
+  case SCR_DYN_PROMISE:
+  case SCR_DYN_TYPED_REF: s = "object"; break;
   case SCR_DYN_BOOL: s = "boolean"; break;
   case SCR_DYN_NUM: s = "number"; break;
   case SCR_DYN_STR: s = "string"; break;
@@ -1747,6 +1789,7 @@ static const char *scr_dyn_kind_name(const ScrDyn *d) {
   case SCR_DYN_JSVAL: return "an island value"; /* "got an island value" — validated
     * extraction of engine-held values has no armed route yet (lane
     * dom-jsval-long-tail); the failure names the world honestly. */
+  case SCR_DYN_TYPED_REF: return "object";
   }
   return "unknown";
 }
@@ -2307,6 +2350,11 @@ bool scr_dyn_strict_eq(const ScrDyn *a, const ScrDyn *b) {
      * strict equality answers). Mixed kinds already answered false above
      * — a dyn copy is a different object, which is Node's answer too. */
     return a == b || scr_dyn_jsval_ops()->strict_eq(a->v.jsval.cell, b->v.jsval.cell);
+  case SCR_DYN_TYPED_REF:
+    return a->v.typed_ref.ptr == b->v.typed_ref.ptr &&
+           a->v.typed_ref.type_key_len == b->v.typed_ref.type_key_len &&
+           memcmp(a->v.typed_ref.type_key, b->v.typed_ref.type_key,
+                  a->v.typed_ref.type_key_len) == 0;
   default: return a == b;
   }
 }

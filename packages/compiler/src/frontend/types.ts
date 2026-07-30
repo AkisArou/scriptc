@@ -1351,6 +1351,49 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // Response` maps as a record like any other.
   // Interface OR class declarations (the shipped fallback declares
   // interfaces; @types/node's undici-types declares Response as a class).
+  {
+    const alias = widened.getAliasSymbol();
+    if (
+      !ctx.dynamic &&
+      alias?.name === "ReadableStreamReadResult" &&
+      checker.declarationsOf(alias).some(
+        (d) =>
+          ts.isTypeAliasDeclaration(d) &&
+          ctx.isStdlibFile(d.getSourceFile()),
+      )
+    ) {
+      const elemTs = widened.getAliasTypeArguments()?.[0];
+      const elem =
+        elemTs && elemTs.flags & ts.TypeFlags.Any
+          ? DYN
+          : elemTs
+            ? mapType(elemTs, ctx)
+            : null;
+      if (!elem) return null;
+      return genResultRecord(elem, VOID, ctx.shapes, ctx.unions);
+    }
+  }
+  if (
+    !ctx.dynamic &&
+    psym &&
+    (psym.name === "ReadableStreamReadValueResult" ||
+      psym.name === "ReadableStreamReadDoneResult") &&
+    checker.declarationsOf(psym).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        ctx.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    const elemTs = checker.getTypeArguments(widened as ts.TypeReference)[0];
+    const elem =
+      elemTs && elemTs.flags & ts.TypeFlags.Any
+        ? DYN
+        : elemTs
+          ? mapType(elemTs, ctx)
+          : null;
+    if (!elem) return null;
+    return genResultRecord(elem, VOID, ctx.shapes, ctx.unions);
+  }
   if (
     psym &&
     (ISLAND_AMBIENT_TYPES as readonly string[]).includes(psym.name) &&
