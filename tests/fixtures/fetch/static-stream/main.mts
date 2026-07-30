@@ -257,6 +257,27 @@ for (;;) {
 }
 console.log(new TextDecoder().decode(Buffer.concat(chunks)), streamed.bodyUsed);
 
+const collected = await fetch(`${process.argv[2]}/text`);
+await collected.text();
+console.log("collected response locked:", collected.body!.locked);
+try {
+  collected.body!.getReader();
+  console.log("collected response reader unexpectedly acquired");
+} catch (error) {
+  console.log("collected response reader:", (error as Error).name);
+}
+
+const pressureKey = process.argv[3] ?? "static-stream";
+const pressured = await fetch(
+  `${process.argv[2]}/backpressure?key=${pressureKey}`,
+);
+await new Promise<void>((resolve) => setTimeout(resolve, 250));
+const pressureState = await (
+  await fetch(`${process.argv[2]}/backpressure-state?key=${pressureKey}`)
+).text();
+console.log("response backpressure:", pressureState);
+await pressured.body!.cancel();
+
 const signal = AbortSignal.any([AbortSignal.timeout(20)]);
 AbortSignal.abort().addEventListener("custom", () => {
   console.log("custom abort event unexpectedly fired");

@@ -17,7 +17,8 @@
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
  * /redirect-fragment/path /early-hints /switching-protocols /invalid-utf8 /slow /drip
- * /chunked /gzip /gzip-concat /deflate /status-meta /no-content /sse,
+ * /chunked /backpressure /backpressure-state /gzip /gzip-concat /deflate
+ * /status-meta /no-content /sse,
  * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
@@ -28,13 +29,47 @@ import { deflateSync, gzipSync } from "node:zlib";
 
 export async function startFetchServers() {
   const fragmentRedirects = new Set();
+  const backpressureStates = new Map();
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       const body = Buffer.concat(chunks);
-      if (url === "/text") {
+      if (url.startsWith("/backpressure-state?")) {
+        const parsed = new URL(url, "http://fixture.invalid");
+        const key = parsed.searchParams.get("key") ?? "missing";
+        const state = backpressureStates.get(key);
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(state?.done ? "unbounded" : state ? "bounded" : "missing");
+        backpressureStates.delete(key);
+      } else if (url.startsWith("/backpressure?")) {
+        const parsed = new URL(url, "http://fixture.invalid");
+        const key = parsed.searchParams.get("key") ?? "missing";
+        const state = { closed: false, done: false, sent: 0 };
+        backpressureStates.set(key, state);
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.on("close", () => {
+          state.closed = true;
+        });
+        const chunk = Buffer.alloc(64 * 1024, 0x61);
+        const total = 32 * 1024 * 1024;
+        const pump = () => {
+          while (!state.closed && state.sent < total) {
+            const size = Math.min(chunk.length, total - state.sent);
+            state.sent += size;
+            if (!res.write(size === chunk.length ? chunk : chunk.subarray(0, size))) {
+              res.once("drain", pump);
+              return;
+            }
+          }
+          if (!state.closed && state.sent === total) {
+            state.done = true;
+            res.end();
+          }
+        };
+        pump();
+      } else if (url === "/text") {
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "x-kind": "greeting" });
         res.end("héllo wörld 😀");
       } else if (url === "/json") {

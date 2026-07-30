@@ -266,6 +266,8 @@ struct SfTransfer {
   int hops;
   bool redirected;
   ScrHttpClientReq *client;  /* owned */
+  ScrNetSocket *response_socket; /* owned while the response is live */
+  bool response_paused;
   SfSignal *signal;          /* owned */
   SfSignalWatch *signal_watch;
   SfStream *request_stream;  /* owned */
@@ -1180,7 +1182,12 @@ static void sf_collector_drop(SfStream *s) {
   SfCollector *c = s->collector;
   if (!c) return;
   s->collector = NULL;
-  s->internal_lock = false;
+  /*
+   * Body-mixin consumption acquires a reader that is never exposed or
+   * released. Keep that lock after text()/json()/bytes() settles: Node
+   * reports response.body.locked === true and rejects a later getReader(),
+   * on both fulfillment and rejection.
+   */
   scr_promise_release(c->promise);
   free(c->data);
   SfStream *held = c->held_stream;
@@ -1228,6 +1235,33 @@ static void sf_settle(SfTransfer *t);
 static void sf_stream_pull(SfStream *s);
 static void sf_stream_schedule_initial_pull(SfStream *s);
 
+/*
+ * A default ReadableStream has a one-chunk high-water mark. Apply that
+ * bound to the transport itself: pausing the IncomingMessage only moves
+ * bytes into its parser-side buffer, while pausing the socket leaves them
+ * in the kernel/TCP window. resume() merely re-arms the poller, so calling
+ * it while satisfying a read never re-enters this stack.
+ */
+static void sf_response_pause_if_full(SfStream *s) {
+  SfTransfer *t = s->response_owner;
+  if (!t || t->done || t->response_paused || !t->response_socket ||
+      s->queued < 1) {
+    return;
+  }
+  t->response_paused = true;
+  scr_net_sock_release(scr_net_sock_pause(t->response_socket));
+}
+
+static void sf_response_resume_if_ready(SfStream *s) {
+  SfTransfer *t = s->response_owner;
+  if (!t || t->done || !t->response_paused || !t->response_socket ||
+      s->queued >= 1 || s->close_requested || s->closed || s->error) {
+    return;
+  }
+  t->response_paused = false;
+  scr_net_sock_release(scr_net_sock_resume(t->response_socket));
+}
+
 static void sf_stream_finish_close(SfStream *s) {
   if (!s->close_requested || s->head || s->closed || s->error) return;
   s->closed = true;
@@ -1259,6 +1293,7 @@ static void sf_stream_drain(SfStream *s) {
       sf_chunk_release(c);
     }
     sf_stream_finish_close(s);
+    sf_response_resume_if_ready(s);
     if (s->error) sf_collector_reject(s, s->error);
     else if (s->closed) sf_collector_finish(s);
     return;
@@ -1289,9 +1324,11 @@ static void sf_stream_drain(SfStream *s) {
         !s->close_requested && !s->closed && !s->error) {
       sf_stream_pull(s);
     }
+    sf_response_resume_if_ready(s);
     return;
   }
   sf_stream_finish_close(s);
+  sf_response_resume_if_ready(s);
 }
 
 static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
@@ -1322,6 +1359,7 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
   ) {
     sf_stream_pull(s);
   }
+  sf_response_pause_if_full(s);
 }
 
 static void sf_stream_enqueue_bytes(SfStream *s, ScrBytes *bytes) {
@@ -2464,6 +2502,7 @@ static void sf_release(SfTransfer *t) {
   scr_arr_release(t->headers);
   scr_dyn_release(t->body);
   if (t->client) scr_http_client_release(t->client);
+  scr_net_sock_release(t->response_socket);
   if (t->inflating) inflateEnd(&t->zs);
   sf_watch_free(t->signal_watch);
   sf_signal_release(t->signal);
@@ -2503,6 +2542,11 @@ static void sf_settle(SfTransfer *t) {
   if (t->client) {
     scr_http_client_release(t->client);
     t->client = NULL;
+  }
+  if (t->response_socket) {
+    scr_net_sock_release(t->response_socket);
+    t->response_socket = NULL;
+    t->response_paused = false;
   }
   for (SfTransfer **link = &sf_live; *link; link = &(*link)->next) {
     if (*link == t) {
@@ -3419,6 +3463,7 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
   SfStream *body = sf_stream_new_native();
   body->response_owner = t;
   t->response_stream = sf_stream_retain(body);
+  t->response_socket = scr_http_req_socket(res);
   SfResponse *response = calloc(1, sizeof *response);
   if (!response) sf_oom();
   response->rc = 1;
