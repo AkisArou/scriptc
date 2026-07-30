@@ -1173,6 +1173,24 @@ class FnAnalyzer {
         );
         return joinEnv(viaLeft, viaRight);
       }
+      case "unionIsTag": {
+        const unionType: IrType = { kind: "union", unionId: cond.unionId };
+        if (numberCarrierKind(unionType, this.mod) !== "optional") return env;
+        const def = this.mod.unions?.find((u) => u.id === cond.unionId);
+        const arm = def?.arms[cond.tag];
+        const key = this.refinementKey(cond.value, allowPaths);
+        if (arm === undefined || key === null) return env;
+        const tagMatches = cond.negated ? !branch : branch;
+        // The abstract value describes only PRESENT f64 inhabitants. A
+        // branch selecting a unit arm has no numeric inhabitants; likewise
+        // a branch excluding the optional carrier's sole f64 arm.
+        if ((tagMatches && arm.kind !== "f64") || (!tagMatches && arm.kind === "f64")) {
+          const out = cloneEnv(env);
+          out.set(key, { ...BOTTOM });
+          return out;
+        }
+        return env;
+      }
       case "bin": {
         if (!CMP_OPS.has(cond.op)) return env;
         if (cond.left.type.kind !== "f64" || cond.right.type.kind !== "f64") return env;
@@ -1358,6 +1376,8 @@ class FnAnalyzer {
       case "recordGet":
       case "fieldGet":
         return this.staticAccessPath(e) !== null;
+      case "unionIsTag":
+        return this.stablePathGuard(e.value);
       case "unionNarrow":
         return this.stablePathGuard(e.value);
       case "bin":

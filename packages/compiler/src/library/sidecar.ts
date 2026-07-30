@@ -714,6 +714,51 @@ class Projector {
     }
   }
 
+  /** Record a number_bytes obligation for every composed occurrence of the
+   * wire-selected discriminant. Unlike a scalar descriptor, number_bytes
+   * exposes both source field names, so a later same-named arm must retain
+   * those names and the required number-then-bytes family. Text and bytes
+   * are the same sidecar bytes payload but distinct IR shapes; compatible
+   * occurrences therefore each need their own structural inference fact. */
+  private recordIntegerNumberBytesArmFacts(
+    unionName: string,
+    armName: string,
+    numberField: string,
+    bytesField: string,
+    cls: "i64" | "u64",
+    path: string,
+    loc: SrcLoc,
+  ): void {
+    for (const arm of this.allUnionArms(unionName, loc)) {
+      if (arm.name !== armName) continue;
+      const [number, bytes] = arm.fields;
+      const compatible =
+        arm.fields.length === 2 &&
+        number !== undefined &&
+        bytes !== undefined &&
+        !number.optional &&
+        !bytes.optional &&
+        number.name === numberField &&
+        bytes.name === bytesField &&
+        number.shape.k === "number" &&
+        (bytes.shape.k === "text" || bytes.shape.k === "bytes");
+      if (!compatible) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects number_bytes payload fields '${numberField}' and '${bytesField}', but another composed '${armName}' arm does not have the same required number-then-bytes fields`,
+          arm.loc,
+        );
+      }
+      this.pendingIntRecordFacts.push({
+        fields: arm.fields,
+        tagged: true,
+        targetField: numberField,
+        cls,
+        path,
+        loc: arm.loc,
+      });
+    }
+  }
+
   /** Project a syntactic field to a TypeRef, tabling every named type it
    * references. `container`/`member` seed synthesized names. */
   fieldRef(field: ContractField, container: string): TypeRef {
@@ -919,14 +964,15 @@ class Projector {
         const slotPath = `${msgName}.${arm.name}.${first.name}`;
         const numRef = this.intify({ kind: "f64" }, slotPath, first.loc);
         if (numRef.kind === "i64") {
-          this.pendingIntRecordFacts.push({
-            fields,
-            tagged: true,
-            targetField: first.name,
-            cls: this.intConsumed.get(slotPath)!,
-            path: slotPath,
-            loc: first.loc,
-          });
+          this.recordIntegerNumberBytesArmFacts(
+            msgName,
+            arm.name,
+            first.name,
+            second.name,
+            this.intConsumed.get(slotPath)!,
+            slotPath,
+            first.loc,
+          );
         }
         return { kind: "number_bytes", number_field: first.name, number_class: numRef.kind as "f64" | "i64", bytes_field: second.name };
       }

@@ -625,6 +625,30 @@ export function replace(m: Model, id: number): Model {
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("a unit-tag branch makes an optional integer return vacuous", async () => {
+    const source = `export interface Model { value: number; }
+export type Msg = { kind: "noop" } | { kind: "other" };
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+export function normalize(m: Model, x: number | null): number | null {
+  if (x === null) return x;
+  return 1;
+}
+`;
+    const r = await buildCase(
+      "sidecar-optional-int-unit-branch",
+      source,
+      sidecarProfile(
+        [{ slot: "helpers.normalize.return", class: "u64" }],
+        { exports: [] },
+      ),
+    );
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+    if (!r.ok) return;
+    const doc = JSON.parse(readFileSync(r.sidecarPath!, "utf8")) as unknown;
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+
   test("same-named fields with different field types remain distinct integer shapes", async () => {
     const source = `export interface A { value: number; extra: string; }
 export interface B { value: number; extra: boolean; }
@@ -717,6 +741,57 @@ export function update(m: Model, msg: Msg): Model {
     expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
     expect(r.diagnostics[0]!.message).toContain("'Nested.dup'");
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("same-named composed number_bytes arms each keep the integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; n: number; payload: string }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; n: number; payload: Uint8Array }
+  | { kind: "secondOnly" };
+export type Msg = First | Second;
+export interface Model { value: number; }
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  const later: Msg = { kind: "dup", n: 0.5, payload: new Uint8Array(0) };
+  return later.n > 0 ? m : m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-int-composed-duplicate-number-bytes",
+      source,
+      sidecarProfile([{ slot: "Msg.dup.n", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Msg.dup.n'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("a composed number_bytes arm cannot change the selected wire field names", async () => {
+    const source = `export type First =
+  | { kind: "dup"; n: number; a: string }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; n: number; b: string }
+  | { kind: "secondOnly" };
+export type Msg = First | Second;
+export interface Model { value: number; }
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const r = await buildCase(
+      "sidecar-int-composed-number-bytes-fields",
+      source,
+      sidecarProfile([{ slot: "Msg.dup.n", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4009"]);
+    expect(r.diagnostics[0]!.message).toContain("'Msg.dup.n'");
+    expect(r.diagnostics[0]!.message).toContain("same required number-then-bytes fields");
   });
 
   test("computed record writes check every optional integer field they can select", async () => {
