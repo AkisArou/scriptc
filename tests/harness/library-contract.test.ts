@@ -706,6 +706,47 @@ describe("the V1-V14 validator", () => {
   });
 });
 
+/* ── Focused sidecar projection fixtures ───────────────────────────────── */
+
+let projectionCounter = 0;
+
+async function sidecarProjection(source: string): Promise<SidecarDoc> {
+  const outDir = join(cacheDir, `projection-${projectionCounter++}`);
+  mkdirSync(outDir, { recursive: true });
+  const entry = join(outDir, "lib.ts");
+  writeFileSync(entry, source);
+  const profile = {
+    profile_format: 1,
+    name: "sidecar-projection-fixture",
+    entry: "lib.ts",
+    emission: "c",
+    abi: {
+      prefix: "kp_",
+      init_symbol: "kp_init",
+      sink_register_symbol: "kp_set_panic_sink",
+      collect_symbol: null,
+      result_reset_symbol: null,
+    },
+    exports: [{ export: "boot", symbol: "kp_boot", params: [], returns: "f64" }],
+    sidecar: {
+      wire_version: 1,
+      abi_version: 1,
+      snapshot_format: 1,
+      build_id_symbol: "kp_build_id",
+      abi_version_symbol: "kp_abi_version",
+      model: "Model",
+      msg: "Msg",
+    },
+  };
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile));
+  const result = await compileLibrary({ profilePath, outDir });
+  if (!result.ok) {
+    throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+  }
+  return JSON.parse(readFileSync(result.sidecarPath!, "utf8")) as SidecarDoc;
+}
+
 /* ── SC4009: unprojectable designations refuse, never guess ────────────── */
 
 let refusalCounter = 0;
@@ -758,6 +799,51 @@ export function update(m: Model, msg: Msg): Model { return { count: m.count + 1 
 let state = init();
 export function boot(): number { state = update(state, { kind: "tick" }); return state.count; }
 `;
+
+describe("contract sidecar array spellings", () => {
+  test("readonly T[] and ReadonlyArray<T> project identically to T[]", async () => {
+    const doc = await sidecarProjection(`export interface Model {
+  plainIds: number[];
+  readonlyIds: readonly number[];
+  genericIds: ReadonlyArray<number>;
+  maybeIds?: readonly number[];
+}
+export type Msg =
+  | { kind: "replace"; ids: ReadonlyArray<number> }
+  | { kind: "keep" };
+export function init(): Model {
+  return { plainIds: [1], readonlyIds: [2], genericIds: [3] };
+}
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "keep") return m;
+  return { plainIds: msg.ids.slice(), readonlyIds: msg.ids, genericIds: m.genericIds };
+}
+export function inspect(m: Model, left: readonly number[], right: ReadonlyArray<number>): readonly number[] {
+  return [m.plainIds.length, left.length, right.length];
+}
+let state = init();
+export function boot(): number {
+  state = update(state, { kind: "replace", ids: [4, 5] });
+  return state.readonlyIds.length;
+}
+`);
+    const slice = { kind: "slice", elem: { kind: "f64" } } as const;
+    const model = doc.types.structs.find((s) => s.name === "Model");
+    expect(model?.fields).toEqual([
+      { name: "plainIds", type: slice },
+      { name: "readonlyIds", type: slice },
+      { name: "genericIds", type: slice },
+      { name: "maybeIds", type: { kind: "optional", inner: slice } },
+    ]);
+    expect(doc.msg.arms).toEqual([
+      { name: "replace", payload: { kind: "scalar", type: slice } },
+      { name: "keep", payload: { kind: "void" } },
+    ]);
+    expect(doc.model_helpers).toEqual([
+      { name: "inspect", params: [slice, slice], returns: slice, arena: true },
+    ]);
+  });
+});
 
 describe("SC4009: contract sidecar refusals", () => {
   test("a model designation naming nothing refuses", async () => {

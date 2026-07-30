@@ -158,6 +158,13 @@ export function typeShape(file: ts.SourceFile, node: ts.TypeNode): ContractTypeS
       break;
   }
   if (ts.isParenthesizedTypeNode(node)) return typeShape(file, node.type);
+  // `readonly T[]` is the same contract shape as `T[]`: readonly is a
+  // checker-only view, and format 1 has one mutability-neutral slice
+  // spelling. Preserve the wrapped shape so readonly tuples still reach
+  // the projector's explicit tuple refusal.
+  if (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword) {
+    return typeShape(file, node.type);
+  }
   if (ts.isLiteralTypeNode(node)) {
     const lit = node.literal;
     if (ts.isStringLiteral(lit)) return { k: "stringLit", text: lit.text };
@@ -195,7 +202,7 @@ export function typeShape(file: ts.SourceFile, node: ts.TypeNode): ContractTypeS
     if (!ts.isIdentifier(node.typeName)) return { k: "unsupported", text: node.getText(file) };
     const name = node.typeName.text;
     if (name === "Uint8Array" && (node.typeArguments?.length ?? 0) === 0) return { k: "bytes" };
-    if (name === "Array" && node.typeArguments?.length === 1) {
+    if ((name === "Array" || name === "ReadonlyArray") && node.typeArguments?.length === 1) {
       return { k: "array", elem: typeShape(file, node.typeArguments[0]!) };
     }
     if ((node.typeArguments?.length ?? 0) > 0) return { k: "unsupported", text: node.getText(file) };
