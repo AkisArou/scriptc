@@ -1108,6 +1108,7 @@ function sidecarRecordMatcher(
       case "bool":
       case "nullT":
       case "undefinedT":
+      case "dyn":
         return actual.kind === pattern.kind;
       case "bytes":
         return actual.kind === "bytes" && actual.elem === pattern.elem;

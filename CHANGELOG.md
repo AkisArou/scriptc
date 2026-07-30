@@ -4,7 +4,13 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+### Fixes
+
+- **Library integer slots compose with optional numbers.** A declared `number | null` or optional-number slot projects as `optional<i64>` and proves only its present numeric values across records, tagged-message payloads, and helper parameters/returns. When two sidecar paths collapse to the same structurally interned record field, the build now refuses with both paths instead of silently overwriting one proof obligation.
+
 <!-- release:start -->
+
+## 0.0.18
 
 ### Features
 
@@ -13,15 +19,14 @@ All notable changes to scriptc will be documented in this file.
 ### Fixes
 
 - **`https.request(options, responseCallback)` compiles on the LLVM backend.** The options-object row now lowers the TLS verification and CA arguments through the same runtime ABI as the C backend, including response-callback ownership and event-loop liveness. The already-supported `http.request(options, responseCallback)` row is pinned alongside it.
-- **Library integer slots compose with optional numbers.** A declared `number | null` or optional-number slot projects as `optional<i64>` and proves only its present numeric values across records, tagged-message payloads, and helper parameters/returns. When two sidecar paths collapse to the same structurally interned record field, the build now refuses with both paths instead of silently overwriting one proof obligation.
+
+<!-- release:end -->
 
 ## 0.0.17
 
 ### Fixes
 
 - **The CLI builds and runs programs on Windows.** TypeScript's virtual filesystem now sees consistently slash-normalized Windows paths, default executable names carry the required `.exe` suffix for both native and cross-target Windows builds, and the workspace build command survives Windows shell quoting. A Windows CI lane pins the path regressions and drives `scriptc run` end to end.
-
-<!-- release:end -->
 
 ## 0.0.16
 

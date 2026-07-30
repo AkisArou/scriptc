@@ -879,6 +879,27 @@ export function update(m: Model, msg: Msg): Model { return m }
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("declared empty-object siblings do not make a live integer obligation vacuous", async () => {
+    const source = `export interface Empty {}
+export interface Model { value: number; inline: {}; named: Empty }
+export type Msg = { kind: "noop" } | { kind: "other" }
+export function init(): Model {
+  return { value: 0.5, inline: {}, named: {} }
+}
+export function update(m: Model, msg: Msg): Model { return m }
+`;
+    const r = await buildCase(
+      "sidecar-int-empty-object-sibling",
+      source,
+      sidecarProfile([{ slot: "Model.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Model.value'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
   test.each([
     {
       name: "an unsupported later sibling",

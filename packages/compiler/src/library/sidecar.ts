@@ -254,7 +254,7 @@ type Classified =
  * string discriminant field while others use only the surrounding union
  * tag. */
 export type SidecarIrTypePattern =
-  | { kind: "f64" | "string" | "bool" | "nullT" | "undefinedT" }
+  | { kind: "f64" | "string" | "bool" | "nullT" | "undefinedT" | "dyn" }
   | { kind: "bytes"; elem: "u8" }
   | { kind: "array"; elem: SidecarIrTypePattern }
   | SidecarIrRecordPattern
@@ -490,10 +490,18 @@ class Projector {
       case "union":
         return this.irUnionPattern(shape.parts.map((part) => this.irTypePattern(part, loc)));
       case "object":
-        return this.irRecordPattern(shape.fields);
+        // A declared `{}` annotation is TypeScript's top non-nullish type,
+        // not the inferred shape of an empty object literal. The frontend
+        // therefore lowers it to dyn (types.ts's declared-empty rule).
+        return shape.fields.length === 0
+          ? { kind: "dyn" }
+          : this.irRecordPattern(shape.fields);
       case "ref": {
         const resolved = this.resolve(shape.name, loc);
         if (resolved.c.c === "enum") return { kind: "string" };
+        if (resolved.c.c === "struct" && resolved.c.fields.length === 0) {
+          return { kind: "dyn" };
+        }
         if (this.irPatterning.has(resolved.name)) {
           throw new SidecarError(
             `the contract type graph is cyclic through '${resolved.name}' — recursive contract types cannot encode`,
