@@ -91,7 +91,8 @@ export async function startFetchServers() {
         res.writeHead(200, {
           "content-type": "text/plain",
           "x-multi": ["a", "b"],
-          "set-cookie": ["first=1", "second=2"],
+          "x-latin": "é",
+          "set-cookie": ["first=1", "second=2", "flavor=é"],
         });
         res.end(`one=${req.headers["x-echo-one"]} two=${req.headers["x-echo-two"]}`);
       } else if (url === "/header-empty") {

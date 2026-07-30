@@ -1,6 +1,13 @@
 // Native AbortSignal + WHATWG readable-stream ownership coverage. The request body
 // is produced in two turns, the response body is consumed through the
 // default reader, and a timeout aborts a live native transfer.
+try {
+  new ReadableStream(null!);
+  console.log("null source unexpectedly accepted");
+} catch (error) {
+  console.log("null source:", (error as Error).name);
+}
+
 let initialPullCalls = 0;
 const initialPullStream = new ReadableStream<number>({
   pull() {

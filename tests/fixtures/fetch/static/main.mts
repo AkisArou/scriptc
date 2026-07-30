@@ -35,6 +35,7 @@ console.log(
   "headers:",
   responseHeaders.get("content-type"),
   responseHeaders.get("x-multi"),
+  responseHeaders.get("x-latin"),
   responseHeaders.get("missing") ?? "none",
   responseHeaders.has("x-multi"),
   responseHeaders.has("missing"),

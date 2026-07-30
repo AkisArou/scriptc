@@ -21,6 +21,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { globSync, mkdirSync, readFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -171,6 +173,87 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
+
+  test.for(["c", "llvm"] as const)(
+    "static fetch / %s backend trusts NODE_EXTRA_CA_CERTS",
+    async (backend) => {
+      const certs = join(fixturesRoot, "../server/certs");
+      const server = createHttpsServer(
+        {
+          key: readFileSync(join(certs, "localhost-key.pem")),
+          cert: readFileSync(join(certs, "localhost.pem")),
+        },
+        (_request, response) => response.end("secure"),
+      );
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string") throw new Error("missing HTTPS address");
+        const entry = join(fixturesRoot, "static-network/main.mts");
+        const binary = await buildStatic(entry, backend, "https-extra-ca");
+        const argv = [`https://localhost:${address.port}`];
+        const env = {
+          ...process.env,
+          NODE_EXTRA_CA_CERTS: join(certs, "ca.pem"),
+        };
+        const [nodeRes, nativeRes] = await Promise.all([
+          runBinary("node", [entry, ...argv], env),
+          runBinary(binary, argv, env),
+        ]);
+        expect(nativeRes.stdout.toString("utf8")).toBe(
+          nodeRes.stdout.toString("utf8"),
+        );
+        expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    },
+    120_000,
+  );
+
+  test.for(["c", "llvm"] as const)(
+    "static fetch / %s backend supports IPv6 URL literals",
+    async (backend) => {
+      const server = createHttpServer(
+        (_request, response) => response.end("ipv6"),
+      );
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "::1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string") throw new Error("missing HTTP address");
+        const entry = join(fixturesRoot, "static-network/main.mts");
+        const binary = await buildStatic(entry, backend, "ipv6");
+        const argv = [`http://[::1]:${address.port}`];
+        const [nodeRes, nativeRes] = await Promise.all([
+          runBinary("node", [entry, ...argv]),
+          runBinary(binary, argv),
+        ]);
+        expect(nativeRes.stdout.toString("utf8")).toBe(
+          nodeRes.stdout.toString("utf8"),
+        );
+        expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    },
+    120_000,
+  );
 
   test("the dynamic curl comparison switch leaves static fetch native", async () => {
     const previous = process.env["SCRIPTC_FETCH_CURL"];

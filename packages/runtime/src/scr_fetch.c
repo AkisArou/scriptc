@@ -2000,7 +2000,7 @@ static ScrPromise *sf_stream_collect(SfStream *s, int mode) {
 
 ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
   if (source && source->kind != SCR_DYN_UNDEF &&
-      source->kind != SCR_DYN_NULL && source->kind != SCR_DYN_OBJ) {
+      source->kind != SCR_DYN_OBJ) {
     sf_type_error("ReadableStream source must be an object");
     return NULL;
   }
@@ -2269,12 +2269,52 @@ static ScrDyn *sf_controller_get(void *ptr, const char *key, size_t len) {
 
 static bool sf_header_name_ok(const char *s, size_t len);
 
+/* HTTP field values are ByteStrings: each wire octet becomes the same
+ * U+00XX code point in the JS string. ScrStr stores UTF-8, so obs-text
+ * bytes need a real Latin-1→UTF-8 expansion before they enter a Headers
+ * handle (and before string methods assume the storage invariant). */
+static ScrStr *sf_latin1_to_utf8(const ScrStr *raw) {
+  size_t extra = 0;
+  for (size_t i = 0; i < raw->len; i++) {
+    if ((unsigned char)raw->data[i] >= 0x80) extra++;
+  }
+  if (extra == 0) return scr_str_retain((ScrStr *)raw);
+  char *utf8 = malloc(raw->len + extra);
+  if (!utf8) sf_oom();
+  size_t at = 0;
+  for (size_t i = 0; i < raw->len; i++) {
+    unsigned char byte = (unsigned char)raw->data[i];
+    if (byte < 0x80) {
+      utf8[at++] = (char)byte;
+    } else {
+      utf8[at++] = (char)(0xc0 | (byte >> 6));
+      utf8[at++] = (char)(0x80 | (byte & 0x3f));
+    }
+  }
+  ScrStr *out = scr_str_new(utf8, at);
+  free(utf8);
+  return out;
+}
+
 static SfHeaders *sf_headers_new(ScrArr *pairs) {
   SfHeaders *h = calloc(1, sizeof *h);
   if (!h) sf_oom();
   h->rc = 1;
   h->pairs = pairs;
   return h;
+}
+
+static SfHeaders *sf_headers_new_response(ScrArr *raw_pairs) {
+  size_t n = (size_t)scr_arr_len(raw_pairs);
+  ScrArr *pairs = scr_arr_new(SCR_ELEM_STR, n);
+  for (size_t i = 0; i + 1 < n; i += 2) {
+    scr_arr_push_ref(pairs, scr_arr_get_ref(raw_pairs, (double)i));
+    ScrStr *raw = scr_arr_get_ref(raw_pairs, (double)(i + 1));
+    scr_arr_push_ref(pairs, sf_latin1_to_utf8(raw));
+    scr_str_release(raw);
+  }
+  scr_arr_release(raw_pairs);
+  return sf_headers_new(pairs);
 }
 
 static SfHeaders *sf_headers_retain(SfHeaders *h) {
@@ -3715,10 +3755,14 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
   if (!response) sf_oom();
   response->rc = 1;
   response->body = sf_stream_retain(body);
-  response->headers = sf_headers_new(scr_http_req_header_pairs(res));
+  response->headers =
+      sf_headers_new_response(scr_http_req_header_pairs(res));
   response->url = sf_url_serialize(t->url);
-  response->status_text = scr_http_req_status_message(res);
-  if (!response->status_text) response->status_text = scr_str_new("", 0);
+  ScrStr *raw_status_text = scr_http_req_status_message(res);
+  response->status_text =
+      raw_status_text ? sf_latin1_to_utf8(raw_status_text)
+                      : scr_str_new("", 0);
+  scr_str_release(raw_status_text);
   response->status = status;
   response->redirected = t->redirected;
   response->null_body = null_body;
