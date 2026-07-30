@@ -18,7 +18,7 @@
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
  * /redirect-fragment/path /early-hints /switching-protocols /invalid-utf8 /slow /drip
  * /chunked /backpressure /backpressure-state /gzip /gzip-concat /deflate
- * /status-meta /no-content /sse,
+ * /status-meta /no-content /reset-content /reset-content-large /sse,
  * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
@@ -242,6 +242,14 @@ export async function startFetchServers() {
       } else if (url === "/reset-content") {
         res.writeHead(205, { "content-length": "4" });
         res.end("body");
+      } else if (url === "/reset-content-large") {
+        // Fetch exposes a null body for 205 even when a peer violates the
+        // protocol and sends content. Make the payload larger than the
+        // native socket's read window so an inaccessible backpressured
+        // stream would stall the process instead of merely wasting bytes.
+        const payload = Buffer.alloc(2 * 1024 * 1024, 0x61);
+        res.writeHead(205, { "content-length": String(payload.length) });
+        res.end(payload);
       } else if (url === "/sse") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         const frames = [

@@ -268,6 +268,7 @@ struct SfTransfer {
   ScrHttpClientReq *client;  /* owned */
   ScrNetSocket *response_socket; /* owned while the response is live */
   bool response_paused;
+  bool response_null_body;
   SfSignal *signal;          /* owned */
   SfSignalWatch *signal_watch;
   SfStream *request_stream;  /* owned */
@@ -1828,11 +1829,17 @@ static void sf_stream_cancel_wait_entry(ScrFiber *self, void *arg) {
 static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
                                     bool through_reader) {
   ScrPromise *p = scr_promise_new();
-  if (s->reader && !through_reader) {
+  if (!through_reader && (s->reader || s->internal_lock)) {
     sf_type_error("Invalid state: cannot cancel a locked ReadableStream");
     scr_promise_reject_pending(p);
     return p;
   }
+  /*
+   * ReadableStreamCancel disturbs the stream before inspecting its state.
+   * This remains observable through Response.bodyUsed even when the
+   * stream had already closed or errored.
+   */
+  s->disturbed = true;
   if (s->closed) {
     /* WHATWG cancel is a no-op once the stream is closed. */
     scr_promise_fulfill_void(p);
@@ -1843,7 +1850,6 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
     sf_reject_promise_reason(p, s->error);
     return p;
   }
-  s->disturbed = true;
   sf_stream_drop_chunks(s);
   SfTransfer *response_owner = s->response_owner;
   if (response_owner && response_owner->client) {
@@ -3327,6 +3333,16 @@ static void sf_on_data(ScrClosure *cb, ScrBytes *chunk) {
     sf_release(t);
     return;
   }
+  /*
+   * Fetch exposes no body for HEAD/204/205/304 responses. The shared HTTP
+   * parser still drains an invalid payload on 205, so discard those bytes
+   * here instead of queueing them into an inaccessible stream that would
+   * apply backpressure forever.
+   */
+  if (t->response_null_body) {
+    sf_release(t);
+    return;
+  }
   if (!t->inflating) {
     sf_stream_enqueue_bytes(t->response_stream, chunk);
     sf_release(t);
@@ -3446,6 +3462,7 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
     }
   }
   bool null_body = sf_response_has_null_body(t, status);
+  t->response_null_body = null_body;
   if (!null_body) {
     ScrStr *name = scr_str_new("content-encoding", 16);
     ScrStr *encoding = scr_http_req_header(res, name);

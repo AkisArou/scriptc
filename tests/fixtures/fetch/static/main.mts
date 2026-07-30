@@ -249,6 +249,14 @@ console.log(
   resetContent.body === null,
   JSON.stringify(await resetContent.text()),
 );
+const largeResetContent = await fetch(
+  `${process.argv[2]}/reset-content-large`,
+);
+console.log(
+  "large reset-content body:",
+  largeResetContent.body === null,
+  JSON.stringify(await largeResetContent.text()),
+);
 
 try {
   await fetch(`${process.argv[2]}/json`, { method: "BAD METHOD" });

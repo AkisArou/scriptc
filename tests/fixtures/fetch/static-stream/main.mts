@@ -257,6 +257,31 @@ for (;;) {
 }
 console.log(new TextDecoder().decode(Buffer.concat(chunks)), streamed.bodyUsed);
 
+const lockedCancelResponse = await fetch(`${process.argv[2]}/chunked`);
+const lockedCancelBody = lockedCancelResponse.body!;
+async function collectLockedCancelResponse(): Promise<string> {
+  return await lockedCancelResponse.text();
+}
+const lockedCancelText = collectLockedCancelResponse();
+try {
+  await lockedCancelBody.cancel();
+  console.log("locked response cancel unexpectedly resolved");
+} catch (error) {
+  console.log("locked response cancel:", (error as Error).name);
+}
+console.log("locked response text:", await lockedCancelText);
+
+const closedCancelResponse = await fetch(
+  `${process.argv[2]}/headers-source`,
+);
+const closedCancelBefore = closedCancelResponse.bodyUsed;
+await closedCancelResponse.body!.cancel();
+console.log(
+  "closed response cancel:",
+  closedCancelBefore,
+  closedCancelResponse.bodyUsed,
+);
+
 const collected = await fetch(`${process.argv[2]}/text`);
 await collected.text();
 console.log("collected response locked:", collected.body!.locked);
