@@ -87,9 +87,14 @@ async function runBinary(
   cmd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  timeout?: number,
 ): Promise<RunResult> {
   try {
-    const { stdout } = await execFileAsync(cmd, args, { encoding: "buffer", env });
+    const { stdout } = await execFileAsync(cmd, args, {
+      encoding: "buffer",
+      env,
+      timeout,
+    });
     return { stdout, exitCode: 0 };
   } catch (err) {
     const e = err as { code?: unknown; stdout?: Buffer };
@@ -178,6 +183,21 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
+
+  test.for(["c", "llvm"] as const)(
+    "static fetch / %s backend settles an abandoned compressed response",
+    async (backend) => {
+      const entry = join(fixturesRoot, "static-abandon/main.mts");
+      const binary = await buildStatic(entry, backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry, baseUrl], undefined, 3_000),
+        runBinary(binary, [baseUrl], undefined, 3_000),
+      ]);
+      expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
 
   test.for(["c", "llvm"] as const)(
     "static fetch / %s backend trusts NODE_EXTRA_CA_CERTS",

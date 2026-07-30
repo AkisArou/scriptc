@@ -22,6 +22,14 @@ async function main(baseUrl: string, redirectKey: string): Promise<void> {
     `${backslash.url.endsWith("/text")}`,
     backslashBody,
   );
+
+  const invalidUtf8 = await fetch(`${baseUrl}/redirect-invalid-utf8`);
+  const invalidUtf8Body: string = await invalidUtf8.text();
+  console.log(
+    "invalid utf8:",
+    `${invalidUtf8.url.endsWith("/caf%EF%BF%BD")}`,
+    invalidUtf8Body,
+  );
 }
 
 main(process.argv[2], process.argv[4]);

@@ -1086,6 +1086,8 @@ static void sf_stream_drop_chunks(SfStream *s) {
   s->queued = 0;
 }
 
+static void sf_inflate_finish_if_ended(SfTransfer *t);
+
 /*
  * The live transfer owns one stream reference. When every user-visible
  * Response/body/reader/collector reference is gone, only that transfer
@@ -1109,6 +1111,16 @@ static void sf_response_discard_if_unobserved(SfStream *s) {
   if (!t->inflate_draining) {
     t->zs.next_in = Z_NULL;
     t->zs.avail_in = 0;
+  }
+  /*
+   * EOF may already have arrived while the decoded high-water-mark chunk
+   * kept sf_inflate_finish_if_ended() from settling. Dropping that last
+   * chunk removes the only remaining blocker. Finish before attempting to
+   * resume an already-ended socket; settlement may release both t and s.
+   */
+  if (t->response_ended) {
+    sf_inflate_finish_if_ended(t);
+    return;
   }
   if (!t->done && t->response_paused && t->response_socket) {
     t->response_paused = false;
@@ -2293,6 +2305,22 @@ static ScrStr *sf_latin1_to_utf8(const ScrStr *raw) {
   }
   ScrStr *out = scr_str_new(utf8, at);
   free(utf8);
+  return out;
+}
+
+/*
+ * Redirect Location values are byte sequences until Fetch's header-value
+ * extraction decodes them as UTF-8. Invalid wire sequences become U+FFFD;
+ * treating the bytes as an already-valid ScrStr instead percent-encodes
+ * each invalid octet and can follow a different resource.
+ */
+static ScrStr *sf_location_to_utf8(const ScrStr *raw) {
+  ScrBytes *bytes = scr_bytes_new(SCR_BYTES_U8, (double)raw->len);
+  if (raw->len > 0) memcpy(bytes->data, raw->data, raw->len);
+  ScrStr *encoding = scr_str_new("utf8", 4);
+  ScrStr *out = scr_bytes_to_str(bytes, encoding);
+  scr_str_release(encoding);
+  scr_bytes_release(bytes);
   return out;
 }
 
@@ -3791,7 +3819,9 @@ static void sf_on_response(ScrClosure *cb, ScrHttpReq *res) {
           sf_release(t);
           return;
         }
-        bool follow = sf_redirect(t, status, location);
+        ScrStr *decoded_location = sf_location_to_utf8(location);
+        bool follow = sf_redirect(t, status, decoded_location);
+        scr_str_release(decoded_location);
         scr_str_release(location);
         if (follow) sf_start_hop(t);
         scr_http_req_release(res);
@@ -4349,6 +4379,16 @@ static bool fx_eq_ci(const char *a, size_t alen, const char *b) {
 }
 
 static bool fx_str_is(const ScrStr *s, const char *lit) { return fx_eq_ci(s->data, s->len, lit); }
+
+static ScrStr *fx_location_to_utf8(const ScrStr *raw) {
+  ScrBytes *bytes = scr_bytes_new(SCR_BYTES_U8, (double)raw->len);
+  if (raw->len > 0) memcpy(bytes->data, raw->data, raw->len);
+  ScrStr *encoding = scr_str_new("utf8", 4);
+  ScrStr *out = scr_bytes_to_str(bytes, encoding);
+  scr_str_release(encoding);
+  scr_bytes_release(bytes);
+  return out;
+}
 
 /* Does the flat [name, value, ...] pairs array carry `name`? */
 static bool fx_pairs_have(ScrArr *pairs, const char *name) {
@@ -5073,7 +5113,9 @@ static void fx_on_response(ScrClosure *cb, ScrHttpReq *res /*+1*/) {
       /* drop this hop's connection (its body never reaches the island) */
       ScrHttpClientReq *old = t->client;
       t->client = NULL;
-      bool go = fx_redirect(t, status, loc);
+      ScrStr *decoded_loc = fx_location_to_utf8(loc);
+      bool go = fx_redirect(t, status, decoded_loc);
+      scr_str_release(decoded_loc);
       scr_str_release(loc);
       if (old) {
         scr_http_client_destroy(old);

@@ -166,6 +166,15 @@ console.log(
   await backslashRedirect.text(),
 );
 
+const invalidUtf8Redirect = await fetch(
+  `${process.argv[2]}/redirect-invalid-utf8`,
+);
+console.log(
+  "invalid utf8 redirect:",
+  invalidUtf8Redirect.url.endsWith("/caf%EF%BF%BD"),
+  await invalidUtf8Redirect.text(),
+);
+
 const fragmentRedirect = await fetch(
   `${process.argv[2]}/redirect-fragment/path`,
   {

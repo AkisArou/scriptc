@@ -16,7 +16,8 @@
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
- * /redirect-fragment/path /redirect-backslash /early-hints
+ * /redirect-fragment/path /redirect-backslash /redirect-invalid-utf8
+ * /early-hints
  * /switching-protocols /invalid-utf8 /slow /drip
  * /chunked /backpressure /backpressure-state /gzip /gzip-concat
  * /gzip-truncated /gzip-pressure /deflate
@@ -167,6 +168,15 @@ export async function startFetchServers() {
           location: `\\\\${req.headers.host}\\text`,
         });
         res.end();
+      } else if (url === "/redirect-invalid-utf8") {
+        // node:http serializes this ByteString as a raw E9 octet. Fetch
+        // UTF-8-decodes that invalid one-byte sequence to U+FFFD before
+        // resolving the redirect URL.
+        res.writeHead(302, { location: "/café" });
+        res.end();
+      } else if (url.startsWith("/caf")) {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(url);
       } else if (url === "/redirect-fragment/path") {
         const key = String(req.headers["x-redirect-key"] ?? "missing");
         if (!fragmentRedirects.has(key)) {
