@@ -777,7 +777,7 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
   "fs.existsChk",
   "http.createServer", "http.createServerEmpty",
   "http.request", "http.requestCb", "http.requestUrl", "http.requestUrlCb",
-  "https.requestUrl", "https.requestUrlCb",
+  "https.request", "https.requestCb", "https.requestUrl", "https.requestUrlCb",
   "http.requestConn", "http.requestConnCb",
   "http.agentNew", "http.requestAgent", "http.requestAgentCb",
   // The dyn-async slice (emit-exprs.ts's markings): fiber parks, the
@@ -11604,14 +11604,17 @@ class LlEmitter {
     }
     if (e.fn === "http.request" || e.fn === "http.requestCb" || e.fn === "http.requestUrl" || e.fn === "http.requestUrlCb" ||
         e.fn === "http.requestAgent" || e.fn === "http.requestAgentCb" ||
+        e.fn === "https.request" || e.fn === "https.requestCb" ||
         e.fn === "https.requestUrl" || e.fn === "https.requestUrlCb") {
       // The https URL row is the http one with the TLS entry point — same
-      // three arguments, same response-callback adapter. (The https
-      // OPTIONS forms are a separate, wider row and are not here yet.)
+      // three arguments, same response-callback adapter. The https options
+      // row is wider: rejectUnauthorized stays an i1, while its ScrStr or
+      // ScrBytes CA value expands to the runtime's raw pointer + length.
       const isTls = e.fn.startsWith("https.");
-      const isUrl = isTls || e.fn.startsWith("http.requestUrl");
+      const isUrl = e.fn.includes("requestUrl");
+      const isTlsOptions = isTls && !isUrl;
       const isAgent = e.fn.startsWith("http.requestAgent");
-      const cbIdx = isUrl ? 3 : isAgent ? 8 : 7;
+      const cbIdx = isUrl ? 3 : isTlsOptions ? 9 : isAgent ? 8 : 7;
       const hasCb = e.fn.endsWith("Cb");
       const args = e.args.map((a) => this.emitExpr(a));
       let cb = "null";
@@ -11626,14 +11629,40 @@ class LlEmitter {
         adapter = `@${sym}`;
       }
       const head = args.slice(0, cbIdx);
-      const decls = head.map((a) => (this.llType(a.type) === "i1" ? "i1 zeroext" : this.llType(a.type)));
-      const entry = isTls ? "scr_https_request_url"
+      const entry = isTlsOptions ? "scr_https_request"
+        : isTls ? "scr_https_request_url"
         : isUrl ? "scr_http_request_url"
         : isAgent ? "scr_http_request_agent" : "scr_http_request";
-      this.declare(`declare ptr @${entry}(${[...decls, "ptr", "ptr"].join(", ")})`);
+      let callArgs = head.map((a) => `${this.llType(a.type)} ${a.name}`);
+      if (isTlsOptions) {
+        const ca = args[8]!;
+        const caLenPtr = B.tmp();
+        const caLen = B.tmp();
+        let caData: string;
+        if (ca.type.kind === "string") {
+          caData = B.tmp();
+          B.line(`${caLenPtr} = getelementptr inbounds %ScrStr, ptr ${ca.name}, i64 0, i32 1`);
+          B.line(`${caLen} = load i64, ptr ${caLenPtr}`);
+          B.line(`${caData} = getelementptr inbounds i8, ptr ${ca.name}, i64 24`);
+        } else if (ca.type.kind === "bytes" && ca.type.elem === "u8") {
+          const caDataPtr = B.tmp();
+          caData = B.tmp();
+          B.line(`${caLenPtr} = getelementptr inbounds i8, ptr ${ca.name}, i64 8`);
+          B.line(`${caLen} = load i64, ptr ${caLenPtr}`);
+          B.line(`${caDataPtr} = getelementptr inbounds i8, ptr ${ca.name}, i64 24`);
+          B.line(`${caData} = load ptr, ptr ${caDataPtr}`);
+        } else {
+          throw new Error(`llvm emitter bug: ${e.fn} CA is not a string or Buffer`);
+        }
+        callArgs = [...callArgs.slice(0, 8), `ptr ${caData}`, `i64 ${caLen}`];
+        this.declare(`declare ptr @scr_https_request(ptr, double, ptr, ptr, double, ptr, i1 zeroext, i1 zeroext, ptr, i64, ptr, ptr)`);
+      } else {
+        const decls = head.map((a) => (this.llType(a.type) === "i1" ? "i1 zeroext" : this.llType(a.type)));
+        this.declare(`declare ptr @${entry}(${[...decls, "ptr", "ptr"].join(", ")})`);
+      }
       const t = B.tmp();
       B.line(
-        `${t} = call ptr @${entry}(${[...head.map((a) => `${this.llType(a.type)} ${a.name}`), `ptr ${cb}`, `ptr ${adapter}`].join(", ")})`,
+        `${t} = call ptr @${entry}(${[...callArgs, `ptr ${cb}`, `ptr ${adapter}`].join(", ")})`,
       );
       const out = this.own({ name: t, type: e.type });
       if (MAY_THROW_LIB_FNS.has(e.fn)) this.emitPendingCheck();
