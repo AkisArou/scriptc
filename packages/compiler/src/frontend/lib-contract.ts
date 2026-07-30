@@ -38,7 +38,7 @@ export type ContractTypeShape =
   | { k: "text" }
   | { k: "bytes" }
   | { k: "void" }
-  | { k: "absent" } // `null` / `undefined` type constituents
+  | { k: "absent"; unit: "null" | "undefined" }
   | { k: "ref"; name: string }
   | { k: "array"; elem: ContractTypeShape }
   | { k: "tuple"; elems: ContractTypeShape[] }
@@ -153,7 +153,7 @@ export function typeShape(file: ts.SourceFile, node: ts.TypeNode): ContractTypeS
     case ts.SyntaxKind.VoidKeyword:
       return { k: "void" };
     case ts.SyntaxKind.UndefinedKeyword:
-      return { k: "absent" };
+      return { k: "absent", unit: "undefined" };
     default:
       break;
   }
@@ -161,7 +161,7 @@ export function typeShape(file: ts.SourceFile, node: ts.TypeNode): ContractTypeS
   if (ts.isLiteralTypeNode(node)) {
     const lit = node.literal;
     if (ts.isStringLiteral(lit)) return { k: "stringLit", text: lit.text };
-    if (lit.kind === ts.SyntaxKind.NullKeyword) return { k: "absent" };
+    if (lit.kind === ts.SyntaxKind.NullKeyword) return { k: "absent", unit: "null" };
     return { k: "unsupported", text: node.getText(file) };
   }
   if (ts.isArrayTypeNode(node)) return { k: "array", elem: typeShape(file, node.elementType) };

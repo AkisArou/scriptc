@@ -245,6 +245,25 @@ type Classified =
   | { c: "alias"; target: string; decl: ContractTypeDecl; index: number }
   | { c: "unsupported"; why: string; computed?: "conditional" | "mapped"; decl: ContractTypeDecl; index: number };
 
+/** The sidecar syntax's exact IR-shape projection. Record integer facts
+ * carry this structural pattern into the post-lowering join so it can use
+ * the same field-name AND field-type identity as ShapeRegistry. Tagged
+ * payload records admit omission of `kind`: some lowering paths retain the
+ * string discriminant field while others use only the surrounding union
+ * tag. */
+export type SidecarIrTypePattern =
+  | { kind: "f64" | "string" | "bool" | "nullT" | "undefinedT" }
+  | { kind: "bytes"; elem: "u8" }
+  | { kind: "array"; elem: SidecarIrTypePattern }
+  | SidecarIrRecordPattern
+  | { kind: "union"; arms: SidecarIrTypePattern[] };
+
+export interface SidecarIrRecordPattern {
+  kind: "record";
+  fields: { name: string; type: SidecarIrTypePattern }[];
+  kindMayBeOmitted?: true;
+}
+
 function classify(decl: ContractTypeDecl, index: number): Classified {
   const s = decl.shape;
   if (s.k === "unsupported") {
@@ -322,8 +341,8 @@ class Projector {
   private readonly intDeclared = new Map<string, "i64" | "u64">();
   readonly intConsumed = new Map<string, "i64" | "u64">();
   /** The record-field slots' resolution facts for the inference: the
-   * containing record's full projected field-name list plus the target
-   * field (ir shapes intern structurally by field names). */
+   * containing record's complete projected IR shape plus the target field
+   * (IR shapes intern structurally by field names and field types). */
   readonly intRecordFacts: SidecarIntegerSlotFacts["records"] = [];
 
   constructor(
@@ -367,21 +386,102 @@ class Projector {
 
   /** intify for a struct field (declared or synthesized), recording the
    * record-resolution fact the inference maps onto interned IR shapes. */
-  intifyStructField(ref: TypeRef, container: string, field: string, allFields: string[], loc: SrcLoc): TypeRef {
+  intifyStructField(ref: TypeRef, container: string, field: string, allFields: ContractField[], loc: SrcLoc): TypeRef {
     const slotPath = `${container}.${field}`;
     const before = this.intConsumed.has(slotPath);
     const out = this.intify(ref, slotPath, loc);
     if (!before && this.intConsumed.has(slotPath)) {
       this.intRecordFacts.push({
-        fieldNames: allFields,
+        shape: this.irRecordPattern(allFields),
         targetField: field,
-        optional: out.kind === "optional",
         cls: this.intConsumed.get(slotPath)!,
         path: slotPath,
         loc,
       });
     }
     return out;
+  }
+
+  /** Canonical union constructor mirroring the frontend: nested unions
+   * flatten, structurally repeated arms collapse, and one surviving arm is
+   * just that arm. */
+  private irUnionPattern(arms: SidecarIrTypePattern[]): SidecarIrTypePattern {
+    const flat: SidecarIrTypePattern[] = [];
+    for (const arm of arms) {
+      if (arm.kind === "union") flat.push(...arm.arms);
+      else flat.push(arm);
+    }
+    const unique = new Map<string, SidecarIrTypePattern>();
+    for (const arm of flat) unique.set(JSON.stringify(arm), arm);
+    const canonical = [...unique.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, arm]) => arm);
+    if (canonical.length === 0) throw new Error("sidecar pattern bug: empty union");
+    return canonical.length === 1 ? canonical[0]! : { kind: "union", arms: canonical };
+  }
+
+  private irFieldPattern(field: ContractField): SidecarIrTypePattern {
+    const inner = this.irTypePattern(field.shape, field.loc);
+    return field.optional
+      ? this.irUnionPattern([inner, { kind: "undefinedT" }])
+      : inner;
+  }
+
+  private irRecordPattern(fields: ContractField[], tagged = false): SidecarIrRecordPattern {
+    const projected = fields.map((field) => ({
+      name: field.name,
+      type: this.irFieldPattern(field),
+    }));
+    if (tagged) projected.push({ name: "kind", type: { kind: "string" } });
+    projected.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return {
+      kind: "record",
+      fields: projected,
+      ...(tagged ? { kindMayBeOmitted: true as const } : {}),
+    };
+  }
+
+  /** Convert a sidecar-supported syntactic type into the exact structural
+   * IR pattern the frontend maps it to. Projection has already refused
+   * unsupported shapes before an integer fact is recorded, so the default
+   * cases are internal consistency checks. */
+  private irTypePattern(shape: ContractTypeShape, loc: SrcLoc): SidecarIrTypePattern {
+    switch (shape.k) {
+      case "number":
+        return { kind: "f64" };
+      case "text":
+      case "stringLit":
+        return { kind: "string" };
+      case "bool":
+        return { kind: "bool" };
+      case "bytes":
+        return { kind: "bytes", elem: "u8" };
+      case "absent":
+        return { kind: shape.unit === "null" ? "nullT" : "undefinedT" };
+      case "array":
+        return { kind: "array", elem: this.irTypePattern(shape.elem, loc) };
+      case "union":
+        return this.irUnionPattern(shape.parts.map((part) => this.irTypePattern(part, loc)));
+      case "object":
+        return this.irRecordPattern(shape.fields);
+      case "ref": {
+        const resolved = this.resolve(shape.name, loc);
+        switch (resolved.c.c) {
+          case "struct":
+            return this.irRecordPattern(resolved.c.fields);
+          case "enum":
+            return { kind: "string" };
+          case "tagged":
+            return this.irUnionPattern(
+              this.unionArms(resolved.name, loc).map((arm) => this.irRecordPattern(arm.fields, true)),
+            );
+        }
+      }
+      case "void":
+      case "tuple":
+      case "unsupported":
+        throw new Error(`sidecar pattern bug: unsupported ${shape.k} shape reached an integer record fact`);
+    }
   }
 
   /** A declared slot path that the whole projection never spelled: the
@@ -602,7 +702,7 @@ class Projector {
           seen.add(f.name);
           entry.fields.push({
             name: f.name,
-            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields.map((x) => x.name), f.loc),
+            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields, f.loc),
           });
         }
         this.table.set(name, { kind: "struct", entry, anchor: c.index, sub: -1 });
@@ -621,9 +721,8 @@ class Projector {
           // The one intifiable arm shape is a single number payload
           // field; its IR record carries the 'kind' discriminant too.
           this.intRecordFacts.push({
-            fieldNames: [...arm.fields.map((f) => f.name), "kind"],
+            shape: this.irRecordPattern(arm.fields, true),
             targetField: arm.fields[0]!.name,
-            optional: payload.kind === "optional",
             cls: this.intConsumed.get(slotPath)!,
             path: slotPath,
             loc: arm.loc,
@@ -669,7 +768,7 @@ class Projector {
       seen.add(f.name);
       entry.fields.push({
         name: f.name,
-        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields.map((x) => x.name), f.loc),
+        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields, f.loc),
       });
     }
     return name;
@@ -696,9 +795,8 @@ class Projector {
         const numRef = this.intify({ kind: "f64" }, slotPath, first.loc);
         if (numRef.kind === "i64") {
           this.intRecordFacts.push({
-            fieldNames: [first.name, second.name, "kind"],
+            shape: this.irRecordPattern(fields, true),
             targetField: first.name,
-            optional: false,
             cls: this.intConsumed.get(slotPath)!,
             path: slotPath,
             loc: first.loc,
@@ -717,9 +815,8 @@ class Projector {
       ref = this.intify(ref, slotPath, arm.loc);
       if (!before && this.intConsumed.has(slotPath)) {
         this.intRecordFacts.push({
-          fieldNames: [fields[0]!.name, "kind"],
+          shape: this.irRecordPattern(fields, true),
           targetField: fields[0]!.name,
-          optional: ref.kind === "optional",
           cls: this.intConsumed.get(slotPath)!,
           path: slotPath,
           loc: arm.loc,
@@ -778,15 +875,14 @@ export interface SidecarBuildInput {
  * the facts the boundary inference maps onto lowered IR: helper slots by
  * function name and IR parameter index (the schema's helper param index
  * skips the model receiver, so `index` is already shifted +1), and
- * record-field slots by the containing record's projected field-name
- * list plus the target field (IR record shapes intern structurally by
- * field name, so the list is the join key). */
+ * record-field slots by the containing record's complete structural IR
+ * pattern plus the target field (IR record shapes intern by both field
+ * names and field types, so the full signature is the join key). */
 export interface SidecarIntegerSlotFacts {
   helpers: { fnName: string; kind: "param" | "return"; index?: number; cls: "i64" | "u64"; path: string }[];
   records: {
-    fieldNames: string[];
+    shape: SidecarIrRecordPattern;
     targetField: string;
-    optional: boolean;
     cls: "i64" | "u64";
     path: string;
     loc: SrcLoc;

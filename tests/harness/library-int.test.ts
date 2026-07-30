@@ -625,6 +625,72 @@ export function replace(m: Model, id: number): Model {
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("same-named fields with different field types remain distinct integer shapes", async () => {
+    const source = `export interface A { value: number; extra: string; }
+export interface B { value: number; extra: boolean; }
+export interface Model { a: A; b: B; }
+export type Msg = { kind: "noop" } | { kind: "other" };
+export function init(): Model {
+  return {
+    a: { value: 1, extra: "" },
+    b: { value: 2, extra: false },
+  };
+}
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const slots = [
+      { slot: "A.value", class: "u64" },
+      { slot: "B.value", class: "i64" },
+    ];
+    const r = await buildCase(
+      "sidecar-int-distinct-shapes",
+      source,
+      sidecarProfile(slots, { exports: [] }),
+    );
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+    if (!r.ok) return;
+    const doc = JSON.parse(readFileSync(r.sidecarPath!, "utf8")) as {
+      integer_slots: { slot: string; class: string }[];
+      types: { structs: { name: string; fields: { name: string; type: { kind: string } }[] }[] };
+    };
+    expect(doc.integer_slots).toEqual(slots);
+    for (const name of ["A", "B"]) {
+      expect(doc.types.structs.find((s) => s.name === name)!.fields.find((f) => f.name === "value")!.type).toEqual({ kind: "i64" });
+    }
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+
+  test("null- and undefined-optional integer fields remain distinct IR shapes", async () => {
+    const source = `export interface A { value: number | null; }
+export interface B { value: number | undefined; }
+export interface Model { a: A; b: B; }
+export type Msg = { kind: "noop" } | { kind: "other" };
+export function init(): Model {
+  return {
+    a: { value: null },
+    b: { value: undefined },
+  };
+}
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const slots = [
+      { slot: "A.value", class: "u64" },
+      { slot: "B.value", class: "i64" },
+    ];
+    const r = await buildCase(
+      "sidecar-int-distinct-optional-shapes",
+      source,
+      sidecarProfile(slots, { exports: [] }),
+    );
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+    if (!r.ok) return;
+    const doc = JSON.parse(readFileSync(r.sidecarPath!, "utf8")) as {
+      integer_slots: { slot: string; class: string }[];
+    };
+    expect(doc.integer_slots).toEqual(slots);
+    expect(validateSidecar(doc)).toEqual([]);
+  });
+
   test("same-shaped tagged-union integer slots refuse instead of overwriting an obligation", async () => {
     const source = `export interface Model { value: number; }
 export type Msg = { kind: "first"; id: number } | { kind: "second"; id: number };

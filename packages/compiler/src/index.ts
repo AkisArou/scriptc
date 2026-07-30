@@ -15,11 +15,13 @@ import {
   compilerReleaseVersion,
   libraryIdentityHashes,
   type SidecarIntegerSlotFacts,
+  type SidecarIrRecordPattern,
+  type SidecarIrTypePattern,
 } from "./library/sidecar.js";
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrType, type SrcLoc } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -1046,14 +1048,99 @@ function libraryIntSlotConfig(profile: LibraryProfile): IntSlotConfig {
   return cfg;
 }
 
+/** Match the sidecar syntax's exact structural type projection against the
+ * frontend's interned IR registries. The pattern deliberately mirrors
+ * ShapeRegistry's identity: every field name and recursively mapped field
+ * type participates. Tagged payload records additionally accept omission
+ * of their `kind` field because the lowering may carry that discriminant
+ * only in the surrounding union tag. */
+function sidecarRecordMatcher(
+  mod: IrModule,
+): (pattern: SidecarIrRecordPattern, shape: IrRecordShape) => boolean {
+  const records = new Map((mod.records ?? []).map((shape) => [shape.id, shape]));
+  const unions = new Map((mod.unions ?? []).map((union) => [union.id, union]));
+
+  const recordMatches = (
+    pattern: SidecarIrRecordPattern,
+    shape: IrRecordShape,
+    depth: number,
+  ): boolean => {
+    if (depth > 64 || shape.tuple === true || shape.indexValue !== undefined) return false;
+    const variants = [pattern.fields];
+    if (pattern.kindMayBeOmitted === true) {
+      variants.push(pattern.fields.filter((field) => field.name !== "kind"));
+    }
+    return variants.some(
+      (fields) =>
+        fields.length === shape.fields.length &&
+        fields.every((field) => {
+          const actual = shape.fields.find((candidate) => candidate.name === field.name);
+          return actual !== undefined && typeMatches(field.type, actual.type, depth + 1);
+        }),
+    );
+  };
+
+  const unionMatches = (
+    patterns: SidecarIrTypePattern[],
+    actual: IrType[],
+    depth: number,
+  ): boolean => {
+    if (patterns.length !== actual.length) return false;
+    const used = new Set<number>();
+    const visit = (index: number): boolean => {
+      if (index === patterns.length) return true;
+      for (let i = 0; i < actual.length; i++) {
+        if (used.has(i) || !typeMatches(patterns[index]!, actual[i]!, depth + 1)) continue;
+        used.add(i);
+        if (visit(index + 1)) return true;
+        used.delete(i);
+      }
+      return false;
+    };
+    return visit(0);
+  };
+
+  const typeMatches = (
+    pattern: SidecarIrTypePattern,
+    actual: IrType,
+    depth: number,
+  ): boolean => {
+    if (depth > 64) return false;
+    switch (pattern.kind) {
+      case "f64":
+      case "string":
+      case "bool":
+      case "nullT":
+      case "undefinedT":
+        return actual.kind === pattern.kind;
+      case "bytes":
+        return actual.kind === "bytes" && actual.elem === pattern.elem;
+      case "array":
+        return actual.kind === "array" && typeMatches(pattern.elem, actual.elem, depth + 1);
+      case "record": {
+        if (actual.kind !== "record") return false;
+        const shape = records.get(actual.shapeId);
+        return shape !== undefined && recordMatches(pattern, shape, depth + 1);
+      }
+      case "union": {
+        if (actual.kind !== "union") return false;
+        const union = unions.get(actual.unionId);
+        return union !== undefined && unionMatches(pattern.arms, union.arms, depth + 1);
+      }
+    }
+  };
+
+  return (pattern, shape) => recordMatches(pattern, shape, 0);
+}
+
 /** Merge the sidecar-resolved integer slots (ask 4) into the inference
  * config: helper slots key by function name and IR parameter index (the
  * projection already shifted past the model receiver); record-field
- * slots map onto every interned IR shape whose field-name set and numeric
- * optionality match the projected record's. Shapes intern structurally, so
- * a same-shaped second type shares the obligation (a sound
- * over-approximation); two DECLARED paths resolving to the same shape-field
- * key refuse because overwriting either attestation would be unsound. A
+ * slots map onto every interned IR shape whose complete structural field
+ * signature matches the projected record's. Shapes intern structurally,
+ * so a same-shaped second type shares the obligation; two DECLARED paths
+ * resolving to the same shape-field key refuse because overwriting either
+ * attestation would be unsound. A
  * record fact that matches no shape binds nothing: no compiled code
  * constructs the type (the contract surface — init/update/subscriptions
  * and every helper — is force-lowered whenever integer slots are
@@ -1063,6 +1150,7 @@ function mergeSidecarIntSlots(
   facts: SidecarIntegerSlotFacts,
   mod: IrModule,
 ): { ok: true; config: IntSlotConfig } | { ok: false; diagnostic: ScrDiagnostic } {
+  const recordMatches = sidecarRecordMatcher(mod);
   for (const h of facts.helpers) {
     const fn = mod.functions.find((f) => f.name === h.fnName);
     const arity = Math.max(fn?.params.length ?? 0, (h.index ?? 0) + 1);
@@ -1093,20 +1181,10 @@ function mergeSidecarIntSlots(
     }
   }
   for (const r of facts.records) {
-    const wanted = new Set(r.fieldNames);
-    const wantedSansKind = new Set(r.fieldNames.filter((n) => n !== "kind"));
     for (const shape of mod.records ?? []) {
-      if (shape.tuple === true || shape.indexValue !== undefined) continue;
-      const names = shape.fields.map((f) => f.name);
-      if (names.some((n) => n.startsWith("%"))) continue;
-      // The union discriminant may or may not materialize as a shape
-      // field depending on the arm's lowering; match either spelling.
-      const matches =
-        (names.length === wanted.size && names.every((n) => wanted.has(n))) ||
-        (names.length === wantedSansKind.size && names.every((n: string) => wantedSansKind.has(n)));
-      if (!matches) continue;
+      if (!recordMatches(r.shape, shape)) continue;
       const target = shape.fields.find((f) => f.name === r.targetField);
-      if (target === undefined || numberCarrierKind(target.type, mod) !== (r.optional ? "optional" : "plain")) continue;
+      if (target === undefined || numberCarrierKind(target.type, mod) === null) continue;
       let m = cfg.records.get(shape.id);
       if (m === undefined) {
         m = new Map();
