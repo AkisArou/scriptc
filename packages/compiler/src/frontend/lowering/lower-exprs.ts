@@ -3640,7 +3640,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         // the surrounding array literal will copy. In particular this is
         // the Uint8Array-to-Array bridge (`[...u8]`), with element values
         // read rather than backing bytes for the wider typed-array kinds.
-        if (src.type.kind === "bytes" && type.elem.kind === "f64") {
+        if (src.type.kind === "bytes") {
           src = {
             kind: "bytesIntrinsic",
             method: "toArray",

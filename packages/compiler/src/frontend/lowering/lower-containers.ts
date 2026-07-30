@@ -210,14 +210,17 @@ function lowerOptionalDefaultArg(
         type: F64,
         loc,
       };
-      const deleteCount = call.arguments[1]
-        ? lowerOptionalDefaultArg(
-            L,
-            call.arguments[1],
-            F64,
-            deleteCountDefault,
-          )
-        : { kind: "numLit" as const, value: Infinity, type: F64, loc };
+      const deleteCount =
+        call.arguments.length === 0
+          ? { kind: "numLit" as const, value: 0, type: F64, loc }
+          : call.arguments[1]
+            ? lowerOptionalDefaultArg(
+                L,
+                call.arguments[1],
+                F64,
+                deleteCountDefault,
+              )
+            : { kind: "numLit" as const, value: Infinity, type: F64, loc };
       const items: IrExpr = {
         kind: "arrayLit",
         elems: call.arguments.slice(2).map((arg) =>

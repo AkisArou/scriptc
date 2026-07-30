@@ -49,6 +49,9 @@ const spread = [...source];
 spread[0] = 99;
 console.log(spread.join(","), source.join(","));
 
+const widened: (number | string)[] = [...source, "tail"];
+console.log(widened.join(","));
+
 const [a, b, , d] = source;
 console.log(a, b, d);
 
