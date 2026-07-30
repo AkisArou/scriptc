@@ -6,13 +6,23 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.0.20
+
+### Features
+
+- **Contract sidecars accept TypeScript's read-only and named scalar vocabulary.** `readonly T[]` and `ReadonlyArray<T>` project as the same mutability-neutral slice as `T[]`, while aliases of `number`, `string`, `boolean`, and `Uint8Array` dissolve recursively to their primitive wire types across models, messages, helpers, and integer slots without adding phantom type-table entries.
+
+### Fixes
+
+- A local declaration, import, or type parameter named `Array`, `ReadonlyArray`, or `Uint8Array` remains the user's type instead of being mistaken for the same-spelled global and publishing the wrong slice or bytes contract.
+
+<!-- release:end -->
+
 ## 0.0.19
 
 ### Fixes
 
 - **Library integer slots compose with optional numbers.** A declared `number | null` or optional-number slot projects as `optional<i64>` and proves only its present numeric values across records, tagged-message payloads, and helper parameters/returns. When two sidecar paths collapse to the same structurally interned record field, the build now refuses with both paths instead of silently overwriting one proof obligation.
-
-<!-- release:end -->
 
 ## 0.0.18
 
