@@ -24,6 +24,7 @@ const F64 = { kind: "f64" } as const;
 const BOOL = { kind: "bool" } as const;
 const VOID = { kind: "void" } as const;
 const MODEL = { kind: "record", shapeId: "model-shape" } as const;
+const OPTIONAL_NUMBER = { kind: "union", unionId: "optional-number" } as const;
 
 const num = (value: number, spelling?: string): IrExpr =>
   spelling === undefined
@@ -326,6 +327,71 @@ describe("the domain's edges beyond the corpus", () => {
     expect(vs[0]!.outcome).toBe("refuse");
     expect(vs[0]!.obligation).toBe("range");
     expect(vs[0]!.detail).toContain(`[${SAFE_MIN}, ${SAFE_MAX}]`);
+  });
+
+  test("a matching unit tag makes an optional return vacuous", () => {
+    const x: IrExpr = { kind: "varRef", localId: "x.0", type: OPTIONAL_NUMBER, loc };
+    const one: IrExpr = {
+      kind: "unionWrap",
+      unionId: OPTIONAL_NUMBER.unionId,
+      tag: 0,
+      value: num(1),
+      type: OPTIONAL_NUMBER,
+      loc,
+    };
+    const mod: IrModule = {
+      irVersion: 3,
+      sourceFile: "optional.ts",
+      functions: [{
+        name: "normalize",
+        params: [{ localId: "x.0", name: "x", type: OPTIONAL_NUMBER }],
+        returnType: OPTIONAL_NUMBER,
+        locals: [{ id: "x.0", name: "x", type: OPTIONAL_NUMBER, mutable: true }],
+        body: [
+          {
+            kind: "if",
+            cond: {
+              kind: "unionIsTag",
+              unionId: OPTIONAL_NUMBER.unionId,
+              tag: 1,
+              negated: false,
+              value: x,
+              type: BOOL,
+              loc,
+            },
+            then: [{ kind: "return", value: x, loc }],
+            else_: null,
+            loc,
+          },
+          { kind: "return", value: one, loc },
+        ],
+        loc,
+      }],
+      unions: [{
+        id: OPTIONAL_NUMBER.unionId,
+        arms: [F64, { kind: "nullT" }],
+      }],
+      entry: "normalize",
+    };
+    const cfg: IntSlotConfig = {
+      fns: new Map([[
+        "normalize",
+        {
+          fnName: "normalize",
+          params: [null],
+          paramPaths: [null],
+          ret: "u64",
+          retPath: "helpers.normalize.return",
+          paramSeeds: [null],
+        },
+      ]]),
+      records: new Map(),
+    };
+    const vs = checkLibraryIntegerSlots(mod, cfg);
+    expect(vs).toHaveLength(2);
+    expect(vs.every((v) => v.outcome === "prove")).toBe(true);
+    expect(Number.isNaN(vs[0]!.provenLo)).toBe(true);
+    expect(vs[1]!.provenLo).toBe(1);
   });
 
   test("a guard that only excludes NaN still refuses on the unbounded range", () => {

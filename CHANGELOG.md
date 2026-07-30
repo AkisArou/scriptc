@@ -4,6 +4,10 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+### Fixes
+
+- **Library integer slots compose with optional numbers.** A declared `number | null` or optional-number slot projects as `optional<i64>` and proves only its present numeric values across records, tagged-message payloads, and helper parameters/returns. When two sidecar paths collapse to the same structurally interned record field, the build now refuses with both paths instead of silently overwriting one proof obligation.
+
 <!-- release:start -->
 
 ## 0.0.18
