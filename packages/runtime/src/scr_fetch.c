@@ -245,6 +245,7 @@ struct SfStream {
   SfCollector *collector; /* owned while a body reader is active */
   ScrDyn *pull_cb;
   ScrDyn *cancel_cb;
+  ScrDyn *source_this;
   ScrDyn *from_dyn;
   ScrArr *from_array;
   ScrBytes *from_bytes;
@@ -1260,13 +1261,19 @@ static void sf_stream_drop_source_callbacks(
     SfStream *s, bool include_cancel) {
   ScrDyn *pull = s->pull_cb;
   ScrDyn *cancel = include_cancel ? s->cancel_cb : NULL;
+  ScrDyn *source_this = NULL;
   s->pull_cb = NULL;
   if (include_cancel) s->cancel_cb = NULL;
-  if (!s->pull_cb && !s->cancel_cb) sf_stream_untrack_callbacks(s);
+  if (!s->pull_cb && !s->cancel_cb) {
+    source_this = s->source_this;
+    s->source_this = NULL;
+    sf_stream_untrack_callbacks(s);
+  }
   /* Unlink both edges before either closure release can re-enter through a
    * captured stream handle. */
   scr_dyn_release(pull);
   scr_dyn_release(cancel);
+  scr_dyn_release(source_this);
 }
 
 static void sf_stream_release(SfStream *s) {
@@ -1947,8 +1954,10 @@ static void sf_stream_pull(SfStream *s) {
     ScrDyn *controller = sf_controller_box(s);
     ScrDyn *args[1] = {controller};
     ScrDyn *pull_cb = scr_dyn_retain(s->pull_cb);
+    scr_dyn_this_push_dyn(s->source_this);
     ScrDyn *r =
         scr_dyn_call(pull_cb, args, 1, "underlyingSource.pull");
+    scr_dyn_this_pop();
     scr_dyn_release(pull_cb);
     scr_dyn_release(controller);
     if (!r) {
@@ -2095,6 +2104,8 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
   }
   ScrDyn *cancel_cb =
       s->cancel_cb ? scr_dyn_retain(s->cancel_cb) : NULL;
+  ScrDyn *cancel_this =
+      cancel_cb ? scr_dyn_retain(s->source_this) : NULL;
   sf_stream_drop_chunks(s);
   SfTransfer *response_owner = s->response_owner;
   if (response_owner && response_owner->client) {
@@ -2106,9 +2117,12 @@ static ScrPromise *sf_stream_cancel(SfStream *s, ScrDyn *reason,
 
   if (cancel_cb) {
     ScrDyn *args[1] = {reason ? reason : scr_dyn_undefined()};
+    scr_dyn_this_push_dyn(cancel_this);
     ScrDyn *r =
         scr_dyn_call(cancel_cb, args, 1, "underlyingSource.cancel");
+    scr_dyn_this_pop();
     scr_dyn_release(cancel_cb);
+    scr_dyn_release(cancel_this);
     if (!r) {
       scr_promise_reject_pending(p);
       return p;
@@ -2185,6 +2199,9 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
       }
       s->cancel_cb = scr_dyn_retain((ScrDyn *)cancel);
     }
+    if (s->pull_cb || s->cancel_cb) {
+      s->source_this = scr_dyn_retain(source);
+    }
     sf_stream_track_callbacks(s);
     if (start && start->kind != SCR_DYN_UNDEF) {
       if (start->kind != SCR_DYN_FUNC) {
@@ -2195,8 +2212,10 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
       s->started = false;
       ScrDyn *controller = sf_controller_box(s);
       ScrDyn *args[1] = {controller};
+      scr_dyn_this_push_dyn(source);
       ScrDyn *r =
           scr_dyn_call((ScrDyn *)start, args, 1, "underlyingSource.start");
+      scr_dyn_this_pop();
       scr_dyn_release(controller);
       if (!r) {
         sf_stream_release(s);
