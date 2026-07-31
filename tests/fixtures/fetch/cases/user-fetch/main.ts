@@ -136,6 +136,15 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   const modeJson = (await modeResponse.json()) as { secFetchMode: string };
   console.log("forced sec-fetch-mode:", modeJson.secFetchMode);
 
+  const hostResponse = await fetch(`${baseUrl}/request-defaults`, {
+    headers: { host: "custom.invalid" },
+  });
+  const hostJson = (await hostResponse.json()) as { host: string };
+  console.log(
+    "transport-controlled host:",
+    hostJson.host === new URL(baseUrl).host,
+  );
+
   // A stored Response promise awaits later like any static promise.
   const pending: Promise<Response> = fetch(`${baseUrl}/json`);
   const again = await pending;

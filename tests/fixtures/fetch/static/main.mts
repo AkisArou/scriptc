@@ -124,6 +124,15 @@ const forcedFetchMode = (await (
   })
 ).json()) as { secFetchMode: string };
 console.log("forced sec-fetch-mode:", forcedFetchMode.secFetchMode);
+const forcedHost = (await (
+  await fetch(`${process.argv[2]}/request-defaults`, {
+    headers: { host: "custom.invalid" },
+  })
+).json()) as { host: string };
+console.log(
+  "transport-controlled host:",
+  forcedHost.host === new URL(process.argv[2]!).host,
+);
 console.log(
   "raw request headers:",
   await (await fetch(`${process.argv[2]}/raw-headers`)).text(),

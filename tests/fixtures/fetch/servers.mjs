@@ -133,6 +133,7 @@ export async function startFetchServers() {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
           JSON.stringify({
+            host: req.headers.host ?? null,
             accept: req.headers["accept"] ?? null,
             acceptLanguage: req.headers["accept-language"] ?? null,
             secFetchMode: req.headers["sec-fetch-mode"] ?? null,

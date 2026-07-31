@@ -777,7 +777,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
               : scr_dyn_retain(callable);
       const ScrDyn *handle =
           scr_dyn_obj_get(current_listener, "handleEvent", 11);
-      if (!handle || handle->kind != SCR_DYN_FUNC) {
+      if (!handle) {
         scr_dyn_release(current_listener);
         scr_dyn_release(dispatch[i].listener);
         continue;
@@ -973,11 +973,10 @@ static bool sf_signal_listener_options(
 }
 
 static bool sf_abort_listener_value(const ScrDyn *listener) {
-  if (listener->kind == SCR_DYN_FUNC) return true;
-  if (listener->kind != SCR_DYN_OBJ) return false;
-  const ScrDyn *handle =
-      scr_dyn_obj_get(listener, "handleEvent", 11);
-  return handle && handle->kind == SCR_DYN_FUNC;
+  /* Web IDL callback interfaces accept any object. handleEvent is looked up
+   * when the event is dispatched, where a non-callable value reports an
+   * asynchronous listener error and a missing value is a no-op. */
+  return listener->kind == SCR_DYN_FUNC || listener->kind == SCR_DYN_OBJ;
 }
 
 static bool sf_abort_listener_equal(
@@ -1498,7 +1497,6 @@ static void sf_stream_finish_close(SfStream *s) {
 }
 
 static void sf_stream_drain(SfStream *s) {
-  if (!s->started) return;
   if (s->request_owner) {
     sf_stream_request_flush(s);
     return;
@@ -3733,7 +3731,7 @@ static void sf_request_length_mismatch(SfTransfer *t) {
 
 static void sf_stream_request_flush(SfStream *s) {
   SfTransfer *t = s->request_owner;
-  if (!s->started || !t || t->done || !t->client) return;
+  if (!t || t->done || !t->client) return;
   while (s->head) {
     SfChunk *c = s->head;
     s->head = c->next;
@@ -4216,31 +4214,35 @@ static bool sf_start_hop(SfTransfer *t) {
   size_t user_len = (size_t)scr_arr_len(t->headers);
   ScrArr *headers = scr_arr_new(SCR_ELEM_STR, user_len + 16);
 
-  if (!sf_pairs_have(t->headers, "host")) {
-    char authority[384];
-    int authority_len =
-        port == default_port
-            ? snprintf(authority, sizeof authority, "%.*s",
-                       (int)url->host->len, url->host->data)
-            : snprintf(authority, sizeof authority, "%.*s:%d",
-                       (int)url->host->len, url->host->data, port);
-    if (authority_len < 0 ||
-        (size_t)authority_len >= sizeof authority) {
-      scr_arr_release(headers);
-      scr_url_release(proxy);
-      sf_reject(t, "fetch failed");
-      return false;
-    }
-    sf_push_header_text(headers, "host", authority,
-                        (size_t)authority_len);
+  char authority[384];
+  int authority_len =
+      port == default_port
+          ? snprintf(authority, sizeof authority, "%.*s",
+                     (int)url->host->len, url->host->data)
+          : snprintf(authority, sizeof authority, "%.*s:%d",
+                     (int)url->host->len, url->host->data, port);
+  if (authority_len < 0 ||
+      (size_t)authority_len >= sizeof authority) {
+    scr_arr_release(headers);
+    scr_url_release(proxy);
+    sf_reject(t, "fetch failed");
+    return false;
   }
+  sf_push_header_text(headers, "host", authority,
+                      (size_t)authority_len);
   if (!sf_pairs_have(t->headers, "connection")) {
     sf_push_header_text(headers, "connection", "keep-alive", 10);
   }
   for (size_t i = 0; i + 1 < user_len; i += 2) {
-    scr_arr_push_ref(headers, scr_arr_get_ref(t->headers, (double)i));
-    scr_arr_push_ref(headers,
-                     scr_arr_get_ref(t->headers, (double)(i + 1)));
+    ScrStr *name = scr_arr_get_ref(t->headers, (double)i);
+    ScrStr *value = scr_arr_get_ref(t->headers, (double)(i + 1));
+    if (sf_eq_ci(name, "host")) {
+      scr_str_release(name);
+      scr_str_release(value);
+      continue;
+    }
+    scr_arr_push_ref(headers, name);
+    scr_arr_push_ref(headers, value);
   }
   if (proxy && proxy->userinfo->len > 0 &&
       !sf_pairs_have(t->headers, "proxy-authorization")) {
@@ -5312,22 +5314,27 @@ static void fx_start_hop(FxTransfer *t) {
    * headers, then the fetch defaults for whatever the user left unset. */
   size_t nuser = (size_t)scr_arr_len(t->headers);
   ScrArr *pairs = scr_arr_new(SCR_ELEM_STR, nuser + 16);
-  if (!fx_pairs_have(t->headers, "host")) {
-    char authority[300];
-    int alen;
-    if (port != default_port) {
-      alen = snprintf(authority, sizeof authority, "%.*s:%d", (int)u->host->len, u->host->data, port);
-    } else {
-      alen = snprintf(authority, sizeof authority, "%.*s", (int)u->host->len, u->host->data);
-    }
-    fx_pairs_push(pairs, "host", authority, (size_t)alen);
+  char authority[300];
+  int alen;
+  if (port != default_port) {
+    alen = snprintf(authority, sizeof authority, "%.*s:%d", (int)u->host->len, u->host->data, port);
+  } else {
+    alen = snprintf(authority, sizeof authority, "%.*s", (int)u->host->len, u->host->data);
   }
+  fx_pairs_push(pairs, "host", authority, (size_t)alen);
   if (!fx_pairs_have(t->headers, "connection")) {
     fx_pairs_push(pairs, "connection", "keep-alive", 10);
   }
   for (size_t i = 0; i + 1 < nuser; i += 2) {
-    scr_arr_push_ref(pairs, scr_arr_get_ref(t->headers, (double)i));
-    scr_arr_push_ref(pairs, scr_arr_get_ref(t->headers, (double)(i + 1)));
+    ScrStr *name = scr_arr_get_ref(t->headers, (double)i);
+    ScrStr *value = scr_arr_get_ref(t->headers, (double)(i + 1));
+    if (fx_eq_ci(name->data, name->len, "host")) {
+      scr_str_release(name);
+      scr_str_release(value);
+      continue;
+    }
+    scr_arr_push_ref(pairs, name);
+    scr_arr_push_ref(pairs, value);
   }
   if (proxy && proxy->userinfo->len > 0 &&
       !fx_pairs_have(t->headers, "proxy-authorization")) {

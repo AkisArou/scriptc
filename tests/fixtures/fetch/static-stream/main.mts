@@ -712,6 +712,25 @@ const asyncStart = new ReadableStream<Uint8Array>({
 });
 await asyncStart.getReader().read();
 
+let releaseQueuedStart = (): void => {};
+const queuedDuringStart = new ReadableStream<string>({
+  start(controller) {
+    controller.enqueue("queued");
+    return new Promise<void>((resolve) => {
+      releaseQueuedStart = resolve;
+    });
+  },
+});
+let queuedStartObserved = "pending";
+const queuedStartRead = queuedDuringStart.getReader().read();
+void queuedStartRead.then((part) => {
+  queuedStartObserved = part.done ? "done" : `read:${part.value}`;
+});
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("queued during pending start:", queuedStartObserved);
+releaseQueuedStart();
+await queuedStartRead;
+
 let thenableStartReady = false;
 const thenableStart = new ReadableStream<Uint8Array>({
   start() {
