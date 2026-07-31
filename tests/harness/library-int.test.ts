@@ -950,7 +950,53 @@ export function update(m: Model, msg: Msg): Model { return m }
     expect(r.diagnostics[0]!.message).toContain(evidence);
   });
 
-  test("same-shaped tagged-union integer slots refuse instead of overwriting an obligation", async () => {
+  test("same-shaped tagged-union slots with the same class coalesce and retain every path", async () => {
+    const source = `export interface Model { value: number; }
+export type Msg = { kind: "first"; id: number } | { kind: "second"; id: number };
+let last: Msg = { kind: "first", id: 1 };
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "first") last = { kind: "second", id: 2 };
+  return m;
+}
+`;
+    const slots = [
+      { slot: "Msg.first", class: "i64" },
+      { slot: "Msg.second", class: "i64" },
+    ];
+    const proved = await buildCase(
+      "sidecar-int-same-class-shape-collision",
+      source,
+      sidecarProfile(slots, { exports: [] }),
+    );
+    expect(
+      proved.ok,
+      proved.ok ? "" : proved.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+    ).toBe(true);
+    if (!proved.ok) return;
+    const doc = JSON.parse(readFileSync(proved.sidecarPath!, "utf8")) as {
+      integer_slots: { slot: string; class: string }[];
+    };
+    expect(doc.integer_slots).toEqual(slots);
+    expect(validateSidecar(doc)).toEqual([]);
+
+    const refused = await buildCase(
+      "sidecar-int-same-class-shape-collision-refuse",
+      source.replace('last = { kind: "second", id: 2 }', 'last = { kind: "second", id: 0.5 }'),
+      sidecarProfile(slots, { exports: [] }),
+    );
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.diagnostics.map((d) => d.code)).toEqual(["SC4022", "SC4022"]);
+    expect(refused.diagnostics.map((d) => d.message)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("'Msg.first' (i64)"),
+        expect.stringContaining("'Msg.second' (i64)"),
+      ]),
+    );
+  });
+
+  test("same-shaped tagged-union integer slots with differing classes refuse instead of overwriting an obligation", async () => {
     const source = `export interface Model { value: number; }
 export type Msg = { kind: "first"; id: number } | { kind: "second"; id: number };
 export function init(): Model { return { value: 0 }; }

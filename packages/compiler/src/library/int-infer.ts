@@ -419,23 +419,21 @@ export interface FnIntSlots {
   paramSeeds: (AbsVal | null)[];
 }
 
-/** One record-field slot, resolved to an interned IR record shape: every
- * program-side construction (recordLit) or write (recordSet) of `field`
- * on shape `shapeId` must discharge the obligations. Shapes are interned
- * STRUCTURALLY, so a second type with the identical field list shares the
- * shape — and inherits the obligation, a sound over-approximation. */
+/** One lowered record-field obligation. Every program-side construction
+ * (recordLit) or write (recordSet) of the field must discharge `cls` for
+ * EVERY source contract path in `paths`. Shapes are interned STRUCTURALLY,
+ * so same-shaped source slots with the same declared class coalesce here:
+ * one proof fact, all attestation/diagnostic identities retained. */
 export interface RecordIntSlot {
-  shapeId: string;
-  field: string;
   cls: IntClass;
-  path: string;
+  paths: string[];
 }
 
 export interface IntSlotConfig {
   /** Keyed by IR function name. */
   fns: Map<string, FnIntSlots>;
   /** shapeId → field → slot. */
-  records: Map<string, Map<string, { cls: IntClass; path: string }>>;
+  records: Map<string, Map<string, RecordIntSlot>>;
 }
 
 /** The IR representations whose PRESENT values can carry one number slot.
@@ -798,6 +796,14 @@ class FnAnalyzer {
     this.verdicts.push(checkBoundary(v, path, cls, loc));
   }
 
+  /** One lowered write can conservatively cover several same-class source
+   * contract slots. Check once per path so every attestation identity
+   * survives into a refusal instead of inheriting the first declarer's
+   * label. */
+  private emitRecordSlot(v: AbsVal, slot: RecordIntSlot, loc: SrcLoc): void {
+    for (const path of slot.paths) this.emit(v, path, slot.cls, loc);
+  }
+
   /* ── statements ─────────────────────────────────────────────────────── */
 
   private execStmts(stmts: IrStmt[], env: Env | null): Env | null {
@@ -897,7 +903,7 @@ class FnAnalyzer {
         this.evalExpr(s.obj, env);
         const v = this.evalExpr(s.value, env);
         const slot = this.cfg.records.get(s.shapeId)?.get(s.field);
-        if (slot !== undefined) this.emit(v, slot.path, slot.cls, s.loc);
+        if (slot !== undefined) this.emitRecordSlot(v, slot, s.loc);
         // The RHS and its boundary obligation observe the pre-write value;
         // only the completed heap write invalidates paths (JS evaluation
         // order, and what lets `m.count = m.count + 1` prove).
@@ -915,7 +921,7 @@ class FnAnalyzer {
         // independent obligations (their classes and paths may differ).
         if (s.overflowOnly !== true) {
           for (const slot of this.cfg.records.get(s.shapeId)?.values() ?? []) {
-            this.emit(v, slot.path, slot.cls, s.loc);
+            this.emitRecordSlot(v, slot, s.loc);
           }
         }
         clearPathFacts(env);
@@ -1604,7 +1610,7 @@ class FnAnalyzer {
           const v = this.evalExpr(f.value, env);
           const slot = slotMap?.get(f.name);
           if (slot !== undefined && numberCarrierKind(f.value.type, this.mod) !== null) {
-            this.emit(v, slot.path, slot.cls, f.value.loc);
+            this.emitRecordSlot(v, slot, f.value.loc);
           }
         }
         return { ...TOP };

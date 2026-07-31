@@ -127,7 +127,7 @@ const countWrite = (value: IrExpr, name = "m"): IrStmt => ({
 const RECORD_CFG: IntSlotConfig = {
   fns: new Map(),
   records: new Map([
-    [MODEL.shapeId, new Map([["count", { cls: "i64", path: "Model.count" }]])],
+    [MODEL.shapeId, new Map([["count", { cls: "i64", paths: ["Model.count"] }]])],
   ]),
 };
 

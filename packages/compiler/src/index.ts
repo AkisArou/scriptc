@@ -1135,9 +1135,10 @@ function sidecarRecordMatcher(
  * projection already shifted past the model receiver); record-field
  * slots map onto every interned IR shape whose complete structural field
  * signature matches the projected record's. Shapes intern structurally,
- * so a same-shaped second type shares the obligation; two DECLARED paths
- * resolving to the same shape-field key refuse because overwriting either
- * attestation would be unsound. A
+ * so a same-shaped second type shares the obligation. DECLARED paths with
+ * the same class coalesce while retaining every source path for verdicts;
+ * differing classes refuse because one lowered field cannot seed or check
+ * two distinct class contracts without arm provenance. A
  * record fact that matches no shape binds nothing: no compiled code
  * constructs the type (the contract surface — init/update/subscriptions
  * and every helper — is force-lowered whenever integer slots are
@@ -1188,17 +1189,25 @@ function mergeSidecarIntSlots(
         cfg.records.set(shape.id, m);
       }
       const existing = m.get(r.targetField);
-      if (existing !== undefined && existing.path !== r.path) {
+      if (existing !== undefined && existing.cls !== r.cls) {
+        const paths = [
+          ...existing.paths.map((path) => `'${path}' (${existing.cls})`),
+          `'${r.path}' (${r.cls})`,
+        ];
         return {
           ok: false,
           diagnostic: libSidecarDiag(
-            `integer slots '${existing.path}' (${existing.cls}) and '${r.path}' (${r.cls}) collapse to the same lowered record field '${r.targetField}' — their proof obligations cannot be kept distinct`,
+            `integer slots ${paths.join(" and ")} collapse to the same lowered record field '${r.targetField}' — their proof obligations cannot be kept distinct`,
             r.loc,
-            "kind-tagged union arms and structurally identical records may share one lowered shape — give the colliding payloads distinct structural shapes, or integer-class at most one of these slots",
+            "kind-tagged union arms and structurally identical records may share one lowered shape — same-class declarations coalesce, but differing classes require distinct structural shapes or at most one classified slot",
           ),
         };
       }
-      m.set(r.targetField, { cls: r.cls, path: r.path });
+      if (existing === undefined) {
+        m.set(r.targetField, { cls: r.cls, paths: [r.path] });
+      } else if (!existing.paths.includes(r.path)) {
+        existing.paths.push(r.path);
+      }
     }
   }
   return { ok: true, config: cfg };
