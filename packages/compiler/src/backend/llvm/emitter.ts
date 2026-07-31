@@ -88,6 +88,16 @@ import {
 import { DK, LlDyn } from "./dyn.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import { LlWalkers } from "./walkers.js";
+
+interface LlStreamTypedRefAdapter {
+  snapshot: string;
+  commit: string;
+}
+
+interface LlStreamTypedRefContext {
+  prefix: string;
+  adapters: Map<string, LlStreamTypedRefAdapter>;
+}
 import {
   arrNewCall,
   boxAccess,
@@ -9980,6 +9990,44 @@ class LlEmitter {
     t: IrType,
     snapshot: string,
   ): string {
+    if (t.kind === "array") {
+      const commit = `${snapshot}_commit`;
+      const check = this.dyn.dynCheckHelper(t);
+      this.declare(`declare void @scr_arr_release(ptr)`);
+      this.resolveThunkDefs.push(
+        `define internal void @${commit}(ptr %target, ptr %d) ${FN_ATTRS} { ; commit live stream element ${typeKey(t)}`,
+        `entry:`,
+        `  %next = call ptr @${check}(ptr %d, ptr null)`,
+        `  %missing = icmp eq ptr %next, null`,
+        `  br i1 %missing, label %done, label %swap`,
+        `swap:`,
+        `  %target_len_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 1`,
+        `  %next_len_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 1`,
+        `  %target_len = load i64, ptr %target_len_ptr`,
+        `  %next_len = load i64, ptr %next_len_ptr`,
+        `  store i64 %next_len, ptr %target_len_ptr`,
+        `  store i64 %target_len, ptr %next_len_ptr`,
+        `  %target_cap_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 2`,
+        `  %next_cap_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 2`,
+        `  %target_cap = load i64, ptr %target_cap_ptr`,
+        `  %next_cap = load i64, ptr %next_cap_ptr`,
+        `  store i64 %next_cap, ptr %target_cap_ptr`,
+        `  store i64 %target_cap, ptr %next_cap_ptr`,
+        `  %target_data_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 7`,
+        `  %next_data_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 7`,
+        `  %target_data = load ptr, ptr %target_data_ptr`,
+        `  %next_data = load ptr, ptr %next_data_ptr`,
+        `  store ptr %next_data, ptr %target_data_ptr`,
+        `  store ptr %target_data, ptr %next_data_ptr`,
+        `  call void @scr_arr_release(ptr %next)`,
+        `  br label %done`,
+        `done:`,
+        `  ret void`,
+        `}`,
+        ``,
+      );
+      return `@${commit}`;
+    }
     if (t.kind !== "record") return "null";
     const shape = this.recordsById.get(t.shapeId);
     if (!shape) {
@@ -10031,6 +10079,188 @@ class LlEmitter {
     );
     this.resolveThunkDefs.push(...lines);
     return `@${commit}`;
+  }
+
+  private streamTypedRefEligible(t: IrType): boolean {
+    return t.kind === "record" || t.kind === "array";
+  }
+
+  private streamTypedRefBoxValue(
+    B: BlockBuilder,
+    t: IrType,
+    value: string,
+    ctx: LlStreamTypedRefContext,
+  ): string {
+    const boxed = B.tmp();
+    if (!this.streamTypedRefEligible(t)) {
+      const valueTy = t.kind === "f64"
+        ? "double"
+        : t.kind === "bool"
+          ? "i1"
+          : "ptr";
+      B.line(
+        `${boxed} = call ptr @${this.dyn.toDynHelper(t)}(${valueTy} ${value})`,
+      );
+      return boxed;
+    }
+    const nested = this.streamTypedRefMaterializeAdapter(t, ctx);
+    const rc = vAdapters(this, t);
+    const key = typeKey(t);
+    this.declare(
+      `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+    );
+    B.line(
+      `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${nested.snapshot}, ptr ${nested.commit})`,
+    );
+    return boxed;
+  }
+
+  /** LLVM twin of the C stream materializer: mutable reference children
+   * are their own typed capsules, so writes through a nested alias commit
+   * to the nested static source immediately. */
+  private streamTypedRefMaterializeAdapter(
+    t: IrType,
+    ctx: LlStreamTypedRefContext,
+    preferredSnapshot?: string,
+  ): LlStreamTypedRefAdapter {
+    const key = typeKey(t);
+    const existing = ctx.adapters.get(key);
+    if (existing) return existing;
+    const snapshot = preferredSnapshot ??
+      `${ctx.prefix}_nested_${ctx.adapters.size}`;
+    const adapter: LlStreamTypedRefAdapter = { snapshot, commit: "null" };
+    ctx.adapters.set(key, adapter);
+    adapter.commit = this.streamTypedRefCommitAdapter(t, snapshot);
+    const B = new BlockBuilder();
+
+    if (t.kind === "record") {
+      const shape = this.recordsById.get(t.shapeId);
+      if (!shape) {
+        throw new Error(
+          `llvm emitter bug: stream typed-ref materialize of unknown shape ${t.shapeId}`,
+        );
+      }
+      /* Keep the ordinary converter for index-signature/listener records;
+       * their source-identity and overflow walks have extra contracts.
+       * Declared-field records and tuples cover the live stream values. */
+      const ordinary = shape.indexValue || shape.fields.some(
+        (field) => field.name === "handleEvent" && field.type.kind === "func",
+      );
+      if (ordinary) {
+        const out = B.tmp();
+        B.line(`${out} = call ptr @${this.dyn.toDynHelper(t)}(ptr %p)`);
+        B.terminate(`ret ptr ${out}`);
+      } else if (shape.tuple) {
+        this.declare(`declare ptr @scr_dyn_new_arr()`);
+        this.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
+        const out = B.tmp();
+        B.line(`${out} = call ptr @scr_dyn_new_arr()`);
+        const fields = [...shape.fields].sort(
+          (a, b) => Number(a.name) - Number(b.name),
+        );
+        for (const field of fields) {
+          const index = shape.fields.indexOf(field) + 1;
+          const fieldPtr = B.tmp();
+          const fieldValue = B.tmp();
+          B.line(`${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`);
+          B.line(`${fieldValue} = load ${llFieldType(field.type)}, ptr ${fieldPtr}`);
+          const boxed = this.streamTypedRefBoxValue(
+            B,
+            field.type,
+            fieldValue,
+            ctx,
+          );
+          B.line(`call void @scr_dyn_arr_push(ptr ${out}, ptr ${boxed})`);
+        }
+        B.terminate(`ret ptr ${out}`);
+      } else {
+        this.declare(`declare ptr @scr_dyn_new_obj()`);
+        this.declare(`declare void @scr_dyn_obj_set(ptr, ptr, i64, ptr)`);
+        const out = B.tmp();
+        B.line(`${out} = call ptr @scr_dyn_new_obj()`);
+        const byName = new Map(shape.fields.map((field) => [field.name, field]));
+        const order = shape.declaredOrder ?? shape.fields.map((field) => field.name);
+        const inOrder = new Set(order);
+        const fields = [
+          ...order.map((name) => byName.get(name)).filter((field) => field !== undefined),
+          ...shape.fields.filter((field) => !inOrder.has(field.name)),
+        ];
+        for (const field of fields) {
+          const index = shape.fields.indexOf(field) + 1;
+          const fieldPtr = B.tmp();
+          const fieldValue = B.tmp();
+          B.line(`${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`);
+          B.line(`${fieldValue} = load ${llFieldType(field.type)}, ptr ${fieldPtr}`);
+          const boxed = this.streamTypedRefBoxValue(
+            B,
+            field.type,
+            fieldValue,
+            ctx,
+          );
+          B.line(`call void @scr_dyn_obj_set(ptr ${out}, ptr ${this.cstr(field.name)}, i64 ${Buffer.byteLength(field.name, "utf8")}, ptr ${boxed})`);
+        }
+        B.terminate(`ret ptr ${out}`);
+      }
+    } else if (t.kind === "array") {
+      const elem = t.elem;
+      this.declare(`declare ptr @scr_dyn_new_arr()`);
+      this.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
+      this.declare(`declare double @scr_arr_len(ptr)`);
+      const out = B.tmp();
+      B.line(`${out} = call ptr @scr_dyn_new_arr()`);
+      const len = B.tmp();
+      B.line(`${len} = call double @scr_arr_len(ptr %p)`);
+      const iSlot = B.slot();
+      B.entryAllocas.push(`${iSlot} = alloca double`);
+      B.line(`store double ${f64Lit(0)}, ptr ${iSlot}`);
+      const condition = B.newLabel("strm.c");
+      const body = B.newLabel("strm.b");
+      const done = B.newLabel("strm.e");
+      B.br(condition);
+      B.startBlock(condition);
+      const index = B.tmp();
+      const more = B.tmp();
+      B.line(`${index} = load double, ptr ${iSlot}`);
+      B.line(`${more} = fcmp olt double ${index}, ${len}`);
+      B.condBr(more, body, done);
+      B.startBlock(body);
+      let value: string;
+      if (elem.kind === "f64" || elem.kind === "bool") {
+        const valueTy = elem.kind === "f64" ? "double" : "i1";
+        this.declare(
+          `declare ${elem.kind === "bool" ? "zeroext i1" : valueTy} @scr_arr_get_${elem.kind}(ptr, double)`,
+        );
+        value = B.tmp();
+        B.line(`${value} = call ${valueTy} @scr_arr_get_${elem.kind}(ptr %p, double ${index})`);
+      } else {
+        this.declare(`declare ptr @scr_arr_get_ref(ptr, double)`);
+        value = B.tmp();
+        B.line(`${value} = call ptr @scr_arr_get_ref(ptr %p, double ${index}) ; +1`);
+      }
+      const boxed = this.streamTypedRefBoxValue(B, elem, value, ctx);
+      B.line(`call void @scr_dyn_arr_push(ptr ${out}, ptr ${boxed})`);
+      if (isRefCounted(elem)) {
+        B.line(`call void ${releaseSym(this, elem)}(ptr ${value})`);
+      }
+      const next = B.tmp();
+      B.line(`${next} = fadd double ${index}, ${f64Lit(1)}`);
+      B.line(`store double ${next}, ptr ${iSlot}`);
+      B.br(condition);
+      B.startBlock(done);
+      B.terminate(`ret ptr ${out}`);
+    } else {
+      const out = B.tmp();
+      B.line(`${out} = call ptr @${this.dyn.toDynHelper(t)}(ptr %p)`);
+      B.terminate(`ret ptr ${out}`);
+    }
+
+    this.resolveThunkDefs.push(
+      `define internal ptr @${snapshot}(ptr %p) ${FN_ATTRS} { ; materialize live stream value ${key}`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return adapter;
   }
 
   private streamFromArrayAdapter(
@@ -10151,20 +10381,29 @@ class LlEmitter {
       boxed = B.tmp();
       const rc = vAdapters(this, elem);
       const keyPtr = this.cstr(key);
-      const commit = this.streamTypedRefCommitAdapter(elem, snapshot);
+      let commit: string;
+      if (this.streamTypedRefEligible(elem)) {
+        commit = this.streamTypedRefMaterializeAdapter(
+          elem,
+          { prefix: snapshot, adapters: new Map() },
+          snapshot,
+        ).commit;
+      } else {
+        commit = this.streamTypedRefCommitAdapter(elem, snapshot);
+        this.resolveThunkDefs.push(
+          `define internal ptr @${snapshot}(ptr %p) ${FN_ATTRS} { ; materialize stream element ${key}`,
+          `entry:`,
+          `  %d = call ptr @${this.dyn.toDynHelper(elem)}(ptr %p)`,
+          `  ret ptr %d`,
+          `}`,
+          ``,
+        );
+      }
       this.declare(
         `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
       );
       B.line(
         `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot}, ptr ${commit})`,
-      );
-      this.resolveThunkDefs.push(
-        `define internal ptr @${snapshot}(ptr %p) ${FN_ATTRS} { ; materialize stream element ${key}`,
-        `entry:`,
-        `  %d = call ptr @${this.dyn.toDynHelper(elem)}(ptr %p)`,
-        `  ret ptr %d`,
-        `}`,
-        ``,
       );
     } else {
       boxed = B.tmp();

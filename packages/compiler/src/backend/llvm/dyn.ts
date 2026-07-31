@@ -582,12 +582,14 @@ export class LlDyn {
         B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
         const hasCached = B.tmp();
         B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
-        const lCached = B.newLabel("dc.tr.hit");
-        const lMaterialize = B.newLabel("dc.tr.mat");
-        B.condBr(hasCached, lCached, lMaterialize);
-        B.startBlock(lCached);
-        B.terminate(`ret ptr ${cached}`);
-        B.startBlock(lMaterialize);
+        if (t.kind !== "record") {
+          const lCached = B.newLabel("dc.tr.hit");
+          const lMaterialize = B.newLabel("dc.tr.mat");
+          B.condBr(hasCached, lCached, lMaterialize);
+          B.startBlock(lCached);
+          B.terminate(`ret ptr ${cached}`);
+          B.startBlock(lMaterialize);
+        }
         const materialized = B.tmp();
         const checked = B.tmp();
         B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
@@ -595,14 +597,71 @@ export class LlDyn {
         B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
         const ok = B.tmp();
         B.line(`${ok} = icmp ne ptr ${checked}, null`);
-        const lCache = B.newLabel("dc.tr.put");
-        const lReturn = B.newLabel("dc.tr.ret");
-        B.condBr(ok, lCache, lReturn);
-        B.startBlock(lCache);
-        B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
-        B.br(lReturn);
-        B.startBlock(lReturn);
-        B.terminate(`ret ptr ${checked}`);
+        if (t.kind === "record") {
+          const shape = host.recordsById.get(t.shapeId);
+          if (!shape) {
+            throw new Error(
+              `llvm emitter bug: cached typed-ref cast of unknown shape ${t.shapeId}`,
+            );
+          }
+          const lOk = B.newLabel("dc.tr.ok");
+          const lBad = B.newLabel("dc.tr.bad");
+          B.condBr(ok, lOk, lBad);
+          B.startBlock(lBad);
+          const lBadDrop = B.newLabel("dc.tr.bad.drop");
+          const lBadRet = B.newLabel("dc.tr.bad.ret");
+          B.condBr(hasCached, lBadDrop, lBadRet);
+          B.startBlock(lBadDrop);
+          B.line(`call void ${releaseSym(host, t)}(ptr ${cached})`);
+          B.br(lBadRet);
+          B.startBlock(lBadRet);
+          B.terminate(`ret ptr null`);
+          B.startBlock(lOk);
+          const lRefresh = B.newLabel("dc.tr.refresh");
+          const lCache = B.newLabel("dc.tr.put");
+          B.condBr(hasCached, lRefresh, lCache);
+          B.startBlock(lRefresh);
+          const members = [
+            ...shape.fields.map((field, index) => ({
+              index: index + 1,
+              type: llFieldType(field.type),
+              name: field.name,
+            })),
+            ...(shape.indexValue
+              ? [{
+                  index: shape.fields.length + 1,
+                  type: "ptr" as const,
+                  name: "[key: string] overflow",
+                }]
+              : []),
+          ];
+          members.forEach((member) => {
+            const cachedPtr = B.tmp();
+            const checkedPtr = B.tmp();
+            const oldValue = B.tmp();
+            const newValue = B.tmp();
+            B.line(`${cachedPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr ${cached}, i64 0, i32 ${member.index}`);
+            B.line(`${checkedPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr ${checked}, i64 0, i32 ${member.index}`);
+            B.line(`${oldValue} = load ${member.type}, ptr ${cachedPtr} ; ${member.name}`);
+            B.line(`${newValue} = load ${member.type}, ptr ${checkedPtr}`);
+            B.line(`store ${member.type} ${newValue}, ptr ${cachedPtr}`);
+            B.line(`store ${member.type} ${oldValue}, ptr ${checkedPtr}`);
+          });
+          B.line(`call void ${releaseSym(host, t)}(ptr ${checked})`);
+          B.terminate(`ret ptr ${cached}`);
+          B.startBlock(lCache);
+          B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+          B.terminate(`ret ptr ${checked}`);
+        } else {
+          const lCache = B.newLabel("dc.tr.put");
+          const lReturn = B.newLabel("dc.tr.ret");
+          B.condBr(ok, lCache, lReturn);
+          B.startBlock(lCache);
+          B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+          B.br(lReturn);
+          B.startBlock(lReturn);
+          B.terminate(`ret ptr ${checked}`);
+        }
         B.startBlock(lPlain);
       }
     }
@@ -977,6 +1036,7 @@ export class LlDyn {
         host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, i64)`);
         host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, i64, ptr, ptr, ptr)`);
         host.declare(`declare void @scr_dyn_release_v(ptr)`);
+        host.declare(`declare void @scr_union_release(ptr)`);
         const rc = vAdapters(host, t);
         const kind = this.kindOf(B, "%d");
         const capsule = B.tmp();
@@ -989,12 +1049,6 @@ export class LlDyn {
         B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
         const hasCached = B.tmp();
         B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
-        const lCached = B.newLabel("dcu.hit");
-        const lMaterialize = B.newLabel("dcu.mat");
-        B.condBr(hasCached, lCached, lMaterialize);
-        B.startBlock(lCached);
-        B.terminate(`ret ptr ${cached}`);
-        B.startBlock(lMaterialize);
         const materialized = B.tmp();
         const checked = B.tmp();
         B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
@@ -1002,13 +1056,45 @@ export class LlDyn {
         B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
         const ok = B.tmp();
         B.line(`${ok} = icmp ne ptr ${checked}, null`);
+        const lOk = B.newLabel("dcu.ok");
+        const lBad = B.newLabel("dcu.bad");
+        B.condBr(ok, lOk, lBad);
+        B.startBlock(lBad);
+        const lBadDrop = B.newLabel("dcu.bad.drop");
+        const lBadRet = B.newLabel("dcu.bad.ret");
+        B.condBr(hasCached, lBadDrop, lBadRet);
+        B.startBlock(lBadDrop);
+        B.line(`call void @scr_union_release(ptr ${cached})`);
+        B.br(lBadRet);
+        B.startBlock(lBadRet);
+        B.terminate(`ret ptr null`);
+        B.startBlock(lOk);
+        const lRefresh = B.newLabel("dcu.refresh");
         const lCache = B.newLabel("dcu.put");
-        const lReturn = B.newLabel("dcu.ret");
-        B.condBr(ok, lCache, lReturn);
+        B.condBr(hasCached, lRefresh, lCache);
+        B.startBlock(lRefresh);
+        ([
+          [1, "i32", "tag"],
+          [2, "ptr", "retain"],
+          [3, "ptr", "release"],
+          [4, "ptr", "trace"],
+          [5, "i64", "slot"],
+        ] as const).forEach(([index, fieldType, fieldName]) => {
+          const cachedPtr = B.tmp();
+          const checkedPtr = B.tmp();
+          const oldValue = B.tmp();
+          const newValue = B.tmp();
+          B.line(`${cachedPtr} = getelementptr inbounds %ScrUnion, ptr ${cached}, i64 0, i32 ${index}`);
+          B.line(`${checkedPtr} = getelementptr inbounds %ScrUnion, ptr ${checked}, i64 0, i32 ${index}`);
+          B.line(`${oldValue} = load ${fieldType}, ptr ${cachedPtr} ; ${fieldName}`);
+          B.line(`${newValue} = load ${fieldType}, ptr ${checkedPtr}`);
+          B.line(`store ${fieldType} ${newValue}, ptr ${cachedPtr}`);
+          B.line(`store ${fieldType} ${oldValue}, ptr ${checkedPtr}`);
+        });
+        B.line(`call void @scr_union_release(ptr ${checked})`);
+        B.terminate(`ret ptr ${cached}`);
         B.startBlock(lCache);
         B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
-        B.br(lReturn);
-        B.startBlock(lReturn);
         B.terminate(`ret ptr ${checked}`);
         B.startBlock(lFail);
         B.line(`call void @scr_dyn_check_fail(ptr %path, ptr ${want}, ptr %d)`);

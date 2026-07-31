@@ -15,6 +15,31 @@ function streamTypedRefCommitAdapter(
   snapshot: string,
   defs: string[],
 ): string {
+  if (t.kind === "array") {
+    const commit = `${snapshot}_commit`;
+    E.walkerProtos.push(
+      `static void ${commit}(void *sc_p, const ScrDyn *sc_d); /* commit live stream element ${typeKey(t)} */`,
+    );
+    defs.push(
+      `static void ${commit}(void *sc_p, const ScrDyn *sc_d) {`,
+      `  ScrArr *sc_target = (ScrArr *)sc_p;`,
+      `  ScrArr *sc_next = ${E.dynCheckHelper(t)}(sc_d, NULL);`,
+      `  if (!sc_next) return;`,
+      `  size_t sc_target_len = sc_target->len;`,
+      `  size_t sc_target_cap = sc_target->cap;`,
+      `  uint64_t *sc_target_data = sc_target->data;`,
+      `  sc_target->len = sc_next->len;`,
+      `  sc_target->cap = sc_next->cap;`,
+      `  sc_target->data = sc_next->data;`,
+      `  sc_next->len = sc_target_len;`,
+      `  sc_next->cap = sc_target_cap;`,
+      `  sc_next->data = sc_target_data;`,
+      `  scr_arr_release(sc_next);`,
+      `}`,
+      ``,
+    );
+    return `&${commit}`;
+  }
   if (t.kind !== "record") return "NULL";
   const shape = E.recordsById.get(t.shapeId);
   if (!shape) {
@@ -57,6 +82,132 @@ function streamTypedRefCommitAdapter(
   return `&${commit}`;
 }
 
+interface StreamTypedRefAdapter {
+  snapshot: string;
+  commit: string;
+}
+
+interface StreamTypedRefContext {
+  prefix: string;
+  defs: string[];
+  adapters: Map<string, StreamTypedRefAdapter>;
+}
+
+function streamTypedRefEligible(t: IrType): boolean {
+  return t.kind === "record" || t.kind === "array";
+}
+
+/** Build the live dyn view of one typed stream value. Mutable reference
+ * children are capsules of their own, so a write through `v.child.x` or
+ * `v.items[0]` commits directly to that child's static source instead of
+ * disappearing into the parent's detached snapshot. */
+function streamTypedRefAdapter(
+  E: CEmitter,
+  t: IrType,
+  ctx: StreamTypedRefContext,
+  preferredSnapshot?: string,
+): StreamTypedRefAdapter {
+  const key = typeKey(t);
+  const existing = ctx.adapters.get(key);
+  if (existing) return existing;
+  const snapshot = preferredSnapshot ??
+    `${ctx.prefix}_nested_${ctx.adapters.size}`;
+  const adapter: StreamTypedRefAdapter = { snapshot, commit: "NULL" };
+  /* Register before walking children: recursive record/array types refer
+   * back to this prototype without recursively generating helpers. */
+  ctx.adapters.set(key, adapter);
+  E.walkerProtos.push(
+    `static ScrDyn *${snapshot}(void *sc_p); /* materialize live stream value ${key} */`,
+  );
+  adapter.commit = streamTypedRefCommitAdapter(E, t, snapshot, ctx.defs);
+
+  const box = (child: IrType, expr: string): string => {
+    if (!streamTypedRefEligible(child)) {
+      return `${E.toDynHelper(child)}(${expr})`;
+    }
+    const nested = streamTypedRefAdapter(E, child, ctx);
+    const rc = vAdapters(child);
+    const childKey = typeKey(child);
+    const keyLit = cStringLiteral(Buffer.from(childKey, "utf8"));
+    return `scr_dyn_new_typed_ref(${expr}, &${rc.retain}, &${rc.release}, ${keyLit}, ${Buffer.byteLength(childKey, "utf8")}, &${nested.snapshot}, ${nested.commit})`;
+  };
+
+  const lines = [
+    `static ScrDyn *${snapshot}(void *sc_p) { /* materialize live stream value ${key} */`,
+    `  ${cDecl(t, "v")} = (${cType(t).trim()})sc_p;`,
+  ];
+  if (t.kind === "record") {
+    const shape = E.recordsById.get(t.shapeId);
+    if (!shape) {
+      throw new Error(
+        `emitter bug: stream typed-ref materialize of unknown shape ${t.shapeId}`,
+      );
+    }
+    const ordinary = shape.indexValue || shape.fields.some(
+      (field) => field.name === "handleEvent" && field.type.kind === "func",
+    );
+    if (ordinary) {
+      lines.push(`  return ${E.toDynHelper(t)}(v);`, `}`, ``);
+      ctx.defs.push(...lines);
+      return adapter;
+    }
+    if (shape.tuple) {
+      lines.push(`  ScrDyn *d = scr_dyn_new_arr();`);
+      const fields = [...shape.fields].sort(
+        (a, b) => Number(a.name) - Number(b.name),
+      );
+      for (const field of fields) {
+        lines.push(
+          `  scr_dyn_arr_push(d, ${box(field.type, `v->${mangleField(field.name)}`)});`,
+        );
+      }
+    } else {
+      lines.push(`  ScrDyn *d = scr_dyn_new_obj();`);
+      const byName = new Map(shape.fields.map((field) => [field.name, field]));
+      const order = shape.declaredOrder ?? shape.fields.map((field) => field.name);
+      const inOrder = new Set(order);
+      const fields = [
+        ...order.map((name) => byName.get(name)).filter((field) => field !== undefined),
+        ...shape.fields.filter((field) => !inOrder.has(field.name)),
+      ];
+      for (const field of fields) {
+        const keyLit = cStringLiteral(Buffer.from(field.name, "utf8"));
+        lines.push(
+          `  scr_dyn_obj_set(d, ${keyLit}, ${Buffer.byteLength(field.name, "utf8")}, ${box(field.type, `v->${mangleField(field.name)}`)});`,
+        );
+      }
+    }
+    lines.push(`  return d;`);
+  } else if (t.kind === "array") {
+    const elem = t.elem;
+    lines.push(
+      `  ScrDyn *d = scr_dyn_new_arr();`,
+      `  for (size_t sc_i = 0; sc_i < v->len; sc_i++) {`,
+    );
+    if (elem.kind === "f64") {
+      lines.push(
+        `    scr_dyn_arr_push(d, ${box(elem, "scr_arr_get_f64(v, (double)sc_i)")});`,
+      );
+    } else if (elem.kind === "bool") {
+      lines.push(
+        `    scr_dyn_arr_push(d, ${box(elem, "scr_arr_get_bool(v, (double)sc_i)")});`,
+      );
+    } else {
+      lines.push(
+        `    ${cDecl(elem, "sc_value")} = (${cType(elem).trim()})scr_arr_get_ref(v, (double)sc_i);`,
+        `    scr_dyn_arr_push(d, ${box(elem, "sc_value")});`,
+        `    ${releaseCallC(elem, "sc_value")};`,
+      );
+    }
+    lines.push(`  }`, `  return d;`);
+  } else {
+    lines.push(`  return ${E.toDynHelper(t)}(v);`);
+  }
+  lines.push(`}`, ``);
+  ctx.defs.push(...lines);
+  return adapter;
+}
+
 function streamFromArrayAdapter(
   E: CEmitter,
   t: IrType & { kind: "array" },
@@ -88,15 +239,25 @@ function streamFromArrayAdapter(
   const d: string[] = [];
   let commit = "NULL";
   if (typedRef) {
-    const snapshotSig = `static ScrDyn *${snapshot}(void *sc_p)`;
-    E.walkerProtos.push(`${snapshotSig}; /* materialize stream element ${key} */`);
-    d.push(
-      `${snapshotSig} {`,
-      `  return ${E.toDynHelper(elem)}((${cType(elem).trim()})sc_p);`,
-      `}`,
-      ``,
-    );
-    commit = streamTypedRefCommitAdapter(E, elem, snapshot, d);
+    if (streamTypedRefEligible(elem)) {
+      const adapter = streamTypedRefAdapter(
+        E,
+        elem,
+        { prefix: snapshot, defs: d, adapters: new Map() },
+        snapshot,
+      );
+      commit = adapter.commit;
+    } else {
+      const snapshotSig = `static ScrDyn *${snapshot}(void *sc_p)`;
+      E.walkerProtos.push(`${snapshotSig}; /* materialize stream element ${key} */`);
+      d.push(
+        `${snapshotSig} {`,
+        `  return ${E.toDynHelper(elem)}((${cType(elem).trim()})sc_p);`,
+        `}`,
+        ``,
+      );
+      commit = streamTypedRefCommitAdapter(E, elem, snapshot, d);
+    }
   }
   const unionCommits = new Map<number, string>();
   for (const { arm, tag } of unionRefArms) {

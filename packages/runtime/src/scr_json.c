@@ -700,6 +700,46 @@ void *scr_dyn_typed_ref_unbox(const ScrDyn *d) {
   return d->v.typed_ref.retain(d->v.typed_ref.ptr);
 }
 
+static void scr_dyn_typed_ref_preserve_child(
+    ScrDyn **fresh_slot, ScrDyn *cached_child) {
+  ScrDyn *fresh_child = *fresh_slot;
+  if (!cached_child || !fresh_child ||
+      cached_child->kind != SCR_DYN_TYPED_REF ||
+      fresh_child->kind != SCR_DYN_TYPED_REF ||
+      !scr_dyn_strict_eq(cached_child, fresh_child)) {
+    return;
+  }
+  *fresh_slot = scr_dyn_retain(cached_child);
+  scr_dyn_release(fresh_child);
+}
+
+/* A live record/array materializer creates typed capsules for mutable
+ * children. Preserve an existing child capsule when the fresh view points
+ * at the same static source, so retaining `value.child` across parent
+ * refreshes keeps JavaScript reference identity as well as liveness. */
+static void scr_dyn_typed_ref_preserve_children(
+    ScrDyn *cached, ScrDyn *fresh) {
+  if (cached->kind != fresh->kind) return;
+  if (cached->kind == SCR_DYN_ARR) {
+    size_t n = cached->v.arr.len < fresh->v.arr.len
+        ? cached->v.arr.len
+        : fresh->v.arr.len;
+    for (size_t i = 0; i < n; i++) {
+      scr_dyn_typed_ref_preserve_child(
+          &fresh->v.arr.items[i], cached->v.arr.items[i]);
+    }
+    return;
+  }
+  if (cached->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < fresh->v.obj.len; i++) {
+      ScrDynEntry *entry = &fresh->v.obj.entries[i];
+      ScrDyn *cached_child = scr_dyn_obj_get(
+          cached, entry->key, entry->key_len);
+      scr_dyn_typed_ref_preserve_child(&entry->value, cached_child);
+    }
+  }
+}
+
 ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d) {
   ScrDyn *capsule = (ScrDyn *)d;
   if (!capsule->v.typed_ref.materialized) {
@@ -712,6 +752,8 @@ ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d) {
      * detached contents without changing the cached node's address. */
     ScrDyn *fresh =
         capsule->v.typed_ref.materialize(capsule->v.typed_ref.ptr);
+    scr_dyn_typed_ref_preserve_children(
+        capsule->v.typed_ref.materialized, fresh);
     size_t cached_rc = capsule->v.typed_ref.materialized->rc;
     size_t fresh_rc = fresh->rc;
     ScrDyn old = *capsule->v.typed_ref.materialized;

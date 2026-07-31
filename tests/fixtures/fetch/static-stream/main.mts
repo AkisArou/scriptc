@@ -57,6 +57,22 @@ const posted = await fetch(`${process.argv[2]}/post-echo`, {
 });
 console.log(await posted.json());
 console.log("consumed request locked:", requestBody.locked);
+
+const arrayRequestBody: any = ["array", "body"];
+const arrayPosted = await fetch(`${process.argv[2]}/post-echo`, {
+  method: "POST",
+  body: arrayRequestBody,
+  duplex: "half",
+});
+const arrayPostResult = (await arrayPosted.json()) as {
+  body: string;
+  contentType: string | null;
+};
+console.log(
+  "array request body:",
+  arrayPostResult.body,
+  arrayPostResult.contentType,
+);
 try {
   requestBody.getReader();
   console.log("consumed request reader unexpectedly acquired");
@@ -300,6 +316,17 @@ const bracketReader = ReadableStream.from(["bracket"]).getReader();
 const bracketPart = await bracketReader["read"]();
 console.log("bracket reader read:", bracketPart.done, bracketPart.value);
 
+const surplusReader: any = ReadableStream.from([11]).getReader();
+console.log(
+  "reader surplus argument:",
+  JSON.stringify(await surplusReader.read("ignored")),
+);
+const surplusSignal: any = AbortSignal.any([]);
+console.log(
+  "throwIfAborted surplus argument:",
+  surplusSignal.throwIfAborted("ignored"),
+);
+
 interface StreamUnionBox {
   value: number;
 }
@@ -365,12 +392,14 @@ const repeatedStructuralReader =
     repeatedStructuralValue,
   ]) as ReadableStream<StreamBaseValue>).getReader();
 const repeatedStructuralFirst = await repeatedStructuralReader.read();
+repeatedStructuralValue.value = 19;
 const repeatedStructuralSecond = await repeatedStructuralReader.read();
 console.log(
   "stream widened repeated identity:",
   repeatedStructuralFirst.done || repeatedStructuralSecond.done
     ? false
     : repeatedStructuralFirst.value === repeatedStructuralSecond.value,
+  repeatedStructuralSecond.done ? -1 : repeatedStructuralSecond.value.value,
 );
 
 const repeatedDynamicValue = { value: 14 };
@@ -400,6 +429,37 @@ const liveDynamicSecond: any = await liveDynamicReader.read();
 console.log("dynamic stream live refresh:", JSON.stringify(liveDynamicSecond.value));
 liveDynamicSecond.value.value = 18;
 console.log("dynamic stream live commit:", liveDynamicValue.value);
+
+const dynamicArrayValue = [21];
+const dynamicArrayReader: any = ReadableStream.from([
+  dynamicArrayValue,
+  dynamicArrayValue,
+]).getReader();
+const dynamicArrayFirst: any = await dynamicArrayReader.read();
+dynamicArrayFirst.value[0] = 22;
+const dynamicArraySecond: any = await dynamicArrayReader.read();
+console.log(
+  "dynamic stream array commit:",
+  dynamicArrayValue[0],
+  dynamicArraySecond.value[0],
+  dynamicArrayFirst.value === dynamicArraySecond.value,
+);
+
+const dynamicNestedValue = { nested: { value: 23 } };
+const dynamicNestedReader: any = ReadableStream.from([
+  dynamicNestedValue,
+  dynamicNestedValue,
+]).getReader();
+const dynamicNestedFirst: any = await dynamicNestedReader.read();
+const retainedDynamicNested: any = dynamicNestedFirst.value.nested;
+retainedDynamicNested.value = 24;
+const dynamicNestedSecond: any = await dynamicNestedReader.read();
+console.log(
+  "dynamic stream nested commit:",
+  dynamicNestedValue.nested.value,
+  dynamicNestedSecond.value.nested.value,
+  retainedDynamicNested === dynamicNestedSecond.value.nested,
+);
 
 const widenedStringStream: ReadableStream<unknown> = ReadableStream.from([
   "same",

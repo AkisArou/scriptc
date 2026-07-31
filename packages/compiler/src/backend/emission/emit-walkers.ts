@@ -1130,10 +1130,48 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         d.push(
           `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
           `    ${cDecl(t, "sc_cached")} = (${cType(t).trim()})scr_dyn_typed_ref_cached_cast(d, ${keyLit}, ${keyLen});`,
-          `    if (sc_cached) return sc_cached;`,
+        );
+        if (t.kind !== "record") {
+          d.push(`    if (sc_cached) return sc_cached;`);
+        }
+        d.push(
           `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
           `    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`,
           `    scr_dyn_release(sc_materialized);`,
+        );
+        if (t.kind === "record") {
+          const shape = E.recordsById.get(t.shapeId);
+          if (!shape) {
+            throw new Error(
+              `emitter bug: cached typed-ref cast of unknown shape ${t.shapeId}`,
+            );
+          }
+          d.push(`    if (sc_out && sc_cached) {`);
+          for (const field of shape.fields) {
+            const member = mangleField(field.name);
+            d.push(
+              `      {`,
+              `        ${cDecl(field.type, "sc_old")} = sc_cached->${member};`,
+              `        sc_cached->${member} = sc_out->${member};`,
+              `        sc_out->${member} = sc_old;`,
+              `      }`,
+            );
+          }
+          if (shape.indexValue) {
+            d.push(
+              `      ScrMap *sc_old = sc_cached->${OVERFLOW_MEMBER};`,
+              `      sc_cached->${OVERFLOW_MEMBER} = sc_out->${OVERFLOW_MEMBER};`,
+              `      sc_out->${OVERFLOW_MEMBER} = sc_old;`,
+            );
+          }
+          d.push(
+            `      ${releaseCallC(t, "sc_out")};`,
+            `      return sc_cached;`,
+            `    }`,
+            `    if (sc_cached) ${releaseCallC(t, "sc_cached")};`,
+          );
+        }
+        d.push(
           `    if (sc_out) {`,
           `      scr_dyn_typed_ref_cache_cast((ScrDyn *)d, ${keyLit}, ${keyLen}, sc_out, &${rc.retain}, &${rc.release});`,
           `    }`,
@@ -1344,10 +1382,21 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           const keyLen = Buffer.byteLength(key, "utf8");
           const rc = vAdapters(t);
           d.push(`    ${cDecl(t, "sc_cached")} = (${cType(t).trim()})scr_dyn_typed_ref_cached_cast(d, ${keyLit}, ${keyLen});`);
-          d.push(`    if (sc_cached) return sc_cached;`);
           d.push(`    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`);
           d.push(`    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`);
           d.push(`    scr_dyn_release(sc_materialized);`);
+          d.push(`    if (sc_out && sc_cached) {`);
+          d.push(`      size_t sc_cached_rc = sc_cached->rc;`);
+          d.push(`      size_t sc_out_rc = sc_out->rc;`);
+          d.push(`      ScrUnion sc_old = *sc_cached;`);
+          d.push(`      *sc_cached = *sc_out;`);
+          d.push(`      sc_cached->rc = sc_cached_rc;`);
+          d.push(`      *sc_out = sc_old;`);
+          d.push(`      sc_out->rc = sc_out_rc;`);
+          d.push(`      scr_union_release(sc_out);`);
+          d.push(`      return sc_cached;`);
+          d.push(`    }`);
+          d.push(`    if (sc_cached) scr_union_release(sc_cached);`);
           d.push(`    if (sc_out) {`);
           d.push(`      scr_dyn_typed_ref_cache_cast((ScrDyn *)d, ${keyLit}, ${keyLen}, sc_out, &${rc.retain}, &${rc.release});`);
           d.push(`    }`);

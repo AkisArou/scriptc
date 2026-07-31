@@ -999,10 +999,6 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
                                 const char *what) {
   SfSignal *s = ptr;
   if (strcmp(method, "throwIfAborted") == 0) {
-    if (argc != 0) {
-      sf_type_error("AbortSignal.throwIfAborted takes no arguments");
-      return NULL;
-    }
     if (s->aborted) {
       sf_throw_dyn_reason(s->reason);
       return NULL;
@@ -2402,10 +2398,6 @@ static ScrDyn *sf_reader_invoke(void *ptr, ScrDyn *self, const char *method,
                                 const char *what) {
   SfReader *r = ptr;
   if (strcmp(method, "read") == 0) {
-    if (argc != 0) {
-      sf_type_error("ReadableStreamDefaultReader.read takes no arguments");
-      return NULL;
-    }
     ScrPromise *p = sf_reader_read(r);
     ScrDyn *out = scr_dyn_new_promise(p);
     scr_promise_release(p);
@@ -4208,9 +4200,8 @@ static void sf_on_upgrade(
 
 static bool sf_body_is_stream(const ScrDyn *body) {
   return body &&
-         ((body->kind == SCR_DYN_HANDLE &&
-           body->v.handle.tag == SCR_DYNH_WEB_STREAM) ||
-          body->kind == SCR_DYN_ARR);
+         body->kind == SCR_DYN_HANDLE &&
+         body->v.handle.tag == SCR_DYNH_WEB_STREAM;
 }
 
 static bool sf_redirect(SfTransfer *t, int status,
@@ -4501,9 +4492,8 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       body && body->kind != SCR_DYN_UNDEF && body->kind != SCR_DYN_NULL;
   bool body_stream =
       body_present &&
-      ((body->kind == SCR_DYN_HANDLE &&
-        body->v.handle.tag == SCR_DYNH_WEB_STREAM) ||
-       body->kind == SCR_DYN_ARR);
+      body->kind == SCR_DYN_HANDLE &&
+      body->v.handle.tag == SCR_DYNH_WEB_STREAM;
   const ScrDyn *duplex =
       init && init->kind == SCR_DYN_OBJ
           ? scr_dyn_obj_get(init, "duplex", 6)
@@ -4521,7 +4511,8 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
         promise, "RequestInit.duplex must be 'half'");
   }
   if (body_present && body->kind != SCR_DYN_STR &&
-      body->kind != SCR_DYN_BYTES && !body_stream) {
+      body->kind != SCR_DYN_BYTES && body->kind != SCR_DYN_ARR &&
+      !body_stream) {
     scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(promise, "fetch failed");
@@ -4542,12 +4533,24 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
         promise, "Request with GET/HEAD method cannot have body.");
   }
 
+  /* BodyInit's USVString fallback applies to ordinary arrays too. An
+   * `any`-typed array is therefore "a,b", not a stream of "a" and "b";
+   * only an actual ReadableStream uses the streaming-body branch. */
+  ScrDyn *coerced_body = NULL;
+  if (body_present && body->kind == SCR_DYN_ARR) {
+    ScrStr *text = scr_dyn_string_coerce(body);
+    coerced_body = scr_dyn_new_str(text);
+    scr_str_release(text);
+    body = coerced_body;
+  }
+
   ScrArr *headers = scr_arr_new(SCR_ELEM_STR, 16);
   const ScrDyn *init_headers =
       init && init->kind == SCR_DYN_OBJ
           ? scr_dyn_obj_get(init, "headers", 7)
           : NULL;
   if (!sf_add_headers(headers, init_headers)) {
+    scr_dyn_release(coerced_body);
     scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
@@ -4564,6 +4567,7 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
   bool has_content_length = false;
   size_t content_length = 0;
   if (!sf_content_length(headers, &has_content_length, &content_length)) {
+    scr_dyn_release(coerced_body);
     scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
@@ -4577,6 +4581,7 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
                 ? body->v.str->len
                 : body->v.bytes->len;
     if (body_length != content_length) {
+      scr_dyn_release(coerced_body);
       scr_arr_release(headers);
       scr_str_release(method);
       scr_url_release(u);
@@ -4589,6 +4594,7 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
    * over starting I/O, but never masks a RequestInit validation error.
    */
   if (signal && signal->aborted) {
+    scr_dyn_release(coerced_body);
     scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
@@ -4604,6 +4610,7 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
   t->method = method;
   t->headers = headers;
   t->body = body_present ? scr_dyn_retain((ScrDyn *)body) : NULL;
+  scr_dyn_release(coerced_body);
   t->redirect_mode = redirect_mode;
   t->request_has_content_length = has_content_length;
   t->request_content_length = content_length;
