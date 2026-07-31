@@ -21,9 +21,11 @@ import {
 
 const loc = { file: "corpus.ts", start: 0, end: 0 };
 const F64 = { kind: "f64" } as const;
+const STRING = { kind: "string" } as const;
 const BOOL = { kind: "bool" } as const;
 const VOID = { kind: "void" } as const;
 const MODEL = { kind: "record", shapeId: "model-shape" } as const;
+const MODEL_CLASS = { kind: "object", className: "Model" } as const;
 const OPTIONAL_NUMBER = { kind: "union", unionId: "optional-number" } as const;
 
 const num = (value: number, spelling?: string): IrExpr =>
@@ -105,6 +107,14 @@ const countRead = (name = "m"): IrExpr => ({
   type: F64,
   loc,
 });
+const labelRead = (name = "m"): IrExpr => ({
+  kind: "recordGet",
+  obj: recordRef(name),
+  shapeId: MODEL.shapeId,
+  field: "label",
+  type: STRING,
+  loc,
+});
 const countWrite = (value: IrExpr, name = "m"): IrStmt => ({
   kind: "recordSet",
   obj: recordRef(name),
@@ -142,6 +152,44 @@ function recordCase(body: IrStmt[], names = ["m"], extraFns: IrFunction[] = []):
 
 function onlyRecord(body: IrStmt[], names = ["m"], extraFns: IrFunction[] = []): IntVerdict {
   const vs = checkLibraryIntegerSlots(recordCase(body, names, extraFns), RECORD_CFG);
+  expect(vs.length).toBe(1);
+  return vs[0]!;
+}
+
+function onlyOrdinaryRecord(body: IrStmt[], extraFns: IrFunction[] = []): IntVerdict {
+  const vs = checkLibraryIntegerSlots(recordCase(body, ["m"], [sink("send"), ...extraFns]), CFG);
+  expect(vs.length).toBe(1);
+  return vs[0]!;
+}
+
+const classRef = (): IrExpr => ({ kind: "varRef", localId: "m.0", type: MODEL_CLASS, loc });
+const classCountRead = (): IrExpr => ({
+  kind: "fieldGet",
+  obj: classRef(),
+  className: MODEL_CLASS.className,
+  field: "count",
+  type: F64,
+  loc,
+});
+
+function onlyOrdinaryClass(body: IrStmt[]): IntVerdict {
+  const mod: IrModule = {
+    irVersion: 3,
+    sourceFile: "class-fields.ts",
+    functions: [
+      sink("send"),
+      {
+        name: "case",
+        params: [{ localId: "m.0", name: "m", type: MODEL_CLASS }],
+        returnType: VOID,
+        locals: [{ id: "m.0", name: "m", type: MODEL_CLASS, mutable: true }],
+        body,
+        loc,
+      },
+    ],
+    entry: "case",
+  };
+  const vs = checkLibraryIntegerSlots(mod, CFG);
   expect(vs.length).toBe(1);
   return vs[0]!;
 }
@@ -452,6 +500,85 @@ describe("the domain's edges beyond the corpus", () => {
 
   test("Math.min/max propagate NaN from any argument, as JS does", () => {
     const v = only(caseModule(["a"], [], [send(math("min", math("trunc", ref("a.0")), num(0)))]));
+    expect(v.outcome).toBe("refuse");
+    expect(v.obligation).toBe("wholeness");
+    expect(v.detail).toContain("NaN");
+  });
+});
+
+describe("straight-line ordinary-field refinement", () => {
+  test("ordered comparisons refine a repeated record field into Math.trunc", () => {
+    const v = onlyOrdinaryRecord([
+      iff(and(bin(">=", countRead(), num(0)), bin("<=", countRead(), num(100))), [
+        send(math("trunc", countRead())),
+      ]),
+    ]);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(0);
+    expect(v.provenHi).toBe(100);
+  });
+
+  test("an unrelated string !== conjunct preserves the numeric field facts", () => {
+    const labelIsNotSkip: IrExpr = {
+      kind: "strEq",
+      negated: true,
+      left: labelRead(),
+      right: { kind: "strLit", value: "skip", type: STRING, loc },
+      type: BOOL,
+      loc,
+    };
+    const range = and(bin(">=", countRead(), num(0)), bin("<=", countRead(), num(100)));
+    const v = onlyOrdinaryRecord([
+      iff(and(labelIsNotSkip, range), [send(math("trunc", countRead()))]),
+    ]);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(0);
+    expect(v.provenHi).toBe(100);
+  });
+
+  test("ordered comparisons refine a repeated class field into Math.trunc", () => {
+    const v = onlyOrdinaryClass([
+      iff(and(bin(">=", classCountRead(), num(0)), bin("<=", classCountRead(), num(100))), [
+        send(math("trunc", classCountRead())),
+      ]),
+    ]);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(0);
+    expect(v.provenHi).toBe(100);
+  });
+
+  test("a call between an ordinary-field guard and use kills the proof", () => {
+    const call: IrStmt = {
+      kind: "exprStmt",
+      expr: { kind: "call", callee: "touch", args: [], type: VOID, loc },
+      loc,
+    };
+    const v = onlyOrdinaryRecord([
+      iff(and(bin(">=", countRead(), num(0)), bin("<=", countRead(), num(100))), [
+        call,
+        send(math("trunc", countRead())),
+      ]),
+    ], [noopFn("touch")]);
+    expect(v.outcome).toBe("refuse");
+    expect(v.obligation).toBe("wholeness");
+    expect(v.detail).toContain("NaN");
+  });
+
+  test("a heap write between an ordinary-field guard and use kills the proof", () => {
+    const otherWrite: IrStmt = {
+      kind: "recordSet",
+      obj: recordRef(),
+      shapeId: MODEL.shapeId,
+      field: "other",
+      value: num(0),
+      loc,
+    };
+    const v = onlyOrdinaryRecord([
+      iff(and(bin(">=", countRead(), num(0)), bin("<=", countRead(), num(100))), [
+        otherWrite,
+        send(math("trunc", countRead())),
+      ]),
+    ]);
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("wholeness");
     expect(v.detail).toContain("NaN");

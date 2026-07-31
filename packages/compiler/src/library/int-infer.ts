@@ -43,8 +43,9 @@
  * short threshold list ONLY at loop headers, after a few plain joins;
  * precision lost to widening is recovered by the body-edge refinement,
  * so `for (let n = 0; n < 10; n = n + 1) send(n)` proves exactly [0, 9].
- * Static field reads rooted at one binding carry the same guard facts as
- * locals through a straight-line dominated region. Those facts are proof
+ * Static numeric field reads rooted at one binding carry the same guard
+ * facts as locals through a straight-line dominated region, whether or
+ * not the field is itself a declared integer slot. Those facts are proof
  * state only (the emitted program still performs every source read), and
  * are discarded at calls/suspensions, heap writes, receiver rebindings,
  * and control-flow joins. This is deliberately not alias analysis.
@@ -482,22 +483,28 @@ export function classSeed(cls: string): AbsVal {
 /* ── the environment ───────────────────────────────────────────────────────
  * Abstract state per program point: binding/access key → AbsVal. Binding
  * keys cover f64-typed locals and module globals ("%g." ids); reserved path
- * keys carry temporary facts for declared integer fields. A missing LOCAL
- * is bottom (not yet bound on this path — tsc's definite-assignment analysis
- * guarantees no read precedes a binding); a missing GLOBAL is TOP (any prior
- * entry may have written it). `null` in place of an Env is unreachable. */
+ * keys carry temporary facts for static numeric fields. A missing LOCAL is
+ * bottom (not yet bound on this path — tsc's definite-assignment analysis
+ * guarantees no read precedes a binding); a missing GLOBAL or ordinary
+ * field path is TOP (any value, including NaN). `null` in place of an Env
+ * is unreachable. */
 
 type Env = Map<string, AbsVal>;
 
 /** Static-access facts share Env's join/clone machinery but have their own
- * missing-key value: the declared slot seed. A killed field fact therefore
- * falls back to the same whole-in-class-range assumption a field read had
- * before access-path refinement, preserving SC4023 rather than degrading
- * to a spurious SC4022. */
+ * missing-key value: TOP for an ordinary numeric field, or the declared
+ * slot seed for a declared integer field. A killed declared-field fact
+ * therefore falls back to the same whole-in-class-range assumption its read
+ * had before access-path refinement, preserving SC4023 rather than
+ * degrading to a spurious SC4022. */
+const PATH_TOP_PREFIX = "%path.top:";
 const PATH_I64_PREFIX = "%path.i64:";
 const PATH_U64_PREFIX = "%path.u64:";
 
-function pathClassOfKey(id: string): IntClass | null {
+type PathSeed = IntClass | "top";
+
+function pathSeedOfKey(id: string): PathSeed | null {
+  if (id.startsWith(PATH_TOP_PREFIX)) return "top";
   if (id.startsWith(PATH_I64_PREFIX)) return "i64";
   if (id.startsWith(PATH_U64_PREFIX)) return "u64";
   return null;
@@ -505,14 +512,14 @@ function pathClassOfKey(id: string): IntClass | null {
 
 function clearPathFacts(env: Env): void {
   for (const k of [...env.keys()]) {
-    if (pathClassOfKey(k) !== null) env.delete(k);
+    if (pathSeedOfKey(k) !== null) env.delete(k);
   }
 }
 
 const isGlobalId = (id: string): boolean => id.startsWith("%g.");
 const defaultVal = (id: string): AbsVal => {
-  const pathClass = pathClassOfKey(id);
-  if (pathClass !== null) return classSeed(pathClass);
+  const pathSeed = pathSeedOfKey(id);
+  if (pathSeed !== null) return pathSeed === "top" ? { ...TOP } : classSeed(pathSeed);
   return isGlobalId(id) ? TOP : BOTTOM;
 };
 
@@ -1268,6 +1275,8 @@ class FnAnalyzer {
       case "unionNarrow":
         return this.isPure(e.value);
       case "bin":
+      case "strEq":
+      case "strCmp":
         return this.isPure(e.left) && this.isPure(e.right);
       case "unary":
         return this.isPure(e.operand);
@@ -1289,9 +1298,14 @@ class FnAnalyzer {
         return this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
       case "recordGet": {
         const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
-        if (slot === undefined || numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
-        const key = this.pathKey(e, slot.cls);
-        return key === null ? classSeed(slot.cls) : envGet(env, key);
+        if (numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
+        const key = this.pathKey(e, slot?.cls ?? null);
+        return key === null ? (slot === undefined ? { ...TOP } : classSeed(slot.cls)) : envGet(env, key);
+      }
+      case "fieldGet": {
+        if (numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
+        const key = this.pathKey(e, null);
+        return key === null ? { ...TOP } : envGet(env, key);
       }
       case "unionNarrow":
         return e.type.kind === "f64" && numberCarrierKind(e.value.type, this.mod) === "optional"
@@ -1341,10 +1355,10 @@ class FnAnalyzer {
 
   private readonly pathRoots = new Map<string, string | null>();
 
-  private pathKey(e: IrExpr, cls: IntClass): string | null {
+  private pathKey(e: IrExpr, cls: IntClass | null): string | null {
     const path = this.staticAccessPath(e);
     if (path === null) return null;
-    const prefix = cls === "i64" ? PATH_I64_PREFIX : PATH_U64_PREFIX;
+    const prefix = cls === null ? PATH_TOP_PREFIX : cls === "i64" ? PATH_I64_PREFIX : PATH_U64_PREFIX;
     const key = `${prefix}${JSON.stringify(path.steps)}`;
     this.pathRoots.set(key, path.rootId);
     return key;
@@ -1355,9 +1369,12 @@ class FnAnalyzer {
     if (e.kind === "unionNarrow" && e.type.kind === "f64") {
       return this.refinementKey(e.value, allowPaths);
     }
-    if (!allowPaths || e.kind !== "recordGet" || numberCarrierKind(e.type, this.mod) === null) return null;
-    const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
-    return slot === undefined ? null : this.pathKey(e, slot.cls);
+    if (!allowPaths || numberCarrierKind(e.type, this.mod) === null) return null;
+    if (e.kind === "recordGet") {
+      const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
+      return this.pathKey(e, slot?.cls ?? null);
+    }
+    return e.kind === "fieldGet" ? this.pathKey(e, null) : null;
   }
 
   /** Path facts are admitted only when the entire guard is synchronous,
@@ -1381,6 +1398,8 @@ class FnAnalyzer {
       case "unionNarrow":
         return this.stablePathGuard(e.value);
       case "bin":
+      case "strEq":
+      case "strCmp":
       case "logical":
         return this.stablePathGuard(e.left) && this.stablePathGuard(e.right);
       case "unary":
@@ -1393,7 +1412,7 @@ class FnAnalyzer {
 
   private clearPathsRootedAt(env: Env, localId: string): void {
     for (const k of [...env.keys()]) {
-      if (pathClassOfKey(k) !== null && this.pathRoots.get(k) === localId) env.delete(k);
+      if (pathSeedOfKey(k) !== null && this.pathRoots.get(k) === localId) env.delete(k);
     }
   }
 
@@ -1456,6 +1475,14 @@ class FnAnalyzer {
         if (e.left.type.kind !== "f64" || e.right.type.kind !== "f64") return { ...TOP };
         return transferBin(e.op, a, b);
       }
+      case "strEq":
+      case "strCmp":
+        this.evalExpr(e.left, env);
+        this.evalExpr(e.right, env);
+        return { ...TOP };
+      case "unionIsTag":
+        this.evalExpr(e.value, env);
+        return { ...TOP };
       case "unary": {
         const v = this.evalExpr(e.operand, env);
         if (e.op === "-") return transferNeg(v);
@@ -1585,21 +1612,23 @@ class FnAnalyzer {
       case "recordGet": {
         // A declared record-field slot is an assumption on the read side,
         // exactly like a declared parameter inside its callee: every write
-        // into the field discharged the class's obligations, so the value
-        // read back is whole and in class range (the read that lets
-        // `model.count + 1` refuse RANGE — the unbounded-counter teaching
-        // — instead of a spurious may-be-NaN wholeness refusal).
+        // into the field discharged the class's obligations, so its path
+        // starts at the class seed. An ordinary numeric field starts at TOP
+        // but can acquire the same straight-line guard facts as a local.
         this.evalExpr(e.obj, env);
         const slot = this.cfg.records.get(e.shapeId)?.get(e.field);
-        if (slot !== undefined && numberCarrierKind(e.type, this.mod) !== null) {
-          const key = this.pathKey(e, slot.cls);
-          return key === null ? classSeed(slot.cls) : envGet(env, key);
+        if (numberCarrierKind(e.type, this.mod) !== null) {
+          const key = this.pathKey(e, slot?.cls ?? null);
+          return key === null ? (slot === undefined ? { ...TOP } : classSeed(slot.cls)) : envGet(env, key);
         }
         return { ...TOP };
       }
-      case "fieldGet":
+      case "fieldGet": {
         this.evalExpr(e.obj, env);
-        return { ...TOP };
+        if (numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
+        const key = this.pathKey(e, null);
+        return key === null ? { ...TOP } : envGet(env, key);
+      }
       default: {
         for (const v of childExprs(e)) this.evalExpr(v, env);
         // Unmodeled expressions do not participate in the cheap
