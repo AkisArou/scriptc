@@ -4694,6 +4694,12 @@ static void fx_pairs_push(ScrArr *pairs, const char *name, const char *value, si
 
 /* ── transfers ───────────────────────────────────────────────────────── */
 
+enum {
+  FX_REDIRECT_FOLLOW,
+  FX_REDIRECT_ERROR,
+  FX_REDIRECT_MANUAL,
+};
+
 typedef struct FxTransfer {
   size_t rc; /* the live registry's +1 plus one per minted listener box */
   int id;
@@ -4705,8 +4711,11 @@ typedef struct FxTransfer {
   ScrArr *headers; /* flat [name, value, ...] user pairs — owned */
   ScrBytes *body;  /* owned, NULL = none */
   ScrUrl *url;     /* the CURRENT hop's URL — owned */
+  int redirect_mode;
   int hops;
   bool redirected;
+  bool request_streaming;
+  bool request_ended;
   /* the live hop */
   ScrHttpClientReq *client; /* +1, NULL between/after hops */
   bool responded; /* onResponse fired (the final response) */
@@ -5308,11 +5317,17 @@ static void fx_start_hop(FxTransfer *t) {
   if (proxy) scr_url_release(proxy);
 
   t->client = c; /* the constructor's +1 */
+  t->request_ended = false;
   scr_http_client_on_response(c, fx_closure(t, (void *)&fx_on_response), &fx_on_response, true);
   scr_http_client_on_upgrade(c, fx_closure(t, (void *)&fx_on_upgrade), &fx_on_upgrade, true);
   scr_http_client_on_error(c, fx_closure(t, (void *)&fx_on_client_error), &fx_on_client_error, false);
-  if (t->body != NULL) scr_http_client_end_bytes(c, t->body);
-  else scr_http_client_end(c);
+  if (t->body != NULL) {
+    scr_http_client_end_bytes(c, t->body);
+    t->request_ended = true;
+  } else if (!t->request_streaming) {
+    scr_http_client_end(c);
+    t->request_ended = true;
+  }
 }
 
 /* ── redirects ───────────────────────────────────────────────────────── */
@@ -5341,8 +5356,6 @@ static bool fx_redirect(FxTransfer *t, int status, const ScrStr *loc) {
     fx_error(t, "redirect count exceeded", NULL);
     return false;
   }
-  t->hops++;
-  t->redirected = true;
   ScrUrl *next = fx_resolve(t->url, loc);
   if (next == NULL ||
       !(fx_str_is(next->scheme, "http") || fx_str_is(next->scheme, "https")) ||
@@ -5355,10 +5368,16 @@ static bool fx_redirect(FxTransfer *t, int status, const ScrStr *loc) {
    * the body and its content-* headers drop with the rewrite. */
   bool is_get = fx_str_is(t->method, "GET");
   bool is_head = fx_str_is(t->method, "HEAD");
+  if (t->request_streaming && status != 303) {
+    scr_url_release(next);
+    fx_error(t, "fetch failed", NULL);
+    return false;
+  }
   if ((status == 303 && !is_get && !is_head) ||
       ((status == 301 || status == 302) && fx_str_is(t->method, "POST"))) {
     scr_str_release(t->method);
     t->method = scr_str_new("GET", 3);
+    t->request_streaming = false;
     if (t->body) {
       scr_bytes_release(t->body);
       t->body = NULL;
@@ -5383,6 +5402,8 @@ static bool fx_redirect(FxTransfer *t, int status, const ScrStr *loc) {
   }
   scr_url_release(t->url);
   t->url = next;
+  t->hops++;
+  t->redirected = true;
   return true;
 }
 
@@ -5474,21 +5495,32 @@ static void fx_on_response(ScrClosure *cb, ScrHttpReq *res /*+1*/) {
     ScrStr *loc = scr_http_req_header(res, locname);
     scr_str_release(locname);
     if (loc != NULL) {
-      /* drop this hop's connection (its body never reaches the island) */
-      ScrHttpClientReq *old = t->client;
-      t->client = NULL;
-      ScrStr *decoded_loc = fx_location_to_utf8(loc);
-      bool go = fx_redirect(t, status, decoded_loc);
-      scr_str_release(decoded_loc);
-      scr_str_release(loc);
-      if (old) {
-        scr_http_client_destroy(old);
-        scr_http_client_release(old);
+      if (t->redirect_mode == FX_REDIRECT_MANUAL) {
+        scr_str_release(loc);
+      } else {
+        /* drop this hop's connection (its body never reaches the island) */
+        ScrHttpClientReq *old = t->client;
+        t->client = NULL;
+        if (old) {
+          scr_http_client_destroy(old);
+          scr_http_client_release(old);
+        }
+        if (t->redirect_mode == FX_REDIRECT_ERROR) {
+          fx_error(t, "fetch failed", NULL);
+          scr_str_release(loc);
+          scr_http_req_release(res);
+          fx_release(t);
+          return;
+        }
+        ScrStr *decoded_loc = fx_location_to_utf8(loc);
+        bool go = fx_redirect(t, status, decoded_loc);
+        scr_str_release(decoded_loc);
+        scr_str_release(loc);
+        if (go) fx_start_hop(t);
+        scr_http_req_release(res);
+        fx_release(t);
+        return;
       }
-      if (go) fx_start_hop(t);
-      scr_http_req_release(res);
-      fx_release(t);
-      return;
     }
     /* a FINAL 3xx (no Location) resolves with its own body, like Node —
      * the curl bridge documented this corner away; this unit delivers it */
@@ -5607,10 +5639,11 @@ static void fx_on_upgrade(
 
 /* ── host functions (called by the fetch glue, inside the engine) ────── */
 
-/* host.start({url, method, headers: [n,v,...], body: Uint8Array|undefined},
- * cbs) → transfer id. Everything is copied out of the engine before the
- * net stack sees it. An unparsable URL throws the engine TypeError the
- * promise executor turns into Node's rejection shape. */
+/* host.start({url, method, headers: [n,v,...], body, streaming, redirectMode},
+ * cbs) → transfer id. Fixed bodies are copied out of the engine before the
+ * net stack sees them; streams arrive later through host.write/end. An
+ * unparsable URL throws the engine TypeError the promise executor turns into
+ * Node's rejection shape. */
 static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   (void)this_val;
@@ -5643,6 +5676,14 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
   t->cbs = JS_DupValue(ctx, argv[1]);
   t->cbs_live = true;
   t->url = u;
+
+  JSValue redirectv = JS_GetPropertyStr(ctx, req, "redirectMode");
+  JS_ToInt32(ctx, &t->redirect_mode, redirectv);
+  JS_FreeValue(ctx, redirectv);
+
+  JSValue streamingv = JS_GetPropertyStr(ctx, req, "streaming");
+  t->request_streaming = JS_ToBool(ctx, streamingv) > 0;
+  JS_FreeValue(ctx, streamingv);
 
   JSValue methodv = JS_GetPropertyStr(ctx, req, "method");
   const char *method = JS_ToCString(ctx, methodv);
@@ -5701,6 +5742,72 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_NewInt32(ctx, id);
 }
 
+static FxTransfer *fx_find(int32_t id) {
+  for (FxTransfer *t = fx_live; t; t = t->next) {
+    if (t->id == id) return t;
+  }
+  return NULL;
+}
+
+/* host.write(id, chunk): forwards one byte chunk from a streaming request.
+ * The boolean result lets a queued promise job stop pumping after settlement. */
+static JSValue fx_host_write(JSContext *ctx, JSValueConst this_val, int argc,
+                             JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  int32_t id = 0;
+  JS_ToInt32(ctx, &id, argv[0]);
+  FxTransfer *t = fx_find(id);
+  if (t == NULL || t->done || t->client == NULL ||
+      !t->request_streaming || t->request_ended) {
+    return JS_NewBool(ctx, false);
+  }
+  size_t blen = 0;
+  uint8_t *bytes = JS_GetUint8Array(ctx, &blen, argv[1]);
+  if (bytes == NULL && blen != 0) return JS_NewBool(ctx, false);
+  if (blen > 0) {
+    ScrBytes *chunk = scr_bytes_new(SCR_BYTES_U8, (double)blen);
+    memcpy(chunk->data, bytes, blen);
+    scr_http_client_write_bytes(t->client, chunk);
+    scr_bytes_release(chunk);
+  }
+  return JS_NewBool(ctx, true);
+}
+
+/* host.end(id): closes a streaming request after its reader reaches EOF. */
+static JSValue fx_host_end(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  int32_t id = 0;
+  JS_ToInt32(ctx, &id, argv[0]);
+  FxTransfer *t = fx_find(id);
+  if (t == NULL || t->done || t->client == NULL ||
+      !t->request_streaming || t->request_ended) {
+    return JS_NewBool(ctx, false);
+  }
+  t->request_ended = true;
+  scr_http_client_end(t->client);
+  return JS_NewBool(ctx, true);
+}
+
+/* host.fail(id, detail): a request reader failed or produced a non-byte
+ * chunk. Tear down the hop and reject through the ordinary fetch error path. */
+static JSValue fx_host_fail(JSContext *ctx, JSValueConst this_val, int argc,
+                            JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  int32_t id = 0;
+  JS_ToInt32(ctx, &id, argv[0]);
+  FxTransfer *t = fx_find(id);
+  if (t == NULL || t->done) return JS_NewBool(ctx, false);
+  const char *detail = JS_ToCString(ctx, argv[1]);
+  if (t->client) scr_http_client_destroy(t->client);
+  fx_error(t, detail ? detail : "fetch failed", NULL);
+  if (detail) JS_FreeCString(ctx, detail);
+  return JS_NewBool(ctx, true);
+}
+
 /* host.abort(id): the island aborted the fetch or cancelled the response
  * body stream. The transfer dies quietly — no onError, no onEnd. */
 static JSValue fx_host_abort(JSContext *ctx, JSValueConst this_val, int argc,
@@ -5709,20 +5816,17 @@ static JSValue fx_host_abort(JSContext *ctx, JSValueConst this_val, int argc,
   (void)argc;
   int32_t id = 0;
   JS_ToInt32(ctx, &id, argv[0]);
-  for (FxTransfer *t = fx_live; t; t = t->next) {
-    if (t->id == id) {
-      t->cancelled = true;
-      if (t->client) scr_http_client_destroy(t->client);
-      fx_settle(t);
-      break;
-    }
+  FxTransfer *t = fx_find(id);
+  if (t != NULL) {
+    t->cancelled = true;
+    if (t->client) scr_http_client_destroy(t->client);
+    fx_settle(t);
   }
   return JS_UNDEFINED;
 }
 
-/* ── the JS half (UNCHANGED from the curl bridge — the island surface,
- * abort wiring, and error shaping are the contract the fixture suite
- * pins) ──────────────────────────────────────────────────────────────── */
+/* ── the JS half: island surface, request streaming, abort wiring, and
+ * error shaping ──────────────────────────────────────────────────────── */
 
 static const char fx_glue[] =
     "(host) => {\n"
@@ -5740,7 +5844,7 @@ static const char fx_glue[] =
     "        url = input.url;\n"
     "        method = input.method;\n"
     "        headers = new g.Headers(input.headers);\n"
-    "        body = input._body instanceof Uint8Array ? input._body : null;\n"
+    "        body = input._body instanceof Uint8Array || input._body instanceof g.ReadableStream ? input._body : null;\n"
     "        signal = input._signal;\n"
     "      } else {\n"
     "        url = String(input);\n"
@@ -5753,8 +5857,12 @@ static const char fx_glue[] =
     "        }\n"
     "        signal = init.signal;\n"
     "      }\n"
-    "      if (init.redirect !== undefined && init.redirect !== 'follow') {\n"
-    "        throw new Error(\"scriptc: only redirect: 'follow' is supported by the embedded fetch\");\n"
+    "      const redirect = init.redirect === undefined ? (input instanceof g.Request ? input.redirect : 'follow') : String(init.redirect);\n"
+    "      let redirectMode = 0;\n"
+    "      if (redirect === 'error') redirectMode = 1;\n"
+    "      else if (redirect === 'manual') redirectMode = 2;\n"
+    "      else if (redirect !== 'follow') {\n"
+    "        throw new TypeError(`undefined: ${redirect} is not an accepted type. Expected one of follow, manual, error.`);\n"
     "      }\n"
     "      // Reuse Request's init handling: method normalization, header\n"
     "      // collection, body coercion with its implicit content-type, and the\n"
@@ -5763,15 +5871,16 @@ static const char fx_glue[] =
     "      if (init.method !== undefined) reqInit.method = init.method;\n"
     "      if (init.headers !== undefined) reqInit.headers = init.headers;\n"
     "      if (init.body !== undefined && init.body !== null) reqInit.body = init.body;\n"
-    "      if (reqInit.method !== undefined || reqInit.headers !== undefined || reqInit.body !== undefined || headers === null) {\n"
+    "      if (init.duplex !== undefined) reqInit.duplex = init.duplex;\n"
+    "      if (reqInit.method !== undefined || reqInit.headers !== undefined || reqInit.body !== undefined || reqInit.duplex !== undefined || headers === null) {\n"
     "        const base = input instanceof g.Request ? input : url;\n"
     "        const r = new g.Request(base, reqInit);\n"
     "        method = r.method;\n"
     "        headers = r.headers;\n"
-    "        if (r._body instanceof Uint8Array) body = r._body;\n"
+    "        body = r._body instanceof Uint8Array || r._body instanceof g.ReadableStream ? r._body : null;\n"
     "      }\n"
-    "      if (body !== null && !(body instanceof Uint8Array)) {\n"
-    "        throw new TypeError('streaming request bodies are not supported in the scriptc island');\n"
+    "      if (body !== null && !(body instanceof Uint8Array) && !(body instanceof g.ReadableStream)) {\n"
+    "        throw new TypeError('unsupported request body in the scriptc island');\n"
     "      }\n"
     "      // An already-aborted signal rejects with ITS reason before any\n"
     "      // transfer starts (Node: validation above still throws first).\n"
@@ -5783,15 +5892,28 @@ static const char fx_glue[] =
     "      let resolved = false;\n"
     "      let done = false;\n"
     "      let id = 0;\n"
+    "      let requestReader = body instanceof g.ReadableStream ? body.getReader() : null;\n"
+    "      const stopRequest = (reason) => {\n"
+    "        const reader = requestReader;\n"
+    "        requestReader = null;\n"
+    "        if (reader === null) return;\n"
+    "        try {\n"
+    "          const cancelled = reader.cancel(reason);\n"
+    "          if (cancelled !== undefined && cancelled !== null && typeof cancelled.catch === 'function') cancelled.catch(() => {});\n"
+    "        } catch (_e) { /* already released or errored */ }\n"
+    "        try { reader.releaseLock(); } catch (_e) { /* pending read */ }\n"
+    "      };\n"
     "      // The transfer is over (delivered, failed, cancelled, or aborted):\n"
     "      // a later signal abort must not touch it.\n"
-    "      const finish = () => {\n"
+    "      const finish = (reason) => {\n"
+    "        if (done) return;\n"
     "        done = true;\n"
+    "        stopRequest(reason);\n"
     "        if (signal !== null) signal.removeEventListener('abort', onAbort);\n"
     "      };\n"
     "      const onAbort = () => {\n"
     "        if (done) return;\n"
-    "        finish();\n"
+    "        finish(signal.reason);\n"
     "        host.abort(id); // the C side dies quietly; rejection is ours\n"
     "        if (!resolved) {\n"
     "          resolved = true;\n"
@@ -5803,11 +5925,67 @@ static const char fx_glue[] =
     "          controller = null;\n"
     "        }\n"
     "      };\n"
+    "      const pumpRequest = () => {\n"
+    "        const reader = requestReader;\n"
+    "        if (done || reader === null) return;\n"
+    "        let pending;\n"
+    "        try { pending = reader.read(); }\n"
+    "        catch (error) {\n"
+    "          requestReader = null;\n"
+    "          try { reader.releaseLock(); } catch (_e) { /* already released */ }\n"
+    "          host.fail(id, error instanceof Error ? error.message : String(error));\n"
+    "          return;\n"
+    "        }\n"
+    "        pending.then(\n"
+    "          (result) => {\n"
+    "            if (done || requestReader !== reader) {\n"
+    "              try { reader.releaseLock(); } catch (_e) { /* cancel still pending */ }\n"
+    "              return;\n"
+    "            }\n"
+    "            if (result.done) {\n"
+    "              requestReader = null;\n"
+    "              try { reader.releaseLock(); } catch (_e) { /* already released */ }\n"
+    "              host.end(id);\n"
+    "              return;\n"
+    "            }\n"
+    "            if (!(result.value instanceof Uint8Array)) {\n"
+    "              const error = new TypeError('Received non-Uint8Array chunk');\n"
+    "              requestReader = null;\n"
+    "              try {\n"
+    "                const cancelled = reader.cancel(error);\n"
+    "                if (cancelled !== undefined && cancelled !== null && typeof cancelled.catch === 'function') cancelled.catch(() => {});\n"
+    "              } catch (_e) { /* source already errored */ }\n"
+    "              try { reader.releaseLock(); } catch (_e) { /* pending cancel */ }\n"
+    "              host.fail(id, error.message);\n"
+    "              return;\n"
+    "            }\n"
+    "            if (host.write(id, result.value)) pumpRequest();\n"
+    "            else stopRequest();\n"
+    "          },\n"
+    "          (error) => {\n"
+    "            if (done || requestReader !== reader) {\n"
+    "              try { reader.releaseLock(); } catch (_e) { /* cancel still pending */ }\n"
+    "              return;\n"
+    "            }\n"
+    "            requestReader = null;\n"
+    "            try { reader.releaseLock(); } catch (_e) { /* already released */ }\n"
+    "            host.fail(id, error instanceof Error ? error.message : String(error));\n"
+    "          },\n"
+    "        );\n"
+    "      };\n"
     "      const flat = [];\n"
     "      for (const pair of headers) { flat.push(pair[0], pair[1]); }\n"
-    "      id = host.start(\n"
-    "        { url, method, headers: flat, body: body === null ? undefined : body },\n"
-    "        {\n"
+    "      try {\n"
+    "        id = host.start(\n"
+    "          {\n"
+    "            url,\n"
+    "            method,\n"
+    "            headers: flat,\n"
+    "            body: body instanceof Uint8Array ? body : undefined,\n"
+    "            streaming: body instanceof g.ReadableStream,\n"
+    "            redirectMode,\n"
+    "          },\n"
+    "          {\n"
     "          onResponse(status, statusText, raw, finalUrl, redirected) {\n"
     "            resolved = true;\n"
     "            const h = new g.Headers();\n"
@@ -5852,9 +6030,14 @@ static const char fx_glue[] =
     "              controller = null;\n"
     "            }\n"
     "          },\n"
-    "        },\n"
-    "      );\n"
-    "      if (signal !== null) signal.addEventListener('abort', onAbort, { once: true });\n"
+    "          },\n"
+    "        );\n"
+    "      } catch (error) {\n"
+    "        stopRequest(error);\n"
+    "        throw error;\n"
+    "      }\n"
+    "      if (!done && signal !== null) signal.addEventListener('abort', onAbort, { once: true });\n"
+    "      if (!done && requestReader !== null) pumpRequest();\n"
     "    });\n"
     "  };\n"
     "}\n";
@@ -5870,6 +6053,9 @@ static void fx_boot(void *jsctx) {
   }
   JSValue host = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, host, "start", JS_NewCFunction(ctx, fx_host_start, "start", 2));
+  JS_SetPropertyStr(ctx, host, "write", JS_NewCFunction(ctx, fx_host_write, "write", 2));
+  JS_SetPropertyStr(ctx, host, "end", JS_NewCFunction(ctx, fx_host_end, "end", 1));
+  JS_SetPropertyStr(ctx, host, "fail", JS_NewCFunction(ctx, fx_host_fail, "fail", 2));
   JS_SetPropertyStr(ctx, host, "abort", JS_NewCFunction(ctx, fx_host_abort, "abort", 1));
   JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 1, (JSValueConst *)&host);
   JS_FreeValue(ctx, host);

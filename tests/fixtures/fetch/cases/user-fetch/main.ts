@@ -7,6 +7,12 @@
 // in the island (method/headers/body/signal), AbortSignal.timeout cancels,
 // and network failure rejects catchably. Byte-exact vs Node.
 
+async function requestStream(baseUrl: string): Promise<ReadableStream<Uint8Array>> {
+  const response = await fetch(`${baseUrl}/chunked`);
+  if (response.body === null) throw new Error("missing response body");
+  return response.body;
+}
+
 async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   // ok + status through the handle; json() exits through a checked cast.
   const r = await fetch(`${baseUrl}/json`);
@@ -39,6 +45,58 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     body: string;
   };
   console.log("post:", ej.method, ej.contentType ?? "none", ej.body);
+
+  // A request ReadableStream crosses the island incrementally instead of
+  // being silently discarded.
+  const streamed = await fetch(`${baseUrl}/post-echo`, {
+    method: "POST",
+    body: await requestStream(baseUrl),
+    duplex: "half",
+  });
+  const streamedJson = (await streamed.json()) as {
+    method: string;
+    body: string;
+  };
+  console.log("stream post:", streamedJson.method, streamedJson.body);
+
+  // All three redirect policies are implemented by the dynamic bridge.
+  const manual = await fetch(`${baseUrl}/redirect`, { redirect: "manual" });
+  console.log(
+    "manual redirect:",
+    `${manual.status}`,
+    manual.redirected ? "redirected" : "direct",
+    manual.url.endsWith("/redirect") ? "original" : "changed",
+    JSON.stringify(await manual.text()),
+  );
+  try {
+    await fetch(`${baseUrl}/redirect`, { redirect: "error" });
+    console.log("error redirect: resolved");
+  } catch (e) {
+    if (e instanceof Error) console.log("error redirect:", e.name, e.message);
+  }
+
+  // A consumed stream is not replayable across 301/302/307/308. A 303 may
+  // discard it while rewriting the request to GET.
+  try {
+    await fetch(`${baseUrl}/redirect-stream-302`, {
+      method: "POST",
+      body: await requestStream(baseUrl),
+      duplex: "half",
+    });
+    console.log("stream redirect 302: resolved");
+  } catch (e) {
+    if (e instanceof Error) console.log("stream redirect 302:", e.name, e.message);
+  }
+  const stream303 = await fetch(`${baseUrl}/redirect-stream-303`, {
+    method: "POST",
+    body: await requestStream(baseUrl),
+    duplex: "half",
+  });
+  const stream303Json = (await stream303.json()) as {
+    method: string;
+    body: string;
+  };
+  console.log("stream redirect 303:", stream303Json.method, JSON.stringify(stream303Json.body));
 
   const modeResponse = await fetch(`${baseUrl}/request-defaults`, {
     headers: { "sec-fetch-mode": "navigate" },
