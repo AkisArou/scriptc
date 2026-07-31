@@ -259,6 +259,80 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
     120_000,
   );
 
+  test(
+    "all native fetch lanes snapshot proxy and extra-CA env before user code",
+    async () => {
+      const certs = join(fixturesRoot, "../server/certs");
+      const server = createHttpsServer(
+        {
+          key: readFileSync(join(certs, "localhost-key.pem")),
+          cert: readFileSync(join(certs, "localhost.pem")),
+        },
+        (_request, response) => response.end("secure"),
+      );
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          throw new Error("missing HTTPS address");
+        }
+        const entry = join(
+          fixturesRoot,
+          "static-env-snapshot/main.mts",
+        );
+        const [dynamic, c, llvm] = await Promise.all([
+          build(entry),
+          buildStatic(entry, "c", "env-snapshot"),
+          buildStatic(entry, "llvm", "env-snapshot"),
+        ]);
+        const argv = [
+          `${baseUrl}/text`,
+          proxyUrl,
+          `https://localhost:${address.port}`,
+          join(certs, "ca.pem"),
+        ];
+        const env: NodeJS.ProcessEnv = { ...process.env };
+        for (const key of [
+          "NODE_USE_ENV_PROXY",
+          "NODE_EXTRA_CA_CERTS",
+          "http_proxy",
+          "https_proxy",
+          "HTTP_PROXY",
+          "HTTPS_PROXY",
+          "no_proxy",
+          "NO_PROXY",
+        ]) {
+          delete env[key];
+        }
+        const before = servers.proxiedRequests();
+        const [nodeRes, ...nativeResults] = await Promise.all([
+          runBinary("node", [entry, ...argv], env),
+          runBinary(dynamic, argv, env),
+          runBinary(c, argv, env),
+          runBinary(llvm, argv, env),
+        ]);
+        for (const nativeRes of nativeResults) {
+          expect(nativeRes.stdout.toString("utf8")).toBe(
+            nodeRes.stdout.toString("utf8"),
+          );
+          expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+        }
+        expect(servers.proxiedRequests() - before).toBe(0);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    },
+    120_000,
+  );
+
   test.for(["c", "llvm"] as const)(
     "static fetch / %s backend supports IPv6 URL literals and NO_PROXY",
     async (backend) => {

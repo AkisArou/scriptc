@@ -383,9 +383,12 @@ static mbedtls_x509_crt *scr_tls_system_ca(void) {
     for (size_t i = 0; i < sizeof bundles / sizeof bundles[0]; i++) {
       if (mbedtls_x509_crt_parse_file(&scr_tls_system_roots, bundles[i]) == 0) break;
     }
-    const char *extra = getenv("NODE_EXTRA_CA_CERTS");
-    if (extra != NULL && extra[0] != '\0') {
-      (void)mbedtls_x509_crt_parse_file(&scr_tls_system_roots, extra);
+    const char *extra = NULL;
+    size_t extra_len = 0;
+    if (scr_tls_ca_extra_pem(&extra, &extra_len) && extra_len > 0) {
+      (void)mbedtls_x509_crt_parse(
+          &scr_tls_system_roots, (const unsigned char *)extra,
+          extra_len + 1);
     }
   }
   return &scr_tls_system_roots;

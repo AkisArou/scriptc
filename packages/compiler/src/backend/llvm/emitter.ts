@@ -73,7 +73,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -1194,6 +1194,8 @@ class LlEmitter {
     // any island entry (the engine's lazy boot consults it) — cc.ts
     // compiles scr_fetch.c on the same predicate.
     const usesFetch = moduleUsesFetch(this.mod);
+    const snapshotsTlsCa =
+      moduleUsesTls(this.mod) || moduleUsesTlsCa(this.mod);
     const hasRefGlobals = globals.some((g) => isRefCounted(g.type)) || fnValueProps.length > 0;
     // Declared NOW — the extern block flushes before main assembles.
     if (usesEvents) this.declare(`declare void @scr_events_install()`);
@@ -1205,6 +1207,9 @@ class LlEmitter {
     }
     if (usesHttp) this.declare(`declare void @scr_http_dyn_install()`);
     if (usesFetch) this.declare(`declare void @scr_fetch_install()`);
+    if (snapshotsTlsCa) {
+      this.declare(`declare void @scr_tls_ca_install()`);
+    }
     if (usesEvents && hasRefGlobals) {
       this.declare(`declare void @scr_run_exit_listeners(double)`);
       this.declare(`declare i32 @scr_exit_code_hint_get()`);
@@ -1471,6 +1476,7 @@ class LlEmitter {
       // fs.watch programs fill the loop's watch hooks the same way —
       // scr_watch.c links only when this line is emitted.
       ...(usesFsWatch ? [`  call void @scr_watch_install()`] : []),
+      ...(snapshotsTlsCa ? [`  call void @scr_tls_ca_install()`] : []),
       ...(usesFetch ? [`  call void @scr_fetch_install()`] : []),
       ...(usesNet ? [`  call void @scr_net_install()`, `  call void @scr_net_dyn_install()`] : []),
       ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),

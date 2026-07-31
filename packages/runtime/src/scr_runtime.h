@@ -5197,9 +5197,12 @@ long scr_secure_ctx_live_count(void);
  * /etc/ssl/cert.pem probe order scr_tls.c documents) stands in for both
  * Node's compiled-in Mozilla roots ('bundled', rootCertificates) and the
  * platform store ('system') — the established SEMANTICS divergence,
- * extended to introspection; 'extra' reads NODE_EXTRA_CA_CERTS. Arrays
- * are cached per type (+1 retained answers each call — Node's own
- * caching, and the identity the suite pins with strictEqual). */
+ * extended to introspection; 'extra' uses the NODE_EXTRA_CA_CERTS file
+ * captured before user code runs. Arrays are cached per type (+1 retained
+ * answers each call — Node's own caching, and the identity the suite pins
+ * with strictEqual). */
+void scr_tls_ca_install(void); /* snapshots NODE_EXTRA_CA_CERTS + file bytes */
+bool scr_tls_ca_extra_pem(const char **pem, size_t *len); /* borrowed launch snapshot */
 ScrArr *scr_tls_ca_get(ScrStr *type); /* +1; throws ERR_INVALID_ARG_VALUE on unknown types */
 ScrArr *scr_tls_ca_root(void);        /* +1; === getCACertificates("bundled") */
 /* Replaces the 'default' set: entries filter to their PEM certificate

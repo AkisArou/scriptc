@@ -3021,10 +3021,36 @@ static ScrUrl *sf_url_parse_quiet(ScrStr *text) {
   return url;
 }
 
-static const char *sf_env2(const char *lower, const char *upper) {
+static bool sf_proxy_enabled;
+static char *sf_http_proxy;
+static char *sf_https_proxy;
+static char *sf_no_proxy;
+
+static char *sf_env_copy(const char *lower, const char *upper) {
   const char *value = getenv(lower);
   if (!value || value[0] == '\0') value = getenv(upper);
-  return value && value[0] != '\0' ? value : NULL;
+  if (!value || value[0] == '\0') return NULL;
+  size_t len = strlen(value);
+  char *copy = malloc(len + 1);
+  if (!copy) sf_oom();
+  memcpy(copy, value, len + 1);
+  return copy;
+}
+
+static void sf_proxy_snapshot(void) {
+  const char *optin = getenv("NODE_USE_ENV_PROXY");
+  sf_proxy_enabled = optin && strcmp(optin, "1") == 0;
+  if (!sf_proxy_enabled) return;
+  sf_http_proxy = sf_env_copy("http_proxy", "HTTP_PROXY");
+  sf_https_proxy = sf_env_copy("https_proxy", "HTTPS_PROXY");
+  sf_no_proxy = sf_env_copy("no_proxy", "NO_PROXY");
+}
+
+static void sf_proxy_snapshot_free(void) {
+  free(sf_http_proxy);
+  free(sf_https_proxy);
+  free(sf_no_proxy);
+  sf_http_proxy = sf_https_proxy = sf_no_proxy = NULL;
 }
 
 static int sf_hex_value(char c) {
@@ -3144,14 +3170,11 @@ static bool sf_no_proxy_match(const char *list, const ScrStr *host,
 static ScrUrl *sf_proxy_for(const ScrUrl *target, bool https,
                             int target_port, bool *invalid) {
   *invalid = false;
-  const char *optin = getenv("NODE_USE_ENV_PROXY");
-  if (!optin || strcmp(optin, "1") != 0) return NULL;
-  const char *proxy = https ? sf_env2("https_proxy", "HTTPS_PROXY")
-                            : sf_env2("http_proxy", "HTTP_PROXY");
+  if (!sf_proxy_enabled) return NULL;
+  const char *proxy = https ? sf_https_proxy : sf_http_proxy;
   if (!proxy) return NULL;
-  const char *no_proxy = sf_env2("no_proxy", "NO_PROXY");
-  if (no_proxy &&
-      sf_no_proxy_match(no_proxy, target->host, target_port)) {
+  if (sf_no_proxy &&
+      sf_no_proxy_match(sf_no_proxy, target->host, target_port)) {
     return NULL;
   }
   ScrStr *text = scr_str_new(proxy, strlen(proxy));
@@ -4562,12 +4585,15 @@ static void sf_teardown(void) {
   while (sf_callback_signals) {
     sf_signal_drop_callbacks(sf_callback_signals);
   }
+  sf_proxy_snapshot_free();
 }
 
 void scr_fetch_install(void) {
   static bool installed;
   if (installed) return;
   installed = true;
+  scr_tls_ca_install();
+  sf_proxy_snapshot();
   scr_net_install();
   scr_dyn_handle_install(SCR_DYNH_ABORT_SIGNAL, &sf_signal_ops);
   scr_dyn_handle_install(SCR_DYNH_WEB_STREAM, &sf_stream_ops);
@@ -4990,10 +5016,36 @@ static bool fx_bad_port(int port) {
 
 /* ── env proxy (NODE_USE_ENV_PROXY=1, undici's EnvHttpProxyAgent) ────── */
 
-static const char *fx_env2(const char *lower, const char *upper) {
+static bool fx_proxy_enabled;
+static char *fx_http_proxy;
+static char *fx_https_proxy;
+static char *fx_no_proxy;
+
+static char *fx_env_copy(const char *lower, const char *upper) {
   const char *v = getenv(lower);
   if (v == NULL || v[0] == '\0') v = getenv(upper);
-  return (v != NULL && v[0] != '\0') ? v : NULL;
+  if (v == NULL || v[0] == '\0') return NULL;
+  size_t len = strlen(v);
+  char *copy = malloc(len + 1);
+  if (!copy) fx_oom();
+  memcpy(copy, v, len + 1);
+  return copy;
+}
+
+static void fx_proxy_snapshot(void) {
+  const char *optin = getenv("NODE_USE_ENV_PROXY");
+  fx_proxy_enabled = optin != NULL && strcmp(optin, "1") == 0;
+  if (!fx_proxy_enabled) return;
+  fx_http_proxy = fx_env_copy("http_proxy", "HTTP_PROXY");
+  fx_https_proxy = fx_env_copy("https_proxy", "HTTPS_PROXY");
+  fx_no_proxy = fx_env_copy("no_proxy", "NO_PROXY");
+}
+
+static void fx_proxy_snapshot_free(void) {
+  free(fx_http_proxy);
+  free(fx_https_proxy);
+  free(fx_no_proxy);
+  fx_http_proxy = fx_https_proxy = fx_no_proxy = NULL;
 }
 
 static int fx_hex_value(char c) {
@@ -5115,13 +5167,13 @@ static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
 static ScrUrl *fx_proxy_for(const ScrUrl *target, bool https, int target_port,
                             bool *invalid) {
   *invalid = false;
-  const char *optin = getenv("NODE_USE_ENV_PROXY");
-  if (optin == NULL || strcmp(optin, "1") != 0) return NULL;
-  const char *proxy = https ? fx_env2("https_proxy", "HTTPS_PROXY")
-                            : fx_env2("http_proxy", "HTTP_PROXY");
+  if (!fx_proxy_enabled) return NULL;
+  const char *proxy = https ? fx_https_proxy : fx_http_proxy;
   if (proxy == NULL) return NULL;
-  const char *no = fx_env2("no_proxy", "NO_PROXY");
-  if (no != NULL && fx_no_proxy_match(no, target->host, target_port)) return NULL;
+  if (fx_no_proxy != NULL &&
+      fx_no_proxy_match(fx_no_proxy, target->host, target_port)) {
+    return NULL;
+  }
   ScrStr *ps = scr_str_new(proxy, strlen(proxy));
   ScrUrl *u = fx_url_parse(ps);
   scr_str_release(ps);
@@ -5847,6 +5899,9 @@ void scr_fetch_install(void) {
   static bool installed = false;
   if (installed) return;
   installed = true;
+  scr_tls_ca_install();
+  fx_proxy_snapshot();
+  scr_atexit(fx_proxy_snapshot_free);
   /* The net unit's loop hooks (pending/dispatch/pollfd): the emitted main
    * registers them only for programs that USE node:net — a fetch-only
    * build must register them itself or its sockets would neither keep

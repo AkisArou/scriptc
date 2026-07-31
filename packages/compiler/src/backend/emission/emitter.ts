@@ -33,7 +33,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -729,6 +729,11 @@ export class CEmitter {
     // drains the engine's job queue at quiescence, so npm-importing
     // programs always run the loop, like Node always runs its own.
     const usesIsland = embedded !== undefined && embedded.modules.length > 0;
+    const snapshotsTlsCa =
+      moduleUsesTls(this.mod) ||
+      moduleUsesTlsCa(this.mod) ||
+      moduleEmbedsBuiltin(this.mod, "node:https") ||
+      moduleEmbedsBuiltin(this.mod, "node:tls");
     // A pending module root normally selects Node's exit status 13, but
     // an already-failed node:test run or an embedded process.exitCode has
     // higher precedence. Keep this expression shared with the ordinary
@@ -780,6 +785,10 @@ export class CEmitter {
       // node:stream (the emitter story — instanceof and dynamic teardown
       // both dispatch through them).
       ...streamVtStampLines(this),
+      // Node reads NODE_EXTRA_CA_CERTS and the referenced file during
+      // process initialization. Native fetch performs the same idempotent
+      // install from scr_fetch_install.
+      ...(snapshotsTlsCa ? [`  scr_tls_ca_install();`] : []),
       `  scr_lib_init(argc, argv);`,
       // Fetch-referencing programs register the native fetch bridge before any
       // island entry (the engine's lazy boot consults it): the ONLY
