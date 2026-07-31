@@ -9,6 +9,54 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
 
+function streamTypedRefCommitAdapter(
+  E: CEmitter,
+  t: IrType,
+  snapshot: string,
+  defs: string[],
+): string {
+  if (t.kind !== "record") return "NULL";
+  const shape = E.recordsById.get(t.shapeId);
+  if (!shape) {
+    throw new Error(`emitter bug: stream typed-ref commit of unknown shape ${t.shapeId}`);
+  }
+  const commit = `${snapshot}_commit`;
+  E.walkerProtos.push(
+    `static void ${commit}(void *sc_p, const ScrDyn *sc_d); /* commit live stream element ${typeKey(t)} */`,
+  );
+  defs.push(
+    `static void ${commit}(void *sc_p, const ScrDyn *sc_d) {`,
+    `  ${cDecl(t, "sc_target")} = (${cType(t).trim()})sc_p;`,
+    `  ${cDecl(t, "sc_next")} = ${E.dynCheckHelper(t)}(sc_d, NULL);`,
+    `  if (!sc_next) return;`,
+  );
+  for (const field of shape.fields) {
+    const member = mangleField(field.name);
+    defs.push(
+      `  {`,
+      `    ${cDecl(field.type, "sc_old")} = sc_target->${member};`,
+      `    sc_target->${member} = sc_next->${member};`,
+      `    sc_next->${member} = sc_old;`,
+      `  }`,
+    );
+  }
+  if (shape.indexValue) {
+    defs.push(
+      `  {`,
+      `    ScrMap *sc_old = sc_target->${OVERFLOW_MEMBER};`,
+      `    sc_target->${OVERFLOW_MEMBER} = sc_next->${OVERFLOW_MEMBER};`,
+      `    sc_next->${OVERFLOW_MEMBER} = sc_old;`,
+      `  }`,
+    );
+  }
+  defs.push(
+    `  ${releaseCallC(t, "sc_next")};`,
+    `}`,
+    ``,
+  );
+  return `&${commit}`;
+}
+
 function streamFromArrayAdapter(
   E: CEmitter,
   t: IrType & { kind: "array" },
@@ -38,6 +86,7 @@ function streamFromArrayAdapter(
     elem.kind !== "union";
   const snapshot = `${sym}_materialize`;
   const d: string[] = [];
+  let commit = "NULL";
   if (typedRef) {
     const snapshotSig = `static ScrDyn *${snapshot}(void *sc_p)`;
     E.walkerProtos.push(`${snapshotSig}; /* materialize stream element ${key} */`);
@@ -47,7 +96,9 @@ function streamFromArrayAdapter(
       `}`,
       ``,
     );
+    commit = streamTypedRefCommitAdapter(E, elem, snapshot, d);
   }
+  const unionCommits = new Map<number, string>();
   for (const { arm, tag } of unionRefArms) {
     const armKey = typeKey(arm);
     const armSnapshot = `${snapshot}_${tag}`;
@@ -58,6 +109,10 @@ function streamFromArrayAdapter(
       `  return ${E.toDynHelper(arm)}((${cType(arm).trim()})sc_p);`,
       `}`,
       ``,
+    );
+    unionCommits.set(
+      tag,
+      streamTypedRefCommitAdapter(E, arm, armSnapshot, d),
     );
   }
   d.push(`${sig} { /* ReadableStream.from array<${key}> */`);
@@ -79,7 +134,7 @@ function streamFromArrayAdapter(
         const keyLit = cStringLiteral(Buffer.from(armKey, "utf8"));
         d.push(
           `  case ${tag}:`,
-          `    sc_d = scr_dyn_new_typed_ref(scr_union_peek(sc_v), &${rc.retain}, &${rc.release}, ${keyLit}, ${Buffer.byteLength(armKey, "utf8")}, &${snapshot}_${tag});`,
+          `    sc_d = scr_dyn_new_typed_ref(scr_union_peek(sc_v), &${rc.retain}, &${rc.release}, ${keyLit}, ${Buffer.byteLength(armKey, "utf8")}, &${snapshot}_${tag}, ${unionCommits.get(tag) ?? "NULL"});`,
           `    break;`,
         );
       }
@@ -94,7 +149,7 @@ function streamFromArrayAdapter(
       const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
       const keyLen = Buffer.byteLength(key, "utf8");
       d.push(
-        `  ScrDyn *sc_d = scr_dyn_new_typed_ref(sc_v, &${rc.retain}, &${rc.release}, ${keyLit}, ${keyLen}, &${snapshot});`,
+        `  ScrDyn *sc_d = scr_dyn_new_typed_ref(sc_v, &${rc.retain}, &${rc.release}, ${keyLit}, ${keyLen}, &${snapshot}, ${commit});`,
       );
     } else {
       d.push(`  ScrDyn *sc_d = ${E.toDynHelper(elem)}(sc_v);`);

@@ -9976,6 +9976,63 @@ class LlEmitter {
     return sym;
   }
 
+  private streamTypedRefCommitAdapter(
+    t: IrType,
+    snapshot: string,
+  ): string {
+    if (t.kind !== "record") return "null";
+    const shape = this.recordsById.get(t.shapeId);
+    if (!shape) {
+      throw new Error(
+        `llvm emitter bug: stream typed-ref commit of unknown shape ${t.shapeId}`,
+      );
+    }
+    const commit = `${snapshot}_commit`;
+    const check = this.dyn.dynCheckHelper(t);
+    const lines = [
+      `define internal void @${commit}(ptr %target, ptr %d) ${FN_ATTRS} { ; commit live stream element ${typeKey(t)}`,
+      `entry:`,
+      `  %next = call ptr @${check}(ptr %d, ptr null)`,
+      `  %missing = icmp eq ptr %next, null`,
+      `  br i1 %missing, label %done, label %swap`,
+      `swap:`,
+    ];
+    const members = [
+      ...shape.fields.map((field, index) => ({
+        index: index + 1,
+        type: llFieldType(field.type),
+        name: field.name,
+      })),
+      ...(shape.indexValue
+        ? [{
+            index: shape.fields.length + 1,
+            type: "ptr" as const,
+            name: "[key: string] overflow",
+          }]
+        : []),
+    ];
+    members.forEach((member, index) => {
+      lines.push(
+        `  %tp${index} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %target, i64 0, i32 ${member.index}`,
+        `  %np${index} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %next, i64 0, i32 ${member.index}`,
+        `  %old${index} = load ${member.type}, ptr %tp${index} ; ${member.name}`,
+        `  %new${index} = load ${member.type}, ptr %np${index}`,
+        `  store ${member.type} %new${index}, ptr %tp${index}`,
+        `  store ${member.type} %old${index}, ptr %np${index}`,
+      );
+    });
+    lines.push(
+      `  call void ${releaseSym(this, t)}(ptr %next)`,
+      `  br label %done`,
+      `done:`,
+      `  ret void`,
+      `}`,
+      ``,
+    );
+    this.resolveThunkDefs.push(...lines);
+    return `@${commit}`;
+  }
+
   private streamFromArrayAdapter(
     t: IrType & { kind: "array" },
   ): string {
@@ -10033,7 +10090,7 @@ class LlEmitter {
         );
       } else {
         this.declare(
-          `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr)`,
+          `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
         );
         const boxedSlot = B.slot();
         B.entryAllocas.push(`${boxedSlot} = alloca ptr`);
@@ -10052,6 +10109,10 @@ class LlEmitter {
         unionRefArms.forEach(({ arm, tag }, i) => {
           const armKey = typeKey(arm);
           const armSnapshot = `${snapshot}_${tag}`;
+          const armCommit = this.streamTypedRefCommitAdapter(
+            arm,
+            armSnapshot,
+          );
           const rc = vAdapters(this, arm);
           B.startBlock(armLabels[i]!);
           const payloadPtr = B.tmp();
@@ -10062,7 +10123,7 @@ class LlEmitter {
           );
           B.line(`${payload} = load ptr, ptr ${payloadPtr}`);
           B.line(
-            `${armBoxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, i64 ${Buffer.byteLength(armKey, "utf8")}, ptr @${armSnapshot})`,
+            `${armBoxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, i64 ${Buffer.byteLength(armKey, "utf8")}, ptr @${armSnapshot}, ptr ${armCommit})`,
           );
           B.line(`store ptr ${armBoxed}, ptr ${boxedSlot}`);
           B.br(join);
@@ -10090,11 +10151,12 @@ class LlEmitter {
       boxed = B.tmp();
       const rc = vAdapters(this, elem);
       const keyPtr = this.cstr(key);
+      const commit = this.streamTypedRefCommitAdapter(elem, snapshot);
       this.declare(
-        `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr)`,
+        `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
       );
       B.line(
-        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot})`,
+        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot}, ptr ${commit})`,
       );
       this.resolveThunkDefs.push(
         `define internal ptr @${snapshot}(ptr %p) ${FN_ATTRS} { ; materialize stream element ${key}`,

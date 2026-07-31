@@ -2098,7 +2098,7 @@ export class LlDyn {
       B.terminate(`ret ptr null`);
       B.startBlock(lNext);
     }
-    // Typed stream capsules expose their one cached detached dyn view to
+    // Typed stream capsules expose their one cached, refreshed dyn view to
     // ordinary property reads while the capsule itself keeps identity.
     {
       const isTyped = B.tmp();
@@ -2510,7 +2510,7 @@ export class LlDyn {
     host.declare(`declare void @scr_str_release(ptr)`);
     const B = new BlockBuilder();
     const kd = this.kindOf(B, "%d");
-    // Typed stream capsules iterate their cached detached dyn view.
+    // Typed stream capsules iterate their cached, refreshed dyn view.
     {
       const isTyped = B.tmp();
       B.line(`${isTyped} = icmp eq i32 ${kd}, ${DK.TYPED_REF}`);

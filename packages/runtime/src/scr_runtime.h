@@ -2809,10 +2809,11 @@ struct ScrDyn {
       const char *type_key;
       size_t type_key_len;
       ScrDyn *(*materialize)(void *);
+      void (*commit)(void *, const ScrDyn *);
       /* Both caches belong to this capsule. ReadableStream canonicalizes
-       * capsules for repeated source references, so the detached dyn view
+       * capsules for repeated source references, so the refreshed dyn view
        * and every structurally converted static view keep JS reference
-       * identity for the lifetime of that stream. */
+       * identity while the source reference remains observable. */
       ScrDyn *materialized;
       ScrDynTypedCast *casts;
     } typed_ref;
@@ -2915,11 +2916,13 @@ ScrDyn *scr_dyn_new_buffer_copy(const ScrBytes *b);
 ScrDyn *scr_dyn_new_typed_ref(
     void *ptr, void *(*retain)(void *), void (*release)(void *),
     const char *type_key, size_t type_key_len,
-    ScrDyn *(*materialize)(void *));
+    ScrDyn *(*materialize)(void *),
+    void (*commit)(void *, const ScrDyn *));
 bool scr_dyn_typed_ref_is(
     const ScrDyn *d, const char *type_key, size_t type_key_len);
 void *scr_dyn_typed_ref_unbox(const ScrDyn *d); /* +1 */
 ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d); /* +1 */
+void scr_dyn_typed_ref_commit(ScrDyn *d);
 void *scr_dyn_typed_ref_cached_cast(
     const ScrDyn *d, const char *type_key, size_t type_key_len); /* +1/NULL */
 void scr_dyn_typed_ref_cache_cast(

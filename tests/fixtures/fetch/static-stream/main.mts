@@ -388,6 +388,19 @@ console.log(
   repeatedDynamicSecond.value.value,
 );
 
+const liveDynamicValue = { value: 16 };
+const liveDynamicReader: any = ReadableStream.from([
+  liveDynamicValue,
+  liveDynamicValue,
+]).getReader();
+const liveDynamicFirst: any = await liveDynamicReader.read();
+console.log("dynamic stream live first:", JSON.stringify(liveDynamicFirst.value));
+liveDynamicValue.value = 17;
+const liveDynamicSecond: any = await liveDynamicReader.read();
+console.log("dynamic stream live refresh:", JSON.stringify(liveDynamicSecond.value));
+liveDynamicSecond.value.value = 18;
+console.log("dynamic stream live commit:", liveDynamicValue.value);
+
 const widenedStringStream: ReadableStream<unknown> = ReadableStream.from([
   "same",
   ["sa", "me"].join(""),

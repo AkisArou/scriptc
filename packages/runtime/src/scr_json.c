@@ -674,7 +674,8 @@ ScrDyn *scr_dyn_new_buffer_copy(const ScrBytes *b) {
 ScrDyn *scr_dyn_new_typed_ref(
     void *ptr, void *(*retain)(void *), void (*release)(void *),
     const char *type_key, size_t type_key_len,
-    ScrDyn *(*materialize)(void *)) {
+    ScrDyn *(*materialize)(void *),
+    void (*commit)(void *, const ScrDyn *)) {
   ScrDyn *d = scr_dyn_alloc(SCR_DYN_TYPED_REF);
   d->v.typed_ref.ptr = retain(ptr);
   d->v.typed_ref.retain = retain;
@@ -682,6 +683,7 @@ ScrDyn *scr_dyn_new_typed_ref(
   d->v.typed_ref.type_key = type_key;
   d->v.typed_ref.type_key_len = type_key_len;
   d->v.typed_ref.materialize = materialize;
+  d->v.typed_ref.commit = commit;
   d->v.typed_ref.materialized = NULL;
   d->v.typed_ref.casts = NULL;
   return d;
@@ -703,8 +705,31 @@ ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d) {
   if (!capsule->v.typed_ref.materialized) {
     capsule->v.typed_ref.materialized =
         capsule->v.typed_ref.materialize(capsule->v.typed_ref.ptr);
+  } else {
+    /* Keep the stable dyn object identity while refreshing its contents
+     * from the live typed source. The fresh snapshot owns exactly one
+     * reference; swapping payloads lets its release dispose the old
+     * detached contents without changing the cached node's address. */
+    ScrDyn *fresh =
+        capsule->v.typed_ref.materialize(capsule->v.typed_ref.ptr);
+    size_t cached_rc = capsule->v.typed_ref.materialized->rc;
+    size_t fresh_rc = fresh->rc;
+    ScrDyn old = *capsule->v.typed_ref.materialized;
+    *capsule->v.typed_ref.materialized = *fresh;
+    capsule->v.typed_ref.materialized->rc = cached_rc;
+    *fresh = old;
+    fresh->rc = fresh_rc;
+    scr_dyn_release(fresh);
   }
   return scr_dyn_retain(capsule->v.typed_ref.materialized);
+}
+
+void scr_dyn_typed_ref_commit(ScrDyn *d) {
+  if (d && d->kind == SCR_DYN_TYPED_REF && d->v.typed_ref.commit &&
+      d->v.typed_ref.materialized) {
+    d->v.typed_ref.commit(d->v.typed_ref.ptr,
+                          d->v.typed_ref.materialized);
+  }
 }
 
 void *scr_dyn_typed_ref_cached_cast(
@@ -1691,6 +1716,7 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
   if (recv->kind == SCR_DYN_TYPED_REF) {
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(recv);
     scr_dyn_key_set(materialized, key, value);
+    if (!scr_exc_pending()) scr_dyn_typed_ref_commit(recv);
     scr_dyn_release(materialized);
     return;
   }
@@ -2892,6 +2918,7 @@ ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
   if (target->kind == SCR_DYN_TYPED_REF) {
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(target);
     ScrDyn *assigned = scr_dyn_assign(materialized, src);
+    if (!scr_exc_pending()) scr_dyn_typed_ref_commit(target);
     scr_dyn_release(assigned);
     scr_dyn_release(materialized);
     return scr_exc_pending() ? NULL : scr_dyn_retain(target);

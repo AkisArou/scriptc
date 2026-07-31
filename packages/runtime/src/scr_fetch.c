@@ -1068,7 +1068,12 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "removeEventListener") == 0) {
-    if (argc >= 2 && args[0]->kind == SCR_DYN_STR &&
+    if (argc < 2) {
+      sf_type_error(
+          "AbortSignal.removeEventListener requires an event name and listener");
+      return NULL;
+    }
+    if (args[0]->kind == SCR_DYN_STR &&
         sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
       bool capture = false;
       bool once = false;
@@ -1591,11 +1596,23 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
   if (!c) sf_oom();
   ScrDyn *stored = value;
   if (value->kind == SCR_DYN_TYPED_REF) {
-    for (SfTypedRef *ref = s->typed_refs; ref; ref = ref->next) {
+    for (SfTypedRef **at = &s->typed_refs; *at;) {
+      SfTypedRef *ref = *at;
+      /* The cache's own reference is no longer observable. Drop it before
+       * comparing the next value so a consume-and-discard stream retains
+       * only its live queue/reader window instead of every value ever
+       * seen. A retained reader result keeps rc > 1 and remains canonical. */
+      if (ref->value->rc == 1) {
+        *at = ref->next;
+        scr_dyn_release(ref->value);
+        free(ref);
+        continue;
+      }
       if (scr_dyn_strict_eq(ref->value, value)) {
         stored = ref->value;
         break;
       }
+      at = &ref->next;
     }
     if (stored == value) {
       SfTypedRef *ref = malloc(sizeof *ref);
@@ -2657,7 +2674,11 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
                                  const char *what) {
   SfHeaders *h = ptr;
   if (strcmp(method, "get") == 0 || strcmp(method, "has") == 0) {
-    ScrStr *name = sf_headers_name(argc ? args[0] : NULL);
+    if (argc < 1) {
+      sf_type_error("Headers.get/has requires a header name");
+      return NULL;
+    }
+    ScrStr *name = sf_headers_name(args[0]);
     if (!name) return NULL;
     ScrStr *value = sf_headers_get_value(h, name);
     scr_str_release(name);
@@ -2687,7 +2708,11 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
     return out;
   }
   if (strcmp(method, "forEach") == 0) {
-    ScrDyn *callback = argc ? args[0] : scr_dyn_undefined();
+    if (argc < 1 || args[0]->kind != SCR_DYN_FUNC) {
+      sf_type_error("Headers.forEach requires a callback function");
+      return NULL;
+    }
+    ScrDyn *callback = args[0];
     const ScrDyn *this_arg =
         argc > 1 ? args[1] : scr_dyn_undefined();
     size_t count = 0;
@@ -2719,6 +2744,11 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
   }
   if (strcmp(method, "append") == 0 || strcmp(method, "delete") == 0 ||
       strcmp(method, "set") == 0) {
+    size_t required = strcmp(method, "delete") == 0 ? 1 : 2;
+    if (argc < required) {
+      sf_type_error("Headers mutation requires its declared arguments");
+      return NULL;
+    }
     sf_type_error("immutable");
     return NULL;
   }
@@ -2799,10 +2829,6 @@ static ScrDyn *sf_response_invoke(void *ptr, ScrDyn *self,
   else if (strcmp(method, "text") == 0) mode = SF_COLLECT_TEXT;
   else if (strcmp(method, "bytes") == 0) mode = SF_COLLECT_BYTES;
   if (mode >= 0) {
-    if (argc != 0) {
-      sf_type_error("Response body readers take no arguments");
-      return NULL;
-    }
     ScrPromise *p = sf_response_collect(r, mode);
     ScrDyn *out = scr_dyn_new_promise(p);
     scr_promise_release(p);

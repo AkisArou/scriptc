@@ -30,6 +30,21 @@ const pendingBytes: Promise<Uint8Array> = (
 const storedBytes = await pendingBytes;
 console.log("stored bytes promise:", storedBytes.length, storedBytes[0]);
 
+const arityHeaders: any = (await fetch(`${process.argv[2]}/text`)).headers;
+try {
+  arityHeaders.get();
+} catch (error) {
+  console.log("headers get arity:", (error as Error).name);
+}
+try {
+  arityHeaders.has();
+} catch (error) {
+  console.log("headers has arity:", (error as Error).name);
+}
+
+const extraArgResponse: any = await fetch(`${process.argv[2]}/text`);
+console.log("response text extra arg:", await extraArgResponse.text("ignored"));
+
 const gzipText = await (await fetch(`${process.argv[2]}/gzip`)).text();
 console.log(
   "gzip:",
