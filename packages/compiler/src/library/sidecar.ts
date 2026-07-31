@@ -413,15 +413,24 @@ class Projector {
   }
 
   /** intify for a struct field (declared or synthesized), recording the
-   * record-resolution fact the inference maps onto interned IR shapes. */
-  intifyStructField(ref: TypeRef, container: string, field: string, allFields: ContractField[], loc: SrcLoc): TypeRef {
+   * record-resolution fact the inference maps onto interned IR shapes.
+   * Synthesized records that are tagged-union payloads retain the source
+   * arm's `kind` field in IR even though the wire struct omits it. */
+  intifyStructField(
+    ref: TypeRef,
+    container: string,
+    field: string,
+    allFields: ContractField[],
+    tagged: boolean,
+    loc: SrcLoc,
+  ): TypeRef {
     const slotPath = `${container}.${field}`;
     const before = this.intConsumed.has(slotPath);
     const out = this.intify(ref, slotPath, loc);
     if (!before && this.intConsumed.has(slotPath)) {
       this.pendingIntRecordFacts.push({
         fields: allFields,
-        tagged: false,
+        tagged,
         targetField: field,
         cls: this.intConsumed.get(slotPath)!,
         path: slotPath,
@@ -854,7 +863,7 @@ class Projector {
         return { kind: "union", name: r.name };
       }
       case "object":
-        return { kind: "value", name: this.tableSynthesized(container, member, shape.fields, loc) };
+        return { kind: "value", name: this.tableSynthesized(container, member, shape.fields, false, loc) };
       case "stringLit":
         throw new SidecarError(
           `'${container}.${member}' is a bare string-literal type — declare a named string-literal union and reference it as an enum`,
@@ -915,7 +924,7 @@ class Projector {
           seen.add(f.name);
           entry.fields.push({
             name: f.name,
-            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields, f.loc),
+            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields, false, f.loc),
           });
         }
         this.table.set(name, { kind: "struct", entry, anchor: c.index, sub: -1 });
@@ -954,13 +963,15 @@ class Projector {
   armPayloadRef(unionName: string, arm: { name: string; fields: ContractField[]; loc: SrcLoc }): TypeRef {
     if (arm.fields.length === 0) return { kind: "void" };
     if (arm.fields.length === 1) return this.fieldRef(arm.fields[0]!, unionName);
-    return { kind: "value", name: this.tableSynthesized(unionName, arm.name, arm.fields, arm.loc) };
+    return { kind: "value", name: this.tableSynthesized(unionName, arm.name, arm.fields, true, arm.loc) };
   }
 
   /** Table an anonymous inline record under the schema's synthesized-name
    * contract: `<Container>_<member>`, deterministic and stable across
-   * identical re-compiles, unique in the one namespace. */
-  tableSynthesized(container: string, member: string, fields: ContractField[], loc: SrcLoc): string {
+   * identical re-compiles, unique in the one namespace. `tagged` records
+   * whether this wire payload comes from a union arm whose lowered IR shape
+   * also carries the discriminant. */
+  tableSynthesized(container: string, member: string, fields: ContractField[], tagged: boolean, loc: SrcLoc): string {
     const name = `${container}_${member}`;
     const existing = this.table.get(name);
     if (existing !== undefined) return name; // the same inline decl, revisited
@@ -980,7 +991,7 @@ class Projector {
       seen.add(f.name);
       entry.fields.push({
         name: f.name,
-        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields, f.loc),
+        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields, tagged, f.loc),
       });
     }
     return name;
@@ -1060,7 +1071,7 @@ class Projector {
     }
     // Everything else — bytes-first pairs, three-plus fields, optional
     // payload fields — tables a synthesized record (family 5).
-    return { kind: "record", name: this.tableSynthesized(msgName, arm.name, fields, arm.loc) };
+    return { kind: "record", name: this.tableSynthesized(msgName, arm.name, fields, true, arm.loc) };
   }
 
   /** Materialize structural join patterns only after normal sidecar

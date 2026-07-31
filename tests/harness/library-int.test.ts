@@ -1141,6 +1141,55 @@ export function update(m: Model, msg: Msg): Model {
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("an unproven write into a synthesized named-union payload field refuses", async () => {
+    const source = `export type TextInputEvent =
+  | { kind: "set_composition"; text: string; cursor: number }
+  | { kind: "clear_composition" };
+export interface Model { input: TextInputEvent; }
+export type Msg = { kind: "noop" } | { kind: "other" };
+export function init(): Model {
+  return { input: { kind: "set_composition", text: "", cursor: 0.5 } };
+}
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const r = await buildCase(
+      "sidecar-refuse-synthesized-union-record-slot",
+      source,
+      sidecarProfile([{ slot: "TextInputEvent_set_composition.cursor", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'TextInputEvent_set_composition.cursor'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("an unproven write into a synthesized msg payload field refuses", async () => {
+    const source = `export interface Model { value: number; }
+export type Msg =
+  | { kind: "audio_event"; name: string; at: number }
+  | { kind: "noop" };
+let last: Msg = { kind: "noop" };
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "noop") {
+    last = { kind: "audio_event", name: "", at: 0.5 };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-refuse-synthesized-msg-record-slot",
+      source,
+      sidecarProfile([{ slot: "Msg_audio_event.at", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Msg_audio_event.at'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
   test("an unproven declared helper return refuses by slot path", async () => {
     const broken = SIDECAR_ENTRY.replace("return i | 0;", "return i * 0.5;");
     const r = await buildCase("sidecar-refuse-helper", broken, sidecarProfile(DECLARED));
