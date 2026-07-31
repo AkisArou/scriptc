@@ -208,6 +208,31 @@ function streamTypedRefAdapter(
   return adapter;
 }
 
+/** One per-type capsule adapter for Web API arguments whose JavaScript
+ * contract preserves the exact input reference. */
+function liveDynRefAdapter(
+  E: CEmitter,
+  t: IrType,
+): StreamTypedRefAdapter {
+  const key = typeKey(t);
+  const existing = E.liveDynRefAdapters.get(key);
+  if (existing) return existing;
+  if (!streamTypedRefEligible(t)) {
+    throw new Error(`emitter bug: live dyn ref of ${key}`);
+  }
+  const prefix = `sc_ldr_${E.liveDynRefAdapters.size}`;
+  const defs: string[] = [];
+  const adapter = streamTypedRefAdapter(
+    E,
+    t,
+    { prefix, defs, adapters: new Map() },
+    `${prefix}_materialize`,
+  );
+  E.liveDynRefAdapters.set(key, adapter);
+  E.walkerDefs.push(...defs);
+  return adapter;
+}
+
 function streamFromArrayAdapter(
   E: CEmitter,
   t: IrType & { kind: "array" },
@@ -2102,6 +2127,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           );
         }
         const v = E.emitExpr(e.value);
+        if (e.liveRef) {
+          const adapter = liveDynRefAdapter(E, v.type);
+          const rc = vAdapters(v.type);
+          const key = typeKey(v.type);
+          const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
+          return E.newTemp(
+            e.type,
+            `scr_dyn_new_typed_ref(${v.name}, &${rc.retain}, &${rc.release}, ${keyLit}, ${Buffer.byteLength(key, "utf8")}, &${adapter.snapshot}, ${adapter.commit})`,
+          );
+        }
         if (v.type.kind === "func") {
           // A closure boxes as the checked-dynamic tree's function kind: retained closure +
           // the per-signature call thunk + the interned signature key. The
@@ -2453,12 +2488,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 // engine's own typeof.
                 `(${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE || ${d.name}->kind == SCR_DYN_NULL || scr_dyn_isl_typeof_is(${d.name}, "object"))`
               : e.test === "truthy"
-                ? // ToBoolean over the checked-dynamic tree: bool by value; number falsy for
-                  // 0, -0 (== 0 in C), and NaN (self-inequality); string
-                  // falsy when empty; obj/arr/bytes/func/handle always true;
-                  // JSVAL through the runtime's routed arm (the bigint 0n
-                  // edge); the remaining kinds (undefined, null) always false.
-                  `(${d.name}->kind == SCR_DYN_BOOL ? ${d.name}->v.b : ${d.name}->kind == SCR_DYN_NUM ? (${d.name}->v.num == ${d.name}->v.num && ${d.name}->v.num != 0) : ${d.name}->kind == SCR_DYN_STR ? ${d.name}->v.str->len != 0 : ${d.name}->kind == SCR_DYN_JSVAL ? scr_dyn_truthy(${d.name}) : (${d.name}->kind == SCR_DYN_OBJ || ${d.name}->kind == SCR_DYN_ARR || ${d.name}->kind == SCR_DYN_BYTES || ${d.name}->kind == SCR_DYN_FUNC || ${d.name}->kind == SCR_DYN_HANDLE || ${d.name}->kind == SCR_DYN_PROMISE))`
+                ? // Runtime ToBoolean includes typed-reference capsules and
+                  // keeps this backend in lockstep with LLVM.
+                  `scr_dyn_truthy(${d.name})`
                 : e.test === "error"
                   ? // `u instanceof Error`: the checked-dynamic tree's error encoding — an
                     // object carrying the reserved "%error" marker key

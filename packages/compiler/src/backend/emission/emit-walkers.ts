@@ -756,6 +756,16 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${Buffer.byteLength(key, "utf8")})) return true;`,
       );
     }
+    if (t.kind !== "dyn") {
+      d.push(
+        `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
+        `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
+        `    bool sc_out = ${name}(sc_materialized);`,
+        `    scr_dyn_release(sc_materialized);`,
+        `    return sc_out;`,
+        `  }`,
+      );
+    }
     switch (t.kind) {
       case "f64":
         d.push(`  return d->kind == SCR_DYN_NUM;`);
@@ -1131,7 +1141,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
           `    ${cDecl(t, "sc_cached")} = (${cType(t).trim()})scr_dyn_typed_ref_cached_cast(d, ${keyLit}, ${keyLen});`,
         );
-        if (t.kind !== "record") {
+        if (t.kind !== "record" && t.kind !== "array") {
           d.push(`    if (sc_cached) return sc_cached;`);
         }
         d.push(
@@ -1169,6 +1179,23 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             `      return sc_cached;`,
             `    }`,
             `    if (sc_cached) ${releaseCallC(t, "sc_cached")};`,
+          );
+        } else if (t.kind === "array") {
+          d.push(
+            `    if (sc_out && sc_cached) {`,
+            `      size_t sc_old_len = sc_cached->len;`,
+            `      size_t sc_old_cap = sc_cached->cap;`,
+            `      uint64_t *sc_old_data = sc_cached->data;`,
+            `      sc_cached->len = sc_out->len;`,
+            `      sc_cached->cap = sc_out->cap;`,
+            `      sc_cached->data = sc_out->data;`,
+            `      sc_out->len = sc_old_len;`,
+            `      sc_out->cap = sc_old_cap;`,
+            `      sc_out->data = sc_old_data;`,
+            `      scr_arr_release(sc_out);`,
+            `      return sc_cached;`,
+            `    }`,
+            `    if (sc_cached) scr_arr_release(sc_cached);`,
           );
         }
         d.push(

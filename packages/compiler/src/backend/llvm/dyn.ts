@@ -349,6 +349,24 @@ export class LlDyn {
       B.terminate(`ret i1 true`);
       B.startBlock(lNext);
     }
+    if (t.kind !== "dyn") {
+      this.host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+      this.host.declare(`declare void @scr_dyn_release_v(ptr)`);
+      const kind = this.kindOf(B, "%d");
+      const capsule = B.tmp();
+      B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
+      const lCapsule = B.newLabel("dm.tr.mat");
+      const lPlain = B.newLabel("dm.tr.plain");
+      B.condBr(capsule, lCapsule, lPlain);
+      B.startBlock(lCapsule);
+      const materialized = B.tmp();
+      const matched = B.tmp();
+      B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+      B.line(`${matched} = call zeroext i1 @${name}(ptr ${materialized})`);
+      B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
+      B.terminate(`ret i1 ${matched}`);
+      B.startBlock(lPlain);
+    }
     const kindIs = (k: number): void => {
       const kd = this.kindOf(B, "%d");
       const r = B.tmp();
@@ -582,7 +600,7 @@ export class LlDyn {
         B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
         const hasCached = B.tmp();
         B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
-        if (t.kind !== "record") {
+        if (t.kind !== "record" && t.kind !== "array") {
           const lCached = B.newLabel("dc.tr.hit");
           const lMaterialize = B.newLabel("dc.tr.mat");
           B.condBr(hasCached, lCached, lMaterialize);
@@ -597,9 +615,11 @@ export class LlDyn {
         B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
         const ok = B.tmp();
         B.line(`${ok} = icmp ne ptr ${checked}, null`);
-        if (t.kind === "record") {
-          const shape = host.recordsById.get(t.shapeId);
-          if (!shape) {
+        if (t.kind === "record" || t.kind === "array") {
+          const shape = t.kind === "record"
+            ? host.recordsById.get(t.shapeId)
+            : undefined;
+          if (t.kind === "record" && !shape) {
             throw new Error(
               `llvm emitter bug: cached typed-ref cast of unknown shape ${t.shapeId}`,
             );
@@ -621,27 +641,36 @@ export class LlDyn {
           const lCache = B.newLabel("dc.tr.put");
           B.condBr(hasCached, lRefresh, lCache);
           B.startBlock(lRefresh);
-          const members = [
-            ...shape.fields.map((field, index) => ({
-              index: index + 1,
-              type: llFieldType(field.type),
-              name: field.name,
-            })),
-            ...(shape.indexValue
-              ? [{
-                  index: shape.fields.length + 1,
-                  type: "ptr" as const,
-                  name: "[key: string] overflow",
-                }]
-              : []),
-          ];
+          const members = t.kind === "record"
+            ? [
+                ...shape!.fields.map((field, index) => ({
+                  index: index + 1,
+                  type: llFieldType(field.type),
+                  name: field.name,
+                })),
+                ...(shape!.indexValue
+                  ? [{
+                      index: shape!.fields.length + 1,
+                      type: "ptr" as const,
+                      name: "[key: string] overflow",
+                    }]
+                  : []),
+              ]
+            : [
+                { index: 1, type: "i64" as const, name: "length" },
+                { index: 2, type: "i64" as const, name: "capacity" },
+                { index: 7, type: "ptr" as const, name: "data" },
+              ];
           members.forEach((member) => {
             const cachedPtr = B.tmp();
             const checkedPtr = B.tmp();
             const oldValue = B.tmp();
             const newValue = B.tmp();
-            B.line(`${cachedPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr ${cached}, i64 0, i32 ${member.index}`);
-            B.line(`${checkedPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr ${checked}, i64 0, i32 ${member.index}`);
+            const struct = t.kind === "record"
+              ? `%${mangleRecordStruct(t.shapeId)}`
+              : "%ScrArr";
+            B.line(`${cachedPtr} = getelementptr inbounds ${struct}, ptr ${cached}, i64 0, i32 ${member.index}`);
+            B.line(`${checkedPtr} = getelementptr inbounds ${struct}, ptr ${checked}, i64 0, i32 ${member.index}`);
             B.line(`${oldValue} = load ${member.type}, ptr ${cachedPtr} ; ${member.name}`);
             B.line(`${newValue} = load ${member.type}, ptr ${checkedPtr}`);
             B.line(`store ${member.type} ${newValue}, ptr ${cachedPtr}`);

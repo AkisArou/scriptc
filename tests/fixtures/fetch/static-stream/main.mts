@@ -19,6 +19,24 @@ await Promise.resolve();
 console.log("initial pull checkpoint:", initialPullCalls);
 void initialPullStream;
 
+const enqueuedIdentityBox = { value: 1 };
+const enqueuedIdentityStream = new ReadableStream<typeof enqueuedIdentityBox>({
+  start(controller) {
+    controller.enqueue(enqueuedIdentityBox);
+    controller.close();
+  },
+});
+const enqueuedIdentityPart =
+  await enqueuedIdentityStream.getReader().read();
+if (!enqueuedIdentityPart.done) enqueuedIdentityPart.value.value = 2;
+console.log(
+  "controller enqueue record identity:",
+  enqueuedIdentityPart.done
+    ? false
+    : enqueuedIdentityPart.value === enqueuedIdentityBox,
+  enqueuedIdentityBox.value,
+);
+
 // Draining a pre-queued chunk creates demand even with no second read.
 let replenishingPulls = 0;
 const replenishingStream = new ReadableStream<number>({
@@ -354,6 +372,22 @@ console.log(
   String(dynamicStreamPart.value),
   JSON.stringify(dynamicStreamPart),
 );
+console.log(
+  "dynamic stream record predicates:",
+  typeof dynamicStreamPart.value === "object",
+  !!dynamicStreamPart.value,
+);
+
+const dynamicPredicateArrayReader: any =
+  ReadableStream.from([[1]]).getReader();
+const dynamicPredicateArrayPart: any =
+  await dynamicPredicateArrayReader.read();
+console.log(
+  "dynamic stream array predicates:",
+  typeof dynamicPredicateArrayPart.value === "object",
+  !!dynamicPredicateArrayPart.value,
+  Array.isArray(dynamicPredicateArrayPart.value),
+);
 
 const widenedRecordStream: ReadableStream<unknown> =
   ReadableStream.from([{ value: 7 }]);
@@ -400,6 +434,27 @@ console.log(
     ? false
     : repeatedStructuralFirst.value === repeatedStructuralSecond.value,
   repeatedStructuralSecond.done ? -1 : repeatedStructuralSecond.value.value,
+);
+
+const nestedStructuralValue: StreamDerivedValue[] = [
+  { value: 25, extra: 26 },
+];
+const nestedStructuralReader =
+  (ReadableStream.from([
+    nestedStructuralValue,
+    nestedStructuralValue,
+  ]) as ReadableStream<StreamBaseValue[]>).getReader();
+const nestedStructuralFirst = await nestedStructuralReader.read();
+nestedStructuralValue[0]!.value = 27;
+const nestedStructuralSecond = await nestedStructuralReader.read();
+console.log(
+  "stream nested array widening:",
+  nestedStructuralFirst.done || nestedStructuralSecond.done
+    ? false
+    : nestedStructuralFirst.value === nestedStructuralSecond.value,
+  nestedStructuralSecond.done
+    ? -1
+    : nestedStructuralSecond.value[0]!.value,
 );
 
 const repeatedDynamicValue = { value: 14 };
@@ -605,6 +660,16 @@ try {
   const caught = error as Error;
   console.log(caught.name, caught.message);
 }
+
+const abortIdentityReason = { value: 1 };
+const abortIdentitySignal = AbortSignal.abort(abortIdentityReason);
+const observedAbortReason = abortIdentitySignal.reason as { value: number };
+observedAbortReason.value = 2;
+console.log(
+  "abort reason identity:",
+  observedAbortReason === abortIdentityReason,
+  abortIdentityReason.value,
+);
 
 const identitySignal = AbortSignal.timeout(0);
 let identityCalls = 0;

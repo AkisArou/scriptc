@@ -3018,6 +3018,9 @@ function validateFunction(
         if (!canConvertToDyn(vt, (id) => records.get(id), (id) => unions.get(id))) {
           err(`dynFrom of non-dyn-convertible type ${vt.kind}`, e.loc);
         }
+        if (e.liveRef && vt.kind !== "record" && vt.kind !== "array") {
+          err(`live dynFrom of unsupported type ${vt.kind}`, e.loc);
+        }
         break;
       }
       case "dynFromJsval": {

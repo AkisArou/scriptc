@@ -441,6 +441,31 @@ function staticResponseMemberName(
   return key.isStringLiteralType() ? key.value : null;
 }
 
+/** Box mutable data for Web API slots that expose the exact JavaScript
+ * value again. Ordinary dynFrom remains the documented copy boundary;
+ * this capsule is deliberately limited to records/arrays that the live
+ * materializer can snapshot and commit. */
+function lowerLiveWebValue(L: Lowerer, node: ts.Expression): IrExpr {
+  const value = L.lowerExpr(node);
+  if (
+    (value.type.kind === "record" || value.type.kind === "array") &&
+    canConvertToDyn(
+      value.type,
+      (id) => L.shapes.get(id),
+      (id) => L.unions.get(id),
+    )
+  ) {
+    return {
+      kind: "dynFrom",
+      value,
+      liveRef: true,
+      type: DYN,
+      loc: value.loc,
+    };
+  }
+  return L.coerceInto(node, value, DYN);
+}
+
 /** The adopted undici Response declaration is wider than the native static
  * handle. Keep the supported fallback slice on checked-dynamic dispatch, but
  * fence every other declared member before the generic dyn keyed-read/call
@@ -508,7 +533,7 @@ export function lowerStaticFetchCompanionCall(
           fn: "fetch.abortNow",
           args: [
             call.arguments[0]
-              ? L.lowerExprExpecting(call.arguments[0], DYN)
+              ? lowerLiveWebValue(L, call.arguments[0])
               : dynUndefinedExpr(loc),
           ],
           type: DYN,
@@ -578,6 +603,57 @@ export function lowerStaticFetchCompanionCall(
     };
   }
   return null;
+}
+
+/** `ReadableStreamDefaultController.enqueue(value)` is a dyn-handle call,
+ * but unlike a general checked-dynamic boundary the Web Streams contract
+ * exposes the same chunk reference from reader.read(). */
+export function lowerStaticReadableStreamControllerCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length > 1 ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken ||
+    staticResponseMemberName(L, access) !== "enqueue"
+  ) {
+    return null;
+  }
+  const receiverTs = L.checker.getBaseTypeOfLiteralType(
+    L.typeOf(access.expression),
+  );
+  const symbol = receiverTs.getAliasSymbol() ?? receiverTs.getSymbol();
+  if (
+    symbol?.name !== "ReadableStreamDefaultController" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const recv = L.lowerExpr(access.expression);
+  if (recv.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  return {
+    kind: "dynInvoke",
+    recv,
+    method: "enqueue",
+    calleeName: access.getText(),
+    args: [
+      call.arguments[0]
+        ? lowerLiveWebValue(L, call.arguments[0])
+        : dynUndefinedExpr(loc),
+    ],
+    type: DYN,
+    loc,
+  };
 }
 
 /** `new ReadableStream(source?)` in a static build. The source record is

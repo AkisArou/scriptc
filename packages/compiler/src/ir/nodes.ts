@@ -4460,8 +4460,12 @@ export type IrExpr =
    * TypeError), the interned signature key (dynCheck's exact-unwrap fast
    * path), and `fnName` — the best-effort static spelling for inspect
    * ([Function: name]) and Node-shaped call errors. The operand is
-   * borrowed; the result is owned (+1). Never throws. */
-  | { kind: "dynFrom"; value: IrExpr; fnName?: string; type: IrType; loc: SrcLoc }
+   * borrowed; the result is owned (+1). Never throws. `liveRef` is the
+   * narrow Web-platform exception for record/array values whose API
+   * contract exposes the same reference again (stream chunks and abort
+   * reasons): it emits a typed capsule with a live materializer instead
+   * of the ordinary deep copy. */
+  | { kind: "dynFrom"; value: IrExpr; fnName?: string; liveRef?: true; type: IrType; loc: SrcLoc }
   /** Island value → dyn conversion (`type` is always dyn; the operand
    * is always jsval): the jsval→dyn crossing — an 'any'-typed engine
    * value flowing into an 'unknown'/'object'/JS-residue slot wraps BY

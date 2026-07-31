@@ -3215,9 +3215,10 @@ ScrDyn *scr_dyn_alloc_jsval(ScrJsval *cell, const ScrDynJsvalOps *ops);
 /* The installed ops (traps on a missing install — impossible unless a
  * JSVAL node was forged without the constructor). */
 const ScrDynJsvalOps *scr_dyn_jsval_ops(void);
-/* dynTest arms that need the ENGINE's answer on a JSVAL node. Each
- * answers false for every other kind (callers test unconditionally —
- * the emitted narrowing tests stay branch-free). Never throw. */
+/* dynTest arms that need the ENGINE's answer on a JSVAL node, or the
+ * materialized answer for a live typed-reference capsule. Each answers
+ * false for every other kind (callers test unconditionally — the emitted
+ * narrowing tests stay branch-free). Never throw. */
 bool scr_dyn_isl_typeof_is(const ScrDyn *d, const char *name);
 bool scr_dyn_isl_is_array(const ScrDyn *d);
 bool scr_dyn_isl_is_error(const ScrDyn *d);

@@ -1111,6 +1111,24 @@ const ScrDynJsvalOps *scr_dyn_jsval_ops(void) {
 }
 
 bool scr_dyn_isl_typeof_is(const ScrDyn *d, const char *name) {
+  if (d->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    bool out = scr_dyn_isl_typeof_is(materialized, name);
+    if (materialized->kind != SCR_DYN_JSVAL) {
+      bool object =
+          materialized->kind == SCR_DYN_NULL ||
+          materialized->kind == SCR_DYN_OBJ ||
+          materialized->kind == SCR_DYN_ARR ||
+          materialized->kind == SCR_DYN_BYTES ||
+          materialized->kind == SCR_DYN_HANDLE ||
+          materialized->kind == SCR_DYN_PROMISE;
+      out = (strcmp(name, "object") == 0 && object) ||
+            (strcmp(name, "function") == 0 &&
+             materialized->kind == SCR_DYN_FUNC);
+    }
+    scr_dyn_release(materialized);
+    return out;
+  }
   if (d->kind != SCR_DYN_JSVAL) return false;
   ScrStr *t = scr_dyn_jsval_ops()->type_of(d->v.jsval.cell);
   size_t n = strlen(name);
@@ -1120,10 +1138,26 @@ bool scr_dyn_isl_typeof_is(const ScrDyn *d, const char *name) {
 }
 
 bool scr_dyn_isl_is_array(const ScrDyn *d) {
+  if (d->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    bool out = materialized->kind == SCR_DYN_ARR ||
+               scr_dyn_isl_is_array(materialized);
+    scr_dyn_release(materialized);
+    return out;
+  }
   return d->kind == SCR_DYN_JSVAL && scr_dyn_jsval_ops()->is_array(d->v.jsval.cell);
 }
 
 bool scr_dyn_isl_is_error(const ScrDyn *d) {
+  if (d->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    bool out =
+        (materialized->kind == SCR_DYN_OBJ &&
+         scr_dyn_obj_get(materialized, "%error", 6) != NULL) ||
+        scr_dyn_isl_is_error(materialized);
+    scr_dyn_release(materialized);
+    return out;
+  }
   return d->kind == SCR_DYN_JSVAL && scr_dyn_jsval_ops()->is_error(d->v.jsval.cell);
 }
 
@@ -1297,6 +1331,12 @@ bool scr_dyn_truthy(const ScrDyn *d) {
  * null answers "object" — JS's oldest wart, preserved. */
 ScrStr *scr_dyn_typeof(const ScrDyn *d) {
   const char *s;
+  if (d->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    ScrStr *out = scr_dyn_typeof(materialized);
+    scr_dyn_release(materialized);
+    return out;
+  }
   /* An island value answers the ENGINE's typeof — "object" for the
    * wrapped objects/arrays, "function" for engine functions (row 1 of
    * the jsval→dyn op table; scalars normalized away at wrap time). */
@@ -1309,7 +1349,7 @@ ScrStr *scr_dyn_typeof(const ScrDyn *d) {
   case SCR_DYN_BYTES:
   case SCR_DYN_HANDLE:
   case SCR_DYN_PROMISE:
-  case SCR_DYN_TYPED_REF: s = "object"; break;
+  case SCR_DYN_TYPED_REF: s = "object"; break; /* handled above */
   case SCR_DYN_BOOL: s = "boolean"; break;
   case SCR_DYN_NUM: s = "number"; break;
   case SCR_DYN_STR: s = "string"; break;

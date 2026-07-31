@@ -929,6 +929,12 @@ class LlEmitter {
   /** ReadableStream.from adapters keep typed arrays by reference and box
    * one current element per pull. */
   private readonly streamFromArrayAdapters = new Map<string, string>();
+  /** Identity-preserving static→dyn capsules used by Web APIs whose values
+   * remain directly observable (stream chunks and AbortSignal reasons). */
+  private readonly liveDynRefAdapters = new Map<
+    string,
+    LlStreamTypedRefAdapter
+  >();
   private readonly dynPromiseAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
   readonly recordsById = new Map<string, IrRecordShape>();
@@ -6106,6 +6112,31 @@ class LlEmitter {
           return this.own({ name: t, type: e.type });
         }
         const v = this.emitExpr(e.value);
+        if (e.liveRef) {
+          if (!this.streamTypedRefEligible(v.type)) {
+            throw new Error(`llvm emitter bug: live dyn ref of ${typeKey(v.type)}`);
+          }
+          const key = typeKey(v.type);
+          let adapter = this.liveDynRefAdapters.get(key);
+          if (!adapter) {
+            const prefix = `sc_ldr_${this.liveDynRefAdapters.size}`;
+            adapter = this.streamTypedRefMaterializeAdapter(
+              v.type,
+              { prefix, adapters: new Map() },
+              `${prefix}_materialize`,
+            );
+            this.liveDynRefAdapters.set(key, adapter);
+          }
+          const rc = vAdapters(this, v.type);
+          this.declare(
+            `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+          );
+          const boxed = B.tmp();
+          B.line(
+            `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
+          );
+          return this.own({ name: boxed, type: e.type });
+        }
         if (v.type.kind === "func") {
           // A closure boxes as the checked-dynamic tree's function kind: retained closure +
           // the per-signature call thunk + the interned signature key. The
