@@ -166,6 +166,16 @@ console.log(
   await backslashRedirect.text(),
 );
 
+const sameSchemeRedirect = await fetch(
+  `${process.argv[2]}/redirect-same-scheme/dir/start`,
+);
+console.log(
+  "same-scheme redirect:",
+  sameSchemeRedirect.status,
+  sameSchemeRedirect.url.endsWith("/redirect-same-scheme/dir/next"),
+  await sameSchemeRedirect.text(),
+);
+
 const invalidUtf8Redirect = await fetch(
   `${process.argv[2]}/redirect-invalid-utf8`,
 );

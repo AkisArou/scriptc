@@ -427,6 +427,39 @@ mutationSignal.addEventListener("abort", selfRemovingListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("self-removing abort listener:", mutationCalls);
 
+const dispatchSignal = AbortSignal.timeout(0);
+let dispatchEvent!: Event;
+let dispatchCalls = 0;
+dispatchSignal.addEventListener("abort", (event: Event) => {
+  dispatchEvent = event;
+  dispatchCalls++;
+});
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log(
+  "manual abort dispatch:",
+  dispatchSignal.dispatchEvent(dispatchEvent),
+  dispatchCalls,
+);
+
+const stoppedDispatchSignal = AbortSignal.timeout(0);
+let stoppedDispatchEvent!: Event;
+const stoppedDispatchCalls: string[] = [];
+stoppedDispatchSignal.addEventListener(
+  "abort",
+  (event: Event) => {
+    stoppedDispatchEvent = event;
+    stoppedDispatchCalls.push("first");
+    event.stopImmediatePropagation();
+  },
+  { once: true },
+);
+stoppedDispatchSignal.addEventListener("abort", () => {
+  stoppedDispatchCalls.push("second");
+});
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+stoppedDispatchSignal.dispatchEvent(stoppedDispatchEvent);
+console.log("stopped abort redispatch:", stoppedDispatchCalls.join(","));
+
 const eventSignal = AbortSignal.timeout(0);
 eventSignal.addEventListener("abort", (event: Event) => {
   console.log(
@@ -925,6 +958,27 @@ selfCapturingSignal.addEventListener("abort", () => {
   console.log("self-capturing abort:", selfCapturingSignal.aborted);
 });
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+// These callbacks deliberately leave their owners open and capture the
+// owner handles. The native teardown must sever both callback cycles before
+// the sanitized RC audit runs.
+function leaveOpenStreamCycle(): void {
+  let openStream!: ReadableStream<number>;
+  openStream = new ReadableStream<number>({
+    pull() {
+      void openStream.locked;
+    },
+  });
+}
+function leaveNeverAbortingSignalCycle(): void {
+  const openSignal = AbortSignal.any([]);
+  openSignal.addEventListener("abort", () => {
+    void openSignal.aborted;
+  });
+}
+leaveOpenStreamCycle();
+leaveNeverAbortingSignalCycle();
+await Promise.resolve();
 
 // Dropping the only Response/body reference must not strand the transfer
 // behind the native stream's one-chunk backpressure pause.

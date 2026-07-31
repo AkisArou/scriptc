@@ -17,6 +17,7 @@
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
  * /redirect /redirect-stream-302 /redirect-stream-303 /redirect-credentials
  * /redirect-fragment/path /redirect-backslash /redirect-invalid-utf8
+ * /redirect-same-scheme/dir/start
  * /early-hints
  * /switching-protocols /invalid-utf8 /slow /drip
  * /chunked /backpressure /backpressure-state /gzip /gzip-concat
@@ -177,6 +178,14 @@ export async function startFetchServers() {
           location: `\\\\${req.headers.host}\\text`,
         });
         res.end();
+      } else if (url === "/redirect-same-scheme/dir/start") {
+        // In a special URL, a matching scheme without `//` is relative to
+        // the current URL rather than an absolute URL whose host is "next".
+        res.writeHead(302, { location: "http:next" });
+        res.end();
+      } else if (url === "/redirect-same-scheme/dir/next") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("same-scheme final");
       } else if (url === "/redirect-invalid-utf8") {
         // node:http serializes this ByteString as a raw E9 octet. Fetch
         // UTF-8-decodes that invalid one-byte sequence to U+FFFD before

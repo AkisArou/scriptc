@@ -4489,6 +4489,7 @@ export const DYN_DISPATCH_METHODS = new Set([
   // the http/net names above.
   "getReader", "cancel", "releaseLock", "enqueue", "error",
   "throwIfAborted", "addEventListener", "removeEventListener",
+  "dispatchEvent",
   "preventDefault", "stopPropagation", "stopImmediatePropagation",
   "composedPath",
   "json", "text", "bytes",

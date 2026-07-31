@@ -23,6 +23,17 @@ async function main(baseUrl: string, redirectKey: string): Promise<void> {
     backslashBody,
   );
 
+  const sameScheme = await fetch(
+    `${baseUrl}/redirect-same-scheme/dir/start`,
+  );
+  const sameSchemeBody: string = await sameScheme.text();
+  console.log(
+    "same scheme:",
+    `${sameScheme.status}`,
+    `${sameScheme.url.endsWith("/redirect-same-scheme/dir/next")}`,
+    sameSchemeBody,
+  );
+
   const invalidUtf8 = await fetch(`${baseUrl}/redirect-invalid-utf8`);
   const invalidUtf8Body: string = await invalidUtf8.text();
   console.log(

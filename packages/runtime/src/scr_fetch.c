@@ -149,6 +149,8 @@ struct SfSignal {
   SfSignalWatch **source_watches;
   size_t source_count;
   double timer_id;
+  bool callbacks_tracked;
+  SfSignal *callbacks_next;
 };
 
 struct SfEvent {
@@ -240,6 +242,8 @@ struct SfStream {
   double from_index;
   SfTransfer *request_owner;  /* weak; transfer owns the stream */
   SfTransfer *response_owner; /* weak; transfer owns the stream */
+  bool callbacks_tracked;
+  SfStream *callbacks_next;
 };
 
 struct SfHeaders {
@@ -292,6 +296,11 @@ struct SfTransfer {
 };
 
 static SfTransfer *sf_live;
+/* Weak registries: owners unlink themselves on destruction. They let the
+ * fetch teardown sever native→callback edges before final cycle collection,
+ * including an otherwise-untraceable callback→captured-handle backedge. */
+static SfSignal *sf_callback_signals;
+static SfStream *sf_callback_streams;
 
 static void sf_oom(void) {
   fputs("scriptc: out of memory\n", stderr);
@@ -378,6 +387,26 @@ static ScrDyn *sf_type_reason(const char *message, ScrError **error_out) {
 
 /* ── AbortSignal ─────────────────────────────────────────────────── */
 
+static void sf_signal_track_callbacks(SfSignal *s) {
+  if (s->callbacks_tracked) return;
+  s->callbacks_tracked = true;
+  s->callbacks_next = sf_callback_signals;
+  sf_callback_signals = s;
+}
+
+static void sf_signal_untrack_callbacks(SfSignal *s) {
+  if (!s->callbacks_tracked) return;
+  for (SfSignal **at = &sf_callback_signals; *at;
+       at = &(*at)->callbacks_next) {
+    if (*at == s) {
+      *at = s->callbacks_next;
+      break;
+    }
+  }
+  s->callbacks_tracked = false;
+  s->callbacks_next = NULL;
+}
+
 static SfSignal *sf_signal_new(void) {
   SfSignal *s = calloc(1, sizeof *s);
   if (!s) sf_oom();
@@ -415,15 +444,20 @@ static void sf_abort_listener_free(SfAbortListener *l) {
   free(l);
 }
 
-static void sf_signal_drop_listeners(SfSignal *s) {
+static void sf_signal_drop_callbacks(SfSignal *s) {
   SfAbortListener *listeners = s->listeners;
+  ScrDyn *onabort = s->onabort;
   s->listeners = NULL; /* unlink before callback releases can re-enter */
+  s->onabort = NULL;
+  s->onabort_order = 0;
+  sf_signal_untrack_callbacks(s);
   while (listeners) {
     SfAbortListener *next = listeners->next;
     listeners->next = NULL;
     sf_abort_listener_free(listeners);
     listeners = next;
   }
+  scr_dyn_release(onabort);
 }
 
 static void sf_signal_release(SfSignal *s) {
@@ -434,8 +468,7 @@ static void sf_signal_release(SfSignal *s) {
   }
   free(s->source_watches);
   free(s->sources);
-  sf_signal_drop_listeners(s);
-  scr_dyn_release(s->onabort);
+  sf_signal_drop_callbacks(s);
   scr_dyn_release(s->reason);
   scr_error_release(s->error_reason);
   free(s);
@@ -590,11 +623,21 @@ static void sf_listener_signal_abort(SfSignalWatch *w,
   sf_watch_free(w);
 }
 
-static void sf_signal_dispatch_listeners(SfSignal *s) {
-  SfEvent *event_state = sf_event_new(s);
-  ScrDyn *event =
-      scr_dyn_new_handle(event_state, SCR_DYNH_EVENT);
-  sf_event_release(event_state);
+static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
+  SfEvent *event_state;
+  ScrDyn *event;
+  if (provided_event) {
+    event = scr_dyn_retain(provided_event);
+    event_state = (SfEvent *)provided_event->v.handle.ptr;
+    SfSignal *old_target = event_state->target;
+    event_state->target = sf_signal_retain(s);
+    sf_signal_release(old_target);
+    event_state->dispatching = true;
+  } else {
+    event_state = sf_event_new(s);
+    event = scr_dyn_new_handle(event_state, SCR_DYNH_EVENT);
+    sf_event_release(event_state);
+  }
   ScrCaught *first_error = NULL;
   /*
    * EventTarget dispatch snapshots the handlers present at the start:
@@ -638,7 +681,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
     dispatch[j] = entry;
   }
 
-  for (i = 0; i < count; i++) {
+  for (i = 0; i < count && !event_state->stop_immediate; i++) {
     if (dispatch[i].attribute) {
       if (!s->onabort || s->onabort_order != dispatch[i].id) {
         scr_dyn_release(dispatch[i].listener);
@@ -735,10 +778,6 @@ static void sf_signal_dispatch_listeners(SfSignal *s) {
   event_state->dispatching = false;
   free(dispatch);
   scr_dyn_release(event);
-  /* Abort is one-shot. Registrations cannot fire again, so retaining them
-   * after dispatch only creates EventTarget→listener→EventTarget cycles
-   * that the checked-dynamic boundary cannot trace. */
-  sf_signal_drop_listeners(s);
   if (first_error) {
     scr_rethrow(first_error);
     scr_caught_release(first_error);
@@ -757,7 +796,7 @@ static void sf_signal_abort_full(SfSignal *s, ScrDyn *reason,
     w->source = NULL;
     w->fire(w, s); /* the owner may free w */
   }
-  sf_signal_dispatch_listeners(s);
+  sf_signal_dispatch_listeners(s, NULL);
 }
 
 static void sf_signal_abort_default(SfSignal *s, bool timeout) {
@@ -965,10 +1004,6 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     if (option_signal && option_signal->aborted) {
       return scr_dyn_retain(scr_dyn_undefined());
     }
-    if (s->aborted) {
-      /* An already-aborted signal never dispatches another abort event. */
-      return scr_dyn_retain(scr_dyn_undefined());
-    }
     SfAbortListener **tail = &s->listeners;
     while (*tail) {
       if ((*tail)->capture == capture &&
@@ -993,6 +1028,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
       l->signal_watch =
           sf_signal_watch(option_signal, l, &sf_listener_signal_abort);
     }
+    sf_signal_track_callbacks(s);
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "removeEventListener") == 0) {
@@ -1014,6 +1050,21 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
       }
     }
     return scr_dyn_retain(scr_dyn_undefined());
+  }
+  if (strcmp(method, "dispatchEvent") == 0) {
+    if (argc != 1 || args[0]->kind != SCR_DYN_HANDLE ||
+        args[0]->v.handle.tag != SCR_DYNH_EVENT) {
+      sf_type_error("AbortSignal.dispatchEvent requires an Event");
+      return NULL;
+    }
+    SfEvent *event = (SfEvent *)args[0]->v.handle.ptr;
+    if (event->dispatching) {
+      sf_type_error("The event is already being dispatched");
+      return NULL;
+    }
+    sf_signal_dispatch_listeners(s, args[0]);
+    if (scr_exc_pending()) return NULL;
+    return scr_dyn_new_bool(true);
   }
   (void)self;
   sf_not_function(what);
@@ -1047,6 +1098,7 @@ static bool sf_signal_set(void *ptr, const char *key, size_t len,
   if (value->kind == SCR_DYN_FUNC) {
     s->onabort = scr_dyn_retain((ScrDyn *)value);
     if (!had_handler) s->onabort_order = ++s->next_listener_id;
+    sf_signal_track_callbacks(s);
   } else {
     s->onabort = NULL;
     s->onabort_order = 0;
@@ -1055,6 +1107,26 @@ static bool sf_signal_set(void *ptr, const char *key, size_t len,
 }
 
 /* ── ReadableStream ──────────────────────────────────────────────── */
+
+static void sf_stream_track_callbacks(SfStream *s) {
+  if (s->callbacks_tracked || (!s->pull_cb && !s->cancel_cb)) return;
+  s->callbacks_tracked = true;
+  s->callbacks_next = sf_callback_streams;
+  sf_callback_streams = s;
+}
+
+static void sf_stream_untrack_callbacks(SfStream *s) {
+  if (!s->callbacks_tracked) return;
+  for (SfStream **at = &sf_callback_streams; *at;
+       at = &(*at)->callbacks_next) {
+    if (*at == s) {
+      *at = s->callbacks_next;
+      break;
+    }
+  }
+  s->callbacks_tracked = false;
+  s->callbacks_next = NULL;
+}
 
 static SfStream *sf_stream_new_native(void) {
   SfStream *s = calloc(1, sizeof *s);
@@ -1164,6 +1236,7 @@ static void sf_stream_drop_source_callbacks(
   ScrDyn *cancel = include_cancel ? s->cancel_cb : NULL;
   s->pull_cb = NULL;
   if (include_cancel) s->cancel_cb = NULL;
+  if (!s->pull_cb && !s->cancel_cb) sf_stream_untrack_callbacks(s);
   /* Unlink both edges before either closure release can re-enter through a
    * captured stream handle. */
   scr_dyn_release(pull);
@@ -1184,8 +1257,7 @@ static void sf_stream_release(SfStream *s) {
     s->reader = NULL;
   }
   scr_dyn_release(s->error);
-  scr_dyn_release(s->pull_cb);
-  scr_dyn_release(s->cancel_cb);
+  sf_stream_drop_source_callbacks(s, true);
   scr_dyn_release(s->from_dyn);
   scr_arr_release(s->from_array);
   scr_bytes_release(s->from_bytes);
@@ -2082,6 +2154,7 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
       }
       s->cancel_cb = scr_dyn_retain((ScrDyn *)cancel);
     }
+    sf_stream_track_callbacks(s);
     if (start && start->kind != SCR_DYN_UNDEF) {
       if (start->kind != SCR_DYN_FUNC) {
         sf_stream_release(s);
@@ -3052,11 +3125,41 @@ static ScrUrl *sf_proxy_for(const ScrUrl *target, bool https,
   return url;
 }
 
+static bool sf_same_scheme_relative(const ScrUrl *base,
+                                    const ScrStr *location) {
+  if (location->len <= base->scheme->len ||
+      location->data[base->scheme->len] != ':') {
+    return false;
+  }
+  for (size_t i = 0; i < base->scheme->len; i++) {
+    char a = location->data[i];
+    char b = base->scheme->data[i];
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) return false;
+  }
+  size_t tail = base->scheme->len + 1;
+  return location->len - tail < 2 ||
+         !((location->data[tail] == '/' ||
+            location->data[tail] == '\\') &&
+           (location->data[tail + 1] == '/' ||
+            location->data[tail + 1] == '\\'));
+}
+
 static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
-  ScrStr *absolute = scr_str_new(location->data, location->len);
-  ScrUrl *parsed = sf_url_parse_quiet(absolute);
-  scr_str_release(absolute);
-  if (parsed) return parsed;
+  bool same_scheme_relative = sf_same_scheme_relative(base, location);
+  const char *ref_data =
+      location->data +
+      (same_scheme_relative ? base->scheme->len + 1 : 0);
+  size_t ref_len =
+      location->len -
+      (same_scheme_relative ? base->scheme->len + 1 : 0);
+  if (!same_scheme_relative) {
+    ScrStr *absolute = scr_str_new(location->data, location->len);
+    ScrUrl *parsed = sf_url_parse_quiet(absolute);
+    scr_str_release(absolute);
+    if (parsed) return parsed;
+  }
 
   /*
    * Empty and fragment-only references preserve the complete base path
@@ -3064,13 +3167,13 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
    * resolving it first is significant: `Location: #next` re-requests
    * `/a/start`, not its parent `/a/`.
    */
-  if (location->len == 0 || location->data[0] == '#') {
+  if (ref_len == 0 || ref_data[0] == '#') {
     ScrStr *base_text = sf_url_serialize(base);
-    size_t len = base_text->len + location->len;
+    size_t len = base_text->len + ref_len;
     char *joined = malloc(len);
     if (!joined) sf_oom();
     memcpy(joined, base_text->data, base_text->len);
-    memcpy(joined + base_text->len, location->data, location->len);
+    memcpy(joined + base_text->len, ref_data, ref_len);
     ScrStr *text = scr_str_new(joined, len);
     free(joined);
     scr_str_release(base_text);
@@ -3081,18 +3184,18 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
 
   size_t cap = base->scheme->len + base->userinfo->len + base->host->len +
                base->port->len + base->path->len + base->query->len +
-               location->len + 16;
+               ref_len + 16;
   char *buf = malloc(cap);
   if (!buf) sf_oom();
   size_t n = 0;
   memcpy(buf + n, base->scheme->data, base->scheme->len);
   n += base->scheme->len;
   buf[n++] = ':';
-  if (location->len >= 2 &&
-      (location->data[0] == '/' || location->data[0] == '\\') &&
-      (location->data[1] == '/' || location->data[1] == '\\')) {
-    memcpy(buf + n, location->data, location->len);
-    n += location->len;
+  if (ref_len >= 2 &&
+      (ref_data[0] == '/' || ref_data[0] == '\\') &&
+      (ref_data[1] == '/' || ref_data[1] == '\\')) {
+    memcpy(buf + n, ref_data, ref_len);
+    n += ref_len;
   } else {
     buf[n++] = '/';
     buf[n++] = '/';
@@ -3108,15 +3211,15 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
       memcpy(buf + n, base->port->data, base->port->len);
       n += base->port->len;
     }
-    if (location->len > 0 &&
-        (location->data[0] == '/' || location->data[0] == '\\')) {
-      memcpy(buf + n, location->data, location->len);
-      n += location->len;
-    } else if (location->len > 0 && location->data[0] == '?') {
+    if (ref_len > 0 &&
+        (ref_data[0] == '/' || ref_data[0] == '\\')) {
+      memcpy(buf + n, ref_data, ref_len);
+      n += ref_len;
+    } else if (ref_len > 0 && ref_data[0] == '?') {
       memcpy(buf + n, base->path->data, base->path->len);
       n += base->path->len;
-      memcpy(buf + n, location->data, location->len);
-      n += location->len;
+      memcpy(buf + n, ref_data, ref_len);
+      n += ref_len;
     } else {
       size_t keep = 0;
       for (size_t i = 0; i < base->path->len; i++) {
@@ -3125,8 +3228,8 @@ static ScrUrl *sf_resolve_url(const ScrUrl *base, const ScrStr *location) {
       memcpy(buf + n, base->path->data, keep);
       n += keep;
       if (keep == 0) buf[n++] = '/';
-      memcpy(buf + n, location->data, location->len);
-      n += location->len;
+      memcpy(buf + n, ref_data, ref_len);
+      n += ref_len;
     }
   }
   ScrStr *text = scr_str_new(buf, n);
@@ -4385,6 +4488,18 @@ static void sf_teardown(void) {
     if (t->response_stream) sf_stream_close(t->response_stream);
     sf_settle(t);
   }
+  /*
+   * Dyn function boxes deliberately do not participate in trial deletion.
+   * At process/session teardown no Web object remains observable, so sever
+   * every native callback edge before the collector and RC audit run.
+   * Releasing a callback may destroy and unlink another tracked owner.
+   */
+  while (sf_callback_streams) {
+    sf_stream_drop_source_callbacks(sf_callback_streams, true);
+  }
+  while (sf_callback_signals) {
+    sf_signal_drop_callbacks(sf_callback_signals);
+  }
 }
 
 void scr_fetch_install(void) {
@@ -4399,7 +4514,7 @@ void scr_fetch_install(void) {
   scr_dyn_handle_install(SCR_DYNH_FETCH_RESPONSE, &sf_response_ops);
   scr_dyn_handle_install(SCR_DYNH_FETCH_HEADERS, &sf_headers_ops);
   scr_dyn_handle_install(SCR_DYNH_EVENT, &sf_event_ops);
-  atexit(sf_teardown);
+  scr_atexit(sf_teardown);
 }
 
 #else
@@ -4678,24 +4793,51 @@ static ScrUrl *fx_url_parse(ScrStr *s) {
  * absolute form plus the relative shapes real servers send (//authority,
  * /rooted, ?query, plain relative); everything reparses through the
  * WHATWG parser so dot segments and encoding normalize consistently. */
+static bool fx_same_scheme_relative(const ScrUrl *base,
+                                    const ScrStr *loc) {
+  if (loc->len <= base->scheme->len ||
+      loc->data[base->scheme->len] != ':') {
+    return false;
+  }
+  for (size_t i = 0; i < base->scheme->len; i++) {
+    char a = loc->data[i];
+    char b = base->scheme->data[i];
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) return false;
+  }
+  size_t tail = base->scheme->len + 1;
+  return loc->len - tail < 2 ||
+         !((loc->data[tail] == '/' || loc->data[tail] == '\\') &&
+           (loc->data[tail + 1] == '/' ||
+            loc->data[tail + 1] == '\\'));
+}
+
 static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
-  ScrStr *abs_try = scr_str_new(loc->data, loc->len);
-  ScrUrl *u = fx_url_parse(abs_try);
-  scr_str_release(abs_try);
-  if (u) return u;
+  bool same_scheme_relative = fx_same_scheme_relative(base, loc);
+  const char *ref_data =
+      loc->data + (same_scheme_relative ? base->scheme->len + 1 : 0);
+  size_t ref_len =
+      loc->len - (same_scheme_relative ? base->scheme->len + 1 : 0);
+  if (!same_scheme_relative) {
+    ScrStr *abs_try = scr_str_new(loc->data, loc->len);
+    ScrUrl *u = fx_url_parse(abs_try);
+    scr_str_release(abs_try);
+    if (u) return u;
+  }
 
   /*
    * Empty and fragment-only references preserve the complete base path
    * and query. The request serializer omits the fragment, but resolving it
    * first keeps the redirect on the current resource rather than its parent.
    */
-  if (loc->len == 0 || loc->data[0] == '#') {
+  if (ref_len == 0 || ref_data[0] == '#') {
     ScrStr *base_text = fx_url_serialize(base, false);
-    size_t len = base_text->len + loc->len;
+    size_t len = base_text->len + ref_len;
     char *joined = malloc(len);
     if (!joined) fx_oom();
     memcpy(joined, base_text->data, base_text->len);
-    memcpy(joined + base_text->len, loc->data, loc->len);
+    memcpy(joined + base_text->len, ref_data, ref_len);
     ScrStr *text = scr_str_new(joined, len);
     free(joined);
     scr_str_release(base_text);
@@ -4706,18 +4848,18 @@ static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
 
   /* relative: assemble scheme://authority + resolved path/query */
   size_t cap = base->scheme->len + base->userinfo->len + base->host->len + base->port->len +
-               base->path->len + base->query->len + loc->len + 16;
+               base->path->len + base->query->len + ref_len + 16;
   char *buf = malloc(cap);
   if (!buf) fx_oom();
   size_t n = 0;
   memcpy(buf + n, base->scheme->data, base->scheme->len);
   n += base->scheme->len;
   buf[n++] = ':';
-  if (loc->len >= 2 &&
-      (loc->data[0] == '/' || loc->data[0] == '\\') &&
-      (loc->data[1] == '/' || loc->data[1] == '\\')) {
-    memcpy(buf + n, loc->data, loc->len);
-    n += loc->len;
+  if (ref_len >= 2 &&
+      (ref_data[0] == '/' || ref_data[0] == '\\') &&
+      (ref_data[1] == '/' || ref_data[1] == '\\')) {
+    memcpy(buf + n, ref_data, ref_len);
+    n += ref_len;
   } else {
     buf[n++] = '/';
     buf[n++] = '/';
@@ -4733,14 +4875,14 @@ static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
       memcpy(buf + n, base->port->data, base->port->len);
       n += base->port->len;
     }
-    if (loc->len > 0 && (loc->data[0] == '/' || loc->data[0] == '\\')) {
-      memcpy(buf + n, loc->data, loc->len);
-      n += loc->len;
-    } else if (loc->len > 0 && loc->data[0] == '?') {
+    if (ref_len > 0 && (ref_data[0] == '/' || ref_data[0] == '\\')) {
+      memcpy(buf + n, ref_data, ref_len);
+      n += ref_len;
+    } else if (ref_len > 0 && ref_data[0] == '?') {
       memcpy(buf + n, base->path->data, base->path->len);
       n += base->path->len;
-      memcpy(buf + n, loc->data, loc->len);
-      n += loc->len;
+      memcpy(buf + n, ref_data, ref_len);
+      n += ref_len;
     } else {
       /* plain relative: replace everything after the path's last '/' */
       size_t keep = 0;
@@ -4750,8 +4892,8 @@ static ScrUrl *fx_resolve(const ScrUrl *base, const ScrStr *loc) {
       memcpy(buf + n, base->path->data, keep);
       n += keep;
       if (keep == 0) buf[n++] = '/';
-      memcpy(buf + n, loc->data, loc->len);
-      n += loc->len;
+      memcpy(buf + n, ref_data, ref_len);
+      n += ref_len;
     }
   }
   ScrStr *s = scr_str_new(buf, n);
