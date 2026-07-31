@@ -460,6 +460,24 @@ console.log(
   dispatchCalls,
 );
 
+const truthyOptionsSignal = AbortSignal.timeout(0);
+let truthyOptionsEvent!: Event;
+let truthyOptionsCalls = 0;
+const truthyOptionsListener = (event: Event) => {
+  truthyOptionsEvent = event;
+  truthyOptionsCalls++;
+};
+const truthyListenerOptions = JSON.parse('{"capture":1,"once":1}');
+truthyOptionsSignal.addEventListener(
+  "abort",
+  truthyOptionsListener,
+  truthyListenerOptions,
+);
+truthyOptionsSignal.addEventListener("abort", truthyOptionsListener, true);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+truthyOptionsSignal.dispatchEvent(truthyOptionsEvent);
+console.log("truthy abort listener options:", truthyOptionsCalls);
+
 const stoppedDispatchSignal = AbortSignal.timeout(0);
 let stoppedDispatchEvent!: Event;
 const stoppedDispatchCalls: string[] = [];

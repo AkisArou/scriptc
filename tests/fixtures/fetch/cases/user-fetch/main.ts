@@ -59,6 +59,37 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   };
   console.log("stream post:", streamedJson.method, streamedJson.body);
 
+  const matchedStreamLength = await fetch(`${baseUrl}/post-echo`, {
+    method: "POST",
+    headers: { "content-length": "14" },
+    body: await requestStream(baseUrl),
+    duplex: "half",
+  });
+  const matchedStreamLengthJson = (await matchedStreamLength.json()) as {
+    contentLength: string | null;
+    body: string;
+  };
+  console.log(
+    "matched stream content-length:",
+    matchedStreamLengthJson.contentLength,
+    matchedStreamLengthJson.body,
+  );
+
+  try {
+    await fetch(`${baseUrl}/post-echo`, {
+      method: "POST",
+      headers: { "content-length": "20" },
+      body: await requestStream(baseUrl),
+      duplex: "half",
+      signal: AbortSignal.timeout(200),
+    });
+    console.log("stream content-length mismatch: resolved");
+  } catch (e) {
+    if (e instanceof Error) {
+      console.log("stream content-length mismatch:", e.name, e.message);
+    }
+  }
+
   // All three redirect policies are implemented by the dynamic bridge.
   const manual = await fetch(`${baseUrl}/redirect`, { redirect: "manual" });
   console.log(
@@ -89,6 +120,7 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   }
   const stream303 = await fetch(`${baseUrl}/redirect-stream-303`, {
     method: "POST",
+    headers: { "content-length": "14" },
     body: await requestStream(baseUrl),
     duplex: "half",
   });

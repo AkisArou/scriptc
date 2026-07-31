@@ -956,10 +956,8 @@ static bool sf_signal_listener_options(
   const ScrDyn *capture_value =
       scr_dyn_obj_get(args[2], "capture", 7);
   const ScrDyn *once_value = scr_dyn_obj_get(args[2], "once", 4);
-  *capture = capture_value && capture_value->kind == SCR_DYN_BOOL &&
-             capture_value->v.b;
-  *once = once_value && once_value->kind == SCR_DYN_BOOL &&
-          once_value->v.b;
+  *capture = capture_value && scr_dyn_truthy(capture_value);
+  *once = once_value && scr_dyn_truthy(once_value);
   if (option_signal) {
     const ScrDyn *signal_value =
         scr_dyn_obj_get(args[2], "signal", 6);
@@ -4692,6 +4690,61 @@ static void fx_pairs_push(ScrArr *pairs, const char *name, const char *value, si
   scr_arr_push_ref(pairs, scr_str_new(value, vlen));
 }
 
+static bool fx_content_length(ScrArr *headers, bool *present_out,
+                              size_t *length_out) {
+  bool present = false;
+  size_t length = 0;
+  size_t n = (size_t)scr_arr_len(headers);
+  for (size_t i = 0; i + 1 < n; i += 2) {
+    ScrStr *name = scr_arr_get_ref(headers, (double)i);
+    ScrStr *value = scr_arr_get_ref(headers, (double)(i + 1));
+    if (!fx_eq_ci(name->data, name->len, "content-length")) {
+      scr_str_release(name);
+      scr_str_release(value);
+      continue;
+    }
+    if (present) {
+      scr_str_release(name);
+      scr_str_release(value);
+      return false;
+    }
+    size_t start = 0;
+    size_t end = value->len;
+    while (start < end &&
+           (value->data[start] == ' ' || value->data[start] == '\t')) {
+      start++;
+    }
+    while (end > start &&
+           (value->data[end - 1] == ' ' ||
+            value->data[end - 1] == '\t')) {
+      end--;
+    }
+    bool valid = start < end;
+    size_t parsed = 0;
+    for (size_t j = start; j < end && valid; j++) {
+      unsigned char c = (unsigned char)value->data[j];
+      if (c < '0' || c > '9') {
+        valid = false;
+        break;
+      }
+      size_t digit = (size_t)(c - '0');
+      if (parsed > (SIZE_MAX - digit) / 10) {
+        valid = false;
+        break;
+      }
+      parsed = parsed * 10 + digit;
+    }
+    scr_str_release(name);
+    scr_str_release(value);
+    if (!valid) return false;
+    present = true;
+    length = parsed;
+  }
+  *present_out = present;
+  *length_out = length;
+  return true;
+}
+
 /* ── transfers ───────────────────────────────────────────────────────── */
 
 enum {
@@ -4716,6 +4769,9 @@ typedef struct FxTransfer {
   bool redirected;
   bool request_streaming;
   bool request_ended;
+  bool request_has_content_length;
+  size_t request_content_length;
+  size_t request_body_sent;
   /* the live hop */
   ScrHttpClientReq *client; /* +1, NULL between/after hops */
   bool responded; /* onResponse fired (the final response) */
@@ -4813,6 +4869,12 @@ static void fx_error(FxTransfer *t, const char *detail, const char *code) {
   JS_FreeValue(ctx, args[0]);
   JS_FreeValue(ctx, args[1]);
   fx_settle(t);
+}
+
+static void fx_request_length_mismatch(FxTransfer *t) {
+  if (t->client) scr_http_client_destroy(t->client);
+  fx_error(t, "Request body length does not match content-length header",
+           "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH");
 }
 
 /* ── minted listener closures (caps[0] boxes the transfer) ───────────── */
@@ -5213,6 +5275,13 @@ static void fx_on_upgrade(
     ScrBytes *head);
 
 static void fx_start_hop(FxTransfer *t) {
+  if (!t->request_streaming && t->request_has_content_length) {
+    size_t body_len = t->body ? t->body->len : 0;
+    if (body_len != t->request_content_length) {
+      fx_request_length_mismatch(t);
+      return;
+    }
+  }
   ScrUrl *u = t->url;
   bool https = fx_str_is(u->scheme, "https");
   int default_port = https ? 443 : 80;
@@ -5387,6 +5456,9 @@ static bool fx_redirect(FxTransfer *t, int status, const ScrStr *loc) {
     fx_strip_header(&t->headers, "content-encoding");
     fx_strip_header(&t->headers, "content-language");
     fx_strip_header(&t->headers, "content-location");
+    t->request_has_content_length = false;
+    t->request_content_length = 0;
+    t->request_body_sent = 0;
   }
   /* cross-origin hop: credentials do not follow (the fetch spec's
    * authorization rule; cookies are not modeled as ambient state). */
@@ -5717,6 +5789,9 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
    * Node's transport always controls its value. Match that behavior before
    * the native request head is built. */
   fx_strip_header(&t->headers, "sec-fetch-mode");
+  bool content_length_valid =
+      fx_content_length(t->headers, &t->request_has_content_length,
+                        &t->request_content_length);
 
   JSValue bodyv = JS_GetPropertyStr(ctx, req, "body");
   if (!JS_IsUndefined(bodyv) && !JS_IsNull(bodyv)) {
@@ -5738,7 +5813,11 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
    * reference, so preserve the scalar result before the call.
    */
   int id = t->id;
-  fx_start_hop(t);
+  if (content_length_valid) {
+    fx_start_hop(t);
+  } else {
+    fx_error(t, "fetch failed", NULL);
+  }
   return JS_NewInt32(ctx, id);
 }
 
@@ -5765,6 +5844,13 @@ static JSValue fx_host_write(JSContext *ctx, JSValueConst this_val, int argc,
   size_t blen = 0;
   uint8_t *bytes = JS_GetUint8Array(ctx, &blen, argv[1]);
   if (bytes == NULL && blen != 0) return JS_NewBool(ctx, false);
+  if (t->request_has_content_length &&
+      (t->request_body_sent > t->request_content_length ||
+       blen > t->request_content_length - t->request_body_sent)) {
+    fx_request_length_mismatch(t);
+    return JS_NewBool(ctx, false);
+  }
+  t->request_body_sent += blen;
   if (blen > 0) {
     ScrBytes *chunk = scr_bytes_new(SCR_BYTES_U8, (double)blen);
     memcpy(chunk->data, bytes, blen);
@@ -5784,6 +5870,11 @@ static JSValue fx_host_end(JSContext *ctx, JSValueConst this_val, int argc,
   FxTransfer *t = fx_find(id);
   if (t == NULL || t->done || t->client == NULL ||
       !t->request_streaming || t->request_ended) {
+    return JS_NewBool(ctx, false);
+  }
+  if (t->request_has_content_length &&
+      t->request_body_sent != t->request_content_length) {
+    fx_request_length_mismatch(t);
     return JS_NewBool(ctx, false);
   }
   t->request_ended = true;
