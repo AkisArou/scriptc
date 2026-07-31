@@ -1456,6 +1456,16 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     const helperNames = new Set(helpers.map((h) => h.name));
 
     // Shape flags from the designated entries' declared signatures.
+    const subscriptionsFn = facts.functions.find((f) => f.name === config.subscriptionsExport);
+    if (config.subscriptionsExportDeclared && subscriptionsFn === undefined) {
+      throw new SidecarRefusal(
+        libSidecarDiag(
+          `'sidecar.subscriptions_export' designates export '${config.subscriptionsExport}', but the entry module exports no function by that name`,
+          { file: profile.profilePath, start: 0, end: 0 },
+          `export a function named '${config.subscriptionsExport}' from the entry module, or omit 'sidecar.subscriptions_export' when the contract has no subscriptions entry`,
+        ),
+      );
+    }
     const returnsCmd = (which: "init" | "update", exportName: string): boolean => {
       const fn = facts.functions.find((f) => f.name === exportName);
       if (fn === undefined) {
@@ -1473,7 +1483,7 @@ export function buildSidecar(input: SidecarBuildInput): SidecarBuildResult {
     };
     const initReturnsCmd = returnsCmd("init", config.initExport);
     const updateReturnsCmd = returnsCmd("update", config.updateExport);
-    const hasSubscriptions = facts.functions.some((f) => f.name === config.subscriptionsExport);
+    const hasSubscriptions = subscriptionsFn !== undefined;
 
     // Unbound lists: model fields or helper entries (helpers are bindable
     // surface — the clarified rule) on the model side, arm names on the
