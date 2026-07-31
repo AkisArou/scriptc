@@ -174,6 +174,7 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
   const staticCases = [
     "static",
     "static-stream",
+    "static-listener-this",
     "static-abort-throw",
     "static-dispatch-throw",
   ] as const;
@@ -182,7 +183,10 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
       (["c", "llvm"] as const).map((backend) => [name, backend] as const),
     ),
   )("%s / %s backend", async ([name, backend]) => {
-    const entry = join(fixturesRoot, `${name}/main.mts`);
+    const entry = join(
+      fixturesRoot,
+      `${name}/${name === "static-listener-this" ? "main.js" : "main.mts"}`,
+    );
     const binary = await buildStatic(entry, backend);
     const redirectKey = `${name}-${backend}`;
     const [nodeRes, nativeRes] = await Promise.all([

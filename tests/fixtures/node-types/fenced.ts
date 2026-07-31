@@ -81,4 +81,7 @@ generateKeyPair("rsa", { modulusLength: 2048 }, () => {});
 createCipheriv("aes-128-cbc", Buffer.alloc(16), Buffer.alloc(16));
 pbkdf2Sync("pw", "salt", 100000, 64, "sha512");
 setFips(false);
+fetch("https://example.invalid/", {
+  integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+});
 // End of the declared-but-not-lowered surface.

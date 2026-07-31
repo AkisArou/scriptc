@@ -774,7 +774,11 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
       callable = (ScrDyn *)handle;
     }
     ScrDyn *args[1] = {event};
-    scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
+    if (current_listener) {
+      scr_dyn_this_push_dyn(current_listener);
+    } else {
+      scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
+    }
     ScrDyn *r =
         scr_dyn_call(callable, args, 1, "abort listener");
     scr_dyn_this_pop();
@@ -4298,6 +4302,19 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       init->kind != SCR_DYN_UNDEF && init->kind != SCR_DYN_NULL) {
     return sf_reject_now(promise, "fetch failed");
   }
+  if (init && init->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < init->v.obj.len; i++) {
+      const ScrDynEntry *entry = &init->v.obj.entries[i];
+      if (!sf_name(entry->key, entry->key_len, "method") &&
+          !sf_name(entry->key, entry->key_len, "headers") &&
+          !sf_name(entry->key, entry->key_len, "body") &&
+          !sf_name(entry->key, entry->key_len, "duplex") &&
+          !sf_name(entry->key, entry->key_len, "redirect") &&
+          !sf_name(entry->key, entry->key_len, "signal")) {
+        return sf_reject_now(promise, "fetch failed");
+      }
+    }
+  }
   int redirect_mode;
   if (!sf_redirect_mode(init, &redirect_mode)) {
     return sf_reject_now(promise, "fetch failed");
@@ -4404,6 +4421,9 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
     scr_url_release(u);
     return sf_reject_now(promise, "fetch failed");
   }
+  /* Fetch Metadata is controlled by the fetch implementation. Undici
+   * replaces a caller-provided sec-fetch-mode with "cors". */
+  sf_strip_header(&headers, "sec-fetch-mode");
   if (body && body->kind == SCR_DYN_STR &&
       !sf_pairs_have(headers, "content-type")) {
     sf_push_header_text(headers, "content-type",
@@ -5566,6 +5586,10 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
     JS_FreeValue(ctx, vv);
   }
   JS_FreeValue(ctx, hdrs);
+  /* The island's Request accepts this forbidden Fetch Metadata name, but
+   * Node's transport always controls its value. Match that behavior before
+   * the native request head is built. */
+  fx_strip_header(&t->headers, "sec-fetch-mode");
 
   JSValue bodyv = JS_GetPropertyStr(ctx, req, "body");
   if (!JS_IsUndefined(bodyv) && !JS_IsNull(bodyv)) {

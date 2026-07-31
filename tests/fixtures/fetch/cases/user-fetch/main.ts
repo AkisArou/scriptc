@@ -40,6 +40,12 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   };
   console.log("post:", ej.method, ej.contentType ?? "none", ej.body);
 
+  const modeResponse = await fetch(`${baseUrl}/request-defaults`, {
+    headers: { "sec-fetch-mode": "navigate" },
+  });
+  const modeJson = (await modeResponse.json()) as { secFetchMode: string };
+  console.log("forced sec-fetch-mode:", modeJson.secFetchMode);
+
   // A stored Response promise awaits later like any static promise.
   const pending: Promise<Response> = fetch(`${baseUrl}/json`);
   const again = await pending;

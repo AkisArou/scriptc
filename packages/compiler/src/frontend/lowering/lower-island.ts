@@ -229,6 +229,61 @@ import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
     return entry;
   }
 
+const STATIC_REQUEST_INIT_KEYS = new Set([
+  "method",
+  "headers",
+  "body",
+  "duplex",
+  "redirect",
+  "signal",
+]);
+
+function requestInitLiteralKey(
+  prop: ts.ObjectLiteralElementLike,
+): string | null {
+  if (
+    !ts.isPropertyAssignment(prop) &&
+    !ts.isShorthandPropertyAssignment(prop) &&
+    !ts.isMethodDeclaration(prop)
+  ) {
+    return null;
+  }
+  const name = prop.name;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return String(Number(name.text));
+  if (ts.isComputedPropertyName(name)) {
+    const value = name.expression;
+    if (ts.isStringLiteral(value)) return value.text;
+    if (ts.isNumericLiteral(value)) return String(Number(value.text));
+  }
+  return null;
+}
+
+/** Fence declared RequestInit members outside the native static slice.
+ * Computed runtime keys and non-literal objects are validated again by
+ * scr_fetch_static, so no unsupported option can be silently discarded. */
+function fenceStaticRequestInitLiteral(
+  L: Lowerer,
+  init: ts.ObjectLiteralExpression,
+): void {
+  const contextual = L.checker.getContextualType(init);
+  for (const prop of init.properties) {
+    const key = requestInitLiteralKey(prop);
+    if (key === null || STATIC_REQUEST_INIT_KEYS.has(key)) continue;
+    const contextualArms =
+      contextual?.isUnionType() ? contextual.getTypes() : contextual ? [contextual] : [];
+    const sym = contextualArms
+      .map((arm) => L.checker.getPropertyOfType(arm, key))
+      .find((member) => member !== undefined);
+    L.noLowering(
+      `RequestInit option '${key}' in a static build`,
+      prop,
+      "the native static RequestInit surface is method, headers, body, duplex, redirect, and signal; use --dynamic for the wider fetch options",
+      sym,
+    );
+  }
+}
+
 /** USER-code `fetch(url)` / `fetch(url, init)` — the ambient global
    * (provenance, not the name: a user's own `fetch` never matches).
    *
@@ -273,12 +328,15 @@ import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
             }
           : L.coerceInto(inputNode, input, STRING);
       const initNode = call.arguments[1];
-      const init =
-        initNode === undefined
-          ? dynUndefinedExpr(loc)
-          : ts.isObjectLiteralExpression(initNode)
-            ? lowerDynObjectLiteral(L, initNode)
-            : L.lowerExprExpecting(initNode, DYN);
+      let init: IrExpr;
+      if (initNode === undefined) {
+        init = dynUndefinedExpr(loc);
+      } else if (ts.isObjectLiteralExpression(initNode)) {
+        fenceStaticRequestInitLiteral(L, initNode);
+        init = lowerDynObjectLiteral(L, initNode);
+      } else {
+        init = L.lowerExprExpecting(initNode, DYN);
+      }
       return {
         kind: "libCall",
         fn: "fetch.start",

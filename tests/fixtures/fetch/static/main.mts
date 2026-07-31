@@ -105,6 +105,12 @@ console.log(
   "request defaults:",
   await (await fetch(`${process.argv[2]}/request-defaults`)).json(),
 );
+const forcedFetchMode = (await (
+  await fetch(`${process.argv[2]}/request-defaults`, {
+    headers: { "sec-fetch-mode": "navigate" },
+  })
+).json()) as { secFetchMode: string };
+console.log("forced sec-fetch-mode:", forcedFetchMode.secFetchMode);
 console.log(
   "raw request headers:",
   await (await fetch(`${process.argv[2]}/raw-headers`)).text(),
@@ -139,6 +145,18 @@ const init: RequestInit = {
 };
 const echoed = await fetch(`${process.argv[2]}/post-echo`, init);
 console.log(await echoed.json());
+
+const unsupportedInit = {
+  method: "GET",
+  integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+};
+try {
+  await fetch(`${process.argv[2]}/text`, unsupportedInit);
+  console.log("unsupported request init unexpectedly accepted");
+} catch (error) {
+  const caught = error as Error;
+  console.log("unsupported request init:", caught.name, caught.message);
+}
 
 const matchedLength = await fetch(`${process.argv[2]}/post-echo`, {
   method: "POST",
