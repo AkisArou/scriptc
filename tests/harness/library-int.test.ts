@@ -1196,6 +1196,58 @@ export function update(m: Model, msg: Msg): Model {
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("nested synthesized union records keep every composed-arm integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; payload: { nested: { value: number; first: string }; marker: string } }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; payload: { nested: { value: number; second: boolean }; marker: string } }
+  | { kind: "secondOnly" };
+export type Nested = First | Second;
+export interface Model { nested: Nested; }
+export type Msg = { kind: "fractional" } | { kind: "noop" };
+export function init(): Model {
+  return {
+    nested: {
+      kind: "dup",
+      payload: { nested: { value: 1, first: "" }, marker: "" },
+    },
+  };
+}
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "fractional") {
+    return {
+      nested: {
+        kind: "dup",
+        payload: { nested: { value: 0.5, second: false }, marker: "" },
+      },
+    };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-refuse-composed-nested-synthesized-union-record-slot",
+      source,
+      sidecarProfile([{ slot: "Nested_payload_nested.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Nested_payload_nested.value'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+
+    const proved = await buildCase(
+      "sidecar-prove-composed-nested-synthesized-union-record-slot",
+      source.replace("value: 0.5", "value: 2"),
+      sidecarProfile([{ slot: "Nested_payload_nested.value", class: "u64" }], { exports: [] }),
+    );
+    expect(
+      proved.ok,
+      proved.ok ? "" : proved.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+    ).toBe(true);
+  });
+
   test("colliding synthesized names refuse before a tagged integer obligation can escape", async () => {
     const source = `export interface A {
   B_C: { value: number; plain: string };
@@ -1249,6 +1301,36 @@ export function update(m: Model, msg: Msg): Model {
     if (r.ok) return;
     expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
     expect(r.diagnostics[0]!.message).toContain("'Msg_audio_event.at'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("nested synthesized msg records keep every composed-arm integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; payload: { value: number; first: string } }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; payload: { value: number; second: boolean } }
+  | { kind: "secondOnly" };
+export type Msg = First | Second;
+export interface Model { value: number; }
+let last: Msg = { kind: "dup", payload: { value: 1, first: "" } };
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "secondOnly") {
+    last = { kind: "dup", payload: { value: 0.5, second: false } };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-refuse-composed-nested-synthesized-msg-record-slot",
+      source,
+      sidecarProfile([{ slot: "Msg_payload.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Msg_payload.value'");
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
