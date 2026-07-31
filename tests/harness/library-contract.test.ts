@@ -837,7 +837,7 @@ async function sidecarRefusal(
   source: string,
   sidecarPatch: Record<string, unknown> = {},
   extraFiles: Record<string, string> = {},
-): Promise<{ code: string; message: string; hint?: string }[]> {
+): Promise<{ code: string; message: string; file: string; hint?: string }[]> {
   const outDir = join(cacheDir, `refusal-${refusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
   const entry = join(outDir, "lib.ts");
@@ -872,7 +872,11 @@ async function sidecarRefusal(
   const result = await compileLibrary({ profilePath, outDir });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
-  return result.diagnostics.map((d) => (d.hint === undefined ? { code: d.code, message: d.message } : { code: d.code, message: d.message, hint: d.hint }));
+  return result.diagnostics.map((d) => (
+    d.hint === undefined
+      ? { code: d.code, message: d.message, file: d.loc.file }
+      : { code: d.code, message: d.message, file: d.loc.file, hint: d.hint }
+  ));
 }
 
 const REFUSAL_BASE = `export interface Model { count: number; }
@@ -985,6 +989,19 @@ export function boot(): number {
 });
 
 describe("SC4009: contract sidecar refusals", () => {
+  test("an explicit subscriptions export naming nothing refuses at the profile", async () => {
+    const diags = await sidecarRefusal(REFUSAL_BASE, { subscriptions_export: "watch" });
+    expect(diags[0]!.code).toBe("SC4009");
+    expect(diags[0]!.message).toContain("'sidecar.subscriptions_export'");
+    expect(diags[0]!.message).toContain("'watch'");
+    expect(diags[0]!.file).toMatch(/[/\\]profile\.json$/);
+  });
+
+  test("an omitted subscriptions export remains optional", async () => {
+    const doc = await sidecarProjection(REFUSAL_BASE);
+    expect(doc.has_subscriptions).toBe(false);
+  });
+
   test("a model designation naming nothing refuses", async () => {
     const diags = await sidecarRefusal(REFUSAL_BASE, { model: "Nope" });
     expect(diags[0]!.code).toBe("SC4009");
