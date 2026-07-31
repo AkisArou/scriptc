@@ -207,7 +207,7 @@ export class CEmitter {
    * for each pull, preserving iterator-time reads without teaching the
    * runtime the compiler's program-specific record/union layouts. */
   readonly streamFromArrayAdapters = new Map<string, string>();
-  readonly streamReadAdapters = new Map<string, string>();
+  readonly dynPromiseAdapters = new Map<string, string>();
   /** The checked-dynamic function boundary's per-signature helpers (see
    * emit-walkers.ts): call thunks (sc_dfk_*), box builders (sc_dfb_*),
    * and dynCheck adapters (sc_dfa_*), each per func typeKey. */

@@ -970,7 +970,9 @@ export class LlDyn {
           B.startBlock(lNext);
         });
         // Preserve an exact typed-ref arm above. If no producer tag matched,
-        // retry the union against the ordinary structural snapshot.
+        // retry the union against the ordinary copy-based structural
+        // snapshot (the compiler's width-coercion stance, rather than a
+        // live narrowed alias).
         host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
         host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, i64)`);
         host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, i64, ptr, ptr, ptr)`);

@@ -4,7 +4,7 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canConvertToDyn, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
+import { BYTES_U8, DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canConvertToDyn, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
@@ -397,14 +397,12 @@ export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): Ir
   }
   const recv = L.lowerExpr(access.expression);
   if (recv.type.kind !== "dyn") return null;
-  if (member !== "json") {
+  if (member === "text" || member === "bytes") {
     return {
-      kind: "dynInvoke",
-      recv,
-      method: member,
-      calleeName: access.getText(),
-      args: [],
-      type: DYN,
+      kind: "libCall",
+      fn: member === "text" ? "fetch.responseText" : "fetch.responseBytes",
+      args: [recv],
+      type: { kind: "promise", inner: member === "text" ? STRING : BYTES_U8 },
       loc: locOf(call),
     };
   }
@@ -534,7 +532,22 @@ export function lowerStaticFetchCompanionCall(
     call.expression.name.text === "from" &&
     call.arguments.length === 1
   ) {
-    const source = L.lowerExpr(call.arguments[0]!);
+    let source = L.lowerExpr(call.arguments[0]!);
+    // A readonly tuple satisfies the fallback's readonly-array overload,
+    // but maps to a monomorphic record in IR. Reuse the ordinary
+    // tuple→array width conversion with the resolved generic parameter so
+    // `ReadableStream.from([1, 2] as const)` follows every other tuple
+    // flowing into a readonly T[] slot.
+    if (source.type.kind === "record") {
+      const signature = L.checker.getResolvedSignature(call);
+      const iterableParam = signature?.getParameters()[0];
+      const iterableType = iterableParam
+        ? L.mapTypeOf(L.checker.getTypeOfSymbol(iterableParam))
+        : null;
+      if (iterableType?.kind === "array") {
+        source = L.widthCoerce(source, iterableType) ?? source;
+      }
+    }
     const preserve =
       source.type.kind === "string" ||
       (source.type.kind === "bytes" && source.type.elem === "u8") ||
@@ -559,9 +572,7 @@ export function lowerStaticFetchCompanionCall(
       // entry at pull time, so mutations after ReadableStream.from() remain
       // observable just as they are in Node. Other supported iterable
       // shapes retain the checked-dynamic fallback.
-      args: [
-        source,
-      ],
+      args: [source],
       type: DYN,
       loc,
     };
@@ -605,9 +616,9 @@ export function lowerStaticReadableStreamNew(
 }
 
 /** A static default reader's read() exits the native checked-dynamic
- * transport into the checker's concrete chunk type. The result adapter
- * preserves ReadableStream.from(array)'s element identity instead of
- * routing the chunk through the ordinary typed→unknown deep-copy boundary. */
+ * transport into the checker's concrete chunk type. An exact chunk type
+ * preserves ReadableStream.from(array)'s element identity; structural
+ * widening keeps the compiler's ordinary copy-based width semantics. */
 export function lowerStaticReadableStreamReaderCall(
   L: Lowerer,
   call: ts.CallExpression,

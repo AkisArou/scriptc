@@ -1613,11 +1613,13 @@ export type IrRegexIntrinsicMethod =
  * bridge into the exception cell as catchable strings (may-throw). */
 export type IrLibFn =
   /** Native static fetch and its Web-platform companions. fetch.start
-   * answers once the response head arrives; responseJson consumes the
-   * native body stream. AbortSignal and ReadableStream values are opaque
-   * checked-dynamic handles. */
+   * answers once the response head arrives; the response body readers
+   * consume the native body stream. AbortSignal and ReadableStream values
+   * are opaque checked-dynamic handles. */
   | "fetch.start"
   | "fetch.responseJson"
+  | "fetch.responseText"
+  | "fetch.responseBytes"
   | "fetch.abortTimeout"
   | "fetch.abortNow"
   | "fetch.abortAny"

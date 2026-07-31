@@ -29,5 +29,15 @@ async function reuseHeaders(url: string): Promise<void> {
   await fetch(url, { headers: response.headers });
 }
 
+async function retainBodyPromises(url: string): Promise<void> {
+  const textResponse = await fetch(url);
+  const text: Promise<string> = textResponse.text();
+  const bytesResponse = await fetch(url);
+  const bytes: Promise<Uint8Array> = bytesResponse.bytes();
+  await text;
+  await bytes;
+}
+
 void consume;
 void reuseHeaders;
+void retainBodyPromises;

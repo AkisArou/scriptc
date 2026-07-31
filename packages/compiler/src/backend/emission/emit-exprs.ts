@@ -104,20 +104,31 @@ function streamFromArrayAdapter(
   return sym;
 }
 
-function streamReadAdapter(
+function dynPromiseAdapter(
   E: CEmitter,
-  inner: IrType & { kind: "record" },
+  inner: IrType,
 ): string {
+  if (!isRefCounted(inner) || inner.kind === "dyn") {
+    throw new Error(
+      `dynamic promise adapter requires a concrete reference type, got ${typeKey(inner)}`,
+    );
+  }
   const key = typeKey(inner);
-  const existing = E.streamReadAdapters.get(key);
+  const existing = E.dynPromiseAdapters.get(key);
   if (existing) return existing;
-  const sym = `sc_sra_${E.streamReadAdapters.size}`;
-  E.streamReadAdapters.set(key, sym);
+  const sym = `sc_dpa_${E.dynPromiseAdapters.size}`;
+  E.dynPromiseAdapters.set(key, sym);
   const sig = `static void ${sym}(ScrPromise *sc_dst, ScrPromise *sc_src)`;
-  E.walkerProtos.push(`${sig}; /* typed Web-stream read ${key} */`);
-  const rc = vAdapters(inner);
+  E.walkerProtos.push(`${sig}; /* checked-dynamic promise exit ${key} */`);
+  let fulfill: string;
+  if (inner.kind === "string") {
+    fulfill = `scr_promise_fulfill_str(sc_dst, sc_v);`;
+  } else {
+    const rc = vAdapters(inner);
+    fulfill = `scr_promise_fulfill_ref(sc_dst, sc_v, &${rc.retain}, &${rc.release}, ${E.traceArgC(inner)});`;
+  }
   E.walkerDefs.push(
-    `${sig} { /* typed Web-stream read ${key} */`,
+    `${sig} { /* checked-dynamic promise exit ${key} */`,
     `  ScrDyn *sc_d = (ScrDyn *)scr_promise_payload_ref(sc_src);`,
     `  ${cDecl(inner, "sc_v")} = ${E.dynCheckHelper(inner)}(sc_d, NULL);`,
     `  scr_dyn_release(sc_d);`,
@@ -125,7 +136,7 @@ function streamReadAdapter(
     `    scr_promise_reject_pending(sc_dst);`,
     `    return;`,
     `  }`,
-    `  scr_promise_fulfill_ref(sc_dst, sc_v, &${rc.retain}, &${rc.release}, ${E.traceArgC(inner)});`,
+    `  ${fulfill}`,
     `}`,
     ``,
   );
@@ -2480,6 +2491,26 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fetch_static(${arg(0)}, ${arg(1)})`);
           case "fetch.responseJson":
             return finish(`scr_fetch_response_json(${arg(0)})`);
+          case "fetch.responseText":
+          case "fetch.responseBytes": {
+            if (e.type.kind !== "promise") {
+              throw new Error(`emitter bug: ${fn} result`);
+            }
+            const runtimeFn =
+              fn === "fetch.responseText"
+                ? "scr_fetch_response_text"
+                : "scr_fetch_response_bytes";
+            const source = E.newTemp(
+              { kind: "promise", inner: DYN },
+              `${runtimeFn}(${arg(0)})`,
+            );
+            const result = E.newTemp(e.type, `scr_promise_new()`);
+            const adapter = dynPromiseAdapter(E, e.type.inner);
+            E.line(
+              `scr_promise_race_add(${result.name}, ${source.name}, &${adapter});${E.srcComment(e.loc)}`,
+            );
+            return result;
+          }
           case "fetch.abortTimeout":
             E.usesTimers = true;
             return finish(`scr_fetch_abort_timeout(${arg(0)})`);
@@ -2514,7 +2545,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `scr_fetch_reader_read(${arg(0)})`,
             );
             const result = E.newTemp(e.type, `scr_promise_new()`);
-            const adapter = streamReadAdapter(E, e.type.inner);
+            const adapter = dynPromiseAdapter(E, e.type.inner);
             E.line(
               `scr_promise_race_add(${result.name}, ${source.name}, &${adapter});${E.srcComment(e.loc)}`,
             );

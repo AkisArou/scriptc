@@ -1336,7 +1336,8 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // A typed stream capsule may fit one arm EXACTLY; those probes run
         // first so the matching arm can preserve object identity. Only when
         // no arm matches the producer tag do we snapshot and retry the
-        // ordinary structural union check.
+        // ordinary copy-based structural union check (the compiler's width
+        // coercion stance, rather than a live narrowed alias).
         d.push(`  if (d && d->kind == SCR_DYN_TYPED_REF) {`);
         {
           const keyLit = cStringLiteral(Buffer.from(key, "utf8"));

@@ -2841,7 +2841,7 @@ static ScrDyn *sf_response_get(void *ptr, const char *key, size_t len) {
   return NULL;
 }
 
-ScrPromise *scr_fetch_response_json(ScrDyn *response) {
+static ScrPromise *sf_response_collect_dyn(ScrDyn *response, int mode) {
   if (!response || response->kind != SCR_DYN_HANDLE ||
       response->v.handle.tag != SCR_DYNH_FETCH_RESPONSE) {
     sf_type_error("Illegal invocation");
@@ -2849,7 +2849,19 @@ ScrPromise *scr_fetch_response_json(ScrDyn *response) {
                                    &scr_dyn_release_v, NULL);
   }
   SfResponse *r = response->v.handle.ptr;
-  return sf_response_collect(r, SF_COLLECT_JSON);
+  return sf_response_collect(r, mode);
+}
+
+ScrPromise *scr_fetch_response_json(ScrDyn *response) {
+  return sf_response_collect_dyn(response, SF_COLLECT_JSON);
+}
+
+ScrPromise *scr_fetch_response_text(ScrDyn *response) {
+  return sf_response_collect_dyn(response, SF_COLLECT_TEXT);
+}
+
+ScrPromise *scr_fetch_response_bytes(ScrDyn *response) {
+  return sf_response_collect_dyn(response, SF_COLLECT_BYTES);
 }
 
 /* ── fetch transfer ──────────────────────────────────────────────── */

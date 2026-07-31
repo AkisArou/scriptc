@@ -268,6 +268,18 @@ console.log(
   liveDone.done,
 );
 
+const tupleValues = [6, 7] as const;
+const tupleReader = ReadableStream.from(tupleValues).getReader();
+const tupleFirst = await tupleReader.read();
+const tupleSecond = await tupleReader.read();
+const tupleDone = await tupleReader.read();
+console.log(
+  "stream from readonly tuple:",
+  tupleFirst.value,
+  tupleSecond.value,
+  tupleDone.done,
+);
+
 const streamIdentityBox = { value: 1 };
 const streamIdentityReader =
   ReadableStream.from([streamIdentityBox]).getReader();

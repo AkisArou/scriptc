@@ -17,6 +17,19 @@ const bracketBytes = await (
 )["bytes"]();
 console.log("bracket bytes:", bracketBytes.length, bracketBytes[0]);
 
+function readTextLater(response: Response): Promise<string> {
+  return response.text();
+}
+const pendingText: Promise<string> = readTextLater(
+  await fetch(`${process.argv[2]}/text`),
+);
+console.log("stored text promise:", await pendingText);
+const pendingBytes: Promise<Uint8Array> = (
+  await fetch(`${process.argv[2]}/text`)
+).bytes();
+const storedBytes = await pendingBytes;
+console.log("stored bytes promise:", storedBytes.length, storedBytes[0]);
+
 const gzipText = await (await fetch(`${process.argv[2]}/gzip`)).text();
 console.log(
   "gzip:",
