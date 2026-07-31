@@ -281,6 +281,17 @@ interface PendingIntegerRecordFact {
   loc: SrcLoc;
 }
 
+type SynthesizedRecordVariant =
+  | { fields: ContractField[]; loc: SrcLoc }
+  | { fields: null; loc: SrcLoc; why: string };
+
+/** The composed-arm provenance of a synthesized record, kept separately
+ * from whether this particular record's IR shape carries the discriminant. */
+interface SynthesizedRecordContext {
+  armName: string;
+  variants: () => SynthesizedRecordVariant[];
+}
+
 function classify(decl: ContractTypeDecl, index: number): Classified {
   const s = decl.shape;
   if (s.k === "unsupported") {
@@ -330,6 +341,15 @@ interface TableEntry {
   kind: "struct" | "enum" | "union";
   anchor: number;
   sub: number;
+  /** Present only for anonymous inline records. The generated name is not
+   * injective (`A.B_C` and `A_B.C` both become `A_B_C`), so a table hit is
+   * reusable only when it came from this exact source declaration. */
+  synthesizedOrigin?: {
+    container: string;
+    member: string;
+    fields: ContractField[];
+    tagged: boolean;
+  };
 }
 
 class SidecarError extends Error {
@@ -413,20 +433,43 @@ class Projector {
   }
 
   /** intify for a struct field (declared or synthesized), recording the
-   * record-resolution fact the inference maps onto interned IR shapes. */
-  intifyStructField(ref: TypeRef, container: string, field: string, allFields: ContractField[], loc: SrcLoc): TypeRef {
+   * record-resolution fact the inference maps onto interned IR shapes.
+   * Synthesized records that are tagged-union payloads retain the source
+   * arm's `kind` field in IR even though the wire struct omits it. */
+  intifyStructField(
+    ref: TypeRef,
+    container: string,
+    field: string,
+    allFields: ContractField[],
+    tagged: boolean,
+    loc: SrcLoc,
+    synthesizedContext?: SynthesizedRecordContext,
+  ): TypeRef {
     const slotPath = `${container}.${field}`;
     const before = this.intConsumed.has(slotPath);
     const out = this.intify(ref, slotPath, loc);
     if (!before && this.intConsumed.has(slotPath)) {
-      this.pendingIntRecordFacts.push({
-        fields: allFields,
-        tagged: false,
-        targetField: field,
-        cls: this.intConsumed.get(slotPath)!,
-        path: slotPath,
-        loc,
-      });
+      const cls = this.intConsumed.get(slotPath)!;
+      if (synthesizedContext !== undefined) {
+        this.recordIntegerSynthesizedRecordFacts(
+          synthesizedContext,
+          container,
+          field,
+          out,
+          tagged,
+          cls,
+          slotPath,
+        );
+      } else {
+        this.pendingIntRecordFacts.push({
+          fields: allFields,
+          tagged,
+          targetField: field,
+          cls,
+          path: slotPath,
+          loc,
+        });
+      }
     }
     return out;
   }
@@ -693,6 +736,130 @@ class Projector {
     }
   }
 
+  /** Lazily retain every source occurrence of a wire-selected arm. Most
+   * synthesized records have no integer declaration, so the full composed
+   * walk stays deferred until a nested slot actually needs proof facts. */
+  private synthesizedArmContext(
+    unionName: string,
+    armName: string,
+    loc: SrcLoc,
+  ): SynthesizedRecordContext {
+    return {
+      armName,
+      variants: () =>
+        this.allUnionArms(unionName, loc)
+          .filter((arm) => arm.name === armName)
+          .map((arm) => ({ fields: arm.fields, loc: arm.loc })),
+    };
+  }
+
+  /** Follow one inline-object field through every composed occurrence of
+   * the selected arm. Missing or differently shaped occurrences remain in
+   * the context as refusals, but only matter if an integer slot is declared
+   * inside this nested synthesized record. */
+  private nestedSynthesizedRecordContext(
+    parent: SynthesizedRecordContext,
+    member: string,
+  ): SynthesizedRecordContext {
+    return {
+      armName: parent.armName,
+      variants: () =>
+        parent.variants().map((variant): SynthesizedRecordVariant => {
+          if (variant.fields === null) return variant;
+          const field = variant.fields.find((candidate) => candidate.name === member);
+          if (field === undefined) {
+            return {
+              fields: null,
+              loc: variant.loc,
+              why: `has no field '${member}' leading to that nested record`,
+            };
+          }
+          const fields = this.inlineRecordFields(field.shape);
+          return fields === null
+            ? {
+                fields: null,
+                loc: field.loc,
+                why: `projects field '${member}' as a non-inline-record shape`,
+              }
+            : { fields, loc: field.loc };
+        }),
+    };
+  }
+
+  /** The object whose fields tableSynthesized will project through the
+   * sidecar's optional/array wrappers, or null when the shape names or
+   * projects something other than an inline record. */
+  private inlineRecordFields(shape: ContractTypeShape): ContractField[] | null {
+    if (shape.k === "object") return shape.fields;
+    if (shape.k === "array") return this.inlineRecordFields(shape.elem);
+    if (shape.k === "union") {
+      const present = shape.parts.filter((part) => part.k !== "absent");
+      return present.length === 1 && present.length !== shape.parts.length
+        ? this.inlineRecordFields(present[0]!)
+        : null;
+    }
+    return null;
+  }
+
+  /** Record a synthesized-record field obligation for every composed
+   * occurrence of the wire-selected discriminant. The first arm supplies
+   * the wire struct, but later same-named arms may lower to distinct record
+   * shapes; every compatible numeric field therefore needs the same proof.
+   * An absent, non-number, or newly optional field cannot satisfy the
+   * selected wire slot and refuses at projection. */
+  private recordIntegerSynthesizedRecordFacts(
+    context: SynthesizedRecordContext,
+    container: string,
+    targetField: string,
+    intifiedRef: TypeRef,
+    tagged: boolean,
+    cls: "i64" | "u64",
+    path: string,
+  ): void {
+    const selectedOptional =
+      intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
+    if (intifiedRef.kind !== "i64" && !selectedOptional) {
+      throw new Error(`sidecar pattern bug: synthesized integer field '${path}' has ref '${intifiedRef.kind}'`);
+    }
+    for (const variant of context.variants()) {
+      if (variant.fields === null) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects synthesized record field '${targetField}', but another composed '${context.armName}' arm ${variant.why}`,
+          variant.loc,
+        );
+      }
+      const field = variant.fields.find((candidate) => candidate.name === targetField);
+      if (field === undefined) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects synthesized record field '${targetField}', but another composed '${context.armName}' arm has no such field`,
+          variant.loc,
+        );
+      }
+      const ref = this.fieldRef(field, container);
+      const candidateOptional = ref.kind === "optional" && ref.inner.kind === "f64";
+      if (ref.kind !== "f64" && !candidateOptional) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects synthesized record field '${targetField}', but another composed '${context.armName}' arm projects that field as '${ref.kind}'`,
+          field.loc,
+        );
+      }
+      if (!selectedOptional && candidateOptional) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects required synthesized record field '${targetField}', but another composed '${context.armName}' arm makes that field optional`,
+          field.loc,
+        );
+      }
+      this.pendingIntRecordFacts.push({
+        fields: variant.fields,
+        tagged,
+        targetField,
+        cls,
+        path,
+        loc: variant.loc,
+      });
+    }
+  }
+
   /** Record one integer obligation for every lowered structural arm carrying
    * the wire-selected discriminant. A composed union can repeat an arm name
    * with a different payload field name; the sidecar's scalar descriptor
@@ -795,8 +962,12 @@ class Projector {
 
   /** Project a syntactic field to a TypeRef, tabling every named type it
    * references. `container`/`member` seed synthesized names. */
-  fieldRef(field: ContractField, container: string): TypeRef {
-    const inner = this.shapeRef(field.shape, container, field.name, field.loc);
+  fieldRef(
+    field: ContractField,
+    container: string,
+    synthesizedContext?: SynthesizedRecordContext,
+  ): TypeRef {
+    const inner = this.shapeRef(field.shape, container, field.name, field.loc, synthesizedContext);
     if (field.optional) {
       if (inner.kind === "optional") return inner;
       return { kind: "optional", inner };
@@ -804,7 +975,13 @@ class Projector {
     return inner;
   }
 
-  shapeRef(shape: ContractTypeShape, container: string, member: string, loc: SrcLoc): TypeRef {
+  shapeRef(
+    shape: ContractTypeShape,
+    container: string,
+    member: string,
+    loc: SrcLoc,
+    synthesizedContext?: SynthesizedRecordContext,
+  ): TypeRef {
     switch (shape.k) {
       case "bool":
         return { kind: "bool" };
@@ -816,12 +993,12 @@ class Projector {
       case "bytes":
         return { kind: "bytes" };
       case "array":
-        return { kind: "slice", elem: this.shapeRef(shape.elem, container, member, loc) };
+        return { kind: "slice", elem: this.shapeRef(shape.elem, container, member, loc, synthesizedContext) };
       case "union": {
         const present = shape.parts.filter((p) => p.k !== "absent");
         const absents = shape.parts.length - present.length;
         if (absents > 0 && present.length === 1) {
-          const inner = this.shapeRef(present[0]!, container, member, loc);
+          const inner = this.shapeRef(present[0]!, container, member, loc, synthesizedContext);
           return inner.kind === "optional" ? inner : { kind: "optional", inner };
         }
         throw new SidecarError(
@@ -834,7 +1011,7 @@ class Projector {
         // aliases remain transparent to the aliased table declaration.
         const r = this.resolve(shape.name, loc);
         if (r.c.c === "scalar") {
-          return this.shapeRef(r.c.shape, container, member, loc);
+          return this.shapeRef(r.c.shape, container, member, loc, synthesizedContext);
         }
         if (r.c.c === "struct") {
           this.tableNamed(r.name, loc);
@@ -854,7 +1031,19 @@ class Projector {
         return { kind: "union", name: r.name };
       }
       case "object":
-        return { kind: "value", name: this.tableSynthesized(container, member, shape.fields, loc) };
+        return {
+          kind: "value",
+          name: this.tableSynthesized(
+            container,
+            member,
+            shape.fields,
+            false,
+            loc,
+            synthesizedContext === undefined
+              ? undefined
+              : this.nestedSynthesizedRecordContext(synthesizedContext, member),
+          ),
+        };
       case "stringLit":
         throw new SidecarError(
           `'${container}.${member}' is a bare string-literal type — declare a named string-literal union and reference it as an enum`,
@@ -915,7 +1104,7 @@ class Projector {
           seen.add(f.name);
           entry.fields.push({
             name: f.name,
-            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields, f.loc),
+            type: this.intifyStructField(this.fieldRef(f, name), name, f.name, c.fields, false, f.loc),
           });
         }
         this.table.set(name, { kind: "struct", entry, anchor: c.index, sub: -1 });
@@ -953,34 +1142,80 @@ class Projector {
    * multi-field inline payloads. */
   armPayloadRef(unionName: string, arm: { name: string; fields: ContractField[]; loc: SrcLoc }): TypeRef {
     if (arm.fields.length === 0) return { kind: "void" };
-    if (arm.fields.length === 1) return this.fieldRef(arm.fields[0]!, unionName);
-    return { kind: "value", name: this.tableSynthesized(unionName, arm.name, arm.fields, arm.loc) };
+    const synthesizedContext = this.synthesizedArmContext(unionName, arm.name, arm.loc);
+    if (arm.fields.length === 1) return this.fieldRef(arm.fields[0]!, unionName, synthesizedContext);
+    return {
+      kind: "value",
+      name: this.tableSynthesized(unionName, arm.name, arm.fields, true, arm.loc, synthesizedContext),
+    };
   }
 
   /** Table an anonymous inline record under the schema's synthesized-name
    * contract: `<Container>_<member>`, deterministic and stable across
-   * identical re-compiles, unique in the one namespace. */
-  tableSynthesized(container: string, member: string, fields: ContractField[], loc: SrcLoc): string {
+   * identical re-compiles, unique in the one namespace. `tagged` records
+   * whether this wire payload comes from a union arm whose lowered IR shape
+   * also carries the discriminant. */
+  tableSynthesized(
+    container: string,
+    member: string,
+    fields: ContractField[],
+    tagged: boolean,
+    loc: SrcLoc,
+    synthesizedContext?: SynthesizedRecordContext,
+  ): string {
     const name = `${container}_${member}`;
-    const existing = this.table.get(name);
-    if (existing !== undefined) return name; // the same inline decl, revisited
     if (this.byName.has(name)) {
       throw new SidecarError(
         `the inline record at '${container}.${member}' needs the synthesized name '${name}', which a declared type already uses — rename one`,
         loc,
       );
     }
+    const existing = this.table.get(name);
+    if (existing !== undefined) {
+      const origin = existing.synthesizedOrigin;
+      if (
+        origin !== undefined &&
+        origin.container === container &&
+        origin.member === member &&
+        origin.fields === fields &&
+        origin.tagged === tagged
+      ) {
+        return name; // the same inline declaration, revisited
+      }
+      const owner =
+        origin === undefined
+          ? `a declared type`
+          : `another inline record at '${origin.container}.${origin.member}'`;
+      throw new SidecarError(
+        `the inline record at '${container}.${member}' needs the synthesized name '${name}', which ${owner} already uses — rename one`,
+        loc,
+      );
+    }
     const entry: SidecarStruct = { name, synthesized: true, fields: [] };
     const anchor = this.byName.get(container)?.index ?? this.facts.types.length;
     const sub = this.synthCounter++;
-    this.table.set(name, { kind: "struct", entry, anchor, sub });
+    this.table.set(name, {
+      kind: "struct",
+      entry,
+      anchor,
+      sub,
+      synthesizedOrigin: { container, member, fields, tagged },
+    });
     const seen = new Set<string>();
     for (const f of fields) {
       if (seen.has(f.name)) throw new SidecarError(`the inline record at '${container}.${member}' repeats field '${f.name}'`, f.loc);
       seen.add(f.name);
       entry.fields.push({
         name: f.name,
-        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields, f.loc),
+        type: this.intifyStructField(
+          this.fieldRef(f, name, synthesizedContext),
+          name,
+          f.name,
+          fields,
+          tagged,
+          f.loc,
+          synthesizedContext,
+        ),
       });
     }
     return name;
@@ -990,6 +1225,7 @@ class Projector {
   msgDescriptor(msgName: string, arm: { name: string; fields: ContractField[]; loc: SrcLoc }): PayloadDescriptor {
     const fields = arm.fields;
     if (fields.length === 0) return { kind: "void" };
+    const synthesizedContext = this.synthesizedArmContext(msgName, arm.name, arm.loc);
     if (fields.length === 2) {
       const [first, second] = [fields[0]!, fields[1]!];
       const firstShape = this.scalarShape(first.shape, first.loc);
@@ -1022,7 +1258,7 @@ class Projector {
       }
     }
     if (fields.length === 1 && !fields[0]!.optional) {
-      let ref = this.fieldRef(fields[0]!, msgName);
+      let ref = this.fieldRef(fields[0]!, msgName, synthesizedContext);
       // A bare or optional number payload is an ask-4 declarable slot:
       // `<msg>.<arm>`. Calling intify for every one-field family also makes
       // a declaration targeting a non-number refuse at the precise arm.
@@ -1060,7 +1296,10 @@ class Projector {
     }
     // Everything else — bytes-first pairs, three-plus fields, optional
     // payload fields — tables a synthesized record (family 5).
-    return { kind: "record", name: this.tableSynthesized(msgName, arm.name, fields, arm.loc) };
+    return {
+      kind: "record",
+      name: this.tableSynthesized(msgName, arm.name, fields, true, arm.loc, synthesizedContext),
+    };
   }
 
   /** Materialize structural join patterns only after normal sidecar
