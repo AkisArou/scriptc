@@ -4567,6 +4567,9 @@ void scr_dataview_set(ScrBytes *b, double byte_off, double value, ScrDataViewGet
  * toward zero, wrap mod 2^8/2^32), f32 by double→float rounding. */
 double scr_bytes_get(const ScrBytes *b, double i);
 void scr_bytes_set(ScrBytes *b, double i, double v);
+/* Replace a live typed-array capsule's fixed-size payload from its dyn
+ * snapshot. Source and target have the same compiler-checked bytes type. */
+void scr_bytes_copy_contents(ScrBytes *dst, const ScrBytes *src);
 
 /* TypedArray.prototype.slice(start, end): relative indices clamp like
  * string/array slice (ToIntegerOrInfinity, negatives from the end); the

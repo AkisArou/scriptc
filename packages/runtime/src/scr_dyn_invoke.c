@@ -312,6 +312,13 @@ static bool dyn_arr_proto_unimpl(const char *m) {
   for (size_t i = 0; names[i]; i++) if (dyn_name_is(m, names[i])) return true;
   return false;
 }
+static bool dyn_arr_proto_mutates(const char *m) {
+  static const char *names[] = {
+    "push", "pop", "shift", "unshift", "reverse", "sort", NULL
+  };
+  for (size_t i = 0; names[i]; i++) if (dyn_name_is(m, names[i])) return true;
+  return false;
+}
 static bool dyn_bytes_proto_real(const char *m) {
   static const char *names[] = { "slice", "at", "indexOf", "lastIndexOf", "includes", "join",
     "forEach", "map", "filter", "some", "every", "find", "findIndex", "reverse", "fill", "set",
@@ -351,6 +358,25 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
    * engine's message names the failure. */
   if (recv->kind == SCR_DYN_JSVAL) {
     return scr_dyn_jsval_ops()->invoke(recv->v.jsval.cell, method, args, argc, what);
+  }
+
+  /* Live Web-boundary capsules expose the prototype of their materialized
+   * value. Run the ordinary dispatch against the stable snapshot, then
+   * commit successful mutations back into the original static value.
+   * Mutators such as reverse/sort return their receiver, so translate that
+   * snapshot identity back to the externally visible capsule. */
+  if (recv->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(recv);
+    bool mutates = materialized->kind == SCR_DYN_ARR &&
+                   dyn_arr_proto_mutates(method);
+    ScrDyn *result = scr_dyn_invoke(materialized, method, args, argc, what);
+    if (mutates && !scr_exc_pending()) scr_dyn_typed_ref_commit(recv);
+    if (result == materialized) {
+      scr_dyn_release(result);
+      result = scr_dyn_retain(recv);
+    }
+    scr_dyn_release(materialized);
+    return result;
   }
 
   /* OBJ: the own member calls (own properties shadow prototypes in JS

@@ -37,6 +37,34 @@ console.log(
   enqueuedIdentityBox.value,
 );
 
+const enqueuedIdentityBytes = Buffer.from([1]);
+const enqueuedBytesStream = new ReadableStream<Uint8Array>({
+  start(controller) {
+    controller.enqueue(enqueuedIdentityBytes);
+    controller.close();
+  },
+});
+const enqueuedBytesPart = await enqueuedBytesStream.getReader().read();
+if (!enqueuedBytesPart.done) enqueuedBytesPart.value[0] = 2;
+console.log(
+  "controller enqueue bytes identity:",
+  enqueuedBytesPart.done
+    ? false
+    : enqueuedBytesPart.value === enqueuedIdentityBytes,
+  enqueuedIdentityBytes[0],
+);
+
+const undefinedOptionsStream: any = ReadableStream.from([3]);
+const undefinedOptionsPart =
+  await undefinedOptionsStream.getReader(undefined).read();
+const emptyOptionsStream: any = ReadableStream.from([4]);
+const emptyOptionsPart = await emptyOptionsStream.getReader({}).read();
+console.log(
+  "default reader options:",
+  undefinedOptionsPart.value,
+  emptyOptionsPart.value,
+);
+
 // Draining a pre-queued chunk creates demand even with no second read.
 let replenishingPulls = 0;
 const replenishingStream = new ReadableStream<number>({
@@ -500,6 +528,18 @@ console.log(
   dynamicArrayFirst.value === dynamicArraySecond.value,
 );
 
+const dynamicArrayMethodValue = [31];
+const dynamicArrayMethodReader: any = ReadableStream.from([
+  dynamicArrayMethodValue,
+]).getReader();
+const dynamicArrayMethodPart: any = await dynamicArrayMethodReader.read();
+const dynamicArrayMethodResult = dynamicArrayMethodPart.value.push(32);
+console.log(
+  "dynamic stream array method:",
+  dynamicArrayMethodResult,
+  dynamicArrayMethodValue.join(","),
+);
+
 const dynamicNestedValue = { nested: { value: 23 } };
 const dynamicNestedReader: any = ReadableStream.from([
   dynamicNestedValue,
@@ -669,6 +709,16 @@ console.log(
   "abort reason identity:",
   observedAbortReason === abortIdentityReason,
   abortIdentityReason.value,
+);
+
+const abortIdentityBytes = Buffer.from([5]);
+const observedAbortBytes =
+  AbortSignal.abort(abortIdentityBytes).reason as Uint8Array;
+observedAbortBytes[0] = 6;
+console.log(
+  "abort reason bytes identity:",
+  observedAbortBytes === abortIdentityBytes,
+  abortIdentityBytes[0],
 );
 
 const identitySignal = AbortSignal.timeout(0);

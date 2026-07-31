@@ -15,6 +15,23 @@ function streamTypedRefCommitAdapter(
   snapshot: string,
   defs: string[],
 ): string {
+  if (t.kind === "bytes") {
+    const commit = `${snapshot}_commit`;
+    E.walkerProtos.push(
+      `static void ${commit}(void *sc_p, const ScrDyn *sc_d); /* commit live stream element ${typeKey(t)} */`,
+    );
+    defs.push(
+      `static void ${commit}(void *sc_p, const ScrDyn *sc_d) {`,
+      `  ScrBytes *sc_target = (ScrBytes *)sc_p;`,
+      `  ScrBytes *sc_next = ${E.dynCheckHelper(t)}(sc_d, NULL);`,
+      `  if (!sc_next) return;`,
+      `  scr_bytes_copy_contents(sc_target, sc_next);`,
+      `  scr_bytes_release(sc_next);`,
+      `}`,
+      ``,
+    );
+    return `&${commit}`;
+  }
   if (t.kind === "array") {
     const commit = `${snapshot}_commit`;
     E.walkerProtos.push(
@@ -94,7 +111,7 @@ interface StreamTypedRefContext {
 }
 
 function streamTypedRefEligible(t: IrType): boolean {
-  return t.kind === "record" || t.kind === "array";
+  return t.kind === "record" || t.kind === "array" || t.kind === "bytes";
 }
 
 /** Build the live dyn view of one typed stream value. Mutable reference

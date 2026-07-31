@@ -2363,7 +2363,27 @@ static ScrDyn *sf_stream_invoke(void *ptr, ScrDyn *self, const char *method,
                                 const char *what) {
   SfStream *s = ptr;
   if (strcmp(method, "getReader") == 0) {
-    if (argc != 0) {
+    ScrDyn *options = argc ? args[0] : NULL;
+    ScrDyn *materialized = NULL;
+    ScrDyn *mode = NULL;
+    bool owned_mode = false;
+    if (options && options->kind == SCR_DYN_TYPED_REF) {
+      materialized = scr_dyn_typed_ref_materialize(options);
+      options = materialized;
+    }
+    if (options && options->kind == SCR_DYN_OBJ) {
+      mode = scr_dyn_obj_get(options, "mode", 4);
+    } else if (options && options->kind == SCR_DYN_JSVAL) {
+      ScrStr *key = scr_str_new("mode", 4);
+      mode = scr_dyn_isl_key_get(options, key);
+      scr_str_release(key);
+      owned_mode = mode != NULL;
+    }
+    bool byob = mode && mode->kind != SCR_DYN_UNDEF;
+    if (owned_mode) scr_dyn_release(mode);
+    scr_dyn_release(materialized);
+    if (scr_exc_pending()) return NULL;
+    if (byob) {
       sf_type_error("BYOB readers are not supported");
       return NULL;
     }

@@ -443,12 +443,14 @@ function staticResponseMemberName(
 
 /** Box mutable data for Web API slots that expose the exact JavaScript
  * value again. Ordinary dynFrom remains the documented copy boundary;
- * this capsule is deliberately limited to records/arrays that the live
- * materializer can snapshot and commit. */
+ * this capsule is deliberately limited to records/arrays/bytes that the
+ * live materializer can snapshot and commit. */
 function lowerLiveWebValue(L: Lowerer, node: ts.Expression): IrExpr {
   const value = L.lowerExpr(node);
   if (
-    (value.type.kind === "record" || value.type.kind === "array") &&
+    (value.type.kind === "record" ||
+      value.type.kind === "array" ||
+      value.type.kind === "bytes") &&
     canConvertToDyn(
       value.type,
       (id) => L.shapes.get(id),

@@ -10021,6 +10021,28 @@ class LlEmitter {
     t: IrType,
     snapshot: string,
   ): string {
+    if (t.kind === "bytes") {
+      const commit = `${snapshot}_commit`;
+      const check = this.dyn.dynCheckHelper(t);
+      this.declare(`declare void @scr_bytes_copy_contents(ptr, ptr)`);
+      this.declare(`declare void @scr_bytes_release(ptr)`);
+      this.resolveThunkDefs.push(
+        `define internal void @${commit}(ptr %target, ptr %d) ${FN_ATTRS} { ; commit live stream element ${typeKey(t)}`,
+        `entry:`,
+        `  %next = call ptr @${check}(ptr %d, ptr null)`,
+        `  %missing = icmp eq ptr %next, null`,
+        `  br i1 %missing, label %done, label %copy`,
+        `copy:`,
+        `  call void @scr_bytes_copy_contents(ptr %target, ptr %next)`,
+        `  call void @scr_bytes_release(ptr %next)`,
+        `  br label %done`,
+        `done:`,
+        `  ret void`,
+        `}`,
+        ``,
+      );
+      return `@${commit}`;
+    }
     if (t.kind === "array") {
       const commit = `${snapshot}_commit`;
       const check = this.dyn.dynCheckHelper(t);
@@ -10113,7 +10135,7 @@ class LlEmitter {
   }
 
   private streamTypedRefEligible(t: IrType): boolean {
-    return t.kind === "record" || t.kind === "array";
+    return t.kind === "record" || t.kind === "array" || t.kind === "bytes";
   }
 
   private streamTypedRefBoxValue(
