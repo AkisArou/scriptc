@@ -423,19 +423,33 @@ class Projector {
     allFields: ContractField[],
     tagged: boolean,
     loc: SrcLoc,
+    taggedArm?: { unionName: string; armName: string },
   ): TypeRef {
     const slotPath = `${container}.${field}`;
     const before = this.intConsumed.has(slotPath);
     const out = this.intify(ref, slotPath, loc);
     if (!before && this.intConsumed.has(slotPath)) {
-      this.pendingIntRecordFacts.push({
-        fields: allFields,
-        tagged,
-        targetField: field,
-        cls: this.intConsumed.get(slotPath)!,
-        path: slotPath,
-        loc,
-      });
+      const cls = this.intConsumed.get(slotPath)!;
+      if (taggedArm !== undefined) {
+        this.recordIntegerSynthesizedRecordFacts(
+          taggedArm.unionName,
+          taggedArm.armName,
+          field,
+          out,
+          cls,
+          slotPath,
+          loc,
+        );
+      } else {
+        this.pendingIntRecordFacts.push({
+          fields: allFields,
+          tagged,
+          targetField: field,
+          cls,
+          path: slotPath,
+          loc,
+        });
+      }
     }
     return out;
   }
@@ -699,6 +713,60 @@ class Projector {
       return out;
     } finally {
       this.allFlattening.delete(unionName);
+    }
+  }
+
+  /** Record a synthesized-record field obligation for every composed
+   * occurrence of the wire-selected discriminant. The first arm supplies
+   * the wire struct, but later same-named arms may lower to distinct record
+   * shapes; every compatible numeric field therefore needs the same proof.
+   * An absent, non-number, or newly optional field cannot satisfy the
+   * selected wire slot and refuses at projection. */
+  private recordIntegerSynthesizedRecordFacts(
+    unionName: string,
+    armName: string,
+    targetField: string,
+    intifiedRef: TypeRef,
+    cls: "i64" | "u64",
+    path: string,
+    loc: SrcLoc,
+  ): void {
+    const selectedOptional =
+      intifiedRef.kind === "optional" && intifiedRef.inner.kind === "i64";
+    if (intifiedRef.kind !== "i64" && !selectedOptional) {
+      throw new Error(`sidecar pattern bug: synthesized integer field '${path}' has ref '${intifiedRef.kind}'`);
+    }
+    for (const arm of this.allUnionArms(unionName, loc)) {
+      if (arm.name !== armName) continue;
+      const field = arm.fields.find((candidate) => candidate.name === targetField);
+      if (field === undefined) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects synthesized record field '${targetField}', but another composed '${armName}' arm has no such field`,
+          arm.loc,
+        );
+      }
+      const ref = this.fieldRef(field, unionName);
+      const candidateOptional = ref.kind === "optional" && ref.inner.kind === "f64";
+      if (ref.kind !== "f64" && !candidateOptional) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects synthesized record field '${targetField}', but another composed '${armName}' arm projects that field as '${ref.kind}'`,
+          field.loc,
+        );
+      }
+      if (!selectedOptional && candidateOptional) {
+        throw new SidecarError(
+          `integer slot '${path}' (${cls}) selects required synthesized record field '${targetField}', but another composed '${armName}' arm makes that field optional`,
+          field.loc,
+        );
+      }
+      this.pendingIntRecordFacts.push({
+        fields: arm.fields,
+        tagged: true,
+        targetField,
+        cls,
+        path,
+        loc: arm.loc,
+      });
     }
   }
 
@@ -991,7 +1059,15 @@ class Projector {
       seen.add(f.name);
       entry.fields.push({
         name: f.name,
-        type: this.intifyStructField(this.fieldRef(f, name), name, f.name, fields, tagged, f.loc),
+        type: this.intifyStructField(
+          this.fieldRef(f, name),
+          name,
+          f.name,
+          fields,
+          tagged,
+          f.loc,
+          tagged ? { unionName: container, armName: member } : undefined,
+        ),
       });
     }
     return name;

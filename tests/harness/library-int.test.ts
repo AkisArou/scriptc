@@ -1164,6 +1164,38 @@ export function update(m: Model, msg: Msg): Model { return m; }
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("same-named composed synthesized union records each keep the integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; value: number; first: string }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; value: number; second: boolean }
+  | { kind: "secondOnly" };
+export type Nested = First | Second;
+export interface Model { nested: Nested; }
+export type Msg = { kind: "fractional" } | { kind: "noop" };
+export function init(): Model {
+  return { nested: { kind: "dup", value: 1, first: "" } };
+}
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "fractional") {
+    return { nested: { kind: "dup", value: 0.5, second: false } };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-refuse-composed-synthesized-union-record-slot",
+      source,
+      sidecarProfile([{ slot: "Nested_dup.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Nested_dup.value'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
   test("an unproven write into a synthesized msg payload field refuses", async () => {
     const source = `export interface Model { value: number; }
 export type Msg =
@@ -1187,6 +1219,36 @@ export function update(m: Model, msg: Msg): Model {
     if (r.ok) return;
     expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
     expect(r.diagnostics[0]!.message).toContain("'Msg_audio_event.at'");
+    expect(r.diagnostics[0]!.message).toContain("wholeness failed");
+  });
+
+  test("same-named composed synthesized msg records each keep the integer obligation live", async () => {
+    const source = `export type First =
+  | { kind: "dup"; first: string; value: number }
+  | { kind: "firstOnly" };
+export type Second =
+  | { kind: "dup"; second: boolean; value: number }
+  | { kind: "secondOnly" };
+export type Msg = First | Second;
+export interface Model { value: number; }
+let last: Msg = { kind: "dup", first: "", value: 1 };
+export function init(): Model { return { value: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "secondOnly") {
+    last = { kind: "dup", second: false, value: 0.5 };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-refuse-composed-synthesized-msg-record-slot",
+      source,
+      sidecarProfile([{ slot: "Msg_dup.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4022"]);
+    expect(r.diagnostics[0]!.message).toContain("'Msg_dup.value'");
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
