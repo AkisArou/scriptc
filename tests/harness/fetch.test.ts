@@ -193,7 +193,9 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
       runBinary("node", [entry, baseUrl, `${redirectKey}-node`]),
       runBinary(binary, [baseUrl, `${redirectKey}-native`]),
     ]);
-    expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+    expect(nativeRes.stdout.toString("utf8")).toBe(
+      nodeRes.stdout.toString("utf8"),
+    );
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
 
@@ -298,6 +300,102 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
         await new Promise<void>((resolve, reject) => {
           server.close((error) => error ? reject(error) : resolve());
         });
+      }
+    },
+    120_000,
+  );
+
+  test(
+    "all native fetch lanes block bad ports on initial and redirect hops",
+    async () => {
+      let blockedRequests = 0;
+      let redirectRequests = 0;
+      let blockedServer: ReturnType<typeof createHttpServer> | undefined;
+      let redirectServer: ReturnType<typeof createHttpServer> | undefined;
+      try {
+        for (const port of [6000, 6667, 10080, 6697, 4045]) {
+          const candidate = createHttpServer((_request, response) => {
+            blockedRequests++;
+            response.end("bad-port server reached");
+          });
+          try {
+            await new Promise<void>((resolve, reject) => {
+              candidate.once("error", reject);
+              candidate.listen(port, "127.0.0.1", () => {
+                candidate.removeAllListeners("error");
+                resolve();
+              });
+            });
+            blockedServer = candidate;
+            break;
+          } catch (error) {
+            candidate.removeAllListeners();
+            if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+              throw error;
+            }
+          }
+        }
+        if (!blockedServer) {
+          throw new Error("no Fetch-blocked fixture port was available");
+        }
+        const blockedAddress = blockedServer.address();
+        if (blockedAddress === null || typeof blockedAddress === "string") {
+          throw new Error("missing blocked-port address");
+        }
+        const blockedUrl = `http://127.0.0.1:${blockedAddress.port}`;
+
+        redirectServer = createHttpServer((_request, response) => {
+          redirectRequests++;
+          response.writeHead(302, {
+            connection: "close",
+            location: blockedUrl,
+          });
+          response.end();
+        });
+        await new Promise<void>((resolve, reject) => {
+          redirectServer!.once("error", reject);
+          redirectServer!.listen(0, "127.0.0.1", () => {
+            redirectServer!.removeAllListeners("error");
+            resolve();
+          });
+        });
+        const redirectAddress = redirectServer.address();
+        if (redirectAddress === null || typeof redirectAddress === "string") {
+          throw new Error("missing redirect address");
+        }
+        const redirectUrl =
+          `http://127.0.0.1:${redirectAddress.port}/to-blocked-port`;
+
+        const entry = join(fixturesRoot, "static-bad-port/main.mts");
+        const [dynamic, c, llvm] = await Promise.all([
+          build(entry),
+          buildStatic(entry, "c", "bad-port"),
+          buildStatic(entry, "llvm", "bad-port"),
+        ]);
+        const argv = [blockedUrl, redirectUrl];
+        const [nodeRes, ...nativeResults] = await Promise.all([
+          runBinary("node", [entry, ...argv]),
+          runBinary(dynamic, argv),
+          runBinary(c, argv),
+          runBinary(llvm, argv),
+        ]);
+        for (const nativeRes of nativeResults) {
+          expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+          expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+        }
+        expect(redirectRequests).toBe(4);
+        expect(blockedRequests).toBe(0);
+      } finally {
+        await Promise.all(
+          [redirectServer, blockedServer]
+            .filter((server) => server?.listening)
+            .map(
+              (server) =>
+                new Promise<void>((resolve, reject) => {
+                  server!.close((error) => error ? reject(error) : resolve());
+                }),
+            ),
+        );
       }
     },
     120_000,

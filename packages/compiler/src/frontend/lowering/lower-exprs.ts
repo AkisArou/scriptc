@@ -5596,6 +5596,10 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const en = lowerEnumAccess(L, expr);
       if (en) return en;
     }
+    // Response["member"] has the same supported surface as Response.member.
+    // Fence a statically-known unsupported key before the generic checked-
+    // dynamic element-read path can turn it into a runtime missing member.
+    L.fenceStaticResponseMember(expr, "read");
     // `globalThis[<expr>]` — the dynamic global probe (the harness's
     // conditional-globals sweep): a compiled binary's globals are
     // compile-time bindings, not runtime properties, and none of the

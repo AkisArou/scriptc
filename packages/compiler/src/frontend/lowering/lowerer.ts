@@ -2592,7 +2592,7 @@ export class Lowerer {
   }
 
   fenceStaticResponseMember(
-    access: ts.PropertyAccessExpression,
+    access: ts.PropertyAccessExpression | ts.ElementAccessExpression,
     use: "read" | "call",
   ): IrExpr | null {
     return fenceStaticResponseMember(this, access, use);

@@ -295,6 +295,25 @@ console.log(
     : JSON.stringify(widenedRecordPart.value),
 );
 
+interface StreamBaseValue {
+  value: number;
+}
+
+interface StreamDerivedValue extends StreamBaseValue {
+  extra: number;
+}
+
+const structurallyDerived: StreamDerivedValue = { value: 8, extra: 9 };
+const structurallyWidenedStream: ReadableStream<StreamBaseValue> =
+  ReadableStream.from([structurallyDerived]);
+const structurallyWidenedPart =
+  await structurallyWidenedStream.getReader().read();
+console.log(
+  "stream from structurally widened record:",
+  structurallyWidenedPart.done,
+  structurallyWidenedPart.done ? "done" : structurallyWidenedPart.value.value,
+);
+
 const liveBytes = new Uint8Array([4]);
 const liveBytesReader = ReadableStream.from(liveBytes).getReader();
 liveBytes[0] = 5;

@@ -4,6 +4,19 @@
 const res = await fetch(`${process.argv[2]}/json`);
 console.log(await res.json());
 
+const bracketJson = (await (
+  await fetch(`${process.argv[2]}/json`)
+)["json"]()) as { n: number };
+console.log("bracket json:", bracketJson.n);
+console.log(
+  "bracket text:",
+  await (await fetch(`${process.argv[2]}/text`))["text"](),
+);
+const bracketBytes = await (
+  await fetch(`${process.argv[2]}/text`)
+)["bytes"]();
+console.log("bracket bytes:", bracketBytes.length, bracketBytes[0]);
+
 const gzipText = await (await fetch(`${process.argv[2]}/gzip`)).text();
 console.log(
   "gzip:",

@@ -364,11 +364,22 @@ function fenceStaticRequestInitLiteral(
  * stream and parse its UTF-8 payload into the ordinary checked-dynamic
  * JSON tree. Syntax and stream failures reject at await like the web API. */
 export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
-  if (L.dynamic || call.questionDotToken || !ts.isPropertyAccessExpression(call.expression)) return null;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    (!ts.isPropertyAccessExpression(call.expression) &&
+      !ts.isElementAccessExpression(call.expression))
+  ) {
+    return null;
+  }
   const access = call.expression;
+  const member = staticResponseMemberName(L, access);
   if (
     access.questionDotToken ||
-    (access.name.text !== "json" && access.name.text !== "arrayBuffer") ||
+    (member !== "json" &&
+      member !== "text" &&
+      member !== "bytes" &&
+      member !== "arrayBuffer") ||
     call.arguments.length !== 0
   ) {
     return null;
@@ -376,7 +387,7 @@ export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): Ir
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
-  if (access.name.text === "arrayBuffer") {
+  if (member === "arrayBuffer") {
     L.noLowering(
       "Response.arrayBuffer() in a static build",
       call,
@@ -386,6 +397,17 @@ export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): Ir
   }
   const recv = L.lowerExpr(access.expression);
   if (recv.type.kind !== "dyn") return null;
+  if (member !== "json") {
+    return {
+      kind: "dynInvoke",
+      recv,
+      method: member,
+      calleeName: access.getText(),
+      args: [],
+      type: DYN,
+      loc: locOf(call),
+    };
+  }
   return {
     kind: "libCall",
     fn: "fetch.responseJson",
@@ -408,20 +430,34 @@ const STATIC_RESPONSE_READS = new Set([
 
 const STATIC_RESPONSE_CALLS = new Set(["json", "text", "bytes"]);
 
+type StaticResponseAccess =
+  | ts.PropertyAccessExpression
+  | ts.ElementAccessExpression;
+
+function staticResponseMemberName(
+  L: Lowerer,
+  access: StaticResponseAccess,
+): string | null {
+  if (ts.isPropertyAccessExpression(access)) return access.name.text;
+  const key = L.typeOf(access.argumentExpression);
+  return key.isStringLiteralType() ? key.value : null;
+}
+
 /** The adopted undici Response declaration is wider than the native static
  * handle. Keep the supported fallback slice on checked-dynamic dispatch, but
  * fence every other declared member before the generic dyn keyed-read/call
  * paths can turn a missing handle operation into a runtime TypeError. */
 export function fenceStaticResponseMember(
   L: Lowerer,
-  access: ts.PropertyAccessExpression,
+  access: StaticResponseAccess,
   use: "read" | "call",
 ): IrExpr | null {
   if (L.dynamic) return null;
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
-  const member = access.name.text;
+  const member = staticResponseMemberName(L, access);
+  if (member === null) return null;
   const supported =
     use === "call"
       ? STATIC_RESPONSE_CALLS.has(member)

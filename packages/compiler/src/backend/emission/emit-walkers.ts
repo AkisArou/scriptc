@@ -1099,11 +1099,17 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     E.walkerProtos.push(`${sig}; /* check ${key} */`);
     const want = cStringLiteral(Buffer.from(E.dynDesc(t), "utf8"));
     const d: string[] = [`${sig} { /* check ${key} */`];
-    if (isRefCounted(t) && t.kind !== "dyn") {
+    if (isRefCounted(t) && t.kind !== "dyn" && t.kind !== "union") {
       const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
       d.push(
         `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${Buffer.byteLength(key, "utf8")})) {`,
         `    return (${cType(t).trim()})scr_dyn_typed_ref_unbox(d);`,
+        `  }`,
+        `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
+        `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
+        `    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`,
+        `    scr_dyn_release(sc_materialized);`,
+        `    return sc_out;`,
         `  }`,
       );
     }
@@ -1302,6 +1308,16 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           }
           d.push(`  }`);
         });
+        // A typed stream capsule may fit one arm EXACTLY; those probes run
+        // first so the matching arm can preserve object identity. Only when
+        // no arm matches the producer tag do we snapshot and retry the
+        // ordinary structural union check.
+        d.push(`  if (d && d->kind == SCR_DYN_TYPED_REF) {`);
+        d.push(`    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`);
+        d.push(`    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`);
+        d.push(`    scr_dyn_release(sc_materialized);`);
+        d.push(`    return sc_out;`);
+        d.push(`  }`);
         d.push(`  scr_dyn_check_fail(path, ${want}, d);`);
         d.push(`  return NULL;`);
         break;

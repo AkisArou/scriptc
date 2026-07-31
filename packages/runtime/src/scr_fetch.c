@@ -72,6 +72,16 @@
  *   the engine callback object and the hop client, and teardown
  *   (registered with the island) frees whatever is still live before the
  *   engine goes down, so the island audit stays zero. */
+/* Fetch's bad-port table. Keep the static and dynamic transports on one
+ * source of truth: both start a fresh hop after every followed redirect. */
+#define SCR_FETCH_BAD_PORTS \
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, \
+  77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, \
+  123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,   \
+  526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,   \
+  993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566,   \
+  6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080
+
 #ifndef SCR_DYNAMIC
 
 #include "scr_runtime.h"
@@ -2941,6 +2951,14 @@ static int sf_port(const ScrUrl *u, int dflt) {
   return p;
 }
 
+static bool sf_bad_port(int port) {
+  static const int ports[] = {SCR_FETCH_BAD_PORTS};
+  for (size_t i = 0; i < sizeof ports / sizeof ports[0]; i++) {
+    if (port == ports[i]) return true;
+  }
+  return false;
+}
+
 static ScrStr *sf_path(const ScrUrl *u) {
   size_t plen = (u->path->len > 0 ? u->path->len : 1) + u->query->len;
   char *buf = malloc(plen);
@@ -4153,6 +4171,10 @@ static bool sf_start_hop(SfTransfer *t) {
   bool https = sf_eq_ci(url->scheme, "https");
   int default_port = https ? 443 : 80;
   int port = sf_port(url, default_port);
+  if (sf_bad_port(port)) {
+    sf_reject(t, "fetch failed");
+    return false;
+  }
   bool invalid_proxy = false;
   ScrUrl *proxy = sf_proxy_for(url, https, port, &invalid_proxy);
   bool proxy_http = proxy && sf_eq_ci(proxy->scheme, "http");
@@ -4958,6 +4980,14 @@ static int fx_url_port(const ScrUrl *u, int deflt) {
   return p;
 }
 
+static bool fx_bad_port(int port) {
+  static const int ports[] = {SCR_FETCH_BAD_PORTS};
+  for (size_t i = 0; i < sizeof ports / sizeof ports[0]; i++) {
+    if (port == ports[i]) return true;
+  }
+  return false;
+}
+
 /* ── env proxy (NODE_USE_ENV_PROXY=1, undici's EnvHttpProxyAgent) ────── */
 
 static const char *fx_env2(const char *lower, const char *upper) {
@@ -5126,6 +5156,10 @@ static void fx_start_hop(FxTransfer *t) {
   bool https = fx_str_is(u->scheme, "https");
   int default_port = https ? 443 : 80;
   int port = fx_url_port(u, default_port);
+  if (fx_bad_port(port)) {
+    fx_error(t, "fetch failed", NULL);
+    return;
+  }
   bool invalid_proxy = false;
   ScrUrl *proxy = fx_proxy_for(u, https, port, &invalid_proxy);
   bool proxy_http = proxy && fx_str_is(proxy->scheme, "http");
@@ -5826,3 +5860,5 @@ void scr_fetch_install(void) {
 }
 
 #endif /* SCR_DYNAMIC */
+
+#undef SCR_FETCH_BAD_PORTS
