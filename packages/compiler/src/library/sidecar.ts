@@ -330,6 +330,15 @@ interface TableEntry {
   kind: "struct" | "enum" | "union";
   anchor: number;
   sub: number;
+  /** Present only for anonymous inline records. The generated name is not
+   * injective (`A.B_C` and `A_B.C` both become `A_B_C`), so a table hit is
+   * reusable only when it came from this exact source declaration. */
+  synthesizedOrigin?: {
+    container: string;
+    member: string;
+    fields: ContractField[];
+    tagged: boolean;
+  };
 }
 
 class SidecarError extends Error {
@@ -1041,18 +1050,43 @@ class Projector {
    * also carries the discriminant. */
   tableSynthesized(container: string, member: string, fields: ContractField[], tagged: boolean, loc: SrcLoc): string {
     const name = `${container}_${member}`;
-    const existing = this.table.get(name);
-    if (existing !== undefined) return name; // the same inline decl, revisited
     if (this.byName.has(name)) {
       throw new SidecarError(
         `the inline record at '${container}.${member}' needs the synthesized name '${name}', which a declared type already uses — rename one`,
         loc,
       );
     }
+    const existing = this.table.get(name);
+    if (existing !== undefined) {
+      const origin = existing.synthesizedOrigin;
+      if (
+        origin !== undefined &&
+        origin.container === container &&
+        origin.member === member &&
+        origin.fields === fields &&
+        origin.tagged === tagged
+      ) {
+        return name; // the same inline declaration, revisited
+      }
+      const owner =
+        origin === undefined
+          ? `a declared type`
+          : `another inline record at '${origin.container}.${origin.member}'`;
+      throw new SidecarError(
+        `the inline record at '${container}.${member}' needs the synthesized name '${name}', which ${owner} already uses — rename one`,
+        loc,
+      );
+    }
     const entry: SidecarStruct = { name, synthesized: true, fields: [] };
     const anchor = this.byName.get(container)?.index ?? this.facts.types.length;
     const sub = this.synthCounter++;
-    this.table.set(name, { kind: "struct", entry, anchor, sub });
+    this.table.set(name, {
+      kind: "struct",
+      entry,
+      anchor,
+      sub,
+      synthesizedOrigin: { container, member, fields, tagged },
+    });
     const seen = new Set<string>();
     for (const f of fields) {
       if (seen.has(f.name)) throw new SidecarError(`the inline record at '${container}.${member}' repeats field '${f.name}'`, f.loc);

@@ -1196,6 +1196,36 @@ export function update(m: Model, msg: Msg): Model {
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("colliding synthesized names refuse before a tagged integer obligation can escape", async () => {
+    const source = `export interface A {
+  B_C: { value: number; plain: string };
+}
+export type A_B =
+  | { kind: "C"; value: number; tagged: boolean }
+  | { kind: "noop" };
+export interface Model { a: A; tagged: A_B; }
+export type Msg = { kind: "noop" } | { kind: "other" };
+export function init(): Model {
+  return {
+    a: { B_C: { value: 1, plain: "" } },
+    tagged: { kind: "C", value: 0.5, tagged: false },
+  };
+}
+export function update(m: Model, msg: Msg): Model { return m; }
+`;
+    const r = await buildCase(
+      "sidecar-refuse-colliding-synthesized-integer-records",
+      source,
+      sidecarProfile([{ slot: "A_B_C.value", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.diagnostics.map((d) => d.code)).toEqual(["SC4009"]);
+    expect(r.diagnostics[0]!.message).toContain("'A_B.C'");
+    expect(r.diagnostics[0]!.message).toContain("'A.B_C'");
+    expect(r.diagnostics[0]!.message).toContain("'A_B_C'");
+  });
+
   test("an unproven write into a synthesized msg payload field refuses", async () => {
     const source = `export interface Model { value: number; }
 export type Msg =
