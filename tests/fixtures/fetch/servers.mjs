@@ -3,15 +3,16 @@
  * inside its container (linux-differential.test.ts). Two entry forms, one
  * behavior:
  *
- * - module: `startFetchServers()` binds all three legs on 127.0.0.1 and
- *   resolves { baseUrl, refusedUrl, proxyUrl, proxiedRequests(), close() }
+ * - module: `startFetchServers()` binds the target, refused-port probe, and
+ *   HTTP/HTTPS proxy legs locally and resolves their URLs plus counters
  *   (fetch.test.ts's in-process use).
  * - standalone: `node servers.mjs` starts the same legs and prints
- *   `BASE <url>` / `REFUSED <url>` / `PROXY <url>` on stderr (the PORT
- *   protocol's channel — never a compared stream), then serves until
- *   killed. The proxied-request COUNT is queryable over the wire in this
- *   form: a plain `GET /__count` to the proxy (a relative-path request no
- *   real proxy client sends) answers the current count.
+ *   `BASE <url>` / `REFUSED <url>` / `PROXY <url>` /
+ *   `SECURE_PROXY <url>` on stderr (the PORT protocol's channel — never a
+ *   compared stream), then serves until killed. The proxied-request COUNT
+ *   is queryable over the wire in this form: a plain `GET /__count` to the
+ *   HTTP proxy (a relative-path request no real proxy client sends) answers
+ *   the current count.
  *
  * Routes: /text /json /post-echo /header-echo /header-empty /headers-source
  * /headers-reuse /request-defaults /raw-headers /header-init-echo
@@ -27,7 +28,9 @@
  * 404 for the rest;
  * the proxy relays absolute-URI requests and CONNECT tunnels, counting one
  * per proxied request either way. */
+import { readFileSync } from "node:fs";
 import { createServer, request } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { deflateSync, gzipSync } from "node:zlib";
@@ -367,7 +370,7 @@ export async function startFetchServers() {
   // http) splice raw sockets. One count per proxied request either way.
   let proxiedRequests = 0;
   const proxyAuthorizations = [];
-  const proxy = createServer((req, res) => {
+  const proxyRequest = (req, res) => {
     // Relative-path requests are never proxy traffic — the standalone
     // form's count query rides one; anything else relative is a 404.
     if ((req.url ?? "").startsWith("/")) {
@@ -403,8 +406,8 @@ export async function startFetchServers() {
       });
       upstream.end(Buffer.concat(chunks));
     });
-  });
-  proxy.on("connect", (req, clientSocket, head) => {
+  };
+  const proxyConnect = (req, clientSocket, head) => {
     proxiedRequests++;
     proxyAuthorizations.push(req.headers["proxy-authorization"] ?? "");
     const [host, portStr] = (req.url ?? "").split(":");
@@ -416,21 +419,41 @@ export async function startFetchServers() {
     });
     upstream.on("error", () => clientSocket.destroy());
     clientSocket.on("error", () => upstream.destroy());
-  });
+  };
+
+  const proxy = createServer(proxyRequest);
+  proxy.on("connect", proxyConnect);
   await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
   const pxaddr = proxy.address();
   if (pxaddr === null || typeof pxaddr !== "object") throw new Error("no proxy address");
   const proxyUrl = `http://127.0.0.1:${pxaddr.port}`;
 
+  const secureProxy = createHttpsServer(
+    {
+      key: readFileSync(new URL("../server/certs/localhost-key.pem", import.meta.url)),
+      cert: readFileSync(new URL("../server/certs/localhost.pem", import.meta.url)),
+    },
+    proxyRequest,
+  );
+  secureProxy.on("connect", proxyConnect);
+  await new Promise((resolve) => secureProxy.listen(0, "127.0.0.1", resolve));
+  const securePxaddr = secureProxy.address();
+  if (securePxaddr === null || typeof securePxaddr !== "object") {
+    throw new Error("no secure proxy address");
+  }
+  const secureProxyUrl = `https://localhost:${securePxaddr.port}`;
+
   return {
     baseUrl,
     refusedUrl,
     proxyUrl,
+    secureProxyUrl,
     proxiedRequests: () => proxiedRequests,
     proxyAuthorizations: () => proxyAuthorizations.slice(),
     close: async () => {
       await new Promise((resolve) => server.close(() => resolve()));
       await new Promise((resolve) => proxy.close(() => resolve()));
+      await new Promise((resolve) => secureProxy.close(() => resolve()));
     },
   };
 }
@@ -438,5 +461,6 @@ export async function startFetchServers() {
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
   const s = await startFetchServers();
   process.stderr.write(`BASE ${s.baseUrl}\nREFUSED ${s.refusedUrl}\nPROXY ${s.proxyUrl}\n`);
+  process.stderr.write(`SECURE_PROXY ${s.secureProxyUrl}\n`);
   // Serve until killed (the lane owns the process's lifetime).
 }

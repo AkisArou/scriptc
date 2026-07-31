@@ -510,6 +510,35 @@ static void sf_event_release_v(void *ptr) {
   sf_event_release((SfEvent *)ptr);
 }
 
+static void *sf_listener_error_retain_v(void *ptr) {
+  return scr_caught_retain((ScrCaught *)ptr);
+}
+
+static void sf_listener_error_release_v(void *ptr) {
+  scr_caught_release((ScrCaught *)ptr);
+}
+
+static void sf_listener_error_tick(ScrClosure *cb) {
+  ScrCaught *caught = scr_box_get_ref(cb->caps[0]);
+  scr_rethrow(caught);
+  scr_caught_release(caught);
+}
+
+/*
+ * EventTarget reports listener exceptions as uncaught next-tick failures;
+ * dispatchEvent itself keeps running listeners and returns its boolean.
+ * Queue every failure separately so an uncaughtException handler that
+ * recovers from one still observes later listener failures in order.
+ */
+static void sf_defer_listener_error(ScrCaught *caught) {
+  ScrClosure *cb =
+      scr_closure_new((void *)&sf_listener_error_tick, 1);
+  cb->caps[0] = scr_box_new_obj(
+      &sf_listener_error_retain_v, &sf_listener_error_release_v, NULL);
+  scr_box_set_ref(cb->caps[0], caught); /* moves */
+  scr_next_tick(cb);
+}
+
 static ScrDyn *sf_event_invoke(void *ptr, ScrDyn *self,
                                const char *method, ScrDyn *const *args,
                                size_t argc, const char *what) {
@@ -638,7 +667,6 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
     event = scr_dyn_new_handle(event_state, SCR_DYNH_EVENT);
     sf_event_release(event_state);
   }
-  ScrCaught *first_error = NULL;
   /*
    * EventTarget dispatch snapshots the handlers present at the start:
    * additions wait for the next event, removals before a listener's turn
@@ -701,12 +729,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
       scr_dyn_release(handler);
       scr_dyn_release(dispatch[i].listener);
       if (scr_exc_pending()) {
-        ScrCaught *caught = scr_exc_take();
-        if (!first_error) {
-          first_error = caught;
-        } else {
-          scr_caught_release(caught);
-        }
+        sf_defer_listener_error(scr_exc_take());
       }
       if (event_state->stop_immediate) {
         i++;
@@ -759,12 +782,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
     scr_dyn_release(current_listener);
     scr_dyn_release(dispatch[i].listener);
     if (scr_exc_pending()) {
-      ScrCaught *caught = scr_exc_take();
-      if (!first_error) {
-        first_error = caught;
-      } else {
-        scr_caught_release(caught);
-      }
+      sf_defer_listener_error(scr_exc_take());
     }
     if (event_state->stop_immediate) {
       i++;
@@ -778,10 +796,6 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
   event_state->dispatching = false;
   free(dispatch);
   scr_dyn_release(event);
-  if (first_error) {
-    scr_rethrow(first_error);
-    scr_caught_release(first_error);
-  }
 }
 
 static void sf_signal_abort_full(SfSignal *s, ScrDyn *reason,
@@ -4137,7 +4151,10 @@ static bool sf_start_hop(SfTransfer *t) {
   int port = sf_port(url, default_port);
   bool invalid_proxy = false;
   ScrUrl *proxy = sf_proxy_for(url, https, port, &invalid_proxy);
-  if (invalid_proxy || (https && proxy)) {
+  bool proxy_http = proxy && sf_eq_ci(proxy->scheme, "http");
+  bool proxy_https = proxy && sf_eq_ci(proxy->scheme, "https");
+  if (invalid_proxy || (proxy && !proxy_http && !proxy_https) ||
+      (https && proxy)) {
     scr_url_release(proxy);
     sf_reject(t, "fetch failed");
     return false;
@@ -4198,13 +4215,16 @@ static bool sf_start_hop(SfTransfer *t) {
       sf_bare_host(proxy ? proxy->host : url->host);
   ScrStr *dial = scr_net_blocking_lookup(bare);
   ScrStr *path = proxy ? sf_url_serialize(url) : sf_path(url);
-  int dial_port = proxy ? sf_port(proxy, 80) : port;
-  ScrStr *sni = https ? sf_bare_host(url->host) : NULL;
+  int dial_port =
+      proxy ? sf_port(proxy, proxy_https ? 443 : 80) : port;
+  ScrStr *sni =
+      https ? sf_bare_host(url->host)
+            : proxy_https ? sf_bare_host(proxy->host) : NULL;
   void *tls_ctx =
-      https ? scr_tls_fetch_client_ctx(sni, true) : NULL;
+      sni ? scr_tls_fetch_client_ctx(sni, true) : NULL;
   ScrHttpClientReq *client = scr_http_request_ex(
       dial, dial_port, path, t->method, 0, headers, false, NULL, NULL,
-      default_port, https ? &scr_tls_fetch_client_wrap : NULL, tls_ctx);
+      default_port, sni ? &scr_tls_fetch_client_wrap : NULL, tls_ctx);
   scr_arr_release(headers);
   scr_str_release(path);
   scr_str_release(dial);
@@ -5088,7 +5108,10 @@ static void fx_start_hop(FxTransfer *t) {
   int port = fx_url_port(u, default_port);
   bool invalid_proxy = false;
   ScrUrl *proxy = fx_proxy_for(u, https, port, &invalid_proxy);
-  if (invalid_proxy || (https && proxy)) {
+  bool proxy_http = proxy && fx_str_is(proxy->scheme, "http");
+  bool proxy_https = proxy && fx_str_is(proxy->scheme, "https");
+  if (invalid_proxy || (proxy && !proxy_http && !proxy_https) ||
+      (https && proxy)) {
     if (proxy) scr_url_release(proxy);
     fx_error(t, "fetch failed", NULL);
     return;
@@ -5137,7 +5160,7 @@ static void fx_start_hop(FxTransfer *t) {
   if (proxy != NULL) {
     path = fx_url_serialize(u, false); /* absolute-URI through the proxy */
     dial = fx_dial_host(proxy->host);
-    dial_port = fx_url_port(proxy, 80);
+    dial_port = fx_url_port(proxy, proxy_https ? 443 : 80);
   } else {
     if (u->query->len > 0) {
       size_t plen = (u->path->len > 0 ? u->path->len : 1) + u->query->len;
@@ -5162,8 +5185,9 @@ static void fx_start_hop(FxTransfer *t) {
   }
 
   ScrHttpClientReq *c;
-  if (https) {
-    ScrStr *sni = fx_bare_host(u->host);
+  if (https || proxy_https) {
+    ScrStr *sni =
+        fx_bare_host(https ? u->host : proxy->host);
     void *cli = scr_tls_fetch_client_ctx(sni, true);
     scr_str_release(sni);
     c = scr_http_request_ex(dial, dial_port, path, t->method, 0, pairs, false, NULL, NULL,

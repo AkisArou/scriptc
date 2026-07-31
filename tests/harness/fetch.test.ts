@@ -46,15 +46,19 @@ let servers: Awaited<ReturnType<typeof startFetchServers>>;
 let baseUrl = "";
 let refusedUrl = "";
 let proxyUrl = "";
+let secureProxyUrl = "";
 let authenticatedProxyUrl = "";
+let secureAuthenticatedProxyUrl = "";
 const expectedProxyAuthorization =
   `Basic ${Buffer.from("proxy-user:proxy-pass").toString("base64")}`;
 
 beforeAll(async () => {
   servers = await startFetchServers();
-  ({ baseUrl, refusedUrl, proxyUrl } = servers);
+  ({ baseUrl, refusedUrl, proxyUrl, secureProxyUrl } = servers);
   authenticatedProxyUrl =
     proxyUrl.replace("http://", "http://proxy-user:proxy-pass@");
+  secureAuthenticatedProxyUrl =
+    secureProxyUrl.replace("https://", "https://proxy-user:proxy-pass@");
 
   // Every child below inherits POISONED proxy env pointing at the refused
   // port: Node's fetch ignores http_proxy/https_proxy without the
@@ -167,7 +171,12 @@ const cases = globSync(join(fixturesRoot, "cases/*/main.ts"))
   .map((entry) => ({ name: entry.split("/").at(-2)!, entry }));
 
 describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
-  const staticCases = ["static", "static-stream", "static-abort-throw"] as const;
+  const staticCases = [
+    "static",
+    "static-stream",
+    "static-abort-throw",
+    "static-dispatch-throw",
+  ] as const;
   test.for(
     staticCases.flatMap((name) =>
       (["c", "llvm"] as const).map((backend) => [name, backend] as const),
@@ -348,6 +357,43 @@ describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`
         NODE_USE_ENV_PROXY: "1",
         http_proxy: authenticatedProxyUrl,
         HTTP_PROXY: authenticatedProxyUrl,
+        no_proxy: "",
+        NO_PROXY: "",
+      };
+      const before = servers.proxiedRequests();
+      const authBefore = servers.proxyAuthorizations().length;
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry, baseUrl], env),
+        runBinary(binary, [baseUrl], env),
+      ]);
+      expect(nativeRes.stdout.equals(nodeRes.stdout)).toBe(true);
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      expect(servers.proxiedRequests() - before).toBe(2);
+      expect(servers.proxyAuthorizations().slice(authBefore)).toEqual([
+        expectedProxyAuthorization,
+        expectedProxyAuthorization,
+      ]);
+    },
+    120_000,
+  );
+
+  test.for(["dynamic", "c", "llvm"] as const)(
+    "%s fetch authenticates over an HTTPS proxy transport",
+    async (lane) => {
+      const entry = join(fixturesRoot, "static-proxy/main.mts");
+      const binary =
+        lane === "dynamic"
+          ? await build(entry)
+          : await buildStatic(entry, lane, "proxy-https");
+      const env = {
+        ...process.env,
+        NODE_EXTRA_CA_CERTS: join(
+          fixturesRoot,
+          "../server/certs/ca.pem",
+        ),
+        NODE_USE_ENV_PROXY: "1",
+        http_proxy: secureAuthenticatedProxyUrl,
+        HTTP_PROXY: secureAuthenticatedProxyUrl,
         no_proxy: "",
         NO_PROXY: "",
       };
