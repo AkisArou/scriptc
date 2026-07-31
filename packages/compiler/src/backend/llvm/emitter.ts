@@ -9994,8 +9994,13 @@ class LlEmitter {
     }
     const unionRefArms = unionDef?.arms
       .map((arm, tag) => ({ arm, tag }))
-      .filter(({ arm }) => isRefCounted(arm) && arm.kind !== "dyn") ?? [];
-    const typedRef = isRefCounted(elem) && elem.kind !== "dyn" && elem.kind !== "union";
+      .filter(({ arm }) =>
+        isRefCounted(arm) && arm.kind !== "dyn" && arm.kind !== "string"
+      ) ?? [];
+    const typedRef = isRefCounted(elem) &&
+      elem.kind !== "dyn" &&
+      elem.kind !== "string" &&
+      elem.kind !== "union";
     const snapshot = `${sym}_materialize`;
     let value: string;
     if (elem.kind === "f64") {

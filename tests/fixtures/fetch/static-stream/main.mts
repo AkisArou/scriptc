@@ -388,6 +388,40 @@ console.log(
   repeatedDynamicSecond.value.value,
 );
 
+const widenedStringStream: ReadableStream<unknown> = ReadableStream.from([
+  "same",
+  ["sa", "me"].join(""),
+]);
+const widenedStringReader = widenedStringStream.getReader();
+const widenedStringFirst = await widenedStringReader.read();
+const widenedStringSecond = await widenedStringReader.read();
+console.log(
+  "stream widened string primitives:",
+  widenedStringFirst.done ? "done" : typeof widenedStringFirst.value,
+  widenedStringFirst.done || widenedStringSecond.done
+    ? false
+    : widenedStringFirst.value === widenedStringSecond.value,
+);
+
+const unionStringValues: Array<string | null> = [
+  "same",
+  ["sa", "me"].join(""),
+];
+const widenedUnionStringStream: ReadableStream<unknown> =
+  ReadableStream.from(unionStringValues);
+const widenedUnionStringReader = widenedUnionStringStream.getReader();
+const widenedUnionStringFirst = await widenedUnionStringReader.read();
+const widenedUnionStringSecond = await widenedUnionStringReader.read();
+console.log(
+  "stream widened union string primitives:",
+  widenedUnionStringFirst.done
+    ? "done"
+    : typeof widenedUnionStringFirst.value,
+  widenedUnionStringFirst.done || widenedUnionStringSecond.done
+    ? false
+    : widenedUnionStringFirst.value === widenedUnionStringSecond.value,
+);
+
 const liveBytes = new Uint8Array([4]);
 const liveBytesReader = ReadableStream.from(liveBytes).getReader();
 liveBytes[0] = 5;
