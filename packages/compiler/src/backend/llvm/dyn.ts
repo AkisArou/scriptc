@@ -550,7 +550,7 @@ export class LlDyn {
     host.declare(`declare void @scr_dyn_check_fail(ptr, ptr, ptr)`);
     const want = host.cstr(this.dynDesc(t));
     const B = new BlockBuilder();
-    if (isRefCounted(t) && t.kind !== "dyn" && t.kind !== "union") {
+    if (isRefCounted(t) && t.kind !== "dyn") {
       host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, i64)`);
       host.declare(`declare ptr @scr_dyn_typed_ref_unbox(ptr)`);
       const matched = B.tmp();
@@ -565,22 +565,24 @@ export class LlDyn {
       B.line(`${ref} = call ptr @scr_dyn_typed_ref_unbox(ptr %d)`);
       B.terminate(`ret ptr ${ref}`);
       B.startBlock(lNext);
-      host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
-      host.declare(`declare void @scr_dyn_release_v(ptr)`);
-      const kind = this.kindOf(B, "%d");
-      const capsule = B.tmp();
-      B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
-      const lMaterialize = B.newLabel("dc.tr.mat");
-      const lPlain = B.newLabel("dc.tr.plain");
-      B.condBr(capsule, lMaterialize, lPlain);
-      B.startBlock(lMaterialize);
-      const materialized = B.tmp();
-      const checked = B.tmp();
-      B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
-      B.line(`${checked} = call ${retTy} @${name}(ptr ${materialized}, ptr %path)`);
-      B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
-      B.terminate(`ret ${retTy} ${checked}`);
-      B.startBlock(lPlain);
+      if (t.kind !== "union") {
+        host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+        host.declare(`declare void @scr_dyn_release_v(ptr)`);
+        const kind = this.kindOf(B, "%d");
+        const capsule = B.tmp();
+        B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
+        const lMaterialize = B.newLabel("dc.tr.mat");
+        const lPlain = B.newLabel("dc.tr.plain");
+        B.condBr(capsule, lMaterialize, lPlain);
+        B.startBlock(lMaterialize);
+        const materialized = B.tmp();
+        const checked = B.tmp();
+        B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+        B.line(`${checked} = call ${retTy} @${name}(ptr ${materialized}, ptr %path)`);
+        B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
+        B.terminate(`ret ${retTy} ${checked}`);
+        B.startBlock(lPlain);
+      }
     }
     /** kind test with the standard fail path (got = %d). */
     const requireKind = (k: number, hint: string): void => {

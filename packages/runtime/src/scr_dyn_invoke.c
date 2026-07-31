@@ -119,6 +119,12 @@ static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
      * pending and appends nothing — the loud path). */
     scr_dyn_isl_tostr_buf(b, d);
     return;
+  case SCR_DYN_TYPED_REF: {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    scr_dyn_display_buf(b, materialized);
+    scr_dyn_release(materialized);
+    return;
+  }
   }
 }
 

@@ -612,17 +612,20 @@ export function lowerStaticReadableStreamReaderCall(
   L: Lowerer,
   call: ts.CallExpression,
 ): IrExpr | null {
+  const access = call.expression;
   if (
     L.dynamic ||
     call.questionDotToken ||
     call.arguments.length !== 0 ||
-    !ts.isPropertyAccessExpression(call.expression) ||
-    call.expression.questionDotToken ||
-    call.expression.name.text !== "read"
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken
   ) {
     return null;
   }
-  const receiverTs = L.typeOf(call.expression.expression);
+  const member = staticResponseMemberName(L, access);
+  if (member !== "read") return null;
+  const receiverTs = L.typeOf(access.expression);
   const symbol = receiverTs.getSymbol();
   if (
     symbol?.name !== "ReadableStreamDefaultReader" ||
@@ -644,7 +647,7 @@ export function lowerStaticReadableStreamReaderCall(
   return {
     kind: "libCall",
     fn: "fetch.readerRead",
-    args: [L.lowerExprExpecting(call.expression.expression, DYN)],
+    args: [L.lowerExprExpecting(access.expression, DYN)],
     type,
     loc: locOf(call),
   };

@@ -1284,6 +1284,12 @@ static bool scr_dyn_json_write(ScrJsonBuf *b, const ScrDyn *d) {
     scr_str_release(j);
     return true;
   }
+  case SCR_DYN_TYPED_REF: {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    bool present = scr_dyn_json_write(b, materialized);
+    scr_dyn_release(materialized);
+    return present;
+  }
   case SCR_DYN_HANDLE:
   default: {
     const char *msg = "JSON.stringify of a runtime handle is not supported yet";
@@ -1508,6 +1514,12 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
      * throw shape (pending exception + the empty-string dummy). */
     ScrStr *s = scr_dyn_jsval_ops()->to_str(d->v.jsval.cell);
     return s ? s : scr_str_new("", 0);
+  }
+  case SCR_DYN_TYPED_REF: {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    ScrStr *s = scr_dyn_to_string(materialized, enc);
+    scr_dyn_release(materialized);
+    return s;
   }
   case SCR_DYN_UNDEF:
   case SCR_DYN_NULL:
@@ -1749,6 +1761,12 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
     if (!j) return; /* bridged — the pending throw wins */
     for (size_t i = 0; i < j->len; i++) scr_jb_putc(b, j->data[i]);
     scr_str_release(j);
+    return;
+  }
+  case SCR_DYN_TYPED_REF: {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    scr_jb_put_dyn(b, materialized);
+    scr_dyn_release(materialized);
     return;
   }
   case SCR_DYN_OBJ: {
@@ -2501,6 +2519,12 @@ static ScrDyn *scr_sc_clone(const ScrDyn *v, const ScrScParent *up) {
      * silent wrong answer. Loud fence (lane dom-jsval-long-tail). */
     scr_dyn_isl_fence(v, "structuredClone");
     return NULL;
+  case SCR_DYN_TYPED_REF: {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(v);
+    ScrDyn *out = scr_sc_clone(materialized, up);
+    scr_dyn_release(materialized);
+    return out;
+  }
   case SCR_DYN_FUNC:
   case SCR_DYN_HANDLE:
   default: {

@@ -1099,19 +1099,23 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     E.walkerProtos.push(`${sig}; /* check ${key} */`);
     const want = cStringLiteral(Buffer.from(E.dynDesc(t), "utf8"));
     const d: string[] = [`${sig} { /* check ${key} */`];
-    if (isRefCounted(t) && t.kind !== "dyn" && t.kind !== "union") {
+    if (isRefCounted(t) && t.kind !== "dyn") {
       const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
       d.push(
         `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${Buffer.byteLength(key, "utf8")})) {`,
         `    return (${cType(t).trim()})scr_dyn_typed_ref_unbox(d);`,
         `  }`,
-        `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
-        `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
-        `    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`,
-        `    scr_dyn_release(sc_materialized);`,
-        `    return sc_out;`,
-        `  }`,
       );
+      if (t.kind !== "union") {
+        d.push(
+          `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
+          `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
+          `    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`,
+          `    scr_dyn_release(sc_materialized);`,
+          `    return sc_out;`,
+          `  }`,
+        );
+      }
     }
     switch (t.kind) {
       case "f64":

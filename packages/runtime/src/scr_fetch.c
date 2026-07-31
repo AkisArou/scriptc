@@ -124,6 +124,7 @@ typedef struct SfChunk {
 
 struct SfReadRequest {
   ScrPromise *promise;
+  bool materialize;
   SfReadRequest *next;
 };
 
@@ -1342,10 +1343,10 @@ static ScrBytes *sf_chunk_bytes(const ScrDyn *chunk) {
 
 static ScrDyn *sf_read_result(bool done, ScrDyn *value) {
   ScrDyn *result = scr_dyn_new_obj();
-  scr_dyn_obj_set(result, "done", 4, scr_dyn_new_bool(done));
   scr_dyn_obj_set(result, "value", 5,
                   value ? scr_dyn_retain(value)
                         : scr_dyn_retain(scr_dyn_undefined()));
+  scr_dyn_obj_set(result, "done", 4, scr_dyn_new_bool(done));
   return result;
 }
 
@@ -1353,8 +1354,13 @@ static void sf_reader_fulfill_one(SfReader *r, bool done, ScrDyn *value) {
   if (!r) return;
   SfReadRequest *request = sf_reader_take_request(r);
   if (!request) return;
-  scr_promise_fulfill_ref(request->promise, sf_read_result(done, value),
+  ScrDyn *public_value = value;
+  if (request->materialize && value && value->kind == SCR_DYN_TYPED_REF) {
+    public_value = scr_dyn_typed_ref_materialize(value);
+  }
+  scr_promise_fulfill_ref(request->promise, sf_read_result(done, public_value),
                           &scr_dyn_retain_v, &scr_dyn_release_v, NULL);
+  if (public_value != value) scr_dyn_release(public_value);
   scr_promise_release(request->promise);
   free(request);
 }
@@ -1996,7 +2002,7 @@ static SfReader *sf_stream_get_reader(SfStream *s) {
   return r;
 }
 
-static ScrPromise *sf_reader_read(SfReader *r) {
+static ScrPromise *sf_reader_read(SfReader *r, bool materialize) {
   ScrPromise *p = scr_promise_new();
   SfStream *s = r->stream;
   if (!s || s->reader != r) {
@@ -2008,6 +2014,7 @@ static ScrPromise *sf_reader_read(SfReader *r) {
   SfReadRequest *request = calloc(1, sizeof *request);
   if (!request) sf_oom();
   request->promise = scr_promise_retain(p);
+  request->materialize = materialize;
   if (r->pending_tail) r->pending_tail->next = request;
   else r->pending_head = request;
   r->pending_tail = request;
@@ -2286,7 +2293,7 @@ ScrPromise *scr_fetch_reader_read(ScrDyn *reader) {
     scr_promise_reject_pending(p);
     return p;
   }
-  return sf_reader_read((SfReader *)reader->v.handle.ptr);
+  return sf_reader_read((SfReader *)reader->v.handle.ptr, false);
 }
 
 static SfStream *sf_stream_of(const ScrDyn *d) {
@@ -2342,7 +2349,7 @@ static ScrDyn *sf_reader_invoke(void *ptr, ScrDyn *self, const char *method,
       sf_type_error("ReadableStreamDefaultReader.read takes no arguments");
       return NULL;
     }
-    ScrPromise *p = sf_reader_read(r);
+    ScrPromise *p = sf_reader_read(r, true);
     ScrDyn *out = scr_dyn_new_promise(p);
     scr_promise_release(p);
     return out;

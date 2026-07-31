@@ -284,6 +284,38 @@ console.log(
   streamIdentityBox.value,
 );
 
+const bracketReader = ReadableStream.from(["bracket"]).getReader();
+const bracketPart = await bracketReader["read"]();
+console.log("bracket reader read:", bracketPart.done, bracketPart.value);
+
+interface StreamUnionBox {
+  value: number;
+}
+
+const streamUnionBox: StreamUnionBox = { value: 9 };
+const streamUnionValues: Array<StreamUnionBox | null> = [streamUnionBox];
+const streamUnionPart =
+  await ReadableStream.from(streamUnionValues).getReader().read();
+if (streamUnionPart.done) {
+  console.log("stream from union identity:", true, false, -1);
+} else {
+  console.log(
+    "stream from union identity:",
+    false,
+    streamUnionPart.value === streamUnionBox,
+    streamUnionPart.value?.value ?? -1,
+  );
+}
+
+const dynamicStreamReader: any =
+  ReadableStream.from([{ value: 10 }]).getReader();
+const dynamicStreamPart: any = await dynamicStreamReader.read();
+console.log(
+  "dynamic stream result:",
+  String(dynamicStreamPart.value),
+  JSON.stringify(dynamicStreamPart),
+);
+
 const widenedRecordStream: ReadableStream<unknown> =
   ReadableStream.from([{ value: 7 }]);
 const widenedRecordPart = await widenedRecordStream.getReader().read();

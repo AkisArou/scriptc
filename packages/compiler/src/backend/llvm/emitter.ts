@@ -9976,7 +9976,16 @@ class LlEmitter {
     const sym = `sc_sfa_${this.streamFromArrayAdapters.size}`;
     this.streamFromArrayAdapters.set(key, sym);
     const B = new BlockBuilder();
-    const typedRef = isRefCounted(elem) && elem.kind !== "dyn";
+    const unionDef = elem.kind === "union"
+      ? this.unionsById.get(elem.unionId)
+      : undefined;
+    if (elem.kind === "union" && !unionDef) {
+      throw new Error(`llvm emitter bug: streamFrom of unknown union ${elem.unionId}`);
+    }
+    const unionRefArms = unionDef?.arms
+      .map((arm, tag) => ({ arm, tag }))
+      .filter(({ arm }) => isRefCounted(arm) && arm.kind !== "dyn") ?? [];
+    const typedRef = isRefCounted(elem) && elem.kind !== "dyn" && elem.kind !== "union";
     const snapshot = `${sym}_materialize`;
     let value: string;
     if (elem.kind === "f64") {
@@ -9998,10 +10007,72 @@ class LlEmitter {
         `${value} = call ptr @scr_arr_get_ref(ptr %a, double %i) ; +1`,
       );
     }
-    const boxed = B.tmp();
+    let boxed: string;
     const valueTy =
       elem.kind === "f64" ? "double" : elem.kind === "bool" ? "i1" : "ptr";
-    if (typedRef) {
+    if (elem.kind === "union") {
+      if (unionRefArms.length === 0) {
+        boxed = B.tmp();
+        B.line(
+          `${boxed} = call ptr @${this.dyn.toDynHelper(elem)}(ptr ${value})`,
+        );
+      } else {
+        this.declare(
+          `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr)`,
+        );
+        const boxedSlot = B.slot();
+        B.entryAllocas.push(`${boxedSlot} = alloca ptr`);
+        const tagPtr = B.tmp();
+        const tagValue = B.tmp();
+        B.line(
+          `${tagPtr} = getelementptr inbounds %ScrUnion, ptr ${value}, i64 0, i32 1`,
+        );
+        B.line(`${tagValue} = load i32, ptr ${tagPtr}`);
+        const fallback = B.newLabel("sfa.union.dyn");
+        const join = B.newLabel("sfa.union.join");
+        const armLabels = unionRefArms.map(() => B.newLabel("sfa.union.ref"));
+        B.terminate(
+          `switch i32 ${tagValue}, label %${fallback} [ ${unionRefArms.map(({ tag }, i) => `i32 ${tag}, label %${armLabels[i]}`).join(" ")} ]`,
+        );
+        unionRefArms.forEach(({ arm, tag }, i) => {
+          const armKey = typeKey(arm);
+          const armSnapshot = `${snapshot}_${tag}`;
+          const rc = vAdapters(this, arm);
+          B.startBlock(armLabels[i]!);
+          const payloadPtr = B.tmp();
+          const payload = B.tmp();
+          const armBoxed = B.tmp();
+          B.line(
+            `${payloadPtr} = getelementptr inbounds %ScrUnion, ptr ${value}, i64 0, i32 5`,
+          );
+          B.line(`${payload} = load ptr, ptr ${payloadPtr}`);
+          B.line(
+            `${armBoxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, i64 ${Buffer.byteLength(armKey, "utf8")}, ptr @${armSnapshot})`,
+          );
+          B.line(`store ptr ${armBoxed}, ptr ${boxedSlot}`);
+          B.br(join);
+          this.resolveThunkDefs.push(
+            `define internal ptr @${armSnapshot}(ptr %p) ${FN_ATTRS} { ; materialize stream union arm ${armKey}`,
+            `entry:`,
+            `  %d = call ptr @${this.dyn.toDynHelper(arm)}(ptr %p)`,
+            `  ret ptr %d`,
+            `}`,
+            ``,
+          );
+        });
+        B.startBlock(fallback);
+        const dynBoxed = B.tmp();
+        B.line(
+          `${dynBoxed} = call ptr @${this.dyn.toDynHelper(elem)}(ptr ${value})`,
+        );
+        B.line(`store ptr ${dynBoxed}, ptr ${boxedSlot}`);
+        B.br(join);
+        B.startBlock(join);
+        boxed = B.tmp();
+        B.line(`${boxed} = load ptr, ptr ${boxedSlot}`);
+      }
+    } else if (typedRef) {
+      boxed = B.tmp();
       const rc = vAdapters(this, elem);
       const keyPtr = this.cstr(key);
       this.declare(
@@ -10019,6 +10090,7 @@ class LlEmitter {
         ``,
       );
     } else {
+      boxed = B.tmp();
       B.line(
         `${boxed} = call ptr @${this.dyn.toDynHelper(elem)}(${valueTy} ${value})`,
       );

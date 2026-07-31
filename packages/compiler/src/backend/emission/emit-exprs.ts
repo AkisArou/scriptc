@@ -21,7 +21,16 @@ function streamFromArrayAdapter(
   E.streamFromArrayAdapters.set(key, sym);
   const sig = `static ScrDyn *${sym}(ScrArr *sc_a, double sc_i)`;
   E.walkerProtos.push(`${sig}; /* ReadableStream.from array<${key}> */`);
-  const typedRef = isRefCounted(elem) && elem.kind !== "dyn";
+  const unionDef = elem.kind === "union"
+    ? E.unionsById.get(elem.unionId)
+    : undefined;
+  if (elem.kind === "union" && !unionDef) {
+    throw new Error(`emitter bug: streamFrom of unknown union ${elem.unionId}`);
+  }
+  const unionRefArms = unionDef?.arms
+    .map((arm, tag) => ({ arm, tag }))
+    .filter(({ arm }) => isRefCounted(arm) && arm.kind !== "dyn") ?? [];
+  const typedRef = isRefCounted(elem) && elem.kind !== "dyn" && elem.kind !== "union";
   const snapshot = `${sym}_materialize`;
   const d: string[] = [];
   if (typedRef) {
@@ -30,6 +39,18 @@ function streamFromArrayAdapter(
     d.push(
       `${snapshotSig} {`,
       `  return ${E.toDynHelper(elem)}((${cType(elem).trim()})sc_p);`,
+      `}`,
+      ``,
+    );
+  }
+  for (const { arm, tag } of unionRefArms) {
+    const armKey = typeKey(arm);
+    const armSnapshot = `${snapshot}_${tag}`;
+    const snapshotSig = `static ScrDyn *${armSnapshot}(void *sc_p)`;
+    E.walkerProtos.push(`${snapshotSig}; /* materialize stream union arm ${armKey} */`);
+    d.push(
+      `${snapshotSig} {`,
+      `  return ${E.toDynHelper(arm)}((${cType(arm).trim()})sc_p);`,
       `}`,
       ``,
     );
@@ -45,7 +66,25 @@ function streamFromArrayAdapter(
     );
   } else {
     d.push(`  ${cDecl(elem, "sc_v")} = (${cType(elem).trim()})scr_arr_get_ref(sc_a, sc_i);`);
-    if (typedRef) {
+    if (elem.kind === "union") {
+      d.push(`  ScrDyn *sc_d;`, `  switch (sc_v->tag) {`);
+      for (const { arm, tag } of unionRefArms) {
+        const armKey = typeKey(arm);
+        const rc = vAdapters(arm);
+        const keyLit = cStringLiteral(Buffer.from(armKey, "utf8"));
+        d.push(
+          `  case ${tag}:`,
+          `    sc_d = scr_dyn_new_typed_ref(scr_union_peek(sc_v), &${rc.retain}, &${rc.release}, ${keyLit}, ${Buffer.byteLength(armKey, "utf8")}, &${snapshot}_${tag});`,
+          `    break;`,
+        );
+      }
+      d.push(
+        `  default:`,
+        `    sc_d = ${E.toDynHelper(elem)}(sc_v);`,
+        `    break;`,
+        `  }`,
+      );
+    } else if (typedRef) {
       const rc = vAdapters(elem);
       const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
       const keyLen = Buffer.byteLength(key, "utf8");
