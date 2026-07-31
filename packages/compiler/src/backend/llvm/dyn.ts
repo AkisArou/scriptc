@@ -567,20 +567,42 @@ export class LlDyn {
       B.startBlock(lNext);
       if (t.kind !== "union") {
         host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+        host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, i64)`);
+        host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, i64, ptr, ptr, ptr)`);
         host.declare(`declare void @scr_dyn_release_v(ptr)`);
+        const rc = vAdapters(host, t);
         const kind = this.kindOf(B, "%d");
         const capsule = B.tmp();
         B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
-        const lMaterialize = B.newLabel("dc.tr.mat");
+        const lCapsule = B.newLabel("dc.tr.cap");
         const lPlain = B.newLabel("dc.tr.plain");
-        B.condBr(capsule, lMaterialize, lPlain);
+        B.condBr(capsule, lCapsule, lPlain);
+        B.startBlock(lCapsule);
+        const cached = B.tmp();
+        B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
+        const hasCached = B.tmp();
+        B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
+        const lCached = B.newLabel("dc.tr.hit");
+        const lMaterialize = B.newLabel("dc.tr.mat");
+        B.condBr(hasCached, lCached, lMaterialize);
+        B.startBlock(lCached);
+        B.terminate(`ret ptr ${cached}`);
         B.startBlock(lMaterialize);
         const materialized = B.tmp();
         const checked = B.tmp();
         B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
         B.line(`${checked} = call ${retTy} @${name}(ptr ${materialized}, ptr %path)`);
         B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
-        B.terminate(`ret ${retTy} ${checked}`);
+        const ok = B.tmp();
+        B.line(`${ok} = icmp ne ptr ${checked}, null`);
+        const lCache = B.newLabel("dc.tr.put");
+        const lReturn = B.newLabel("dc.tr.ret");
+        B.condBr(ok, lCache, lReturn);
+        B.startBlock(lCache);
+        B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+        B.br(lReturn);
+        B.startBlock(lReturn);
+        B.terminate(`ret ptr ${checked}`);
         B.startBlock(lPlain);
       }
     }
@@ -620,20 +642,9 @@ export class LlDyn {
         break;
       }
       case "dyn": {
-        // Preserve the ordinary detached snapshot at an unknown boundary;
-        // the typed-ref capsule is only observable to an exact static type.
-        host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
-        const kind = this.kindOf(B, "%d");
-        const capsule = B.tmp();
-        B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
-        const lCapsule = B.newLabel("dc.dyn.tr");
-        const lPlain = B.newLabel("dc.dyn.plain");
-        B.condBr(capsule, lCapsule, lPlain);
-        B.startBlock(lCapsule);
-        const materialized = B.tmp();
-        B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
-        B.terminate(`ret ptr ${materialized}`);
-        B.startBlock(lPlain);
+        // Preserve the capsule at an unknown boundary. Generic dyn
+        // operations materialize its one cached detached view, while
+        // strict equality keeps repeated stream references identical.
         const retained = this.retainDyn(B, "%d");
         B.terminate(`ret ptr ${retained}`);
         break;
@@ -961,19 +972,41 @@ export class LlDyn {
         // Preserve an exact typed-ref arm above. If no producer tag matched,
         // retry the union against the ordinary structural snapshot.
         host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+        host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, i64)`);
+        host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, i64, ptr, ptr, ptr)`);
         host.declare(`declare void @scr_dyn_release_v(ptr)`);
+        const rc = vAdapters(host, t);
         const kind = this.kindOf(B, "%d");
         const capsule = B.tmp();
         B.line(`${capsule} = icmp eq i32 ${kind}, ${DK.TYPED_REF}`);
-        const lMaterialize = B.newLabel("dcu.mat");
+        const lCapsule = B.newLabel("dcu.cap");
         const lFail = B.newLabel("dcu.fail");
-        B.condBr(capsule, lMaterialize, lFail);
+        B.condBr(capsule, lCapsule, lFail);
+        B.startBlock(lCapsule);
+        const cached = B.tmp();
+        B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
+        const hasCached = B.tmp();
+        B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
+        const lCached = B.newLabel("dcu.hit");
+        const lMaterialize = B.newLabel("dcu.mat");
+        B.condBr(hasCached, lCached, lMaterialize);
+        B.startBlock(lCached);
+        B.terminate(`ret ptr ${cached}`);
         B.startBlock(lMaterialize);
         const materialized = B.tmp();
         const checked = B.tmp();
         B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
         B.line(`${checked} = call ptr @${name}(ptr ${materialized}, ptr %path)`);
         B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
+        const ok = B.tmp();
+        B.line(`${ok} = icmp ne ptr ${checked}, null`);
+        const lCache = B.newLabel("dcu.put");
+        const lReturn = B.newLabel("dcu.ret");
+        B.condBr(ok, lCache, lReturn);
+        B.startBlock(lCache);
+        B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+        B.br(lReturn);
+        B.startBlock(lReturn);
         B.terminate(`ret ptr ${checked}`);
         B.startBlock(lFail);
         B.line(`call void @scr_dyn_check_fail(ptr %path, ptr ${want}, ptr %d)`);
@@ -1579,7 +1612,7 @@ export class LlDyn {
       const kd = this.kindOf(B, "%d");
       const done = B.newLabel("ds.d");
       const labels = new Map<number, string>();
-      for (const k of [DK.NULL, DK.BOOL, DK.NUM, DK.STR, DK.ARR, DK.OBJ, DK.UNDEF, DK.BYTES, DK.FUNC, DK.HANDLE, DK.PROMISE, DK.JSVAL]) {
+      for (const k of [DK.NULL, DK.BOOL, DK.NUM, DK.STR, DK.ARR, DK.OBJ, DK.UNDEF, DK.BYTES, DK.FUNC, DK.HANDLE, DK.PROMISE, DK.JSVAL, DK.TYPED_REF]) {
         labels.set(k, B.newLabel(`ds.k${k}`));
       }
       B.terminate(
@@ -1591,6 +1624,16 @@ export class LlDyn {
         // leaves the exception pending and appends nothing).
         host.declare(`declare void @scr_dyn_isl_tostr_buf(ptr, ptr)`);
         B.line(`call void @scr_dyn_isl_tostr_buf(ptr %b, ptr %d)`);
+        B.br(done);
+      }
+      B.startBlock(labels.get(DK.TYPED_REF)!);
+      {
+        host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+        host.declare(`declare void @scr_dyn_release_v(ptr)`);
+        const materialized = B.tmp();
+        B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+        B.line(`call void @sc_ds_buf(ptr %b, ptr ${materialized})`);
+        B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
         B.br(done);
       }
       B.startBlock(labels.get(DK.UNDEF)!);
@@ -2053,6 +2096,25 @@ export class LlDyn {
       B.terminate(`ret ptr null`);
       B.startBlock(lNext);
     }
+    // Typed stream capsules expose their one cached detached dyn view to
+    // ordinary property reads while the capsule itself keeps identity.
+    {
+      const isTyped = B.tmp();
+      B.line(`${isTyped} = icmp eq i32 ${kd}, ${DK.TYPED_REF}`);
+      const lTyped = B.newLabel("kg.tr");
+      const lNext = B.newLabel("kg.n");
+      B.condBr(isTyped, lTyped, lNext);
+      B.startBlock(lTyped);
+      host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+      host.declare(`declare void @scr_dyn_release_v(ptr)`);
+      const materialized = B.tmp();
+      const r = B.tmp();
+      B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+      B.line(`${r} = call ptr @${name}(ptr ${materialized}, ptr %k, i1 %opt)`);
+      B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
+      B.terminate(`ret ptr ${r}`);
+      B.startBlock(lNext);
+    }
     // ISLAND-held receivers: o[k] reads the REAL engine property (getters
     // included, throws bridged catchably) and the result wraps back
     // scalar-normalized — the routed keyed read that retired the fence.
@@ -2446,6 +2508,24 @@ export class LlDyn {
     host.declare(`declare void @scr_str_release(ptr)`);
     const B = new BlockBuilder();
     const kd = this.kindOf(B, "%d");
+    // Typed stream capsules iterate their cached detached dyn view.
+    {
+      const isTyped = B.tmp();
+      B.line(`${isTyped} = icmp eq i32 ${kd}, ${DK.TYPED_REF}`);
+      const lTyped = B.newLabel("din.tr");
+      const lNext = B.newLabel("din.nt");
+      B.condBr(isTyped, lTyped, lNext);
+      B.startBlock(lTyped);
+      host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+      host.declare(`declare void @scr_dyn_release_v(ptr)`);
+      const materialized = B.tmp();
+      const out = B.tmp();
+      B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+      B.line(`${out} = call ptr @${name}(ptr ${materialized}, i64 %n)`);
+      B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
+      B.terminate(`ret ptr ${out}`);
+      B.startBlock(lNext);
+    }
     // ISLAND-held sources: an engine array IS iterable — the not-iterable
     // TypeError below would be a wrong claim. Loud fence (lane
     // dyn-routing-ops).

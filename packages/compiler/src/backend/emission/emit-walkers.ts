@@ -373,6 +373,12 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       `     * leaves the exception pending and appends nothing). */`,
       `    scr_dyn_isl_tostr_buf(b, d);`,
       `    break;`,
+      `  case SCR_DYN_TYPED_REF: {`,
+      `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
+      `    ${name}_buf(b, sc_materialized);`,
+      `    scr_dyn_release(sc_materialized);`,
+      `    break;`,
+      `  }`,
       `  }`,
       `}`,
       `static ScrStr *${name}(const ScrDyn *d) { /* String(unknown) -> owned (+1) */`,
@@ -929,6 +935,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     E.walkerProtos.push(`${sig}; /* destructuring GetIterator + N steps */`);
     E.walkerDefs.push(
       `${sig} { /* destructuring GetIterator + N steps */`,
+      `  if (d->kind == SCR_DYN_TYPED_REF) {`,
+      `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
+      `    ScrDyn *sc_out = ${name}(sc_materialized, n);`,
+      `    scr_dyn_release(sc_materialized);`,
+      `    return sc_out;`,
+      `  }`,
       `  if (d->kind == SCR_DYN_JSVAL) {`,
       `    /* An engine array IS iterable — the not-iterable TypeError below`,
       `     * would be a wrong claim. Loud fence (lane dyn-routing-ops). */`,
@@ -1013,6 +1025,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     d.push(`    scr_str_release(tail);`);
     d.push(`    scr_throw_error(SCR_ERR_TYPE, msg); /* takes ownership */`);
     d.push(`    return NULL;`);
+    d.push(`  }`);
+    d.push(`  if (d->kind == SCR_DYN_TYPED_REF) {`);
+    d.push(`    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`);
+    d.push(`    ScrDyn *sc_out = ${name}(sc_materialized, k, opt);`);
+    d.push(`    scr_dyn_release(sc_materialized);`);
+    d.push(`    return sc_out;`);
     d.push(`  }`);
     d.push(`  if (d->kind == SCR_DYN_OBJ) {`);
     d.push(`    ScrDyn *m = scr_dyn_obj_get(d, k->data, k->len);`);
@@ -1101,17 +1119,24 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     const d: string[] = [`${sig} { /* check ${key} */`];
     if (isRefCounted(t) && t.kind !== "dyn") {
       const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
+      const keyLen = Buffer.byteLength(key, "utf8");
       d.push(
-        `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${Buffer.byteLength(key, "utf8")})) {`,
+        `  if (scr_dyn_typed_ref_is(d, ${keyLit}, ${keyLen})) {`,
         `    return (${cType(t).trim()})scr_dyn_typed_ref_unbox(d);`,
         `  }`,
       );
       if (t.kind !== "union") {
+        const rc = vAdapters(t);
         d.push(
           `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
+          `    ${cDecl(t, "sc_cached")} = (${cType(t).trim()})scr_dyn_typed_ref_cached_cast(d, ${keyLit}, ${keyLen});`,
+          `    if (sc_cached) return sc_cached;`,
           `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
           `    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`,
           `    scr_dyn_release(sc_materialized);`,
+          `    if (sc_out) {`,
+          `      scr_dyn_typed_ref_cache_cast((ScrDyn *)d, ${keyLit}, ${keyLen}, sc_out, &${rc.retain}, &${rc.release});`,
+          `    }`,
           `    return sc_out;`,
           `  }`,
         );
@@ -1131,15 +1156,11 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         d.push(`  return scr_str_retain(d->v.str);`);
         break;
       case "dyn":
-        // An `unknown` slot (a dyn record field): the checked-dynamic tree subtree passes
-        // through as-is — except for the Web-stream transport capsule, whose
-        // public unknown view remains the ordinary detached dyn snapshot.
+        // An `unknown` slot passes through as-is. Typed Web-stream transit
+        // capsules stay wrapped so repeated references keep identity;
+        // generic operations materialize their one cached detached view.
         d.push(`  (void)path;`);
-        d.push(
-          `  return d->kind == SCR_DYN_TYPED_REF`,
-          `    ? scr_dyn_typed_ref_materialize(d)`,
-          `    : scr_dyn_retain((ScrDyn *)d);`,
-        );
+        d.push(`  return scr_dyn_retain((ScrDyn *)d);`);
         break;
       case "bytes":
         // `u as Uint8Array`: kind check, then a fresh COPY out (the
@@ -1317,10 +1338,20 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // no arm matches the producer tag do we snapshot and retry the
         // ordinary structural union check.
         d.push(`  if (d && d->kind == SCR_DYN_TYPED_REF) {`);
-        d.push(`    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`);
-        d.push(`    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`);
-        d.push(`    scr_dyn_release(sc_materialized);`);
-        d.push(`    return sc_out;`);
+        {
+          const keyLit = cStringLiteral(Buffer.from(key, "utf8"));
+          const keyLen = Buffer.byteLength(key, "utf8");
+          const rc = vAdapters(t);
+          d.push(`    ${cDecl(t, "sc_cached")} = (${cType(t).trim()})scr_dyn_typed_ref_cached_cast(d, ${keyLit}, ${keyLen});`);
+          d.push(`    if (sc_cached) return sc_cached;`);
+          d.push(`    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`);
+          d.push(`    ${cDecl(t, "sc_out")} = ${name}(sc_materialized, path);`);
+          d.push(`    scr_dyn_release(sc_materialized);`);
+          d.push(`    if (sc_out) {`);
+          d.push(`      scr_dyn_typed_ref_cache_cast((ScrDyn *)d, ${keyLit}, ${keyLen}, sc_out, &${rc.retain}, &${rc.release});`);
+          d.push(`    }`);
+          d.push(`    return sc_out;`);
+        }
         d.push(`  }`);
         d.push(`  scr_dyn_check_fail(path, ${want}, d);`);
         d.push(`  return NULL;`);

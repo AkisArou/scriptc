@@ -116,6 +116,7 @@ typedef struct SfReadRequest SfReadRequest;
 typedef struct SfPullWait SfPullWait;
 typedef struct SfStartWait SfStartWait;
 typedef struct SfCancelWait SfCancelWait;
+typedef struct SfTypedRef SfTypedRef;
 
 typedef struct SfChunk {
   ScrDyn *value;
@@ -124,8 +125,12 @@ typedef struct SfChunk {
 
 struct SfReadRequest {
   ScrPromise *promise;
-  bool materialize;
   SfReadRequest *next;
+};
+
+struct SfTypedRef {
+  ScrDyn *value;
+  SfTypedRef *next;
 };
 
 typedef struct SfAbortListener {
@@ -252,6 +257,10 @@ struct SfStream {
   ScrStr *from_string;
   ScrDyn *(*from_array_item)(ScrArr *, double);
   double from_index;
+  /* Canonical transit capsules for repeated references in a typed source
+   * array. Keeping one capsule per source identity gives both typed
+   * structural conversions and unknown/any reads one stable JS object. */
+  SfTypedRef *typed_refs;
   SfTransfer *request_owner;  /* weak; transfer owns the stream */
   SfTransfer *response_owner; /* weak; transfer owns the stream */
   bool callbacks_tracked;
@@ -1115,19 +1124,17 @@ static bool sf_signal_set(void *ptr, const char *key, size_t len,
                           const ScrDyn *value) {
   SfSignal *s = ptr;
   if (!sf_name(key, len, "onabort")) return false;
-  if (value->kind != SCR_DYN_FUNC && value->kind != SCR_DYN_NULL &&
-      value->kind != SCR_DYN_UNDEF) {
-    sf_type_error("AbortSignal.onabort must be a function or null");
-    return true;
-  }
-  bool had_handler = s->onabort != NULL;
+  bool had_handler = s->onabort && s->onabort->kind == SCR_DYN_FUNC;
   scr_dyn_release(s->onabort);
-  if (value->kind == SCR_DYN_FUNC) {
+  if (value->kind != SCR_DYN_NULL && value->kind != SCR_DYN_UNDEF) {
     s->onabort = scr_dyn_retain((ScrDyn *)value);
+  } else {
+    s->onabort = NULL;
+  }
+  if (value->kind == SCR_DYN_FUNC) {
     if (!had_handler) s->onabort_order = ++s->next_listener_id;
     sf_signal_track_callbacks(s);
   } else {
-    s->onabort = NULL;
     s->onabort_order = 0;
   }
   return true;
@@ -1295,6 +1302,12 @@ static void sf_stream_release(SfStream *s) {
   scr_arr_release(s->from_array);
   scr_bytes_release(s->from_bytes);
   scr_str_release(s->from_string);
+  while (s->typed_refs) {
+    SfTypedRef *ref = s->typed_refs;
+    s->typed_refs = ref->next;
+    scr_dyn_release(ref->value);
+    free(ref);
+  }
   free(s);
 }
 
@@ -1360,13 +1373,8 @@ static void sf_reader_fulfill_one(SfReader *r, bool done, ScrDyn *value) {
   if (!r) return;
   SfReadRequest *request = sf_reader_take_request(r);
   if (!request) return;
-  ScrDyn *public_value = value;
-  if (request->materialize && value && value->kind == SCR_DYN_TYPED_REF) {
-    public_value = scr_dyn_typed_ref_materialize(value);
-  }
-  scr_promise_fulfill_ref(request->promise, sf_read_result(done, public_value),
+  scr_promise_fulfill_ref(request->promise, sf_read_result(done, value),
                           &scr_dyn_retain_v, &scr_dyn_release_v, NULL);
-  if (public_value != value) scr_dyn_release(public_value);
   scr_promise_release(request->promise);
   free(request);
 }
@@ -1581,7 +1589,23 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
   }
   SfChunk *c = calloc(1, sizeof *c);
   if (!c) sf_oom();
-  c->value = scr_dyn_retain(value);
+  ScrDyn *stored = value;
+  if (value->kind == SCR_DYN_TYPED_REF) {
+    for (SfTypedRef *ref = s->typed_refs; ref; ref = ref->next) {
+      if (scr_dyn_strict_eq(ref->value, value)) {
+        stored = ref->value;
+        break;
+      }
+    }
+    if (stored == value) {
+      SfTypedRef *ref = malloc(sizeof *ref);
+      if (!ref) sf_oom();
+      ref->value = scr_dyn_retain(value);
+      ref->next = s->typed_refs;
+      s->typed_refs = ref;
+    }
+  }
+  c->value = scr_dyn_retain(stored);
   if (s->tail) s->tail->next = c;
   else s->head = c;
   s->tail = c;
@@ -2009,7 +2033,7 @@ static SfReader *sf_stream_get_reader(SfStream *s) {
   return r;
 }
 
-static ScrPromise *sf_reader_read(SfReader *r, bool materialize) {
+static ScrPromise *sf_reader_read(SfReader *r) {
   ScrPromise *p = scr_promise_new();
   SfStream *s = r->stream;
   if (!s || s->reader != r) {
@@ -2021,7 +2045,6 @@ static ScrPromise *sf_reader_read(SfReader *r, bool materialize) {
   SfReadRequest *request = calloc(1, sizeof *request);
   if (!request) sf_oom();
   request->promise = scr_promise_retain(p);
-  request->materialize = materialize;
   if (r->pending_tail) r->pending_tail->next = request;
   else r->pending_head = request;
   r->pending_tail = request;
@@ -2310,7 +2333,7 @@ ScrPromise *scr_fetch_reader_read(ScrDyn *reader) {
     scr_promise_reject_pending(p);
     return p;
   }
-  return sf_reader_read((SfReader *)reader->v.handle.ptr, false);
+  return sf_reader_read((SfReader *)reader->v.handle.ptr);
 }
 
 static SfStream *sf_stream_of(const ScrDyn *d) {
@@ -2366,7 +2389,7 @@ static ScrDyn *sf_reader_invoke(void *ptr, ScrDyn *self, const char *method,
       sf_type_error("ReadableStreamDefaultReader.read takes no arguments");
       return NULL;
     }
-    ScrPromise *p = sf_reader_read(r, true);
+    ScrPromise *p = sf_reader_read(r);
     ScrDyn *out = scr_dyn_new_promise(p);
     scr_promise_release(p);
     return out;

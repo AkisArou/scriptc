@@ -346,6 +346,36 @@ console.log(
   structurallyWidenedPart.done ? "done" : structurallyWidenedPart.value.value,
 );
 
+const repeatedStructuralValue: StreamDerivedValue = { value: 12, extra: 13 };
+const repeatedStructuralReader =
+  (ReadableStream.from([
+    repeatedStructuralValue,
+    repeatedStructuralValue,
+  ]) as ReadableStream<StreamBaseValue>).getReader();
+const repeatedStructuralFirst = await repeatedStructuralReader.read();
+const repeatedStructuralSecond = await repeatedStructuralReader.read();
+console.log(
+  "stream widened repeated identity:",
+  repeatedStructuralFirst.done || repeatedStructuralSecond.done
+    ? false
+    : repeatedStructuralFirst.value === repeatedStructuralSecond.value,
+);
+
+const repeatedDynamicValue = { value: 14 };
+const repeatedDynamicReader: any =
+  ReadableStream.from([
+    repeatedDynamicValue,
+    repeatedDynamicValue,
+  ]).getReader();
+const repeatedDynamicFirst: any = await repeatedDynamicReader.read();
+const repeatedDynamicSecond: any = await repeatedDynamicReader.read();
+repeatedDynamicFirst.value.value = 15;
+console.log(
+  "dynamic stream repeated identity:",
+  repeatedDynamicFirst.value === repeatedDynamicSecond.value,
+  repeatedDynamicSecond.value.value,
+);
+
 const liveBytes = new Uint8Array([4]);
 const liveBytesReader = ReadableStream.from(liveBytes).getReader();
 liveBytes[0] = 5;
@@ -657,6 +687,12 @@ orderedSignal.onabort = () => {
 };
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("abort handler order:", orderedHandlers.join(","));
+
+const noncallableOnabortSignal: any = AbortSignal.timeout(0);
+noncallableOnabortSignal.onabort = 42;
+console.log("noncallable onabort value:", noncallableOnabortSignal.onabort);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("noncallable onabort ignored:", noncallableOnabortSignal.aborted);
 
 const listenerGate = AbortSignal.timeout(0);
 const gatedTarget = AbortSignal.timeout(10);

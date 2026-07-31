@@ -1132,11 +1132,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(opts.zlib
       ? driver.target !== null
         ? ["-I", vendorZlibDir(), rt(join(rtDir, "scr_zlib.c")), ...zlibObjects]
-        : [rt(join(rtDir, "scr_zlib.c")), "-lz"]
+        : [rt(join(rtDir, "scr_zlib.c"))]
       : nativeFetch
         ? driver.target !== null
           ? ["-I", vendorZlibDir(), ...zlibObjects]
-          : ["-lz"]
+          : []
       : []),
     // The zlib ↔ island bridge: only when BOTH halves are in the build
     // (the scr_inspect_island.c pattern) — the emitted main calls its
@@ -1244,6 +1244,13 @@ export async function compileC(opts: CcOptions): Promise<void> {
     opts.cPath,
     ...(opts.linkInputs ?? []),
     ...(opts.systemLibraries ?? []).map((name) => `-l${name}`),
+    // GNU ld resolves libraries from left to right and commonly enables
+    // --as-needed: host libz must follow scr_zlib.c/scr_fetch.c and every
+    // generated/native input that references inflate symbols. Cross
+    // builds use vendored zlib objects in the input section above.
+    ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null
+      ? ["-lz"]
+      : []),
     // glibc keeps libm separate from libc. This must trail the generated
     // program and every native FFI input because GNU ld resolves archives
     // from left to right.

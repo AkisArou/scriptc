@@ -2720,6 +2720,14 @@ typedef enum {
 typedef struct ScrDyn ScrDyn;
 typedef struct ScrBytes ScrBytes; /* full definition below (C11 repeat) */
 typedef struct ScrClosure ScrClosure; /* full definition below (C11 repeat) */
+typedef struct ScrDynTypedCast {
+  const char *type_key;
+  size_t type_key_len;
+  void *ptr;
+  void *(*retain)(void *);
+  void (*release)(void *);
+  struct ScrDynTypedCast *next;
+} ScrDynTypedCast;
 typedef struct ScrJsval ScrJsval; /* opaque island cell (C11 repeat; the
                                    * always-linked dyn core never touches
                                    * its engine value — only the gated ops
@@ -2801,6 +2809,12 @@ struct ScrDyn {
       const char *type_key;
       size_t type_key_len;
       ScrDyn *(*materialize)(void *);
+      /* Both caches belong to this capsule. ReadableStream canonicalizes
+       * capsules for repeated source references, so the detached dyn view
+       * and every structurally converted static view keep JS reference
+       * identity for the lifetime of that stream. */
+      ScrDyn *materialized;
+      ScrDynTypedCast *casts;
     } typed_ref;
     /* SCR_DYN_PROMISE: the retained promise. The boundary contract: it
      * settles with a dyn payload (SCR_EXC_REF ScrDyn fulfillment or a
@@ -2895,7 +2909,9 @@ ScrDyn *scr_dyn_new_bytes_copy(const ScrBytes *b);
 ScrDyn *scr_dyn_new_buffer_copy(const ScrBytes *b);
 /* Identity-preserving transit capsule used by ReadableStream.from over
  * typed arrays. The constructor retains `ptr`; matching unbox returns +1.
- * materialize returns the ordinary owned dyn snapshot. */
+ * materialize lazily creates and then retains one detached dyn snapshot.
+ * The cast cache lets a non-exact dynCheck reuse one safe, compiler-built
+ * target view instead of raw-casting structurally different layouts. */
 ScrDyn *scr_dyn_new_typed_ref(
     void *ptr, void *(*retain)(void *), void (*release)(void *),
     const char *type_key, size_t type_key_len,
@@ -2904,6 +2920,11 @@ bool scr_dyn_typed_ref_is(
     const ScrDyn *d, const char *type_key, size_t type_key_len);
 void *scr_dyn_typed_ref_unbox(const ScrDyn *d); /* +1 */
 ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d); /* +1 */
+void *scr_dyn_typed_ref_cached_cast(
+    const ScrDyn *d, const char *type_key, size_t type_key_len); /* +1/NULL */
+void scr_dyn_typed_ref_cache_cast(
+    ScrDyn *d, const char *type_key, size_t type_key_len, void *ptr,
+    void *(*retain)(void *), void (*release)(void *));
 /* A fresh u8 COPY of a SCR_DYN_BYTES payload (+1) — the dynCheck
  * extraction (`u as Uint8Array`). */
 ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d);

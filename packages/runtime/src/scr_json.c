@@ -393,6 +393,13 @@ void scr_dyn_release(ScrDyn *d) {
     scr_dyn_jsval_ops()->release(d->v.jsval.cell);
     break;
   case SCR_DYN_TYPED_REF:
+    scr_dyn_release(d->v.typed_ref.materialized);
+    while (d->v.typed_ref.casts) {
+      ScrDynTypedCast *cast = d->v.typed_ref.casts;
+      d->v.typed_ref.casts = cast->next;
+      cast->release(cast->ptr);
+      free(cast);
+    }
     d->v.typed_ref.release(d->v.typed_ref.ptr);
     break;
   default:
@@ -448,6 +455,12 @@ void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item) {
  * the generic "Spread syntax requires ...iterable[Symbol.iterator] to be
  * a function". Borrows src. */
 void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what) {
+  if (src->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(src);
+    scr_dyn_arr_push_spread(arr, materialized, what);
+    scr_dyn_release(materialized);
+    return;
+  }
   if (src->kind == SCR_DYN_ARR) {
     for (size_t i = 0; i < src->v.arr.len; i++) {
       scr_dyn_arr_push(arr, scr_dyn_retain(src->v.arr.items[i]));
@@ -510,6 +523,12 @@ void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what) {
  * undefined no kind prefix, null V8's "object null"). Borrows both; +1 or
  * NULL with the TypeError pending. */
 ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg) {
+  if (src->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(src);
+    ScrDyn *out = scr_dyn_iter_pack(materialized, msg);
+    scr_dyn_release(materialized);
+    return out;
+  }
   if (src->kind == SCR_DYN_ARR || src->kind == SCR_DYN_BYTES || src->kind == SCR_DYN_STR) {
     ScrDyn *out = scr_dyn_new_arr();
     scr_dyn_arr_push_spread(out, src, ""); /* iterable kinds never consult `what` */
@@ -663,6 +682,8 @@ ScrDyn *scr_dyn_new_typed_ref(
   d->v.typed_ref.type_key = type_key;
   d->v.typed_ref.type_key_len = type_key_len;
   d->v.typed_ref.materialize = materialize;
+  d->v.typed_ref.materialized = NULL;
+  d->v.typed_ref.casts = NULL;
   return d;
 }
 
@@ -678,7 +699,39 @@ void *scr_dyn_typed_ref_unbox(const ScrDyn *d) {
 }
 
 ScrDyn *scr_dyn_typed_ref_materialize(const ScrDyn *d) {
-  return d->v.typed_ref.materialize(d->v.typed_ref.ptr);
+  ScrDyn *capsule = (ScrDyn *)d;
+  if (!capsule->v.typed_ref.materialized) {
+    capsule->v.typed_ref.materialized =
+        capsule->v.typed_ref.materialize(capsule->v.typed_ref.ptr);
+  }
+  return scr_dyn_retain(capsule->v.typed_ref.materialized);
+}
+
+void *scr_dyn_typed_ref_cached_cast(
+    const ScrDyn *d, const char *type_key, size_t type_key_len) {
+  for (ScrDynTypedCast *cast = d->v.typed_ref.casts; cast;
+       cast = cast->next) {
+    if (cast->type_key_len == type_key_len &&
+        memcmp(cast->type_key, type_key, type_key_len) == 0) {
+      return cast->retain(cast->ptr);
+    }
+  }
+  return NULL;
+}
+
+void scr_dyn_typed_ref_cache_cast(
+    ScrDyn *d, const char *type_key, size_t type_key_len, void *ptr,
+    void *(*retain)(void *), void (*release)(void *)) {
+  if (!ptr) return;
+  ScrDynTypedCast *cast = malloc(sizeof *cast);
+  if (!cast) scr_trap("scriptc: out of memory\n");
+  cast->type_key = type_key;
+  cast->type_key_len = type_key_len;
+  cast->ptr = retain(ptr);
+  cast->retain = retain;
+  cast->release = release;
+  cast->next = d->v.typed_ref.casts;
+  d->v.typed_ref.casts = cast;
 }
 
 ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d) {
@@ -1570,6 +1623,12 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d) {
  * kind matches scr_dyn_string_coerce (units RENDER — ToString(null) is
  * "null"). Borrows; +1, or NULL with the exception pending. */
 ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
+  if (d->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    ScrStr *out = scr_dyn_string_coerce_js(materialized);
+    scr_dyn_release(materialized);
+    return out;
+  }
   if (d->kind == SCR_DYN_OBJ) {
     static const char *const hint[2] = { "toString", "valueOf" };
     for (int i = 0; i < 2; i++) {
@@ -1606,6 +1665,12 @@ static const char *scr_dyn_kind_name(const ScrDyn *d);
  * valid dense index, every other kind false (tsc admits `in` only on
  * object-typed operands). Borrows both; never throws. */
 bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key) {
+  if (v->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(v);
+    bool out = scr_dyn_has_key(materialized, key);
+    scr_dyn_release(materialized);
+    return out;
+  }
   if (v->kind == SCR_DYN_OBJ) return scr_dyn_obj_get(v, key->data, key->len) != NULL;
   if (v->kind == SCR_DYN_ARR) {
     if (key->len == 6 && memcmp(key->data, "length", 6) == 0) return true;
@@ -1623,6 +1688,12 @@ bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key) {
 }
 
 void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
+  if (recv->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(recv);
+    scr_dyn_key_set(materialized, key, value);
+    scr_dyn_release(materialized);
+    return;
+  }
   if (recv->kind == SCR_DYN_OBJ) {
     scr_dyn_obj_set(recv, key->data, key->len, scr_dyn_retain(value));
     return;
@@ -2636,6 +2707,12 @@ static void scr_dyn_objwalk_push(ScrDyn *out, ScrObjWalk mode, const char *key,
 }
 
 static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
+  if (v->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(v);
+    ScrDyn *out = scr_dyn_objwalk(materialized, mode);
+    scr_dyn_release(materialized);
+    return out;
+  }
   if (v->kind == SCR_DYN_UNDEF || v->kind == SCR_DYN_NULL) {
     static const char msg[] = "Cannot convert undefined or null to object";
     scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
@@ -2759,6 +2836,12 @@ ScrDyn *scr_dyn_obj_keys(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWAL
  * existing two-arg stance — a dyn array target has no property table). */
 static void scr_dyn_assign_from(ScrDyn *target, const ScrDyn *src) {
   if (target->kind != SCR_DYN_OBJ) return;
+  if (src->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(src);
+    scr_dyn_assign_from(target, materialized);
+    scr_dyn_release(materialized);
+    return;
+  }
   if (src->kind == SCR_DYN_UNDEF || src->kind == SCR_DYN_NULL) return;
   if (src->kind == SCR_DYN_OBJ) {
     for (size_t i = 0; i < src->v.obj.len; i++) {
@@ -2805,6 +2888,13 @@ ScrDyn *scr_dyn_assign(ScrDyn *target, const ScrDyn *src) {
      * dyn data as the usual member deep copy). */
     if (!scr_dyn_jsval_ops()->assign(target->v.jsval.cell, src)) return NULL;
     return scr_dyn_retain(target);
+  }
+  if (target->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(target);
+    ScrDyn *assigned = scr_dyn_assign(materialized, src);
+    scr_dyn_release(assigned);
+    scr_dyn_release(materialized);
+    return scr_exc_pending() ? NULL : scr_dyn_retain(target);
   }
   if (src->kind == SCR_DYN_JSVAL) {
     /* A wrapped SOURCE onto a dyn target: the engine lists its own
