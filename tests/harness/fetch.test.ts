@@ -6,8 +6,9 @@
  * program runs under Node AND compiled --dynamic with the server's base
  * URL in argv; stdout must match byte-for-byte and exit codes agree. The
  * suite covers the enumerated request-time needs of the AI-SDK graph:
- * text/json bodies, POST with implicit/explicit content-types, header
- * round trips, chunked streaming consumed through the reader protocol,
+ * text/json bodies, POST with implicit/explicit content-types, string-chunk
+ * request streams, header round trips, chunked response streaming consumed
+ * through the reader protocol,
  * SSE through the real eventsource-parser (TextDecoderStream →
  * EventSourceParserStream — the exact AI-SDK shape), 404-resolves,
  * redirect following, gzip/deflate response decoding, and
