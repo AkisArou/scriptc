@@ -167,6 +167,20 @@ const CORPUS: CorpusCase[] = [
     expected: "prove",
   },
   {
+    name: "record-field-range-with-string-neq",
+    body: `const m = { kind: a < 0 ? "skip" : "count", n: a };\nif (m.kind !== "skip" && m.n >= 0 && m.n <= 1000) {\n  send(Math.trunc(m.n));\n}`,
+    param: true,
+    args: ["0", "999.75", "1000", "-1", "nan"],
+    expected: "prove",
+  },
+  {
+    name: "optional-record-field-range-with-neq",
+    body: `const m = { n: a < 0 ? undefined : a };\nif (m.n !== undefined && m.n >= 0 && m.n <= 1000) {\n  send(Math.trunc(m.n));\n}`,
+    param: true,
+    args: ["0", "999.75", "1000", "-1", "nan"],
+    expected: "prove",
+  },
+  {
     name: "data-dependent-loop-bound",
     body: `for (let n = 0; n < a; n = n + 1) {\n  send(n);\n}`,
     param: true,
