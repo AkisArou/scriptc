@@ -146,6 +146,30 @@ const PROBES: Probe[] = [
   },
   { id: "diagnostic.sc2011", source: "const y: any = 1;\nconst z = y * 2;\nconsole.log(0);\n" },
   // status unsupported — refused with the entry's code
+  {
+    id: "stdlib.abort-signal.constructor",
+    source: '/// <reference types="node" />\nvoid new AbortSignal();\n',
+  },
+  {
+    id: "stdlib.headers.constructor",
+    source: '/// <reference types="node" />\nvoid new Headers();\n',
+  },
+  {
+    id: "stdlib.headers.symbol.iterator",
+    source: '/// <reference types="node" />\nfunction f(h: Headers): void {\n  void h[Symbol.iterator]();\n}\nvoid f;\n',
+  },
+  {
+    id: "stdlib.response.constructor",
+    source: '/// <reference types="node" />\nvoid new Response(null);\n',
+  },
+  {
+    id: "stdlib.response.static.json",
+    source: '/// <reference types="node" />\nvoid Response.json(1);\n',
+  },
+  {
+    id: "stdlib.readable-stream.symbol.asyncIterator",
+    source: '/// <reference types="node" />\nfunction f(s: ReadableStream<Uint8Array>): void {\n  void s[Symbol.asyncIterator]();\n}\nvoid f;\n',
+  },
   { id: "syntax.debugger-statements", source: "debugger;\nconsole.log(0);\n" },
   {
     id: "syntax.delete-expressions",
@@ -222,6 +246,14 @@ describe("surface manifest sampling harness", () => {
         `${probe.id}: dynamic-only entries must analyze clean under --dynamic`,
       ).toEqual([]);
       expect(dyn.stats.statementsFailed).toBe(0);
+    } else {
+      const dyn = analyze(file, { dynamic: true }).coverage;
+      expect(dyn.preflightFailed, `${probe.id}: dynamic probe must reach lowering`).toBe(false);
+      const dynCodes = [...new Set(dyn.diagnostics.map((d) => d.code))];
+      expect(
+        dynCodes,
+        `${probe.id}: unsupported entries must retain the listed refusal under --dynamic`,
+      ).toEqual([entry!.code]);
     }
   });
 });

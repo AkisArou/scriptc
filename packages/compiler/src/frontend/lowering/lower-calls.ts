@@ -3942,6 +3942,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // hasOwnProperty on a program class CONSTRUCTOR — own statics are
         // compile-time-known, so a literal key folds to a constant.
         lowerClassHasOwnPropertyCall(L, expr, expr.expression) ??
+        // Response constructor-object operations are unsupported in both
+        // tiers. Keep their SC2020 inventory contract ahead of the island
+        // and generic-call fallbacks (Response.json otherwise reports the
+        // generic SC1090 fence).
+        L.fenceUnsupportedFetchConstructorMember(expr.expression) ??
         L.lowerIslandMethodCall(expr, expr.expression) ??
         // Static fetch responses are checked-dynamic handles, but the
         // adopted undici declaration exposes a wider API than that handle.
@@ -4047,6 +4052,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // The element spelling of an unsupported native Web method must fence
     // before lowering the callee into a checked-dynamic keyed read.
     if (ts.isElementAccessExpression(expr.expression)) {
+      L.fenceUnsupportedFetchConstructorMember(expr.expression);
       L.fenceStaticResponseMember(expr.expression, "call");
       L.fenceStaticHeadersMember(expr.expression, "call");
       L.fenceStaticReadableStreamMember(expr.expression, "call");

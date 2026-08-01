@@ -1922,9 +1922,9 @@
       "id": "stdlib.abort-signal.constructor",
       "kind": "stdlib",
       "name": "AbortSignal constructor",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Node exposes the interface object but constructing it throws; the dynamic tier preserves that behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; Node exposes the interface object but constructing it throws; neither compiler tier currently preserves that constructor behavior"
     },
     {
       "id": "stdlib.abort-signal.dispatch-event",
@@ -2280,9 +2280,9 @@
       "id": "stdlib.headers.constructor",
       "kind": "stdlib",
       "name": "Headers constructor",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the interface constructor has no engine-free static representation"
+      "note": "Node 24.15.0 / Undici 7.24.4; the interface constructor has no compiler bridge in either tier"
     },
     {
       "id": "stdlib.headers.delete",
@@ -2346,9 +2346,9 @@
       "id": "stdlib.headers.symbol.iterator",
       "kind": "stdlib",
       "name": "Headers.[Symbol.iterator]",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; native Headers iteration does not yet expose a static iterator handle"
+      "note": "Node 24.15.0 / Undici 7.24.4; symbol-keyed Headers iteration has no compiler lowering in either tier; use entries() with --dynamic"
     },
     {
       "id": "stdlib.headers.values",
@@ -2724,9 +2724,9 @@
       "id": "stdlib.readable-stream.symbol.asyncIterator",
       "kind": "stdlib",
       "name": "ReadableStream.[Symbol.asyncIterator]",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; async iterator handles are not represented in the engine-free static tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; symbol-keyed async iterator handles have no compiler lowering in either tier; use values() with --dynamic"
     },
     {
       "id": "stdlib.readable-stream.tee",
@@ -2964,25 +2964,25 @@
       "id": "stdlib.response-init.headers",
       "kind": "stdlib",
       "name": "ResponseInit.headers",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response construction is available only in the dynamic tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response construction has no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response-init.status",
       "kind": "stdlib",
       "name": "ResponseInit.status",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response construction is available only in the dynamic tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response construction has no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response-init.statusText",
       "kind": "stdlib",
       "name": "ResponseInit.statusText",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response construction is available only in the dynamic tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response construction has no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.arrayBuffer",
@@ -3033,9 +3033,9 @@
       "id": "stdlib.response.constructor",
       "kind": "stdlib",
       "name": "Response constructor",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the interface constructor has no engine-free static representation"
+      "note": "Node 24.15.0 / Undici 7.24.4; the interface constructor has no compiler bridge in either tier"
     },
     {
       "id": "stdlib.response.formData",
@@ -3077,25 +3077,25 @@
       "id": "stdlib.response.static.error",
       "kind": "stdlib",
       "name": "Response.error",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations are available only in the dynamic tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations have no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.static.json",
       "kind": "stdlib",
       "name": "Response.json",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations are available only in the dynamic tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations have no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.static.redirect",
       "kind": "stdlib",
       "name": "Response.redirect",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations are available only in the dynamic tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations have no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.status",

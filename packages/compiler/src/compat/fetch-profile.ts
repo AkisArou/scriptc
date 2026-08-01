@@ -166,8 +166,8 @@ const outOfScopeEntry = (
   reason,
 });
 
-const constructorFence =
-  "the interface constructor has no engine-free static representation";
+const constructorUnsupported =
+  "the interface constructor has no compiler bridge in either tier";
 const widerMemberFence =
   "the member is outside the native static handle projection";
 const typedInterfaceUnsupported =
@@ -497,12 +497,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         metadataExclusion,
       ),
 
-      dynamicEntry(
+      unsupportedEntry(
         "stdlib.abort-signal.constructor",
         "AbortSignal",
         "constructor",
         "constructor",
-        "Node exposes the interface object but constructing it throws; the dynamic tier preserves that behavior",
+        "Node exposes the interface object but constructing it throws; neither compiler tier currently preserves that constructor behavior",
       ),
       staticEntry("stdlib.abort-signal.abort", "AbortSignal", "abort", "static"),
       staticEntry("stdlib.abort-signal.timeout", "AbortSignal", "timeout", "static"),
@@ -542,12 +542,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         metadataExclusion,
       ),
 
-      dynamicEntry(
+      unsupportedEntry(
         "stdlib.headers.constructor",
         "Headers",
         "constructor",
         "constructor",
-        constructorFence,
+        constructorUnsupported,
       ),
       ...[
         "append",
@@ -569,12 +569,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         )
       ),
       staticEntry("stdlib.headers.forEach", "Headers", "forEach", "prototype"),
-      dynamicEntry(
+      unsupportedEntry(
         "stdlib.headers.symbol.iterator",
         "Headers",
         "[Symbol.iterator]",
         "prototype-symbol",
-        "native Headers iteration does not yet expose a static iterator handle",
+        "symbol-keyed Headers iteration has no compiler lowering in either tier; use entries() with --dynamic",
       ),
       outOfScopeEntry(
         "stdlib.headers.symbol.toStringTag",
@@ -635,20 +635,20 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         metadataExclusion,
       ),
 
-      dynamicEntry(
+      unsupportedEntry(
         "stdlib.response.constructor",
         "Response",
         "constructor",
         "constructor",
-        constructorFence,
+        constructorUnsupported,
       ),
       ...["error", "json", "redirect"].map((member) =>
-        dynamicEntry(
+        unsupportedEntry(
           `stdlib.response.static.${member}`,
           "Response",
           member,
           "static",
-          "Response constructor-object operations are available only in the dynamic tier",
+          "Response constructor-object operations have no compiler lowering in either tier",
         )
       ),
       dynamicEntry(
@@ -715,12 +715,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
           "the wider Web Streams graph is outside the native readable-stream slice",
         )
       ),
-      dynamicEntry(
+      unsupportedEntry(
         "stdlib.readable-stream.symbol.asyncIterator",
         "ReadableStream",
         "[Symbol.asyncIterator]",
         "prototype-symbol",
-        "async iterator handles are not represented in the engine-free static tier",
+        "symbol-keyed async iterator handles have no compiler lowering in either tier; use values() with --dynamic",
       ),
       outOfScopeEntry(
         "stdlib.readable-stream.symbol.toStringTag",
@@ -839,12 +839,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
             );
       }),
       ...["headers", "status", "statusText"].map((member) =>
-        dynamicEntry(
+        unsupportedEntry(
           `stdlib.response-init.${member}`,
           "ResponseInit",
           member,
           "dictionary",
-          "Response construction is available only in the dynamic tier",
+          "Response construction has no compiler lowering in either tier",
         )
       ),
     ],

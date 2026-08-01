@@ -11,6 +11,7 @@ import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program
 import { lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
 import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 import {
+  NODE24_FETCH_COMPAT_PROFILE,
   STATIC_HEADERS_CALLS,
   STATIC_READABLE_STREAM_CALLS,
   STATIC_READABLE_STREAM_READS,
@@ -461,8 +462,53 @@ function staticResponseMemberName(
   access: StaticResponseAccess,
 ): string | null {
   if (ts.isPropertyAccessExpression(access)) return access.name.text;
+  const keyExpr = access.argumentExpression;
+  if (
+    ts.isPropertyAccessExpression(keyExpr) &&
+    L.isStdlibGlobal(keyExpr.expression, "Symbol") &&
+    (keyExpr.name.text === "iterator" ||
+      keyExpr.name.text === "asyncIterator" ||
+      keyExpr.name.text === "toStringTag")
+  ) {
+    return `[Symbol.${keyExpr.name.text}]`;
+  }
   const key = L.typeOf(access.argumentExpression);
   return key.isStringLiteralType() ? key.value : null;
+}
+
+function fetchInventoryStatus(
+  owner: string,
+  member: string,
+  placement: "static" | "prototype" | "prototype-symbol",
+): "static" | "dynamic-only" | "unsupported" | "out-of-scope" | null {
+  return NODE24_FETCH_COMPAT_PROFILE.inventory.entries.find((entry) =>
+    entry.owner === owner &&
+    entry.member === member &&
+    entry.placement === placement
+  )?.status ?? null;
+}
+
+/** Constructor-object operations are distinct from Response instance
+ * methods. The inventory marks the former unsupported in both tiers; fence
+ * them explicitly so the generic call fallback cannot report SC1090 for
+ * Response.json while the other statics report SC2020. */
+export function fenceUnsupportedFetchConstructorMember(
+  L: Lowerer,
+  access: StaticResponseAccess,
+): IrExpr | null {
+  if (!L.isStdlibGlobal(access.expression, "Response")) return null;
+  const member = staticResponseMemberName(L, access);
+  if (
+    member === null ||
+    fetchInventoryStatus("Response", member, "static") !== "unsupported"
+  ) {
+    return null;
+  }
+  L.noLowering(
+    `Response.${member}`,
+    access,
+    "Response constructor-object operations have no compiler lowering in either tier",
+  );
 }
 
 function hasLiveWebMutableArm(L: Lowerer, type: IrType): boolean {
@@ -514,12 +560,14 @@ export function fenceStaticResponseMember(
   access: StaticResponseAccess,
   use: "read" | "call",
 ): IrExpr | null {
-  if (L.dynamic) return null;
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
   const member = staticResponseMemberName(L, access);
   if (member === null) return null;
+  const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";
+  const status = fetchInventoryStatus("Response", member, placement);
+  if (L.dynamic && status !== "unsupported") return null;
   const supported =
     use === "call"
       ? STATIC_RESPONSE_CALLS.has(member)
@@ -542,17 +590,27 @@ export function fenceStaticHeadersMember(
   access: StaticResponseAccess,
   use: "read" | "call",
 ): IrExpr | null {
-  if (L.dynamic) return null;
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Headers" || !L.isStdlibSymbol(sym)) return null;
   const member = staticResponseMemberName(L, access);
   if (member === null) return null;
+  const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";
+  const status = fetchInventoryStatus("Headers", member, placement);
+  if (L.dynamic && status !== "unsupported") return null;
   if (use === "call" && STATIC_HEADERS_CALLS.has(member)) return null;
+  if (status === "unsupported") {
+    L.noLowering(
+      `Headers.${member}`,
+      access,
+      "symbol-keyed Headers iteration has no compiler lowering in either tier; call entries() with --dynamic instead",
+      sym,
+    );
+  }
   L.noLowering(
     `Headers.${member} in a static build`,
     access,
-    "the native static Headers surface is append/delete/get/getSetCookie/has/set/forEach; use --dynamic for constructor and iterator operations",
+    "the native static Headers surface is append/delete/get/getSetCookie/has/set/forEach; use keys()/values()/entries() with --dynamic, while construction and symbol-keyed iteration remain unsupported",
     sym,
   );
 }
@@ -566,7 +624,6 @@ export function fenceStaticReadableStreamMember(
   access: StaticResponseAccess,
   use: "read" | "call",
 ): IrExpr | null {
-  if (L.dynamic) return null;
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "ReadableStream" || !L.isStdlibSymbol(sym)) {
@@ -574,11 +631,22 @@ export function fenceStaticReadableStreamMember(
   }
   const member = staticResponseMemberName(L, access);
   if (member === null) return null;
+  const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";
+  const status = fetchInventoryStatus("ReadableStream", member, placement);
+  if (L.dynamic && status !== "unsupported") return null;
   const supported =
     use === "call"
       ? STATIC_READABLE_STREAM_CALLS.has(member)
       : STATIC_READABLE_STREAM_READS.has(member);
   if (supported) return null;
+  if (status === "unsupported") {
+    L.noLowering(
+      `ReadableStream.${member}`,
+      access,
+      "symbol-keyed async iteration has no compiler lowering in either tier; call values() with --dynamic instead",
+      sym,
+    );
+  }
   L.noLowering(
     `ReadableStream.${member} in a static build`,
     access,
