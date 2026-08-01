@@ -73,4 +73,19 @@ console.log(
   surplusStreamPart.value,
 );
 
+let fetchSurplusEffects = "";
+const surplusFetchResponse = await fetch(
+  `${process.argv[2]}/text`,
+  undefined,
+  (() => {
+    fetchSurplusEffects += "fetch";
+    return "ignored";
+  })(),
+);
+console.log(
+  "fetch surplus arguments:",
+  fetchSurplusEffects,
+  await surplusFetchResponse.text(),
+);
+
 export {};

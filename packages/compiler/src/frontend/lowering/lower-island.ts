@@ -312,7 +312,7 @@ function fenceStaticRequestInitLiteral(
     if (call.questionDotToken) return null;
     const symbol = L.resolveValueSymbol(callee);
     if (!symbol || !L.isStdlibSymbol(symbol)) return null;
-    if (call.arguments.length < 1 || call.arguments.length > 2) return null;
+    if (call.arguments.length < 1) return null;
     const loc = locOf(call);
     if (!L.dynamic) {
       const inputNode = call.arguments[0]!;
@@ -337,13 +337,51 @@ function fenceStaticRequestInitLiteral(
       } else {
         init = L.lowerExprExpecting(initNode, DYN);
       }
-      return {
+      const answer: IrExpr = {
         kind: "libCall",
         fn: "fetch.start",
         args: [url, init],
         type: { kind: "promise", inner: DYN },
         loc,
       };
+      if (call.arguments.length <= 2) return answer;
+
+      // JavaScript evaluates surplus call arguments in source order even
+      // though fetch ignores their values. Preserve the URL/init values
+      // across those evaluations, then start the request.
+      const urlLocal = L.declareHiddenLocal("%fetchUrl", url.type);
+      const initLocal = L.declareHiddenLocal("%fetchInit", init.type);
+      const urlRef: IrExpr = {
+        kind: "varRef",
+        localId: urlLocal.id,
+        type: url.type,
+        loc,
+      };
+      const initRef: IrExpr = {
+        kind: "varRef",
+        localId: initLocal.id,
+        type: init.type,
+        loc,
+      };
+      const stmts: IrStmt[] = [
+        { kind: "varDecl", localId: urlLocal.id, init: url, loc },
+        { kind: "varDecl", localId: initLocal.id, init, loc },
+      ];
+      for (const argument of call.arguments.slice(2)) {
+        if (ts.isSpreadElement(argument)) {
+          L.noLowering(
+            "spread surplus arguments on static fetch()",
+            argument,
+            "pass surplus arguments without spread syntax",
+          );
+        }
+        const discarded = ts.isVoidExpression(argument)
+          ? L.lowerExpr(argument.expression)
+          : L.lowerExpr(argument);
+        stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
+      }
+      answer.args = [urlRef, initRef];
+      return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
     }
     const fetchFn: IrExpr = { kind: "jsOp", op: "globalGet", name: "fetch", args: [], type: JSVAL, loc };
     // Init OBJECT LITERALS build natively in the island (the general

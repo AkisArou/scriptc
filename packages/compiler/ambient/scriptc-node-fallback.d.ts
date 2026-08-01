@@ -659,7 +659,10 @@ interface Headers {
   getSetCookie(): string[];
   has(name: string): boolean;
   set(name: string, value: string): void;
-  forEach(callbackfn: (value: string, key: string, parent: Headers) => void): void;
+  forEach(
+    callbackfn: (value: string, key: string, parent: Headers) => void,
+    thisArg?: unknown,
+  ): void;
 }
 declare var Headers: {
   new (init?: Record<string, string> | readonly (readonly [string, string])[]): Headers;

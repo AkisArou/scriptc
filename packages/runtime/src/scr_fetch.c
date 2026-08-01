@@ -3814,11 +3814,8 @@ static ScrStr *sf_method(const ScrDyn *init) {
           ? scr_dyn_obj_get(init, "method", 6)
           : NULL;
   if (!value || value->kind == SCR_DYN_UNDEF) return scr_str_new("GET", 3);
-  if (value->kind != SCR_DYN_STR) {
-    sf_type_error("fetch failed");
-    return NULL;
-  }
-  ScrStr *method = scr_str_retain(value->v.str);
+  ScrStr *method = scr_dyn_string_coerce_js(value);
+  if (!method) return NULL;
   static const char *normalized[] = {
       "DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"};
   for (size_t i = 0; i < sizeof normalized / sizeof normalized[0]; i++) {
@@ -4628,14 +4625,25 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
     return sf_reject_now(
         promise, "RequestInit.duplex must be 'half'");
   }
+  /* BodyInit's USVString fallback applies to every ordinary value that
+   * is not already bytes or a ReadableStream. This includes scalars,
+   * arrays, and plain objects (with the ordinary JS object coercion
+   * protocol), while null and undefined continue to mean no body. */
+  ScrDyn *coerced_body = NULL;
   if (body_present && body->kind != SCR_DYN_STR &&
-      body->kind != SCR_DYN_BYTES && body->kind != SCR_DYN_ARR &&
-      !body_stream) {
-    scr_str_release(method);
-    scr_url_release(u);
-    return sf_reject_now(promise, "fetch failed");
+      body->kind != SCR_DYN_BYTES && !body_stream) {
+    ScrStr *text = scr_dyn_string_coerce_js(body);
+    if (!text) {
+      scr_str_release(method);
+      scr_url_release(u);
+      return sf_reject_now(promise, "fetch failed");
+    }
+    coerced_body = scr_dyn_new_str(text);
+    scr_str_release(text);
+    body = coerced_body;
   }
   if (body_stream && !duplex_half) {
+    scr_dyn_release(coerced_body);
     scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(
@@ -4645,21 +4653,11 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
   if (body_present &&
       ((method->len == 3 && memcmp(method->data, "GET", 3) == 0) ||
        (method->len == 4 && memcmp(method->data, "HEAD", 4) == 0))) {
+    scr_dyn_release(coerced_body);
     scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(
         promise, "Request with GET/HEAD method cannot have body.");
-  }
-
-  /* BodyInit's USVString fallback applies to ordinary arrays too. An
-   * `any`-typed array is therefore "a,b", not a stream of "a" and "b";
-   * only an actual ReadableStream uses the streaming-body branch. */
-  ScrDyn *coerced_body = NULL;
-  if (body_present && body->kind == SCR_DYN_ARR) {
-    ScrStr *text = scr_dyn_string_coerce(body);
-    coerced_body = scr_dyn_new_str(text);
-    scr_str_release(text);
-    body = coerced_body;
   }
 
   ScrArr *headers = scr_arr_new(SCR_ELEM_STR, 16);

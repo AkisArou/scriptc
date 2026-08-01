@@ -85,6 +85,9 @@ console.log(
 responseHeaders.forEach((value, name) => {
   if (name.startsWith("x-")) console.log("header walk:", name, value);
 });
+responseHeaders.forEach((value, name) => {
+  if (name === "x-kind") console.log("header walk thisArg:", name, value);
+}, { label: "ignored by the arrow callback" });
 await headerResponse.text();
 
 const latin1HeaderResponse = await fetch(`${process.argv[2]}/header-echo`, {
@@ -221,6 +224,25 @@ const init: RequestInit = {
 };
 const echoed = await fetch(`${process.argv[2]}/post-echo`, init);
 console.log(await echoed.json());
+
+const scalarBodyInit = JSON.parse(
+  '{"method":"POST","body":123}',
+) as RequestInit;
+const scalarBodyEcho = await (
+  await fetch(`${process.argv[2]}/post-echo`, scalarBodyInit)
+).json() as { method: string; contentType: string; body: string };
+console.log(
+  "coerced scalar body:",
+  scalarBodyEcho.method,
+  scalarBodyEcho.contentType,
+  scalarBodyEcho.body,
+);
+
+const scalarMethodInit = JSON.parse('{"method":null}') as RequestInit;
+const scalarMethodEcho = await (
+  await fetch(`${process.argv[2]}/post-echo`, scalarMethodInit)
+).json() as { method: string };
+console.log("coerced scalar method:", scalarMethodEcho.method);
 
 const unsupportedInit = {
   method: "GET",
