@@ -20,13 +20,14 @@ Full-suite runs (`vitest run` with no filters) take an advisory machine-wide loc
 
 ## Build and oracle caches
 
-Test runs are dominated by clang (~275 corpus programs × two lanes at -O2/-O1+ASan). Three content-addressed caches make repeat runs fast, all under `node_modules/.cache/scriptc-tests/cas` (gitignored; override with `SCRIPTC_CACHE_DIR`):
+Test runs are dominated by clang (~275 corpus programs × two lanes at -O2/-O1+ASan). The production content-addressed build cache and the harness's oracle cache make repeat runs fast. Tests pin them under `node_modules/.cache/scriptc-tests/cas` (gitignored; override with `SCRIPTC_CACHE_DIR`) instead of using the per-user default:
 
 - **binaries** (`bin/`, cc.ts): key = clang version + runtime fingerprint (every runtime .c/.h + the vendor pin) + the full normalized command line + the emitted C bytes (byte-stable by project invariant). A hit skips clang entirely; the binary still RUNS live, so no comparison or sanitizer coverage is ever skipped. The sanitized lane's flags land in naturally distinct keys.
-- **runtime objects** (`obj/`, cc.ts): per-flavor .o for the runtime sources, so a binary-cache miss compiles only the program's own C and links (~0.15s instead of ~1.4s). Compiles route through ccache when installed, silently fall back when not.
+- **library archives** (`lib/`, cc.ts): key = clang version + runtime fingerprint + target/flags + gated runtime-source set + archiver spelling/version + emitted program-TU bytes. A hit skips clang and `ar`.
+- **runtime objects** (`obj/`, cc.ts): per-flavor .o for the runtime sources, including a distinct `-DSCR_LIB` flavor, so an edited executable or library recompiles only the program's own translation unit before linking or archiving. Compiles route through ccache when installed, silently falling back when not.
 - **oracle results** (`oracle/`, differential.test.ts): Node's stdout/exit per program, keyed by program bytes + the spawned node's version + shim contents + invocation shape. Only the spawn is skipped; the comparison never changes. Real-time programs (setTimeout/setInterval/Promise.race — 18 of 298) are excluded and always spawn Node live: their stdout is a timer interleave that Node and the native binary only agree on under the same instantaneous load, so a cached verdict from one run must never meet a live native run from another.
 
-Escape hatches: `SCRIPTC_NO_CACHE=1` bypasses every cache in both directions (no reads, no writes — the run behaves exactly like pre-cache main). Caching only activates when `SCRIPTC_CACHE_DIR` is set, which only vitest.config.ts does — production CLI builds are untouched. Eviction is a size-capped LRU sweep over the cache root (`SCRIPTC_CACHE_MAX_MB`, default 4096), run at most once per process after a write; reads bump mtimes.
+Escape hatches: `SCRIPTC_NO_CACHE=1` bypasses every cache in both directions (no reads, no writes — the run behaves exactly like the uncached path). An explicitly empty `SCRIPTC_CACHE_DIR` does the same; a non-empty value overrides the production default. Eviction is a size-capped LRU sweep over each cache root (`SCRIPTC_CACHE_MAX_MB`, default 4096), run after the first write and periodically in long-lived processes; reads bump mtimes.
 
 `pnpm test:cache-identity` (optionally `--san`) is the acceptance artifact: it runs the full suite uncached, cache-populating, and cached, then diffs every test's name/status/failure output between the cached and uncached passes and exits nonzero on any drift.
 

@@ -4,8 +4,8 @@ import { defineConfig } from "vitest/config";
 // Compiled-binary + oracle caches for the test lanes (see cc.ts's cache block
 // and tests/harness/README.md). Workers inherit SCRIPTC_CACHE_DIR from here;
 // SCRIPTC_NO_CACHE=1 in the caller's environment bypasses every cache in both
-// directions (no reads, no writes). Production CLI builds never see this —
-// caching is opt-in via the env var, and only vitest sets it.
+// directions (no reads, no writes). Production builds use the platform cache;
+// this explicit override keeps test artifacts repo-local and disposable.
 const cacheDir =
   process.env["SCRIPTC_CACHE_DIR"] ??
   fileURLToPath(new URL("./node_modules/.cache/scriptc-tests/cas", import.meta.url));

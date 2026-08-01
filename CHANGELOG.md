@@ -4,6 +4,10 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+### Features
+
+- **Production and library builds persist compilation work.** A bounded content-addressed cache is enabled by default: unchanged executables and library archives skip clang, while source edits reuse separately keyed runtime objects (including library mode's `-DSCR_LIB` flavor) and rebuild only the program translation unit. Library graphs with no npm package to opt in also retain the auto-detection frontend instead of loading the same graph twice. `SCRIPTC_CACHE_DIR` overrides the platform cache root, and `SCRIPTC_NO_CACHE=1` preserves a fully uncached path.
+
 <!-- release:start -->
 
 ## 0.0.21

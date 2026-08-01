@@ -2,8 +2,8 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
-import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { availableParallelism, homedir, tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -709,8 +709,9 @@ async function ensureTlsArchive(sanitize: boolean, driver: CcDriver): Promise<st
  * One `scriptc build --lib` invocation produces <name>.lib.a: the program TU
  * object plus exactly the runtime objects the program's IR gates in, every
  * TU compiled with -DSCR_LIB (the per-flavor discipline that keeps library
- * objects apart from executable-lane objects — here trivially, because library
- * builds compile fresh into the archive and never touch the object cache).
+ * objects apart from executable-lane objects). Persistent builds cache the
+ * completed archive by program-TU content and cache runtime objects separately,
+ * so an edit recompiles only the changed program object before re-archiving.
  * The base set narrows from the executable lane's unconditional sources:
  * scr_async.c (fibers, timers, the loop) and scr_child.c drop — the
  * async_free refusal already guarantees nothing references them — and
@@ -751,8 +752,6 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const driver = resolveCc();
   const sanitize = opts.sanitize ?? false;
   const regex = opts.regex ?? false;
-  const lreObjects = regex ? await ensureLreObjects(sanitize, driver) : [];
-  const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
   const sources = [
     ...LIB_RUNTIME_SOURCES,
     // win32 targets compile the libc-shim TU into the archive (stpcpy,
@@ -786,10 +785,56 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.zlib ? ["-I", vendorZlibDir()] : []),
   ];
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
+  const root = cacheRootDir();
+  let cachedArchive: string | null = null;
+  let compilerVersion = "";
+  let runtimeHash = "";
+  if (root !== null) {
+    try {
+      const [cv, av, fingerprint, programBytes] = await Promise.all([
+        ccVersionOnce(driver.argv),
+        toolVersionOnce(arArgv),
+        runtimeFingerprint(rtDir),
+        readFile(opts.cPath),
+      ]);
+      compilerVersion = cv;
+      runtimeHash = fingerprint;
+      const key = createHash("sha256")
+        .update("lib-v1\0")
+        .update(driver.argv.join("\x1f")).update("\0")
+        .update(cv).update("\0")
+        .update(fingerprint).update("\0")
+        .update(arArgv.join("\x1f")).update("\0")
+        .update(av).update("\0")
+        .update(cflags.join("\x1f")).update("\0")
+        .update(sources.join("\x1f")).update("\0")
+        .update(programBytes)
+        .digest("hex");
+      cachedArchive = join(root, "lib", key);
+      const tmpOut = `${opts.outPath}.hit-${process.pid}-${Math.random().toString(36).slice(2)}`;
+      try {
+        await mkdir(dirname(opts.outPath), { recursive: true });
+        await copyFile(cachedArchive, tmpOut);
+        await rename(tmpOut, opts.outPath);
+        const now = new Date();
+        await utimes(cachedArchive, now, now).catch(() => undefined);
+        return;
+      } catch {
+        await rm(tmpOut, { force: true }).catch(() => undefined);
+        // Miss (or unreadable cache): compile below and publish best-effort.
+      }
+    } catch {
+      // Cache identity trouble is never a build failure. The fresh path below
+      // retains the historical compile-everything behavior.
+      cachedArchive = null;
+    }
+  }
+
+  const lreObjects = regex ? await ensureLreObjects(sanitize, driver) : [];
+  const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
   const buildDir = await mkdtemp(join(tmpdir(), "scriptc-lib-"));
   try {
-    const objects: string[] = [];
-    const compileOne = async (src: string, objName: string): Promise<void> => {
+    const compileOne = async (src: string, objName: string): Promise<string> => {
       const obj = join(buildDir, objName);
       const args = [
         ...driver.argv.slice(1),
@@ -807,26 +852,68 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
             `This is a scriptc bug (generated/runtime C should always compile) unless the compiler itself is missing/broken.\n\n${stderr}`,
         );
       }
-      objects.push(obj);
+      return obj;
     };
     const stem = basename(opts.cPath).replace(/\.(c|ll)$/, "");
-    await compileOne(opts.cPath, `${stem}.program.o`);
-    const width = Math.min(4, availableParallelism());
-    for (let i = 0; i < sources.length; i += width) {
-      await Promise.all(sources.slice(i, i + width).map((f) => compileOne(join(rtDir, f), f.replace(/\.c$/, ".o"))));
+    const programObject = await compileOne(opts.cPath, `${stem}.program.o`);
+    let runtimeObjects: string[] | null = null;
+    if (root !== null && compilerVersion !== "" && runtimeHash !== "") {
+      try {
+        const sourcePaths = sources.map((f) => join(rtDir, f));
+        const cached = await ensureRuntimeObjects(
+          root,
+          driver.argv,
+          cflags,
+          sourcePaths,
+          `lib-obj-v1\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+        );
+        runtimeObjects = sourcePaths.map((path) => cached.get(path)!);
+      } catch {
+        runtimeObjects = null;
+      }
     }
-    objects.push(...lreObjects, ...zlibObjects);
+    if (runtimeObjects === null) {
+      runtimeObjects = [];
+      const width = Math.min(4, availableParallelism());
+      for (let i = 0; i < sources.length; i += width) {
+        runtimeObjects.push(
+          ...(await Promise.all(
+            sources.slice(i, i + width).map((f) => compileOne(join(rtDir, f), f.replace(/\.c$/, ".o"))),
+          )),
+        );
+      }
+    }
+    const objects = [programObject, ...runtimeObjects, ...lreObjects, ...zlibObjects];
     await rm(opts.outPath, { force: true }); // `ar r` would append into a stale archive
     await mkdir(dirname(opts.outPath), { recursive: true });
     await execFileAsync(arArgv[0] ?? "ar", [...arArgv.slice(1), "rcs", opts.outPath, ...objects]);
+    if (cachedArchive !== null && root !== null) {
+      try {
+        const cacheDir = dirname(cachedArchive);
+        await mkdir(cacheDir, { recursive: true });
+        const tmp = join(
+          cacheDir,
+          `.tmp-${basename(cachedArchive).slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`,
+        );
+        try {
+          await copyFile(opts.outPath, tmp);
+          await rename(tmp, cachedArchive);
+        } finally {
+          await rm(tmp, { force: true }).catch(() => undefined);
+        }
+        await pruneCache(root);
+      } catch {
+        // Publishing is best-effort; the requested archive is already valid.
+      }
+    }
   } finally {
     await rm(buildDir, { recursive: true, force: true });
   }
 }
 
-/* ------------------- build cache (opt-in via SCRIPTC_CACHE_DIR) ----------------
+/* -------------------------- persistent build cache ---------------------------
  * Content-addressed caches that let repeat builds of unchanged programs skip
- * clang entirely — the test lanes' dominant cost. Two keyspaces under the
+ * clang entirely — the test lanes' dominant cost. Three keyspaces under the
  * cache root:
  *
  *   bin/<key>       — whole program binaries. key = sha256(clang version,
@@ -843,31 +930,57 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     asked for it, so no comparison or sanitizer coverage
  *                     is ever skipped.
  *
+ *   lib/<key>       — whole library archives. The identity covers the compiler
+ *                     version, runtime fingerprint, target/flags, gated source
+ *                     set, archiver spelling/version, and program-TU bytes.
+ *                     Hits skip both clang and ar.
+ *
  *   obj/<set>/<f>.o — per-flavor runtime objects for cache-miss builds. The
  *                     historical single invocation recompiles every runtime
  *                     TU per program (~1.3s at -O2); with cached objects a
  *                     miss compiles ONLY the program's C and links (~0.15s).
+ *                     Library-mode -DSCR_LIB objects use a distinct flavor.
  *                     The clang driver hands every input the same option set,
  *                     so per-TU `-c` compiles with those options plus a final
  *                     link reproduce the single invocation exactly. Object
  *                     compiles go through ccache when it is installed (silent
  *                     fallback when not).
  *
- * Escape hatches, honored in BOTH directions (no reads, no writes): leave
- * SCRIPTC_CACHE_DIR unset (the production default — the CLI never caches unless
- * asked; vitest.config.ts sets it for the test lanes) or set SCRIPTC_NO_CACHE=1.
- * Either way compileC issues the exact historical command line.
+ * Production builds use a per-user platform cache by default. SCRIPTC_CACHE_DIR
+ * overrides its root (the test lanes use this to stay repo-local); an explicitly
+ * empty value or SCRIPTC_NO_CACHE=1 disables reads and writes. With caching
+ * disabled compileC issues the exact historical command line.
  *
  * Eviction: size-capped LRU over the whole cache root (SCRIPTC_CACHE_MAX_MB,
- * default 4096) swept at most once per process after a write; reads bump
- * mtimes. The harness's oracle cache lives under the same root and is swept
- * by the same pass. Cache trouble is never a build failure — every cache
- * error falls back to a real compile. */
+ * default 4096) swept after the first write and periodically in long-lived
+ * processes; reads bump mtimes. The harness's oracle cache lives under the
+ * same root and is swept by the same pass. Cache trouble is never a build
+ * failure — every cache error falls back to a real compile. */
+
+/** Resolve the build cache without touching the filesystem. Exported from this
+ * internal module so its platform and override behavior can be pinned directly. */
+export function resolveBuildCacheRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  userHome: string = homedir(),
+): string | null {
+  if (env["SCRIPTC_NO_CACHE"] === "1") return null;
+  const configured = env["SCRIPTC_CACHE_DIR"];
+  if (configured !== undefined) return configured === "" ? null : resolve(configured);
+
+  const xdg = env["XDG_CACHE_HOME"];
+  if (xdg !== undefined && xdg !== "") return resolve(xdg, "scriptc", "build");
+  if (platform === "win32") {
+    const local = env["LOCALAPPDATA"];
+    if (local !== undefined && local !== "") return resolve(local, "scriptc", "cache", "build");
+  }
+  return platform === "darwin"
+    ? resolve(userHome, "Library", "Caches", "scriptc", "build")
+    : resolve(userHome, ".cache", "scriptc", "build");
+}
 
 function cacheRootDir(): string | null {
-  if (process.env["SCRIPTC_NO_CACHE"] === "1") return null;
-  const dir = process.env["SCRIPTC_CACHE_DIR"];
-  return dir !== undefined && dir !== "" ? dir : null;
+  return resolveBuildCacheRoot();
 }
 
 const ccVersionMemos = new Map<string, Promise<string>>();
@@ -881,6 +994,21 @@ function ccVersionOnce(argv: string[]): Promise<string> {
       (r) => r.stdout.split("\n", 1)[0] ?? "",
     );
     ccVersionMemos.set(key, memo);
+  }
+  return memo;
+}
+
+const toolVersionMemos = new Map<string, Promise<string>>();
+function toolVersionOnce(argv: string[]): Promise<string> {
+  const key = argv.join("\x1f");
+  let memo = toolVersionMemos.get(key);
+  if (memo === undefined) {
+    memo = execFileAsync(argv[0] ?? "ar", [...argv.slice(1), "--version"]).then(
+      (r) => `${r.stdout}\n${r.stderr}`.trim(),
+      (err: { stdout?: string; stderr?: string; message?: string }) =>
+        `${err.stdout ?? ""}\n${err.stderr ?? ""}`.trim() || err.message || key,
+    );
+    toolVersionMemos.set(key, memo);
   }
   return memo;
 }
@@ -958,13 +1086,16 @@ async function ensureRuntimeObjects(
   return new Map(sources.map((s) => [s, objOf(s)]));
 }
 
-/** Size-capped LRU sweep of the whole cache root, at most once per process
- * and only after a write. Oldest-mtime files go first until the tree is back
- * under 75% of the cap; read hits bump mtimes so hot entries survive. */
-let pruneDone = false;
+/** Size-capped LRU sweep of the whole cache root after the first write and
+ * every 64th later write in a long-lived process. Ordinary CLI invocations
+ * write once; the periodic arm keeps library API/watch loops bounded without
+ * putting a full cache-tree walk on every edit. Oldest-mtime files go first
+ * until the tree is back under 75% of the cap; reads bump mtimes. */
+const rootWriteCounts = new Map<string, number>();
 async function pruneCache(root: string): Promise<void> {
-  if (pruneDone) return;
-  pruneDone = true;
+  const writes = (rootWriteCounts.get(root) ?? 0) + 1;
+  rootWriteCounts.set(root, writes);
+  if (writes !== 1 && writes % 64 !== 0) return;
   const capBytes = Number(process.env["SCRIPTC_CACHE_MAX_MB"] ?? "4096") * 1024 * 1024;
   if (!Number.isFinite(capBytes) || capBytes <= 0) return;
   const files: { path: string; size: number; mtimeMs: number }[] = [];
@@ -992,9 +1123,9 @@ async function pruneCache(root: string): Promise<void> {
 }
 
 /** Compiles one C program together with the runtime sources.
- * Without a cache dir (the production default), the runtime (a dozen small
- * files) is recompiled on every build in one historical clang invocation —
- * no cached-archive staleness bugs. --dynamic additionally compiles
+ * With caching disabled, the runtime (a dozen small files) is recompiled on
+ * every build in one historical clang invocation — no cached-archive
+ * staleness bugs. --dynamic additionally compiles
  * scr_island.c under SCR_DYNAMIC and links the cached engine archive (built
  * lazily, see above); regex-using programs additionally compile scr_regex.c
  * and link libregexp (the cached objects, or the archive's own copy under

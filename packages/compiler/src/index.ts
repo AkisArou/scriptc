@@ -364,16 +364,28 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
   const npmSites = new Map<string, SrcLoc>();
   const judged = new Set<string>();
   let requested: string[] = [];
+  let reusableScout: ReturnType<typeof loadProgram> | null = null;
+  let reusablePreflight: ScrDiagnostic[] | null = null;
   if (npmStatic === "auto" || npmStatic === "lib") {
     const scout = loadProgram(entryPath);
+    let retained = false;
     try {
-      checkPreflight(scout);
+      const scoutPreflight = checkPreflight(scout);
       requested =
         npmStatic === "lib"
           ? detectAutoPackages(scout, statuses, "lib", judged, npmSites)
           : detectAutoPackages(scout, statuses);
+      // With no package to opt in, the scout already IS the final frontend:
+      // same roots, resolution posture, preflight, and module order. Retain it
+      // instead of spawning a second tsgo server and checking the whole graph
+      // again — the common library-mode path has no bare npm imports.
+      if (requested.length === 0) {
+        reusableScout = scout;
+        reusablePreflight = scoutPreflight;
+        retained = true;
+      }
     } finally {
-      scout.dispose();
+      if (!retained) scout.dispose();
     }
   } else if (npmStatic !== undefined) {
     requested = [...new Set(npmStatic)];
@@ -398,8 +410,8 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
   // island with a note, never a failed gate. Explicit opt-ins degrade
   // exactly like auto's — "the user asked for these packages" buys the
   // attempt, not a broken build.
-  let load = loadProgram(entryPath, { npmStatic: requested });
-  let preflight = checkPreflight(load);
+  let load = reusableScout ?? loadProgram(entryPath, { npmStatic: requested });
+  let preflight = reusablePreflight ?? checkPreflight(load);
   // Library mode's fixpoint: the opted-in packages' files joined the
   // program just now, and THEIR bare edges (import statements and
   // top-level requires) name packages the scout could not see. Judge each
