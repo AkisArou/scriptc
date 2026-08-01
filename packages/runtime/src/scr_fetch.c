@@ -916,7 +916,19 @@ static void sf_signal_timer_fire(ScrClosure *cb) {
   sf_signal_release(s);
 }
 
-ScrDyn *scr_fetch_abort_timeout(double ms) {
+ScrDyn *scr_fetch_abort_timeout(ScrDyn *delay) {
+  if (!delay || delay->kind != SCR_DYN_NUM) {
+    if (delay) {
+      scr_dyn_arg_type_fail("delay", "of type number", delay);
+    } else {
+      static const char message[] =
+          "The \"delay\" argument must be of type number. Received undefined";
+      scr_throw_error_msg_code(SCR_ERR_TYPE, message, sizeof message - 1,
+                               "ERR_INVALID_ARG_TYPE");
+    }
+    return NULL;
+  }
+  double ms = delay->v.num;
   if (!isfinite(ms) || trunc(ms) != ms || ms < 0 || ms > 4294967295.0) {
     char received[48];
     scr_num_received(ms, received);
@@ -968,7 +980,10 @@ static void sf_any_source_abort(SfSignalWatch *w, SfSignal *source) {
 
 ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
   if (!signals || signals->kind != SCR_DYN_ARR) {
-    sf_type_error("AbortSignal.any requires an array of AbortSignals");
+    static const char message[] =
+        "signals can not be converted to sequence.";
+    scr_throw_error_msg_code(SCR_ERR_TYPE, message, sizeof message - 1,
+                             "ERR_INVALID_ARG_TYPE");
     return NULL;
   }
   SfSignal *out = sf_signal_new();
@@ -1069,10 +1084,15 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "addEventListener") == 0) {
-    if (argc < 2 || args[0]->kind != SCR_DYN_STR) {
+    if (argc < 2) {
       sf_type_error("AbortSignal.addEventListener requires an event name");
       return NULL;
     }
+    ScrStr *event_name = scr_dyn_string_coerce_js(args[0]);
+    if (!event_name) return NULL;
+    bool is_abort_event =
+        sf_name(event_name->data, event_name->len, "abort");
+    scr_str_release(event_name);
     /* Web IDL's nullable EventListener argument: null is a no-op. */
     if (args[1]->kind == SCR_DYN_NULL ||
         args[1]->kind == SCR_DYN_UNDEF) {
@@ -1093,7 +1113,7 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
     }
     /* AbortSignal is an EventTarget: listeners for other event names are
      * valid registrations even though this target only dispatches abort. */
-    if (!sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
+    if (!is_abort_event) {
       return scr_dyn_retain(scr_dyn_undefined());
     }
     if (option_signal && option_signal->aborted) {
@@ -1132,8 +1152,12 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
           "AbortSignal.removeEventListener requires an event name and listener");
       return NULL;
     }
-    if (args[0]->kind == SCR_DYN_STR &&
-        sf_name(args[0]->v.str->data, args[0]->v.str->len, "abort")) {
+    ScrStr *event_name = scr_dyn_string_coerce_js(args[0]);
+    if (!event_name) return NULL;
+    bool is_abort_event =
+        sf_name(event_name->data, event_name->len, "abort");
+    scr_str_release(event_name);
+    if (is_abort_event) {
       bool capture = false;
       bool once = false;
       (void)sf_signal_listener_options(
@@ -2364,6 +2388,11 @@ ScrDyn *scr_fetch_stream_from(ScrDyn *iterable) {
     sf_type_error("ReadableStream.from requires an iterable");
     return NULL;
   }
+  if (iterable->kind == SCR_DYN_UNDEF) {
+    sf_type_error(
+        "Cannot read properties of undefined (reading 'Symbol(Symbol.asyncIterator)')");
+    return NULL;
+  }
   if (iterable->kind != SCR_DYN_ARR &&
        iterable->kind != SCR_DYN_BYTES &&
        iterable->kind != SCR_DYN_STR &&
@@ -2661,7 +2690,7 @@ static void sf_headers_release_v(void *p) {
 
 static ScrStr *sf_headers_name(const ScrDyn *value) {
   ScrStr *raw =
-      scr_dyn_string_coerce(value ? value : scr_dyn_undefined());
+      scr_dyn_string_coerce_js(value ? value : scr_dyn_undefined());
   if (!raw) return NULL;
   if (!sf_header_name_ok(raw->data, raw->len)) {
     scr_str_release(raw);

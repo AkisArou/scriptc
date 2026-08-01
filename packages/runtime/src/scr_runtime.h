@@ -3910,7 +3910,8 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init); /* +1 promise<Response 
 ScrPromise *scr_fetch_response_json(ScrDyn *response); /* +1 promise<dyn> */
 ScrPromise *scr_fetch_response_text(ScrDyn *response); /* +1 promise<dyn> */
 ScrPromise *scr_fetch_response_bytes(ScrDyn *response); /* +1 promise<dyn> */
-ScrDyn *scr_fetch_abort_timeout(double ms); /* +1 AbortSignal handle */
+/* Borrowed number; +1 AbortSignal handle or NULL pending. */
+ScrDyn *scr_fetch_abort_timeout(ScrDyn *delay);
 ScrDyn *scr_fetch_abort_now(ScrDyn *reason); /* borrowed reason; +1 handle */
 ScrDyn *scr_fetch_abort_any(ScrDyn *signals); /* borrowed array; +1 handle or NULL pending */
 ScrDyn *scr_fetch_stream_new(ScrDyn *source); /* borrowed source; +1 handle or NULL pending */

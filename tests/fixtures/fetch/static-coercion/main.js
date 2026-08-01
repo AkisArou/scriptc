@@ -14,6 +14,23 @@ console.log(
   methodResult.body,
 );
 
+let headerNameCoercions = 0;
+function headerNameToString() {
+  headerNameCoercions++;
+  return this.expected;
+}
+
+const headerName = {
+  expected: "content-type",
+  toString: headerNameToString,
+};
+console.log(
+  "header name coercion:",
+  methodResponse.headers.get(headerName),
+  methodResponse.headers.has(headerName),
+  headerNameCoercions,
+);
+
 function bufferToString() {
   return Buffer.from("POST");
 }

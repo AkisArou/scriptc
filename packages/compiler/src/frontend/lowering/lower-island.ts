@@ -643,12 +643,15 @@ export function lowerStaticFetchCompanionCall(
   if (root.text === "AbortSignal") {
     switch (call.expression.name.text) {
       case "timeout":
-        if (call.arguments.length < 1) return null;
-        if (ts.isSpreadElement(call.arguments[0]!)) return null;
+        if (call.arguments[0] && ts.isSpreadElement(call.arguments[0])) {
+          return null;
+        }
         return staticCallWithSurplusArgs(
           L,
           call,
-          L.lowerExprExpecting(call.arguments[0]!, F64),
+          call.arguments[0]
+            ? L.lowerExprExpecting(call.arguments[0], DYN)
+            : dynUndefinedExpr(loc),
           (first) => ({
             kind: "libCall",
             fn: "fetch.abortTimeout",
@@ -681,12 +684,15 @@ export function lowerStaticFetchCompanionCall(
           }),
         );
       case "any":
-        if (call.arguments.length < 1) return null;
-        if (ts.isSpreadElement(call.arguments[0]!)) return null;
+        if (call.arguments[0] && ts.isSpreadElement(call.arguments[0])) {
+          return null;
+        }
         return staticCallWithSurplusArgs(
           L,
           call,
-          L.lowerExprExpecting(call.arguments[0]!, DYN),
+          call.arguments[0]
+            ? L.lowerExprExpecting(call.arguments[0], DYN)
+            : dynUndefinedExpr(loc),
           (first) => ({
             kind: "libCall",
             fn: "fetch.abortAny",
@@ -702,9 +708,17 @@ export function lowerStaticFetchCompanionCall(
   if (
     root.text === "ReadableStream" &&
     call.expression.name.text === "from" &&
-    call.arguments.length >= 1 &&
-    !ts.isSpreadElement(call.arguments[0]!)
+    (!call.arguments[0] || !ts.isSpreadElement(call.arguments[0]))
   ) {
+    if (!call.arguments[0]) {
+      return {
+        kind: "libCall",
+        fn: "fetch.streamFrom",
+        args: [dynUndefinedExpr(loc)],
+        type: DYN,
+        loc,
+      };
+    }
     let source = L.lowerExpr(call.arguments[0]!);
     // A readonly tuple satisfies the fallback's readonly-array overload,
     // but maps to a monomorphic record in IR. Reuse the ordinary
