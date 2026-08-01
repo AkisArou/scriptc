@@ -115,6 +115,7 @@ const PROBES: Probe[] = [
   { id: "stdlib.map.has", source: 'const m = new Map<string, number>();\nm.set("a", 1);\nconsole.log(m.has("a"));\n' },
   { id: "stdlib.date.now", source: "console.log(Date.now() > 0);\n" },
   { id: "stdlib.number.toFixed", source: "const n = 1.2345;\nconsole.log(n.toFixed(2));\n" },
+  { id: "stdlib.abort-signal.timeout", source: "const signal = AbortSignal.timeout(1000);\nconsole.log(signal.aborted);\n" },
   { id: "node-builtin.process.pid", source: "console.log(process.pid > 0);\n" },
   { id: "node-builtin.perf_hooks.performance.now", source: "console.log(performance.now() >= 0);\n" },
   { id: "node-builtin.path.join", source: 'import { join } from "node:path";\nconsole.log(join("a", "b"));\n' },

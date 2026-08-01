@@ -16,6 +16,33 @@ A fifth lane covers LIBRARY MODE across targets: `SCRIPTC_CROSS=1 pnpm exec vite
 
 Iterate filtered, gate full: while developing, run just what you're touching (`pnpm exec vitest run tests/harness/differential.test.ts -t <name>` or a single test file); run the full lanes (`pnpm test`, then `SCRIPTC_SAN=1 pnpm test`) as the gate before committing.
 
+### Fetch compatibility profile
+
+The engine-free fetch/Web Streams slice has one versioned source of truth in
+`packages/compiler/src/compat/fetch-profile.ts`. It pins the exact Node and
+bundled Undici oracle, drives the lowering allowlists, projects every supported
+operation into `packages/compiler/surface-manifest.json`, and names the
+differential evidence for each operation and `RequestInit` member. A new row
+without a real fixture or registered generated scenario fails the profile
+suite.
+
+`pnpm test:fetch-conformance` generates a program from that profile and runs it
+under the pinned Node plus both native backends. The default seed exercises
+WebIDL argument conversion/order, AbortSignal events, and twelve valid
+ReadableStream state-machine traces. Reproduce or widen a campaign with:
+
+```bash
+SCRIPTC_FETCH_CONFORMANCE_SEED=12345 \
+SCRIPTC_FETCH_CONFORMANCE_TRACES=50 \
+pnpm test:fetch-conformance
+```
+
+When Node changes, update `.node-version` and the profile's Node/Undici tuple
+together, regenerate with `pnpm manifest`, then run the focused plain and
+sanitized conformance lanes before the full sandbox gate. When the static fetch
+surface changes, update the profile first; its evidence check makes the missing
+fixture or generated scenario the implementation worklist.
+
 Full-suite runs (`vitest run` with no filters) take an advisory machine-wide lock (a pidfile in the OS temp dir) so concurrent full suites — typically parallel agents — queue instead of oversubscribing the CPU, which is a known flake source (vitest worker RPC timeouts, event-loop timing failures). The lock is per flavor (plain vs `SCRIPTC_SAN=1`): the two lanes read the same committed tree through separate cache directories, so a merge gate may deliberately run one of each concurrently — split the cores between them with `SCRIPTC_TEST_WORKERS` (e.g. 5 and 5) or the oversubscription flakes come back. Two runs of the SAME flavor still queue. Filtered and watch runs never wait. `SCRIPTC_NO_LOCK=1` opts out; stale locks from dead processes are stolen automatically. `SCRIPTC_TEST_WORKERS=<n>` caps the vitest worker pool (default: unchanged, all cores).
 
 ## Build and oracle caches
