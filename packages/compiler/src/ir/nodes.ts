@@ -1612,6 +1612,20 @@ export type IrRegexIntrinsicMethod =
  * assume the island runtime is linked when they see it; island exceptions
  * bridge into the exception cell as catchable strings (may-throw). */
 export type IrLibFn =
+  /** Native static fetch and its Web-platform companions. fetch.start
+   * answers once the response head arrives; the response body readers
+   * consume the native body stream. AbortSignal and ReadableStream values
+   * are opaque checked-dynamic handles. */
+  | "fetch.start"
+  | "fetch.responseJson"
+  | "fetch.responseText"
+  | "fetch.responseBytes"
+  | "fetch.abortTimeout"
+  | "fetch.abortNow"
+  | "fetch.abortAny"
+  | "fetch.streamNew"
+  | "fetch.streamFrom"
+  | "fetch.readerRead"
   | "island.eval"
   /** Load an embedded npm package's runtime entry in the island (cached by
    * the engine's module registry) and take one export: args are the entry
@@ -4446,8 +4460,13 @@ export type IrExpr =
    * TypeError), the interned signature key (dynCheck's exact-unwrap fast
    * path), and `fnName` — the best-effort static spelling for inspect
    * ([Function: name]) and Node-shaped call errors. The operand is
-   * borrowed; the result is owned (+1). Never throws. */
-  | { kind: "dynFrom"; value: IrExpr; fnName?: string; type: IrType; loc: SrcLoc }
+   * borrowed; the result is owned (+1). Never throws. `liveRef` is the
+   * narrow Web-platform exception for record/array/bytes values (including
+   * mutable arms selected at runtime from a union) whose API contract
+   * exposes the same reference again (stream chunks and abort reasons): it
+   * emits a typed capsule with a live materializer instead of the ordinary
+   * deep copy. */
+  | { kind: "dynFrom"; value: IrExpr; fnName?: string; liveRef?: true; type: IrType; loc: SrcLoc }
   /** Island value → dyn conversion (`type` is always dyn; the operand
    * is always jsval): the jsval→dyn crossing — an 'any'-typed engine
    * value flowing into an 'unknown'/'object'/JS-residue slot wraps BY
@@ -5304,13 +5323,12 @@ export function canConvertToDyn(
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
   if (isJsonSafeType(t, getRecord, getUnion)) return true;
-  // bytes<u8> is a dyn kind the walker boxes ANYWHERE (payload copied),
-  // including nested in records/arrays/unions — the tls/https options
-  // record's cert/key/ca Buffers. isJsonSafeType rejects nested bytes
-  // (no JSON-exact round trip), but dynFrom needs only that the walker
-  // can build the dyn value, which it can — so canConvertToDyn folds the
-  // bytes-bearing composites in beyond the JSON-safe core.
-  if (canBoxBytesComposite(t, getRecord, getUnion)) return true;
+  // bytes<u8> and boxable functions are dyn kinds the walker boxes
+  // ANYWHERE (bytes copied, functions held by identity), including nested
+  // in records/arrays/unions. isJsonSafeType rejects them, but dynFrom
+  // needs only that the walker can build the dyn value, so this composite
+  // fold extends the JSON-safe core.
+  if (canBoxDynComposite(t, getRecord, getUnion)) return true;
   if (t.kind === "bytes" && t.elem === "u8") return true;
   // %Error converts as the checked-dynamic tree's error encoding ({%error, name, message,
   // code?} — the caughtToDyn shape, scr_dyn_from_error): the dyn 'error'
@@ -5345,13 +5363,13 @@ export function canConvertToDyn(
   return false;
 }
 
-/** The bytes-bearing extension of the dynFrom domain: JSON-safe scalars
- * plus bytes<u8> anywhere, recursing through records (fields + index
- * value), arrays, and unit-armed unions — exactly the sc_td_* walker's
- * capability for the tls/https options-record shapes. Returns false for
- * a composite carrying any kind the walker cannot box (funcs, Maps,
- * handles nested in a record); those still fence. */
-function canBoxBytesComposite(
+/** The composite extension of the dynFrom domain: JSON-safe scalars plus
+ * bytes<u8> and boxable functions anywhere, recursing through records
+ * (fields + index value), arrays, and unit-armed unions — exactly the
+ * sc_td_* walker's capability. Returns false for a composite carrying a
+ * kind the walker cannot box (Maps or handles nested in a record); those
+ * still fence. */
+function canBoxDynComposite(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
@@ -5367,23 +5385,25 @@ function canBoxBytesComposite(
       return true;
     case "bytes":
       return t.elem === "u8";
+    case "func":
+      return canBoxFuncIntoDyn(t, getRecord, getUnion);
     case "array":
-      return canBoxBytesComposite(t.elem, getRecord, getUnion, visiting);
+      return canBoxDynComposite(t.elem, getRecord, getUnion, visiting);
     case "record": {
       const shape = getRecord(t.shapeId);
       if (!shape) return false;
       // Recursive shapes answer coinductively, like isJsonSafeType.
       if (visiting.has(t.shapeId)) return true;
       visiting.add(t.shapeId);
-      if (!shape.fields.every((f) => canBoxBytesComposite(f.type, getRecord, getUnion, visiting))) return false;
-      return !shape.indexValue || canBoxBytesComposite(shape.indexValue, getRecord, getUnion, visiting);
+      if (!shape.fields.every((f) => canBoxDynComposite(f.type, getRecord, getUnion, visiting))) return false;
+      return !shape.indexValue || canBoxDynComposite(shape.indexValue, getRecord, getUnion, visiting);
     }
     case "union": {
       const def = getUnion(t.unionId);
       if (!def) return false;
       if (visiting.has(t.unionId)) return true;
       visiting.add(t.unionId);
-      return def.arms.every((a) => canBoxBytesComposite(a, getRecord, getUnion, visiting));
+      return def.arms.every((a) => canBoxDynComposite(a, getRecord, getUnion, visiting));
     }
     default:
       return false;
@@ -5597,18 +5617,18 @@ export function moduleUsesCopying(mod: IrModule): boolean {
   return found;
 }
 
-/** True when the embedded npm graph references fetch — the link switch
- * that pulls scr_fetch.c + its socket/tls/zlib dependencies into the binary (cc.ts) and
- * has the emitted main call scr_fetch_install. A word-boundary scan over
- * the embedded SOURCES, erring toward linking: a false positive costs one
- * dylib reference; a false negative would leave embedded code without the
- * global at runtime. Static builds and fetch-free graphs keep their exact
- * historical link lines. */
+/** True when user code lowers static fetch or the embedded npm graph
+ * references dynamic fetch — the link switch that pulls scr_fetch.c +
+ * its socket/tls/zlib dependencies into the binary (cc.ts) and has the
+ * emitted main call scr_fetch_install. For embedded sources, use a
+ * word-boundary scan and err toward linking: a false positive costs one
+ * dylib reference; a false negative would leave embedded code without
+ * the global at runtime. Fetch-free graphs keep their exact historical
+ * link lines. */
 export function moduleUsesFetch(mod: IrModule): boolean {
   const embedded = mod.embedded;
   if (embedded && embedded.modules.some((m) => /\bfetch\b/.test(m.source))) return true;
-  // USER-code fetch (the island-backed ambient): its lowering reads the
-  // engine's fetch global — the same jsOp walk shape as moduleUsesZlib.
+  // User-code fetch is either the engine global or the static libCall pair.
   let found = false;
   const visit = (v: unknown): void => {
     if (found || v === null || typeof v !== "object") return;
@@ -5616,8 +5636,12 @@ export function moduleUsesFetch(mod: IrModule): boolean {
       for (const item of v) visit(item);
       return;
     }
-    const node = v as { kind?: unknown; op?: unknown; name?: unknown };
-    if (node.kind === "jsOp" && node.op === "globalGet" && node.name === "fetch") {
+    const node = v as { kind?: unknown; op?: unknown; name?: unknown; fn?: unknown };
+    if (
+      (node.kind === "jsOp" && node.op === "globalGet" && node.name === "fetch") ||
+      (node.kind === "libCall" &&
+        typeof node.fn === "string" && node.fn.startsWith("fetch."))
+    ) {
       found = true;
       return;
     }
@@ -6514,6 +6538,10 @@ export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "fetch.abortTimeout",
+  "fetch.abortAny",
+  "fetch.streamNew",
+  "fetch.streamFrom",
   "num.toFixed",
   "insp.jsonDyn",
   // diagnostics_channel: publish runs subscribers synchronously (a throw

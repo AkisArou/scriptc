@@ -83,6 +83,20 @@ export const REGEX_INTRINSIC_SIGS: Record<
  * the libCall case checks it specially, like process.envGet's result.
  * Exported for the frontend's lib-boundary pass (lib-boundary.ts). */
 export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result: IrType }> = {
+  "fetch.start": { argTypes: [STRING, DYN], result: { kind: "promise", inner: DYN } },
+  "fetch.responseJson": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
+  "fetch.responseText": { argTypes: [DYN], result: { kind: "promise", inner: STRING } },
+  "fetch.responseBytes": { argTypes: [DYN], result: { kind: "promise", inner: BYTES_U8 } },
+  "fetch.abortTimeout": { argTypes: [DYN], result: DYN },
+  "fetch.abortNow": { argTypes: [DYN], result: DYN },
+  "fetch.abortAny": { argTypes: [DYN], result: DYN },
+  "fetch.streamNew": { argTypes: [DYN], result: DYN },
+  // Program-dependent iterable: typed arrays/bytes/string stay intact so
+  // the native stream can pull lazily; checked-dynamic values are the
+  // fallback. The libCall validator below checks the closed set.
+  "fetch.streamFrom": { argTypes: [null], result: DYN },
+  // The chunk/result record depends on ReadableStream<T>; validated below.
+  "fetch.readerRead": { argTypes: [DYN], result: VOID },
   "island.eval": { argTypes: [STRING], result: STRING },
   "island.import": { argTypes: [STRING, STRING, STRING], result: JSVAL },
   "island.importDyn": { argTypes: [STRING], result: JSVAL },
@@ -1614,6 +1628,24 @@ function validateFunction(
   // the body of the optChain whose id it names.
   const activeChains = new Map<string, IrType>();
 
+  const liveDynRefEligible = (
+    type: IrType,
+    seen = new Set<string>(),
+  ): boolean => {
+    if (
+      type.kind === "record" ||
+      type.kind === "array" ||
+      type.kind === "bytes"
+    ) {
+      return true;
+    }
+    if (type.kind !== "union" || seen.has(type.unionId)) return false;
+    seen.add(type.unionId);
+    return unions.get(type.unionId)?.arms.some((arm) =>
+      liveDynRefEligible(arm, seen)
+    ) ?? false;
+  };
+
   function checkExpr(e: IrExpr): void {
     switch (e.kind) {
       case "numLit":
@@ -3004,6 +3036,9 @@ function validateFunction(
         if (!canConvertToDyn(vt, (id) => records.get(id), (id) => unions.get(id))) {
           err(`dynFrom of non-dyn-convertible type ${vt.kind}`, e.loc);
         }
+        if (e.liveRef && !liveDynRefEligible(vt)) {
+          err(`live dynFrom of unsupported type ${vt.kind}`, e.loc);
+        }
         break;
       }
       case "dynFromJsval": {
@@ -3440,6 +3475,35 @@ function validateFunction(
           const want = sig.argTypes[i];
           if (want) expectType(a, want, `libCall ${e.fn} arg ${i}`);
         });
+        if (e.fn === "fetch.streamFrom") {
+          const t = e.args[0]?.type;
+          const ok =
+            t?.kind === "string" ||
+            (t?.kind === "bytes" && t.elem === "u8") ||
+            (t?.kind === "array" &&
+              canConvertToDyn(
+                t.elem,
+                (id) => records.get(id),
+                (id) => unions.get(id),
+              )) ||
+            t?.kind === "dyn";
+          if (!ok) {
+            err(
+              `libCall fetch.streamFrom arg 0: expected a supported iterable, got ${t?.kind}`,
+              e.loc,
+            );
+          }
+          break;
+        }
+        if (e.fn === "fetch.readerRead") {
+          if (e.type.kind !== "promise" || e.type.inner.kind !== "record") {
+            err(
+              `libCall fetch.readerRead must return a promise of a read-result record`,
+              e.loc,
+            );
+          }
+          break;
+        }
         if (e.fn === "string.fromCharCode") {
           // One packed f64[] or one bytes value (the spread form).
           const t = e.args[0]?.type;

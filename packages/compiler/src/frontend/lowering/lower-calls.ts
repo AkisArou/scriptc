@@ -3943,6 +3943,12 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // compile-time-known, so a literal key folds to a constant.
         lowerClassHasOwnPropertyCall(L, expr, expr.expression) ??
         L.lowerIslandMethodCall(expr, expr.expression) ??
+        // Static fetch responses are checked-dynamic handles, but the
+        // adopted undici declaration exposes a wider API than that handle.
+        // Fence the unimplemented members before the generic dyn receiver
+        // path would compile them into a runtime missing-method failure.
+        L.fenceStaticResponseMember(expr.expression, "call") ??
+        L.fenceStaticReadableStreamMember(expr.expression, "call") ??
         // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
         // validated-extract, then the static machinery. After the island
         // path (jsval receivers belong there), before the fences.
@@ -4035,6 +4041,13 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         }
       }
       L.unsupported("SC1090", expr, `method calls like '${expr.expression.getText()}'`);
+    }
+
+    // The element spelling of an unsupported native Web method must fence
+    // before lowering the callee into a checked-dynamic keyed read.
+    if (ts.isElementAccessExpression(expr.expression)) {
+      L.fenceStaticResponseMember(expr.expression, "call");
+      L.fenceStaticReadableStreamMember(expr.expression, "call");
     }
 
     // The ELEMENT spelling of a primitive method call — `x['toString']()`,
@@ -4466,6 +4479,7 @@ export const DYN_DISPATCH_METHODS = new Set([
   "setEncoding", "setDefaultEncoding", "setTimeout", "read", "isPaused",
   "writeHead", "setHeader", "getHeader", "hasHeader", "removeHeader",
   "getHeaders", "getHeaderNames", "appendHeader", "flushHeaders",
+  "append", "delete", "get", "getSetCookie", "has", "set",
   "writeContinue", "writeEarlyHints", "cork", "uncork", "addTrailers",
   "ref", "unref", "address", "setNoDelay", "setKeepAlive", "connect",
   "resetAndDestroy", "destroySoon",
@@ -4478,6 +4492,15 @@ export const DYN_DISPATCH_METHODS = new Set([
   // server ops; no other dyn prototype declares either name, so the
   // remainder keeps the stored-member answers.
   "listen", "close",
+  // The native WHATWG readable-stream and AbortSignal handles used by
+  // static fetch. These route through SCR_DYN_HANDLE dispatch just like
+  // the http/net names above.
+  "getReader", "cancel", "releaseLock", "enqueue", "error",
+  "throwIfAborted", "addEventListener", "removeEventListener",
+  "dispatchEvent",
+  "preventDefault", "stopPropagation", "stopImmediatePropagation",
+  "composedPath",
+  "json", "text", "bytes",
   // Promise.prototype (SCR_DYN_PROMISE receivers): the reaction trio
   // rides the fiber machinery (scr_dyn_promise_then); on every other dyn
   // kind then/catch/finally answer the stored-member path (OBJ own

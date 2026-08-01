@@ -1728,6 +1728,8 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // The lib fence's PROPERTY chokepoint: a stdlib-declared member that
       // no lowering above claimed ([1,2].entries, Math.SQRT2, Promise.all,
       // re.exec as a value, ...) reports SC2020 here.
+      L.fenceStaticResponseMember(expr, "read");
+      L.fenceStaticReadableStreamMember(expr, "read");
       L.stdlibMemberFence(expr);
       // The npm chokepoint: a member on a package-typed receiver in a
       // static build — attributed to the package, like every other site.
@@ -3882,11 +3884,15 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     const loc = locOf(expr);
     const fields: { key: IrExpr; value: IrExpr }[] = [];
     for (const prop of expr.properties) {
-      if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) {
+      if (
+        !ts.isPropertyAssignment(prop) &&
+        !ts.isShorthandPropertyAssignment(prop) &&
+        !ts.isMethodDeclaration(prop)
+      ) {
         L.unsupported(
           "SC1090",
           prop,
-          "spreads, accessors, and methods in a runtime-keyed (computed-key) object literal",
+          "spreads and accessors in a runtime-keyed (computed-key) object literal",
         );
       }
       const name = prop.name;
@@ -3916,16 +3922,24 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       } else {
         L.unsupported("SC1090", prop, "non-identifier property names");
       }
-      const valueExpr = ts.isShorthandPropertyAssignment(prop) ? (prop.name as ts.Identifier) : prop.initializer;
+      const valueExpr: ts.Node = ts.isMethodDeclaration(prop)
+        ? prop
+        : ts.isShorthandPropertyAssignment(prop)
+          ? (prop.name as ts.Identifier)
+          : prop.initializer;
       // Lambda values that fail to lower become trap closures (the
       // per-call fence granularity — fenceClosureProbe) so the object
       // still builds; everything else keeps the per-property fence below.
       let raw: IrExpr;
       const propDiagsBefore = L.diags.length;
       try {
+        const lowerValue = (): IrExpr =>
+          ts.isMethodDeclaration(prop)
+            ? (L.rejectThisInObjectMethod(prop.body ?? prop), L.lowerLambda(prop))
+            : L.lowerExpr(valueExpr as ts.Expression);
         raw =
-          fenceClosureProbe(L, valueExpr, undefined, () => L.lowerExpr(valueExpr)) ??
-          L.lowerExpr(valueExpr);
+          fenceClosureProbe(L, valueExpr, undefined, lowerValue) ??
+          lowerValue();
       } catch (err) {
         // A PURE member read a JS file cannot lower (a namespace object
         // in an export aggregate): the slot takes a boxed fence closure —
@@ -5583,6 +5597,12 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const en = lowerEnumAccess(L, expr);
       if (en) return en;
     }
+    // Native Web handles use the same supported surface for bracket and dot
+    // spellings. Fence a statically-known unsupported key before the generic
+    // checked-dynamic element-read path can turn it into a runtime missing
+    // member.
+    L.fenceStaticResponseMember(expr, "read");
+    L.fenceStaticReadableStreamMember(expr, "read");
     // `globalThis[<expr>]` — the dynamic global probe (the harness's
     // conditional-globals sweep): a compiled binary's globals are
     // compile-time bindings, not runtime properties, and none of the

@@ -4,12 +4,12 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
+import { BYTES_U8, DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canConvertToDyn, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
-import { pureReemittable } from "./lower-exprs.js";
-import { PoisonError, newFnCtx, own } from "./lowerer.js";
+import { lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
+import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 
 /** True iff the checker's type for this node maps to jsval ('any') —
    * the island test in front of every engine-op lowering (receivers,
@@ -229,8 +229,71 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     return entry;
   }
 
-/** USER-code `fetch(url)` / `fetch(url, init)` — the island-backed ambient
-   * global (provenance, not the name: a user's own `fetch` never matches).
+const STATIC_REQUEST_INIT_KEYS = new Set([
+  "method",
+  "headers",
+  "body",
+  "duplex",
+  "redirect",
+  "signal",
+]);
+
+function requestInitLiteralKey(
+  prop: ts.ObjectLiteralElementLike,
+): string | null {
+  if (
+    !ts.isPropertyAssignment(prop) &&
+    !ts.isShorthandPropertyAssignment(prop) &&
+    !ts.isMethodDeclaration(prop)
+  ) {
+    return null;
+  }
+  const name = prop.name;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return String(Number(name.text));
+  if (ts.isComputedPropertyName(name)) {
+    const value = name.expression;
+    if (ts.isStringLiteral(value)) return value.text;
+    if (ts.isNumericLiteral(value)) return String(Number(value.text));
+  }
+  return null;
+}
+
+/** Fence declared RequestInit members outside the native static slice.
+ * Computed runtime keys and non-literal objects are validated again by
+ * scr_fetch_static, so no unsupported option can be silently discarded. */
+function fenceStaticRequestInitLiteral(
+  L: Lowerer,
+  init: ts.ObjectLiteralExpression,
+): void {
+  const contextual = L.checker.getContextualType(init);
+  for (const prop of init.properties) {
+    const key = requestInitLiteralKey(prop);
+    if (key === null || STATIC_REQUEST_INIT_KEYS.has(key)) continue;
+    const contextualArms =
+      contextual?.isUnionType() ? contextual.getTypes() : contextual ? [contextual] : [];
+    const sym = contextualArms
+      .map((arm) => L.checker.getPropertyOfType(arm, key))
+      .find((member) => member !== undefined);
+    L.noLowering(
+      `RequestInit option '${key}' in a static build`,
+      prop,
+      "the native static RequestInit surface is method, headers, body, duplex, redirect, and signal; use --dynamic for the wider fetch options",
+      sym,
+    );
+  }
+}
+
+/** USER-code `fetch(url)` / `fetch(url, init)` — the ambient global
+   * (provenance, not the name: a user's own `fetch` never matches).
+   *
+   * The static tier owns URL requests directly: scr_fetch_static runs
+   * over the native net/http/tls stack, consumes a checked-dynamic
+   * RequestInit object, and returns a promise of an opaque native
+   * Response handle. AbortSignal and readable Web Streams are native
+   * checked-dynamic handles too, so cancellation and streaming bodies
+   * stay engine-free.
+   *
    * The engine's own fetch executes (the same one embedded npm code calls —
    * scr_fetch.c over the native net/tls stack): the url marshals in (strings; template
    * results), an init OBJECT LITERAL builds natively in the island through
@@ -241,17 +304,85 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
    * fiber like any await and resumes with the Response HANDLE. Member
    * reads/calls on the handle are engine ops; typed extraction happens at
    * the user's narrowing sites through the validated-exit machinery.
-   * Without --dynamic every call site is its own SC2012. Null for
-   * anything that isn't THE ambient fetch, so lowerCall keeps trying. */
+   * Null for anything that isn't THE ambient fetch, so lowerCall keeps
+   * trying. */
   export function lowerFetchCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
     const callee = call.expression;
     if (!ts.isIdentifier(callee) || callee.text !== "fetch") return null;
     if (call.questionDotToken) return null;
     const symbol = L.resolveValueSymbol(callee);
     if (!symbol || !L.isStdlibSymbol(symbol)) return null;
-    if (call.arguments.length < 1 || call.arguments.length > 2) return null;
-    L.requireDynamicApi("'fetch'", call);
+    if (call.arguments.length < 1) return null;
     const loc = locOf(call);
+    if (!L.dynamic) {
+      const inputNode = call.arguments[0]!;
+      const input = L.lowerExpr(inputNode);
+      const initNode = call.arguments[1];
+      let init: IrExpr;
+      if (initNode === undefined) {
+        init = dynUndefinedExpr(loc);
+      } else if (ts.isObjectLiteralExpression(initNode)) {
+        fenceStaticRequestInitLiteral(L, initNode);
+        init = lowerDynObjectLiteral(L, initNode);
+      } else {
+        init = L.lowerExprExpecting(initNode, DYN);
+      }
+
+      // Calling a WebIDL operation has two distinct phases: JavaScript
+      // first evaluates every argument expression, then the callee converts
+      // those values. In particular, evaluating RequestInit may mutate a
+      // URL object passed as input; its href must not be snapshotted until
+      // all argument expressions (including ignored surplus ones) ran.
+      const inputLocal = L.declareHiddenLocal("%fetchInput", input.type);
+      const initLocal = L.declareHiddenLocal("%fetchInit", init.type);
+      const inputRef: IrExpr = {
+        kind: "varRef",
+        localId: inputLocal.id,
+        type: input.type,
+        loc: locOf(inputNode),
+      };
+      const initRef: IrExpr = {
+        kind: "varRef",
+        localId: initLocal.id,
+        type: init.type,
+        loc,
+      };
+      const stmts: IrStmt[] = [
+        { kind: "varDecl", localId: inputLocal.id, init: input, loc },
+        { kind: "varDecl", localId: initLocal.id, init, loc },
+      ];
+      for (const argument of call.arguments.slice(2)) {
+        if (ts.isSpreadElement(argument)) {
+          L.noLowering(
+            "spread surplus arguments on static fetch()",
+            argument,
+            "pass surplus arguments without spread syntax",
+          );
+        }
+        const discarded = ts.isVoidExpression(argument)
+          ? L.lowerExpr(argument.expression)
+          : L.lowerExpr(argument);
+        stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
+      }
+      const url: IrExpr =
+        input.type.kind === "url"
+          ? {
+              kind: "libCall",
+              fn: "url.href",
+              args: [inputRef],
+              type: STRING,
+              loc: locOf(inputNode),
+            }
+          : L.coerceInto(inputNode, inputRef, STRING);
+      const answer: IrExpr = {
+        kind: "libCall",
+        fn: "fetch.start",
+        args: [url, initRef],
+        type: { kind: "promise", inner: DYN },
+        loc,
+      };
+      return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
+    }
     const fetchFn: IrExpr = { kind: "jsOp", op: "globalGet", name: "fetch", args: [], type: JSVAL, loc };
     // Init OBJECT LITERALS build natively in the island (the general
     // 'any'-contextual literal path can't claim them: the optional param's
@@ -266,6 +397,566 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
     const raw: IrExpr = { kind: "jsOp", op: "callFn", args: [fetchFn, ...args], type: JSVAL, loc };
     return { kind: "jsBridgePromise", value: raw, type: { kind: "promise", inner: JSVAL }, loc };
   }
+
+/** Static Response.json(): consume the native Response's readable body
+ * stream and parse its UTF-8 payload into the ordinary checked-dynamic
+ * JSON tree. Syntax and stream failures reject at await like the web API. */
+export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    (!ts.isPropertyAccessExpression(call.expression) &&
+      !ts.isElementAccessExpression(call.expression))
+  ) {
+    return null;
+  }
+  const access = call.expression;
+  const member = staticResponseMemberName(L, access);
+  if (
+    access.questionDotToken ||
+    (member !== "json" &&
+      member !== "text" &&
+      member !== "bytes" &&
+      member !== "arrayBuffer") ||
+    call.arguments.length !== 0
+  ) {
+    return null;
+  }
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
+  if (member === "arrayBuffer") {
+    L.noLowering(
+      "Response.arrayBuffer() in a static build",
+      call,
+      "use Response.bytes() for the native Uint8Array body; free-standing ArrayBuffer values have no static representation",
+      sym,
+    );
+  }
+  const recv = L.lowerExpr(access.expression);
+  if (recv.type.kind !== "dyn") return null;
+  if (member === "text" || member === "bytes") {
+    return {
+      kind: "libCall",
+      fn: member === "text" ? "fetch.responseText" : "fetch.responseBytes",
+      args: [recv],
+      type: { kind: "promise", inner: member === "text" ? STRING : BYTES_U8 },
+      loc: locOf(call),
+    };
+  }
+  return {
+    kind: "libCall",
+    fn: "fetch.responseJson",
+    args: [recv],
+    type: { kind: "promise", inner: DYN },
+    loc: locOf(call),
+  };
+}
+
+const STATIC_RESPONSE_READS = new Set([
+  "ok",
+  "status",
+  "statusText",
+  "url",
+  "redirected",
+  "headers",
+  "body",
+  "bodyUsed",
+]);
+
+const STATIC_RESPONSE_CALLS = new Set(["json", "text", "bytes"]);
+
+const STATIC_READABLE_STREAM_READS = new Set(["locked"]);
+
+const STATIC_READABLE_STREAM_CALLS = new Set(["cancel", "getReader"]);
+
+type StaticResponseAccess =
+  | ts.PropertyAccessExpression
+  | ts.ElementAccessExpression;
+
+function staticResponseMemberName(
+  L: Lowerer,
+  access: StaticResponseAccess,
+): string | null {
+  if (ts.isPropertyAccessExpression(access)) return access.name.text;
+  const key = L.typeOf(access.argumentExpression);
+  return key.isStringLiteralType() ? key.value : null;
+}
+
+function hasLiveWebMutableArm(L: Lowerer, type: IrType): boolean {
+  if (
+    type.kind === "record" ||
+    type.kind === "array" ||
+    type.kind === "bytes"
+  ) {
+    return true;
+  }
+  if (type.kind !== "union") return false;
+  return L.unions.get(type.unionId)?.arms.some((arm) =>
+    hasLiveWebMutableArm(L, arm)
+  ) ?? false;
+}
+
+/** Box mutable data for Web API slots that expose the exact JavaScript
+ * value again. Ordinary dynFrom remains the documented copy boundary;
+ * this capsule is deliberately limited to records/arrays/bytes (including
+ * those selected at runtime from a union) that the live materializer can
+ * snapshot and commit. */
+function lowerLiveWebValue(L: Lowerer, node: ts.Expression): IrExpr {
+  const value = L.lowerExpr(node);
+  if (
+    hasLiveWebMutableArm(L, value.type) &&
+    canConvertToDyn(
+      value.type,
+      (id) => L.shapes.get(id),
+      (id) => L.unions.get(id),
+    )
+  ) {
+    return {
+      kind: "dynFrom",
+      value,
+      liveRef: true,
+      type: DYN,
+      loc: value.loc,
+    };
+  }
+  return L.coerceInto(node, value, DYN);
+}
+
+/** The adopted undici Response declaration is wider than the native static
+ * handle. Keep the supported fallback slice on checked-dynamic dispatch, but
+ * fence every other declared member before the generic dyn keyed-read/call
+ * paths can turn a missing handle operation into a runtime TypeError. */
+export function fenceStaticResponseMember(
+  L: Lowerer,
+  access: StaticResponseAccess,
+  use: "read" | "call",
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
+  const member = staticResponseMemberName(L, access);
+  if (member === null) return null;
+  const supported =
+    use === "call"
+      ? STATIC_RESPONSE_CALLS.has(member)
+      : STATIC_RESPONSE_READS.has(member);
+  if (supported) return null;
+  L.noLowering(
+    `Response.${member} in a static build`,
+    access,
+    "the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API",
+    sym,
+  );
+}
+
+/** The fallback ambient declaration intentionally exposes only the native
+ * stream slice, but @types/node adopts the complete WHATWG ReadableStream
+ * interface. Fence that wider surface before its checked-dynamic handle can
+ * fall through to a runtime missing-method error. */
+export function fenceStaticReadableStreamMember(
+  L: Lowerer,
+  access: StaticResponseAccess,
+  use: "read" | "call",
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "ReadableStream" || !L.isStdlibSymbol(sym)) {
+    return null;
+  }
+  const member = staticResponseMemberName(L, access);
+  if (member === null) return null;
+  const supported =
+    use === "call"
+      ? STATIC_READABLE_STREAM_CALLS.has(member)
+      : STATIC_READABLE_STREAM_READS.has(member);
+  if (supported) return null;
+  L.noLowering(
+    `ReadableStream.${member} in a static build`,
+    access,
+    "the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API",
+    sym,
+  );
+}
+
+/** Static AbortSignal constructors and ReadableStream.from(). These
+ * ambient globals have no first-class constructor-object representation;
+ * claim the direct calls by declaration provenance before the general
+ * member-call path tries to lower the receiver as a value. */
+function staticCallWithSurplusArgs(
+  L: Lowerer,
+  call: ts.CallExpression,
+  first: IrExpr,
+  result: (first: IrExpr) => IrExpr,
+): IrExpr {
+  const loc = locOf(call);
+  if (call.arguments.length === 1) return result(first);
+  const firstLocal = L.declareHiddenLocal("%fetchArg", first.type);
+  const firstRef = (): IrExpr => ({
+    kind: "varRef",
+    localId: firstLocal.id,
+    type: first.type,
+    loc,
+  });
+  const stmts: IrStmt[] = [
+    { kind: "varDecl", localId: firstLocal.id, init: first, loc },
+  ];
+  for (const argument of call.arguments.slice(1)) {
+    if (ts.isSpreadElement(argument)) {
+      L.noLowering(
+        "spread surplus arguments on the static fetch companion APIs",
+        argument,
+        "pass surplus arguments without spread syntax",
+      );
+    }
+    // The callee ignores the value, but JavaScript still evaluates every
+    // surplus argument in source order. A direct void has the operand's
+    // effects and no additional work of its own.
+    const discarded = ts.isVoidExpression(argument)
+      ? L.lowerExpr(argument.expression)
+      : L.lowerExpr(argument);
+    stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
+  }
+  const answer = result(firstRef());
+  return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
+}
+
+export function lowerStaticFetchCompanionCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    !ts.isPropertyAccessExpression(call.expression) ||
+    call.expression.questionDotToken ||
+    !ts.isIdentifier(call.expression.expression)
+  ) {
+    return null;
+  }
+  const root = call.expression.expression;
+  const symbol = L.resolveValueSymbol(root);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const loc = locOf(call);
+  if (root.text === "AbortSignal") {
+    switch (call.expression.name.text) {
+      case "timeout":
+        if (call.arguments[0] && ts.isSpreadElement(call.arguments[0])) {
+          return null;
+        }
+        return staticCallWithSurplusArgs(
+          L,
+          call,
+          call.arguments[0]
+            ? L.lowerExprExpecting(call.arguments[0], DYN)
+            : dynUndefinedExpr(loc),
+          (first) => ({
+            kind: "libCall",
+            fn: "fetch.abortTimeout",
+            args: [first],
+            type: DYN,
+            loc,
+          }),
+        );
+      case "abort":
+        if (call.arguments.length === 0) {
+          return {
+            kind: "libCall",
+            fn: "fetch.abortNow",
+            args: [dynUndefinedExpr(loc)],
+            type: DYN,
+            loc,
+          };
+        }
+        if (ts.isSpreadElement(call.arguments[0]!)) return null;
+        return staticCallWithSurplusArgs(
+          L,
+          call,
+          lowerLiveWebValue(L, call.arguments[0]!),
+          (first) => ({
+            kind: "libCall",
+            fn: "fetch.abortNow",
+            args: [first],
+            type: DYN,
+            loc,
+          }),
+        );
+      case "any":
+        if (call.arguments[0] && ts.isSpreadElement(call.arguments[0])) {
+          return null;
+        }
+        return staticCallWithSurplusArgs(
+          L,
+          call,
+          call.arguments[0]
+            ? L.lowerExprExpecting(call.arguments[0], DYN)
+            : dynUndefinedExpr(loc),
+          (first) => ({
+            kind: "libCall",
+            fn: "fetch.abortAny",
+            args: [first],
+            type: DYN,
+            loc,
+          }),
+        );
+      default:
+        return null;
+    }
+  }
+  if (
+    root.text === "ReadableStream" &&
+    call.expression.name.text === "from" &&
+    (!call.arguments[0] || !ts.isSpreadElement(call.arguments[0]))
+  ) {
+    if (!call.arguments[0]) {
+      return {
+        kind: "libCall",
+        fn: "fetch.streamFrom",
+        args: [dynUndefinedExpr(loc)],
+        type: DYN,
+        loc,
+      };
+    }
+    let source = L.lowerExpr(call.arguments[0]!);
+    // A readonly tuple satisfies the fallback's readonly-array overload,
+    // but maps to a monomorphic record in IR. Reuse the ordinary
+    // tuple→array width conversion with the resolved generic parameter so
+    // `ReadableStream.from([1, 2] as const)` follows every other tuple
+    // flowing into a readonly T[] slot.
+    if (source.type.kind === "record") {
+      const signature = L.checker.getResolvedSignature(call);
+      const iterableParam = signature?.getParameters()[0];
+      const iterableType = iterableParam
+        ? L.mapTypeOf(L.checker.getTypeOfSymbol(iterableParam))
+        : null;
+      if (iterableType?.kind === "array") {
+        source = L.widthCoerce(source, iterableType) ?? source;
+      }
+    }
+    const preserve =
+      source.type.kind === "string" ||
+      (source.type.kind === "bytes" && source.type.elem === "u8") ||
+      (source.type.kind === "array" &&
+        canConvertToDyn(
+          source.type.elem,
+          (id) => L.shapes.get(id),
+          (id) => L.unions.get(id),
+        )) ||
+      source.type.kind === "dyn";
+    if (!preserve) {
+      L.noLowering(
+        `ReadableStream.from() over ${L.checker.typeToString(L.typeOf(call.arguments[0]!))} iterables`,
+        call.arguments[0]!,
+        "arrays, Uint8Array, and strings are supported — spread other synchronous iterables into an array first: [...iterable]",
+      );
+    }
+    return staticCallWithSurplusArgs(L, call, source, (first) => ({
+      kind: "libCall",
+      fn: "fetch.streamFrom",
+      // Arrays and bytes must cross by reference: their iterators read each
+      // entry at pull time, so mutations after ReadableStream.from() remain
+      // observable just as they are in Node. Other supported iterable
+      // shapes retain the checked-dynamic fallback.
+      args: [first],
+      type: DYN,
+      loc,
+    }));
+  }
+  return null;
+}
+
+/** `ReadableStreamDefaultController.enqueue(value)` is a dyn-handle call,
+ * but unlike a general checked-dynamic boundary the Web Streams contract
+ * exposes the same chunk reference from reader.read(). */
+export function lowerStaticReadableStreamControllerCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length > 1 ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken ||
+    staticResponseMemberName(L, access) !== "enqueue"
+  ) {
+    return null;
+  }
+  const receiverTs = L.checker.getBaseTypeOfLiteralType(
+    L.typeOf(access.expression),
+  );
+  const symbol = receiverTs.getAliasSymbol() ?? receiverTs.getSymbol();
+  if (
+    symbol?.name !== "ReadableStreamDefaultController" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const recv = L.lowerExpr(access.expression);
+  if (recv.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  return {
+    kind: "dynInvoke",
+    recv,
+    method: "enqueue",
+    calleeName: access.getText(),
+    args: [
+      call.arguments[0]
+        ? lowerLiveWebValue(L, call.arguments[0])
+        : dynUndefinedExpr(loc),
+    ],
+    type: DYN,
+    loc,
+  };
+}
+
+/** AbortSignal retains listener object identity for duplicate detection and
+ * removeEventListener(). Functions already box by closure identity; mutable
+ * record/array/bytes listeners need the same live capsule used by stream
+ * chunks so repeated crossings still denote one EventListener object. */
+export function lowerStaticAbortSignalListenerCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length < 2 ||
+    call.arguments.some((arg) => ts.isSpreadElement(arg)) ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken
+  ) {
+    return null;
+  }
+  const member = staticResponseMemberName(L, access);
+  if (member !== "addEventListener" && member !== "removeEventListener") {
+    return null;
+  }
+  const receiverTs = L.checker.getBaseTypeOfLiteralType(
+    L.typeOf(access.expression),
+  );
+  const symbol = receiverTs.getAliasSymbol() ?? receiverTs.getSymbol();
+  if (
+    symbol?.name !== "AbortSignal" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const recv = L.lowerExpr(access.expression);
+  if (recv.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  return {
+    kind: "dynInvoke",
+    recv,
+    method: member,
+    calleeName: access.getText(),
+    args: call.arguments.map((arg, index) =>
+      index === 1
+        ? lowerLiveWebValue(L, arg)
+        : L.lowerExprExpecting(arg, DYN),
+    ),
+    type: DYN,
+    loc,
+  };
+}
+
+/** `new ReadableStream(source?)` in a static build. The source record is
+ * boxed into the checked-dynamic tree so start/pull/cancel callbacks can
+ * be retained by the native controller. Strategies and BYOB sources are
+ * deliberately left to the existing per-site fence. */
+export function lowerStaticReadableStreamNew(
+  L: Lowerer,
+  expr: ts.NewExpression,
+): IrExpr | null {
+  if (
+    L.dynamic ||
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "ReadableStream"
+  ) {
+    return null;
+  }
+  const symbol = L.resolveValueSymbol(expr.expression);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const args = expr.arguments ?? [];
+  if (args.length > 1) return null;
+  const loc = locOf(expr);
+  const source =
+    args.length === 0
+      ? dynUndefinedExpr(loc)
+      : ts.isObjectLiteralExpression(args[0]!)
+        ? lowerDynObjectLiteral(L, args[0]!)
+        : lowerLiveWebValue(L, args[0]!);
+  return {
+    kind: "libCall",
+    fn: "fetch.streamNew",
+    args: [source],
+    type: DYN,
+    loc,
+  };
+}
+
+/** A static default reader's read() exits the native checked-dynamic
+ * transport into the checker's concrete chunk type. An exact chunk type
+ * preserves ReadableStream.from(array)'s element identity; structural
+ * widening keeps the compiler's ordinary copy-based width semantics. */
+export function lowerStaticReadableStreamReaderCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length !== 0 ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken
+  ) {
+    return null;
+  }
+  const member = staticResponseMemberName(L, access);
+  if (member !== "read") return null;
+  const receiverTs = L.typeOf(access.expression);
+  const symbol = receiverTs.getSymbol();
+  if (
+    symbol?.name !== "ReadableStreamDefaultReader" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const type = L.mapTypeOf(L.typeOf(call));
+  if (
+    type?.kind !== "promise" ||
+    type.inner.kind !== "record"
+  ) {
+    return null;
+  }
+  return {
+    kind: "libCall",
+    fn: "fetch.readerRead",
+    args: [L.lowerExprExpecting(access.expression, DYN)],
+    type,
+    loc: locOf(call),
+  };
+}
 
 /** Dynamic `import(spec)` — the island's module system at a USER site.
    * Under --dynamic the call lowers to island.importDyn(key): the engine

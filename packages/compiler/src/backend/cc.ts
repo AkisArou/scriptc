@@ -62,9 +62,11 @@ export interface CcOptions {
    * IR): compiles the NATIVE fetch bridge (scr_fetch.c over scr_net +
    * scr_tls + scr_http's client parser + zlib — the socket units join
    * the link implicitly, no libcurl anywhere), which builds for every
-   * target the socket units reach: hosts, linux cross, win32 cross. Only
-   * meaningful under `dynamic`; fetch-free builds keep their exact link
-   * line. SCRIPTC_FETCH_CURL=1 selects the retired curl reference instead
+   * target the socket units reach: hosts, linux cross, win32 cross.
+   * Static user-code fetch compiles the same TU without the engine; the
+   * broader web surface still uses its dynamic half. Fetch-free builds
+   * keep their exact link line. SCRIPTC_FETCH_CURL=1 selects the retired
+   * curl reference instead
    * (scr_fetch_curl.c + system libcurl on hosts / the generated soname
    * stub on linux cross targets — ensureCurlStub), kept compilable for
    * one release as the flip's reference. */
@@ -1013,7 +1015,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // (scr_fetch_curl.c + system libcurl / the linux soname stub)
   // compilable for one release as the flip's reference.
   const fetchOn = opts.fetch ?? false;
-  const curlFetch = fetchOn && process.env["SCRIPTC_FETCH_CURL"] === "1";
+  // The retired curl bridge has only a SCR_DYNAMIC implementation.
+  // Static fetch always keeps the native runtime even when a developer
+  // has the comparison switch exported in their shell.
+  const curlFetch =
+    dynamic && fetchOn && process.env["SCRIPTC_FETCH_CURL"] === "1";
   const nativeFetch = fetchOn && !curlFetch;
   // The island's node:http/https client bridge: embedded graphs that
   // import those builtins get working clients over the same socket units
@@ -1117,21 +1123,21 @@ export async function compileC(opts: CcOptions): Promise<void> {
       : []),
     ...(opts.assert || regex || opts.symbol ? [rt(join(rtDir, "scr_assert.c"))] : []),
     ...(opts.inspect ? [rt(join(rtDir, "scr_inspect.c"))] : []),
-    ...(opts.dynInvoke ? [rt(join(rtDir, "scr_dyn_invoke.c"))] : []),
+    ...((opts.dynInvoke || nativeFetch) ? [rt(join(rtDir, "scr_dyn_invoke.c"))] : []),
     ...(opts.dc ? [rt(join(rtDir, "scr_dc.c"))] : []),
-    ...(opts.dynAsync || opts.dynInvoke || opts.dc ? [rt(join(rtDir, "scr_async_dyn.c"))] : []),
+    ...(opts.dynAsync || opts.dynInvoke || opts.dc || nativeFetch ? [rt(join(rtDir, "scr_async_dyn.c"))] : []),
     // The zlib UNIT (scr_zlib.c) gates on zlib.* IR use; the LINK (system
     // libz on hosts, the vendored per-target objects on cross builds)
     // also serves the native fetch's gzip decoder — spread exactly once.
     ...(opts.zlib
       ? driver.target !== null
         ? ["-I", vendorZlibDir(), rt(join(rtDir, "scr_zlib.c")), ...zlibObjects]
-        : [rt(join(rtDir, "scr_zlib.c")), "-lz"]
+        : [rt(join(rtDir, "scr_zlib.c"))]
       : nativeFetch
         ? driver.target !== null
           ? ["-I", vendorZlibDir(), ...zlibObjects]
-          : ["-lz"]
-        : []),
+          : []
+      : []),
     // The zlib ↔ island bridge: only when BOTH halves are in the build
     // (the scr_inspect_island.c pattern) — the emitted main calls its
     // installer exactly then.
@@ -1179,7 +1185,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
           // link line cannot change.
           ...(targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
         ]
-      : []),
+        : []),
+    // Static fetch is the engine-free half of scr_fetch.c. Dynamic builds
+    // compile the same source beside scr_island.c below, where its
+    // SCR_DYNAMIC half installs the full web surface.
+    ...(nativeFetch && !dynamic ? [rt(join(rtDir, "scr_fetch.c"))] : []),
     ...(engineArchive
       ? [
           "-DSCR_DYNAMIC",
@@ -1234,6 +1244,13 @@ export async function compileC(opts: CcOptions): Promise<void> {
     opts.cPath,
     ...(opts.linkInputs ?? []),
     ...(opts.systemLibraries ?? []).map((name) => `-l${name}`),
+    // GNU ld resolves libraries from left to right and commonly enables
+    // --as-needed: host libz must follow scr_zlib.c/scr_fetch.c and every
+    // generated/native input that references inflate symbols. Cross
+    // builds use vendored zlib objects in the input section above.
+    ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null
+      ? ["-lz"]
+      : []),
     // glibc keeps libm separate from libc. This must trail the generated
     // program and every native FFI input because GNU ld resolves archives
     // from left to right.
