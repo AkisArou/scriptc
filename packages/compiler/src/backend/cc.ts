@@ -28,6 +28,52 @@ const MBEDTLS_VERSION = "3.6.7";
  * zlib-using programs CROSS-compile (zig has no target sysroot libz). */
 const ZLIB_VERSION = "1.3.1";
 
+/** Environment variables consumed by clang, its linker/subtools, or the
+ * platform SDK selection. They are implicit command-line inputs: changing one
+ * must never reuse an artifact produced under the old toolchain posture. */
+const TOOLCHAIN_ENV_KEYS = [
+  "COMPILER_PATH",
+  "GCC_EXEC_PREFIX",
+  "CPATH",
+  "C_INCLUDE_PATH",
+  "CPLUS_INCLUDE_PATH",
+  "OBJC_INCLUDE_PATH",
+  "OBJCPLUS_INCLUDE_PATH",
+  "LIBRARY_PATH",
+  "LD_LIBRARY_PATH",
+  "LD_RUN_PATH",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FRAMEWORK_PATH",
+  "DYLD_FALLBACK_LIBRARY_PATH",
+  "DYLD_FALLBACK_FRAMEWORK_PATH",
+  "SDKROOT",
+  "DEVELOPER_DIR",
+  "MACOSX_DEPLOYMENT_TARGET",
+  "IPHONEOS_DEPLOYMENT_TARGET",
+  "TVOS_DEPLOYMENT_TARGET",
+  "WATCHOS_DEPLOYMENT_TARGET",
+  "DRIVERKIT_DEPLOYMENT_TARGET",
+  "XROS_DEPLOYMENT_TARGET",
+  "CCC_OVERRIDE_OPTIONS",
+  "CCC_ADD_ARGS",
+  "CLANG_CONFIG_FILE_SYSTEM_DIR",
+  "CLANG_CONFIG_FILE_USER_DIR",
+  "SOURCE_DATE_EPOCH",
+  "ZERO_AR_DATE",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+] as const;
+
+export function toolchainEnvironmentFingerprint(env: NodeJS.ProcessEnv = process.env): string {
+  const hash = createHash("sha256").update("toolchain-env-v1\0");
+  for (const name of TOOLCHAIN_ENV_KEYS) {
+    const value = env[name];
+    hash.update(name).update(value === undefined ? "\0unset\0" : "\0set\0").update(value ?? "").update("\0");
+  }
+  return hash.digest("hex");
+}
+
 export interface CcOptions {
   /** Path of the generated (or hand-written) program TU: a .c file, or the
    * LLVM backend's .ll — clang compiles IR text natively on the same
@@ -798,22 +844,24 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   ];
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
   const root = cacheRootDir();
+  const toolchainEnv = toolchainEnvironmentFingerprint();
   let cachedArchive: string | null = null;
   let compilerVersion = "";
   let runtimeHash = "";
   if (root !== null) {
     try {
       const [cv, av, fingerprint, programBytes] = await Promise.all([
-        ccVersionOnce(driver.argv),
-        toolVersionOnce(arArgv),
+        ccVersionOnce(driver.argv, toolchainEnv),
+        toolVersionOnce(arArgv, toolchainEnv),
         runtimeFingerprint(rtDir),
         readFile(opts.cPath),
       ]);
       compilerVersion = cv;
       runtimeHash = fingerprint;
       const key = createHash("sha256")
-        .update("lib-v1\0")
+        .update("lib-v2\0")
         .update(cacheTargetIdentity(driver)).update("\0")
+        .update(toolchainEnv).update("\0")
         .update(driver.argv.join("\x1f")).update("\0")
         .update(cv).update("\0")
         .update(fingerprint).update("\0")
@@ -878,7 +926,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           driver.argv,
           cflags,
           sourcePaths,
-          `lib-obj-v1\0${cacheTargetIdentity(driver)}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+          `lib-obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
         );
         const staged = await stageRuntimeObjects(cached, join(buildDir, "cached-runtime"));
         runtimeObjects = sourcePaths.map((path) => staged.get(path)!);
@@ -931,9 +979,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * cache root:
  *
  *   bin/<key>       — whole program binaries. key = sha256(clang version,
- *                     runtime fingerprint (every .c/.h in the runtime src dir
- *                     plus the vendor pin QJS_COMMIT), the FULL normalized
- *                     command line, the emitted C bytes). Emitted C is
+ *                     target + compiler/linker environment, runtime fingerprint
+ *                     (every .c/.h in the runtime src dir plus the vendor pin
+ *                     QJS_COMMIT), the FULL normalized command line, the emitted C bytes). Emitted C is
  *                     byte-stable by project invariant, so unchanged programs
  *                     hit; any flag difference — e.g. the sanitized lane's
  *                     -O1/-fsanitize=address/-DSCR_RC_AUDIT — lands in a
@@ -945,8 +993,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     is ever skipped.
  *
  *   lib/<key>       — whole library archives. The identity covers the compiler
- *                     version, runtime fingerprint, target/flags, gated source
- *                     set, archiver spelling/version, and program-TU bytes.
+ *                     version, compiler/linker environment, runtime fingerprint,
+ *                     target/flags, gated source set, archiver spelling/version,
+ *                     and program-TU bytes.
  *                     Hits skip both clang and ar.
  *
  *   obj/<set>/<f>.o — per-flavor runtime objects for cache-miss builds. The
@@ -998,8 +1047,11 @@ function cacheRootDir(): string | null {
 }
 
 const ccVersionMemos = new Map<string, Promise<string>>();
-function ccVersionOnce(argv: string[]): Promise<string> {
-  const key = argv.join("\x1f");
+function ccVersionOnce(
+  argv: string[],
+  environmentFingerprint: string = toolchainEnvironmentFingerprint(),
+): Promise<string> {
+  const key = `${environmentFingerprint}\0${argv.join("\x1f")}`;
   let memo = ccVersionMemos.get(key);
   if (memo === undefined) {
     // cwd: the version probe must not touch the caller's directory —
@@ -1013,8 +1065,11 @@ function ccVersionOnce(argv: string[]): Promise<string> {
 }
 
 const toolVersionMemos = new Map<string, Promise<string>>();
-function toolVersionOnce(argv: string[]): Promise<string> {
-  const key = argv.join("\x1f");
+function toolVersionOnce(
+  argv: string[],
+  environmentFingerprint: string = toolchainEnvironmentFingerprint(),
+): Promise<string> {
+  const key = `${environmentFingerprint}\0${argv.join("\x1f")}`;
   let memo = toolVersionMemos.get(key);
   if (memo === undefined) {
     memo = execFileAsync(argv[0] ?? "ar", [...argv.slice(1), "--version"]).then(
@@ -1474,8 +1529,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
     return;
   }
 
+  const toolchainEnv = toolchainEnvironmentFingerprint();
   const [cv, fingerprint, cBytes, linkBytes] = await Promise.all([
-    ccVersionOnce(driver.argv),
+    ccVersionOnce(driver.argv, toolchainEnv),
     runtimeFingerprint(rtDir),
     readFile(opts.cPath),
     Promise.all((opts.linkInputs ?? []).map((path) => readFile(path))),
@@ -1488,8 +1544,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
     a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
   );
   const key = createHash("sha256")
-    .update("bin-v1\0")
+    .update("bin-v2\0")
     .update(cacheTargetIdentity(driver)).update("\0")
+    .update(toolchainEnv).update("\0")
     // The driver spelling joins the version string: `zig cc --version`
     // reports the clang underneath and could otherwise collide with a
     // same-version host clang.
@@ -1503,19 +1560,22 @@ export async function compileC(opts: CcOptions): Promise<void> {
     .digest("hex");
   const binDir = join(root, "bin");
   const cachedBin = join(binDir, keyHex);
+  const tmpOut = `${opts.outPath}.hit-${process.pid}-${Math.random().toString(36).slice(2)}`;
   try {
     // NEVER copy over outPath in place: overwriting an already-executed
     // signed binary invalidates the kernel's per-vnode code-signature cache
     // on macOS and the next exec dies with SIGKILL. Copy to a fresh inode
     // and rename it into place instead.
-    const tmpOut = `${opts.outPath}.hit-${process.pid}-${Math.random().toString(36).slice(2)}`;
     await copyFile(cachedBin, tmpOut);
-    await chmod(tmpOut, 0o755);
+    // Match a fresh linker output under the caller's current umask. Reusing a
+    // cache entry populated by a less restrictive shell must not widen access.
+    await chmod(tmpOut, 0o777 & ~process.umask());
     await rename(tmpOut, opts.outPath);
     const now = new Date();
     await utimes(cachedBin, now, now).catch(() => undefined); // LRU bump
     return; // hit: clang skipped entirely
   } catch {
+    await rm(tmpOut, { force: true }).catch(() => undefined);
     /* miss — build below, then publish */
   }
 
@@ -1553,7 +1613,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       driver.argv,
       cflags,
       rtInputs,
-      `obj-v1\0${cacheTargetIdentity(driver)}\0${ccName}\0${cv}\0${fingerprint}\0`,
+      `obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${ccName}\0${cv}\0${fingerprint}\0`,
     );
     objectStageDir = await mkdtemp(join(tmpdir(), "scriptc-link-"));
     objects = await stageRuntimeObjects(cached, objectStageDir);
@@ -1575,7 +1635,6 @@ export async function compileC(opts: CcOptions): Promise<void> {
     await mkdir(binDir, { recursive: true });
     const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
     await copyFile(opts.outPath, tmp);
-    await chmod(tmp, 0o755);
     await rename(tmp, cachedBin);
     await pruneCache(root);
   } catch {
