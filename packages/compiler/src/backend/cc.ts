@@ -59,6 +59,14 @@ const TOOLCHAIN_ENV_KEYS = [
   "CCC_ADD_ARGS",
   "CLANG_CONFIG_FILE_SYSTEM_DIR",
   "CLANG_CONFIG_FILE_USER_DIR",
+  "CC",
+  "CFLAGS",
+  "CPPFLAGS",
+  "LDFLAGS",
+  "AR",
+  "RANLIB",
+  "CMAKE_GENERATOR",
+  "CMAKE_TOOLCHAIN_FILE",
   "SOURCE_DATE_EPOCH",
   "ZERO_AR_DATE",
   "LANG",
@@ -90,6 +98,17 @@ const MUTABLE_COMPILE_ENV_KEYS = [
   "CCC_ADD_ARGS",
   "CLANG_CONFIG_FILE_SYSTEM_DIR",
   "CLANG_CONFIG_FILE_USER_DIR",
+  // The direct runtime build does not consume the conventional Make/CMake
+  // variables, but the lazily-built QuickJS prerequisite does. Their values
+  // can name mutable tools, headers, libraries, and toolchain files, so a
+  // stable spelling is not a safe persistent-cache identity.
+  "CC",
+  "CFLAGS",
+  "CPPFLAGS",
+  "LDFLAGS",
+  "AR",
+  "RANLIB",
+  "CMAKE_TOOLCHAIN_FILE",
 ] as const;
 
 /** These variables only redirect link-time inputs. Runtime objects remain
@@ -316,6 +335,8 @@ export class CcCompileError extends Error {
 }
 
 export function runtimeSrcDir(): string {
+  const testRoot = process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"];
+  if (testRoot !== undefined) return resolve(testRoot);
   const require = createRequire(import.meta.url);
   return join(dirname(require.resolve("@scriptc/runtime/package.json")), "src");
 }
@@ -454,12 +475,60 @@ export function vendorCacheTargetFlavor(
   return driver.target === null ? `native-${hostPlatform}-${hostArch}` : driver.target;
 }
 
+/** Vendor prerequisites live outside the content-addressed build root, so
+ * their directory name must carry the same environment and resolved compiler
+ * identity as the artifacts that consume them. The short digest keeps the
+ * package-local path readable while preventing build-order contamination. */
+export function vendorCacheBuildIdentity(
+  environmentFingerprint: string,
+  compilerIdentity: string,
+): string {
+  return createHash("sha256")
+    .update("vendor-toolchain-v1\0")
+    .update(environmentFingerprint)
+    .update("\0")
+    .update(compilerIdentity)
+    .digest("hex")
+    .slice(0, 20);
+}
+
+const vendorCompilerIdentityFallbacks = new Map<string, string>();
+
+async function currentVendorCacheBuildIdentity(
+  driver: Pick<CcDriver, "argv" | "target">,
+  environmentFingerprint: string,
+): Promise<string> {
+  // Native vendor recipes additionally use bare clang/ar and CMake; cross
+  // recipes use the zig driver for compilation and `zig ar`. Include every
+  // executable that can affect the package-local prerequisite, not just the
+  // final program's driver.
+  const commands = [
+    driver.argv[0] ?? "clang",
+    ...(driver.target === null ? ["clang", "cc", "ar", "ranlib", "cmake"] : []),
+  ].filter((command, index, all) => all.indexOf(command) === index);
+  const identities = await Promise.all(
+    commands.map(async (command) => {
+      const spellingKey = `${environmentFingerprint}\0${command}`;
+      const resolved = await resolvedToolIdentity(command);
+      if (resolved !== null) vendorCompilerIdentityFallbacks.set(spellingKey, resolved);
+      return [
+        command,
+        resolved ??
+          vendorCompilerIdentityFallbacks.get(spellingKey) ??
+          `<unresolved>\0${command}`,
+      ].join("\0");
+    }),
+  );
+  return vendorCacheBuildIdentity(environmentFingerprint, identities.join("\x1f"));
+}
+
 function engineArchivePath(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): string {
-  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   return join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-${flavor}`, "libqjs.a");
 }
 
@@ -493,7 +562,7 @@ async function installArtifact(
 }
 
 /** The engine archive for one flavor, built lazily on the first --dynamic
- * compile (~10s) and cached under vendor/.cache/<commit>-<flavor>-<target>/ — unlike
+ * compile (~10s) and cached under vendor/.cache/<commit>-<flavor>-<target>-<toolchain>/ — unlike
  * the runtime's own sources (recompiled every build, ~100ms), the engine is
  * far too big to rebuild per compile. The plain flavor is ALWAYS MinSizeRel
  * regardless of the program's optimization level: measured binary delta is
@@ -513,11 +582,12 @@ async function installArtifact(
 async function ensureEngineArchive(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): Promise<string> {
-  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   const vendor = vendorEngineDir();
-  const archive = engineArchivePath(sanitize, driver, cacheRoot);
+  const archive = engineArchivePath(sanitize, driver, buildIdentity, cacheRoot);
   const cacheDir = dirname(archive);
   if (await fileExists(archive)) return archive;
   if (driver.target !== null) return buildEngineArchiveCross(sanitize, driver, cacheRoot, cacheDir);
@@ -638,19 +708,20 @@ const LRE_SOURCES = ["libregexp.c", "libunicode.c"];
 function lreObjectPaths(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): string[] {
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    `-${vendorCacheTargetFlavor(driver)}`;
+    `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   const cacheDir = join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-lre-${flavor}`);
   return LRE_SOURCES.map((f) => join(cacheDir, f.replace(/\.c$/, ".o")));
 }
 
 /** The libregexp objects for one flavor, compiled lazily on the first
  * regex-using static build (~1s) and cached like the engine archive —
- * vendor/.cache/<commit>-lre-<flavor>/*.o — with the same atomic-rename
+ * vendor/.cache/<commit>-lre-<flavor>-<target>-<toolchain>/*.o — with the same atomic-rename
  * publish (parallel first builds race safely; losers discard their work).
  * Plain is -Os (size class matters: the regex fence pins regex-using
  * binaries well under the engine class); asan matches the final link so
@@ -662,6 +733,7 @@ function lreObjectPaths(
 async function ensureLreObjects(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): Promise<string[]> {
   // The flavor keys the DRIVER as well as the target: a zig-cc-built object
@@ -671,9 +743,9 @@ async function ensureLreObjects(
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    `-${vendorCacheTargetFlavor(driver)}`;
+    `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   const vendor = vendorEngineDir();
-  const objects = lreObjectPaths(sanitize, driver, cacheRoot);
+  const objects = lreObjectPaths(sanitize, driver, buildIdentity, cacheRoot);
   const cacheDir = dirname(objects[0]!);
   if ((await Promise.all(objects.map(fileExists))).every(Boolean)) return objects;
 
@@ -721,19 +793,20 @@ const ZLIB_SOURCES = ["adler32.c", "compress.c", "crc32.c", "deflate.c", "infbac
 function zlibObjectPaths(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): string[] {
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    `-${vendorCacheTargetFlavor(driver)}`;
+    `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   const cacheDir = join(cacheRoot, `zlib-${ZLIB_VERSION}-${flavor}`);
   return ZLIB_SOURCES.map((f) => join(cacheDir, f.replace(/\.c$/, ".o")));
 }
 
 /** The zlib objects for one flavor, compiled lazily on the first zlib-using
  * CROSS build (~1s) and cached like the lre objects —
- * vendor/.cache/zlib-<version>-<flavor>/*.o — with the same atomic-rename
+ * vendor/.cache/zlib-<version>-<flavor>-<target>-<toolchain>/*.o — with the same atomic-rename
  * publish (parallel first builds race safely; losers discard their work).
  * Plain is -Os, asan matches the final link so the sanitized lane
  * instruments the codec too. The flavor keys the driver and target exactly
@@ -743,14 +816,15 @@ function zlibObjectPaths(
 async function ensureZlibObjects(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): Promise<string[]> {
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    `-${vendorCacheTargetFlavor(driver)}`;
+    `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   const vendor = vendorZlibDir();
-  const objects = zlibObjectPaths(sanitize, driver, cacheRoot);
+  const objects = zlibObjectPaths(sanitize, driver, buildIdentity, cacheRoot);
   const cacheDir = dirname(objects[0]!);
   if ((await Promise.all(objects.map(fileExists))).every(Boolean)) return objects;
 
@@ -802,14 +876,15 @@ const CURL_STUB_SYMBOLS = [
 
 function curlStubDirPath(
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): string {
-  return join(cacheRoot, `curl-stub-${driver.target}`);
+  return join(cacheRoot, `curl-stub-${driver.target}-${buildIdentity}`);
 }
 
 /** The libcurl import stub for one CROSS target, generated lazily on the
  * first fetch-using cross build and cached like the zlib objects —
- * vendor/.cache/curl-stub-<target>/libcurl.so, atomic-rename publish. The
+ * vendor/.cache/curl-stub-<target>-<toolchain>/libcurl.so, atomic-rename publish. The
  * stub is empty definitions of CURL_STUB_SYMBOLS compiled `-shared` with
  * `-soname libcurl.so.4`: linking against it satisfies scr_fetch_curl.c's
  * references and records a plain `DT_NEEDED libcurl.so.4`, which the
@@ -820,9 +895,10 @@ function curlStubDirPath(
  * and asan links against plain shared libraries freely. */
 async function ensureCurlStub(
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): Promise<string> {
-  const cacheDir = curlStubDirPath(driver, cacheRoot);
+  const cacheDir = curlStubDirPath(driver, buildIdentity, cacheRoot);
   const lib = join(cacheDir, "libcurl.so");
   if (await fileExists(lib)) return cacheDir;
 
@@ -860,15 +936,16 @@ function vendorTlsDir(): string {
 function tlsArchivePath(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): string {
-  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   return join(cacheRoot, `mbedtls-${MBEDTLS_VERSION}-${flavor}`, "libmbedtls.a");
 }
 
 /** The mbedTLS archive for one flavor, compiled lazily on the first
  * TLS-using build (~15s over ~110 TUs, parallelized) and cached like the
- * engine archive — vendor/.cache/mbedtls-<version>-<flavor>-<target>/libmbedtls.a —
+ * engine archive — vendor/.cache/mbedtls-<version>-<flavor>-<target>-<toolchain>/libmbedtls.a —
  * with the same atomic-rename publish (parallel first builds race safely;
  * losers discard their work). Plain is -Os (the TLS stack is link-gated
  * but still wants its size class small); asan matches the final link so
@@ -884,13 +961,14 @@ function tlsArchivePath(
 async function ensureTlsArchive(
   sanitize: boolean,
   driver: CcDriver,
+  buildIdentity: string,
   cacheRoot: string = vendorBuildCacheRoot(),
 ): Promise<string> {
-  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
   const compileArgv = driver.target !== null ? driver.argv : ["clang"];
   const arArgv = driver.target !== null ? [...driver.argv.slice(0, 1), "ar"] : ["ar"];
   const vendor = vendorTlsDir();
-  const archive = tlsArchivePath(sanitize, driver, cacheRoot);
+  const archive = tlsArchivePath(sanitize, driver, buildIdentity, cacheRoot);
   const cacheDir = dirname(archive);
   if (await fileExists(archive)) return archive;
 
@@ -1031,6 +1109,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     }
   }
   const toolchainEnv = toolchainEnvironmentFingerprint();
+  const vendorBuildIdentity = await currentVendorCacheBuildIdentity(driver, toolchainEnv);
   let cachedArchive: string | null = null;
   let compilerVersion = "";
   let runtimeHash = "";
@@ -1047,7 +1126,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       runtimeHash = fingerprint;
       cachedProgramBytes = programBytes;
       const key = createHash("sha256")
-        .update("lib-v3\0")
+        // v4 invalidates archives that may have been assembled from an
+        // unverified or cross-environment vendor/runtime object cache.
+        .update("lib-v4\0")
         .update(cacheTargetIdentity(driver)).update("\0")
         .update(toolchainEnv).update("\0")
         .update(opts.cacheIdentity!).update("\0")
@@ -1097,10 +1178,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot();
   try {
     const lreObjects = regex
-      ? await ensureLreObjects(sanitize, driver, vendorCacheRoot)
+      ? await ensureLreObjects(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
       : [];
     const zlibObjects = opts.zlib
-      ? await ensureZlibObjects(sanitize, driver, vendorCacheRoot)
+      ? await ensureZlibObjects(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
       : [];
     const buildDir = await mkdtemp(join(tmpdir(), "scriptc-lib-"));
     try {
@@ -1147,6 +1228,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         cachedProgramBytes === null ? undefined : opts.cPath,
       );
       let runtimeObjects: string[] | null = null;
+      let cacheInputsStable = true;
       if (root !== null && compilerVersion !== "" && runtimeHash !== "") {
         try {
           const sourcePaths = sources.map((f) => join(rtDir, f));
@@ -1155,11 +1237,13 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
             driver.argv,
             cflags,
             sourcePaths,
-            `lib-obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+            `lib-obj-v3\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+            async () => (await runtimeFingerprint(rtDir)) === runtimeHash,
           );
           const staged = await stageRuntimeObjects(cached, join(buildDir, "cached-runtime"));
           runtimeObjects = sourcePaths.map((path) => staged.get(path)!);
-        } catch {
+        } catch (err) {
+          if (err instanceof CacheInputsChangedError) cacheInputsStable = false;
           runtimeObjects = null;
         }
       }
@@ -1191,7 +1275,11 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         ...objects,
       ]);
       if (archiveOutput !== opts.outPath) await installArtifact(archiveOutput, opts.outPath);
-      if (cachedArchive !== null && root !== null) {
+      const runtimeStillMatchesKey =
+        cacheInputsStable &&
+        runtimeHash !== "" &&
+        (await runtimeFingerprint(rtDir).catch(() => null)) === runtimeHash;
+      if (cachedArchive !== null && root !== null && runtimeStillMatchesKey) {
         try {
           const cacheDir = dirname(cachedArchive);
           await mkdir(cacheDir, { recursive: true });
@@ -1367,7 +1455,7 @@ async function resolvedToolIdentity(
   return null;
 }
 
-async function ccVersionOnce(
+export async function ccVersionOnce(
   argv: string[],
   environmentFingerprint: string = toolchainEnvironmentFingerprint(),
 ): Promise<string> {
@@ -1384,11 +1472,22 @@ async function ccVersionOnce(
   const key = `${spellingKey}\0${executableIdentity ?? "<unresolved>"}`;
   let memo = ccVersionMemos.get(key);
   if (memo === undefined) {
-    // cwd: the version probe must not touch the caller's directory —
-    // `zig cc --version` (zig 0.16) drops an empty a.o wherever it runs.
-    memo = execFileAsync(argv[0] ?? "clang", [...argv.slice(1), "--version"], { cwd: tmpdir() }).then(
-      (r) => `${executableIdentity ?? "<unresolved>"}\0${`${r.stdout}\n${r.stderr}`.trim()}`,
-    );
+    // `zig cc --version` (zig 0.16) drops an empty a.o in its cwd. A private
+    // probe directory avoids both caller pollution and the cross-process /
+    // cross-user collision a fixed tmpdir()/a.o would create on Linux.
+    memo = (async () => {
+      const probeDir = await mkdtemp(join(tmpdir(), "scriptc-cc-version-"));
+      try {
+        const r = await execFileAsync(
+          argv[0] ?? "clang",
+          [...argv.slice(1), "--version"],
+          { cwd: probeDir },
+        );
+        return `${executableIdentity ?? "<unresolved>"}\0${`${r.stdout}\n${r.stderr}`.trim()}`;
+      } finally {
+        await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    })();
     ccVersionMemos.set(key, memo);
   }
   if (executableIdentity !== null) ccVersionFallbacks.set(spellingKey, memo);
@@ -1456,15 +1555,55 @@ export async function runtimeFingerprint(rtDir: string): Promise<string> {
   return h.digest("hex");
 }
 
+class CacheInputsChangedError extends Error {
+  constructor() {
+    super("runtime inputs changed while populating the native object cache");
+    this.name = "CacheInputsChangedError";
+  }
+}
+
+function cacheDigestPath(path: string): string {
+  return `${path}.sha256`;
+}
+
+async function fileDigest(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+/** Cache entries are disposable data, not trusted compiler output. Atomic
+ * rename prevents ordinary partial writes, while the adjacent digest catches
+ * disk damage, manual truncation, and entries left by an interrupted/older
+ * publisher before they reach clang, the linker, or `ar`. */
+async function validCachedFile(object: string): Promise<boolean> {
+  try {
+    const digestPath = cacheDigestPath(object);
+    const expected = (await readFile(digestPath, "utf8")).trim();
+    const valid = /^[0-9a-f]{64}$/.test(expected) && (await fileDigest(object)) === expected;
+    if (valid) {
+      const now = new Date();
+      await Promise.all([
+        utimes(object, now, now).catch(() => undefined),
+        utimes(digestPath, now, now).catch(() => undefined),
+      ]);
+    }
+    return valid;
+  } catch {
+    return false;
+  }
+}
+
 /** The cached .o set for one flag flavor, compiled on first need. Concurrent
  * first builds (parallel test workers on a cold cache) may duplicate work;
- * per-file atomic renames make every winner equivalent. */
+ * per-file atomic renames make every winner equivalent. Publication is held
+ * until verifyInputs confirms that the source/header fingerprint used by the
+ * key still describes the bytes clang just read. */
 async function ensureRuntimeObjects(
   root: string,
   ccArgv: string[],
   cflags: string[],
   sources: string[],
   keyPrefix: string,
+  verifyInputs: () => Promise<boolean>,
 ): Promise<Map<string, string>> {
   const setKey = createHash("sha256")
     .update(keyPrefix)
@@ -1473,15 +1612,20 @@ async function ensureRuntimeObjects(
     .slice(0, 24);
   const objDir = join(root, "obj", setKey);
   const objOf = (src: string): string => join(objDir, `${basename(src, ".c")}.o`);
-  const present = await Promise.all(sources.map((s) => fileExists(objOf(s))));
+  const present = await Promise.all(sources.map((s) => validCachedFile(objOf(s))));
   const missing = sources.filter((_, i) => !present[i]);
   if (missing.length > 0) {
     // ccache wraps only the default clang driver — multi-word drivers
     // (`zig cc`) run bare; their object sets are keyed apart anyway.
-    const useCcache = ccArgv.length === 1 && ccArgv[0] === "clang" && (await ccacheAvailable());
+    const useCcache =
+      process.env["SCRIPTC_TEST_DISABLE_CCACHE"] !== "1" &&
+      ccArgv.length === 1 &&
+      ccArgv[0] === "clang" &&
+      (await ccacheAvailable());
     await mkdir(objDir, { recursive: true });
     const tmpDir = await mkdtemp(join(root, "obj", "build-"));
     try {
+      const compiled = new Map<string, { object: string; digest: string }>();
       // Modest parallelism: a flavor's objects build once, but several cold
       // workers can race here — keep each build's CPU footprint small.
       const width = 4;
@@ -1491,15 +1635,33 @@ async function ensureRuntimeObjects(
             const tmpObj = join(tmpDir, `${basename(src, ".c")}.o`);
             const argv = [...(useCcache ? ["ccache"] : []), ...ccArgv, ...cflags, "-c", src, "-o", tmpObj];
             await execFileAsync(argv[0] ?? "clang", argv.slice(1));
-            await rename(tmpObj, objOf(src));
+            compiled.set(src, { object: tmpObj, digest: await fileDigest(tmpObj) });
           }),
         );
+      }
+      // The fingerprint was computed before these subprocesses started. Do
+      // not place their outputs under that key if a checkout/package update
+      // changed any runtime source or included header while clang was reading.
+      if (!(await verifyInputs())) throw new CacheInputsChangedError();
+      for (const [src, built] of compiled) {
+        const destination = objOf(src);
+        const tmpDigest = `${built.object}.sha256`;
+        await writeFile(tmpDigest, `${built.digest}\n`);
+        // Publish data first and its verifier second. A concurrent reader in
+        // the tiny gap sees a missing/mismatched digest and falls back safely.
+        await rename(built.object, destination);
+        await rename(tmpDigest, cacheDigestPath(destination));
       }
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
   }
-  return new Map(sources.map((s) => [s, objOf(s)]));
+  if (!(await verifyInputs())) throw new CacheInputsChangedError();
+  const objects = new Map(sources.map((s) => [s, objOf(s)]));
+  if (!(await Promise.all([...objects.values()].map(validCachedFile))).every(Boolean)) {
+    throw new Error("native object cache integrity check failed");
+  }
+  return objects;
 }
 
 /** Give one active link/archive operation private names for its cached
@@ -1643,6 +1805,8 @@ export async function compileC(opts: CcOptions): Promise<void> {
     }
   }
   const cachePolicy = toolchainEnvironmentCachePolicy();
+  const toolchainEnv = toolchainEnvironmentFingerprint();
+  const vendorBuildIdentity = await currentVendorCacheBuildIdentity(driver, toolchainEnv);
   // Mutable include/SDK/config inputs can change behind a stable environment
   // spelling. The complete/runtime cache is disabled below; vendor objects
   // must follow the same rule instead of silently surviving in package-local
@@ -1658,34 +1822,48 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // Every vendor output path is deterministic from pins, flags, driver, and
   // target. Build the command/key from those paths now, but do not materialize
   // them until a complete-binary lookup has missed.
-  const engineArchive = dynamic ? engineArchivePath(sanitize, driver, vendorCacheRoot) : null;
-  const tlsArchive = tls ? tlsArchivePath(sanitize, driver, vendorCacheRoot) : null;
+  const engineArchive = dynamic
+    ? engineArchivePath(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
+    : null;
+  const tlsArchive = tls
+    ? tlsArchivePath(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
+    : null;
   // --dynamic + regex shares the archive's libregexp (its host hooks and
   // ours would collide; see scr_regex.c) — the standalone objects are for
   // static builds only.
-  const lreObjects = regex && !dynamic ? lreObjectPaths(sanitize, driver, vendorCacheRoot) : [];
+  const lreObjects = regex && !dynamic
+    ? lreObjectPaths(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
+    : [];
   // Vendored zlib is the CROSS story only — host builds keep the exact
   // historical `-lz` system link (see CcOptions.zlib). The native fetch's
   // gzip decoder rides the same objects/link.
   const zlibObjects =
     ((opts.zlib ?? false) || nativeFetch) && driver.target !== null
-      ? zlibObjectPaths(sanitize, driver, vendorCacheRoot)
+      ? zlibObjectPaths(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
       : [];
   // The libcurl import stub is likewise CROSS-only — host builds keep the
   // exact historical system `-lcurl` link (see CcOptions.fetch). Curl
   // reference builds only.
   const curlStubDir =
     curlFetch && driver.target !== null
-      ? curlStubDirPath(driver, vendorCacheRoot)
+      ? curlStubDirPath(driver, vendorBuildIdentity, vendorCacheRoot)
       : null;
   const materializeVendorPrerequisites = async (): Promise<void> => {
     // Preserve the historical order to avoid multiplying first-build resource
     // pressure when several large vendor sets are cold simultaneously.
-    if (dynamic) await ensureEngineArchive(sanitize, driver, vendorCacheRoot);
-    if (tls) await ensureTlsArchive(sanitize, driver, vendorCacheRoot);
-    if (regex && !dynamic) await ensureLreObjects(sanitize, driver, vendorCacheRoot);
-    if (zlibObjects.length > 0) await ensureZlibObjects(sanitize, driver, vendorCacheRoot);
-    if (curlStubDir !== null) await ensureCurlStub(driver, vendorCacheRoot);
+    if (dynamic) {
+      await ensureEngineArchive(sanitize, driver, vendorBuildIdentity, vendorCacheRoot);
+    }
+    if (tls) await ensureTlsArchive(sanitize, driver, vendorBuildIdentity, vendorCacheRoot);
+    if (regex && !dynamic) {
+      await ensureLreObjects(sanitize, driver, vendorBuildIdentity, vendorCacheRoot);
+    }
+    if (zlibObjects.length > 0) {
+      await ensureZlibObjects(sanitize, driver, vendorBuildIdentity, vendorCacheRoot);
+    }
+    if (curlStubDir !== null) {
+      await ensureCurlStub(driver, vendorBuildIdentity, vendorCacheRoot);
+    }
   };
   // rt() maps each runtime source's path on the command line: identity for
   // the historical single invocation, cached-.o substitution on cache misses.
@@ -1925,7 +2103,6 @@ export async function compileC(opts: CcOptions): Promise<void> {
     return;
   }
 
-  const toolchainEnv = toolchainEnvironmentFingerprint();
   const [cv, fingerprint, cBytes] = await Promise.all([
     ccVersionOnce(driver.argv, toolchainEnv),
     runtimeFingerprint(rtDir),
@@ -1952,7 +2129,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
       a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
     );
     const key = createHash("sha256")
-      .update("bin-v3\0")
+      // v4 invalidates binaries that may have been published while runtime
+      // inputs changed underneath the former per-file object publisher.
+      .update("bin-v4\0")
       .update(cacheTargetIdentity(driver)).update("\0")
       .update(toolchainEnv).update("\0")
       .update(opts.cacheIdentity!).update("\0")
@@ -2030,16 +2209,19 @@ export async function compileC(opts: CcOptions): Promise<void> {
     await writeFile(programPath, cBytes);
 
     let objects: Map<string, string> | null = null;
+    let cacheInputsStable = true;
     try {
       const cached = await ensureRuntimeObjects(
         root,
         driver.argv,
         cflags,
         rtInputs,
-        `obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${ccName}\0${cv}\0${fingerprint}\0`,
+        `obj-v3\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${ccName}\0${cv}\0${fingerprint}\0`,
+        async () => (await runtimeFingerprint(rtDir)) === fingerprint,
       );
       objects = await stageRuntimeObjects(cached, join(buildDir, "runtime-objects"));
-    } catch {
+    } catch (err) {
+      if (err instanceof CacheInputsChangedError) cacheInputsStable = false;
       objects = null; // cache trouble is never a build failure
     }
 
@@ -2051,7 +2233,10 @@ export async function compileC(opts: CcOptions): Promise<void> {
     );
     await installArtifact(privateOut, opts.outPath);
 
-    if (cachedBin !== null && keyHex !== null) {
+    cacheInputsStable =
+      cacheInputsStable &&
+      (await runtimeFingerprint(rtDir).catch(() => null)) === fingerprint;
+    if (cachedBin !== null && keyHex !== null && cacheInputsStable) {
       try {
         await mkdir(binDir, { recursive: true });
         const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);

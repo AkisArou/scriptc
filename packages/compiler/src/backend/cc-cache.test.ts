@@ -1,18 +1,21 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterAll, expect, test } from "vitest";
 import {
   cacheTargetIdentity,
+  ccVersionOnce,
   compileC,
   compileLibArchive,
   resolveBuildCacheRoot,
   runtimeFingerprint,
+  runtimeSrcDir,
   stageRuntimeObjects,
   toolchainEnvironmentCachePolicy,
   toolchainEnvironmentFingerprint,
+  vendorCacheBuildIdentity,
   vendorCacheTargetFlavor,
 } from "./cc.js";
 
@@ -84,7 +87,52 @@ test("the toolchain environment joins cache identities", () => {
     completeArtifacts: false,
     runtimeObjects: false,
   });
+  expect(toolchainEnvironmentCachePolicy({ CFLAGS: "-I/headers" })).toEqual({
+    completeArtifacts: false,
+    runtimeObjects: false,
+  });
+
+  expect(vendorCacheBuildIdentity(base, "compiler-one")).not.toBe(
+    vendorCacheBuildIdentity(base, "compiler-two"),
+  );
+  expect(vendorCacheBuildIdentity(base, "compiler-one")).not.toBe(
+    vendorCacheBuildIdentity(
+      toolchainEnvironmentFingerprint({ MACOSX_DEPLOYMENT_TARGET: "11.0" }),
+      "compiler-one",
+    ),
+  );
 });
+
+test.skipIf(process.platform === "win32")(
+  "compiler version probes use and remove a private working directory",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-version-probe-"));
+    scratch.push(dir);
+    const probeTmp = join(dir, "tmp");
+    const fakeCompiler = join(dir, "fake-zig");
+    await mkdir(probeTmp);
+    await writeFile(
+      fakeCompiler,
+      `#!/bin/sh
+: > a.o
+printf 'fake zig cc version probe\n'
+`,
+    );
+    await chmod(fakeCompiler, 0o755);
+    const oldTmpdir = process.env["TMPDIR"];
+    try {
+      process.env["TMPDIR"] = probeTmp;
+      // Zig 0.16 creates cwd/a.o for `zig cc --version`. Model that side
+      // effect directly so this regression does not depend on Zig being
+      // installed in every generic test shard.
+      await ccVersionOnce([fakeCompiler, "cc"], `version-probe-${dir}`);
+      expect(await readdir(probeTmp)).toEqual([]);
+    } finally {
+      if (oldTmpdir === undefined) delete process.env["TMPDIR"];
+      else process.env["TMPDIR"] = oldTmpdir;
+    }
+  },
+);
 
 test("the runtime fingerprint includes the textually included Ryū sources", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-runtime-fingerprint-"));
@@ -314,6 +362,61 @@ test("mutable compiler inputs bypass caches when files change in place", async (
   }
 });
 
+test.skipIf(process.platform !== "darwin")(
+  "vendor object caches separate deployment-target environments",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-vendor-environment-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const vendorCacheRoot = join(dir, "vendor-cache");
+    const cPath = join(dir, "program.c");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldVendorCacheDir = process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+    const oldDeploymentTarget = process.env["MACOSX_DEPLOYMENT_TARGET"];
+
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = vendorCacheRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      await writeFile(cPath, "int main(void) { return 0; }\n");
+
+      process.env["MACOSX_DEPLOYMENT_TARGET"] = "14.0";
+      await compileC({
+        cPath,
+        outPath: join(dir, "newer"),
+        cacheIdentity: TEST_CACHE_IDENTITY,
+        regex: true,
+      });
+      process.env["MACOSX_DEPLOYMENT_TARGET"] = "11.0";
+      await compileC({
+        cPath,
+        outPath: join(dir, "older"),
+        cacheIdentity: TEST_CACHE_IDENTITY,
+        regex: true,
+      });
+
+      const lreCaches = (await readdir(vendorCacheRoot)).filter((name) => name.includes("-lre-"));
+      expect(lreCaches).toHaveLength(2);
+      const minVersions = lreCaches.map((cache) =>
+        execFileSync("vtool", ["-show-build", join(vendorCacheRoot, cache, "libregexp.o")], {
+          encoding: "utf8",
+        }).match(/minos\s+(\S+)/)?.[1],
+      );
+      expect(new Set(minVersions)).toEqual(new Set(["11.0", "14.0"]));
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+      else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
+      if (oldDeploymentTarget === undefined) delete process.env["MACOSX_DEPLOYMENT_TARGET"];
+      else process.env["MACOSX_DEPLOYMENT_TARGET"] = oldDeploymentTarget;
+    }
+  },
+);
+
 test("complete binary hits precede missing vendor prerequisite materialization", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-vendor-hit-"));
   scratch.push(dir);
@@ -493,7 +596,18 @@ done
 exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
 `,
       );
-      await chmod(wrapper, 0o755);
+      // ccache availability is memoized across this file. If an earlier test
+      // found it, keep the controlled compiler wrapper in the path by making
+      // a cache shim that simply forwards its compiler argv.
+      const ccacheWrapper = join(binDir, "ccache");
+      await writeFile(
+        ccacheWrapper,
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then exit 1; fi
+exec "$@"
+`,
+      );
+      await Promise.all([chmod(wrapper, 0o755), chmod(ccacheWrapper, 0o755)]);
       await writeFile(cPath, source("one"));
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
       process.env["SCRIPTC_TEST_REAL_CLANG"] = originalClang!;
@@ -580,6 +694,129 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       else process.env["SCRIPTC_TEST_RACE_SIGNAL"] = oldRaceSignal;
       if (oldRaceRelease === undefined) delete process.env["SCRIPTC_TEST_RACE_RELEASE"];
       else process.env["SCRIPTC_TEST_RACE_RELEASE"] = oldRaceRelease;
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "runtime edits during object compilation cannot poison the old fingerprint",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-runtime-cache-race-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const fakeRuntime = join(dir, "runtime", "src");
+    const originalRuntime = runtimeSrcDir();
+    await Promise.all([
+      cp(originalRuntime, fakeRuntime, { recursive: true }),
+      mkdir(join(dir, "runtime", "vendor"), { recursive: true }).then(() =>
+        cp(join(originalRuntime, "..", "vendor", "ryu"), join(dir, "runtime", "vendor", "ryu"), {
+          recursive: true,
+        }),
+      ),
+    ]);
+
+    const binDir = join(dir, "bin");
+    const cPath = join(dir, "program.c");
+    const raceSource = join(fakeRuntime, "scr_number.c");
+    const signal = join(dir, "runtime-compile-started");
+    const release = join(dir, "runtime-compile-release");
+    const marker = "scriptc-runtime-race-marker-unique";
+    const originalRuntimeSource = await readFile(raceSource, "utf8");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldRuntimeDir = process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"];
+    const oldDisableCcache = process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+    const oldPath = process.env["PATH"];
+    const oldRealClang = process.env["SCRIPTC_TEST_REAL_CLANG"];
+    const oldRaceSource = process.env["SCRIPTC_TEST_RUNTIME_RACE_SOURCE"];
+    const oldRaceSignal = process.env["SCRIPTC_TEST_RUNTIME_RACE_SIGNAL"];
+    const oldRaceRelease = process.env["SCRIPTC_TEST_RUNTIME_RACE_RELEASE"];
+    const realClang = (oldPath ?? "")
+      .split(delimiter)
+      .map((entry) => join(entry === "" ? process.cwd() : entry, "clang"))
+      .find((candidate) => existsSync(candidate));
+    expect(realClang).toBeDefined();
+
+    try {
+      await mkdir(binDir);
+      const wrapper = join(binDir, "clang");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "$SCRIPTC_TEST_RUNTIME_RACE_SOURCE" ]; then
+    : > "$SCRIPTC_TEST_RUNTIME_RACE_SIGNAL"
+    while [ ! -e "$SCRIPTC_TEST_RUNTIME_RACE_RELEASE" ]; do sleep 0.01; done
+    break
+  fi
+done
+exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
+`,
+      );
+      await chmod(wrapper, 0o755);
+      await writeFile(cPath, "int main(void) { return 0; }\n");
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"] = fakeRuntime;
+      process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
+      process.env["SCRIPTC_TEST_RUNTIME_RACE_SOURCE"] = raceSource;
+      process.env["SCRIPTC_TEST_RUNTIME_RACE_SIGNAL"] = signal;
+      process.env["SCRIPTC_TEST_RUNTIME_RACE_RELEASE"] = release;
+      // Keep ccache out of this controlled race: its own object store is not
+      // the cache under test and can obscure which compiler read happened.
+      process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
+      process.env["PATH"] = `${binDir}${delimiter}/usr/bin${delimiter}/bin`;
+      delete process.env["SCRIPTC_NO_CACHE"];
+
+      const firstOut = join(dir, "first");
+      const firstBuild = compileC({
+        cPath,
+        outPath: firstOut,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+      });
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(signal)) {
+        if (Date.now() > deadline) throw new Error("timed out waiting for runtime compile");
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      await writeFile(
+        raceSource,
+        `${originalRuntimeSource}\nconst char scriptc_runtime_race_marker[] = "${marker}";\n`,
+      );
+      await writeFile(release, "go");
+      await firstBuild;
+      expect((await readFile(firstOut)).includes(Buffer.from(marker))).toBe(true);
+
+      // Restore the fingerprint, then force a program-cache miss. The old
+      // fingerprint must not have retained the object built from edited bytes.
+      await writeFile(raceSource, originalRuntimeSource);
+      await writeFile(cPath, "int main(void) { return 0; } /* second */\n");
+      const secondOut = join(dir, "second");
+      await compileC({
+        cPath,
+        outPath: secondOut,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+      });
+      expect((await readFile(secondOut)).includes(Buffer.from(marker))).toBe(false);
+      expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(1);
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldRuntimeDir === undefined) delete process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"];
+      else process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"] = oldRuntimeDir;
+      if (oldDisableCcache === undefined) delete process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+      else process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = oldDisableCcache;
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
+      if (oldRealClang === undefined) delete process.env["SCRIPTC_TEST_REAL_CLANG"];
+      else process.env["SCRIPTC_TEST_REAL_CLANG"] = oldRealClang;
+      if (oldRaceSource === undefined) delete process.env["SCRIPTC_TEST_RUNTIME_RACE_SOURCE"];
+      else process.env["SCRIPTC_TEST_RUNTIME_RACE_SOURCE"] = oldRaceSource;
+      if (oldRaceSignal === undefined) delete process.env["SCRIPTC_TEST_RUNTIME_RACE_SIGNAL"];
+      else process.env["SCRIPTC_TEST_RUNTIME_RACE_SIGNAL"] = oldRaceSignal;
+      if (oldRaceRelease === undefined) delete process.env["SCRIPTC_TEST_RUNTIME_RACE_RELEASE"];
+      else process.env["SCRIPTC_TEST_RUNTIME_RACE_RELEASE"] = oldRaceRelease;
     }
   },
 );
@@ -704,6 +941,77 @@ test("system libraries relink after an in-place rebuild while runtime objects re
   }
 });
 
+test("damaged runtime objects are rebuilt before linking or archiving", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-object-integrity-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const corruption = Buffer.from("scriptc-corrupt-object-unique-marker");
+
+  const objectSets = async (): Promise<string[]> =>
+    (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"))
+      .map((entry) => entry.name);
+  const corruptOneObject = async (set: string): Promise<string> => {
+    const objectDir = join(cacheRoot, "obj", set);
+    const object = (await readdir(objectDir)).find((name) => name.endsWith(".o"));
+    expect(object).toBeDefined();
+    await writeFile(join(objectDir, object!), corruption);
+    expect((await stat(`${join(objectDir, object!)}.sha256`)).isFile()).toBe(true);
+    return join(objectDir, object!);
+  };
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("one"); return 0; }\n');
+    await compileC({
+      cPath,
+      outPath: join(dir, "one"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
+    const [executableSet] = await objectSets();
+    const damagedExecutableObject = await corruptOneObject(executableSet!);
+
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("two"); return 0; }\n');
+    const repairedOut = join(dir, "two");
+    await compileC({
+      cPath,
+      outPath: repairedOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
+    expect(execFileSync(repairedOut, { encoding: "utf8" }).trim()).toBe("two");
+    expect(await readFile(damagedExecutableObject)).not.toEqual(corruption);
+
+    const beforeLibrary = new Set(await objectSets());
+    await writeFile(cPath, "int scriptc_integrity_probe = 1;\n");
+    await compileLibArchive({
+      cPath,
+      outPath: join(dir, "one.lib.a"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
+    const librarySet = (await objectSets()).find((set) => !beforeLibrary.has(set));
+    expect(librarySet).toBeDefined();
+    await corruptOneObject(librarySet!);
+
+    await writeFile(cPath, "int scriptc_integrity_probe = 2;\n");
+    const repairedArchive = join(dir, "two.lib.a");
+    await compileLibArchive({
+      cPath,
+      outPath: repairedArchive,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
+    expect((await readFile(repairedArchive)).includes(corruption)).toBe(false);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+  }
+});
+
 test("library archives hit by content, invalidate on edits, and reuse runtime objects", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-lib-cache-"));
   scratch.push(dir);
@@ -731,7 +1039,7 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     const objectSet = objectSets.find((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
     expect(objectSet).toBeDefined();
     const objectDir = join(cacheRoot, "obj", objectSet!.name);
-    const objectNames = await readdir(objectDir);
+    const objectNames = (await readdir(objectDir)).filter((name) => name.endsWith(".o"));
     expect(objectNames.length).toBeGreaterThan(10);
     const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
     await Promise.all(objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)));
