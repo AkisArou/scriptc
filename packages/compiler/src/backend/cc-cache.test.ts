@@ -10,6 +10,7 @@ import {
   resolveBuildCacheRoot,
   runtimeFingerprint,
   stageRuntimeObjects,
+  toolchainEnvironmentCachePolicy,
   toolchainEnvironmentFingerprint,
 } from "./cc.js";
 
@@ -58,6 +59,19 @@ test("the toolchain environment joins cache identities", () => {
       SCRIPTC_CACHE_MAX_MB: "1",
     }),
   ).toBe(base);
+
+  expect(toolchainEnvironmentCachePolicy({ MACOSX_DEPLOYMENT_TARGET: "14.0" })).toEqual({
+    completeArtifacts: true,
+    runtimeObjects: true,
+  });
+  expect(toolchainEnvironmentCachePolicy({ LIBRARY_PATH: "/libraries" })).toEqual({
+    completeArtifacts: false,
+    runtimeObjects: true,
+  });
+  expect(toolchainEnvironmentCachePolicy({ CPATH: "/headers" })).toEqual({
+    completeArtifacts: false,
+    runtimeObjects: false,
+  });
 });
 
 test("the runtime fingerprint includes the textually included Ryū sources", async () => {
@@ -90,31 +104,19 @@ test("staged runtime objects survive removal of their cache names and are promot
   expect(await readFile(staged.get(source)!)).toEqual(Buffer.from("cached object bytes"));
 });
 
-test("cache hits invalidate on compiler environment changes and honor the current umask", async () => {
+test("cache hits honor the current umask", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-environment-"));
   scratch.push(dir);
   const cacheRoot = join(dir, "cache");
-  const firstHeaders = join(dir, "headers-one");
-  const secondHeaders = join(dir, "headers-two");
   const cPath = join(dir, "program.c");
   const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
   const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
-  const oldCpath = process.env["CPATH"];
   const oldUmask = process.umask();
 
   try {
-    await Promise.all([mkdir(firstHeaders), mkdir(secondHeaders)]);
-    await Promise.all([
-      writeFile(join(firstHeaders, "cache_probe.h"), '#define CACHE_PROBE "one"\n'),
-      writeFile(join(secondHeaders, "cache_probe.h"), '#define CACHE_PROBE "two"\n'),
-      writeFile(
-        cPath,
-        '#include <stdio.h>\n#include <cache_probe.h>\nint main(void) { puts(CACHE_PROBE); return 0; }\n',
-      ),
-    ]);
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("one"); return 0; }\n');
     process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
     delete process.env["SCRIPTC_NO_CACHE"];
-    process.env["CPATH"] = firstHeaders;
 
     process.umask(0o022);
     const firstOut = join(dir, "first");
@@ -131,16 +133,6 @@ test("cache hits invalidate on compiler environment changes and honor the curren
     if (process.platform !== "win32") expect((await stat(hitOut)).mode & 0o777).toBe(0o700);
     expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(1);
 
-    // CPATH is an implicit clang input. Changing it must miss both the final
-    // artifact cache and the per-flavor runtime-object cache.
-    process.env["CPATH"] = secondHeaders;
-    const changedOut = join(dir, "changed");
-    await compileC({ cPath, outPath: changedOut, cacheIdentity: TEST_CACHE_IDENTITY });
-    expect(execFileSync(changedOut, { encoding: "utf8" }).trim()).toBe("two");
-    if (process.platform !== "win32") expect((await stat(changedOut)).mode & 0o777).toBe(0o700);
-    expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(2);
-
-    process.env["CPATH"] = firstHeaders;
     process.umask(0o022);
     const firstArchivePath = join(dir, "first.lib.a");
     await compileLibArchive({ cPath, outPath: firstArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
@@ -150,19 +142,119 @@ test("cache hits invalidate on compiler environment changes and honor the curren
     await compileLibArchive({ cPath, outPath: hitArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(await readFile(hitArchivePath)).toEqual(firstArchive);
     if (process.platform !== "win32") expect((await stat(hitArchivePath)).mode & 0o777).toBe(0o600);
-    process.env["CPATH"] = secondHeaders;
-    const secondArchivePath = join(dir, "second.lib.a");
-    await compileLibArchive({ cPath, outPath: secondArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
-    expect(await readFile(secondArchivePath)).not.toEqual(firstArchive);
-    expect(await readdir(join(cacheRoot, "lib"))).toHaveLength(2);
+    expect(await readdir(join(cacheRoot, "lib"))).toHaveLength(1);
   } finally {
     process.umask(oldUmask);
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
     if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
     else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+  }
+});
+
+test("mutable compiler inputs bypass caches when files change in place", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-ambient-input-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const headers = join(dir, "headers");
+  const headerPath = join(headers, "cache_probe.h");
+  const cPath = join(dir, "program.c");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldCpath = process.env["CPATH"];
+
+  try {
+    await mkdir(headers);
+    await writeFile(
+      cPath,
+      '#include <stdio.h>\n#include <cache_probe.h>\nint main(void) { puts(CACHE_PROBE); return 0; }\n',
+    );
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    process.env["CPATH"] = headers;
+
+    await writeFile(headerPath, '#define CACHE_PROBE "one"\n');
+    const firstOut = join(dir, "first");
+    await compileC({ cPath, outPath: firstOut, cacheIdentity: TEST_CACHE_IDENTITY });
+    expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("one");
+
+    // The environment spelling is unchanged; only a file behind it moves.
+    await writeFile(headerPath, '#define CACHE_PROBE "two"\n');
+    const secondOut = join(dir, "second");
+    await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
+    expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
+
+    const firstArchivePath = join(dir, "first.lib.a");
+    await compileLibArchive({ cPath, outPath: firstArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
+    const firstArchive = await readFile(firstArchivePath);
+    await writeFile(headerPath, '#define CACHE_PROBE "three"\n');
+    const secondArchivePath = join(dir, "second.lib.a");
+    await compileLibArchive({ cPath, outPath: secondArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
+    expect(await readFile(secondArchivePath)).not.toEqual(firstArchive);
+
+    // CPATH can mutate behind a stable string, so no cache tier is populated.
+    await expect(stat(cacheRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     if (oldCpath === undefined) delete process.env["CPATH"];
     else process.env["CPATH"] = oldCpath;
+  }
+});
+
+test("complete binary hits precede missing vendor prerequisite materialization", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-vendor-hit-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const vendorCacheRoot = join(dir, "vendor-cache");
+  const cPath = join(dir, "program.c");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldVendorCacheDir = process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+  const oldPath = process.env["PATH"];
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = vendorCacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("cached"); return 0; }\n');
+
+    const firstOut = join(dir, "first");
+    await compileC({
+      cPath,
+      outPath: firstOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      regex: true,
+    });
+    expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("cached");
+    expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(1);
+    expect((await stat(vendorCacheRoot)).isDirectory()).toBe(true);
+
+    // Simulate a package reinstall: the per-package vendor build disappears,
+    // while the per-user complete executable remains. An empty PATH turns any
+    // attempted prerequisite rebuild into an immediate failure.
+    await rm(vendorCacheRoot, { recursive: true, force: true });
+    process.env["PATH"] = "";
+    const hitOut = join(dir, "hit");
+    await compileC({
+      cPath,
+      outPath: hitOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      regex: true,
+    });
+    expect(execFileSync(hitOut, { encoding: "utf8" }).trim()).toBe("cached");
+    await expect(stat(vendorCacheRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+    else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
+    if (oldPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = oldPath;
   }
 });
 
