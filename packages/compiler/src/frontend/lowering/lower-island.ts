@@ -317,16 +317,6 @@ function fenceStaticRequestInitLiteral(
     if (!L.dynamic) {
       const inputNode = call.arguments[0]!;
       const input = L.lowerExpr(inputNode);
-      const url =
-        input.type.kind === "url"
-          ? {
-              kind: "libCall" as const,
-              fn: "url.href" as const,
-              args: [input],
-              type: STRING,
-              loc: locOf(inputNode),
-            }
-          : L.coerceInto(inputNode, input, STRING);
       const initNode = call.arguments[1];
       let init: IrExpr;
       if (initNode === undefined) {
@@ -337,25 +327,19 @@ function fenceStaticRequestInitLiteral(
       } else {
         init = L.lowerExprExpecting(initNode, DYN);
       }
-      const answer: IrExpr = {
-        kind: "libCall",
-        fn: "fetch.start",
-        args: [url, init],
-        type: { kind: "promise", inner: DYN },
-        loc,
-      };
-      if (call.arguments.length <= 2) return answer;
 
-      // JavaScript evaluates surplus call arguments in source order even
-      // though fetch ignores their values. Preserve the URL/init values
-      // across those evaluations, then start the request.
-      const urlLocal = L.declareHiddenLocal("%fetchUrl", url.type);
+      // Calling a WebIDL operation has two distinct phases: JavaScript
+      // first evaluates every argument expression, then the callee converts
+      // those values. In particular, evaluating RequestInit may mutate a
+      // URL object passed as input; its href must not be snapshotted until
+      // all argument expressions (including ignored surplus ones) ran.
+      const inputLocal = L.declareHiddenLocal("%fetchInput", input.type);
       const initLocal = L.declareHiddenLocal("%fetchInit", init.type);
-      const urlRef: IrExpr = {
+      const inputRef: IrExpr = {
         kind: "varRef",
-        localId: urlLocal.id,
-        type: url.type,
-        loc,
+        localId: inputLocal.id,
+        type: input.type,
+        loc: locOf(inputNode),
       };
       const initRef: IrExpr = {
         kind: "varRef",
@@ -364,7 +348,7 @@ function fenceStaticRequestInitLiteral(
         loc,
       };
       const stmts: IrStmt[] = [
-        { kind: "varDecl", localId: urlLocal.id, init: url, loc },
+        { kind: "varDecl", localId: inputLocal.id, init: input, loc },
         { kind: "varDecl", localId: initLocal.id, init, loc },
       ];
       for (const argument of call.arguments.slice(2)) {
@@ -380,7 +364,23 @@ function fenceStaticRequestInitLiteral(
           : L.lowerExpr(argument);
         stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
       }
-      answer.args = [urlRef, initRef];
+      const url: IrExpr =
+        input.type.kind === "url"
+          ? {
+              kind: "libCall",
+              fn: "url.href",
+              args: [inputRef],
+              type: STRING,
+              loc: locOf(inputNode),
+            }
+          : L.coerceInto(inputNode, inputRef, STRING);
+      const answer: IrExpr = {
+        kind: "libCall",
+        fn: "fetch.start",
+        args: [url, initRef],
+        type: { kind: "promise", inner: DYN },
+        loc,
+      };
       return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
     }
     const fetchFn: IrExpr = { kind: "jsOp", op: "globalGet", name: "fetch", args: [], type: JSVAL, loc };
@@ -483,16 +483,29 @@ function staticResponseMemberName(
   return key.isStringLiteralType() ? key.value : null;
 }
 
+function hasLiveWebMutableArm(L: Lowerer, type: IrType): boolean {
+  if (
+    type.kind === "record" ||
+    type.kind === "array" ||
+    type.kind === "bytes"
+  ) {
+    return true;
+  }
+  if (type.kind !== "union") return false;
+  return L.unions.get(type.unionId)?.arms.some((arm) =>
+    hasLiveWebMutableArm(L, arm)
+  ) ?? false;
+}
+
 /** Box mutable data for Web API slots that expose the exact JavaScript
  * value again. Ordinary dynFrom remains the documented copy boundary;
- * this capsule is deliberately limited to records/arrays/bytes that the
- * live materializer can snapshot and commit. */
+ * this capsule is deliberately limited to records/arrays/bytes (including
+ * those selected at runtime from a union) that the live materializer can
+ * snapshot and commit. */
 function lowerLiveWebValue(L: Lowerer, node: ts.Expression): IrExpr {
   const value = L.lowerExpr(node);
   if (
-    (value.type.kind === "record" ||
-      value.type.kind === "array" ||
-      value.type.kind === "bytes") &&
+    hasLiveWebMutableArm(L, value.type) &&
     canConvertToDyn(
       value.type,
       (id) => L.shapes.get(id),

@@ -55,4 +55,47 @@ const plainObjectResponse = await fetch(
 const plainObjectResult = await plainObjectResponse.json();
 console.log("plain object body coercion:", plainObjectResult.body);
 
+const mutableUrl = new URL(`${process.argv[2]}/text?discarded=1`);
+const mutableUrlResponse = await fetch(mutableUrl, {
+  method: (mutableUrl.searchParams.delete("discarded"), "GET"),
+});
+console.log(
+  "url conversion after init:",
+  mutableUrlResponse.status,
+  await mutableUrlResponse.text(),
+);
+
+function orderedBodyToString() {
+  console.log("request init coercion: body");
+  return "ordered body";
+}
+
+function orderedDuplexToString() {
+  console.log("request init coercion: duplex");
+  return "half";
+}
+
+function orderedMethodToString() {
+  console.log("request init coercion: method");
+  return "POST";
+}
+
+function orderedRedirectToString() {
+  console.log("request init coercion: redirect");
+  return "follow";
+}
+
+const orderedInitResponse = await fetch(`${process.argv[2]}/post-echo`, {
+  method: { toString: orderedMethodToString },
+  body: { toString: orderedBodyToString },
+  duplex: { toString: orderedDuplexToString },
+  redirect: { toString: orderedRedirectToString },
+});
+const orderedInitResult = await orderedInitResponse.json();
+console.log(
+  "request init coercion result:",
+  orderedInitResult.method,
+  orderedInitResult.body,
+);
+
 export {};

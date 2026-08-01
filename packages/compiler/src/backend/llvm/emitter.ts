@@ -935,6 +935,8 @@ class LlEmitter {
     string,
     LlStreamTypedRefAdapter
   >();
+  /** Runtime-arm dispatchers for live union values. */
+  private readonly liveDynUnionRefAdapters = new Map<string, string>();
   private readonly dynPromiseAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
   readonly recordsById = new Map<string, IrRecordShape>();
@@ -6113,6 +6115,12 @@ class LlEmitter {
         }
         const v = this.emitExpr(e.value);
         if (e.liveRef) {
+          if (v.type.kind === "union") {
+            const adapter = this.liveDynUnionRefAdapter(v.type);
+            const boxed = B.tmp();
+            B.line(`${boxed} = call ptr @${adapter}(ptr ${v.name})`);
+            return this.own({ name: boxed, type: e.type });
+          }
           if (!this.streamTypedRefEligible(v.type)) {
             throw new Error(`llvm emitter bug: live dyn ref of ${typeKey(v.type)}`);
           }
@@ -10132,6 +10140,88 @@ class LlEmitter {
     );
     this.resolveThunkDefs.push(...lines);
     return `@${commit}`;
+  }
+
+  /** Box the mutable payload of a union directly, preserving the identity
+   * that AbortSignal reasons and stream chunks expose. Scalar/unit arms use
+   * the ordinary union-to-dyn converter. */
+  private liveDynUnionRefAdapter(
+    t: IrType & { kind: "union" },
+  ): string {
+    const key = typeKey(t);
+    const existing = this.liveDynUnionRefAdapters.get(key);
+    if (existing) return existing;
+    const union = this.unionsById.get(t.unionId);
+    if (!union) {
+      throw new Error(
+        `llvm emitter bug: live dyn ref of unknown union ${t.unionId}`,
+      );
+    }
+    const mutableArms = union.arms
+      .map((arm, tag) => ({ arm, tag }))
+      .filter(({ arm }) => this.streamTypedRefEligible(arm));
+    if (mutableArms.length === 0) {
+      throw new Error(`llvm emitter bug: live dyn ref of immutable union ${key}`);
+    }
+
+    const sym = `sc_ldu_${this.liveDynUnionRefAdapters.size}`;
+    this.liveDynUnionRefAdapters.set(key, sym);
+    this.declare(
+      `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+    );
+    const adapters = new Map<number, LlStreamTypedRefAdapter>();
+    for (const { arm, tag } of mutableArms) {
+      const prefix = `${sym}_${tag}`;
+      adapters.set(
+        tag,
+        this.streamTypedRefMaterializeAdapter(
+          arm,
+          { prefix, adapters: new Map() },
+          `${prefix}_materialize`,
+        ),
+      );
+    }
+
+    const B = new BlockBuilder();
+    const tagPtr = B.tmp();
+    const tagValue = B.tmp();
+    B.line(
+      `${tagPtr} = getelementptr inbounds %ScrUnion, ptr %u, i64 0, i32 1`,
+    );
+    B.line(`${tagValue} = load i32, ptr ${tagPtr}`);
+    const fallback = B.newLabel("ldu.dyn");
+    const armLabels = mutableArms.map(() => B.newLabel("ldu.ref"));
+    B.terminate(
+      `switch i32 ${tagValue}, label %${fallback} [ ${mutableArms.map(({ tag }, index) => `i32 ${tag}, label %${armLabels[index]}`).join(" ")} ]`,
+    );
+    mutableArms.forEach(({ arm, tag }, index) => {
+      const adapter = adapters.get(tag)!;
+      const rc = vAdapters(this, arm);
+      const armKey = typeKey(arm);
+      B.startBlock(armLabels[index]!);
+      const payloadPtr = B.tmp();
+      const payload = B.tmp();
+      const boxed = B.tmp();
+      B.line(
+        `${payloadPtr} = getelementptr inbounds %ScrUnion, ptr %u, i64 0, i32 5`,
+      );
+      B.line(`${payload} = load ptr, ptr ${payloadPtr}`);
+      B.line(
+        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, i64 ${Buffer.byteLength(armKey, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
+      );
+      B.terminate(`ret ptr ${boxed}`);
+    });
+    B.startBlock(fallback);
+    const boxed = B.tmp();
+    B.line(`${boxed} = call ptr @${this.dyn.toDynHelper(t)}(ptr %u)`);
+    B.terminate(`ret ptr ${boxed}`);
+    this.resolveThunkDefs.push(
+      `define internal ptr @${sym}(ptr %u) ${FN_ATTRS} { ; materialize live union value ${key}`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return sym;
   }
 
   private streamTypedRefEligible(t: IrType): boolean {

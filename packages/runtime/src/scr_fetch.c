@@ -3808,14 +3808,21 @@ static bool sf_content_length(ScrArr *headers, bool *present_out,
   return true;
 }
 
-static ScrStr *sf_method(const ScrDyn *init) {
+/* RequestInit dictionary conversion coerces every member before Request's
+ * method validation runs. Keep ToString separate so later members
+ * (redirect and signal) are still observed when the resulting method is
+ * syntactically invalid or forbidden. */
+static ScrStr *sf_method_value(const ScrDyn *init) {
   const ScrDyn *value =
       init && init->kind == SCR_DYN_OBJ
           ? scr_dyn_obj_get(init, "method", 6)
           : NULL;
   if (!value || value->kind == SCR_DYN_UNDEF) return scr_str_new("GET", 3);
-  ScrStr *method = scr_dyn_string_coerce_js(value);
-  if (!method) return NULL;
+  return scr_dyn_string_coerce_js(value);
+}
+
+static bool sf_method_validate(ScrStr **method_out) {
+  ScrStr *method = *method_out;
   static const char *normalized[] = {
       "DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"};
   for (size_t i = 0; i < sizeof normalized / sizeof normalized[0]; i++) {
@@ -3830,7 +3837,8 @@ static ScrStr *sf_method(const ScrDyn *init) {
     }
     if (same) {
       scr_str_release(method);
-      return scr_str_new(candidate, n);
+      *method_out = scr_str_new(candidate, n);
+      return true;
     }
   }
   bool valid = method->len > 0;
@@ -3841,9 +3849,8 @@ static ScrStr *sf_method(const ScrDyn *init) {
             strchr("!#$%&'*+-.^_`|~", c) != NULL;
   }
   if (!valid) {
-    scr_str_release(method);
     sf_type_error("fetch failed");
-    return NULL;
+    return false;
   }
   if (sf_eq_ci(method, "connect") || sf_eq_ci(method, "trace") ||
       sf_eq_ci(method, "track")) {
@@ -3852,13 +3859,12 @@ static ScrStr *sf_method(const ScrDyn *init) {
     if (!message) sf_oom();
     int len = snprintf(message, message_len + 1, "'%.*s' HTTP method is unsupported.",
                        (int)method->len, method->data);
-    scr_str_release(method);
     if (len < 0 || (size_t)len > message_len) sf_oom();
     sf_type_error(message);
     free(message);
-    return NULL;
+    return false;
   }
-  return method;
+  return true;
 }
 
 static bool sf_redirect_mode(const ScrDyn *init, int *out) {
@@ -4553,10 +4559,86 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       }
     }
   }
-  int redirect_mode;
-  if (!sf_redirect_mode(init, &redirect_mode)) {
+  /* WebIDL converts dictionary members by name, not object insertion
+   * order: body, duplex, headers, method, redirect, signal. Every
+   * observable conversion completes before Request validates the URL,
+   * method/body combination, or an already-aborted signal. */
+  const ScrDyn *body =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "body", 4)
+          : NULL;
+  bool body_present =
+      body && body->kind != SCR_DYN_UNDEF && body->kind != SCR_DYN_NULL;
+  bool body_stream =
+      body_present &&
+      body->kind == SCR_DYN_HANDLE &&
+      body->v.handle.tag == SCR_DYNH_WEB_STREAM;
+  /* BodyInit's USVString fallback applies to every ordinary value that
+   * is not already bytes or a ReadableStream. This includes scalars,
+   * arrays, and plain objects (with the ordinary JS object coercion
+   * protocol), while null and undefined continue to mean no body. */
+  ScrDyn *coerced_body = NULL;
+  if (body_present && body->kind != SCR_DYN_STR &&
+      body->kind != SCR_DYN_BYTES && !body_stream) {
+    ScrStr *text = scr_dyn_string_coerce_js(body);
+    if (!text) {
+      return sf_reject_now(promise, "fetch failed");
+    }
+    coerced_body = scr_dyn_new_str(text);
+    scr_str_release(text);
+    body = coerced_body;
+  }
+
+  const ScrDyn *duplex =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "duplex", 6)
+          : NULL;
+  bool duplex_present =
+      duplex && duplex->kind != SCR_DYN_UNDEF;
+  bool duplex_half = false;
+  if (duplex_present) {
+    ScrStr *duplex_mode = scr_dyn_string_coerce_js(duplex);
+    if (!duplex_mode) {
+      scr_dyn_release(coerced_body);
+      return sf_reject_now(promise, "fetch failed");
+    }
+    duplex_half =
+        duplex_mode->len == 4 &&
+        memcmp(duplex_mode->data, "half", 4) == 0;
+    scr_str_release(duplex_mode);
+  }
+  if (duplex_present && !duplex_half) {
+    scr_dyn_release(coerced_body);
+    return sf_reject_now(
+        promise, "RequestInit.duplex must be 'half'");
+  }
+
+  ScrArr *headers = scr_arr_new(SCR_ELEM_STR, 16);
+  const ScrDyn *init_headers =
+      init && init->kind == SCR_DYN_OBJ
+          ? scr_dyn_obj_get(init, "headers", 7)
+          : NULL;
+  if (!sf_add_headers(headers, init_headers)) {
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
     return sf_reject_now(promise, "fetch failed");
   }
+
+  ScrStr *method = sf_method_value(init);
+  if (!method) {
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
+    return sf_reject_now(promise, "fetch failed");
+  }
+
+  int redirect_mode;
+  if (!sf_redirect_mode(init, &redirect_mode)) {
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
+    scr_str_release(method);
+    return sf_reject_now(promise, "fetch failed");
+  }
+
   const ScrDyn *signal_dyn =
       init && init->kind == SCR_DYN_OBJ
           ? scr_dyn_obj_get(init, "signal", 6)
@@ -4566,11 +4648,19 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       signal_dyn->kind != SCR_DYN_NULL) {
     signal = sf_signal_of(signal_dyn,
                           "Request init.signal must be an AbortSignal");
-    if (!signal) return sf_reject_now(promise, "fetch failed");
+    if (!signal) {
+      scr_dyn_release(coerced_body);
+      scr_arr_release(headers);
+      scr_str_release(method);
+      return sf_reject_now(promise, "fetch failed");
+    }
   }
 
   ScrUrl *u = scr_url_new(url);
   if (!u) {
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
+    scr_str_release(method);
     scr_promise_reject_pending(promise);
     return promise;
   }
@@ -4585,74 +4675,30 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
     message[message_len] = '\0';
     sf_type_error(message);
     free(message);
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
+    scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(promise, "fetch failed");
   }
   bool https = sf_eq_ci(u->scheme, "https");
   if (!https && !sf_eq_ci(u->scheme, "http")) {
-    scr_url_release(u);
-    return sf_reject_now(promise, "fetch failed");
-  }
-
-  ScrStr *method = sf_method(init);
-  if (!method) {
-    scr_url_release(u);
-    return sf_reject_now(promise, "fetch failed");
-  }
-  const ScrDyn *body =
-      init && init->kind == SCR_DYN_OBJ
-          ? scr_dyn_obj_get(init, "body", 4)
-          : NULL;
-  bool body_present =
-      body && body->kind != SCR_DYN_UNDEF && body->kind != SCR_DYN_NULL;
-  bool body_stream =
-      body_present &&
-      body->kind == SCR_DYN_HANDLE &&
-      body->v.handle.tag == SCR_DYNH_WEB_STREAM;
-  const ScrDyn *duplex =
-      init && init->kind == SCR_DYN_OBJ
-          ? scr_dyn_obj_get(init, "duplex", 6)
-          : NULL;
-  bool duplex_present =
-      duplex && duplex->kind != SCR_DYN_UNDEF;
-  bool duplex_half = false;
-  if (duplex_present) {
-    ScrStr *duplex_mode = scr_dyn_string_coerce_js(duplex);
-    if (!duplex_mode) {
-      scr_str_release(method);
-      scr_url_release(u);
-      return sf_reject_now(promise, "fetch failed");
-    }
-    duplex_half =
-        duplex_mode->len == 4 &&
-        memcmp(duplex_mode->data, "half", 4) == 0;
-    scr_str_release(duplex_mode);
-  }
-  if (duplex_present && !duplex_half) {
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
-    return sf_reject_now(
-        promise, "RequestInit.duplex must be 'half'");
+    return sf_reject_now(promise, "fetch failed");
   }
-  /* BodyInit's USVString fallback applies to every ordinary value that
-   * is not already bytes or a ReadableStream. This includes scalars,
-   * arrays, and plain objects (with the ordinary JS object coercion
-   * protocol), while null and undefined continue to mean no body. */
-  ScrDyn *coerced_body = NULL;
-  if (body_present && body->kind != SCR_DYN_STR &&
-      body->kind != SCR_DYN_BYTES && !body_stream) {
-    ScrStr *text = scr_dyn_string_coerce_js(body);
-    if (!text) {
-      scr_str_release(method);
-      scr_url_release(u);
-      return sf_reject_now(promise, "fetch failed");
-    }
-    coerced_body = scr_dyn_new_str(text);
-    scr_str_release(text);
-    body = coerced_body;
+  if (!sf_method_validate(&method)) {
+    scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
+    scr_str_release(method);
+    scr_url_release(u);
+    return sf_reject_now(promise, "fetch failed");
   }
   if (body_stream && !duplex_half) {
     scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(
@@ -4663,24 +4709,13 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
       ((method->len == 3 && memcmp(method->data, "GET", 3) == 0) ||
        (method->len == 4 && memcmp(method->data, "HEAD", 4) == 0))) {
     scr_dyn_release(coerced_body);
+    scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
     return sf_reject_now(
         promise, "Request with GET/HEAD method cannot have body.");
   }
 
-  ScrArr *headers = scr_arr_new(SCR_ELEM_STR, 16);
-  const ScrDyn *init_headers =
-      init && init->kind == SCR_DYN_OBJ
-          ? scr_dyn_obj_get(init, "headers", 7)
-          : NULL;
-  if (!sf_add_headers(headers, init_headers)) {
-    scr_dyn_release(coerced_body);
-    scr_arr_release(headers);
-    scr_str_release(method);
-    scr_url_release(u);
-    return sf_reject_now(promise, "fetch failed");
-  }
   /* Fetch Metadata is controlled by the fetch implementation. Undici
    * replaces a caller-provided sec-fetch-mode with "cors". */
   sf_strip_header(&headers, "sec-fetch-mode");

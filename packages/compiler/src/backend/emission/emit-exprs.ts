@@ -250,6 +250,69 @@ function liveDynRefAdapter(
   return adapter;
 }
 
+/** A union itself is only the tagged box; the identity Web APIs expose is
+ * the selected mutable arm. Dispatch on the tag and point the typed capsule
+ * directly at that arm's payload. Non-mutable arms keep ordinary dynFrom
+ * semantics. */
+function liveDynUnionRefAdapter(
+  E: CEmitter,
+  t: IrType & { kind: "union" },
+): string {
+  const key = typeKey(t);
+  const existing = E.liveDynUnionRefAdapters.get(key);
+  if (existing) return existing;
+  const union = E.unionsById.get(t.unionId);
+  if (!union) {
+    throw new Error(`emitter bug: live dyn ref of unknown union ${t.unionId}`);
+  }
+  const mutableArms = union.arms
+    .map((arm, tag) => ({ arm, tag }))
+    .filter(({ arm }) => streamTypedRefEligible(arm));
+  if (mutableArms.length === 0) {
+    throw new Error(`emitter bug: live dyn ref of immutable union ${key}`);
+  }
+
+  const sym = `sc_ldu_${E.liveDynUnionRefAdapters.size}`;
+  E.liveDynUnionRefAdapters.set(key, sym);
+  const sig = `static ScrDyn *${sym}(ScrUnion *sc_u)`;
+  E.walkerProtos.push(`${sig}; /* materialize live union value ${key} */`);
+  const defs: string[] = [];
+  const adapters = new Map<number, StreamTypedRefAdapter>();
+  for (const { arm, tag } of mutableArms) {
+    const prefix = `${sym}_${tag}`;
+    adapters.set(
+      tag,
+      streamTypedRefAdapter(
+        E,
+        arm,
+        { prefix, defs, adapters: new Map() },
+        `${prefix}_materialize`,
+      ),
+    );
+  }
+
+  defs.push(`${sig} {`, `  switch (sc_u->tag) {`);
+  for (const { arm, tag } of mutableArms) {
+    const adapter = adapters.get(tag)!;
+    const rc = vAdapters(arm);
+    const armKey = typeKey(arm);
+    const keyLit = cStringLiteral(Buffer.from(armKey, "utf8"));
+    defs.push(
+      `  case ${tag}:`,
+      `    return scr_dyn_new_typed_ref(scr_union_peek(sc_u), &${rc.retain}, &${rc.release}, ${keyLit}, ${Buffer.byteLength(armKey, "utf8")}, &${adapter.snapshot}, ${adapter.commit});`,
+    );
+  }
+  defs.push(
+    `  default:`,
+    `    return ${E.toDynHelper(t)}(sc_u);`,
+    `  }`,
+    `}`,
+    ``,
+  );
+  E.walkerDefs.push(...defs);
+  return sym;
+}
+
 function streamFromArrayAdapter(
   E: CEmitter,
   t: IrType & { kind: "array" },
@@ -2145,6 +2208,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         }
         const v = E.emitExpr(e.value);
         if (e.liveRef) {
+          if (v.type.kind === "union") {
+            const adapter = liveDynUnionRefAdapter(E, v.type);
+            return E.newTemp(e.type, `${adapter}(${v.name})`);
+          }
           const adapter = liveDynRefAdapter(E, v.type);
           const rc = vAdapters(v.type);
           const key = typeKey(v.type);

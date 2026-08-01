@@ -1628,6 +1628,24 @@ function validateFunction(
   // the body of the optChain whose id it names.
   const activeChains = new Map<string, IrType>();
 
+  const liveDynRefEligible = (
+    type: IrType,
+    seen = new Set<string>(),
+  ): boolean => {
+    if (
+      type.kind === "record" ||
+      type.kind === "array" ||
+      type.kind === "bytes"
+    ) {
+      return true;
+    }
+    if (type.kind !== "union" || seen.has(type.unionId)) return false;
+    seen.add(type.unionId);
+    return unions.get(type.unionId)?.arms.some((arm) =>
+      liveDynRefEligible(arm, seen)
+    ) ?? false;
+  };
+
   function checkExpr(e: IrExpr): void {
     switch (e.kind) {
       case "numLit":
@@ -3018,12 +3036,7 @@ function validateFunction(
         if (!canConvertToDyn(vt, (id) => records.get(id), (id) => unions.get(id))) {
           err(`dynFrom of non-dyn-convertible type ${vt.kind}`, e.loc);
         }
-        if (
-          e.liveRef &&
-          vt.kind !== "record" &&
-          vt.kind !== "array" &&
-          vt.kind !== "bytes"
-        ) {
+        if (e.liveRef && !liveDynRefEligible(vt)) {
           err(`live dynFrom of unsupported type ${vt.kind}`, e.loc);
         }
         break;

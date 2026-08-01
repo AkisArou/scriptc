@@ -213,6 +213,10 @@ export class CEmitter {
     string,
     { snapshot: string; commit: string }
   >();
+  /** Runtime-arm dispatchers for live references whose static type is a
+   * union. Mutable arms become typed capsules; scalar/unit arms retain the
+   * ordinary static-to-dyn conversion. */
+  readonly liveDynUnionRefAdapters = new Map<string, string>();
   readonly dynPromiseAdapters = new Map<string, string>();
   /** The checked-dynamic function boundary's per-signature helpers (see
    * emit-walkers.ts): call thunks (sc_dfk_*), box builders (sc_dfb_*),

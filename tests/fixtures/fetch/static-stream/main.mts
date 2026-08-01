@@ -37,6 +37,49 @@ console.log(
   enqueuedIdentityBox.value,
 );
 
+type LiveUnionBox = { value: number };
+type LiveUnionValue = LiveUnionBox | string;
+
+async function checkEnqueuedUnionIdentity(
+  value: LiveUnionValue,
+  original: LiveUnionBox,
+): Promise<void> {
+  const stream = new ReadableStream<LiveUnionValue>({
+    start(controller) {
+      controller.enqueue(value);
+      controller.close();
+    },
+  });
+  const part = await stream.getReader().read();
+  if (!part.done && typeof part.value !== "string") {
+    part.value.value = 3;
+  }
+  console.log(
+    "controller enqueue union identity:",
+    part.done ? false : part.value === original,
+    original.value,
+  );
+}
+
+const enqueuedUnionBox = { value: 1 };
+await checkEnqueuedUnionIdentity(enqueuedUnionBox, enqueuedUnionBox);
+
+function checkAbortUnionIdentity(
+  value: LiveUnionValue,
+  original: LiveUnionBox,
+): void {
+  const reason = AbortSignal.abort(value).reason as LiveUnionValue;
+  if (typeof reason !== "string") reason.value = 4;
+  console.log(
+    "abort reason union identity:",
+    reason === original,
+    original.value,
+  );
+}
+
+const abortUnionBox = { value: 1 };
+checkAbortUnionIdentity(abortUnionBox, abortUnionBox);
+
 const enqueuedIdentityBytes = Buffer.from([1]);
 const enqueuedBytesStream = new ReadableStream<Uint8Array>({
   start(controller) {
