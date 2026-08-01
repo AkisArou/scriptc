@@ -174,6 +174,7 @@ const cases = globSync(join(fixturesRoot, "cases/*/main.ts"))
 describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
   const staticCases = [
     "static",
+    "static-coercion",
     "static-stream",
     "static-stream-this",
     "static-listener-this",
@@ -189,7 +190,9 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
     const entry = join(
       fixturesRoot,
       `${name}/${
-        name === "static-stream-this" || name.startsWith("static-listener-")
+        name === "static-coercion" ||
+        name === "static-stream-this" ||
+        name.startsWith("static-listener-")
           ? "main.js"
           : "main.mts"
       }`,

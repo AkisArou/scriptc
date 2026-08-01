@@ -1721,6 +1721,28 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d) {
   return scr_dyn_to_string(d, NULL);
 }
 
+static bool scr_dyn_to_primitive_result_is_object(const ScrDyn *d) {
+  switch (d->kind) {
+  case SCR_DYN_OBJ:
+  case SCR_DYN_ARR:
+  case SCR_DYN_BYTES:
+  case SCR_DYN_FUNC:
+  case SCR_DYN_HANDLE:
+  case SCR_DYN_PROMISE:
+  case SCR_DYN_TYPED_REF:
+    return true;
+  case SCR_DYN_JSVAL:
+    /* Engine scalars normally normalize into their native dyn kinds on
+     * ingress, but preserve the correct answer for any producer that keeps
+     * a wrapped object/function (or a defensively wrapped null). */
+    return !scr_dyn_is_nullish(d) &&
+           (scr_dyn_isl_typeof_is(d, "object") ||
+            scr_dyn_isl_typeof_is(d, "function"));
+  default:
+    return false;
+  }
+}
+
 /* JS ToString over a dyn value WITH the object protocol (the WHATWG
  * USVString conversions — URLSearchParams names/values): an OBJ whose
  * own 'toString' member is callable is invoked with zero arguments (its
@@ -1741,11 +1763,13 @@ ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
     for (int i = 0; i < 2; i++) {
       ScrDyn *m = scr_dyn_obj_get(d, hint[i], strlen(hint[i])); /* borrowed */
       if (!m || m->kind != SCR_DYN_FUNC) continue;
+      /* OrdinaryToPrimitive performs a method call, not a bare function
+       * call: an own coercion hook observes the source object as `this`. */
+      scr_dyn_this_push_dyn(d);
       ScrDyn *r = scr_dyn_call(m, NULL, 0, hint[i]);
+      scr_dyn_this_pop();
       if (!r) return NULL; /* the method threw — pending */
-      if (r->kind == SCR_DYN_OBJ || r->kind == SCR_DYN_ARR ||
-          r->kind == SCR_DYN_FUNC || r->kind == SCR_DYN_HANDLE ||
-          r->kind == SCR_DYN_PROMISE) {
+      if (scr_dyn_to_primitive_result_is_object(r)) {
         scr_dyn_release(r); /* non-primitive answer: try the next method */
         continue;
       }

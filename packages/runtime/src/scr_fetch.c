@@ -4615,10 +4615,19 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
           : NULL;
   bool duplex_present =
       duplex && duplex->kind != SCR_DYN_UNDEF;
-  bool duplex_half =
-      duplex_present && duplex->kind == SCR_DYN_STR &&
-      duplex->v.str->len == 4 &&
-      memcmp(duplex->v.str->data, "half", 4) == 0;
+  bool duplex_half = false;
+  if (duplex_present) {
+    ScrStr *duplex_mode = scr_dyn_string_coerce_js(duplex);
+    if (!duplex_mode) {
+      scr_str_release(method);
+      scr_url_release(u);
+      return sf_reject_now(promise, "fetch failed");
+    }
+    duplex_half =
+        duplex_mode->len == 4 &&
+        memcmp(duplex_mode->data, "half", 4) == 0;
+    scr_str_release(duplex_mode);
+  }
   if (duplex_present && !duplex_half) {
     scr_str_release(method);
     scr_url_release(u);
