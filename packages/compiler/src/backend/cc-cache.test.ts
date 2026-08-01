@@ -63,6 +63,12 @@ test("native cache identities separate host architectures while cross targets re
 test("the toolchain environment joins cache identities", () => {
   const base = toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/one" });
   expect(toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/two" })).not.toBe(base);
+  expect(toolchainEnvironmentFingerprint({ ZIG_LIB_DIR: "/zig/one" })).not.toBe(
+    toolchainEnvironmentFingerprint({ ZIG_LIB_DIR: "/zig/two" }),
+  );
+  expect(toolchainEnvironmentFingerprint({ ZIG_LIBC: "/libc/one.conf" })).not.toBe(
+    toolchainEnvironmentFingerprint({ ZIG_LIBC: "/libc/two.conf" }),
+  );
   // PATH is deliberately absent from this generic environment hash: the
   // resolved executable identity is keyed separately, while a process that
   // already established it can still use a hit after the tool disappears.
@@ -88,6 +94,14 @@ test("the toolchain environment joins cache identities", () => {
     runtimeObjects: false,
   });
   expect(toolchainEnvironmentCachePolicy({ CFLAGS: "-I/headers" })).toEqual({
+    completeArtifacts: false,
+    runtimeObjects: false,
+  });
+  expect(toolchainEnvironmentCachePolicy({ ZIG_LIB_DIR: "/zig/lib" })).toEqual({
+    completeArtifacts: false,
+    runtimeObjects: false,
+  });
+  expect(toolchainEnvironmentCachePolicy({ ZIG_LIBC: "/zig/libc.conf" })).toEqual({
     completeArtifacts: false,
     runtimeObjects: false,
   });
@@ -357,6 +371,61 @@ test("mutable compiler inputs bypass caches when files change in place", async (
     else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     if (oldCpath === undefined) delete process.env["CPATH"];
     else process.env["CPATH"] = oldCpath;
+    if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+    else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
+  }
+});
+
+test("the hard disable bypasses vendor prerequisite caches", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-no-cache-vendor-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const vendorCacheRoot = join(dir, "vendor-cache");
+  const cPath = join(dir, "program.c");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldVendorCacheDir = process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
+  const corruption = Buffer.from("scriptc-corrupt-vendor-object\n");
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = vendorCacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, "int main(void) { return 0; }\n");
+
+    await compileC({
+      cPath,
+      outPath: join(dir, "populated"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      regex: true,
+    });
+    const lreCache = (await readdir(vendorCacheRoot)).find((name) => name.includes("-lre-"));
+    expect(lreCache).toBeDefined();
+    const cachedObject = join(vendorCacheRoot, lreCache!, "libregexp.o");
+    await writeFile(cachedObject, corruption);
+
+    process.env["SCRIPTC_NO_CACHE"] = "1";
+    await compileC({
+      cPath,
+      outPath: join(dir, "disabled"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      regex: true,
+    });
+    await compileLibArchive({
+      cPath,
+      outPath: join(dir, "disabled.lib.a"),
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      regex: true,
+    });
+
+    // Neither disabled build consulted or repaired the package-local entry;
+    // each built its prerequisite in a private, disposable temp root instead.
+    expect(await readFile(cachedObject)).toEqual(corruption);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
     else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
   }

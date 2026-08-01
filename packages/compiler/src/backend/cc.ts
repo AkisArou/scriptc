@@ -67,6 +67,8 @@ const TOOLCHAIN_ENV_KEYS = [
   "RANLIB",
   "CMAKE_GENERATOR",
   "CMAKE_TOOLCHAIN_FILE",
+  "ZIG_LIB_DIR",
+  "ZIG_LIBC",
   "SOURCE_DATE_EPOCH",
   "ZERO_AR_DATE",
   "LANG",
@@ -109,6 +111,11 @@ const MUTABLE_COMPILE_ENV_KEYS = [
   "AR",
   "RANLIB",
   "CMAKE_TOOLCHAIN_FILE",
+  // `zig cc` resolves its bundled headers/runtime through ZIG_LIB_DIR and a
+  // caller-selected native libc description through ZIG_LIBC. Both values name
+  // mutable compiler inputs whose contents can change behind a stable path.
+  "ZIG_LIB_DIR",
+  "ZIG_LIBC",
 ] as const;
 
 /** These variables only redirect link-time inputs. Runtime objects remain
@@ -1094,13 +1101,14 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   ];
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
   const cachePolicy = toolchainEnvironmentCachePolicy();
+  const configuredCacheRoot = cacheRootDir();
   // A library archive is compile-only from clang's perspective. Link-only
   // search variables cannot affect it, but any mutable compilation input
   // makes both its complete artifact and runtime objects unsafe to reuse.
   let root =
     opts.cacheIdentity === undefined || !cachePolicy.runtimeObjects
       ? null
-      : cacheRootDir();
+      : configuredCacheRoot;
   if (root !== null) {
     try {
       await ensurePrivateCacheRoot(root);
@@ -1169,7 +1177,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     }
   }
 
-  const transientVendorRoot = cachePolicy.runtimeObjects
+  const transientVendorRoot = cachePolicy.runtimeObjects && configuredCacheRoot !== null
     ? null
     : join(
         tmpdir(),
@@ -1805,6 +1813,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     }
   }
   const cachePolicy = toolchainEnvironmentCachePolicy();
+  const configuredCacheRoot = cacheRootDir();
   const toolchainEnv = toolchainEnvironmentFingerprint();
   const vendorBuildIdentity = await currentVendorCacheBuildIdentity(driver, toolchainEnv);
   // Mutable include/SDK/config inputs can change behind a stable environment
@@ -1812,7 +1821,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // must follow the same rule instead of silently surviving in package-local
   // .cache. A private root gives this invocation the usual vendor build recipe
   // without publishing or reusing those prerequisites.
-  const transientVendorRoot = cachePolicy.runtimeObjects
+  const transientVendorRoot = cachePolicy.runtimeObjects && configuredCacheRoot !== null
     ? null
     : join(
         tmpdir(),
@@ -2082,7 +2091,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   let root =
     opts.cacheIdentity === undefined || !cachePolicy.runtimeObjects
       ? null
-      : cacheRootDir();
+      : configuredCacheRoot;
   if (root !== null) {
     try {
       await ensurePrivateCacheRoot(root);
