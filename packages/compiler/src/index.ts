@@ -47,6 +47,14 @@ export {
   type SurfaceManifest,
   type SurfaceManifestEntry,
 } from "./coverage/surface-manifest.js";
+export {
+  NODE24_FETCH_COMPAT_PROFILE,
+  type FetchCompatEvidence,
+  type FetchCompatFacet,
+  type FetchCompatOperation,
+  type FetchCompatOption,
+  type FetchCompatProfile,
+} from "./compat/fetch-profile.js";
 export { LIB_FN_SIGS, validateModule } from "./ir/validate.js";
 export { resolveLibraryFences, type LibraryFenceDecl, type ResolvedLibraryFence } from "./library/fence-eval.js";
 export {

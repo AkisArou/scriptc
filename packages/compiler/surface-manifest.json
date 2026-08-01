@@ -8,6 +8,7 @@
     "stdlib and node-builtin member entries name surface whose LOWERED call forms are constrained (arity, argument shapes); declared call forms outside the lowered set are refused per site, with code SC2020 for standard-library and node-builtin surface.",
     "Entries with status 'unsupported' or 'dynamic-only' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
     "Entries with status 'dynamic-only' compile when the build embeds the dynamic engine (--dynamic); without the flag each use site is refused with the entry's code.",
+    "The engine-free fetch projection targets Node 24.15.0 with bundled Undici 7.24.4. Each projected row names the differential evidence that guards it; changing the pinned Node or Undici version is an explicit profile update.",
     "Process-level diagnostic codes are not surface entries: SC0001-SC0004 are preflight gates, SC1110 is a comptime evaluation failure, SC3001 is the alternate-backend tier refusal, SC9001/SC9002 are internal errors.",
     "No scheduling metadata is published; entry ids are the stable diff keys across releases."
   ],
@@ -1865,6 +1866,76 @@
       "note": "deflateSync and inflateSync are the lowered zlib surface"
     },
     {
+      "id": "stdlib.abort-signal.abort",
+      "kind": "stdlib",
+      "name": "AbortSignal.abort",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, liveness, surplus-arguments, property-read; differential evidence: generated:webidl-operations, fixture:static-stream-this"
+    },
+    {
+      "id": "stdlib.abort-signal.aborted",
+      "kind": "stdlib",
+      "name": "AbortSignal.aborted",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: generated:webidl-operations"
+    },
+    {
+      "id": "stdlib.abort-signal.add-event-listener",
+      "kind": "stdlib",
+      "name": "AbortSignal.addEventListener",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, identity, callback-order, callback-this; differential evidence: generated:abort-events, fixture:static-listener-this, fixture:static-listener-noncallable"
+    },
+    {
+      "id": "stdlib.abort-signal.any",
+      "kind": "stdlib",
+      "name": "AbortSignal.any",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, missing-arguments, surplus-arguments, property-read; differential evidence: generated:webidl-operations, fixture:static-stream-this"
+    },
+    {
+      "id": "stdlib.abort-signal.dispatch-event",
+      "kind": "stdlib",
+      "name": "AbortSignal.dispatchEvent",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: callback-order, callback-this, error-shape; differential evidence: fixture:static-dispatch-throw"
+    },
+    {
+      "id": "stdlib.abort-signal.onabort",
+      "kind": "stdlib",
+      "name": "AbortSignal.onabort",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: callback-order, callback-this, mutation, property-read; differential evidence: generated:abort-events, fixture:static-listener-this"
+    },
+    {
+      "id": "stdlib.abort-signal.reason",
+      "kind": "stdlib",
+      "name": "AbortSignal.reason",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, liveness, property-read; differential evidence: generated:webidl-operations, fixture:static-stream-this"
+    },
+    {
+      "id": "stdlib.abort-signal.remove-event-listener",
+      "kind": "stdlib",
+      "name": "AbortSignal.removeEventListener",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, identity, callback-order; differential evidence: generated:abort-events, fixture:static-stream-this"
+    },
+    {
+      "id": "stdlib.abort-signal.throw-if-aborted",
+      "kind": "stdlib",
+      "name": "AbortSignal.throwIfAborted",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, error-shape; differential evidence: generated:webidl-operations, fixture:static-abort-throw"
+    },
+    {
+      "id": "stdlib.abort-signal.timeout",
+      "kind": "stdlib",
+      "name": "AbortSignal.timeout",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, missing-arguments, surplus-arguments, error-shape; differential evidence: generated:webidl-operations, fixture:static-stream-this"
+    },
+    {
       "id": "stdlib.array.at",
       "kind": "stdlib",
       "name": "Array.prototype.at",
@@ -2035,6 +2106,104 @@
       "name": "Date.prototype.toISOString",
       "status": "static",
       "note": "the composed new Date(ms?).toISOString() form"
+    },
+    {
+      "id": "stdlib.fetch",
+      "kind": "stdlib",
+      "name": "fetch",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: argument-evaluation, webidl-conversion, surplus-arguments, promise-settlement, transport, error-shape; differential evidence: fixture:static, fixture:static-coercion, fixture:static-network-error"
+    },
+    {
+      "id": "stdlib.fetch.request-init.body",
+      "kind": "stdlib",
+      "name": "RequestInit.body",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: string, Uint8Array, ReadableStream, or null; differential evidence: fixture:static, fixture:static-stream, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.fetch.request-init.duplex",
+      "kind": "stdlib",
+      "name": "RequestInit.duplex",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: WebIDL enum; 'half' required for streaming bodies; differential evidence: fixture:static-stream, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.fetch.request-init.headers",
+      "kind": "stdlib",
+      "name": "RequestInit.headers",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: Headers, record, or sequence-of-pairs snapshot; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.fetch.request-init.method",
+      "kind": "stdlib",
+      "name": "RequestInit.method",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: WebIDL ByteString after all call arguments evaluate; differential evidence: fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.fetch.request-init.redirect",
+      "kind": "stdlib",
+      "name": "RequestInit.redirect",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: WebIDL enum: follow, error, or manual; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.fetch.request-init.signal",
+      "kind": "stdlib",
+      "name": "RequestInit.signal",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: native AbortSignal handle or absent; differential evidence: fixture:static, fixture:static-abort-throw"
+    },
+    {
+      "id": "stdlib.headers.append",
+      "kind": "stdlib",
+      "name": "Headers.append",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, error-shape; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.headers.delete",
+      "kind": "stdlib",
+      "name": "Headers.delete",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, error-shape; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.headers.forEach",
+      "kind": "stdlib",
+      "name": "Headers.forEach",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: callback-order, callback-this, mutation; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.headers.get",
+      "kind": "stdlib",
+      "name": "Headers.get",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, missing-arguments, property-read; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.headers.getSetCookie",
+      "kind": "stdlib",
+      "name": "Headers.getSetCookie",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, error-shape; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.headers.has",
+      "kind": "stdlib",
+      "name": "Headers.has",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, missing-arguments, property-read; differential evidence: fixture:static, fixture:static-coercion"
+    },
+    {
+      "id": "stdlib.headers.set",
+      "kind": "stdlib",
+      "name": "Headers.set",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, error-shape; differential evidence: fixture:static, fixture:static-coercion"
     },
     {
       "id": "stdlib.map.clear",
@@ -2274,6 +2443,174 @@
       "name": "number.prototype.toString",
       "status": "dynamic-only",
       "code": "SC2012"
+    },
+    {
+      "id": "stdlib.readable-stream-default-controller.close",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultController.close",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: state-machine, error-shape; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream-default-controller.desired-size",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultController.desiredSize",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; differential evidence: generated:stream-traces"
+    },
+    {
+      "id": "stdlib.readable-stream-default-controller.enqueue",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultController.enqueue",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, liveness, state-machine, error-shape; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream-default-controller.error",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultController.error",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, promise-settlement, state-machine; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream-default-reader.cancel",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultReader.cancel",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, promise-settlement, state-machine; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream-default-reader.closed",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultReader.closed",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: promise-settlement, property-read, state-machine; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream-default-reader.read",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultReader.read",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, promise-settlement, state-machine; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream-default-reader.release-lock",
+      "kind": "stdlib",
+      "name": "ReadableStreamDefaultReader.releaseLock",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: promise-settlement, state-machine, error-shape; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream.cancel",
+      "kind": "stdlib",
+      "name": "ReadableStream.cancel",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, promise-settlement, state-machine; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream.constructor",
+      "kind": "stdlib",
+      "name": "ReadableStream constructor",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, callback-this, callback-order, state-machine; differential evidence: generated:stream-traces, fixture:static-stream-this"
+    },
+    {
+      "id": "stdlib.readable-stream.from",
+      "kind": "stdlib",
+      "name": "ReadableStream.from",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, missing-arguments, surplus-arguments, liveness; differential evidence: generated:webidl-operations, generated:stream-traces"
+    },
+    {
+      "id": "stdlib.readable-stream.get-reader",
+      "kind": "stdlib",
+      "name": "ReadableStream.getReader",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, identity, state-machine, error-shape; differential evidence: generated:stream-traces, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.readable-stream.locked",
+      "kind": "stdlib",
+      "name": "ReadableStream.locked",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; differential evidence: generated:stream-traces"
+    },
+    {
+      "id": "stdlib.response.body",
+      "kind": "stdlib",
+      "name": "Response.body",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.bodyUsed",
+      "kind": "stdlib",
+      "name": "Response.bodyUsed",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.bytes",
+      "kind": "stdlib",
+      "name": "Response.bytes",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.response.headers",
+      "kind": "stdlib",
+      "name": "Response.headers",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.json",
+      "kind": "stdlib",
+      "name": "Response.json",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.response.ok",
+      "kind": "stdlib",
+      "name": "Response.ok",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.redirected",
+      "kind": "stdlib",
+      "name": "Response.redirected",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.status",
+      "kind": "stdlib",
+      "name": "Response.status",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.statusText",
+      "kind": "stdlib",
+      "name": "Response.statusText",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
+    },
+    {
+      "id": "stdlib.response.text",
+      "kind": "stdlib",
+      "name": "Response.text",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static, fixture:static-stream"
+    },
+    {
+      "id": "stdlib.response.url",
+      "kind": "stdlib",
+      "name": "Response.url",
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: property-read; differential evidence: fixture:static"
     },
     {
       "id": "stdlib.set.add",

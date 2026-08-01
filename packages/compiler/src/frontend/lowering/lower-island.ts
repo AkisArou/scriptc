@@ -10,6 +10,13 @@ import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagno
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
 import { lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
 import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
+import {
+  STATIC_READABLE_STREAM_CALLS,
+  STATIC_READABLE_STREAM_READS,
+  STATIC_REQUEST_INIT_KEYS,
+  STATIC_RESPONSE_CALLS,
+  STATIC_RESPONSE_READS,
+} from "../../compat/fetch-profile.js";
 
 /** True iff the checker's type for this node maps to jsval ('any') —
    * the island test in front of every engine-op lowering (receivers,
@@ -229,15 +236,6 @@ import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
     return entry;
   }
 
-const STATIC_REQUEST_INIT_KEYS = new Set([
-  "method",
-  "headers",
-  "body",
-  "duplex",
-  "redirect",
-  "signal",
-]);
-
 function requestInitLiteralKey(
   prop: ts.ObjectLiteralElementLike,
 ): string | null {
@@ -452,23 +450,6 @@ export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): Ir
     loc: locOf(call),
   };
 }
-
-const STATIC_RESPONSE_READS = new Set([
-  "ok",
-  "status",
-  "statusText",
-  "url",
-  "redirected",
-  "headers",
-  "body",
-  "bodyUsed",
-]);
-
-const STATIC_RESPONSE_CALLS = new Set(["json", "text", "bytes"]);
-
-const STATIC_READABLE_STREAM_READS = new Set(["locked"]);
-
-const STATIC_READABLE_STREAM_CALLS = new Set(["cancel", "getReader"]);
 
 type StaticResponseAccess =
   | ts.PropertyAccessExpression

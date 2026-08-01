@@ -1681,11 +1681,13 @@ static void sf_stream_enqueue_value(SfStream *s, ScrDyn *value) {
   if (value->kind == SCR_DYN_TYPED_REF) {
     for (SfTypedRef **at = &s->typed_refs; *at;) {
       SfTypedRef *ref = *at;
-      /* The cache's own reference is no longer observable. Drop it before
-       * comparing the next value so a consume-and-discard stream retains
-       * only its live queue/reader window instead of every value ever
-       * seen. A retained reader result keeps rc > 1 and remains canonical. */
-      if (ref->value->rc == 1) {
+      /* A typed ReadableStream.from(array) retains the source array for the
+       * stream's lifetime, so a source object can recur after an arbitrary
+       * number of pulls and must still denote the same JS object. Keep its
+       * capsule as long as that source is live. Callback-fed streams have no
+       * such bounded owner; drop an otherwise-unobserved capsule there so a
+       * long-running producer does not retain every object it ever emitted. */
+      if (!s->from_array && ref->value->rc == 1) {
         *at = ref->next;
         scr_dyn_release(ref->value);
         free(ref);
@@ -2052,6 +2054,35 @@ static void sf_stream_schedule_initial_pull(SfStream *s) {
   scr_queue_microtask(cb);
 }
 
+/* Web Streams wraps an underlying source's plain pull return in a resolved
+ * promise. Its fulfillment step therefore runs as a promise job, never in
+ * the pull callback's stack. In particular, enqueueing into a pending read
+ * wakes that read's awaiter before a desiredSize-driven repull: the awaiter
+ * can cancel or release the reader first. Keep pulling=true through this
+ * microtask so demand raised by enqueue/read records pull_again exactly as
+ * it does while awaiting a genuinely asynchronous pull result. */
+static void sf_stream_pull_complete_task(ScrClosure *cb) {
+  SfStream *s = (SfStream *)scr_box_get_ref(cb->caps[0]);
+  if (!s) return;
+  s->pulling = false;
+  bool again = s->pull_again;
+  s->pull_again = false;
+  if (again && !s->close_requested && !s->closed && !s->error) {
+    sf_stream_pull(s);
+  }
+  sf_stream_release(s);
+}
+
+static void sf_stream_schedule_pull_complete(SfStream *s) {
+  ScrClosure *cb =
+      scr_closure_new((void *)&sf_stream_pull_complete_task, 1);
+  ScrBox *box =
+      scr_box_new_obj(&sf_stream_retain_v, &sf_stream_release_v, NULL);
+  scr_box_set_ref(box, sf_stream_retain(s));
+  cb->caps[0] = box;
+  scr_queue_microtask(cb);
+}
+
 static void sf_stream_pull(SfStream *s) {
   if (!s->started ||
       (!s->pull_cb && !sf_stream_has_from_source(s)) ||
@@ -2064,54 +2095,45 @@ static void sf_stream_pull(SfStream *s) {
     return;
   }
   if (sf_stream_has_from_source(s)) {
-    for (;;) {
-      s->pulling = true;
-      sf_stream_pull_from_source(s);
-      s->pulling = false;
-      bool again = s->pull_again;
-      s->pull_again = false;
-      if (!again || s->close_requested || s->closed || s->error) return;
-    }
-  }
-  for (;;) {
     s->pulling = true;
-    ScrDyn *controller = sf_controller_box(s);
-    ScrDyn *args[1] = {controller};
-    ScrDyn *pull_cb = scr_dyn_retain(s->pull_cb);
-    scr_dyn_this_push_dyn(s->source_this);
-    ScrDyn *r =
-        scr_dyn_call(pull_cb, args, 1, "underlyingSource.pull");
-    scr_dyn_this_pop();
-    scr_dyn_release(pull_cb);
-    scr_dyn_release(controller);
-    if (!r) {
-      s->pulling = false;
-      s->pull_again = false;
-      ScrCaught *caught = scr_exc_take();
-      ScrDyn *reason = scr_caught_to_dyn(caught);
-      sf_stream_error(s, reason);
-      scr_dyn_release(reason);
-      scr_caught_release(caught);
-      return;
-    }
-    ScrPromise *callback_promise = sf_stream_callback_promise(r);
-    if (callback_promise) {
-      SfPullWait *wait = malloc(sizeof *wait);
-      if (!wait) sf_oom();
-      wait->stream = sf_stream_retain(s);
-      wait->promise = callback_promise;
-      ScrPromise *watcher =
-          scr_async_spawn(&sf_stream_pull_wait_entry, wait);
-      scr_promise_release(watcher);
-      scr_dyn_release(r);
-      return;
-    }
-    scr_dyn_release(r);
-    s->pulling = false;
-    bool again = s->pull_again;
-    s->pull_again = false;
-    if (!again || s->close_requested || s->closed || s->error) return;
+    sf_stream_pull_from_source(s);
+    sf_stream_schedule_pull_complete(s);
+    return;
   }
+  s->pulling = true;
+  ScrDyn *controller = sf_controller_box(s);
+  ScrDyn *args[1] = {controller};
+  ScrDyn *pull_cb = scr_dyn_retain(s->pull_cb);
+  scr_dyn_this_push_dyn(s->source_this);
+  ScrDyn *r =
+      scr_dyn_call(pull_cb, args, 1, "underlyingSource.pull");
+  scr_dyn_this_pop();
+  scr_dyn_release(pull_cb);
+  scr_dyn_release(controller);
+  if (!r) {
+    s->pulling = false;
+    s->pull_again = false;
+    ScrCaught *caught = scr_exc_take();
+    ScrDyn *reason = scr_caught_to_dyn(caught);
+    sf_stream_error(s, reason);
+    scr_dyn_release(reason);
+    scr_caught_release(caught);
+    return;
+  }
+  ScrPromise *callback_promise = sf_stream_callback_promise(r);
+  if (callback_promise) {
+    SfPullWait *wait = malloc(sizeof *wait);
+    if (!wait) sf_oom();
+    wait->stream = sf_stream_retain(s);
+    wait->promise = callback_promise;
+    ScrPromise *watcher =
+        scr_async_spawn(&sf_stream_pull_wait_entry, wait);
+    scr_promise_release(watcher);
+    scr_dyn_release(r);
+    return;
+  }
+  scr_dyn_release(r);
+  sf_stream_schedule_pull_complete(s);
 }
 
 static SfReader *sf_stream_get_reader(SfStream *s) {
