@@ -79,7 +79,7 @@ Measured on Apple M-series against the same workloads in Node, Go, Rust, and Zig
 | memory (RSS) | 1–4MB typical | Node: 67–116MB |
 | runtime | JS-faithful f64 semantics; competitive with the systems languages on most workloads | integer inference and ownership analysis are on the roadmap |
 
-Builds use a bounded, content-addressed cache by default. An unchanged executable or library archive is restored without invoking clang; after a source edit, stable runtime objects are reused and only the program translation unit is rebuilt. FFI builds that name ambient `system_libraries` always relink against their current resolution while retaining runtime-object reuse. Mutable compiler input paths such as `CPATH` and `SDKROOT` conservatively bypass persistent artifacts and objects so an in-place header or SDK update cannot return stale native code. Set `SCRIPTC_NO_CACHE=1` for a fully uncached build, or `SCRIPTC_CACHE_DIR` to choose the cache root.
+Builds use a bounded, content-addressed cache by default. An unchanged executable or library archive is restored without invoking clang; after a source edit, stable runtime objects are reused and only the program translation unit is rebuilt. FFI builds with archive/object inputs or ambient `system_libraries` always relink against their current dependencies while retaining runtime-object reuse. Mutable compiler input paths such as `CPATH` and `SDKROOT` conservatively bypass persistent artifacts and objects so an in-place header or SDK update cannot return stale native code. Set `SCRIPTC_NO_CACHE=1` for a fully uncached build, or `SCRIPTC_CACHE_DIR` to choose the cache root.
 
 ## Escape hatches
 

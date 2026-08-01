@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterAll, expect, test } from "vitest";
 import {
   cacheTargetIdentity,
@@ -49,8 +50,9 @@ test("native cache identities separate host architectures while cross targets re
 test("the toolchain environment joins cache identities", () => {
   const base = toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/one" });
   expect(toolchainEnvironmentFingerprint({ PATH: "/usr/bin", CPATH: "/headers/two" })).not.toBe(base);
-  // PATH is deliberately absent: an already-identified content hit remains
-  // usable when the compiler is no longer installed/reachable.
+  // PATH is deliberately absent from this generic environment hash: the
+  // resolved executable identity is keyed separately, while a process that
+  // already established it can still use a hit after the tool disappears.
   expect(toolchainEnvironmentFingerprint({ PATH: "", CPATH: "/headers/one" })).toBe(base);
   expect(
     toolchainEnvironmentFingerprint({
@@ -80,14 +82,87 @@ test("the runtime fingerprint includes the textually included Ryū sources", asy
   const rtDir = join(dir, "src");
   const ryuDir = join(dir, "vendor", "ryu");
   await Promise.all([mkdir(rtDir, { recursive: true }), mkdir(ryuDir, { recursive: true })]);
+  const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
   await Promise.all([
     writeFile(join(rtDir, "scr_number.c"), '#include "../vendor/ryu/d2s.c"\n'),
     writeFile(join(ryuDir, "d2s.c"), "int ryu_probe = 1;\n"),
   ]);
+  await utimes(join(ryuDir, "d2s.c"), pinnedTime, pinnedTime);
   const first = await runtimeFingerprint(rtDir);
-  await writeFile(join(ryuDir, "d2s.c"), "int ryu_probe = 200;\n");
+  // Timestamp-preserving sync/copy tools can replace bytes without changing
+  // the old stat-memo signature. Content, not metadata, owns this identity.
+  await writeFile(join(ryuDir, "d2s.c"), "int ryu_probe = 2;\n");
+  await utimes(join(ryuDir, "d2s.c"), pinnedTime, pinnedTime);
   expect(await runtimeFingerprint(rtDir)).not.toBe(first);
 });
+
+test.skipIf(process.platform === "win32")(
+  "compiler resolution through PATH joins the cache identity",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-compiler-path-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const firstBinDir = join(dir, "compiler-one");
+    const secondBinDir = join(dir, "compiler-two");
+    const cPath = join(dir, "program.c");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldPath = process.env["PATH"];
+    const oldRealClang = process.env["SCRIPTC_TEST_REAL_CLANG"];
+    const originalClang = (oldPath ?? "")
+      .split(delimiter)
+      .map((entry) => join(entry === "" ? process.cwd() : entry, "clang"))
+      .find((candidate) => existsSync(candidate));
+    expect(originalClang).toBeDefined();
+
+    const installWrapper = async (binDir: string, value: number): Promise<void> => {
+      await mkdir(binDir);
+      const wrapper = join(binDir, "clang");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "scriptc cache-test clang ${value}.0"
+  exit 0
+fi
+exec "$SCRIPTC_TEST_REAL_CLANG" -DSCRIPTC_PATH_PROBE=${value} "$@"
+`,
+      );
+      await chmod(wrapper, 0o755);
+    };
+
+    try {
+      await Promise.all([installWrapper(firstBinDir, 1), installWrapper(secondBinDir, 2)]);
+      await writeFile(
+        cPath,
+        '#include <stdio.h>\nint main(void) { printf("%d\\n", SCRIPTC_PATH_PROBE); return 0; }\n',
+      );
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_REAL_CLANG"] = originalClang!;
+      delete process.env["SCRIPTC_NO_CACHE"];
+
+      process.env["PATH"] = `${firstBinDir}${delimiter}${oldPath ?? ""}`;
+      const firstOut = join(dir, "first");
+      await compileC({ cPath, outPath: firstOut, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
+
+      process.env["PATH"] = `${secondBinDir}${delimiter}${oldPath ?? ""}`;
+      const secondOut = join(dir, "second");
+      await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("2");
+      expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(2);
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
+      if (oldRealClang === undefined) delete process.env["SCRIPTC_TEST_REAL_CLANG"];
+      else process.env["SCRIPTC_TEST_REAL_CLANG"] = oldRealClang;
+    }
+  },
+);
 
 test("staged runtime objects survive removal of their cache names and are promoted in the LRU", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-object-stage-"));
@@ -318,6 +393,62 @@ test("cached translation units keep the compiler-visible source path in their id
     expect(execFileSync(aOut, { encoding: "utf8" }).trim()).toBe(aPath);
     expect(execFileSync(bOut, { encoding: "utf8" }).trim()).toBe(bPath);
     expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(2);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+  }
+});
+
+test("explicit native link inputs relink while runtime objects remain cached", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-link-input-cache-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const nativeSource = join(dir, "probe.c");
+  const nativeObject = join(dir, "probe.o");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+  const rebuildObject = async (value: number): Promise<void> => {
+    await writeFile(nativeSource, `int scriptc_cache_probe(void) { return ${value}; }\n`);
+    execFileSync("clang", ["-c", nativeSource, "-o", nativeObject]);
+  };
+
+  try {
+    await writeFile(
+      cPath,
+      '#include <stdio.h>\nextern int scriptc_cache_probe(void);\nint main(void) { printf("%d\\n", scriptc_cache_probe()); return 0; }\n',
+    );
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+
+    await rebuildObject(1);
+    const firstOut = join(dir, "first");
+    await compileC({
+      cPath,
+      outPath: firstOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      linkInputs: [nativeObject],
+    });
+    expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
+
+    await rebuildObject(2);
+    const secondOut = join(dir, "second");
+    await compileC({
+      cPath,
+      outPath: secondOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      linkInputs: [nativeObject],
+    });
+    expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("2");
+
+    // A path may name a thin archive or linker script whose own bytes do not
+    // cover its dependencies, so every native-input build performs this link.
+    await expect(stat(join(cacheRoot, "bin"))).rejects.toMatchObject({ code: "ENOENT" });
+    const objectSets = await readdir(join(cacheRoot, "obj"), { withFileTypes: true });
+    expect(objectSets.some((entry) => entry.isDirectory() && !entry.name.startsWith("build-"))).toBe(true);
   } finally {
     if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
     else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;

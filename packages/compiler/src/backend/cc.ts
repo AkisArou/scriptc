@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { createRequire } from "node:module";
-import { chmod, copyFile, link, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, link, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism, homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -138,7 +139,10 @@ export interface CcOptions {
   /** Build with ASan + the runtime RC audit (test/debug lane). */
   sanitize?: boolean;
   /** Additional native archives/objects, appended after the generated
-   * program TU so their symbols resolve outbound FFI calls. */
+   * program TU so their symbols resolve outbound FFI calls. These inputs can
+   * be thin archives or linker scripts with mutable transitive dependencies,
+   * so their builds bypass the complete-executable cache while still reusing
+   * cached runtime objects. */
   linkInputs?: readonly string[];
   /** Driver-neutral system library names, emitted as `-l<name>` after
    * linkInputs. Because the linker resolves these ambient names to files,
@@ -1096,8 +1100,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * clang entirely — the test lanes' dominant cost. Three keyspaces under the
  * cache root:
  *
- *   bin/<key>       — whole program binaries. key = sha256(clang version,
- *                     target + compiler/linker environment, runtime fingerprint
+ *   bin/<key>       — whole program binaries. key = sha256(resolved clang
+ *                     identity/version, target + compiler/linker environment,
+ *                     runtime fingerprint
  *                     (every .c/.h in the runtime src dir plus the vendor pin
  *                     QJS_COMMIT), the caller's dependency identity, the
  *                     compiler-visible TU path, the FULL normalized command
@@ -1112,10 +1117,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     asked for it, so no comparison or sanitizer coverage
  *                     is ever skipped.
  *
- *   lib/<key>       — whole library archives. The identity covers the compiler
- *                     version, compiler/linker environment, runtime fingerprint,
- *                     target/flags, gated source set, archiver spelling/version,
- *                     caller dependency identity, TU path, and program-TU bytes.
+ *   lib/<key>       — whole library archives. The identity covers the resolved
+ *                     compiler and archiver identities/versions, compiler/linker
+ *                     environment, runtime fingerprint, target/flags, gated
+ *                     source set, caller dependency identity, TU path, and program-TU bytes.
  *                     Hits skip both clang and ar.
  *
  *   obj/<set>/<f>.o — per-flavor runtime objects for cache-miss builds. The
@@ -1132,10 +1137,11 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * Frontend-generated production builds supply a dependency identity and use a
  * per-user platform cache by default. Arbitrary low-level TUs omit the identity
  * and bypass this cache because their include graph is caller-owned.
- * Builds with caller-named system libraries (`-l<name>`) also bypass the whole
- * binary cache: the selected file can change in place without changing the
- * command line or environment spelling. Their runtime objects remain cached,
- * and every invocation performs the final link against the current library.
+ * Builds with caller-supplied native link inputs (archive/object paths or
+ * `-l<name>` libraries) also bypass the whole binary cache: a thin archive,
+ * linker script, or ambient resolution can change transitively without
+ * changing the named input's bytes or spelling. Their runtime objects remain
+ * cached, and every invocation performs the final link against current inputs.
  * SCRIPTC_CACHE_DIR overrides the root (the test lanes use this to stay
  * repo-local); an explicitly empty value or SCRIPTC_NO_CACHE=1 disables reads
  * and writes. With caching disabled compileC issues the exact historical
@@ -1174,38 +1180,108 @@ function cacheRootDir(): string | null {
 }
 
 const ccVersionMemos = new Map<string, Promise<string>>();
-function ccVersionOnce(
+const ccVersionFallbacks = new Map<string, Promise<string>>();
+
+/** Resolve the executable the OS will select for an argv[0] spelling. The
+ * path and inode metadata join the version output below: two PATH postures
+ * must not share cache entries merely because both drivers call themselves
+ * `clang` or print the same upstream version. ctime catches an in-place tool
+ * replacement even when a package manager preserves its size and mtime. */
+async function resolvedToolIdentity(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  const hasSeparator = command.includes("/") || command.includes("\\");
+  const configuredPath = (env["PATH"] ?? (process.platform === "win32" ? "" : "/usr/bin:/bin"))
+    .split(delimiter);
+  const pathEntries = hasSeparator
+    ? [""]
+    : process.platform === "win32"
+      ? ["", dirname(process.execPath), ...configuredPath]
+      : configuredPath;
+  const windowsExtensions =
+    process.platform === "win32" && extname(command) === ""
+      ? (env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((extension) => extension !== "")
+      : [""];
+  for (const entry of pathEntries) {
+    const directory = entry.startsWith('"') && entry.endsWith('"') ? entry.slice(1, -1) : entry;
+    const base = hasSeparator
+      ? isAbsolute(command) ? command : resolve(command)
+      : join(directory === "" ? process.cwd() : directory, command);
+    for (const extension of windowsExtensions) {
+      const candidate = `${base}${extension}`;
+      try {
+        await access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
+        const [canonical, info] = await Promise.all([realpath(candidate), stat(candidate)]);
+        if (!info.isFile()) continue;
+        return [
+          resolve(candidate),
+          canonical,
+          info.dev,
+          info.ino,
+          info.size,
+          info.mtimeMs,
+          info.ctimeMs,
+        ].join("\0");
+      } catch {
+        // Keep searching PATH/PATHEXT exactly as process spawning would.
+      }
+    }
+  }
+  return null;
+}
+
+async function ccVersionOnce(
   argv: string[],
   environmentFingerprint: string = toolchainEnvironmentFingerprint(),
 ): Promise<string> {
-  const key = `${environmentFingerprint}\0${argv.join("\x1f")}`;
+  const spellingKey = `${environmentFingerprint}\0${argv.join("\x1f")}`;
+  const executableIdentity = await resolvedToolIdentity(argv[0] ?? "clang");
+  // A complete hit may remain useful after the compiler disappears (the
+  // vendor-prerequisite ordering contract). Reuse the identity this process
+  // already established only when resolution now fails; a newly resolved
+  // executable always gets its own key.
+  if (executableIdentity === null) {
+    const fallback = ccVersionFallbacks.get(spellingKey);
+    if (fallback !== undefined) return fallback;
+  }
+  const key = `${spellingKey}\0${executableIdentity ?? "<unresolved>"}`;
   let memo = ccVersionMemos.get(key);
   if (memo === undefined) {
     // cwd: the version probe must not touch the caller's directory —
     // `zig cc --version` (zig 0.16) drops an empty a.o wherever it runs.
     memo = execFileAsync(argv[0] ?? "clang", [...argv.slice(1), "--version"], { cwd: tmpdir() }).then(
-      (r) => `${r.stdout}\n${r.stderr}`.trim(),
+      (r) => `${executableIdentity ?? "<unresolved>"}\0${`${r.stdout}\n${r.stderr}`.trim()}`,
     );
     ccVersionMemos.set(key, memo);
   }
+  if (executableIdentity !== null) ccVersionFallbacks.set(spellingKey, memo);
   return memo;
 }
 
 const toolVersionMemos = new Map<string, Promise<string>>();
-function toolVersionOnce(
+const toolVersionFallbacks = new Map<string, Promise<string>>();
+async function toolVersionOnce(
   argv: string[],
   environmentFingerprint: string = toolchainEnvironmentFingerprint(),
 ): Promise<string> {
-  const key = `${environmentFingerprint}\0${argv.join("\x1f")}`;
+  const spellingKey = `${environmentFingerprint}\0${argv.join("\x1f")}`;
+  const executableIdentity = await resolvedToolIdentity(argv[0] ?? "ar");
+  if (executableIdentity === null) {
+    const fallback = toolVersionFallbacks.get(spellingKey);
+    if (fallback !== undefined) return fallback;
+  }
+  const key = `${spellingKey}\0${executableIdentity ?? "<unresolved>"}`;
   let memo = toolVersionMemos.get(key);
   if (memo === undefined) {
     memo = execFileAsync(argv[0] ?? "ar", [...argv.slice(1), "--version"]).then(
-      (r) => `${r.stdout}\n${r.stderr}`.trim(),
+      (r) => `${executableIdentity ?? "<unresolved>"}\0${`${r.stdout}\n${r.stderr}`.trim()}`,
       (err: { stdout?: string; stderr?: string; message?: string }) =>
-        `${err.stdout ?? ""}\n${err.stderr ?? ""}`.trim() || err.message || key,
+        `${executableIdentity ?? "<unresolved>"}\0${`${err.stdout ?? ""}\n${err.stderr ?? ""}`.trim() || err.message || key}`,
     );
     toolVersionMemos.set(key, memo);
   }
+  if (executableIdentity !== null) toolVersionFallbacks.set(spellingKey, memo);
   return memo;
 }
 
@@ -1222,9 +1298,9 @@ function ccacheAvailable(): Promise<boolean> {
  * textually included by scr_number.c, and the separately-built vendor pins —
  * everything a binary links that the emitted C bytes don't already cover
  * (npm-embedded C rides inside the emitted C; the engine and standalone
- * vendor archives are pinned by their version constants). Memoized per
- * runtime tree behind a stat signature so watch-mode edits re-hash. */
-const rtFingerprintMemos = new Map<string, { sig: string; hash: string }>();
+ * vendor archives are pinned by their version constants). The small source
+ * tree is hashed on every identity calculation: a stat-only memo can miss a
+ * same-size edit whose timestamp was preserved by a copy/sync tool. */
 export async function runtimeFingerprint(rtDir: string): Promise<string> {
   const groups = await Promise.all(
     [
@@ -1232,27 +1308,16 @@ export async function runtimeFingerprint(rtDir: string): Promise<string> {
       { label: "ryu", dir: join(rtDir, "..", "vendor", "ryu") },
     ].map(async (group) => {
       const names = (await readdir(group.dir)).filter((n) => n.endsWith(".c") || n.endsWith(".h")).sort();
-      const stats = await Promise.all(names.map((n) => stat(join(group.dir, n))));
-      return { ...group, names, stats };
+      return { ...group, names };
     }),
   );
-  const sig = groups
-    .flatMap((group) =>
-      group.stats.map((s, i) => `${group.label}/${group.names[i] ?? ""}:${s.size}:${s.mtimeMs}`),
-    )
-    .join("|");
-  const memoKey = resolve(rtDir);
-  const memo = rtFingerprintMemos.get(memoKey);
-  if (memo !== undefined && memo.sig === sig) return memo.hash;
   const h = createHash("sha256").update(QJS_COMMIT).update(MBEDTLS_VERSION).update(ZLIB_VERSION);
   for (const group of groups) {
     for (const n of group.names) {
       h.update(group.label).update("/").update(n).update("\0").update(await readFile(join(group.dir, n))).update("\0");
     }
   }
-  const hash = h.digest("hex");
-  rtFingerprintMemos.set(memoKey, { sig, hash });
-  return hash;
+  return h.digest("hex");
 }
 
 /** The cached .o set for one flag flavor, compiled on first need. Concurrent
@@ -1683,19 +1748,20 @@ export async function compileC(opts: CcOptions): Promise<void> {
   }
 
   const toolchainEnv = toolchainEnvironmentFingerprint();
-  const [cv, fingerprint, cBytes, linkBytes] = await Promise.all([
+  const [cv, fingerprint, cBytes] = await Promise.all([
     ccVersionOnce(driver.argv, toolchainEnv),
     runtimeFingerprint(rtDir),
     readFile(opts.cPath),
-    Promise.all((opts.linkInputs ?? []).map((path) => readFile(path))),
   ]);
-  // Explicit path inputs are hashed below. `-l<name>` inputs are different:
-  // the linker resolves them through ambient search paths, and the selected
-  // archive/shared object can be rebuilt in place while every string in this
-  // identity remains unchanged. Keep the safe runtime-object cache, but force
-  // a fresh final link whenever the caller supplies one.
+  // Caller-supplied native inputs can all hide mutable dependencies: `-l`
+  // resolves through ambient search paths, while a thin archive or linker
+  // script can retain identical top-level bytes as its referenced files are
+  // rebuilt. Keep the safe runtime-object cache, but force a fresh final link
+  // whenever the caller supplies either form.
   const cacheCompleteArtifact =
-    cachePolicy.completeArtifacts && (opts.systemLibraries?.length ?? 0) === 0;
+    cachePolicy.completeArtifacts &&
+    (opts.linkInputs?.length ?? 0) === 0 &&
+    (opts.systemLibraries?.length ?? 0) === 0;
   const binDir = join(root, "bin");
   let keyHex: string | null = null;
   let cachedBin: string | null = null;
@@ -1724,7 +1790,6 @@ export async function compileC(opts: CcOptions): Promise<void> {
       .update(fingerprint).update("\0")
       .update(identityArgs.join("\x1f")).update("\0")
       .update(cBytes);
-    for (const bytes of linkBytes) key.update("\0ffi-link\0").update(bytes);
     keyHex = key.digest("hex");
     cachedBin = join(binDir, keyHex);
     const tmpOut = `${opts.outPath}.hit-${process.pid}-${Math.random().toString(36).slice(2)}`;
@@ -1816,6 +1881,6 @@ export async function compileC(opts: CcOptions): Promise<void> {
     }
   }
   // Runtime-object population is itself a cache write, including on builds
-  // whose ambient system libraries disable complete-artifact publication.
+  // whose native link inputs disable complete-artifact publication.
   await pruneCache(root).catch(() => undefined);
 }
