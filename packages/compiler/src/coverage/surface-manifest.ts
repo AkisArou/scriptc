@@ -91,6 +91,7 @@ const COVERAGE_NOTES: string[] = [
   "Entries with status 'unsupported' or 'dynamic-only' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
   "Entries with status 'dynamic-only' compile when the build embeds the dynamic engine (--dynamic); without the flag each use site is refused with the entry's code.",
   `The engine-free fetch projection targets Node ${NODE24_FETCH_COMPAT_PROFILE.target.node} with bundled Undici ${NODE24_FETCH_COMPAT_PROFILE.target.undici}. Each projected row names the differential evidence that guards it; changing the pinned Node or Undici version is an explicit profile update.`,
+  "The fetch profile also contains a runtime-reflected census of the selected fetch, abort, Headers, and readable-stream interfaces plus RequestInit/ResponseInit dictionary reads. Static, dynamic-only, and unsupported census rows are projected here; its explicitly out-of-scope metadata rows and adjacent-interface exclusions remain in the profile so absence is deliberate rather than ambiguous.",
   "Process-level diagnostic codes are not surface entries: SC0001-SC0004 are preflight gates, SC1110 is a comptime evaluation failure, SC3001 is the alternate-backend tier refusal, SC9001/SC9002 are internal errors.",
   "No scheduling metadata is published; entry ids are the stable diff keys across releases.",
 ];
@@ -345,6 +346,28 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
       note:
         `${fetchTarget}; conversion: ${option.conversion}; ` +
         `differential evidence: ${evidence.join(", ")}`,
+    });
+  }
+  for (const row of NODE24_FETCH_COMPAT_PROFILE.inventory.entries) {
+    if (row.status !== "dynamic-only" && row.status !== "unsupported") continue;
+    if (row.code === undefined || row.reason === undefined) {
+      throw new Error(`non-static fetch inventory row '${row.id}' is incomplete`);
+    }
+    const name =
+      row.placement === "constructor"
+        ? `${row.owner} constructor`
+        : row.placement === "dictionary"
+          ? `${row.owner}.${row.member}`
+          : row.owner === "globalThis"
+            ? row.member
+            : `${row.owner}.${row.member}`;
+    add({
+      id: row.id,
+      kind: "stdlib",
+      name,
+      status: row.status,
+      code: row.code,
+      note: `${fetchTarget}; ${row.reason}`,
     });
   }
 

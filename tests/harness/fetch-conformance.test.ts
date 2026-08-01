@@ -3,9 +3,10 @@
  *
  * The compatibility profile is compiler input, not test-only metadata: its
  * member allowlists drive lowering and its entries project into the shipped
- * surface manifest. This suite checks that the pinned Node executable is the
- * intended oracle, every profile row names differential evidence, and the
- * generated WebIDL/state-machine program agrees through both native backends.
+ * surface manifest. The reflected inventory supplies the denominator. This
+ * suite checks that the pinned Node executable is the intended oracle, every
+ * profile row names differential evidence, and the generated
+ * WebIDL/state-machine program agrees through both native backends.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -152,6 +153,73 @@ function evidenceKey(evidence: FetchCompatEvidence): string {
   throw new Error("fetch profile evidence must name exactly one source");
 }
 
+interface RuntimeInterfaceSurface {
+  statics: string[];
+  prototype: string[];
+  inherited: string[];
+  symbols: string[];
+}
+
+function publicSymbolName(symbol: symbol): string | null {
+  if (symbol === Symbol.iterator) return "[Symbol.iterator]";
+  if (symbol === Symbol.asyncIterator) return "[Symbol.asyncIterator]";
+  if (symbol === Symbol.toStringTag) return "[Symbol.toStringTag]";
+  // Node-private transfer/inspection symbols are implementation details,
+  // not the public WebIDL surface this profile promises to classify.
+  return null;
+}
+
+function runtimeInterfaceSurface(name: string): RuntimeInterfaceSurface {
+  const value = (globalThis as unknown as Record<string, unknown>)[name];
+  expect(typeof value, `${name} must be a global constructor object`).toBe("function");
+  const ctor = value as Function & { prototype: object };
+  const prototype = ctor.prototype;
+  const ownNames = Object.getOwnPropertyNames(prototype)
+    .filter((member) => member !== "constructor");
+  const inherited: string[] = [];
+  const visibleNames = new Set(ownNames);
+  const symbols: string[] = [];
+  const visibleSymbols = new Set<symbol>();
+
+  for (let current: object | null = prototype;
+    current !== null && current !== Object.prototype;
+    current = Object.getPrototypeOf(current) as object | null) {
+    if (current !== prototype) {
+      for (const member of Object.getOwnPropertyNames(current)) {
+        if (member === "constructor" || visibleNames.has(member)) continue;
+        visibleNames.add(member);
+        inherited.push(member);
+      }
+    }
+    for (const symbol of Object.getOwnPropertySymbols(current)) {
+      if (visibleSymbols.has(symbol)) continue;
+      visibleSymbols.add(symbol);
+      const member = publicSymbolName(symbol);
+      if (member !== null) symbols.push(member);
+    }
+  }
+
+  return {
+    statics: Object.getOwnPropertyNames(ctor)
+      .filter((member) => !["length", "name", "prototype"].includes(member)),
+    prototype: ownNames,
+    inherited,
+    symbols,
+  };
+}
+
+function dictionaryReads(construct: (init: object) => unknown): string[] {
+  const reads: string[] = [];
+  const init = new Proxy({}, {
+    get(_target, key) {
+      reads.push(String(key));
+      return undefined;
+    },
+  });
+  construct(init);
+  return [...new Set(reads)];
+}
+
 beforeAll(() => {
   writeFileSync(entry, generatedSource);
 });
@@ -162,6 +230,83 @@ describe("Node 24 fetch compatibility profile", () => {
     expect(profile.target.node).toBe(pinnedNode);
     expect(process.versions.node).toBe(profile.target.node);
     expect(process.versions.undici).toBe(profile.target.undici);
+  });
+
+  test("the inventory classifies every supported row and every gap", () => {
+    const supported = [...profile.operations, ...profile.requestInit]
+      .map((row) => row.id)
+      .sort();
+    const entries = profile.inventory.entries;
+    const ids = entries.map((entry) => entry.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(
+      entries.filter((entry) => entry.status === "static").map((entry) => entry.id).sort(),
+    ).toEqual(supported);
+
+    for (const entry of entries) {
+      if (entry.status === "static") {
+        expect(entry.code, `${entry.id}: static rows have no refusal code`).toBeUndefined();
+        expect(entry.reason, `${entry.id}: static rows are explained by evidence`).toBeUndefined();
+      } else if (entry.status === "dynamic-only" || entry.status === "unsupported") {
+        expect(entry.code, `${entry.id}: non-static rows use the stdlib fence`).toBe("SC2020");
+        expect(entry.reason?.length, `${entry.id}: missing gap rationale`).toBeGreaterThan(0);
+      } else {
+        expect(entry.code, `${entry.id}: exclusions are not refusal claims`).toBeUndefined();
+        expect(entry.reason?.length, `${entry.id}: missing scope rationale`).toBeGreaterThan(0);
+      }
+    }
+
+    expect(entries.some((entry) => entry.status === "dynamic-only")).toBe(true);
+    expect(entries.some((entry) => entry.status === "unsupported")).toBe(true);
+    expect(entries.some((entry) => entry.status === "out-of-scope")).toBe(true);
+    expect(profile.inventory.excludedInterfaces.length).toBeGreaterThan(0);
+    for (const exclusion of profile.inventory.excludedInterfaces) {
+      expect(exclusion.name.length).toBeGreaterThan(0);
+      expect(exclusion.reason.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("the selected runtime interfaces match the complete public census", () => {
+    const entries = profile.inventory.entries;
+    const expected = (owner: string, placement: string): string[] =>
+      entries
+        .filter((entry) => entry.owner === owner && entry.placement === placement)
+        .map((entry) => entry.member)
+        .sort();
+
+    for (const owner of profile.inventory.interfaces) {
+      expect(
+        entries.filter((entry) =>
+          entry.owner === owner && entry.placement === "constructor"
+        ).length,
+        `${owner}: constructor classification`,
+      ).toBe(1);
+      const actual = runtimeInterfaceSurface(owner);
+      expect(actual.statics.sort(), `${owner}: static members`).toEqual(expected(owner, "static"));
+      expect(actual.prototype.sort(), `${owner}: own prototype members`).toEqual(
+        expected(owner, "prototype"),
+      );
+      expect(actual.inherited.sort(), `${owner}: inherited prototype members`).toEqual(
+        expected(owner, "prototype-inherited"),
+      );
+      expect(actual.symbols.sort(), `${owner}: public symbol members`).toEqual(
+        expected(owner, "prototype-symbol"),
+      );
+    }
+    expect(typeof globalThis.fetch).toBe("function");
+  });
+
+  test("the WebIDL dictionary census matches Node's conversion reads", () => {
+    const expected = (owner: string): string[] =>
+      profile.inventory.entries
+        .filter((entry) => entry.owner === owner && entry.placement === "dictionary")
+        .map((entry) => entry.member);
+    expect(dictionaryReads((init) =>
+      new Request("http://example.com", init as RequestInit)
+    )).toEqual(expected("RequestInit"));
+    expect(dictionaryReads((init) =>
+      new Response(null, init as ResponseInit)
+    )).toEqual(expected("ResponseInit"));
   });
 
   test("every row has unique ids and resolvable differential evidence", () => {

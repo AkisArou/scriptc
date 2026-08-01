@@ -1729,6 +1729,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // no lowering above claimed ([1,2].entries, Math.SQRT2, Promise.all,
       // re.exec as a value, ...) reports SC2020 here.
       L.fenceStaticResponseMember(expr, "read");
+      L.fenceStaticHeadersMember(expr, "read");
       L.fenceStaticReadableStreamMember(expr, "read");
       L.stdlibMemberFence(expr);
       // The npm chokepoint: a member on a package-typed receiver in a
@@ -5602,6 +5603,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // checked-dynamic element-read path can turn it into a runtime missing
     // member.
     L.fenceStaticResponseMember(expr, "read");
+    L.fenceStaticHeadersMember(expr, "read");
     L.fenceStaticReadableStreamMember(expr, "read");
     // `globalThis[<expr>]` — the dynamic global probe (the harness's
     // conditional-globals sweep): a compiled binary's globals are

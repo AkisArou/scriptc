@@ -17,7 +17,6 @@
  *   to catch the manifest lying.
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
@@ -125,6 +124,26 @@ const PROBES: Probe[] = [
   { id: "stdlib.math.sqrt", source: "console.log(Math.sqrt(2));\n" },
   { id: "stdlib.math.PI", source: "console.log(Math.PI);\n" },
   { id: "stdlib.string.replace", source: 'console.log("aa".replace("a", "b"));\n' },
+  {
+    id: "stdlib.fetch.request-init.cache",
+    source: '/// <reference types="node" />\nvoid fetch("http://127.0.0.1", { cache: "no-store" });\n',
+  },
+  {
+    id: "stdlib.headers.entries",
+    source: '/// <reference types="node" />\nasync function f(): Promise<void> {\n  const r = await fetch("http://127.0.0.1");\n  void r.headers.entries();\n}\nvoid f();\n',
+  },
+  {
+    id: "stdlib.request.constructor",
+    source: '/// <reference types="node" />\nvoid new Request("http://127.0.0.1");\n',
+  },
+  {
+    id: "stdlib.response.clone",
+    source: '/// <reference types="node" />\nasync function f(): Promise<void> {\n  const r = await fetch("http://127.0.0.1");\n  void r.clone();\n}\nvoid f();\n',
+  },
+  {
+    id: "stdlib.readable-stream.tee",
+    source: '/// <reference types="node" />\nfunction f(s: ReadableStream<Uint8Array>): void {\n  void s.tee();\n}\nconsole.log(typeof f);\n',
+  },
   { id: "diagnostic.sc2011", source: "const y: any = 1;\nconst z = y * 2;\nconsole.log(0);\n" },
   // status unsupported — refused with the entry's code
   { id: "syntax.debugger-statements", source: "debugger;\nconsole.log(0);\n" },
@@ -143,7 +162,16 @@ const PROBES: Probe[] = [
   },
 ];
 
-const probeRoot = mkdtempSync(join(tmpdir(), "scr-surface-manifest-"));
+// Keep probes below the workspace so explicit `/// <reference types="node" />`
+// rows resolve the repository's pinned @types/node package. Ordinary probes
+// still use the compiler fallback declarations exactly as before.
+const probeCacheRoot = join(repoRoot, "node_modules/.cache");
+mkdirSync(probeCacheRoot, { recursive: true });
+const probeRoot = mkdtempSync(join(probeCacheRoot, "scr-surface-manifest-"));
+writeFileSync(
+  join(probeRoot, "tsconfig.json"),
+  `${JSON.stringify({ compilerOptions: { strict: true, skipLibCheck: true } }, null, 2)}\n`,
+);
 
 function probeFile(probe: Probe): string {
   const dir = join(probeRoot, probe.id.replace(/[^A-Za-z0-9]+/g, "-"));

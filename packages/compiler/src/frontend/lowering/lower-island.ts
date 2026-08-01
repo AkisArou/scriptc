@@ -11,6 +11,7 @@ import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program
 import { lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
 import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 import {
+  STATIC_HEADERS_CALLS,
   STATIC_READABLE_STREAM_CALLS,
   STATIC_READABLE_STREAM_READS,
   STATIC_REQUEST_INIT_KEYS,
@@ -528,6 +529,30 @@ export function fenceStaticResponseMember(
     `Response.${member} in a static build`,
     access,
     "the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API",
+    sym,
+  );
+}
+
+/** Response Headers are native checked-dynamic handles. Keep their exact
+ * supported method slice aligned with the compatibility census so newly
+ * observed Node members cannot fall through to a runtime missing-method
+ * error in an engine-free build. */
+export function fenceStaticHeadersMember(
+  L: Lowerer,
+  access: StaticResponseAccess,
+  use: "read" | "call",
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "Headers" || !L.isStdlibSymbol(sym)) return null;
+  const member = staticResponseMemberName(L, access);
+  if (member === null) return null;
+  if (use === "call" && STATIC_HEADERS_CALLS.has(member)) return null;
+  L.noLowering(
+    `Headers.${member} in a static build`,
+    access,
+    "the native static Headers surface is append/delete/get/getSetCookie/has/set/forEach; use --dynamic for constructor and iterator operations",
     sym,
   );
 }

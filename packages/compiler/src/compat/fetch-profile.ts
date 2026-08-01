@@ -2,9 +2,11 @@
  * The engine-free fetch/Web-platform compatibility contract.
  *
  * Keep this data-only: lowering, the shipped surface manifest, and the
- * differential conformance generator all consume the same profile. A Node
- * upgrade is deliberate because Node's bundled Undici version is observable
- * in coercion, error, stream, and transport behavior.
+ * differential conformance generator all consume the same profile. Its
+ * reflected inventory classifies the full selected runtime surface, so
+ * unsupported work cannot hide outside the positive allowlists. A Node upgrade
+ * is deliberate because Node's bundled Undici version is observable in
+ * coercion, error, stream, and transport behavior.
  */
 
 export type FetchCompatFacet =
@@ -46,6 +48,50 @@ export interface FetchCompatOption {
   evidence: readonly FetchCompatEvidence[];
 }
 
+export type FetchCompatInventoryStatus =
+  | "static"
+  | "dynamic-only"
+  | "unsupported"
+  | "out-of-scope";
+
+export type FetchCompatInventoryPlacement =
+  | "global"
+  | "constructor"
+  | "static"
+  | "prototype"
+  | "prototype-inherited"
+  | "prototype-symbol"
+  | "dictionary";
+
+/** One public property in the pinned runtime census, or one WebIDL
+ * dictionary member observed through its conversion reads. Static rows
+ * must resolve to an operation/option above; dynamic-only rows are the
+ * implementation queue; out-of-scope rows make intentional omissions
+ * explicit instead of letting absence masquerade as a support claim. */
+export interface FetchCompatInventoryEntry {
+  id: string;
+  owner: string;
+  member: string;
+  placement: FetchCompatInventoryPlacement;
+  status: FetchCompatInventoryStatus;
+  code?: "SC2020";
+  reason?: string;
+}
+
+export interface FetchCompatInventoryExclusion {
+  name: string;
+  reason: string;
+}
+
+export interface FetchCompatInventory {
+  /** Globals whose own/public inherited surface is reflected under Node. */
+  interfaces: readonly string[];
+  /** Public member and WebIDL dictionary census, in oracle order. */
+  entries: readonly FetchCompatInventoryEntry[];
+  /** Adjacent Web APIs deliberately outside this engine-free slice. */
+  excludedInterfaces: readonly FetchCompatInventoryExclusion[];
+}
+
 export interface FetchCompatProfile {
   schemaVersion: 1;
   target: {
@@ -60,10 +106,74 @@ export interface FetchCompatProfile {
     readableStreamCalls: readonly string[];
   };
   operations: readonly FetchCompatOperation[];
+  inventory: FetchCompatInventory;
 }
 
 const generated = (scenario: string): FetchCompatEvidence => ({ generated: scenario });
 const fixture = (name: string): FetchCompatEvidence => ({ fixture: name });
+
+const staticEntry = (
+  id: string,
+  owner: string,
+  member: string,
+  placement: FetchCompatInventoryPlacement,
+): FetchCompatInventoryEntry => ({ id, owner, member, placement, status: "static" });
+
+const dynamicEntry = (
+  id: string,
+  owner: string,
+  member: string,
+  placement: FetchCompatInventoryPlacement,
+  reason: string,
+): FetchCompatInventoryEntry => ({
+  id,
+  owner,
+  member,
+  placement,
+  status: "dynamic-only",
+  code: "SC2020",
+  reason,
+});
+
+const unsupportedEntry = (
+  id: string,
+  owner: string,
+  member: string,
+  placement: FetchCompatInventoryPlacement,
+  reason: string,
+): FetchCompatInventoryEntry => ({
+  id,
+  owner,
+  member,
+  placement,
+  status: "unsupported",
+  code: "SC2020",
+  reason,
+});
+
+const outOfScopeEntry = (
+  id: string,
+  owner: string,
+  member: string,
+  placement: FetchCompatInventoryPlacement,
+  reason: string,
+): FetchCompatInventoryEntry => ({
+  id,
+  owner,
+  member,
+  placement,
+  status: "out-of-scope",
+  reason,
+});
+
+const constructorFence =
+  "the interface constructor has no engine-free static representation";
+const widerMemberFence =
+  "the member is outside the native static handle projection";
+const typedInterfaceUnsupported =
+  "typed source has no compiler bridge for this interface in either tier";
+const metadataExclusion =
+  "WebIDL brand metadata is observable reflection, not an executable compatibility operation";
 
 export const NODE24_FETCH_COMPAT_PROFILE = {
   schemaVersion: 1,
@@ -344,6 +454,419 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       evidence: [fixture("static"), fixture("static-stream")],
     })),
   ],
+  inventory: {
+    interfaces: [
+      "AbortController",
+      "AbortSignal",
+      "Headers",
+      "Request",
+      "Response",
+      "ReadableStream",
+      "ReadableStreamDefaultReader",
+      "ReadableStreamDefaultController",
+    ],
+    entries: [
+      staticEntry("stdlib.fetch", "globalThis", "fetch", "global"),
+
+      unsupportedEntry(
+        "stdlib.abort-controller.constructor",
+        "AbortController",
+        "constructor",
+        "constructor",
+        typedInterfaceUnsupported,
+      ),
+      unsupportedEntry(
+        "stdlib.abort-controller.signal",
+        "AbortController",
+        "signal",
+        "prototype",
+        typedInterfaceUnsupported,
+      ),
+      unsupportedEntry(
+        "stdlib.abort-controller.abort",
+        "AbortController",
+        "abort",
+        "prototype",
+        typedInterfaceUnsupported,
+      ),
+      outOfScopeEntry(
+        "stdlib.abort-controller.symbol.toStringTag",
+        "AbortController",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      dynamicEntry(
+        "stdlib.abort-signal.constructor",
+        "AbortSignal",
+        "constructor",
+        "constructor",
+        "Node exposes the interface object but constructing it throws; the dynamic tier preserves that behavior",
+      ),
+      staticEntry("stdlib.abort-signal.abort", "AbortSignal", "abort", "static"),
+      staticEntry("stdlib.abort-signal.timeout", "AbortSignal", "timeout", "static"),
+      staticEntry("stdlib.abort-signal.any", "AbortSignal", "any", "static"),
+      staticEntry("stdlib.abort-signal.aborted", "AbortSignal", "aborted", "prototype"),
+      staticEntry("stdlib.abort-signal.reason", "AbortSignal", "reason", "prototype"),
+      staticEntry(
+        "stdlib.abort-signal.throw-if-aborted",
+        "AbortSignal",
+        "throwIfAborted",
+        "prototype",
+      ),
+      staticEntry("stdlib.abort-signal.onabort", "AbortSignal", "onabort", "prototype"),
+      staticEntry(
+        "stdlib.abort-signal.add-event-listener",
+        "AbortSignal",
+        "addEventListener",
+        "prototype-inherited",
+      ),
+      staticEntry(
+        "stdlib.abort-signal.remove-event-listener",
+        "AbortSignal",
+        "removeEventListener",
+        "prototype-inherited",
+      ),
+      staticEntry(
+        "stdlib.abort-signal.dispatch-event",
+        "AbortSignal",
+        "dispatchEvent",
+        "prototype-inherited",
+      ),
+      outOfScopeEntry(
+        "stdlib.abort-signal.symbol.toStringTag",
+        "AbortSignal",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      dynamicEntry(
+        "stdlib.headers.constructor",
+        "Headers",
+        "constructor",
+        "constructor",
+        constructorFence,
+      ),
+      ...[
+        "append",
+        "delete",
+        "get",
+        "has",
+        "set",
+        "getSetCookie",
+      ].map((member) =>
+        staticEntry(`stdlib.headers.${member}`, "Headers", member, "prototype")
+      ),
+      ...["keys", "values", "entries"].map((member) =>
+        dynamicEntry(
+          `stdlib.headers.${member}`,
+          "Headers",
+          member,
+          "prototype",
+          "native Headers iteration does not yet expose a static iterator handle",
+        )
+      ),
+      staticEntry("stdlib.headers.forEach", "Headers", "forEach", "prototype"),
+      dynamicEntry(
+        "stdlib.headers.symbol.iterator",
+        "Headers",
+        "[Symbol.iterator]",
+        "prototype-symbol",
+        "native Headers iteration does not yet expose a static iterator handle",
+      ),
+      outOfScopeEntry(
+        "stdlib.headers.symbol.toStringTag",
+        "Headers",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      unsupportedEntry(
+        "stdlib.request.constructor",
+        "Request",
+        "constructor",
+        "constructor",
+        typedInterfaceUnsupported,
+      ),
+      ...[
+        "method",
+        "url",
+        "headers",
+        "destination",
+        "referrer",
+        "referrerPolicy",
+        "mode",
+        "credentials",
+        "cache",
+        "redirect",
+        "integrity",
+        "keepalive",
+        "isReloadNavigation",
+        "isHistoryNavigation",
+        "signal",
+        "body",
+        "bodyUsed",
+        "duplex",
+        "clone",
+        "blob",
+        "arrayBuffer",
+        "text",
+        "json",
+        "formData",
+        "bytes",
+        "attribute",
+      ].map((member) =>
+        unsupportedEntry(
+          `stdlib.request.${member}`,
+          "Request",
+          member,
+          "prototype",
+          typedInterfaceUnsupported,
+        )
+      ),
+      outOfScopeEntry(
+        "stdlib.request.symbol.toStringTag",
+        "Request",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      dynamicEntry(
+        "stdlib.response.constructor",
+        "Response",
+        "constructor",
+        "constructor",
+        constructorFence,
+      ),
+      ...["error", "json", "redirect"].map((member) =>
+        dynamicEntry(
+          `stdlib.response.static.${member}`,
+          "Response",
+          member,
+          "static",
+          "Response constructor-object operations are available only in the dynamic tier",
+        )
+      ),
+      dynamicEntry(
+        "stdlib.response.type",
+        "Response",
+        "type",
+        "prototype",
+        widerMemberFence,
+      ),
+      ...["url", "redirected", "status", "ok", "statusText", "headers", "body", "bodyUsed"].map(
+        (member) => staticEntry(`stdlib.response.${member}`, "Response", member, "prototype"),
+      ),
+      ...["clone", "blob", "arrayBuffer"].map((member) =>
+        dynamicEntry(
+          `stdlib.response.${member}`,
+          "Response",
+          member,
+          "prototype",
+          member === "arrayBuffer"
+            ? "free-standing ArrayBuffer values have no static representation; use Response.bytes()"
+            : widerMemberFence,
+        )
+      ),
+      ...["text", "json"].map((member) =>
+        staticEntry(`stdlib.response.${member}`, "Response", member, "prototype")
+      ),
+      dynamicEntry(
+        "stdlib.response.formData",
+        "Response",
+        "formData",
+        "prototype",
+        "FormData values have no engine-free static representation",
+      ),
+      staticEntry("stdlib.response.bytes", "Response", "bytes", "prototype"),
+      outOfScopeEntry(
+        "stdlib.response.symbol.toStringTag",
+        "Response",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      staticEntry(
+        "stdlib.readable-stream.constructor",
+        "ReadableStream",
+        "constructor",
+        "constructor",
+      ),
+      staticEntry("stdlib.readable-stream.from", "ReadableStream", "from", "static"),
+      staticEntry("stdlib.readable-stream.locked", "ReadableStream", "locked", "prototype"),
+      staticEntry("stdlib.readable-stream.cancel", "ReadableStream", "cancel", "prototype"),
+      staticEntry(
+        "stdlib.readable-stream.get-reader",
+        "ReadableStream",
+        "getReader",
+        "prototype",
+      ),
+      ...["pipeThrough", "pipeTo", "tee", "values"].map((member) =>
+        dynamicEntry(
+          `stdlib.readable-stream.${member}`,
+          "ReadableStream",
+          member,
+          "prototype",
+          "the wider Web Streams graph is outside the native readable-stream slice",
+        )
+      ),
+      dynamicEntry(
+        "stdlib.readable-stream.symbol.asyncIterator",
+        "ReadableStream",
+        "[Symbol.asyncIterator]",
+        "prototype-symbol",
+        "async iterator handles are not represented in the engine-free static tier",
+      ),
+      outOfScopeEntry(
+        "stdlib.readable-stream.symbol.toStringTag",
+        "ReadableStream",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      unsupportedEntry(
+        "stdlib.readable-stream-default-reader.constructor",
+        "ReadableStreamDefaultReader",
+        "constructor",
+        "constructor",
+        "the constructor object is unavailable in the dynamic engine; static reader handles come from ReadableStream.getReader()",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-reader.read",
+        "ReadableStreamDefaultReader",
+        "read",
+        "prototype",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-reader.release-lock",
+        "ReadableStreamDefaultReader",
+        "releaseLock",
+        "prototype",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-reader.closed",
+        "ReadableStreamDefaultReader",
+        "closed",
+        "prototype",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-reader.cancel",
+        "ReadableStreamDefaultReader",
+        "cancel",
+        "prototype",
+      ),
+      outOfScopeEntry(
+        "stdlib.readable-stream-default-reader.symbol.toStringTag",
+        "ReadableStreamDefaultReader",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      unsupportedEntry(
+        "stdlib.readable-stream-default-controller.constructor",
+        "ReadableStreamDefaultController",
+        "constructor",
+        "constructor",
+        "the constructor object is unavailable in the dynamic engine; static controller handles come from underlying-source callbacks",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-controller.desired-size",
+        "ReadableStreamDefaultController",
+        "desiredSize",
+        "prototype",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-controller.close",
+        "ReadableStreamDefaultController",
+        "close",
+        "prototype",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-controller.enqueue",
+        "ReadableStreamDefaultController",
+        "enqueue",
+        "prototype",
+      ),
+      staticEntry(
+        "stdlib.readable-stream-default-controller.error",
+        "ReadableStreamDefaultController",
+        "error",
+        "prototype",
+      ),
+      outOfScopeEntry(
+        "stdlib.readable-stream-default-controller.symbol.toStringTag",
+        "ReadableStreamDefaultController",
+        "[Symbol.toStringTag]",
+        "prototype-symbol",
+        metadataExclusion,
+      ),
+
+      ...[
+        "body",
+        "cache",
+        "credentials",
+        "dispatcher",
+        "duplex",
+        "headers",
+        "integrity",
+        "keepalive",
+        "method",
+        "mode",
+        "priority",
+        "redirect",
+        "referrer",
+        "referrerPolicy",
+        "signal",
+        "window",
+      ].map((member) => {
+        const id = `stdlib.fetch.request-init.${member}`;
+        const supported = new Set(["body", "duplex", "headers", "method", "redirect", "signal"]);
+        return supported.has(member)
+          ? staticEntry(id, "RequestInit", member, "dictionary")
+          : dynamicEntry(
+              id,
+              "RequestInit",
+              member,
+              "dictionary",
+              "the RequestInit member is outside the native transport projection",
+            );
+      }),
+      ...["headers", "status", "statusText"].map((member) =>
+        dynamicEntry(
+          `stdlib.response-init.${member}`,
+          "ResponseInit",
+          member,
+          "dictionary",
+          "Response construction is available only in the dynamic tier",
+        )
+      ),
+    ],
+    excludedInterfaces: [
+      {
+        name: "Blob/File/FormData",
+        reason: "these body value families have no engine-free static representation",
+      },
+      {
+        name: "WritableStream/TransformStream",
+        reason: "the static tier currently targets readable fetch bodies, not general Web Streams graphs",
+      },
+      {
+        name: "Readable byte/BYOB streams",
+        reason: "the native stream projection currently supports default readers and controllers only",
+      },
+      {
+        name: "EventSource/WebSocket",
+        reason: "these are separate protocol clients, not fetch request/response compatibility",
+      },
+    ],
+  },
 } satisfies FetchCompatProfile;
 
 export const STATIC_REQUEST_INIT_KEYS = new Set(
@@ -358,6 +881,16 @@ export const STATIC_RESPONSE_READS = new Set(
 
 export const STATIC_RESPONSE_CALLS = new Set(
   NODE24_FETCH_COMPAT_PROFILE.members.responseCalls,
+);
+
+export const STATIC_HEADERS_CALLS = new Set(
+  NODE24_FETCH_COMPAT_PROFILE.inventory.entries
+    .filter((entry) =>
+      entry.owner === "Headers" &&
+      entry.placement === "prototype" &&
+      entry.status === "static"
+    )
+    .map((entry) => entry.member),
 );
 
 export const STATIC_READABLE_STREAM_READS = new Set(

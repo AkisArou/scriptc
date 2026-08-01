@@ -3948,6 +3948,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // Fence the unimplemented members before the generic dyn receiver
         // path would compile them into a runtime missing-method failure.
         L.fenceStaticResponseMember(expr.expression, "call") ??
+        L.fenceStaticHeadersMember(expr.expression, "call") ??
         L.fenceStaticReadableStreamMember(expr.expression, "call") ??
         // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
         // validated-extract, then the static machinery. After the island
@@ -4047,6 +4048,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // before lowering the callee into a checked-dynamic keyed read.
     if (ts.isElementAccessExpression(expr.expression)) {
       L.fenceStaticResponseMember(expr.expression, "call");
+      L.fenceStaticHeadersMember(expr.expression, "call");
       L.fenceStaticReadableStreamMember(expr.expression, "call");
     }
 
