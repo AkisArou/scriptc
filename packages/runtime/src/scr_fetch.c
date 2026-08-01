@@ -3667,8 +3667,14 @@ static bool sf_add_headers(ScrArr *pairs, const ScrDyn *headers) {
   if (headers->kind == SCR_DYN_OBJ) {
     for (size_t i = 0; i < headers->v.obj.len; i++) {
       const ScrDynEntry *e = &headers->v.obj.entries[i];
-      if (e->value->kind != SCR_DYN_STR ||
-          !sf_push_header(pairs, e->key, e->key_len, e->value->v.str)) {
+      ScrStr *name = scr_str_new(e->key, e->key_len);
+      ScrDyn *source = scr_dyn_retain(e->value);
+      ScrStr *value = scr_dyn_string_coerce_js(source);
+      scr_dyn_release(source);
+      bool ok = value && sf_push_header(pairs, name->data, name->len, value);
+      scr_str_release(value);
+      scr_str_release(name);
+      if (!ok) {
         if (!scr_exc_pending()) sf_type_error("fetch failed");
         return false;
       }
@@ -3677,13 +3683,24 @@ static bool sf_add_headers(ScrArr *pairs, const ScrDyn *headers) {
   }
   if (headers->kind == SCR_DYN_ARR) {
     for (size_t i = 0; i < headers->v.arr.len; i++) {
-      const ScrDyn *pair = headers->v.arr.items[i];
-      if (pair->kind != SCR_DYN_ARR || pair->v.arr.len != 2 ||
-          pair->v.arr.items[0]->kind != SCR_DYN_STR ||
-          pair->v.arr.items[1]->kind != SCR_DYN_STR ||
-          !sf_push_header(pairs, pair->v.arr.items[0]->v.str->data,
-                          pair->v.arr.items[0]->v.str->len,
-                          pair->v.arr.items[1]->v.str)) {
+      ScrDyn *pair = scr_dyn_retain(headers->v.arr.items[i]);
+      if (pair->kind != SCR_DYN_ARR || pair->v.arr.len != 2) {
+        scr_dyn_release(pair);
+        if (!scr_exc_pending()) sf_type_error("fetch failed");
+        return false;
+      }
+      ScrDyn *name_source = scr_dyn_retain(pair->v.arr.items[0]);
+      ScrDyn *value_source = scr_dyn_retain(pair->v.arr.items[1]);
+      scr_dyn_release(pair);
+      ScrStr *name = scr_dyn_string_coerce_js(name_source);
+      scr_dyn_release(name_source);
+      ScrStr *value = name ? scr_dyn_string_coerce_js(value_source) : NULL;
+      scr_dyn_release(value_source);
+      bool ok = name && value &&
+                sf_push_header(pairs, name->data, name->len, value);
+      scr_str_release(value);
+      scr_str_release(name);
+      if (!ok) {
         if (!scr_exc_pending()) sf_type_error("fetch failed");
         return false;
       }
@@ -4976,6 +4993,7 @@ typedef struct FxTransfer {
   bool done;      /* settled: no callback ever fires again */
   /* response decompression */
   bool inflating;
+  bool inflate_member_end;
   z_stream zs;
   struct FxTransfer *next;
 } FxTransfer;
@@ -5704,14 +5722,31 @@ static void fx_on_data(ScrClosure *cb, ScrBytes *chunk /*borrowed*/) {
   }
   t->zs.next_in = (Bytef *)chunk->data;
   t->zs.avail_in = (uInt)chunk->len;
+  bool drain_internal = false;
   unsigned char out[16384];
-  while (t->zs.avail_in > 0 && !t->done) {
+  while (!t->done && (t->zs.avail_in > 0 || drain_internal)) {
+    if (t->inflate_member_end) {
+      if (t->zs.avail_in == 0) break;
+      if (inflateReset(&t->zs) != Z_OK) {
+        ScrHttpClientReq *c = t->client;
+        if (c) scr_http_client_destroy(c);
+        fx_error(t, "invalid compressed body", NULL);
+        break;
+      }
+      t->inflate_member_end = false;
+    }
     t->zs.next_out = out;
     t->zs.avail_out = sizeof out;
     int r = inflate(&t->zs, Z_NO_FLUSH);
     size_t produced = sizeof out - t->zs.avail_out;
+    drain_internal = false;
     if (produced > 0) fx_emit_chunk(t, out, produced);
-    if (r == Z_STREAM_END) break; /* trailing bytes (if any) are dropped */
+    if (r == Z_STREAM_END) {
+      /* RFC 1952 permits concatenated gzip members. */
+      t->inflate_member_end = true;
+      if (t->zs.avail_in == 0) break;
+      continue;
+    }
     if (r != Z_OK && r != Z_BUF_ERROR) {
       /* corrupt encoding: the body errors (the glue turns a post-resolve
        * onError into controller.error — undici's terminated shape) */
@@ -5722,6 +5757,13 @@ static void fx_on_data(ScrClosure *cb, ScrBytes *chunk /*borrowed*/) {
       break;
     }
     if (r == Z_BUF_ERROR && produced == 0) break; /* need more input */
+    if (t->zs.avail_in == 0) {
+      if (r == Z_OK && t->zs.avail_out == 0) {
+        drain_internal = true;
+        continue;
+      }
+      break;
+    }
   }
   fx_release(t);
 }

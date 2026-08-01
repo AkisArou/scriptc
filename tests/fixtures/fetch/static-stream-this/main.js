@@ -42,4 +42,35 @@ console.log(
 );
 console.log("stream source callback mutation:", mutatingSource.marker);
 
+let surplusEffects = "";
+function ignoredCompanionArgument(label) {
+  surplusEffects += label;
+  return "ignored";
+}
+
+const surplusAbort = AbortSignal.abort(
+  undefined,
+  ignoredCompanionArgument("abort "),
+);
+const surplusTimeout = AbortSignal.timeout(
+  10000,
+  ignoredCompanionArgument("timeout "),
+);
+const surplusAny = AbortSignal.any(
+  [],
+  ignoredCompanionArgument("any "),
+);
+const surplusStreamPart = await ReadableStream.from(
+  ["surplus"],
+  ignoredCompanionArgument("stream"),
+).getReader().read();
+console.log(
+  "companion surplus arguments:",
+  surplusEffects,
+  surplusAbort.aborted,
+  surplusTimeout.aborted,
+  surplusAny.aborted,
+  surplusStreamPart.value,
+);
+
 export {};

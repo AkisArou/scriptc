@@ -25,6 +25,11 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
   const body: string = await t.text();
   console.log("text:", body);
 
+  const concatenatedGzip: string = await (
+    await fetch(`${baseUrl}/gzip-concat`)
+  ).text();
+  console.log("concatenated gzip:", concatenatedGzip);
+
   // HTTP errors RESOLVE: 404 probes read ok/status/statusText.
   const nf = await fetch(baseUrl + "/nope");
   if (!nf.ok) {

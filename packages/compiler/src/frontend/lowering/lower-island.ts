@@ -500,6 +500,44 @@ export function fenceStaticResponseMember(
  * ambient globals have no first-class constructor-object representation;
  * claim the direct calls by declaration provenance before the general
  * member-call path tries to lower the receiver as a value. */
+function staticCallWithSurplusArgs(
+  L: Lowerer,
+  call: ts.CallExpression,
+  first: IrExpr,
+  result: (first: IrExpr) => IrExpr,
+): IrExpr {
+  const loc = locOf(call);
+  if (call.arguments.length === 1) return result(first);
+  const firstLocal = L.declareHiddenLocal("%fetchArg", first.type);
+  const firstRef = (): IrExpr => ({
+    kind: "varRef",
+    localId: firstLocal.id,
+    type: first.type,
+    loc,
+  });
+  const stmts: IrStmt[] = [
+    { kind: "varDecl", localId: firstLocal.id, init: first, loc },
+  ];
+  for (const argument of call.arguments.slice(1)) {
+    if (ts.isSpreadElement(argument)) {
+      L.noLowering(
+        "spread surplus arguments on the static fetch companion APIs",
+        argument,
+        "pass surplus arguments without spread syntax",
+      );
+    }
+    // The callee ignores the value, but JavaScript still evaluates every
+    // surplus argument in source order. A direct void has the operand's
+    // effects and no additional work of its own.
+    const discarded = ts.isVoidExpression(argument)
+      ? L.lowerExpr(argument.expression)
+      : L.lowerExpr(argument);
+    stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
+  }
+  const answer = result(firstRef());
+  return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
+}
+
 export function lowerStaticFetchCompanionCall(
   L: Lowerer,
   call: ts.CallExpression,
@@ -520,36 +558,58 @@ export function lowerStaticFetchCompanionCall(
   if (root.text === "AbortSignal") {
     switch (call.expression.name.text) {
       case "timeout":
-        if (call.arguments.length !== 1) return null;
-        return {
-          kind: "libCall",
-          fn: "fetch.abortTimeout",
-          args: [L.lowerExprExpecting(call.arguments[0]!, F64)],
-          type: DYN,
-          loc,
-        };
+        if (call.arguments.length < 1) return null;
+        if (ts.isSpreadElement(call.arguments[0]!)) return null;
+        return staticCallWithSurplusArgs(
+          L,
+          call,
+          L.lowerExprExpecting(call.arguments[0]!, F64),
+          (first) => ({
+            kind: "libCall",
+            fn: "fetch.abortTimeout",
+            args: [first],
+            type: DYN,
+            loc,
+          }),
+        );
       case "abort":
-        if (call.arguments.length > 1) return null;
-        return {
-          kind: "libCall",
-          fn: "fetch.abortNow",
-          args: [
-            call.arguments[0]
-              ? lowerLiveWebValue(L, call.arguments[0])
-              : dynUndefinedExpr(loc),
-          ],
-          type: DYN,
-          loc,
-        };
+        if (call.arguments.length === 0) {
+          return {
+            kind: "libCall",
+            fn: "fetch.abortNow",
+            args: [dynUndefinedExpr(loc)],
+            type: DYN,
+            loc,
+          };
+        }
+        if (ts.isSpreadElement(call.arguments[0]!)) return null;
+        return staticCallWithSurplusArgs(
+          L,
+          call,
+          lowerLiveWebValue(L, call.arguments[0]!),
+          (first) => ({
+            kind: "libCall",
+            fn: "fetch.abortNow",
+            args: [first],
+            type: DYN,
+            loc,
+          }),
+        );
       case "any":
-        if (call.arguments.length !== 1) return null;
-        return {
-          kind: "libCall",
-          fn: "fetch.abortAny",
-          args: [L.lowerExprExpecting(call.arguments[0]!, DYN)],
-          type: DYN,
-          loc,
-        };
+        if (call.arguments.length < 1) return null;
+        if (ts.isSpreadElement(call.arguments[0]!)) return null;
+        return staticCallWithSurplusArgs(
+          L,
+          call,
+          L.lowerExprExpecting(call.arguments[0]!, DYN),
+          (first) => ({
+            kind: "libCall",
+            fn: "fetch.abortAny",
+            args: [first],
+            type: DYN,
+            loc,
+          }),
+        );
       default:
         return null;
     }
@@ -557,7 +617,8 @@ export function lowerStaticFetchCompanionCall(
   if (
     root.text === "ReadableStream" &&
     call.expression.name.text === "from" &&
-    call.arguments.length === 1
+    call.arguments.length >= 1 &&
+    !ts.isSpreadElement(call.arguments[0]!)
   ) {
     let source = L.lowerExpr(call.arguments[0]!);
     // A readonly tuple satisfies the fallback's readonly-array overload,
@@ -592,17 +653,17 @@ export function lowerStaticFetchCompanionCall(
         "arrays, Uint8Array, and strings are supported — spread other synchronous iterables into an array first: [...iterable]",
       );
     }
-    return {
+    return staticCallWithSurplusArgs(L, call, source, (first) => ({
       kind: "libCall",
       fn: "fetch.streamFrom",
       // Arrays and bytes must cross by reference: their iterators read each
       // entry at pull time, so mutations after ReadableStream.from() remain
       // observable just as they are in Node. Other supported iterable
       // shapes retain the checked-dynamic fallback.
-      args: [source],
+      args: [first],
       type: DYN,
       loc,
-    };
+    }));
   }
   return null;
 }

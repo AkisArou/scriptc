@@ -92,6 +92,32 @@ const latin1HeaderResponse = await fetch(`${process.argv[2]}/header-echo`, {
 });
 console.log("latin1 request header:", await latin1HeaderResponse.text());
 
+const coercedRecordHeaders: any = {
+  "x-echo-one": 123,
+  "x-echo-two": false,
+};
+console.log(
+  "coerced record headers:",
+  await (
+    await fetch(`${process.argv[2]}/header-echo`, {
+      headers: coercedRecordHeaders,
+    })
+  ).text(),
+);
+
+const coercedSequenceHeaders: any = [
+  ["x-echo-one", 456],
+  ["x-echo-two", true],
+];
+console.log(
+  "coerced sequence headers:",
+  await (
+    await fetch(`${process.argv[2]}/header-echo`, {
+      headers: coercedSequenceHeaders,
+    })
+  ).text(),
+);
+
 try {
   await fetch(`${process.argv[2]}/header-echo`, {
     headers: { "x-echo-one": "😀" },
