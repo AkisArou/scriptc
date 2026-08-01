@@ -2346,9 +2346,9 @@
       "id": "stdlib.headers.symbol.iterator",
       "kind": "stdlib",
       "name": "Headers.[Symbol.iterator]",
-      "status": "unsupported",
+      "status": "dynamic-only",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; symbol-keyed Headers iteration has no compiler lowering in either tier; use entries() with --dynamic"
+      "note": "Node 24.15.0 / Undici 7.24.4; native Headers iteration does not expose an engine-free iterator handle"
     },
     {
       "id": "stdlib.headers.values",

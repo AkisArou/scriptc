@@ -126,7 +126,7 @@ const PROBES: Probe[] = [
   { id: "stdlib.string.replace", source: 'console.log("aa".replace("a", "b"));\n' },
   {
     id: "stdlib.fetch.request-init.cache",
-    source: '/// <reference types="node" />\nvoid fetch("http://127.0.0.1", { cache: "no-store" });\n',
+    source: '/// <reference types="node" />\nconst init: RequestInit = { cache: "no-store" };\nvoid fetch("http://127.0.0.1", init);\nvoid fetch("http://127.0.0.1", { ...({ cache: "no-store" } as const) });\n',
   },
   {
     id: "stdlib.headers.entries",
@@ -144,6 +144,10 @@ const PROBES: Probe[] = [
     id: "stdlib.readable-stream.tee",
     source: '/// <reference types="node" />\nfunction f(s: ReadableStream<Uint8Array>): void {\n  void s.tee();\n}\nconsole.log(typeof f);\n',
   },
+  {
+    id: "stdlib.headers.symbol.iterator",
+    source: '/// <reference types="node" />\nfunction f(h: Headers): void {\n  void h[Symbol.iterator]();\n  for (const pair of h) void pair;\n  void [...h];\n  const [] = h;\n}\nvoid f;\n',
+  },
   { id: "diagnostic.sc2011", source: "const y: any = 1;\nconst z = y * 2;\nconsole.log(0);\n" },
   // status unsupported — refused with the entry's code
   {
@@ -153,10 +157,6 @@ const PROBES: Probe[] = [
   {
     id: "stdlib.headers.constructor",
     source: '/// <reference types="node" />\nvoid new Headers();\n',
-  },
-  {
-    id: "stdlib.headers.symbol.iterator",
-    source: '/// <reference types="node" />\nfunction f(h: Headers): void {\n  void h[Symbol.iterator]();\n}\nvoid f;\n',
   },
   {
     id: "stdlib.response.constructor",

@@ -22,14 +22,31 @@ async function main(baseUrl: string): Promise<void> {
   r.headers.forEach((v, k) => {
     if (k.startsWith("x-")) console.log("hdr:", k, "=", v);
   });
+  const explicitIterator = r.headers[Symbol.iterator]();
+  const explicitFirst = explicitIterator.next();
+  console.log(
+    "iterator:",
+    explicitFirst.done ? "done" : explicitFirst.value[0],
+    explicitFirst.done ? "done" : explicitFirst.value[1],
+  );
+  let iteratedHeaders = 0;
+  for (const [k] of r.headers) {
+    if (k.startsWith("x-")) iteratedHeaders++;
+  }
+  console.log("for-of:", iteratedHeaders);
+  const spreadHeaders = [...r.headers];
+  console.log("spread:", spreadHeaders.length);
+  const [destructuredFirst] = r.headers;
+  console.log("destructure:", destructuredFirst[0], destructuredFirst[1]);
   const text: string = await r.text();
   console.log("used:", r.bodyUsed, "url-tail:", r.url.endsWith("/text"), "redirected:", r.redirected);
   console.log("text:", text);
 
   // Duplicate response headers combine on read (x-multi: a, b).
-  const he = await fetch(`${baseUrl}/header-echo`, {
+  const echoInit: RequestInit = {
     headers: { "x-echo-one": "1", "x-echo-two": "2" },
-  });
+  };
+  const he = await fetch(`${baseUrl}/header-echo`, { ...echoInit });
   const multi = he.headers.get("x-multi");
   const latin = he.headers.get("x-latin") ?? "";
   const echoed: string = await he.text();

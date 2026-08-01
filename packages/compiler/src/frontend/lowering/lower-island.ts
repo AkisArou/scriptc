@@ -262,12 +262,31 @@ function requestInitLiteralKey(
 /** Fence declared RequestInit members outside the native static slice.
  * Computed runtime keys and non-literal objects are validated again by
  * scr_fetch_static, so no unsupported option can be silently discarded. */
-function fenceStaticRequestInitLiteral(
+function requestInitValueExpr(expr: ts.Expression): ts.Expression {
+  let current = expr;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isTypeAssertion(current) ||
+    ts.isNonNullExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function fenceStaticRequestInitObject(
   L: Lowerer,
   init: ts.ObjectLiteralExpression,
+  seen: Set<ts.Symbol>,
 ): void {
   const contextual = L.checker.getContextualType(init);
   for (const prop of init.properties) {
+    if (ts.isSpreadAssignment(prop)) {
+      fenceStaticRequestInitValueInner(L, prop.expression, seen);
+      continue;
+    }
     const key = requestInitLiteralKey(prop);
     if (key === null || STATIC_REQUEST_INIT_KEYS.has(key)) continue;
     const contextualArms =
@@ -282,6 +301,47 @@ function fenceStaticRequestInitLiteral(
       sym,
     );
   }
+}
+
+/** Fence statically knowable RequestInit gaps through the ordinary value
+ * plumbing, not only when the fetch argument's AST is itself an object
+ * literal. Const aliases and object spreads preserve the same dictionary
+ * members, so follow their initializers until the profile can make the
+ * decision. Runtime-computed values keep scr_fetch_static's defensive
+ * validation because there is no source member to diagnose. */
+function fenceStaticRequestInitValueInner(
+  L: Lowerer,
+  value: ts.Expression,
+  seen: Set<ts.Symbol>,
+): void {
+  const expr = requestInitValueExpr(value);
+  if (ts.isObjectLiteralExpression(expr)) {
+    fenceStaticRequestInitObject(L, expr, seen);
+    return;
+  }
+  if (!ts.isIdentifier(expr)) return;
+  const symbol = L.checker.getSymbolAtLocation(expr);
+  if (!symbol || seen.has(symbol)) return;
+  seen.add(symbol);
+  for (const declaration of L.checker.declarationsOf(symbol)) {
+    if (
+      !ts.isVariableDeclaration(declaration) ||
+      declaration.initializer === undefined ||
+      !ts.isVariableDeclarationList(declaration.parent) ||
+      (declaration.parent.flags & ts.NodeFlags.Const) === 0
+    ) {
+      continue;
+    }
+    fenceStaticRequestInitValueInner(L, declaration.initializer, seen);
+  }
+}
+
+export function fenceStaticRequestInitValue(
+  L: Lowerer,
+  value: ts.Expression,
+): void {
+  if (L.dynamic) return;
+  fenceStaticRequestInitValueInner(L, value, new Set());
 }
 
 /** USER-code `fetch(url)` / `fetch(url, init)` — the ambient global
@@ -322,9 +382,10 @@ function fenceStaticRequestInitLiteral(
       if (initNode === undefined) {
         init = dynUndefinedExpr(loc);
       } else if (ts.isObjectLiteralExpression(initNode)) {
-        fenceStaticRequestInitLiteral(L, initNode);
+        fenceStaticRequestInitValue(L, initNode);
         init = lowerDynObjectLiteral(L, initNode);
       } else {
+        fenceStaticRequestInitValue(L, initNode);
         init = L.lowerExprExpecting(initNode, DYN);
       }
 
@@ -610,9 +671,103 @@ export function fenceStaticHeadersMember(
   L.noLowering(
     `Headers.${member} in a static build`,
     access,
-    "the native static Headers surface is append/delete/get/getSetCookie/has/set/forEach; use keys()/values()/entries() with --dynamic, while construction and symbol-keyed iteration remain unsupported",
+    "the native static Headers surface is append/delete/get/getSetCookie/has/set/forEach; use keys()/values()/entries() or symbol-keyed iteration with --dynamic, while construction remains unsupported",
     sym,
   );
+}
+
+function isStdlibFetchInterface(
+  L: Lowerer,
+  node: ts.Expression,
+  owner: string,
+): boolean {
+  const type = L.checker.getBaseTypeOfLiteralType(L.typeOf(node));
+  const symbol = type.getAliasSymbol() ?? type.getSymbol();
+  return symbol?.name === owner && L.isStdlibSymbol(symbol);
+}
+
+/** Iteration syntax invokes Headers[Symbol.iterator] without constructing
+ * an element-access node, so the member chokepoint above never sees it.
+ * Keep engine-free builds on the same SC2020 profile row for for-of,
+ * array spread, and array destructuring. The dynamic tier uses the
+ * engine's iterator protocol and is intentionally allowed. */
+export function fenceStaticHeadersIteration(
+  L: Lowerer,
+  node: ts.Expression,
+): void {
+  if (L.dynamic) return;
+  const value = requestInitValueExpr(node);
+  if (!isStdlibFetchInterface(L, value, "Headers")) return;
+  L.noLowering(
+    "Headers.[Symbol.iterator] in a static build",
+    node,
+    "Headers iteration requires --dynamic; append/delete/get/getSetCookie/has/set/forEach remain engine-free",
+    (L.typeOf(value).getAliasSymbol() ?? L.typeOf(value).getSymbol()) ?? undefined,
+  );
+}
+
+/** The dynamic twin of Headers[Symbol.iterator](): the engine prelude's
+ * iterNew operation performs GetIterator and returns the exact iterator
+ * object. This also makes the explicit member spelling agree with the
+ * for-of path, which already uses iterNew for island values. */
+export function lowerDynamicHeadersIteratorCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+  access: ts.ElementAccessExpression,
+): IrExpr | null {
+  if (
+    !L.dynamic ||
+    call.questionDotToken ||
+    access.questionDotToken ||
+    call.arguments.length !== 0 ||
+    staticResponseMemberName(L, access) !== "[Symbol.iterator]" ||
+    !isStdlibFetchInterface(L, access.expression, "Headers")
+  ) {
+    return null;
+  }
+  const receiver = L.lowerExpr(access.expression);
+  if (receiver.type.kind !== "jsval") return null;
+  return {
+    kind: "jsOp",
+    op: "iterNew",
+    args: [receiver],
+    type: JSVAL,
+    loc: locOf(call),
+  };
+}
+
+/** `[...headers]` in the dynamic tier: Array.from runs inside the engine
+ * over the real Headers iterator, then the resulting pair array exits
+ * through the checker's declared array type. For Headers this is the
+ * spread algorithm's exact iterable snapshot. */
+export function lowerDynamicHeadersSpread(
+  L: Lowerer,
+  node: ts.Expression,
+  type: IrType & { kind: "array" },
+): IrExpr | null {
+  if (!L.dynamic || !isStdlibFetchInterface(L, requestInitValueExpr(node), "Headers")) {
+    return null;
+  }
+  const receiver = L.lowerExpr(node);
+  if (receiver.type.kind !== "jsval") return null;
+  const loc = locOf(node);
+  const arrayCtor: IrExpr = {
+    kind: "jsOp",
+    op: "globalGet",
+    name: "Array",
+    args: [],
+    type: JSVAL,
+    loc,
+  };
+  const snapshot: IrExpr = {
+    kind: "jsOp",
+    op: "callMethod",
+    name: "from",
+    args: [arrayCtor, receiver],
+    type: JSVAL,
+    loc,
+  };
+  return { kind: "jsExit", value: snapshot, type, loc };
 }
 
 /** The fallback ambient declaration intentionally exposes only the native
@@ -1355,11 +1510,31 @@ export function lowerStaticReadableStreamReaderCall(
    * literal path emits, callable from lowerings that KNOW the literal is
    * island-bound (fetch's init) even when the contextual type is a union
    * the generic path declines. Identifier AND string-literal keys — engine
-   * property names have no identifier restriction ("content-type"). */
+   * property names have no identifier restriction ("content-type"). Plain
+   * spreads copy through the engine's CopyDataProperties operation in
+   * source order, including nested RequestInit/header dictionaries. */
   export function lowerIslandObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
     const loc = locOf(expr);
-    const args: IrExpr[] = [];
+    let args: IrExpr[] = [];
+    let acc: IrExpr | null = null;
+    const flushFields = (): void => {
+      if (args.length === 0) return;
+      const chunk: IrExpr = { kind: "jsOp", op: "objLit", args, type: JSVAL, loc };
+      acc = acc === null
+        ? chunk
+        : { kind: "jsOp", op: "objSpread", args: [acc, chunk], type: JSVAL, loc };
+      args = [];
+    };
     for (const prop of expr.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        flushFields();
+        const spread = ts.isObjectLiteralExpression(prop.expression)
+          ? lowerIslandObjectLiteral(L, prop.expression)
+          : L.jsvalIn(L.lowerExpr(prop.expression), prop.expression);
+        acc ??= { kind: "jsOp", op: "objLit", args: [], type: JSVAL, loc };
+        acc = { kind: "jsOp", op: "objSpread", args: [acc, spread], type: JSVAL, loc: locOf(prop) };
+        continue;
+      }
       if (
         !ts.isPropertyAssignment(prop) ||
         !(ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
@@ -1386,7 +1561,8 @@ export function lowerStaticReadableStreamReaderCall(
         args.push(L.jsvalIn(L.lowerExpr(init), init));
       }
     }
-    return { kind: "jsOp", op: "objLit", args, type: JSVAL, loc };
+    flushFields();
+    return acc ?? { kind: "jsOp", op: "objLit", args: [], type: JSVAL, loc };
   }
 
 /** Method calls on the island-backed ambient surface: `Math.<fn>(...)`

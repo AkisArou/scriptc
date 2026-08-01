@@ -569,12 +569,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         )
       ),
       staticEntry("stdlib.headers.forEach", "Headers", "forEach", "prototype"),
-      unsupportedEntry(
+      dynamicEntry(
         "stdlib.headers.symbol.iterator",
         "Headers",
         "[Symbol.iterator]",
         "prototype-symbol",
-        "symbol-keyed Headers iteration has no compiler lowering in either tier; use entries() with --dynamic",
+        "native Headers iteration does not expose an engine-free iterator handle",
       ),
       outOfScopeEntry(
         "stdlib.headers.symbol.toStringTag",

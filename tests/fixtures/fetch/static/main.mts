@@ -244,10 +244,11 @@ const scalarMethodEcho = await (
 ).json() as { method: string };
 console.log("coerced scalar method:", scalarMethodEcho.method);
 
-const unsupportedInit = {
-  method: "GET",
-  integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-};
+// A runtime-computed dictionary cannot be source-profiled, so the native
+// RequestInit validator remains the defensive backstop for unsupported keys.
+const unsupportedInit = JSON.parse(
+  '{"method":"GET","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}',
+) as RequestInit;
 try {
   await fetch(`${process.argv[2]}/text`, unsupportedInit);
   console.log("unsupported request init unexpectedly accepted");

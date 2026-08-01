@@ -1071,6 +1071,9 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // tsc already rejects this (TS1182); defensive.
       L.unsupported("SC1031", decl);
     }
+    if (ts.isArrayBindingPattern(decl.name)) {
+      L.fenceStaticHeadersIteration(decl.initializer);
+    }
     // A STDLIB-GLOBAL source in a JavaScript file (`const { subtle } =
     // globalThis.crypto`, `const { Console } = console` — the suite's
     // webcrypto/console prologues): each element binds a member IDENTITY
@@ -4885,6 +4888,9 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
   export function lowerDestructuringAssignParts(L: Lowerer, target: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
     rhs: ts.Expression,
     loc: SrcLoc,): { stmts: IrStmt[]; value: IrExpr } {
+    if (ts.isArrayLiteralExpression(target)) {
+      L.fenceStaticHeadersIteration(rhs);
+    }
     return destructuringAssignInto(L, target, L.lowerExpr(rhs), rhs, rhs, loc);
   }
 
@@ -5801,6 +5807,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       }
       L.unsupported("SC1070", stmt, "'for await' (async iteration over anything but process.stdin and readable streams)");
     }
+    L.fenceStaticHeadersIteration(stmt.expression);
     // A stored numeric value iterator declared in this function keeps its
     // built-in protocol state in hidden locals (lowerVarStatement). The
     // iterator's own [Symbol.iterator]() returns itself, so for-of resumes
