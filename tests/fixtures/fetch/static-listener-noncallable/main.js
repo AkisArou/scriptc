@@ -7,6 +7,10 @@ try {
   console.log("removeEventListener arity:", error.name);
 }
 
+signal.addEventListener("abort", []);
+signal.addEventListener("abort", Buffer.from([]));
+console.log("registered object-shaped abort listeners");
+
 signal.addEventListener("abort", { handleEvent: 1 });
 console.log("registered non-callable abort listener");
 

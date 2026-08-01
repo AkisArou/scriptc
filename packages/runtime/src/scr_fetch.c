@@ -773,6 +773,8 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
     }
     ScrDyn *callable = dispatch[i].listener;
     ScrDyn *current_listener = NULL;
+    ScrDyn *owned_handle = NULL;
+    ScrDyn *this_listener = NULL;
     if (callable->kind == SCR_DYN_OBJ) {
       /*
        * EventListener is a Web IDL callback interface: handleEvent is read
@@ -785,6 +787,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
               ? callable->v.obj.source_access(
                     callable->v.obj.source_identity, true)
               : scr_dyn_retain(callable);
+      this_listener = current_listener;
       const ScrDyn *handle =
           scr_dyn_obj_get(current_listener, "handleEvent", 11);
       if (!handle) {
@@ -793,10 +796,55 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
         continue;
       }
       callable = (ScrDyn *)handle;
+    } else if (callable->kind == SCR_DYN_TYPED_REF) {
+      /* A live static record must remain the EventListener receiver so
+       * handleEvent mutations commit to the original source. Arrays and
+       * byte views are valid Web IDL objects but have no handleEvent in
+       * the statically modeled surface, so dispatching them is a no-op. */
+      current_listener = scr_dyn_typed_ref_materialize(callable);
+      if (current_listener->kind != SCR_DYN_OBJ) {
+        scr_dyn_release(current_listener);
+        scr_dyn_release(dispatch[i].listener);
+        continue;
+      }
+      const ScrDyn *handle =
+          scr_dyn_obj_get(current_listener, "handleEvent", 11);
+      if (!handle) {
+        scr_dyn_release(current_listener);
+        scr_dyn_release(dispatch[i].listener);
+        continue;
+      }
+      this_listener = callable;
+      callable = (ScrDyn *)handle;
+    } else if (callable->kind == SCR_DYN_JSVAL &&
+               !scr_dyn_isl_typeof_is(callable, "function")) {
+      ScrStr *key = scr_str_new("handleEvent", 11);
+      owned_handle = scr_dyn_isl_key_get(callable, key);
+      scr_str_release(key);
+      if (!owned_handle) {
+        scr_dyn_release(dispatch[i].listener);
+        if (scr_exc_pending()) {
+          sf_defer_listener_error(scr_exc_take());
+        }
+        continue;
+      }
+      if (owned_handle->kind == SCR_DYN_UNDEF) {
+        scr_dyn_release(owned_handle);
+        scr_dyn_release(dispatch[i].listener);
+        continue;
+      }
+      this_listener = callable;
+      callable = owned_handle;
+    } else if (callable->kind != SCR_DYN_FUNC) {
+      /* Web IDL accepts every object as an EventListener. Native arrays,
+       * byte views, handles, and promises cannot carry an expando
+       * handleEvent in the static runtime, so a missing method is a no-op. */
+      scr_dyn_release(dispatch[i].listener);
+      continue;
     }
     ScrDyn *args[1] = {event};
-    if (current_listener) {
-      scr_dyn_this_push_dyn(current_listener);
+    if (this_listener) {
+      scr_dyn_this_push_dyn(this_listener);
     } else {
       scr_dyn_this_push(s, SCR_DYNH_ABORT_SIGNAL);
     }
@@ -804,6 +852,7 @@ static void sf_signal_dispatch_listeners(SfSignal *s, ScrDyn *provided_event) {
         scr_dyn_call(callable, args, 1, "abort listener");
     scr_dyn_this_pop();
     scr_dyn_release(r);
+    scr_dyn_release(owned_handle);
     scr_dyn_release(current_listener);
     scr_dyn_release(dispatch[i].listener);
     if (scr_exc_pending()) {
@@ -986,7 +1035,21 @@ static bool sf_abort_listener_value(const ScrDyn *listener) {
   /* Web IDL callback interfaces accept any object. handleEvent is looked up
    * when the event is dispatched, where a non-callable value reports an
    * asynchronous listener error and a missing value is a no-op. */
-  return listener->kind == SCR_DYN_FUNC || listener->kind == SCR_DYN_OBJ;
+  switch (listener->kind) {
+  case SCR_DYN_FUNC:
+  case SCR_DYN_OBJ:
+  case SCR_DYN_ARR:
+  case SCR_DYN_BYTES:
+  case SCR_DYN_HANDLE:
+  case SCR_DYN_PROMISE:
+    return true;
+  case SCR_DYN_JSVAL:
+  case SCR_DYN_TYPED_REF:
+    return scr_dyn_isl_typeof_is(listener, "function") ||
+           scr_dyn_isl_typeof_is(listener, "object");
+  default:
+    return false;
+  }
 }
 
 static bool sf_abort_listener_equal(
@@ -2203,25 +2266,34 @@ static ScrPromise *sf_stream_collect(SfStream *s, int mode) {
 }
 
 ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
-  if (source && source->kind != SCR_DYN_UNDEF &&
-      source->kind != SCR_DYN_OBJ) {
+  ScrDyn *source_view = source;
+  ScrDyn *materialized = NULL;
+  if (source && source->kind == SCR_DYN_TYPED_REF) {
+    materialized = scr_dyn_typed_ref_materialize(source);
+    source_view = materialized;
+  }
+  if (source_view && source_view->kind != SCR_DYN_UNDEF &&
+      source_view->kind != SCR_DYN_OBJ) {
+    scr_dyn_release(materialized);
     sf_type_error("ReadableStream source must be an object");
     return NULL;
   }
   SfStream *s = sf_stream_new_native();
-  if (source && source->kind == SCR_DYN_OBJ) {
-    const ScrDyn *type = scr_dyn_obj_get(source, "type", 4);
+  if (source_view && source_view->kind == SCR_DYN_OBJ) {
+    const ScrDyn *type = scr_dyn_obj_get(source_view, "type", 4);
     if (type && type->kind != SCR_DYN_UNDEF) {
       sf_stream_release(s);
+      scr_dyn_release(materialized);
       sf_type_error("byte streams are not supported by static ReadableStream");
       return NULL;
     }
-    const ScrDyn *pull = scr_dyn_obj_get(source, "pull", 4);
-    const ScrDyn *cancel = scr_dyn_obj_get(source, "cancel", 6);
-    const ScrDyn *start = scr_dyn_obj_get(source, "start", 5);
+    const ScrDyn *pull = scr_dyn_obj_get(source_view, "pull", 4);
+    const ScrDyn *cancel = scr_dyn_obj_get(source_view, "cancel", 6);
+    const ScrDyn *start = scr_dyn_obj_get(source_view, "start", 5);
     if (pull && pull->kind != SCR_DYN_UNDEF) {
       if (pull->kind != SCR_DYN_FUNC) {
         sf_stream_release(s);
+        scr_dyn_release(materialized);
         sf_type_error("ReadableStream source.pull must be a function");
         return NULL;
       }
@@ -2230,6 +2302,7 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
     if (cancel && cancel->kind != SCR_DYN_UNDEF) {
       if (cancel->kind != SCR_DYN_FUNC) {
         sf_stream_release(s);
+        scr_dyn_release(materialized);
         sf_type_error("ReadableStream source.cancel must be a function");
         return NULL;
       }
@@ -2242,19 +2315,26 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
     if (start && start->kind != SCR_DYN_UNDEF) {
       if (start->kind != SCR_DYN_FUNC) {
         sf_stream_release(s);
+        scr_dyn_release(materialized);
         sf_type_error("ReadableStream source.start must be a function");
         return NULL;
       }
       s->started = false;
+      /* `this` may be a live typed capsule. A property write from start()
+       * refreshes its cached object and releases the old field snapshot,
+       * so retain the borrowed callback across that refresh. */
+      ScrDyn *start_cb = scr_dyn_retain((ScrDyn *)start);
       ScrDyn *controller = sf_controller_box(s);
       ScrDyn *args[1] = {controller};
       scr_dyn_this_push_dyn(source);
       ScrDyn *r =
-          scr_dyn_call((ScrDyn *)start, args, 1, "underlyingSource.start");
+          scr_dyn_call(start_cb, args, 1, "underlyingSource.start");
       scr_dyn_this_pop();
+      scr_dyn_release(start_cb);
       scr_dyn_release(controller);
       if (!r) {
         sf_stream_release(s);
+        scr_dyn_release(materialized);
         return NULL;
       }
       ScrPromise *callback_promise = sf_stream_callback_promise(r);
@@ -2275,6 +2355,7 @@ ScrDyn *scr_fetch_stream_new(ScrDyn *source) {
   if (s->started) sf_stream_schedule_initial_pull(s);
   ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_WEB_STREAM);
   sf_stream_release(s);
+  scr_dyn_release(materialized);
   return out;
 }
 

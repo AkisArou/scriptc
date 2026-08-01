@@ -328,7 +328,19 @@ static bool dyn_bytes_proto_real(const char *m) {
   return false;
 }
 
-ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, size_t argc, const char *what) {
+static ScrDyn *scr_dyn_invoke_impl(
+    ScrDyn *recv, const char *method, ScrDyn *const *args, size_t argc,
+    const char *what, ScrDyn *callback_recv);
+
+ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method,
+                       ScrDyn *const *args, size_t argc,
+                       const char *what) {
+  return scr_dyn_invoke_impl(recv, method, args, argc, what, NULL);
+}
+
+static ScrDyn *scr_dyn_invoke_impl(
+    ScrDyn *recv, const char *method, ScrDyn *const *args, size_t argc,
+    const char *what, ScrDyn *callback_recv) {
   if (recv->kind == SCR_DYN_UNDEF || recv->kind == SCR_DYN_NULL) {
     ScrJsonBuf b;
     scr_jb_init(&b);
@@ -369,7 +381,8 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(recv);
     bool mutates = materialized->kind == SCR_DYN_ARR &&
                    dyn_arr_proto_mutates(method);
-    ScrDyn *result = scr_dyn_invoke(materialized, method, args, argc, what);
+    ScrDyn *result = scr_dyn_invoke_impl(
+        materialized, method, args, argc, what, recv);
     if (mutates && !scr_exc_pending()) scr_dyn_typed_ref_commit(recv);
     if (result == materialized) {
       scr_dyn_release(result);
@@ -588,11 +601,17 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
       if (!dyn_cb_check(args, argc)) return NULL;
       ScrDyn *cb = args[0];
       ScrDyn *out = (dyn_name_is(method, "map") || dyn_name_is(method, "filter")) ? scr_dyn_new_arr() : NULL;
-      /* JS iterates the LIVE array (a push mid-loop is visited); reading
-       * len fresh each step matches that. */
-      for (size_t i = 0; i < recv->v.arr.len; i++) {
+      /* Array iteration methods snapshot length before the first callback.
+       * A shrinking callback can remove a later dense entry; an expanding
+       * callback must not make the new tail observable to this pass. Live
+       * Web-boundary capsules are the externally visible receiver, so pass
+       * that capsule as callback arg 3: mutations through the callback's
+       * array argument then commit directly to the original static array. */
+      size_t n = len;
+      ScrDyn *visible_recv = callback_recv ? callback_recv : recv;
+      for (size_t i = 0; i < n && i < recv->v.arr.len; i++) {
         ScrDyn *item = scr_dyn_retain(recv->v.arr.items[i]);
-        ScrDyn *r = dyn_call_cb(cb, item, i, recv);
+        ScrDyn *r = dyn_call_cb(cb, item, i, visible_recv);
         if (!r) { scr_dyn_release(item); scr_dyn_release(out); return NULL; }
         if (dyn_name_is(method, "map")) {
           scr_dyn_arr_push(out, r); /* ownership moves in */
@@ -629,7 +648,8 @@ ScrDyn *scr_dyn_invoke(ScrDyn *recv, const char *method, ScrDyn *const *args, si
       size_t n = recv->v.arr.len;
       for (size_t i = 0; i < n && i < recv->v.arr.len; i++) {
         ScrDyn *item = scr_dyn_retain(recv->v.arr.items[i]);
-        ScrDyn *r = dyn_call_cb(cb, item, i, recv);
+        ScrDyn *r = dyn_call_cb(
+            cb, item, i, callback_recv ? callback_recv : recv);
         scr_dyn_release(item);
         if (!r) { scr_dyn_release(out); return NULL; }
         if (r->kind == SCR_DYN_ARR) {

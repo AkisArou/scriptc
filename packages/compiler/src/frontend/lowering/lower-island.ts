@@ -658,6 +658,62 @@ export function lowerStaticReadableStreamControllerCall(
   };
 }
 
+/** AbortSignal retains listener object identity for duplicate detection and
+ * removeEventListener(). Functions already box by closure identity; mutable
+ * record/array/bytes listeners need the same live capsule used by stream
+ * chunks so repeated crossings still denote one EventListener object. */
+export function lowerStaticAbortSignalListenerCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length < 2 ||
+    call.arguments.some((arg) => ts.isSpreadElement(arg)) ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken
+  ) {
+    return null;
+  }
+  const member = staticResponseMemberName(L, access);
+  if (member !== "addEventListener" && member !== "removeEventListener") {
+    return null;
+  }
+  const receiverTs = L.checker.getBaseTypeOfLiteralType(
+    L.typeOf(access.expression),
+  );
+  const symbol = receiverTs.getAliasSymbol() ?? receiverTs.getSymbol();
+  if (
+    symbol?.name !== "AbortSignal" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const recv = L.lowerExpr(access.expression);
+  if (recv.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  return {
+    kind: "dynInvoke",
+    recv,
+    method: member,
+    calleeName: access.getText(),
+    args: call.arguments.map((arg, index) =>
+      index === 1
+        ? lowerLiveWebValue(L, arg)
+        : L.lowerExprExpecting(arg, DYN),
+    ),
+    type: DYN,
+    loc,
+  };
+}
+
 /** `new ReadableStream(source?)` in a static build. The source record is
  * boxed into the checked-dynamic tree so start/pull/cancel callbacks can
  * be retained by the native controller. Strategies and BYOB sources are
@@ -683,7 +739,7 @@ export function lowerStaticReadableStreamNew(
       ? dynUndefinedExpr(loc)
       : ts.isObjectLiteralExpression(args[0]!)
         ? lowerDynObjectLiteral(L, args[0]!)
-        : L.lowerExprExpecting(args[0]!, DYN);
+        : lowerLiveWebValue(L, args[0]!);
   return {
     kind: "libCall",
     fn: "fetch.streamNew",

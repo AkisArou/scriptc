@@ -25,6 +25,13 @@ const cancelSource = { marker: "cancel-source", cancel };
 const cancelStream = new ReadableStream(cancelSource);
 await cancelStream.cancel();
 
+function mutatingStart() {
+  this.marker = "changed";
+}
+
+const mutatingSource = { marker: "original", start: mutatingStart };
+new ReadableStream(mutatingSource);
+
 console.log(
   "stream source callback this:",
   startThis,
@@ -33,5 +40,6 @@ console.log(
   first.value,
   done.done,
 );
+console.log("stream source callback mutation:", mutatingSource.marker);
 
 export {};

@@ -540,6 +540,24 @@ console.log(
   dynamicArrayMethodValue.join(","),
 );
 
+const dynamicArrayCallbackValue = [33];
+const dynamicArrayCallbackReader: any = ReadableStream.from([
+  dynamicArrayCallbackValue,
+]).getReader();
+const dynamicArrayCallbackPart: any = await dynamicArrayCallbackReader.read();
+let dynamicArrayCallbackCalls = 0;
+dynamicArrayCallbackPart.value.forEach(
+  (_value: number, _index: number, array: number[]) => {
+    dynamicArrayCallbackCalls++;
+    array.push(34);
+  },
+);
+console.log(
+  "dynamic stream array callback:",
+  dynamicArrayCallbackCalls,
+  dynamicArrayCallbackValue.join(","),
+);
+
 const dynamicNestedValue = { nested: { value: 23 } };
 const dynamicNestedReader: any = ReadableStream.from([
   dynamicNestedValue,
