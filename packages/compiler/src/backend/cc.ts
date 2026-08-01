@@ -443,9 +443,24 @@ function vendorBuildCacheRoot(): string {
     : resolve(testRoot);
 }
 
-function engineArchivePath(sanitize: boolean, driver: CcDriver): string {
-  const flavor = `${sanitize ? "asan" : "plain"}${driver.target !== null ? `-${driver.target}` : ""}`;
-  return join(vendorBuildCacheRoot(), `${QJS_COMMIT.slice(0, 12)}-${flavor}`, "libqjs.a");
+/** Cross targets already carry their architecture in the explicit triple.
+ * Host-native prerequisites need the same separation: a checkout/package can
+ * be used by both arm64 Node and Rosetta/x64 Node on macOS. */
+export function vendorCacheTargetFlavor(
+  driver: Pick<CcDriver, "target">,
+  hostPlatform: NodeJS.Platform = process.platform,
+  hostArch: string = process.arch,
+): string {
+  return driver.target === null ? `native-${hostPlatform}-${hostArch}` : driver.target;
+}
+
+function engineArchivePath(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): string {
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
+  return join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-${flavor}`, "libqjs.a");
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -455,8 +470,30 @@ async function fileExists(path: string): Promise<boolean> {
   );
 }
 
+/** Copy an artifact through a private sibling name, then atomically install it.
+ * The source can live on another filesystem (cache/temp roots commonly do), so
+ * a direct rename is not portable. */
+async function installArtifact(
+  source: string,
+  destination: string,
+  mode?: number,
+): Promise<void> {
+  await mkdir(dirname(destination), { recursive: true });
+  const tmp = join(
+    dirname(destination),
+    `.scriptc-install-${basename(destination)}-${process.pid}-${Math.random().toString(36).slice(2)}`,
+  );
+  try {
+    await copyFile(source, tmp);
+    if (mode !== undefined) await chmod(tmp, mode);
+    await rename(tmp, destination);
+  } finally {
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
+}
+
 /** The engine archive for one flavor, built lazily on the first --dynamic
- * compile (~10s) and cached under vendor/.cache/<commit>-<flavor>/ — unlike
+ * compile (~10s) and cached under vendor/.cache/<commit>-<flavor>-<target>/ — unlike
  * the runtime's own sources (recompiled every build, ~100ms), the engine is
  * far too big to rebuild per compile. The plain flavor is ALWAYS MinSizeRel
  * regardless of the program's optimization level: measured binary delta is
@@ -473,11 +510,14 @@ async function fileExists(path: string): Promise<boolean> {
  * (QJS_ENGINE_SOURCES) compiled with `zig cc -target <triple>` under the
  * same flags CMake's MinSizeRel/Debug+ASan configurations apply, packed
  * with `zig ar`. Host builds keep the exact historical CMake recipe. */
-async function ensureEngineArchive(sanitize: boolean, driver: CcDriver): Promise<string> {
-  const flavor = `${sanitize ? "asan" : "plain"}${driver.target !== null ? `-${driver.target}` : ""}`;
+async function ensureEngineArchive(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): Promise<string> {
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
   const vendor = vendorEngineDir();
-  const cacheRoot = vendorBuildCacheRoot();
-  const archive = engineArchivePath(sanitize, driver);
+  const archive = engineArchivePath(sanitize, driver, cacheRoot);
   const cacheDir = dirname(archive);
   if (await fileExists(archive)) return archive;
   if (driver.target !== null) return buildEngineArchiveCross(sanitize, driver, cacheRoot, cacheDir);
@@ -595,12 +635,16 @@ async function buildEngineArchiveCross(sanitize: boolean, driver: CcDriver, cach
  * never the ~620KB island. */
 const LRE_SOURCES = ["libregexp.c", "libunicode.c"];
 
-function lreObjectPaths(sanitize: boolean, driver: CcDriver): string[] {
+function lreObjectPaths(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): string[] {
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    (driver.target !== null ? `-${driver.target}` : "");
-  const cacheDir = join(vendorBuildCacheRoot(), `${QJS_COMMIT.slice(0, 12)}-lre-${flavor}`);
+    `-${vendorCacheTargetFlavor(driver)}`;
+  const cacheDir = join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-lre-${flavor}`);
   return LRE_SOURCES.map((f) => join(cacheDir, f.replace(/\.c$/, ".o")));
 }
 
@@ -615,18 +659,21 @@ function lreObjectPaths(sanitize: boolean, driver: CcDriver): string[] {
  * args — libregexp/libunicode are plain C11, so the cross story is exactly
  * the runtime sources' (no host-built inputs); vendored SOURCES are
  * untouched, only the build wiring knows about targets. */
-async function ensureLreObjects(sanitize: boolean, driver: CcDriver): Promise<string[]> {
+async function ensureLreObjects(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): Promise<string[]> {
   // The flavor keys the DRIVER as well as the target: a zig-cc-built object
   // set must never be handed to a clang link (or vice versa) off a shared
-  // cache directory — the historical `lre-plain`/`lre-asan` names stay
-  // clang's alone.
+  // cache directory. Native targets include host platform + architecture so
+  // arm64 and Rosetta processes never exchange Mach-O objects.
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    (driver.target !== null ? `-${driver.target}` : "");
+    `-${vendorCacheTargetFlavor(driver)}`;
   const vendor = vendorEngineDir();
-  const cacheRoot = vendorBuildCacheRoot();
-  const objects = lreObjectPaths(sanitize, driver);
+  const objects = lreObjectPaths(sanitize, driver, cacheRoot);
   const cacheDir = dirname(objects[0]!);
   if ((await Promise.all(objects.map(fileExists))).every(Boolean)) return objects;
 
@@ -671,12 +718,16 @@ function vendorZlibDir(): string {
  * Host builds never touch this list — they link the system libz. */
 const ZLIB_SOURCES = ["adler32.c", "compress.c", "crc32.c", "deflate.c", "infback.c", "inffast.c", "inflate.c", "inftrees.c", "trees.c", "uncompr.c", "zutil.c"];
 
-function zlibObjectPaths(sanitize: boolean, driver: CcDriver): string[] {
+function zlibObjectPaths(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): string[] {
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    (driver.target !== null ? `-${driver.target}` : "");
-  const cacheDir = join(vendorBuildCacheRoot(), `zlib-${ZLIB_VERSION}-${flavor}`);
+    `-${vendorCacheTargetFlavor(driver)}`;
+  const cacheDir = join(cacheRoot, `zlib-${ZLIB_VERSION}-${flavor}`);
   return ZLIB_SOURCES.map((f) => join(cacheDir, f.replace(/\.c$/, ".o")));
 }
 
@@ -689,14 +740,17 @@ function zlibObjectPaths(sanitize: boolean, driver: CcDriver): string[] {
  * like the lre flavor: only cross builds call this today, but the keying
  * must never hand a zig-built object set to a clang link off a shared
  * directory. */
-async function ensureZlibObjects(sanitize: boolean, driver: CcDriver): Promise<string[]> {
+async function ensureZlibObjects(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): Promise<string[]> {
   const flavor =
     (sanitize ? "asan" : "plain") +
     (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
-    (driver.target !== null ? `-${driver.target}` : "");
+    `-${vendorCacheTargetFlavor(driver)}`;
   const vendor = vendorZlibDir();
-  const cacheRoot = vendorBuildCacheRoot();
-  const objects = zlibObjectPaths(sanitize, driver);
+  const objects = zlibObjectPaths(sanitize, driver, cacheRoot);
   const cacheDir = dirname(objects[0]!);
   if ((await Promise.all(objects.map(fileExists))).every(Boolean)) return objects;
 
@@ -746,8 +800,11 @@ const CURL_STUB_SYMBOLS = [
   "curl_url", "curl_url_cleanup", "curl_url_get", "curl_url_set",
 ];
 
-function curlStubDirPath(driver: CcDriver): string {
-  return join(vendorBuildCacheRoot(), `curl-stub-${driver.target}`);
+function curlStubDirPath(
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): string {
+  return join(cacheRoot, `curl-stub-${driver.target}`);
 }
 
 /** The libcurl import stub for one CROSS target, generated lazily on the
@@ -761,9 +818,11 @@ function curlStubDirPath(driver: CcDriver): string {
  * from the stub's bodies ever ships in the binary). One stub per target,
  * no sanitize flavor: the stub's code is never executed or instrumented,
  * and asan links against plain shared libraries freely. */
-async function ensureCurlStub(driver: CcDriver): Promise<string> {
-  const cacheRoot = vendorBuildCacheRoot();
-  const cacheDir = curlStubDirPath(driver);
+async function ensureCurlStub(
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): Promise<string> {
+  const cacheDir = curlStubDirPath(driver, cacheRoot);
   const lib = join(cacheDir, "libcurl.so");
   if (await fileExists(lib)) return cacheDir;
 
@@ -798,14 +857,18 @@ function vendorTlsDir(): string {
   return join(runtimeSrcDir(), "..", "vendor", "mbedtls");
 }
 
-function tlsArchivePath(sanitize: boolean, driver: CcDriver): string {
-  const flavor = `${sanitize ? "asan" : "plain"}${driver.target !== null ? `-${driver.target}` : ""}`;
-  return join(vendorBuildCacheRoot(), `mbedtls-${MBEDTLS_VERSION}-${flavor}`, "libmbedtls.a");
+function tlsArchivePath(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): string {
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
+  return join(cacheRoot, `mbedtls-${MBEDTLS_VERSION}-${flavor}`, "libmbedtls.a");
 }
 
 /** The mbedTLS archive for one flavor, compiled lazily on the first
  * TLS-using build (~15s over ~110 TUs, parallelized) and cached like the
- * engine archive — vendor/.cache/mbedtls-<version>-<flavor>/libmbedtls.a —
+ * engine archive — vendor/.cache/mbedtls-<version>-<flavor>-<target>/libmbedtls.a —
  * with the same atomic-rename publish (parallel first builds race safely;
  * losers discard their work). Plain is -Os (the TLS stack is link-gated
  * but still wants its size class small); asan matches the final link so
@@ -818,13 +881,16 @@ function tlsArchivePath(sanitize: boolean, driver: CcDriver): string {
  * TUs compile with `zig cc -target <triple>` and the archive is packed
  * with `zig ar` (llvm-ar — the host BSD ar has no business indexing ELF
  * objects). Host builds keep the exact historical clang + ar recipe. */
-async function ensureTlsArchive(sanitize: boolean, driver: CcDriver): Promise<string> {
-  const flavor = `${sanitize ? "asan" : "plain"}${driver.target !== null ? `-${driver.target}` : ""}`;
+async function ensureTlsArchive(
+  sanitize: boolean,
+  driver: CcDriver,
+  cacheRoot: string = vendorBuildCacheRoot(),
+): Promise<string> {
+  const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}`;
   const compileArgv = driver.target !== null ? driver.argv : ["clang"];
   const arArgv = driver.target !== null ? [...driver.argv.slice(0, 1), "ar"] : ["ar"];
   const vendor = vendorTlsDir();
-  const cacheRoot = vendorBuildCacheRoot();
-  const archive = tlsArchivePath(sanitize, driver);
+  const archive = tlsArchivePath(sanitize, driver, cacheRoot);
   const cacheDir = dirname(archive);
   if (await fileExists(archive)) return archive;
 
@@ -953,14 +1019,22 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   // A library archive is compile-only from clang's perspective. Link-only
   // search variables cannot affect it, but any mutable compilation input
   // makes both its complete artifact and runtime objects unsafe to reuse.
-  const root =
+  let root =
     opts.cacheIdentity === undefined || !cachePolicy.runtimeObjects
       ? null
       : cacheRootDir();
+  if (root !== null) {
+    try {
+      await ensurePrivateCacheRoot(root);
+    } catch {
+      root = null;
+    }
+  }
   const toolchainEnv = toolchainEnvironmentFingerprint();
   let cachedArchive: string | null = null;
   let compilerVersion = "";
   let runtimeHash = "";
+  let cachedProgramBytes: Buffer | null = null;
   if (root !== null) {
     try {
       const [cv, av, fingerprint, programBytes] = await Promise.all([
@@ -971,6 +1045,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       ]);
       compilerVersion = cv;
       runtimeHash = fingerprint;
+      cachedProgramBytes = programBytes;
       const key = createHash("sha256")
         .update("lib-v3\0")
         .update(cacheTargetIdentity(driver)).update("\0")
@@ -1013,85 +1088,136 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     }
   }
 
-  const lreObjects = regex ? await ensureLreObjects(sanitize, driver) : [];
-  const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
-  const buildDir = await mkdtemp(join(tmpdir(), "scriptc-lib-"));
+  const transientVendorRoot = cachePolicy.runtimeObjects
+    ? null
+    : join(
+        tmpdir(),
+        `scriptc-lib-vendor-${process.pid}-${Math.random().toString(36).slice(2)}`,
+      );
+  const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot();
   try {
-    const compileOne = async (src: string, objName: string): Promise<string> => {
-      const obj = join(buildDir, objName);
-      const args = [
-        ...driver.argv.slice(1),
-        ...cflags,
-        ...(src.endsWith(".ll") ? ["-Wno-override-module"] : []),
-        "-c", src,
-        "-o", obj,
-      ];
-      try {
-        await execFileAsync(driver.argv[0] ?? "clang", args);
-      } catch (err) {
-        const stderr = (err as { stderr?: string }).stderr ?? String(err);
-        throw new Error(
-          `${driver.argv.join(" ")} failed compiling ${src} for the library archive.\n` +
-            `This is a scriptc bug (generated/runtime C should always compile) unless the compiler itself is missing/broken.\n\n${stderr}`,
-        );
-      }
-      return obj;
-    };
-    const stem = basename(opts.cPath).replace(/\.(c|ll)$/, "");
-    const programObject = await compileOne(opts.cPath, `${stem}.program.o`);
-    let runtimeObjects: string[] | null = null;
-    if (root !== null && compilerVersion !== "" && runtimeHash !== "") {
-      try {
-        const sourcePaths = sources.map((f) => join(rtDir, f));
-        const cached = await ensureRuntimeObjects(
-          root,
-          driver.argv,
-          cflags,
-          sourcePaths,
-          `lib-obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
-        );
-        const staged = await stageRuntimeObjects(cached, join(buildDir, "cached-runtime"));
-        runtimeObjects = sourcePaths.map((path) => staged.get(path)!);
-      } catch {
-        runtimeObjects = null;
-      }
-    }
-    if (runtimeObjects === null) {
-      runtimeObjects = [];
-      const width = Math.min(4, availableParallelism());
-      for (let i = 0; i < sources.length; i += width) {
-        runtimeObjects.push(
-          ...(await Promise.all(
-            sources.slice(i, i + width).map((f) => compileOne(join(rtDir, f), f.replace(/\.c$/, ".o"))),
-          )),
-        );
-      }
-    }
-    const objects = [programObject, ...runtimeObjects, ...lreObjects, ...zlibObjects];
-    await rm(opts.outPath, { force: true }); // `ar r` would append into a stale archive
-    await mkdir(dirname(opts.outPath), { recursive: true });
-    await execFileAsync(arArgv[0] ?? "ar", [...arArgv.slice(1), "rcs", opts.outPath, ...objects]);
-    if (cachedArchive !== null && root !== null) {
-      try {
-        const cacheDir = dirname(cachedArchive);
-        await mkdir(cacheDir, { recursive: true });
-        const tmp = join(
-          cacheDir,
-          `.tmp-${basename(cachedArchive).slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`,
-        );
+    const lreObjects = regex
+      ? await ensureLreObjects(sanitize, driver, vendorCacheRoot)
+      : [];
+    const zlibObjects = opts.zlib
+      ? await ensureZlibObjects(sanitize, driver, vendorCacheRoot)
+      : [];
+    const buildDir = await mkdtemp(join(tmpdir(), "scriptc-lib-"));
+    try {
+      const compileOne = async (
+        src: string,
+        objName: string,
+        compilerVisibleSource?: string,
+      ): Promise<string> => {
+        const obj = join(buildDir, objName);
+        const args = [
+          ...driver.argv.slice(1),
+          ...cflags,
+          ...(compilerVisibleSource !== undefined
+            ? [
+                `-ffile-prefix-map=${src}=${compilerVisibleSource}`,
+                "-iquote",
+                dirname(resolve(compilerVisibleSource)),
+              ]
+            : []),
+          ...(src.endsWith(".ll") ? ["-Wno-override-module"] : []),
+          "-c", src,
+          "-o", obj,
+        ];
         try {
-          await copyFile(opts.outPath, tmp);
-          await rename(tmp, cachedArchive);
-        } finally {
-          await rm(tmp, { force: true }).catch(() => undefined);
+          await execFileAsync(driver.argv[0] ?? "clang", args);
+        } catch (err) {
+          const stderr = (err as { stderr?: string }).stderr ?? String(err);
+          throw new Error(
+            `${driver.argv.join(" ")} failed compiling ${src} for the library archive.\n` +
+              `This is a scriptc bug (generated/runtime C should always compile) unless the compiler itself is missing/broken.\n\n${stderr}`,
+          );
         }
-        await pruneCache(root);
-      } catch {
-        // Publishing is best-effort; the requested archive is already valid.
+        return obj;
+      };
+      const stem = basename(opts.cPath).replace(/\.(c|ll)$/, "");
+      const programSource =
+        cachedProgramBytes === null
+          ? opts.cPath
+          : join(buildDir, `program${opts.cPath.endsWith(".ll") ? ".ll" : ".c"}`);
+      if (cachedProgramBytes !== null) await writeFile(programSource, cachedProgramBytes);
+      const programObject = await compileOne(
+        programSource,
+        `${stem}.program.o`,
+        cachedProgramBytes === null ? undefined : opts.cPath,
+      );
+      let runtimeObjects: string[] | null = null;
+      if (root !== null && compilerVersion !== "" && runtimeHash !== "") {
+        try {
+          const sourcePaths = sources.map((f) => join(rtDir, f));
+          const cached = await ensureRuntimeObjects(
+            root,
+            driver.argv,
+            cflags,
+            sourcePaths,
+            `lib-obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+          );
+          const staged = await stageRuntimeObjects(cached, join(buildDir, "cached-runtime"));
+          runtimeObjects = sourcePaths.map((path) => staged.get(path)!);
+        } catch {
+          runtimeObjects = null;
+        }
       }
+      if (runtimeObjects === null) {
+        runtimeObjects = [];
+        const width = Math.min(4, availableParallelism());
+        for (let i = 0; i < sources.length; i += width) {
+          runtimeObjects.push(
+            ...(await Promise.all(
+              sources.slice(i, i + width).map((f) =>
+                compileOne(join(rtDir, f), f.replace(/\.c$/, ".o")),
+              ),
+            )),
+          );
+        }
+      }
+      const objects = [programObject, ...runtimeObjects, ...lreObjects, ...zlibObjects];
+      // A cacheable build owns a private archive from `ar` through publication.
+      // The caller-visible output can be shared by another invocation without
+      // letting that invocation's bytes poison this key.
+      const archiveOutput =
+        cachedArchive === null ? opts.outPath : join(buildDir, "artifact.lib.a");
+      await rm(archiveOutput, { force: true }); // `ar r` would append into a stale archive
+      await mkdir(dirname(archiveOutput), { recursive: true });
+      await execFileAsync(arArgv[0] ?? "ar", [
+        ...arArgv.slice(1),
+        "rcs",
+        archiveOutput,
+        ...objects,
+      ]);
+      if (archiveOutput !== opts.outPath) await installArtifact(archiveOutput, opts.outPath);
+      if (cachedArchive !== null && root !== null) {
+        try {
+          const cacheDir = dirname(cachedArchive);
+          await mkdir(cacheDir, { recursive: true });
+          const tmp = join(
+            cacheDir,
+            `.tmp-${basename(cachedArchive).slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`,
+          );
+          try {
+            await copyFile(archiveOutput, tmp);
+            await chmod(tmp, 0o600);
+            await rename(tmp, cachedArchive);
+          } finally {
+            await rm(tmp, { force: true }).catch(() => undefined);
+          }
+          await pruneCache(root);
+        } catch {
+          // Publishing is best-effort; the requested archive is already valid.
+        }
+      }
+    } finally {
+      await rm(buildDir, { recursive: true, force: true });
     }
   } finally {
-    await rm(buildDir, { recursive: true, force: true });
+    if (transientVendorRoot !== null) {
+      await rm(transientVendorRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 }
 
@@ -1177,6 +1303,16 @@ export function resolveBuildCacheRoot(
 
 function cacheRootDir(): string | null {
   return resolveBuildCacheRoot();
+}
+
+/** The production cache can contain complete user executables/archives with
+ * embedded source literals or comptime values. Its root is therefore private
+ * regardless of the caller's ordinary output umask. Windows inherits the
+ * per-user LOCALAPPDATA ACL; POSIX needs an explicit mode, including for roots
+ * created by an older scriptc release. */
+async function ensurePrivateCacheRoot(root: string): Promise<void> {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await chmod(root, 0o700);
 }
 
 const ccVersionMemos = new Map<string, Promise<string>>();
@@ -1506,38 +1642,61 @@ export async function compileC(opts: CcOptions): Promise<void> {
       );
     }
   }
+  const cachePolicy = toolchainEnvironmentCachePolicy();
+  // Mutable include/SDK/config inputs can change behind a stable environment
+  // spelling. The complete/runtime cache is disabled below; vendor objects
+  // must follow the same rule instead of silently surviving in package-local
+  // .cache. A private root gives this invocation the usual vendor build recipe
+  // without publishing or reusing those prerequisites.
+  const transientVendorRoot = cachePolicy.runtimeObjects
+    ? null
+    : join(
+        tmpdir(),
+        `scriptc-vendor-${process.pid}-${Math.random().toString(36).slice(2)}`,
+      );
+  const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot();
   // Every vendor output path is deterministic from pins, flags, driver, and
   // target. Build the command/key from those paths now, but do not materialize
   // them until a complete-binary lookup has missed.
-  const engineArchive = dynamic ? engineArchivePath(sanitize, driver) : null;
-  const tlsArchive = tls ? tlsArchivePath(sanitize, driver) : null;
+  const engineArchive = dynamic ? engineArchivePath(sanitize, driver, vendorCacheRoot) : null;
+  const tlsArchive = tls ? tlsArchivePath(sanitize, driver, vendorCacheRoot) : null;
   // --dynamic + regex shares the archive's libregexp (its host hooks and
   // ours would collide; see scr_regex.c) — the standalone objects are for
   // static builds only.
-  const lreObjects = regex && !dynamic ? lreObjectPaths(sanitize, driver) : [];
+  const lreObjects = regex && !dynamic ? lreObjectPaths(sanitize, driver, vendorCacheRoot) : [];
   // Vendored zlib is the CROSS story only — host builds keep the exact
   // historical `-lz` system link (see CcOptions.zlib). The native fetch's
   // gzip decoder rides the same objects/link.
   const zlibObjects =
     ((opts.zlib ?? false) || nativeFetch) && driver.target !== null
-      ? zlibObjectPaths(sanitize, driver)
+      ? zlibObjectPaths(sanitize, driver, vendorCacheRoot)
       : [];
   // The libcurl import stub is likewise CROSS-only — host builds keep the
   // exact historical system `-lcurl` link (see CcOptions.fetch). Curl
   // reference builds only.
-  const curlStubDir = curlFetch && driver.target !== null ? curlStubDirPath(driver) : null;
+  const curlStubDir =
+    curlFetch && driver.target !== null
+      ? curlStubDirPath(driver, vendorCacheRoot)
+      : null;
   const materializeVendorPrerequisites = async (): Promise<void> => {
     // Preserve the historical order to avoid multiplying first-build resource
     // pressure when several large vendor sets are cold simultaneously.
-    if (dynamic) await ensureEngineArchive(sanitize, driver);
-    if (tls) await ensureTlsArchive(sanitize, driver);
-    if (regex && !dynamic) await ensureLreObjects(sanitize, driver);
-    if (zlibObjects.length > 0) await ensureZlibObjects(sanitize, driver);
-    if (curlStubDir !== null) await ensureCurlStub(driver);
+    if (dynamic) await ensureEngineArchive(sanitize, driver, vendorCacheRoot);
+    if (tls) await ensureTlsArchive(sanitize, driver, vendorCacheRoot);
+    if (regex && !dynamic) await ensureLreObjects(sanitize, driver, vendorCacheRoot);
+    if (zlibObjects.length > 0) await ensureZlibObjects(sanitize, driver, vendorCacheRoot);
+    if (curlStubDir !== null) await ensureCurlStub(driver, vendorCacheRoot);
   };
   // rt() maps each runtime source's path on the command line: identity for
   // the historical single invocation, cached-.o substitution on cache misses.
-  const buildArgs = (rt: (path: string) => string): string[] => [
+  const buildArgs = (
+    rt: (path: string) => string,
+    build: {
+      programPath?: string;
+      outPath?: string;
+      compilerVisibleSource?: string;
+    } = {},
+  ): string[] => [
     "-std=c11",
     ...driver.targetArgs,
     ...(sanitize
@@ -1693,7 +1852,14 @@ export async function compileC(opts: CcOptions): Promise<void> {
     // note about that. Never present for .c inputs, so the historical C
     // command line cannot change by a byte.
     ...(opts.cPath.endsWith(".ll") ? ["-Wno-override-module"] : []),
-    opts.cPath,
+    ...(build.compilerVisibleSource !== undefined && build.programPath !== undefined
+      ? [
+          `-ffile-prefix-map=${build.programPath}=${build.compilerVisibleSource}`,
+          "-iquote",
+          dirname(resolve(build.compilerVisibleSource)),
+        ]
+      : []),
+    build.programPath ?? opts.cPath,
     ...(opts.linkInputs ?? []),
     ...(opts.systemLibraries ?? []).map((name) => `-l${name}`),
     // GNU ld resolves libraries from left to right and commonly enables
@@ -1707,7 +1873,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     // program and every native FFI input because GNU ld resolves archives
     // from left to right.
     ...driver.linkArgs,
-    "-o", opts.outPath,
+    "-o", build.outPath ?? opts.outPath,
   ];
   const ccName = driver.argv.join(" ");
   const runClang = async (args: string[]): Promise<void> => {
@@ -1735,15 +1901,27 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // inputs may include caller-owned headers whose contents are not otherwise
   // represented in this key, so they retain the fully uncached historical
   // path unless the caller supplies its own complete dependency identity.
-  const cachePolicy = toolchainEnvironmentCachePolicy();
-  const root =
+  let root =
     opts.cacheIdentity === undefined || !cachePolicy.runtimeObjects
       ? null
       : cacheRootDir();
+  if (root !== null) {
+    try {
+      await ensurePrivateCacheRoot(root);
+    } catch {
+      root = null;
+    }
+  }
   if (root === null) {
     // The exact historical command line, byte for byte.
-    await materializeVendorPrerequisites();
-    await runClang(buildArgs((p) => p));
+    try {
+      await materializeVendorPrerequisites();
+      await runClang(buildArgs((p) => p));
+    } finally {
+      if (transientVendorRoot !== null) {
+        await rm(transientVendorRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
     return;
   }
 
@@ -1840,45 +2018,59 @@ export async function compileC(opts: CcOptions): Promise<void> {
     rtInputs.push(p);
     return p;
   });
-  let objects: Map<string, string> | null = null;
-  let objectStageDir: string | null = null;
+  const buildDir = await mkdtemp(join(tmpdir(), "scriptc-cache-build-"));
   try {
-    const cached = await ensureRuntimeObjects(
-      root,
-      driver.argv,
-      cflags,
-      rtInputs,
-      `obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${ccName}\0${cv}\0${fingerprint}\0`,
-    );
-    objectStageDir = await mkdtemp(join(tmpdir(), "scriptc-link-"));
-    objects = await stageRuntimeObjects(cached, objectStageDir);
-  } catch {
-    objects = null; // cache trouble is never a build failure
-    if (objectStageDir !== null) {
-      await rm(objectStageDir, { recursive: true, force: true }).catch(() => undefined);
-      objectStageDir = null;
-    }
-  }
-  try {
-    await runClang(buildArgs((p) => objects?.get(p) ?? p));
-  } finally {
-    if (objectStageDir !== null) {
-      await rm(objectStageDir, { recursive: true, force: true }).catch(() => undefined);
-    }
-  }
-  if (cachedBin !== null && keyHex !== null) {
+    // Freeze the exact bytes used for the key. Generated TUs live at stable
+    // paths under .scriptc/, so two builds can otherwise overwrite that path
+    // between hashing and clang and publish one invocation's code under the
+    // other's key. The prefix map preserves the original __FILE__/debug-file
+    // spelling while clang reads this invocation-private snapshot.
+    const programPath = join(buildDir, `program${opts.cPath.endsWith(".ll") ? ".ll" : ".c"}`);
+    const privateOut = join(buildDir, process.platform === "win32" ? "artifact.exe" : "artifact");
+    await writeFile(programPath, cBytes);
+
+    let objects: Map<string, string> | null = null;
     try {
-      await mkdir(binDir, { recursive: true });
-      const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
-      try {
-        await copyFile(opts.outPath, tmp);
-        await rename(tmp, cachedBin);
-      } finally {
-        await rm(tmp, { force: true }).catch(() => undefined);
-      }
+      const cached = await ensureRuntimeObjects(
+        root,
+        driver.argv,
+        cflags,
+        rtInputs,
+        `obj-v2\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${ccName}\0${cv}\0${fingerprint}\0`,
+      );
+      objects = await stageRuntimeObjects(cached, join(buildDir, "runtime-objects"));
     } catch {
-      /* publishing is best-effort */
+      objects = null; // cache trouble is never a build failure
     }
+
+    await runClang(
+      buildArgs(
+        (p) => objects?.get(p) ?? p,
+        { programPath, outPath: privateOut, compilerVisibleSource: opts.cPath },
+      ),
+    );
+    await installArtifact(privateOut, opts.outPath);
+
+    if (cachedBin !== null && keyHex !== null) {
+      try {
+        await mkdir(binDir, { recursive: true });
+        const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+        try {
+          await copyFile(privateOut, tmp);
+          // Cache artifacts are data, never execution targets. Keep generated
+          // code and embedded literals private; the hit path reapplies the
+          // caller's current executable mode to its destination copy.
+          await chmod(tmp, 0o600);
+          await rename(tmp, cachedBin);
+        } finally {
+          await rm(tmp, { force: true }).catch(() => undefined);
+        }
+      } catch {
+        /* publishing is best-effort */
+      }
+    }
+  } finally {
+    await rm(buildDir, { recursive: true, force: true }).catch(() => undefined);
   }
   // Runtime-object population is itself a cache write, including on builds
   // whose native link inputs disable complete-artifact publication.
