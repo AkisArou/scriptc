@@ -736,6 +736,10 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     await compileC({
       cPath,
       outPath: opts.outPath,
+      // The emitted TU's non-system dependencies are the runtime/vendor tree,
+      // which cc.ts fingerprints separately. Low-level arbitrary C omits this
+      // opt-in so same-path header edits can never hit a stale artifact.
+      cacheIdentity: "scriptc-generated-v1",
       sanitize: opts.sanitize ?? false,
       dynamic: opts.dynamic ?? false,
       // The link switch for scr_regex.c + libregexp: detected on the IR, so
@@ -1451,6 +1455,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   await compileLibArchive({
     cPath,
     outPath: archivePath,
+    cacheIdentity: "scriptc-generated-library-v1",
     sanitize: opts.sanitize ?? false,
     regex: moduleUsesRegex(mod),
     assert: moduleUsesAssert(mod),

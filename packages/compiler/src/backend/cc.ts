@@ -81,6 +81,13 @@ export interface CcOptions {
   cPath: string;
   /** Path of the native executable to produce. */
   outPath: string;
+  /** Additional identity for a translation unit whose complete non-system
+   * dependency graph is owned by the caller. Persistent caching is disabled
+   * when omitted: arbitrary C can depend on same-path edited headers and on
+   * compiler-visible source spelling (`__FILE__`), neither of which the
+   * top-level bytes alone can safely represent. scriptc's frontend supplies
+   * this for its generated C/LLVM IR; `--from-c` deliberately does not. */
+  cacheIdentity?: string;
   /** Build with ASan + the runtime RC audit (test/debug lane). */
   sanitize?: boolean;
   /** Additional native archives/objects, appended after the generated
@@ -793,6 +800,10 @@ export interface LibArchiveOptions {
   cPath: string;
   /** The archive to produce (<name>.lib.a). */
   outPath: string;
+  /** Caller-owned identity for the generated TU's complete non-system
+   * dependency graph. Omission bypasses persistent artifact/object caching,
+   * matching compileC's arbitrary-input safety boundary. */
+  cacheIdentity?: string;
   sanitize?: boolean;
   /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
   regex?: boolean;
@@ -843,7 +854,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.zlib ? ["-I", vendorZlibDir()] : []),
   ];
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
-  const root = cacheRootDir();
+  const root = opts.cacheIdentity === undefined ? null : cacheRootDir();
   const toolchainEnv = toolchainEnvironmentFingerprint();
   let cachedArchive: string | null = null;
   let compilerVersion = "";
@@ -859,9 +870,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       compilerVersion = cv;
       runtimeHash = fingerprint;
       const key = createHash("sha256")
-        .update("lib-v2\0")
+        .update("lib-v3\0")
         .update(cacheTargetIdentity(driver)).update("\0")
         .update(toolchainEnv).update("\0")
+        .update(opts.cacheIdentity!).update("\0")
         .update(driver.argv.join("\x1f")).update("\0")
         .update(cv).update("\0")
         .update(fingerprint).update("\0")
@@ -869,6 +881,11 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         .update(av).update("\0")
         .update(cflags.join("\x1f")).update("\0")
         .update(sources.join("\x1f")).update("\0")
+        // The compiler-visible spelling and resolved location are both inputs:
+        // __FILE__ observes the former, while relative includes follow the
+        // latter. Archive members also inherit the TU's basename.
+        .update(opts.cPath).update("\0")
+        .update(resolve(opts.cPath)).update("\0")
         .update(programBytes)
         .digest("hex");
       cachedArchive = join(root, "lib", key);
@@ -876,6 +893,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       try {
         await mkdir(dirname(opts.outPath), { recursive: true });
         await copyFile(cachedArchive, tmpOut);
+        // Match a fresh `ar` output under the caller's current umask. Cache
+        // entries may have been populated by a less restrictive shell.
+        await chmod(tmpOut, 0o666 & ~process.umask());
         await rename(tmpOut, opts.outPath);
         const now = new Date();
         await utimes(cachedArchive, now, now).catch(() => undefined);
@@ -981,7 +1001,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *   bin/<key>       — whole program binaries. key = sha256(clang version,
  *                     target + compiler/linker environment, runtime fingerprint
  *                     (every .c/.h in the runtime src dir plus the vendor pin
- *                     QJS_COMMIT), the FULL normalized command line, the emitted C bytes). Emitted C is
+ *                     QJS_COMMIT), the caller's dependency identity, the
+ *                     compiler-visible TU path, the FULL normalized command
+ *                     line, and the emitted C bytes). Emitted C is
  *                     byte-stable by project invariant, so unchanged programs
  *                     hit; any flag difference — e.g. the sanitized lane's
  *                     -O1/-fsanitize=address/-DSCR_RC_AUDIT — lands in a
@@ -995,7 +1017,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *   lib/<key>       — whole library archives. The identity covers the compiler
  *                     version, compiler/linker environment, runtime fingerprint,
  *                     target/flags, gated source set, archiver spelling/version,
- *                     and program-TU bytes.
+ *                     caller dependency identity, TU path, and program-TU bytes.
  *                     Hits skip both clang and ar.
  *
  *   obj/<set>/<f>.o — per-flavor runtime objects for cache-miss builds. The
@@ -1009,10 +1031,13 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     compiles go through ccache when it is installed (silent
  *                     fallback when not).
  *
- * Production builds use a per-user platform cache by default. SCRIPTC_CACHE_DIR
- * overrides its root (the test lanes use this to stay repo-local); an explicitly
- * empty value or SCRIPTC_NO_CACHE=1 disables reads and writes. With caching
- * disabled compileC issues the exact historical command line.
+ * Frontend-generated production builds supply a dependency identity and use a
+ * per-user platform cache by default. Arbitrary low-level TUs omit the identity
+ * and bypass this cache because their include graph is caller-owned.
+ * SCRIPTC_CACHE_DIR overrides the root (the test lanes use this to stay
+ * repo-local); an explicitly empty value or SCRIPTC_NO_CACHE=1 disables reads
+ * and writes. With caching disabled compileC issues the exact historical
+ * command line.
  *
  * Eviction: size-capped LRU over the whole cache root (SCRIPTC_CACHE_MAX_MB,
  * default 4096) swept after the first write and periodically in long-lived
@@ -1184,6 +1209,7 @@ export async function stageRuntimeObjects(
   stageDir: string,
 ): Promise<Map<string, string>> {
   await mkdir(stageDir, { recursive: true });
+  const now = new Date();
   const staged = await Promise.all(
     [...objects].map(async ([source, object]) => {
       const destination = join(stageDir, basename(object));
@@ -1192,6 +1218,10 @@ export async function stageRuntimeObjects(
       } catch {
         await copyFile(object, destination);
       }
+      // Object files participate in the same mtime-based LRU as complete
+      // artifacts. A successful stage is a cache read, so promote the source
+      // name best-effort (it may have raced an eviction after the hard link).
+      await utimes(object, now, now).catch(() => undefined);
       return [source, destination] as const;
     }),
   );
@@ -1244,7 +1274,7 @@ async function pruneCache(root: string): Promise<void> {
  * --dynamic). Without either, the command line is exactly the historical
  * one — regex-free static builds must stay byte-identical.
  *
- * With SCRIPTC_CACHE_DIR set (the test lanes; see the cache block above),
+ * With a caller-supplied dependency identity and an enabled cache root,
  * unchanged programs skip clang via the binary cache, and misses link the
  * program's own TU against cached per-flavor runtime objects. */
 export async function compileC(opts: CcOptions): Promise<void> {
@@ -1522,7 +1552,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
     }
   };
 
-  const root = cacheRootDir();
+  // Only compiler-generated TUs opt in. Arbitrary `compileC` / `--from-c`
+  // inputs may include caller-owned headers whose contents are not otherwise
+  // represented in this key, so they retain the fully uncached historical
+  // path unless the caller supplies its own complete dependency identity.
+  const root = opts.cacheIdentity === undefined ? null : cacheRootDir();
   if (root === null) {
     // The exact historical command line, byte for byte.
     await runClang(buildArgs((p) => p));
@@ -1544,9 +1578,14 @@ export async function compileC(opts: CcOptions): Promise<void> {
     a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
   );
   const key = createHash("sha256")
-    .update("bin-v2\0")
+    .update("bin-v3\0")
     .update(cacheTargetIdentity(driver)).update("\0")
     .update(toolchainEnv).update("\0")
+    .update(opts.cacheIdentity!).update("\0")
+    // Preserve both the spelling clang sees (__FILE__) and the location used
+    // to resolve relative includes. The top-level bytes are not sufficient.
+    .update(opts.cPath).update("\0")
+    .update(resolve(opts.cPath)).update("\0")
     // The driver spelling joins the version string: `zig cc --version`
     // reports the clang underneath and could otherwise collide with a
     // same-version host clang.

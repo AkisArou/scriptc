@@ -14,6 +14,7 @@ import {
 } from "./cc.js";
 
 const scratch: string[] = [];
+const TEST_CACHE_IDENTITY = "cc-cache-tests-v1";
 
 afterAll(async () => {
   await Promise.all(scratch.map((dir) => rm(dir, { recursive: true, force: true })));
@@ -74,14 +75,17 @@ test("the runtime fingerprint includes the textually included Ryū sources", asy
   expect(await runtimeFingerprint(rtDir)).not.toBe(first);
 });
 
-test("staged runtime objects survive removal of their cache names", async () => {
+test("staged runtime objects survive removal of their cache names and are promoted in the LRU", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-object-stage-"));
   scratch.push(dir);
   const cachedObject = join(dir, "cache", "scr_number.o");
   const source = join(dir, "runtime", "scr_number.c");
   await mkdir(join(dir, "cache"), { recursive: true });
   await writeFile(cachedObject, "cached object bytes");
+  const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
+  await utimes(cachedObject, pinnedTime, pinnedTime);
   const staged = await stageRuntimeObjects(new Map([[source, cachedObject]]), join(dir, "stage"));
+  expect((await stat(cachedObject)).mtimeMs).toBeGreaterThan(pinnedTime.getTime());
   await rm(cachedObject);
   expect(await readFile(staged.get(source)!)).toEqual(Buffer.from("cached object bytes"));
 });
@@ -114,7 +118,7 @@ test("cache hits invalidate on compiler environment changes and honor the curren
 
     process.umask(0o022);
     const firstOut = join(dir, "first");
-    await compileC({ cPath, outPath: firstOut });
+    await compileC({ cPath, outPath: firstOut, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("one");
     if (process.platform !== "win32") expect((await stat(firstOut)).mode & 0o777).toBe(0o755);
 
@@ -122,7 +126,7 @@ test("cache hits invalidate on compiler environment changes and honor the curren
     // one instead of restoring the cached file's broader mode.
     process.umask(0o077);
     const hitOut = join(dir, "hit");
-    await compileC({ cPath, outPath: hitOut });
+    await compileC({ cPath, outPath: hitOut, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(execFileSync(hitOut, { encoding: "utf8" }).trim()).toBe("one");
     if (process.platform !== "win32") expect((await stat(hitOut)).mode & 0o777).toBe(0o700);
     expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(1);
@@ -131,18 +135,24 @@ test("cache hits invalidate on compiler environment changes and honor the curren
     // artifact cache and the per-flavor runtime-object cache.
     process.env["CPATH"] = secondHeaders;
     const changedOut = join(dir, "changed");
-    await compileC({ cPath, outPath: changedOut });
+    await compileC({ cPath, outPath: changedOut, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(execFileSync(changedOut, { encoding: "utf8" }).trim()).toBe("two");
     if (process.platform !== "win32") expect((await stat(changedOut)).mode & 0o777).toBe(0o700);
     expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(2);
 
     process.env["CPATH"] = firstHeaders;
+    process.umask(0o022);
     const firstArchivePath = join(dir, "first.lib.a");
-    await compileLibArchive({ cPath, outPath: firstArchivePath });
+    await compileLibArchive({ cPath, outPath: firstArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
     const firstArchive = await readFile(firstArchivePath);
+    process.umask(0o077);
+    const hitArchivePath = join(dir, "hit.lib.a");
+    await compileLibArchive({ cPath, outPath: hitArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
+    expect(await readFile(hitArchivePath)).toEqual(firstArchive);
+    if (process.platform !== "win32") expect((await stat(hitArchivePath)).mode & 0o777).toBe(0o600);
     process.env["CPATH"] = secondHeaders;
     const secondArchivePath = join(dir, "second.lib.a");
-    await compileLibArchive({ cPath, outPath: secondArchivePath });
+    await compileLibArchive({ cPath, outPath: secondArchivePath, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(await readFile(secondArchivePath)).not.toEqual(firstArchive);
     expect(await readdir(join(cacheRoot, "lib"))).toHaveLength(2);
   } finally {
@@ -153,6 +163,74 @@ test("cache hits invalidate on compiler environment changes and honor the curren
     else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     if (oldCpath === undefined) delete process.env["CPATH"];
     else process.env["CPATH"] = oldCpath;
+  }
+});
+
+test("arbitrary C bypasses persistent artifacts so same-path header edits cannot go stale", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-arbitrary-c-cache-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const headerPath = join(dir, "value.h");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(
+      cPath,
+      '#include <stdio.h>\n#include "value.h"\nint main(void) { puts(VALUE); return 0; }\n',
+    );
+    await writeFile(headerPath, '#define VALUE "one"\n');
+    const firstOut = join(dir, "first");
+    await compileC({ cPath, outPath: firstOut });
+    expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("one");
+
+    await writeFile(headerPath, '#define VALUE "two"\n');
+    const secondOut = join(dir, "second");
+    await compileC({ cPath, outPath: secondOut });
+    expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
+    await expect(stat(join(cacheRoot, "bin"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const archiveOut = join(dir, "program.lib.a");
+    await compileLibArchive({ cPath, outPath: archiveOut });
+    expect((await stat(archiveOut)).isFile()).toBe(true);
+    await expect(stat(join(cacheRoot, "lib"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+  }
+});
+
+test("cached translation units keep the compiler-visible source path in their identity", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-source-path-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const aPath = join(dir, "a.c");
+  const bPath = join(dir, "b.c");
+  const source = '#include <stdio.h>\nint main(void) { puts(__FILE__); return 0; }\n';
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await Promise.all([writeFile(aPath, source), writeFile(bPath, source)]);
+    const aOut = join(dir, "a-out");
+    const bOut = join(dir, "b-out");
+    await compileC({ cPath: aPath, outPath: aOut, cacheIdentity: TEST_CACHE_IDENTITY });
+    await compileC({ cPath: bPath, outPath: bOut, cacheIdentity: TEST_CACHE_IDENTITY });
+    expect(execFileSync(aOut, { encoding: "utf8" }).trim()).toBe(aPath);
+    expect(execFileSync(bOut, { encoding: "utf8" }).trim()).toBe(bPath);
+    expect(await readdir(join(cacheRoot, "bin"))).toHaveLength(2);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
   }
 });
 
@@ -175,7 +253,7 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     process.env["XDG_CACHE_HOME"] = xdgCacheHome;
     delete process.env["SCRIPTC_NO_CACHE"];
     await writeFile(cPath, "int scriptc_cache_probe = 1;\n");
-    await compileLibArchive({ cPath, outPath });
+    await compileLibArchive({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
     const firstArchive = await readFile(outPath);
     expect(await readdir(join(cacheRoot, "lib"))).toHaveLength(1);
 
@@ -193,13 +271,15 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     // remains available.
     process.env["PATH"] = "";
     await rm(outPath, { force: true });
-    await compileLibArchive({ cPath, outPath });
+    await compileLibArchive({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(await readFile(outPath)).toEqual(firstArchive);
 
     // The hard disable bypasses the same valid entry in both directions.
     process.env["SCRIPTC_NO_CACHE"] = "1";
     await rm(outPath, { force: true });
-    await expect(compileLibArchive({ cPath, outPath })).rejects.toThrow(/failed compiling/);
+    await expect(
+      compileLibArchive({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY }),
+    ).rejects.toThrow(/failed compiling/);
     expect(await readdir(join(cacheRoot, "lib"))).toHaveLength(1);
 
     // An edit invalidates the complete archive but retains the library-flavor
@@ -207,12 +287,12 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     process.env["PATH"] = oldPath;
     delete process.env["SCRIPTC_NO_CACHE"];
     await writeFile(cPath, "int scriptc_cache_probe = 2;\n");
-    await compileLibArchive({ cPath, outPath });
+    await compileLibArchive({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
     const editedArchive = await readFile(outPath);
     expect(editedArchive).not.toEqual(firstArchive);
     expect(await readdir(join(cacheRoot, "lib"))).toHaveLength(2);
     for (const name of objectNames) {
-      expect((await stat(join(objectDir, name))).mtimeMs).toBe(pinnedTime.getTime());
+      expect((await stat(join(objectDir, name))).mtimeMs).toBeGreaterThan(pinnedTime.getTime());
     }
 
     // BSD ar preserves member mtimes, so containers assembled from old cached
@@ -221,7 +301,7 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     // publish nothing into the cache.
     process.env["SCRIPTC_NO_CACHE"] = "1";
     const uncachedOut = join(dir, "program.uncached.lib.a");
-    await compileLibArchive({ cPath, outPath: uncachedOut });
+    await compileLibArchive({ cPath, outPath: uncachedOut, cacheIdentity: TEST_CACHE_IDENTITY });
     const cachedMembers = join(dir, "cached-members");
     const uncachedMembers = join(dir, "uncached-members");
     await Promise.all([mkdir(cachedMembers), mkdir(uncachedMembers)]);

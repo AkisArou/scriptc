@@ -79,7 +79,7 @@ Analyzes the program without producing a binary and reports, statement by statem
   <dd>Keep (default) or delete the generated program translation unit next to the executable — the <code>.ll</code> file under the default LLVM backend, or the <code>.c</code> under <code>--backend c</code> (and when the default build fell back). The generated C is readable and annotated with source lines.</dd>
 
   <dt><code>--from-c</code></dt>
-  <dd>Treat the input as a C (or <code>.ll</code>) file. Toolchain plumbing and debugging.</dd>
+  <dd>Treat the input as a C (or <code>.ll</code>) file. Toolchain plumbing and debugging. These arbitrary translation units bypass the persistent artifact cache because their header dependency graph is caller-owned.</dd>
 
   <dt><code>-h, --help</code></dt>
   <dd>Show usage.</dd>
