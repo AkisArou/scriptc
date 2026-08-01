@@ -466,6 +466,10 @@ const STATIC_RESPONSE_READS = new Set([
 
 const STATIC_RESPONSE_CALLS = new Set(["json", "text", "bytes"]);
 
+const STATIC_READABLE_STREAM_READS = new Set(["locked"]);
+
+const STATIC_READABLE_STREAM_CALLS = new Set(["cancel", "getReader"]);
+
 type StaticResponseAccess =
   | ts.PropertyAccessExpression
   | ts.ElementAccessExpression;
@@ -530,6 +534,36 @@ export function fenceStaticResponseMember(
     `Response.${member} in a static build`,
     access,
     "the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API",
+    sym,
+  );
+}
+
+/** The fallback ambient declaration intentionally exposes only the native
+ * stream slice, but @types/node adopts the complete WHATWG ReadableStream
+ * interface. Fence that wider surface before its checked-dynamic handle can
+ * fall through to a runtime missing-method error. */
+export function fenceStaticReadableStreamMember(
+  L: Lowerer,
+  access: StaticResponseAccess,
+  use: "read" | "call",
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
+  if (!sym || sym.name !== "ReadableStream" || !L.isStdlibSymbol(sym)) {
+    return null;
+  }
+  const member = staticResponseMemberName(L, access);
+  if (member === null) return null;
+  const supported =
+    use === "call"
+      ? STATIC_READABLE_STREAM_CALLS.has(member)
+      : STATIC_READABLE_STREAM_READS.has(member);
+  if (supported) return null;
+  L.noLowering(
+    `ReadableStream.${member} in a static build`,
+    access,
+    "the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API",
     sym,
   );
 }

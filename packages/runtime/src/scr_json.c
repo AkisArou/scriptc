@@ -1746,8 +1746,10 @@ static bool scr_dyn_to_primitive_result_is_object(const ScrDyn *d) {
 /* JS ToString over a dyn value WITH the object protocol (the WHATWG
  * USVString conversions — URLSearchParams names/values): an OBJ whose
  * own 'toString' member is callable is invoked with zero arguments (its
- * throw propagates, catchably); a non-primitive answer falls through to
- * 'valueOf' (ToPrimitive's string hint); exhaustion is the spec's
+ * throw propagates, catchably); without an own member, an ordinary object
+ * inherits Object.prototype.toString and answers "[object Object]". A
+ * non-primitive answer falls through to 'valueOf' (ToPrimitive's string
+ * hint); exhaustion is the spec's
  * "Cannot convert object to primitive value" TypeError. Every other
  * kind matches scr_dyn_string_coerce (units RENDER — ToString(null) is
  * "null"). Borrows; +1, or NULL with the exception pending. */
@@ -1762,6 +1764,9 @@ ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
     static const char *const hint[2] = { "toString", "valueOf" };
     for (int i = 0; i < 2; i++) {
       ScrDyn *m = scr_dyn_obj_get(d, hint[i], strlen(hint[i])); /* borrowed */
+      if (!m && i == 0 && !d->null_proto) {
+        return scr_str_new("[object Object]", 15);
+      }
       if (!m || m->kind != SCR_DYN_FUNC) continue;
       /* OrdinaryToPrimitive performs a method call, not a bare function
        * call: an own coercion hook observes the source object as `this`. */

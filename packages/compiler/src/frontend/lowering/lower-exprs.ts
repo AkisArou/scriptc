@@ -1729,6 +1729,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // no lowering above claimed ([1,2].entries, Math.SQRT2, Promise.all,
       // re.exec as a value, ...) reports SC2020 here.
       L.fenceStaticResponseMember(expr, "read");
+      L.fenceStaticReadableStreamMember(expr, "read");
       L.stdlibMemberFence(expr);
       // The npm chokepoint: a member on a package-typed receiver in a
       // static build — attributed to the package, like every other site.
@@ -5596,10 +5597,12 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       const en = lowerEnumAccess(L, expr);
       if (en) return en;
     }
-    // Response["member"] has the same supported surface as Response.member.
-    // Fence a statically-known unsupported key before the generic checked-
-    // dynamic element-read path can turn it into a runtime missing member.
+    // Native Web handles use the same supported surface for bracket and dot
+    // spellings. Fence a statically-known unsupported key before the generic
+    // checked-dynamic element-read path can turn it into a runtime missing
+    // member.
     L.fenceStaticResponseMember(expr, "read");
+    L.fenceStaticReadableStreamMember(expr, "read");
     // `globalThis[<expr>]` — the dynamic global probe (the harness's
     // conditional-globals sweep): a compiled binary's globals are
     // compile-time bindings, not runtime properties, and none of the

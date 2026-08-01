@@ -220,3 +220,39 @@ fenced.ts:85:3 - error SC2020: 'RequestInit option 'integrity' in a static build
   86 | });
 
   hint: the native static RequestInit surface is method, headers, body, duplex, redirect, and signal; use --dynamic for the wider fetch options
+
+fenced.ts:89:3 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+
+  88 |   const body = (await fetch(url)).body!;
+  89 |   body.tee();
+     |   ^~~~~~~~
+  90 |   const tee = body.tee;
+
+  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+
+fenced.ts:90:15 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+
+  89 |   body.tee();
+  90 |   const tee = body.tee;
+     |               ^~~~~~~~
+  91 |   body["tee"]();
+
+  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+
+fenced.ts:91:3 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+
+  90 |   const tee = body.tee;
+  91 |   body["tee"]();
+     |   ^~~~~~~~~~~
+  92 |   const bracketTee = body["tee"];
+
+  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+
+fenced.ts:92:22 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+
+  91 |   body["tee"]();
+  92 |   const bracketTee = body["tee"];
+     |                      ^~~~~~~~~~~
+  93 | }
+
+  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API

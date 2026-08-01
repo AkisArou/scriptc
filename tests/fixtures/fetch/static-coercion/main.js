@@ -45,4 +45,14 @@ const duplexResponse = await fetch(`${process.argv[2]}/post-echo`, {
 const duplexResult = await duplexResponse.json();
 console.log("duplex coercion:", duplexResult.method, duplexResult.body);
 
+const plainObjectInit = JSON.parse(
+  '{"method":"POST","body":{"answer":42}}',
+);
+const plainObjectResponse = await fetch(
+  `${process.argv[2]}/post-echo`,
+  plainObjectInit,
+);
+const plainObjectResult = await plainObjectResponse.json();
+console.log("plain object body coercion:", plainObjectResult.body);
+
 export {};

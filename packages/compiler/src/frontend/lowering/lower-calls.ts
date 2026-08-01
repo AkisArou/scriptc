@@ -3948,6 +3948,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // Fence the unimplemented members before the generic dyn receiver
         // path would compile them into a runtime missing-method failure.
         L.fenceStaticResponseMember(expr.expression, "call") ??
+        L.fenceStaticReadableStreamMember(expr.expression, "call") ??
         // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
         // validated-extract, then the static machinery. After the island
         // path (jsval receivers belong there), before the fences.
@@ -4042,10 +4043,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       L.unsupported("SC1090", expr, `method calls like '${expr.expression.getText()}'`);
     }
 
-    // The element spelling of an unsupported static Response method must
-    // fence before lowering the callee into a checked-dynamic keyed read.
+    // The element spelling of an unsupported native Web method must fence
+    // before lowering the callee into a checked-dynamic keyed read.
     if (ts.isElementAccessExpression(expr.expression)) {
       L.fenceStaticResponseMember(expr.expression, "call");
+      L.fenceStaticReadableStreamMember(expr.expression, "call");
     }
 
     // The ELEMENT spelling of a primitive method call — `x['toString']()`,

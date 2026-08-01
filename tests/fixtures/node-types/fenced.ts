@@ -84,4 +84,12 @@ setFips(false);
 fetch("https://example.invalid/", {
   integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 });
+async function inspectReadableStream(url: string): Promise<void> {
+  const body = (await fetch(url)).body!;
+  body.tee();
+  const tee = body.tee;
+  body["tee"]();
+  const bracketTee = body["tee"];
+}
+void inspectReadableStream;
 // End of the declared-but-not-lowered surface.
