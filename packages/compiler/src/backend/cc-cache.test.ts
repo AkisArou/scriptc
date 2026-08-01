@@ -3,7 +3,13 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, test } from "vitest";
-import { compileLibArchive, resolveBuildCacheRoot } from "./cc.js";
+import {
+  cacheTargetIdentity,
+  compileLibArchive,
+  resolveBuildCacheRoot,
+  runtimeFingerprint,
+  stageRuntimeObjects,
+} from "./cc.js";
 
 const scratch: string[] = [];
 
@@ -26,6 +32,41 @@ test("the production cache root follows overrides, platform defaults, and the ha
   expect(resolveBuildCacheRoot({ LOCALAPPDATA: "/Users/tester/AppData/Local" }, "win32", "/Users/tester")).toBe(
     "/Users/tester/AppData/Local/scriptc/cache/build",
   );
+});
+
+test("native cache identities separate host architectures while cross targets remain explicit", () => {
+  expect(cacheTargetIdentity({ target: null }, "darwin", "arm64")).toBe("native:darwin:arm64");
+  expect(cacheTargetIdentity({ target: null }, "darwin", "x64")).toBe("native:darwin:x64");
+  expect(cacheTargetIdentity({ target: "x86_64-linux-gnu.2.36" }, "darwin", "arm64")).toBe(
+    "cross:x86_64-linux-gnu.2.36",
+  );
+});
+
+test("the runtime fingerprint includes the textually included Ryū sources", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-runtime-fingerprint-"));
+  scratch.push(dir);
+  const rtDir = join(dir, "src");
+  const ryuDir = join(dir, "vendor", "ryu");
+  await Promise.all([mkdir(rtDir, { recursive: true }), mkdir(ryuDir, { recursive: true })]);
+  await Promise.all([
+    writeFile(join(rtDir, "scr_number.c"), '#include "../vendor/ryu/d2s.c"\n'),
+    writeFile(join(ryuDir, "d2s.c"), "int ryu_probe = 1;\n"),
+  ]);
+  const first = await runtimeFingerprint(rtDir);
+  await writeFile(join(ryuDir, "d2s.c"), "int ryu_probe = 200;\n");
+  expect(await runtimeFingerprint(rtDir)).not.toBe(first);
+});
+
+test("staged runtime objects survive removal of their cache names", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-object-stage-"));
+  scratch.push(dir);
+  const cachedObject = join(dir, "cache", "scr_number.o");
+  const source = join(dir, "runtime", "scr_number.c");
+  await mkdir(join(dir, "cache"), { recursive: true });
+  await writeFile(cachedObject, "cached object bytes");
+  const staged = await stageRuntimeObjects(new Map([[source, cachedObject]]), join(dir, "stage"));
+  await rm(cachedObject);
+  expect(await readFile(staged.get(source)!)).toEqual(Buffer.from("cached object bytes"));
 });
 
 test("library archives hit by content, invalidate on edits, and reuse runtime objects", async () => {

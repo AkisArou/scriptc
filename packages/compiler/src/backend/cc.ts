@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -309,6 +309,18 @@ export function targetPlatform(driver: CcDriver): string {
   if (driver.target.includes("linux")) return "linux";
   if (driver.target.includes("windows")) return "win32";
   return driver.target.includes("macos") || driver.target.includes("darwin") ? "darwin" : "other";
+}
+
+/** Architecture identity for host-native cache entries. Explicit cross targets
+ * already name their complete target triple; native builds need the process
+ * architecture too because one per-user cache can serve both native and
+ * emulated processes (arm64 and Rosetta on macOS, for example). */
+export function cacheTargetIdentity(
+  driver: Pick<CcDriver, "target">,
+  hostPlatform: NodeJS.Platform = process.platform,
+  hostArch: string = process.arch,
+): string {
+  return driver.target === null ? `native:${hostPlatform}:${hostArch}` : `cross:${driver.target}`;
 }
 
 function vendorEngineDir(): string {
@@ -801,6 +813,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       runtimeHash = fingerprint;
       const key = createHash("sha256")
         .update("lib-v1\0")
+        .update(cacheTargetIdentity(driver)).update("\0")
         .update(driver.argv.join("\x1f")).update("\0")
         .update(cv).update("\0")
         .update(fingerprint).update("\0")
@@ -865,9 +878,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           driver.argv,
           cflags,
           sourcePaths,
-          `lib-obj-v1\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+          `lib-obj-v1\0${cacheTargetIdentity(driver)}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
         );
-        runtimeObjects = sourcePaths.map((path) => cached.get(path)!);
+        const staged = await stageRuntimeObjects(cached, join(buildDir, "cached-runtime"));
+        runtimeObjects = sourcePaths.map((path) => staged.get(path)!);
       } catch {
         runtimeObjects = null;
       }
@@ -991,7 +1005,7 @@ function ccVersionOnce(argv: string[]): Promise<string> {
     // cwd: the version probe must not touch the caller's directory —
     // `zig cc --version` (zig 0.16) drops an empty a.o wherever it runs.
     memo = execFileAsync(argv[0] ?? "clang", [...argv.slice(1), "--version"], { cwd: tmpdir() }).then(
-      (r) => r.stdout.split("\n", 1)[0] ?? "",
+      (r) => `${r.stdout}\n${r.stderr}`.trim(),
     );
     ccVersionMemos.set(key, memo);
   }
@@ -1022,21 +1036,40 @@ function ccacheAvailable(): Promise<boolean> {
   return ccacheMemo;
 }
 
-/** Content hash of every .c/.h in the runtime src dir plus the vendor pin —
+/** Content hash of every .c/.h in the runtime src dir, the Ryū sources
+ * textually included by scr_number.c, and the separately-built vendor pins —
  * everything a binary links that the emitted C bytes don't already cover
- * (npm-embedded C rides inside the emitted C; the engine archive and lre
- * objects are pinned by QJS_COMMIT, the same trust their own caches use).
- * Memoized behind a stat signature so watch-mode edits re-hash. */
-let rtFingerprintMemo: { sig: string; hash: string } | null = null;
-async function runtimeFingerprint(rtDir: string): Promise<string> {
-  const names = (await readdir(rtDir)).filter((n) => n.endsWith(".c") || n.endsWith(".h")).sort();
-  const stats = await Promise.all(names.map((n) => stat(join(rtDir, n))));
-  const sig = stats.map((s, i) => `${names[i] ?? ""}:${s.size}:${s.mtimeMs}`).join("|");
-  if (rtFingerprintMemo !== null && rtFingerprintMemo.sig === sig) return rtFingerprintMemo.hash;
+ * (npm-embedded C rides inside the emitted C; the engine and standalone
+ * vendor archives are pinned by their version constants). Memoized per
+ * runtime tree behind a stat signature so watch-mode edits re-hash. */
+const rtFingerprintMemos = new Map<string, { sig: string; hash: string }>();
+export async function runtimeFingerprint(rtDir: string): Promise<string> {
+  const groups = await Promise.all(
+    [
+      { label: "runtime", dir: rtDir },
+      { label: "ryu", dir: join(rtDir, "..", "vendor", "ryu") },
+    ].map(async (group) => {
+      const names = (await readdir(group.dir)).filter((n) => n.endsWith(".c") || n.endsWith(".h")).sort();
+      const stats = await Promise.all(names.map((n) => stat(join(group.dir, n))));
+      return { ...group, names, stats };
+    }),
+  );
+  const sig = groups
+    .flatMap((group) =>
+      group.stats.map((s, i) => `${group.label}/${group.names[i] ?? ""}:${s.size}:${s.mtimeMs}`),
+    )
+    .join("|");
+  const memoKey = resolve(rtDir);
+  const memo = rtFingerprintMemos.get(memoKey);
+  if (memo !== undefined && memo.sig === sig) return memo.hash;
   const h = createHash("sha256").update(QJS_COMMIT).update(MBEDTLS_VERSION).update(ZLIB_VERSION);
-  for (const n of names) h.update(n).update("\0").update(await readFile(join(rtDir, n))).update("\0");
+  for (const group of groups) {
+    for (const n of group.names) {
+      h.update(group.label).update("/").update(n).update("\0").update(await readFile(join(group.dir, n))).update("\0");
+    }
+  }
   const hash = h.digest("hex");
-  rtFingerprintMemo = { sig, hash };
+  rtFingerprintMemos.set(memoKey, { sig, hash });
   return hash;
 }
 
@@ -1084,6 +1117,30 @@ async function ensureRuntimeObjects(
     }
   }
   return new Map(sources.map((s) => [s, objOf(s)]));
+}
+
+/** Give one active link/archive operation private names for its cached
+ * runtime objects. A hard link keeps the inode alive if another process's LRU
+ * sweep unlinks the cache entry; filesystems that cannot hard-link across the
+ * cache/tmp boundary fall back to a copy. If eviction wins before staging,
+ * the caller catches the read failure and performs a fully fresh compile. */
+export async function stageRuntimeObjects(
+  objects: ReadonlyMap<string, string>,
+  stageDir: string,
+): Promise<Map<string, string>> {
+  await mkdir(stageDir, { recursive: true });
+  const staged = await Promise.all(
+    [...objects].map(async ([source, object]) => {
+      const destination = join(stageDir, basename(object));
+      try {
+        await link(object, destination);
+      } catch {
+        await copyFile(object, destination);
+      }
+      return [source, destination] as const;
+    }),
+  );
+  return new Map(staged);
 }
 
 /** Size-capped LRU sweep of the whole cache root after the first write and
@@ -1432,6 +1489,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   );
   const key = createHash("sha256")
     .update("bin-v1\0")
+    .update(cacheTargetIdentity(driver)).update("\0")
     // The driver spelling joins the version string: `zig cc --version`
     // reports the clang underneath and could otherwise collide with a
     // same-version host clang.
@@ -1488,12 +1546,31 @@ export async function compileC(opts: CcOptions): Promise<void> {
     return p;
   });
   let objects: Map<string, string> | null = null;
+  let objectStageDir: string | null = null;
   try {
-    objects = await ensureRuntimeObjects(root, driver.argv, cflags, rtInputs, `obj-v1\0${ccName}\0${cv}\0${fingerprint}\0`);
+    const cached = await ensureRuntimeObjects(
+      root,
+      driver.argv,
+      cflags,
+      rtInputs,
+      `obj-v1\0${cacheTargetIdentity(driver)}\0${ccName}\0${cv}\0${fingerprint}\0`,
+    );
+    objectStageDir = await mkdtemp(join(tmpdir(), "scriptc-link-"));
+    objects = await stageRuntimeObjects(cached, objectStageDir);
   } catch {
     objects = null; // cache trouble is never a build failure
+    if (objectStageDir !== null) {
+      await rm(objectStageDir, { recursive: true, force: true }).catch(() => undefined);
+      objectStageDir = null;
+    }
   }
-  await runClang(buildArgs((p) => objects?.get(p) ?? p));
+  try {
+    await runClang(buildArgs((p) => objects?.get(p) ?? p));
+  } finally {
+    if (objectStageDir !== null) {
+      await rm(objectStageDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
   try {
     await mkdir(binDir, { recursive: true });
     const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
