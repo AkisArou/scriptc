@@ -94,7 +94,9 @@ export interface CcOptions {
    * program TU so their symbols resolve outbound FFI calls. */
   linkInputs?: readonly string[];
   /** Driver-neutral system library names, emitted as `-l<name>` after
-   * linkInputs. */
+   * linkInputs. Because the linker resolves these ambient names to files,
+   * their builds bypass the complete-executable cache while still reusing
+   * cached runtime objects. */
   systemLibraries?: readonly string[];
   /** Embed the dynamic-island engine (--dynamic): compiles scr_island.c,
    * defines SCR_DYNAMIC, and links the cached libqjs.a. Off = the static
@@ -1034,6 +1036,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * Frontend-generated production builds supply a dependency identity and use a
  * per-user platform cache by default. Arbitrary low-level TUs omit the identity
  * and bypass this cache because their include graph is caller-owned.
+ * Builds with caller-named system libraries (`-l<name>`) also bypass the whole
+ * binary cache: the selected file can change in place without changing the
+ * command line or environment spelling. Their runtime objects remain cached,
+ * and every invocation performs the final link against the current library.
  * SCRIPTC_CACHE_DIR overrides the root (the test lanes use this to stay
  * repo-local); an explicitly empty value or SCRIPTC_NO_CACHE=1 disables reads
  * and writes. With caching disabled compileC issues the exact historical
@@ -1570,52 +1576,61 @@ export async function compileC(opts: CcOptions): Promise<void> {
     readFile(opts.cPath),
     Promise.all((opts.linkInputs ?? []).map((path) => readFile(path))),
   ]);
-  // The key sees the full command line with the two program-specific paths
-  // normalized out (their CONTENT is what matters: the C bytes are hashed,
-  // the out path is where the result lands). Runtime and vendor paths stay
-  // verbatim — their contents are covered by the fingerprint and the pin.
-  const identityArgs = buildArgs((p) => p).map((a) =>
-    a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
-  );
-  const key = createHash("sha256")
-    .update("bin-v3\0")
-    .update(cacheTargetIdentity(driver)).update("\0")
-    .update(toolchainEnv).update("\0")
-    .update(opts.cacheIdentity!).update("\0")
-    // Preserve both the spelling clang sees (__FILE__) and the location used
-    // to resolve relative includes. The top-level bytes are not sufficient.
-    .update(opts.cPath).update("\0")
-    .update(resolve(opts.cPath)).update("\0")
-    // The driver spelling joins the version string: `zig cc --version`
-    // reports the clang underneath and could otherwise collide with a
-    // same-version host clang.
-    .update(ccName).update("\0")
-    .update(cv).update("\0")
-    .update(fingerprint).update("\0")
-    .update(identityArgs.join("\x1f")).update("\0")
-    .update(cBytes);
-  for (const bytes of linkBytes) key.update("\0ffi-link\0").update(bytes);
-  const keyHex = key
-    .digest("hex");
+  // Explicit path inputs are hashed below. `-l<name>` inputs are different:
+  // the linker resolves them through ambient search paths, and the selected
+  // archive/shared object can be rebuilt in place while every string in this
+  // identity remains unchanged. Keep the safe runtime-object cache, but force
+  // a fresh final link whenever the caller supplies one.
+  const cacheCompleteArtifact = (opts.systemLibraries?.length ?? 0) === 0;
   const binDir = join(root, "bin");
-  const cachedBin = join(binDir, keyHex);
-  const tmpOut = `${opts.outPath}.hit-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  try {
-    // NEVER copy over outPath in place: overwriting an already-executed
-    // signed binary invalidates the kernel's per-vnode code-signature cache
-    // on macOS and the next exec dies with SIGKILL. Copy to a fresh inode
-    // and rename it into place instead.
-    await copyFile(cachedBin, tmpOut);
-    // Match a fresh linker output under the caller's current umask. Reusing a
-    // cache entry populated by a less restrictive shell must not widen access.
-    await chmod(tmpOut, 0o777 & ~process.umask());
-    await rename(tmpOut, opts.outPath);
-    const now = new Date();
-    await utimes(cachedBin, now, now).catch(() => undefined); // LRU bump
-    return; // hit: clang skipped entirely
-  } catch {
-    await rm(tmpOut, { force: true }).catch(() => undefined);
-    /* miss — build below, then publish */
+  let keyHex: string | null = null;
+  let cachedBin: string | null = null;
+  if (cacheCompleteArtifact) {
+    // The key sees the full command line with the two program-specific paths
+    // normalized out (their CONTENT is what matters: the C bytes are hashed,
+    // the out path is where the result lands). Runtime and vendor paths stay
+    // verbatim — their contents are covered by the fingerprint and the pin.
+    const identityArgs = buildArgs((p) => p).map((a) =>
+      a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
+    );
+    const key = createHash("sha256")
+      .update("bin-v3\0")
+      .update(cacheTargetIdentity(driver)).update("\0")
+      .update(toolchainEnv).update("\0")
+      .update(opts.cacheIdentity!).update("\0")
+      // Preserve both the spelling clang sees (__FILE__) and the location used
+      // to resolve relative includes. The top-level bytes are not sufficient.
+      .update(opts.cPath).update("\0")
+      .update(resolve(opts.cPath)).update("\0")
+      // The driver spelling joins the version string: `zig cc --version`
+      // reports the clang underneath and could otherwise collide with a
+      // same-version host clang.
+      .update(ccName).update("\0")
+      .update(cv).update("\0")
+      .update(fingerprint).update("\0")
+      .update(identityArgs.join("\x1f")).update("\0")
+      .update(cBytes);
+    for (const bytes of linkBytes) key.update("\0ffi-link\0").update(bytes);
+    keyHex = key.digest("hex");
+    cachedBin = join(binDir, keyHex);
+    const tmpOut = `${opts.outPath}.hit-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    try {
+      // NEVER copy over outPath in place: overwriting an already-executed
+      // signed binary invalidates the kernel's per-vnode code-signature cache
+      // on macOS and the next exec dies with SIGKILL. Copy to a fresh inode
+      // and rename it into place instead.
+      await copyFile(cachedBin, tmpOut);
+      // Match a fresh linker output under the caller's current umask. Reusing a
+      // cache entry populated by a less restrictive shell must not widen access.
+      await chmod(tmpOut, 0o777 & ~process.umask());
+      await rename(tmpOut, opts.outPath);
+      const now = new Date();
+      await utimes(cachedBin, now, now).catch(() => undefined); // LRU bump
+      return; // hit: clang skipped entirely
+    } catch {
+      await rm(tmpOut, { force: true }).catch(() => undefined);
+      /* miss — build below, then publish */
+    }
   }
 
   // Miss: link the program's own TU against cached per-flavor runtime
@@ -1670,13 +1685,21 @@ export async function compileC(opts: CcOptions): Promise<void> {
       await rm(objectStageDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
-  try {
-    await mkdir(binDir, { recursive: true });
-    const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
-    await copyFile(opts.outPath, tmp);
-    await rename(tmp, cachedBin);
-    await pruneCache(root);
-  } catch {
-    /* publishing is best-effort */
+  if (cachedBin !== null && keyHex !== null) {
+    try {
+      await mkdir(binDir, { recursive: true });
+      const tmp = join(binDir, `.tmp-${keyHex.slice(0, 8)}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+      try {
+        await copyFile(opts.outPath, tmp);
+        await rename(tmp, cachedBin);
+      } finally {
+        await rm(tmp, { force: true }).catch(() => undefined);
+      }
+    } catch {
+      /* publishing is best-effort */
+    }
   }
+  // Runtime-object population is itself a cache write, including on builds
+  // whose ambient system libraries disable complete-artifact publication.
+  await pruneCache(root).catch(() => undefined);
 }

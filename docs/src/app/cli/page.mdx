@@ -89,7 +89,7 @@ Analyzes the program without producing a binary and reports, statement by statem
 
 <dl>
   <dt><code>SCRIPTC_CACHE_DIR</code></dt>
-  <dd>Override the persistent build-cache root. By default it is <code>$XDG_CACHE_HOME/scriptc/build</code> when that variable is set, <code>$HOME/Library/Caches/scriptc/build</code> on macOS, <code>%LOCALAPPDATA%\scriptc\cache\build</code> on Windows, and <code>$HOME/.cache/scriptc/build</code> on other platforms. The cache stores content-addressed executables, library archives, and per-flavor runtime objects.</dd>
+  <dd>Override the persistent build-cache root. By default it is <code>$XDG_CACHE_HOME/scriptc/build</code> when that variable is set, <code>$HOME/Library/Caches/scriptc/build</code> on macOS, <code>%LOCALAPPDATA%\scriptc\cache\build</code> on Windows, and <code>$HOME/.cache/scriptc/build</code> on other platforms. The cache stores content-addressed executables, library archives, and per-flavor runtime objects. FFI builds with ambient <code>system_libraries</code> always relink against the currently resolved libraries while retaining runtime-object reuse.</dd>
 
   <dt><code>SCRIPTC_NO_CACHE</code></dt>
   <dd>Set to <code>1</code> to bypass all build-cache reads and writes. An explicitly empty <code>SCRIPTC_CACHE_DIR</code> has the same effect.</dd>

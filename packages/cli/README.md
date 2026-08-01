@@ -24,7 +24,7 @@ $ npm install -g scriptc
 
 Requires clang on the PATH (Xcode Command Line Tools on macOS, `clang` package on Linux).
 
-Builds use a bounded persistent cache by default. Unchanged executables and library archives skip clang, while edited builds reuse stable runtime objects. Set `SCRIPTC_NO_CACHE=1` to bypass it or `SCRIPTC_CACHE_DIR` to choose its location.
+Builds use a bounded persistent cache by default. Unchanged executables and library archives skip clang, while edited builds reuse stable runtime objects. FFI builds with ambient `system_libraries` relink every time but still reuse runtime objects. Set `SCRIPTC_NO_CACHE=1` to bypass the cache or `SCRIPTC_CACHE_DIR` to choose its location.
 
 ## Commands
 

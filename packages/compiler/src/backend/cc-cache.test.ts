@@ -234,6 +234,70 @@ test("cached translation units keep the compiler-visible source path in their id
   }
 });
 
+test("system libraries relink after an in-place rebuild while runtime objects remain cached", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-system-library-cache-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const libDir = join(dir, "lib");
+  const cPath = join(dir, "program.c");
+  const libSource = join(dir, "probe.c");
+  const libObject = join(dir, "probe.o");
+  const library = join(libDir, "libscriptc_cache_probe.a");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldLibraryPath = process.env["LIBRARY_PATH"];
+
+  const rebuildLibrary = async (value: number): Promise<void> => {
+    await writeFile(libSource, `int scriptc_cache_probe(void) { return ${value}; }\n`);
+    execFileSync("clang", ["-c", libSource, "-o", libObject]);
+    execFileSync("ar", ["rcs", library, libObject]);
+  };
+
+  try {
+    await mkdir(libDir);
+    await writeFile(
+      cPath,
+      '#include <stdio.h>\nextern int scriptc_cache_probe(void);\nint main(void) { printf("%d\\n", scriptc_cache_probe()); return 0; }\n',
+    );
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    process.env["LIBRARY_PATH"] = libDir;
+
+    await rebuildLibrary(1);
+    const firstOut = join(dir, "first");
+    await compileC({
+      cPath,
+      outPath: firstOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      systemLibraries: ["scriptc_cache_probe"],
+    });
+    expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
+
+    await rebuildLibrary(2);
+    const secondOut = join(dir, "second");
+    await compileC({
+      cPath,
+      outPath: secondOut,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      systemLibraries: ["scriptc_cache_probe"],
+    });
+    expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("2");
+
+    // The ambient library prevents a stale complete-binary hit, but the safe
+    // runtime-object half of the persistent cache remains active.
+    await expect(stat(join(cacheRoot, "bin"))).rejects.toMatchObject({ code: "ENOENT" });
+    const objectSets = await readdir(join(cacheRoot, "obj"), { withFileTypes: true });
+    expect(objectSets.some((entry) => entry.isDirectory() && !entry.name.startsWith("build-"))).toBe(true);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    if (oldLibraryPath === undefined) delete process.env["LIBRARY_PATH"];
+    else process.env["LIBRARY_PATH"] = oldLibraryPath;
+  }
+});
+
 test("library archives hit by content, invalidate on edits, and reuse runtime objects", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-lib-cache-"));
   scratch.push(dir);
