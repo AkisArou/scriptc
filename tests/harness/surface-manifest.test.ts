@@ -17,6 +17,7 @@
  *   to catch the manifest lying.
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
@@ -271,6 +272,51 @@ test("static RequestInit fences const-computed dynamic-only keys", () => {
   expect(coverage.diagnostics[0]!.message).toContain(
     "RequestInit option 'cache' in a static build",
   );
+});
+
+test("static RequestInit fences dynamic-only keys through imported const aliases", () => {
+  const root = mkdtempSync(join(tmpdir(), "scr-request-init-import-"));
+  const initFile = join(root, "init.ts");
+  const mainFile = join(root, "main.ts");
+  writeFileSync(
+    join(root, "tsconfig.json"),
+    `${JSON.stringify({ compilerOptions: { strict: true, skipLibCheck: true } }, null, 2)}\n`,
+  );
+  writeFileSync(
+    initFile,
+    'export const init = { method: "GET", cache: "no-store" } as const;\n',
+  );
+  writeFileSync(
+    mainFile,
+    'import { init } from "./init.js";\nvoid fetch("http://127.0.0.1", init);\n',
+  );
+  const { coverage } = analyze(mainFile);
+  const entry = entryById.get("stdlib.fetch.request-init.cache");
+  expect(entry).toBeDefined();
+  expect(
+    coverage.preflightFailed,
+    coverage.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+  ).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual([entry!.code]);
+  expect(coverage.diagnostics[0]!.message).toContain(
+    "RequestInit option 'cache' in a static build",
+  );
+});
+
+test("constructing a spread RequestInit does not apply fetch conversion fences", () => {
+  const root = mkdtempSync(join(tmpdir(), "scr-request-init-value-"));
+  const file = join(root, "main.ts");
+  writeFileSync(
+    file,
+    'interface RequestInit { cache?: "no-store"; }\n' +
+      'const base = { cache: "no-store" } as const;\n' +
+      'const init: RequestInit = { ...base };\n' +
+      'void init;\n',
+  );
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+  expect(coverage.stats.statementsFailed).toBe(0);
 });
 
 /* ── attestation ↔ fence parity: the ask-5 §4 invariant's ground ─────────

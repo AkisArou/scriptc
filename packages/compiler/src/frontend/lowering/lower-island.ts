@@ -317,7 +317,11 @@ function fenceStaticRequestInitValueInner(
     return;
   }
   if (!ts.isIdentifier(expr)) return;
-  const symbol = L.checker.getSymbolAtLocation(expr);
+  // Import bindings point at an ImportSpecifier declaration, not the
+  // exported const whose initializer carries the dictionary members.
+  // Chase the value alias so local and cross-module const plumbing share
+  // the same source-profile fence.
+  const symbol = L.resolveValueSymbol(expr);
   if (!symbol || seen.has(symbol)) return;
   seen.add(symbol);
   for (const declaration of L.checker.declarationsOf(symbol)) {
@@ -333,7 +337,7 @@ function fenceStaticRequestInitValueInner(
   }
 }
 
-export function fenceStaticRequestInitValue(
+function fenceStaticRequestInitValue(
   L: Lowerer,
   value: ts.Expression,
 ): void {
