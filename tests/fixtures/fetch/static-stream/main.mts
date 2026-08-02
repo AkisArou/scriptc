@@ -1,6 +1,21 @@
 // Native AbortSignal + WHATWG readable-stream ownership coverage. The request body
 // is produced in two turns, the response body is consumed through the
 // default reader, and a timeout aborts a live native transfer.
+function effectfulResponseMember(): "text" {
+  console.log("computed response key evaluated");
+  return "text";
+}
+
+async function callComputedResponseMember(response: Response): Promise<void> {
+  await response[effectfulResponseMember()]();
+}
+
+try {
+  await callComputedResponseMember(null as any);
+} catch {
+  console.log("computed response receiver rejected");
+}
+
 try {
   new ReadableStream(null!);
   console.log("null source unexpectedly accepted");
@@ -63,6 +78,28 @@ async function checkEnqueuedUnionIdentity(
 
 const enqueuedUnionBox = { value: 1 };
 await checkEnqueuedUnionIdentity(enqueuedUnionBox, enqueuedUnionBox);
+
+async function checkComputedControllerIdentity(select: boolean): Promise<void> {
+  let controller!: ReadableStreamDefaultController<LiveUnionBox>;
+  const stream = new ReadableStream<LiveUnionBox>({
+    start(value) {
+      controller = value;
+    },
+  });
+  const box = { value: 1 };
+  const member: "enqueue" | "error" = select ? "enqueue" : "error";
+  controller[member](box);
+  box.value = 5;
+  controller.close();
+  const part = await stream.getReader().read();
+  console.log(
+    "computed controller identity:",
+    part.done ? false : part.value === box,
+    part.done ? -1 : part.value.value,
+  );
+}
+
+await checkComputedControllerIdentity(true);
 
 function checkAbortUnionIdentity(
   value: LiveUnionValue,
@@ -792,6 +829,33 @@ identitySignal.addEventListener("abort", identityListener);
 identitySignal.removeEventListener("abort", identityListener);
 await new Promise<void>((resolve) => setTimeout(resolve, 5));
 console.log("removed abort listener:", identityCalls);
+
+function addComputedAbortListener(
+  target: AbortSignal,
+  listener: { handleEvent(event: Event): void },
+  select: boolean,
+): void {
+  const member: "addEventListener" | "removeEventListener" = select
+    ? "addEventListener"
+    : "removeEventListener";
+  target[member]("abort", listener);
+}
+
+const computedIdentitySignal = AbortSignal.timeout(0);
+let computedIdentityCalls = 0;
+const computedIdentityListener = {
+  handleEvent(_event: Event) {
+    computedIdentityCalls++;
+  },
+};
+addComputedAbortListener(
+  computedIdentitySignal,
+  computedIdentityListener,
+  true,
+);
+computedIdentitySignal.removeEventListener("abort", computedIdentityListener);
+await new Promise<void>((resolve) => setTimeout(resolve, 5));
+console.log("computed removed abort listener:", computedIdentityCalls);
 
 const mutationSignal = AbortSignal.timeout(0);
 let mutationCalls = 0;

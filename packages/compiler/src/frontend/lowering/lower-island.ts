@@ -894,22 +894,33 @@ export function lowerStaticResponseCall(L: Lowerer, call: ts.CallExpression): Ir
   }
   const recv = L.lowerExpr(access.expression);
   if (recv.type.kind !== "dyn") return null;
-  if (member === "text" || member === "bytes") {
-    return {
-      kind: "libCall",
-      fn: member === "text" ? "fetch.responseText" : "fetch.responseBytes",
-      args: [recv],
-      type: { kind: "promise", inner: member === "text" ? STRING : BYTES_U8 },
-      loc: locOf(call),
-    };
-  }
-  return {
-    kind: "libCall",
-    fn: "fetch.responseJson",
-    args: [recv],
-    type: { kind: "promise", inner: DYN },
-    loc: locOf(call),
-  };
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    member,
+    recv,
+    [],
+    (receiver) =>
+      member === "text" || member === "bytes"
+        ? {
+            kind: "libCall",
+            fn: member === "text" ? "fetch.responseText" : "fetch.responseBytes",
+            args: [receiver],
+            type: {
+              kind: "promise",
+              inner: member === "text" ? STRING : BYTES_U8,
+            },
+            loc: locOf(call),
+          }
+        : {
+            kind: "libCall",
+            fn: "fetch.responseJson",
+            args: [receiver],
+            type: { kind: "promise", inner: DYN },
+            loc: locOf(call),
+          },
+  );
 }
 
 type StaticResponseAccess =
@@ -923,6 +934,90 @@ function staticResponseMemberName(
   if (ts.isPropertyAccessExpression(access)) return access.name.text;
   const members = fetchElementMemberNames(L, access.argumentExpression);
   return members?.length === 1 ? members[0]! : null;
+}
+
+/** A singleton computed member is still an evaluated JavaScript expression.
+ * The specialized static bridges know the only permitted method name, but
+ * must preserve receiver -> key -> arguments order and reject a lying cast
+ * whose runtime key is not that name. */
+function lowerStaticFixedFetchMethodCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+  access: StaticResponseAccess,
+  member: string,
+  receiver: IrExpr,
+  argumentValues: readonly IrExpr[],
+  invoke: (receiver: IrExpr, args: IrExpr[]) => IrExpr,
+): IrExpr {
+  if (ts.isPropertyAccessExpression(access)) {
+    return invoke(receiver, [...argumentValues]);
+  }
+  const loc = locOf(call);
+  const key = L.lowerExprExpecting(access.argumentExpression, STRING);
+  const receiverLocal = L.declareHiddenLocal(
+    "%fetchReceiver",
+    receiver.type,
+  );
+  const keyLocal = L.declareHiddenLocal("%fetchMember", STRING);
+  const argumentLocals = argumentValues.map((argument) =>
+    L.declareHiddenLocal("%fetchMethodArg", argument.type)
+  );
+  const receiverRef: IrExpr = {
+    kind: "varRef",
+    localId: receiverLocal.id,
+    type: receiverLocal.type,
+    loc,
+  };
+  const keyRef: IrExpr = {
+    kind: "varRef",
+    localId: keyLocal.id,
+    type: STRING,
+    loc,
+  };
+  const argumentRefs = argumentLocals.map<IrExpr>((argument) => ({
+    kind: "varRef",
+    localId: argument.id,
+    type: argument.type,
+    loc,
+  }));
+  const answer = invoke(receiverRef, argumentRefs);
+  const result: IrExpr = {
+    kind: "ternary",
+    cond: {
+      kind: "strEq",
+      negated: false,
+      left: keyRef,
+      right: { kind: "strLit", value: member, type: STRING, loc },
+      type: BOOL,
+      loc,
+    },
+    then: answer,
+    else_: nodeThrowExpr(
+      1,
+      "",
+      `${access.getText()} is not a function`,
+      answer.type,
+      loc,
+    ),
+    type: answer.type,
+    loc,
+  };
+  return {
+    kind: "seqExpr",
+    stmts: [
+      { kind: "varDecl", localId: receiverLocal.id, init: receiver, loc },
+      { kind: "varDecl", localId: keyLocal.id, init: key, loc },
+      ...argumentValues.map<IrStmt>((argument, index) => ({
+        kind: "varDecl",
+        localId: argumentLocals[index]!.id,
+        init: argument,
+        loc: argument.loc,
+      })),
+    ],
+    result,
+    type: answer.type,
+    loc,
+  };
 }
 
 function fetchElementMemberNames(
@@ -1042,6 +1137,27 @@ function lowerLiveWebValue(L: Lowerer, node: ts.Expression): IrExpr {
     };
   }
   return L.coerceInto(node, value, DYN);
+}
+
+function fetchMethodArgumentIsLive(
+  owner: string,
+  members: readonly string[],
+  index: number,
+): boolean {
+  return (
+    (index === 0 &&
+      ((owner === "ReadableStreamDefaultController" &&
+        members.some((member) => member === "enqueue" || member === "error")) ||
+        ((owner === "ReadableStream" ||
+          owner === "ReadableStreamDefaultReader") &&
+          members.includes("cancel")) ||
+        (owner === "AbortController" && members.includes("abort")))) ||
+    (index === 1 &&
+      owner === "AbortSignal" &&
+      members.some((member) =>
+        member === "addEventListener" || member === "removeEventListener"
+      ))
+  );
 }
 
 /** The adopted undici Response declaration is wider than the native static
@@ -1447,10 +1563,16 @@ export function lowerFetchElementMethodCall(
     L.dynamic ? JSVAL : DYN,
   );
   const keyLocal = L.declareHiddenLocal("%fetchMember", STRING);
-  const argumentValues = call.arguments.map((argument) =>
+  const argumentValues = call.arguments.map((argument, index) =>
     L.dynamic
       ? L.jsvalIn(L.lowerExpr(argument), argument)
-      : L.lowerExprExpecting(argument, DYN)
+      : fetchMethodArgumentIsLive(
+          resolved.owner,
+          members,
+          index,
+        )
+        ? lowerLiveWebValue(L, argument)
+        : L.lowerExprExpecting(argument, DYN)
   );
   const argumentLocals = argumentValues.map((argument) =>
     L.declareHiddenLocal("%fetchMethodArg", argument.type)
@@ -1852,19 +1974,28 @@ export function lowerStaticReadableStreamControllerCall(
   const recv = L.lowerExpr(access.expression);
   if (recv.type.kind !== "dyn") return null;
   const loc = locOf(call);
-  return {
-    kind: "dynInvoke",
+  const args = [
+    call.arguments[0]
+      ? lowerLiveWebValue(L, call.arguments[0])
+      : dynUndefinedExpr(loc),
+  ];
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    "enqueue",
     recv,
-    method: "enqueue",
-    calleeName: access.getText(),
-    args: [
-      call.arguments[0]
-        ? lowerLiveWebValue(L, call.arguments[0])
-        : dynUndefinedExpr(loc),
-    ],
-    type: DYN,
-    loc,
-  };
+    args,
+    (receiver, argumentRefs) => ({
+      kind: "dynInvoke",
+      recv: receiver,
+      method: "enqueue",
+      calleeName: access.getText(),
+      args: argumentRefs,
+      type: DYN,
+      loc,
+    }),
+  );
 }
 
 /** AbortSignal retains listener object identity for duplicate detection and
@@ -1908,19 +2039,28 @@ export function lowerStaticAbortSignalListenerCall(
   const recv = L.lowerExpr(access.expression);
   if (recv.type.kind !== "dyn") return null;
   const loc = locOf(call);
-  return {
-    kind: "dynInvoke",
+  const args = call.arguments.map((arg, index) =>
+    index === 1
+      ? lowerLiveWebValue(L, arg)
+      : L.lowerExprExpecting(arg, DYN)
+  );
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    member,
     recv,
-    method: member,
-    calleeName: access.getText(),
-    args: call.arguments.map((arg, index) =>
-      index === 1
-        ? lowerLiveWebValue(L, arg)
-        : L.lowerExprExpecting(arg, DYN),
-    ),
-    type: DYN,
-    loc,
-  };
+    args,
+    (receiver, argumentRefs) => ({
+      kind: "dynInvoke",
+      recv: receiver,
+      method: member,
+      calleeName: access.getText(),
+      args: argumentRefs,
+      type: DYN,
+      loc,
+    }),
+  );
 }
 
 /** `new ReadableStream(source?)`. Static builds box the source record into
@@ -2018,13 +2158,22 @@ export function lowerStaticReadableStreamReaderCall(
   ) {
     return null;
   }
-  return {
-    kind: "libCall",
-    fn: "fetch.readerRead",
-    args: [L.lowerExprExpecting(access.expression, DYN)],
-    type,
-    loc: locOf(call),
-  };
+  const receiver = L.lowerExprExpecting(access.expression, DYN);
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    "read",
+    receiver,
+    [],
+    (receiverRef) => ({
+      kind: "libCall",
+      fn: "fetch.readerRead",
+      args: [receiverRef],
+      type,
+      loc: locOf(call),
+    }),
+  );
 }
 
 /** Dynamic `import(spec)` — the island's module system at a USER site.
