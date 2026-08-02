@@ -329,6 +329,65 @@ test("static RequestInit fences statically traceable property and conditional va
   ).toEqual([]);
 });
 
+test("static RequestInit traces properties through annotated const wrappers", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.request-init.cache.annotated-wrapper",
+    source:
+      '/// <reference types="node" />\n' +
+      'const options: { init: RequestInit } = { init: { cache: "no-store" } };\n' +
+      'void fetch("http://127.0.0.1", options.init);\n',
+  });
+  const entry = entryById.get("stdlib.fetch.request-init.cache");
+  expect(entry).toBeDefined();
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual([entry!.code]);
+  expect(coverage.diagnostics).toHaveLength(1);
+  expect(coverage.diagnostics[0]!.message).toContain(
+    "RequestInit option 'cache' in a static build",
+  );
+  const dynamic = analyze(file, { dynamic: true }).coverage;
+  expect(dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+});
+
+test("RequestInit wrapper tracing respects a later property override", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.request-init.annotated-wrapper-override",
+    source:
+      '/// <reference types="node" />\n' +
+      'const base: { init: RequestInit } = { init: { cache: "no-store" } };\n' +
+      'const options: { init: RequestInit } = { ...base, init: { method: "GET" } };\n' +
+      'void fetch("http://127.0.0.1", options.init);\n',
+  });
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+  expect(coverage.stats.statementsFailed).toBe(0);
+});
+
+test("finite unions of dynamic-only Headers members retain the static fence", () => {
+  const file = probeFile({
+    id: "stdlib.headers.dynamic-member-union",
+    source:
+      '/// <reference types="node" />\n' +
+      'async function f(select: boolean): Promise<void> {\n' +
+      '  const response = await fetch("http://127.0.0.1");\n' +
+      '  const member: "keys" | "values" = select ? "keys" : "values";\n' +
+      '  void response.headers[member]();\n' +
+      '}\n' +
+      'void f;\n',
+  });
+  const entry = entryById.get("stdlib.headers.keys");
+  expect(entry).toBeDefined();
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual([entry!.code]);
+  expect(coverage.diagnostics).toHaveLength(1);
+  expect(coverage.diagnostics[0]!.message).toContain("Headers.keys in a static build");
+  const dynamic = analyze(file, { dynamic: true }).coverage;
+  expect(dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+});
+
 test("fetch interface object bindings retain the inventory fence code", () => {
   const file = probeFile({
     id: "stdlib.fetch.object-binding-fences",

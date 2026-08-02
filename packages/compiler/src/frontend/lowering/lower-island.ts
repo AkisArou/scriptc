@@ -4,7 +4,7 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { BYTES_U8, DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canConvertToDyn, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canConvertToDyn, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
@@ -316,16 +316,142 @@ function requestInitConstBacked(
   );
 }
 
+/** Visit the source values of one property on a const-backed object. The
+ * checker's property symbol can come from an annotation (a PropertySignature)
+ * rather than the object literal that supplies the runtime value, so source
+ * tracing has to follow the receiver initializer by key as well. */
+function visitRequestInitConstPropertyValues(
+  L: Lowerer,
+  value: ts.Expression,
+  key: string,
+  seen: Set<ts.Symbol>,
+  visit: (value: ts.Expression) => void,
+): boolean {
+  const expr = requestInitValueExpr(value);
+  if (ts.isObjectLiteralExpression(expr)) {
+    // Last contributor wins. A definite later property (including one from
+    // a statically traced spread) hides earlier values exactly as it does at
+    // runtime; a conditional/missing spread keeps the earlier contributor
+    // in the possible-value set.
+    for (let i = expr.properties.length - 1; i >= 0; i--) {
+      const property = expr.properties[i]!;
+      if (ts.isSpreadAssignment(property)) {
+        const defines = visitRequestInitConstPropertyValues(
+          L,
+          property.expression,
+          key,
+          new Set(seen),
+          visit,
+        );
+        if (defines) return true;
+        continue;
+      }
+      if (requestInitLiteralKey(L, property) !== key) continue;
+      if (ts.isPropertyAssignment(property)) {
+        visit(property.initializer);
+      } else if (
+        ts.isShorthandPropertyAssignment(property) &&
+        ts.isIdentifier(property.name)
+      ) {
+        visit(property.name);
+      }
+      return true;
+    }
+    return false;
+  }
+  if (ts.isConditionalExpression(expr)) {
+    const selected = requestInitStaticBoolean(L, expr.condition);
+    if (selected !== null) {
+      return visitRequestInitConstPropertyValues(
+        L,
+        selected ? expr.whenTrue : expr.whenFalse,
+        key,
+        seen,
+        visit,
+      );
+    }
+    const whenTrue = visitRequestInitConstPropertyValues(
+      L,
+      expr.whenTrue,
+      key,
+      new Set(seen),
+      visit,
+    );
+    const whenFalse = visitRequestInitConstPropertyValues(
+      L,
+      expr.whenFalse,
+      key,
+      new Set(seen),
+      visit,
+    );
+    return whenTrue && whenFalse;
+  }
+  if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+    const member = ts.isPropertyAccessExpression(expr)
+      ? expr.name.text
+      : foldedStringKeyOf(L, expr.argumentExpression);
+    if (member === null) return false;
+    const nested: ts.Expression[] = [];
+    const receiverDefines = visitRequestInitConstPropertyValues(
+      L,
+      expr.expression,
+      member,
+      new Set(seen),
+      (value) => nested.push(value),
+    );
+    let nestedDefines = nested.length > 0;
+    for (const value of nested) {
+      if (!visitRequestInitConstPropertyValues(L, value, key, new Set(seen), visit)) {
+        nestedDefines = false;
+      }
+    }
+    return receiverDefines && nestedDefines;
+  }
+  if (!ts.isIdentifier(expr)) return false;
+  const symbol = L.resolveValueSymbol(expr);
+  if (!symbol || seen.has(symbol)) return false;
+  seen.add(symbol);
+  let sawDeclaration = false;
+  let defines = true;
+  for (const declaration of L.checker.declarationsOf(symbol)) {
+    if (
+      ts.isVariableDeclaration(declaration) &&
+      declaration.initializer !== undefined &&
+      ts.isVariableDeclarationList(declaration.parent) &&
+      (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      sawDeclaration = true;
+      if (!visitRequestInitConstPropertyValues(
+        L,
+        declaration.initializer,
+        key,
+        new Set(seen),
+        visit,
+      )) {
+        defines = false;
+      }
+    }
+  }
+  return sawDeclaration && defines;
+}
+
 function fenceStaticRequestInitProperty(
   L: Lowerer,
   access: ts.PropertyAccessExpression | ts.ElementAccessExpression,
   seen: Set<ts.Symbol>,
 ): void {
-  if (!requestInitConstBacked(L, access.expression, new Set())) return;
   const key = ts.isPropertyAccessExpression(access)
     ? access.name.text
     : foldedStringKeyOf(L, access.argumentExpression);
   if (key === null) return;
+  visitRequestInitConstPropertyValues(
+    L,
+    access.expression,
+    key,
+    new Set(),
+    (value) => fenceStaticRequestInitValueInner(L, value, seen),
+  );
+  if (!requestInitConstBacked(L, access.expression, new Set())) return;
   const symbol = ts.isPropertyAccessExpression(access)
     ? L.checker.getSymbolAtLocation(access.name)
     : L.checker.getPropertyOfType(L.typeOf(access.expression), key);
@@ -608,13 +734,14 @@ function staticResponseMemberName(
   access: StaticResponseAccess,
 ): string | null {
   if (ts.isPropertyAccessExpression(access)) return access.name.text;
-  return fetchElementMemberName(L, access.argumentExpression);
+  const members = fetchElementMemberNames(L, access.argumentExpression);
+  return members?.length === 1 ? members[0]! : null;
 }
 
-function fetchElementMemberName(
+function fetchElementMemberNames(
   L: Lowerer,
   keyExpr: ts.Expression,
-): string | null {
+): string[] | null {
   if (
     ts.isPropertyAccessExpression(keyExpr) &&
     L.isStdlibGlobal(keyExpr.expression, "Symbol") &&
@@ -622,10 +749,26 @@ function fetchElementMemberName(
       keyExpr.name.text === "asyncIterator" ||
       keyExpr.name.text === "toStringTag")
   ) {
-    return `[Symbol.${keyExpr.name.text}]`;
+    return [`[Symbol.${keyExpr.name.text}]`];
   }
   const key = L.typeOf(keyExpr);
-  return key.isStringLiteralType() ? key.value : null;
+  if (key.isStringLiteralType()) return [key.value];
+  if (!key.isUnionType()) return null;
+  const members: string[] = [];
+  for (const arm of key.getTypes()) {
+    if (!arm.isStringLiteralType()) return null;
+    if (!members.includes(arm.value)) members.push(arm.value);
+  }
+  return members;
+}
+
+function fetchAccessMemberNames(
+  L: Lowerer,
+  access: StaticResponseAccess,
+): string[] | null {
+  return ts.isPropertyAccessExpression(access)
+    ? [access.name.text]
+    : fetchElementMemberNames(L, access.argumentExpression);
 }
 
 function fetchInventoryStatus(
@@ -649,13 +792,12 @@ export function fenceUnsupportedFetchConstructorMember(
   access: StaticResponseAccess,
 ): IrExpr | null {
   if (!L.isStdlibGlobal(access.expression, "Response")) return null;
-  const member = staticResponseMemberName(L, access);
-  if (
-    member === null ||
-    fetchInventoryStatus("Response", member, "static") !== "unsupported"
-  ) {
-    return null;
-  }
+  const members = fetchAccessMemberNames(L, access);
+  if (members === null) return null;
+  const member = members.find((candidate) =>
+    fetchInventoryStatus("Response", candidate, "static") === "unsupported"
+  );
+  if (member === undefined) return null;
   L.noLowering(
     `Response.${member}`,
     access,
@@ -715,16 +857,24 @@ export function fenceStaticResponseMember(
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Response" || !L.isStdlibSymbol(sym)) return null;
-  const member = staticResponseMemberName(L, access);
-  if (member === null) return null;
-  const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";
-  const status = fetchInventoryStatus("Response", member, placement);
-  if (L.dynamic && status !== "unsupported") return null;
-  const supported =
+  const members = fetchAccessMemberNames(L, access);
+  if (members === null) return null;
+  const status = (member: string) => fetchInventoryStatus(
+    "Response",
+    member,
+    member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype",
+  );
+  if (L.dynamic && members.every((member) => status(member) !== "unsupported")) {
+    return null;
+  }
+  const supported = (member: string) =>
     use === "call"
       ? STATIC_RESPONSE_CALLS.has(member)
       : STATIC_RESPONSE_READS.has(member);
-  if (supported) return null;
+  if (!L.dynamic && members.every(supported)) return null;
+  const member = members.find((candidate) =>
+    L.dynamic ? status(candidate) === "unsupported" : !supported(candidate)
+  )!;
   L.noLowering(
     `Response.${member} in a static build`,
     access,
@@ -745,13 +895,25 @@ export function fenceStaticHeadersMember(
   const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
   const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
   if (!sym || sym.name !== "Headers" || !L.isStdlibSymbol(sym)) return null;
-  const member = staticResponseMemberName(L, access);
-  if (member === null) return null;
-  const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";
-  const status = fetchInventoryStatus("Headers", member, placement);
-  if (L.dynamic && status !== "unsupported") return null;
-  if (use === "call" && STATIC_HEADERS_CALLS.has(member)) return null;
-  if (status === "unsupported") {
+  const members = fetchAccessMemberNames(L, access);
+  if (members === null) return null;
+  const status = (member: string) => fetchInventoryStatus(
+    "Headers",
+    member,
+    member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype",
+  );
+  if (L.dynamic && members.every((member) => status(member) !== "unsupported")) {
+    return null;
+  }
+  if (!L.dynamic && use === "call" && members.every((member) => STATIC_HEADERS_CALLS.has(member))) {
+    return null;
+  }
+  const member = members.find((candidate) =>
+    L.dynamic
+      ? status(candidate) === "unsupported"
+      : use !== "call" || !STATIC_HEADERS_CALLS.has(candidate)
+  )!;
+  if (status(member) === "unsupported") {
     L.noLowering(
       `Headers.${member}`,
       access,
@@ -789,7 +951,10 @@ function fetchObjectBindingMemberName(
   if (ts.isIdentifier(name)) return name.text;
   if (ts.isStringLiteral(name)) return name.text;
   if (ts.isNumericLiteral(name)) return String(Number(name.text));
-  if (ts.isComputedPropertyName(name)) return fetchElementMemberName(L, name.expression);
+  if (ts.isComputedPropertyName(name)) {
+    const members = fetchElementMemberNames(L, name.expression);
+    return members?.length === 1 ? members[0]! : null;
+  }
   return null;
 }
 
@@ -802,7 +967,10 @@ function fetchObjectAssignmentMemberName(
   if (name === undefined) return null;
   if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
   if (ts.isNumericLiteral(name)) return String(Number(name.text));
-  if (ts.isComputedPropertyName(name)) return fetchElementMemberName(L, name.expression);
+  if (ts.isComputedPropertyName(name)) {
+    const members = fetchElementMemberNames(L, name.expression);
+    return members?.length === 1 ? members[0]! : null;
+  }
   return null;
 }
 
@@ -906,10 +1074,11 @@ export function fenceStaticHeadersIteration(
   );
 }
 
-/** The dynamic twin of Headers[Symbol.iterator](): the engine prelude's
- * iterNew operation performs GetIterator and returns the exact iterator
- * object. This also makes the explicit member spelling agree with the
- * for-of path, which already uses iterNew for island values. */
+/** Dynamic element-spelled Headers iteration. Symbol.iterator uses the
+ * engine's GetIterator operation. A finite union of keys()/values()/entries()
+ * dispatches through fixed-name engine calls after evaluating the receiver
+ * and key once, preserving the method receiver and JavaScript evaluation
+ * order without trying to represent the union of method values. */
 export function lowerDynamicHeadersIteratorCall(
   L: Lowerer,
   call: ts.CallExpression,
@@ -920,19 +1089,85 @@ export function lowerDynamicHeadersIteratorCall(
     call.questionDotToken ||
     access.questionDotToken ||
     call.arguments.length !== 0 ||
-    staticResponseMemberName(L, access) !== "[Symbol.iterator]" ||
     !isStdlibFetchInterface(L, access.expression, "Headers")
+  ) {
+    return null;
+  }
+  const members = fetchElementMemberNames(L, access.argumentExpression);
+  if (members === null) return null;
+  const symbolIterator = members.length === 1 && members[0] === "[Symbol.iterator]";
+  if (
+    !symbolIterator &&
+    !members.every((member) =>
+      member === "keys" || member === "values" || member === "entries"
+    )
   ) {
     return null;
   }
   const receiver = L.lowerExpr(access.expression);
   if (receiver.type.kind !== "jsval") return null;
+  const loc = locOf(call);
+  if (!symbolIterator) {
+    const key = L.lowerExpr(access.argumentExpression);
+    if (key.type.kind !== "string") return null;
+    const recvLocal = L.declareHiddenLocal("%headers", JSVAL);
+    const keyLocal = L.declareHiddenLocal("%headersKey", STRING);
+    const recvRef: IrExpr = {
+      kind: "varRef",
+      localId: recvLocal.id,
+      type: JSVAL,
+      loc,
+    };
+    const keyRef: IrExpr = {
+      kind: "varRef",
+      localId: keyLocal.id,
+      type: STRING,
+      loc,
+    };
+    const invoke = (member: string): IrExpr => ({
+      kind: "jsOp",
+      op: "callMethod",
+      name: member,
+      args: [recvRef],
+      type: JSVAL,
+      loc,
+    });
+    let result: IrExpr = invoke(members[members.length - 1]!);
+    for (let i = members.length - 2; i >= 0; i--) {
+      const member = members[i]!;
+      result = {
+        kind: "ternary",
+        cond: {
+          kind: "strEq",
+          negated: false,
+          left: keyRef,
+          right: { kind: "strLit", value: member, type: STRING, loc },
+          type: BOOL,
+          loc,
+        },
+        then: invoke(member),
+        else_: result,
+        type: JSVAL,
+        loc,
+      };
+    }
+    return {
+      kind: "seqExpr",
+      stmts: [
+        { kind: "varDecl", localId: recvLocal.id, init: receiver, loc },
+        { kind: "varDecl", localId: keyLocal.id, init: key, loc },
+      ],
+      result,
+      type: JSVAL,
+      loc,
+    };
+  }
   return {
     kind: "jsOp",
     op: "iterNew",
     args: [receiver],
     type: JSVAL,
-    loc: locOf(call),
+    loc,
   };
 }
 
@@ -981,17 +1216,25 @@ export function fenceStaticReadableStreamMember(
 ): IrExpr | null {
   const sym = isStdlibFetchInterface(L, access.expression, "ReadableStream");
   if (!sym) return null;
-  const member = staticResponseMemberName(L, access);
-  if (member === null) return null;
-  const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";
-  const status = fetchInventoryStatus("ReadableStream", member, placement);
-  if (L.dynamic && status !== "unsupported") return null;
-  const supported =
+  const members = fetchAccessMemberNames(L, access);
+  if (members === null) return null;
+  const status = (member: string) => fetchInventoryStatus(
+    "ReadableStream",
+    member,
+    member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype",
+  );
+  if (L.dynamic && members.every((member) => status(member) !== "unsupported")) {
+    return null;
+  }
+  const supported = (member: string) =>
     use === "call"
       ? STATIC_READABLE_STREAM_CALLS.has(member)
       : STATIC_READABLE_STREAM_READS.has(member);
-  if (supported) return null;
-  if (status === "unsupported") {
+  if (!L.dynamic && members.every(supported)) return null;
+  const member = members.find((candidate) =>
+    L.dynamic ? status(candidate) === "unsupported" : !supported(candidate)
+  )!;
+  if (status(member) === "unsupported") {
     L.noLowering(
       `ReadableStream.${member}`,
       access,
