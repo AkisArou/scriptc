@@ -3251,6 +3251,7 @@ static ScrUrl *sf_url_parse_quiet(ScrStr *text) {
 static bool sf_proxy_enabled;
 static char *sf_http_proxy;
 static char *sf_https_proxy;
+static char *sf_all_proxy;
 static char *sf_no_proxy;
 
 static char *sf_env_copy(const char *lower, const char *upper) {
@@ -3270,14 +3271,16 @@ static void sf_proxy_snapshot(void) {
   if (!sf_proxy_enabled) return;
   sf_http_proxy = sf_env_copy("http_proxy", "HTTP_PROXY");
   sf_https_proxy = sf_env_copy("https_proxy", "HTTPS_PROXY");
+  sf_all_proxy = sf_env_copy("all_proxy", "ALL_PROXY");
   sf_no_proxy = sf_env_copy("no_proxy", "NO_PROXY");
 }
 
 static void sf_proxy_snapshot_free(void) {
   free(sf_http_proxy);
   free(sf_https_proxy);
+  free(sf_all_proxy);
   free(sf_no_proxy);
-  sf_http_proxy = sf_https_proxy = sf_no_proxy = NULL;
+  sf_http_proxy = sf_https_proxy = sf_all_proxy = sf_no_proxy = NULL;
 }
 
 static int sf_hex_value(char c) {
@@ -3399,6 +3402,7 @@ static ScrUrl *sf_proxy_for(const ScrUrl *target, bool https,
   *invalid = false;
   if (!sf_proxy_enabled) return NULL;
   const char *proxy = https ? sf_https_proxy : sf_http_proxy;
+  if (!proxy) proxy = sf_all_proxy;
   if (!proxy) return NULL;
   if (sf_no_proxy &&
       sf_no_proxy_match(sf_no_proxy, target->host, target_port)) {
@@ -5088,6 +5092,7 @@ typedef struct FxTransfer {
   int hops;
   bool redirected;
   bool request_streaming;
+  bool use_env_proxy;
   bool request_ended;
   bool request_has_content_length;
   size_t request_content_length;
@@ -5411,6 +5416,7 @@ static bool fx_bad_port(int port) {
 static bool fx_proxy_enabled;
 static char *fx_http_proxy;
 static char *fx_https_proxy;
+static char *fx_all_proxy;
 static char *fx_no_proxy;
 
 static char *fx_env_copy(const char *lower, const char *upper) {
@@ -5427,17 +5433,20 @@ static char *fx_env_copy(const char *lower, const char *upper) {
 static void fx_proxy_snapshot(void) {
   const char *optin = getenv("NODE_USE_ENV_PROXY");
   fx_proxy_enabled = optin != NULL && strcmp(optin, "1") == 0;
-  if (!fx_proxy_enabled) return;
+  /* Snapshot even without Node's global opt-in: Vercel's dispatcher is a
+   * request-local proxy activation over the same startup environment. */
   fx_http_proxy = fx_env_copy("http_proxy", "HTTP_PROXY");
   fx_https_proxy = fx_env_copy("https_proxy", "HTTPS_PROXY");
+  fx_all_proxy = fx_env_copy("all_proxy", "ALL_PROXY");
   fx_no_proxy = fx_env_copy("no_proxy", "NO_PROXY");
 }
 
 static void fx_proxy_snapshot_free(void) {
   free(fx_http_proxy);
   free(fx_https_proxy);
+  free(fx_all_proxy);
   free(fx_no_proxy);
-  fx_http_proxy = fx_https_proxy = fx_no_proxy = NULL;
+  fx_http_proxy = fx_https_proxy = fx_all_proxy = fx_no_proxy = NULL;
 }
 
 static int fx_hex_value(char c) {
@@ -5557,10 +5566,11 @@ static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
 
 /* The proxy for this hop's target, parsed (+1), or NULL for direct. */
 static ScrUrl *fx_proxy_for(const ScrUrl *target, bool https, int target_port,
-                            bool *invalid) {
+                            bool enabled, bool *invalid) {
   *invalid = false;
-  if (!fx_proxy_enabled) return NULL;
+  if (!enabled) return NULL;
   const char *proxy = https ? fx_https_proxy : fx_http_proxy;
+  if (proxy == NULL) proxy = fx_all_proxy;
   if (proxy == NULL) return NULL;
   if (fx_no_proxy != NULL &&
       fx_no_proxy_match(fx_no_proxy, target->host, target_port)) {
@@ -5612,7 +5622,8 @@ static void fx_start_hop(FxTransfer *t) {
     return;
   }
   bool invalid_proxy = false;
-  ScrUrl *proxy = fx_proxy_for(u, https, port, &invalid_proxy);
+  ScrUrl *proxy = fx_proxy_for(
+      u, https, port, fx_proxy_enabled || t->use_env_proxy, &invalid_proxy);
   bool proxy_http = proxy && fx_str_is(proxy->scheme, "http");
   bool proxy_https = proxy && fx_str_is(proxy->scheme, "https");
   if (invalid_proxy || (proxy && !proxy_http && !proxy_https) ||
@@ -6107,6 +6118,10 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
   t->request_streaming = JS_ToBool(ctx, streamingv) > 0;
   JS_FreeValue(ctx, streamingv);
 
+  JSValue envproxyv = JS_GetPropertyStr(ctx, req, "useEnvProxy");
+  t->use_env_proxy = JS_ToBool(ctx, envproxyv) > 0;
+  JS_FreeValue(ctx, envproxyv);
+
   JSValue methodv = JS_GetPropertyStr(ctx, req, "method");
   const char *method = JS_ToCString(ctx, methodv);
   JS_FreeValue(ctx, methodv);
@@ -6307,22 +6322,23 @@ static const char fx_glue[] =
     "      if (initCache !== undefined) throw new TypeError('unsupported RequestInit option: cache');\n"
     "      const initCredentials = init.credentials;\n"
     "      if (initCredentials !== undefined) throw new TypeError('unsupported RequestInit option: credentials');\n"
+    "      let useEnvProxy = g.process?.env?.NODE_USE_ENV_PROXY === '1';\n"
     "      const initDispatcher = init.dispatcher;\n"
     "      // Vercel's dynamic CLI installs its EnvProxyDispatcher when\n"
-    "      // proxy environment variables are present. The native transport\n"
-    "      // already applies NODE_USE_ENV_PROXY itself, so that dispatcher is\n"
-    "      // a validated no-op here. Do not silently accept arbitrary custom\n"
+    "      // ordinary proxy environment variables are present. Validate the\n"
+    "      // known public shape and activate equivalent native proxy routing\n"
+    "      // for this request. Do not silently accept arbitrary custom\n"
     "      // dispatchers whose routing behavior the bridge cannot preserve.\n"
     "      if (initDispatcher !== undefined) {\n"
     "        const dispatcher = initDispatcher;\n"
     "        const envProxyMethods = ['dispatch', 'close', 'destroy', 'agents', 'getAgent', 'shouldProxy', 'parseNoProxy'];\n"
-    "        const isVercelEnvProxy = g.process?.env?.NODE_USE_ENV_PROXY === '1' &&\n"
-    "          dispatcher !== null && typeof dispatcher === 'object' &&\n"
+    "        const isVercelEnvProxy = dispatcher !== null && typeof dispatcher === 'object' &&\n"
     "          dispatcher.constructor?.name === 'EnvProxyDispatcher' &&\n"
     "          envProxyMethods.every((member) => typeof dispatcher[member] === 'function');\n"
     "        if (!isVercelEnvProxy) {\n"
     "          throw new TypeError('unsupported RequestInit option: dispatcher');\n"
     "        }\n"
+    "        useEnvProxy = true;\n"
     "      }\n"
     "      const initDuplex = init.duplex;\n"
     "      let duplex;\n"
@@ -6490,6 +6506,7 @@ static const char fx_glue[] =
     "            headers: flat,\n"
     "            body: body instanceof Uint8Array ? body : undefined,\n"
     "            streaming: body instanceof g.ReadableStream,\n"
+    "            useEnvProxy,\n"
     "            redirectMode,\n"
     "          },\n"
     "          {\n"

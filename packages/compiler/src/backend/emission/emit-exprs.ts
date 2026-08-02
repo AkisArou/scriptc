@@ -7076,6 +7076,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `scr_jsval_call_method(${a(0)}, ${nameSym()}, ${args.length - 1}, ${pack})`,
             );
           }
+          case "callFnThis": {
+            const pack = argPack(args.slice(2).map((x) => x.name));
+            return finishFallible(
+              `scr_jsval_call_this(${a(0)}, ${a(1)}, ${args.length - 2}, ${pack})`,
+            );
+          }
           case "callFn": {
             const pack = argPack(args.slice(1).map((x) => x.name));
             return finishFallible(`scr_jsval_call(${a(0)}, ${args.length - 1}, ${pack})`);

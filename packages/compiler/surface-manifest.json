@@ -2176,7 +2176,7 @@
       "name": "RequestInit.dispatcher",
       "status": "dynamic-only",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic tier accepts Vercel CLI's EnvProxyDispatcher as a compatibility no-op because native fetch applies NODE_USE_ENV_PROXY directly"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic tier recognizes Vercel CLI's EnvProxyDispatcher and applies equivalent native environment-proxy routing"
     },
     {
       "id": "stdlib.fetch.request-init.duplex",

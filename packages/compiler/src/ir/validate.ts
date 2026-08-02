@@ -4779,7 +4779,7 @@ function validateFunction(
           getProp: 1, setProp: 2, getIdx: 2, setIdx: 3, globalGet: 0,
           undefLit: 0, nullLit: 0, iterNew: 1, defineGetter: 3, objSpread: 2,
           callSpread: 3, // callee + pre array + spread source
-          callMethod: null, optCallMethod: null, callFn: null, construct: null, // receiver/callee + any number of args
+          callMethod: null, optCallMethod: null, callFn: null, callFnThis: null, construct: null, // receiver/callee + any number of args
           objLit: null, arrLit: null, tplStrings: null, // variable length (objLit: key/value pairs; tplStrings: n cooked + n raw)
         };
         const want = arity[e.op];
@@ -4788,6 +4788,9 @@ function validateFunction(
         }
         if (want === null && e.op !== "objLit" && e.op !== "arrLit" && e.op !== "tplStrings" && e.args.length < 1) {
           err(`jsOp ${e.op} needs a receiver/callee arg`, e.loc);
+        }
+        if (e.op === "callFnThis" && e.args.length < 2) {
+          err("jsOp callFnThis needs a callee and receiver", e.loc);
         }
         if (e.op === "objLit" && e.args.length % 2 !== 0) {
           err("jsOp objLit takes key/value pairs", e.loc);

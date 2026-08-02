@@ -6863,6 +6863,15 @@ class LlEmitter {
           return t;
         });
       }
+      case "callFnThis": {
+        const pack = argPack(args.slice(2).map((x) => x.name));
+        this.declare(`declare ptr @scr_jsval_call_this(ptr, ptr, i32, ptr)`);
+        return fallible(() => {
+          const t = B.tmp();
+          B.line(`${t} = call ptr @scr_jsval_call_this(ptr ${a(0)}, ptr ${a(1)}, i32 ${args.length - 2}, ptr ${pack})`);
+          return t;
+        });
+      }
       case "callSpread": {
         // Spread application (`f(...pre, ...s)`): the prelude helper's
         // real spread syntax — iterator protocols are the engine's own,

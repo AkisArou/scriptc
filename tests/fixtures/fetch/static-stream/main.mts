@@ -16,6 +16,26 @@ try {
   console.log("computed response receiver rejected");
 }
 
+function effectfulHeadersMember(): "get" {
+  console.log("computed headers key evaluated");
+  return "get";
+}
+
+function effectfulHeadersArgument(): string {
+  console.log("computed headers argument evaluated");
+  return "x-kind";
+}
+
+function callComputedHeadersMember(headers: Headers): void {
+  headers[effectfulHeadersMember()](effectfulHeadersArgument());
+}
+
+try {
+  callComputedHeadersMember(null as any);
+} catch {
+  console.log("computed headers receiver rejected");
+}
+
 try {
   new ReadableStream(null!);
   console.log("null source unexpectedly accepted");
@@ -78,6 +98,39 @@ async function checkEnqueuedUnionIdentity(
 
 const enqueuedUnionBox = { value: 1 };
 await checkEnqueuedUnionIdentity(enqueuedUnionBox, enqueuedUnionBox);
+
+const streamCancelState: { observed: LiveUnionValue } = { observed: "missing" };
+const directCancelStream = new ReadableStream<LiveUnionValue>({
+  cancel(reason) {
+    streamCancelState.observed = reason as LiveUnionValue;
+  },
+});
+const directStreamCancelReason: LiveUnionBox = { value: 1 };
+await directCancelStream.cancel(directStreamCancelReason);
+const streamCancelObserved = streamCancelState.observed;
+if (typeof streamCancelObserved !== "string") streamCancelObserved.value = 2;
+console.log(
+  "stream cancel reason identity:",
+  streamCancelObserved === directStreamCancelReason,
+  directStreamCancelReason.value,
+);
+
+const readerCancelState: { observed: LiveUnionValue } = { observed: "missing" };
+const directReaderCancelStream = new ReadableStream<LiveUnionValue>({
+  cancel(reason) {
+    readerCancelState.observed = reason as LiveUnionValue;
+  },
+});
+const directReader = directReaderCancelStream.getReader();
+const directReaderCancelReason: LiveUnionBox = { value: 3 };
+await directReader.cancel(directReaderCancelReason);
+const readerCancelObserved = readerCancelState.observed;
+if (typeof readerCancelObserved !== "string") readerCancelObserved.value = 4;
+console.log(
+  "reader cancel reason identity:",
+  readerCancelObserved === directReaderCancelReason,
+  directReaderCancelReason.value,
+);
 
 async function checkComputedControllerIdentity(select: boolean): Promise<void> {
   let controller!: ReadableStreamDefaultController<LiveUnionBox>;

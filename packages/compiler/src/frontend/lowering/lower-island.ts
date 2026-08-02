@@ -281,6 +281,65 @@ function requestInitStaticBoolean(L: Lowerer, value: ts.Expression): boolean | n
   return text === "true" ? true : text === "false" ? false : null;
 }
 
+/** Symbols whose object value is mutated through a property write. A const
+ * binding keeps the binding stable, not the object: following its initializer
+ * after `init.cache = undefined` would diagnose the stale literal instead of
+ * the value fetch actually observes. Built lazily and diagnostic-free. */
+function requestInitPropMutatedSymbols(L: Lowerer): Set<ts.Symbol> {
+  const holder = L as unknown as {
+    requestInitPropMutatedSyms?: Set<ts.Symbol>;
+  };
+  if (holder.requestInitPropMutatedSyms) {
+    return holder.requestInitPropMutatedSyms;
+  }
+  const symbols = new Set<ts.Symbol>();
+  const noteBase = (target: ts.Expression): void => {
+    let base = requestInitValueExpr(target);
+    while (
+      ts.isPropertyAccessExpression(base) ||
+      ts.isElementAccessExpression(base)
+    ) {
+      base = requestInitValueExpr(base.expression);
+    }
+    if (!ts.isIdentifier(base)) return;
+    try {
+      const symbol = L.resolveValueSymbol(base);
+      if (symbol) symbols.add(symbol);
+    } catch {
+      /* not a traceable RequestInit candidate */
+    }
+  };
+  for (const source of L.program.getSourceFiles()) {
+    if (source.isDeclarationFile) continue;
+    const walk = (node: ts.Node): void => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+        (ts.isPropertyAccessExpression(node.left) ||
+          ts.isElementAccessExpression(node.left))
+      ) {
+        noteBase(node.left);
+      } else if (
+        (ts.isPrefixUnaryExpression(node) ||
+          ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken ||
+          node.operator === ts.SyntaxKind.MinusMinusToken) &&
+        (ts.isPropertyAccessExpression(node.operand) ||
+          ts.isElementAccessExpression(node.operand))
+      ) {
+        noteBase(node.operand);
+      } else if (ts.isDeleteExpression(node)) {
+        noteBase(node.expression);
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(source);
+  }
+  holder.requestInitPropMutatedSyms = symbols;
+  return symbols;
+}
+
 function requestInitConstBacked(
   L: Lowerer,
   value: ts.Expression,
@@ -303,6 +362,7 @@ function requestInitConstBacked(
   if (!ts.isIdentifier(expr)) return false;
   const symbol = L.resolveValueSymbol(expr);
   if (!symbol || seen.has(symbol)) return false;
+  if (requestInitPropMutatedSymbols(L).has(symbol)) return false;
   seen.add(symbol);
   const declarations = L.checker.declarationsOf(symbol).filter(
     (declaration): declaration is ts.VariableDeclaration =>
@@ -410,6 +470,7 @@ function visitRequestInitConstPropertyValues(
   if (!ts.isIdentifier(expr)) return false;
   const symbol = L.resolveValueSymbol(expr);
   if (!symbol || seen.has(symbol)) return false;
+  if (requestInitPropMutatedSymbols(L).has(symbol)) return false;
   seen.add(symbol);
   let sawDeclaration = false;
   let defines = true;
@@ -506,6 +567,7 @@ function visitRequestInitConstIndexValues(
   if (!ts.isIdentifier(expr)) return false;
   const symbol = L.resolveValueSymbol(expr);
   if (!symbol || seen.has(symbol)) return false;
+  if (requestInitPropMutatedSymbols(L).has(symbol)) return false;
   seen.add(symbol);
   let sawDeclaration = false;
   let defines = true;
@@ -748,6 +810,7 @@ function fenceRequestInitValueInner(
   // the same source-profile fence.
   const symbol = L.resolveValueSymbol(expr);
   if (!symbol || seen.has(symbol)) return;
+  if (requestInitPropMutatedSymbols(L).has(symbol)) return;
   seen.add(symbol);
   for (const declaration of L.checker.declarationsOf(symbol)) {
     if (ts.isBindingElement(declaration)) {
@@ -1046,6 +1109,21 @@ function lowerStaticFixedFetchMethodCall(
     stmts: [
       { kind: "varDecl", localId: receiverLocal.id, init: receiver, loc },
       { kind: "varDecl", localId: keyLocal.id, init: key, loc },
+      // A computed call resolves the property before evaluating arguments.
+      // Native Web handles dispatch methods by name rather than storing
+      // callable properties, so perform the keyed read for its ordering and
+      // nullish-receiver check, then use the fixed native invocation below.
+      {
+        kind: "exprStmt",
+        expr: {
+          kind: "dynKeyGet",
+          value: receiverRef,
+          key: keyRef,
+          type: DYN,
+          loc,
+        },
+        loc,
+      },
       ...argumentValues.map<IrStmt>((argument, index) => ({
         kind: "varDecl",
         localId: argumentLocals[index]!.id,
@@ -1611,6 +1689,9 @@ export function lowerFetchElementMethodCall(
     L.dynamic ? JSVAL : DYN,
   );
   const keyLocal = L.declareHiddenLocal("%fetchMember", STRING);
+  const calleeLocal = L.dynamic
+    ? L.declareHiddenLocal("%fetchMethod", JSVAL)
+    : null;
   const argumentValues = call.arguments.map((argument, index) =>
     L.dynamic
       ? L.jsvalIn(L.lowerExpr(argument), argument)
@@ -1637,6 +1718,41 @@ export function lowerFetchElementMethodCall(
     type: STRING,
     loc,
   };
+  const calleeRef: IrExpr | null = calleeLocal === null
+    ? null
+    : {
+        kind: "varRef",
+        localId: calleeLocal.id,
+        type: JSVAL,
+        loc,
+      };
+  const memberReadStmt: IrStmt = calleeLocal === null
+    ? {
+        kind: "exprStmt",
+        expr: {
+          kind: "dynKeyGet",
+          value: receiverRef,
+          key: keyRef,
+          type: DYN,
+          loc,
+        },
+        loc,
+      }
+    : {
+        kind: "varDecl",
+        localId: calleeLocal.id,
+        init: {
+          kind: "jsOp",
+          op: "getIdx",
+          args: [
+            receiverRef,
+            { kind: "jsMarshal", value: keyRef, type: JSVAL, loc },
+          ],
+          type: JSVAL,
+          loc,
+        },
+        loc,
+      };
   const argumentRefs = argumentLocals.map<IrExpr>((argument) => ({
     kind: "varRef",
     localId: argument.id,
@@ -1664,9 +1780,8 @@ export function lowerFetchElementMethodCall(
     L.dynamic
       ? {
           kind: "jsOp",
-          op: "callMethod",
-          name: member,
-          args: [receiverRef, ...argumentRefs],
+          op: "callFnThis",
+          args: [calleeRef!, receiverRef, ...argumentRefs],
           type: JSVAL,
           loc,
         }
@@ -1730,6 +1845,7 @@ export function lowerFetchElementMethodCall(
     stmts: [
       { kind: "varDecl", localId: receiverLocal.id, init: receiver, loc },
       { kind: "varDecl", localId: keyLocal.id, init: key, loc },
+      memberReadStmt,
       ...argumentValues.map<IrStmt>((argument, index) => ({
         kind: "varDecl",
         localId: argumentLocals[index]!.id,
@@ -2012,9 +2128,9 @@ export function lowerStaticFetchCompanionCall(
   return null;
 }
 
-/** `ReadableStreamDefaultController.enqueue(value)` is a dyn-handle call,
- * but unlike a general checked-dynamic boundary the Web Streams contract
- * exposes the same chunk reference from reader.read(). */
+/** Controller chunks and error reasons are dyn-handle calls, but unlike a
+ * general checked-dynamic boundary the Web Streams contract preserves their
+ * object identity for the reader/source callbacks that observe them. */
 export function lowerStaticReadableStreamControllerCall(
   L: Lowerer,
   call: ts.CallExpression,
@@ -2026,11 +2142,12 @@ export function lowerStaticReadableStreamControllerCall(
     call.arguments.length > 1 ||
     (!ts.isPropertyAccessExpression(access) &&
       !ts.isElementAccessExpression(access)) ||
-    access.questionDotToken ||
-    staticResponseMemberName(L, access) !== "enqueue"
+    access.questionDotToken
   ) {
     return null;
   }
+  const member = staticResponseMemberName(L, access);
+  if (member !== "enqueue" && member !== "error") return null;
   const receiverTs = L.checker.getBaseTypeOfLiteralType(
     L.typeOf(access.expression),
   );
@@ -2057,13 +2174,67 @@ export function lowerStaticReadableStreamControllerCall(
     L,
     call,
     access,
-    "enqueue",
+    member,
     recv,
     args,
     (receiver, argumentRefs) => ({
       kind: "dynInvoke",
       recv: receiver,
-      method: "enqueue",
+      method: member,
+      calleeName: access.getText(),
+      args: argumentRefs,
+      type: DYN,
+      loc,
+    }),
+  );
+}
+
+/** `ReadableStream.cancel(reason)` and default-reader `cancel(reason)` pass
+ * the same reason object to the underlying source's cancel callback. Keep a
+ * live typed-reference capsule instead of the general dyn boundary's copy. */
+export function lowerStaticReadableStreamCancelCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.length > 1 ||
+    call.arguments.some((argument) => ts.isSpreadElement(argument)) ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken ||
+    staticResponseMemberName(L, access) !== "cancel"
+  ) {
+    return null;
+  }
+  const resolved = fetchInterfaceInventoryOwner(L, access.expression);
+  if (
+    resolved?.owner !== "ReadableStream" &&
+    resolved?.owner !== "ReadableStreamDefaultReader"
+  ) {
+    return null;
+  }
+  const receiver = L.lowerExpr(access.expression);
+  if (receiver.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  const args = [
+    call.arguments[0]
+      ? lowerLiveWebValue(L, call.arguments[0])
+      : dynUndefinedExpr(loc),
+  ];
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    "cancel",
+    receiver,
+    args,
+    (receiverRef, argumentRefs) => ({
+      kind: "dynInvoke",
+      recv: receiverRef,
+      method: "cancel",
       calleeName: access.getText(),
       args: argumentRefs,
       type: DYN,

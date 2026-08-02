@@ -843,7 +843,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
                 "RequestInit",
                 member,
                 "dictionary",
-                "the dynamic tier accepts Vercel CLI's EnvProxyDispatcher as a compatibility no-op because native fetch applies NODE_USE_ENV_PROXY directly",
+                "the dynamic tier recognizes Vercel CLI's EnvProxyDispatcher and applies equivalent native environment-proxy routing",
               )
           : unsupportedEntry(
               id,

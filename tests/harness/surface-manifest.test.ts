@@ -401,6 +401,23 @@ test("RequestInit spread tracing respects a later undefined override", () => {
   }
 });
 
+test("RequestInit tracing stops at property-mutated const objects", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.request-init.mutated-const",
+    source:
+      '/// <reference types="node" />\n' +
+      'const init: RequestInit = { cache: "no-store" };\n' +
+      'init.cache = undefined;\n' +
+      'void fetch("http://127.0.0.1", init);\n',
+  });
+  for (const dynamic of [false, true]) {
+    const coverage = analyze(file, { dynamic }).coverage;
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+    expect(coverage.stats.statementsFailed).toBe(0);
+  }
+});
+
 test("RequestInit traces const object and tuple binding aliases", () => {
   const file = probeFile({
     id: "stdlib.fetch.request-init.cache.destructured-alias",

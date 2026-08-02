@@ -12,6 +12,8 @@ async function main(baseUrl: string): Promise<void> {
   // getSetCookie on a cookie-less response, and the sorted forEach walk
   // (filtered to the fixture's own x- names — wire noise stays out).
   const r = await fetch(`${baseUrl}/text`);
+  const responseType: string = (r as any).type;
+  console.log("type:", responseType);
   const ct = r.headers["get"]("content-type");
   const kind = r.headers.get("x-kind");
   const missing = r.headers.get("x-nope");
