@@ -772,7 +772,10 @@ test(`dynamic fetch runtime fences computed unsupported RequestInit${sanitize ? 
   const binary = await build(entry);
   const result = await runBinary(binary, []);
   expect(result.stdout.toString("utf8")).toBe(
-    "TypeError unsupported RequestInit option: cache\n",
+    "cache TypeError unsupported RequestInit option: cache\n" +
+      "dispatcher TypeError unsupported RequestInit option: dispatcher\n" +
+      "stream from: false 7\n" +
+      "stream constructor: false\n",
   );
   expect(result.exitCode).toBe(0);
 }, 120_000);

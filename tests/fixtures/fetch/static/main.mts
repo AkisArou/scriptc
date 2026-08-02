@@ -134,7 +134,7 @@ try {
 const emptyHeaderResponse = await fetch(`${process.argv[2]}/header-empty`);
 console.log(
   "empty duplicate header:",
-  JSON.stringify(emptyHeaderResponse.headers.get("x-empty")),
+  JSON.stringify(emptyHeaderResponse.headers["get"]("x-empty")),
 );
 await emptyHeaderResponse.text();
 

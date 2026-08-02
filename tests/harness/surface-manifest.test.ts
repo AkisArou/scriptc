@@ -116,6 +116,14 @@ const PROBES: Probe[] = [
   { id: "stdlib.date.now", source: "console.log(Date.now() > 0);\n" },
   { id: "stdlib.number.toFixed", source: "const n = 1.2345;\nconsole.log(n.toFixed(2));\n" },
   { id: "stdlib.abort-signal.timeout", source: "const signal = AbortSignal.timeout(1000);\nconsole.log(signal.aborted);\n" },
+  {
+    id: "stdlib.readable-stream.constructor",
+    source: "const stream = new ReadableStream<number>();\nconsole.log(stream.locked);\n",
+  },
+  {
+    id: "stdlib.readable-stream.from",
+    source: "const stream = ReadableStream.from([1, 2]);\nconsole.log(stream.locked);\n",
+  },
   { id: "node-builtin.process.pid", source: "console.log(process.pid > 0);\n" },
   { id: "node-builtin.perf_hooks.performance.now", source: "console.log(performance.now() >= 0);\n" },
   { id: "node-builtin.path.join", source: 'import { join } from "node:path";\nconsole.log(join("a", "b"));\n' },
@@ -236,6 +244,12 @@ describe("surface manifest sampling harness", () => {
             renderAll(result.diagnostics, result.sourceTexts, { color: false }),
         );
       }
+      const dyn = analyze(file, { dynamic: true }).coverage;
+      expect(
+        dyn.diagnostics.map((d) => `${d.code}: ${d.message}`),
+        `${probe.id}: enabling --dynamic must not disable a static surface`,
+      ).toEqual([]);
+      expect(dyn.stats.statementsFailed).toBe(0);
       return;
     }
     // Non-static: the refusal's code must equal the entry's code — the
@@ -430,6 +444,49 @@ test("finite unions of dynamic-only Headers members retain the static fence", ()
   expect(coverage.diagnostics[0]!.message).toContain("Headers.keys in a static build");
   const dynamic = analyze(file, { dynamic: true }).coverage;
   expect(dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+});
+
+test("fetch handle method calls retain their receiver through bracket spellings", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.bracket-method-calls",
+    source:
+      '/// <reference types="node" />\n' +
+      'async function f(): Promise<void> {\n' +
+      '  const response = await fetch("http://127.0.0.1");\n' +
+      '  const header: string | null = response.headers["get"]("x-kind");\n' +
+      '  const text: string = await response["text"]();\n' +
+      '  const member: "get" | "has" = header === null ? "get" : "has";\n' +
+      '  const selected: string | boolean | null = response.headers[member]("x-kind");\n' +
+      '  void text; void selected;\n' +
+      '}\n' +
+      'void f;\n',
+  });
+  for (const dynamic of [false, true]) {
+    const coverage = analyze(file, { dynamic }).coverage;
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+    expect(coverage.stats.statementsFailed).toBe(0);
+  }
+});
+
+test("fetch companion surplus arguments remain supported under --dynamic", () => {
+  const dir = join(probeRoot, "fetch-companion-surplus");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "main.js");
+  writeFileSync(
+    file,
+    'const side = () => 1;\n' +
+      'void AbortSignal.abort(undefined, side());\n' +
+      'void AbortSignal.timeout(1, side());\n' +
+      'void AbortSignal.any([], side());\n' +
+      'void ReadableStream.from([], side());\n',
+  );
+  for (const dynamic of [false, true]) {
+    const coverage = analyze(file, { dynamic }).coverage;
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+    expect(coverage.stats.statementsFailed).toBe(0);
+  }
 });
 
 test("fetch interface object bindings retain the inventory fence code", () => {

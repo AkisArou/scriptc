@@ -1379,6 +1379,154 @@ export function lowerDynamicHeadersIteratorCall(
   };
 }
 
+/** Bracket-spelled calls on a profiled fetch/Web-stream handle. A call such
+ * as `headers["get"](name)` is still a method reference in JavaScript: the
+ * receiver must remain bound. Lower it before the generic callee-as-value
+ * path (which correctly fences bare method extraction), evaluating receiver,
+ * key, and arguments once in source order. Finite string-literal unions
+ * dispatch through fixed-name calls after the key value is captured. */
+export function lowerFetchElementMethodCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  if (
+    call.questionDotToken ||
+    !ts.isElementAccessExpression(call.expression) ||
+    call.expression.questionDotToken ||
+    call.arguments.some((argument) => ts.isSpreadElement(argument))
+  ) {
+    return null;
+  }
+  const access = call.expression;
+  const resolved = fetchInterfaceInventoryOwner(L, access.expression);
+  if (!resolved) return null;
+  const members = fetchElementMemberNames(L, access.argumentExpression);
+  if (
+    members === null ||
+    members.length === 0 ||
+    members.some((member) => member.startsWith("[Symbol."))
+  ) {
+    return null;
+  }
+  const rows = members.map((member) =>
+    NODE24_FETCH_COMPAT_PROFILE.inventory.entries.find((entry) =>
+      entry.owner === resolved.owner &&
+      entry.member === member &&
+      (entry.placement === "prototype" ||
+        entry.placement === "prototype-inherited")
+    )
+  );
+  if (
+    rows.some((row) =>
+      row === undefined ||
+      row.status === "out-of-scope" ||
+      (L.dynamic ? row.status === "unsupported" : row.status !== "static")
+    )
+  ) {
+    return null;
+  }
+
+  const receiver = L.lowerExpr(access.expression);
+  if (receiver.type.kind !== (L.dynamic ? "jsval" : "dyn")) return null;
+  const key = L.lowerExpr(access.argumentExpression);
+  if (key.type.kind !== "string") return null;
+  const loc = locOf(call);
+  const receiverLocal = L.declareHiddenLocal(
+    "%fetchReceiver",
+    L.dynamic ? JSVAL : DYN,
+  );
+  const keyLocal = L.declareHiddenLocal("%fetchMember", STRING);
+  const argumentValues = call.arguments.map((argument) =>
+    L.dynamic
+      ? L.jsvalIn(L.lowerExpr(argument), argument)
+      : L.lowerExprExpecting(argument, DYN)
+  );
+  const argumentLocals = argumentValues.map((argument) =>
+    L.declareHiddenLocal("%fetchMethodArg", argument.type)
+  );
+  const receiverRef: IrExpr = {
+    kind: "varRef",
+    localId: receiverLocal.id,
+    type: receiverLocal.type,
+    loc,
+  };
+  const keyRef: IrExpr = {
+    kind: "varRef",
+    localId: keyLocal.id,
+    type: STRING,
+    loc,
+  };
+  const argumentRefs = argumentLocals.map<IrExpr>((argument) => ({
+    kind: "varRef",
+    localId: argument.id,
+    type: argument.type,
+    loc,
+  }));
+  const invoke = (member: string): IrExpr =>
+    L.dynamic
+      ? {
+          kind: "jsOp",
+          op: "callMethod",
+          name: member,
+          args: [receiverRef, ...argumentRefs],
+          type: JSVAL,
+          loc,
+        }
+      : {
+          kind: "dynInvoke",
+          recv: receiverRef,
+          method: member,
+          calleeName: access.getText(),
+          args: argumentRefs,
+          type: DYN,
+          loc,
+        };
+  let result = invoke(members[members.length - 1]!);
+  for (let index = members.length - 2; index >= 0; index--) {
+    const member = members[index]!;
+    result = {
+      kind: "ternary",
+      cond: {
+        kind: "strEq",
+        negated: false,
+        left: keyRef,
+        right: { kind: "strLit", value: member, type: STRING, loc },
+        type: BOOL,
+        loc,
+      },
+      then: invoke(member),
+      else_: result,
+      type: result.type,
+      loc,
+    };
+  }
+  const declared = L.dynamic ? L.mapTypeOf(L.typeOf(call)) : null;
+  if (
+    declared &&
+    (declared.kind === "f64" ||
+      declared.kind === "bool" ||
+      declared.kind === "string")
+  ) {
+    result = { kind: "jsExit", value: result, type: declared, loc };
+  }
+  return {
+    kind: "seqExpr",
+    stmts: [
+      { kind: "varDecl", localId: receiverLocal.id, init: receiver, loc },
+      { kind: "varDecl", localId: keyLocal.id, init: key, loc },
+      ...argumentValues.map<IrStmt>((argument, index) => ({
+        kind: "varDecl",
+        localId: argumentLocals[index]!.id,
+        init: argument,
+        loc: argument.loc,
+      })),
+    ],
+    result,
+    type: result.type,
+    loc,
+  };
+}
+
 /** `[...headers]` in the dynamic tier: Array.from runs inside the engine
  * over the real Headers iterator, then the resulting pair array exits
  * through the checker's declared array type. For Headers this is the
@@ -1755,16 +1903,14 @@ export function lowerStaticAbortSignalListenerCall(
   };
 }
 
-/** `new ReadableStream(source?)` in a static build. The source record is
- * boxed into the checked-dynamic tree so start/pull/cancel callbacks can
- * be retained by the native controller. Strategies and BYOB sources are
- * deliberately left to the existing per-site fence. */
+/** `new ReadableStream(source?)`. Static builds box the source record into
+ * the checked-dynamic tree; dynamic builds construct the island's Web
+ * stream directly so the returned handle composes with dynamic fetch. */
 export function lowerStaticReadableStreamNew(
   L: Lowerer,
   expr: ts.NewExpression,
 ): IrExpr | null {
   if (
-    L.dynamic ||
     !ts.isIdentifier(expr.expression) ||
     expr.expression.text !== "ReadableStream"
   ) {
@@ -1775,6 +1921,28 @@ export function lowerStaticReadableStreamNew(
   const args = expr.arguments ?? [];
   if (args.length > 1) return null;
   const loc = locOf(expr);
+  if (L.dynamic) {
+    const ctor: IrExpr = {
+      kind: "jsOp",
+      op: "globalGet",
+      name: "ReadableStream",
+      args: [],
+      type: JSVAL,
+      loc,
+    };
+    const source = args[0] === undefined
+      ? null
+      : ts.isObjectLiteralExpression(args[0])
+        ? lowerIslandObjectLiteral(L, args[0])
+        : L.jsvalIn(L.lowerExpr(args[0]), args[0]);
+    return {
+      kind: "jsOp",
+      op: "construct",
+      args: source === null ? [ctor] : [ctor, source],
+      type: JSVAL,
+      loc,
+    };
+  }
   const source =
     args.length === 0
       ? dynUndefinedExpr(loc)
@@ -2187,14 +2355,23 @@ export function lowerStaticReadableStreamReaderCall(
         acc = { kind: "jsOp", op: "objSpread", args: [acc, spread], type: JSVAL, loc: locOf(prop) };
         continue;
       }
-      const propertyName = ts.isPropertyAssignment(prop)
-        ? requestInitLiteralKey(L, prop)
-        : null;
-      if (!ts.isPropertyAssignment(prop) || propertyName === null) {
+      if (
+        !ts.isPropertyAssignment(prop) &&
+        !ts.isShorthandPropertyAssignment(prop) &&
+        !ts.isMethodDeclaration(prop)
+      ) {
         L.unsupported(
           "SC1090",
           prop,
-          "this property form in an island-built object literal (use a spelled or pure const-folded key with `name: value`)",
+          "this property form in an island-built object literal (use a spelled or pure const-folded key with a value or method)",
+        );
+      }
+      const propertyName = requestInitLiteralKey(L, prop);
+      if (propertyName === null) {
+        L.unsupported(
+          "SC1090",
+          prop,
+          "this property key in an island-built object literal (use a spelled or pure const-folded key)",
         );
       }
       const nameLoc = locOf(prop.name);
@@ -2203,14 +2380,25 @@ export function lowerStaticReadableStreamReaderCall(
         value: { kind: "strLit", value: propertyName, type: STRING, loc: nameLoc },
         type: JSVAL, loc: nameLoc,
       });
-      const init = prop.initializer;
-      if (ts.isObjectLiteralExpression(init)) {
-        args.push(lowerIslandObjectLiteral(L, init));
-      } else if (ts.isArrayLiteralExpression(init) && !init.elements.some(ts.isSpreadElement)) {
-        const elems = init.elements.map((el) => L.jsvalIn(L.lowerExpr(el), el));
-        args.push({ kind: "jsOp", op: "arrLit", args: elems, type: JSVAL, loc: locOf(init) });
+      const valueNode: ts.Expression | ts.MethodDeclaration =
+        ts.isPropertyAssignment(prop)
+          ? prop.initializer
+          : ts.isShorthandPropertyAssignment(prop)
+            ? prop.name as ts.Identifier
+            : prop;
+      if (ts.isObjectLiteralExpression(valueNode)) {
+        args.push(lowerIslandObjectLiteral(L, valueNode));
+      } else if (
+        ts.isArrayLiteralExpression(valueNode) &&
+        !valueNode.elements.some(ts.isSpreadElement)
+      ) {
+        const elems = valueNode.elements.map((el) => L.jsvalIn(L.lowerExpr(el), el));
+        args.push({ kind: "jsOp", op: "arrLit", args: elems, type: JSVAL, loc: locOf(valueNode) });
       } else {
-        args.push(L.jsvalIn(L.lowerExpr(init), init));
+        const value = ts.isMethodDeclaration(valueNode)
+          ? (L.rejectThisInObjectMethod(valueNode.body ?? valueNode), L.lowerLambda(valueNode))
+          : L.lowerExpr(valueNode);
+        args.push(L.jsvalIn(value, valueNode));
       }
     }
     flushFields();
@@ -2249,8 +2437,7 @@ export function lowerStaticReadableStreamReaderCall(
       const sigMember = L.stdlibGlobalMember(access, "AbortSignal");
       if (
         (sigMember === "timeout" || sigMember === "abort" || sigMember === "any") &&
-        call.arguments.length <= 1 &&
-        (sigMember === "abort" || call.arguments.length === 1)
+        call.arguments.every((argument) => !ts.isSpreadElement(argument))
       ) {
         L.requireDynamicApi(`'AbortSignal.${sigMember}'`, call);
         const args = call.arguments.map((a) => L.jsvalIn(L.lowerExpr(a), a));
@@ -2262,6 +2449,33 @@ export function lowerStaticReadableStreamReaderCall(
           args: [signalGlobal, ...args], type: JSVAL, loc,
         };
       }
+    }
+    if (
+      L.stdlibGlobalMember(access, "ReadableStream") === "from" &&
+      call.arguments.every((argument) => !ts.isSpreadElement(argument))
+    ) {
+      L.requireDynamicApi("'ReadableStream.from'", call);
+      const streamGlobal: IrExpr = {
+        kind: "jsOp",
+        op: "globalGet",
+        name: "ReadableStream",
+        args: [],
+        type: JSVAL,
+        loc,
+      };
+      return {
+        kind: "jsOp",
+        op: "callMethod",
+        name: "from",
+        args: [
+          streamGlobal,
+          ...call.arguments.map((argument) =>
+            L.jsvalIn(L.lowerExpr(argument), argument)
+          ),
+        ],
+        type: JSVAL,
+        loc,
+      };
     }
     const isMath = L.stdlibGlobalMember(access, "Math") !== null;
     // The STATIC Math members (floor/min/max/random): one C call IS the

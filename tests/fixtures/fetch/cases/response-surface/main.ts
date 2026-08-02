@@ -12,7 +12,7 @@ async function main(baseUrl: string): Promise<void> {
   // getSetCookie on a cookie-less response, and the sorted forEach walk
   // (filtered to the fixture's own x- names — wire noise stays out).
   const r = await fetch(`${baseUrl}/text`);
-  const ct = r.headers.get("content-type");
+  const ct = r.headers["get"]("content-type");
   const kind = r.headers.get("x-kind");
   const missing = r.headers.get("x-nope");
   console.log("ct:", ct ?? "none");
@@ -38,7 +38,7 @@ async function main(baseUrl: string): Promise<void> {
   console.log("spread:", spreadHeaders.length);
   const [destructuredFirst] = r.headers;
   console.log("destructure:", destructuredFirst[0], destructuredFirst[1]);
-  const text: string = await r.text();
+  const text: string = await r["text"]();
   console.log("used:", r.bodyUsed, "url-tail:", r.url.endsWith("/text"), "redirected:", r.redirected);
   console.log("text:", text);
 
