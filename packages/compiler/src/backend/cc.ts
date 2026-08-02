@@ -1106,6 +1106,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(regex ? ["-I", vendorEngineDir()] : []),
     ...(opts.zlib ? ["-I", vendorZlibDir()] : []),
   ];
+  const programCompilerArgs = opts.cPath.endsWith(".ll")
+    ? [...cflags, "-Wno-override-module"]
+    : cflags;
+  const programSourceExtension = opts.cPath.endsWith(".ll") ? ".ll" : ".c";
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
   const cachePolicy = toolchainEnvironmentCachePolicy();
   const configuredCacheRoot = cacheRootDir();
@@ -1125,12 +1129,35 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   }
   const toolchainEnv = toolchainEnvironmentFingerprint();
   let implicitToolchain: string | null = null;
+  let runtimeCompilerInvocation: string | null = null;
+  let programCompilerInvocation: string | null = null;
   if (cachePolicy.runtimeObjects && configuredCacheRoot !== null) {
     try {
       implicitToolchain = await implicitToolchainFingerprint(driver, toolchainEnv);
     } catch {
       // An identity probe is cache machinery, never a reason a valid native
       // compile should fail. Disable every persistent tier for this invocation.
+      root = null;
+    }
+  }
+  if (root !== null) {
+    try {
+      runtimeCompilerInvocation = await effectiveCompilerInvocationFingerprint(
+        driver,
+        toolchainEnv,
+        cflags,
+      );
+      programCompilerInvocation = programSourceExtension === ".ll"
+        ? await effectiveCompilerInvocationFingerprint(
+            driver,
+            toolchainEnv,
+            programCompilerArgs,
+            programSourceExtension,
+          )
+        : runtimeCompilerInvocation;
+    } catch {
+      // A wrapper that cannot expose its effective invocation can still build,
+      // but its outputs cannot safely participate in a persistent cache.
       root = null;
     }
   }
@@ -1165,12 +1192,14 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       programDependencyHash = programDependencies;
       cachedProgramBytes = programBytes;
       const key = createHash("sha256")
-        // v6 adds the program TU's own resolved header graph to the archive
-        // identity; the shared probe only covers runtime/vendor includes.
-        .update("lib-v6\0")
+        // v7 adds effective compiler-wrapper invocations for the real runtime
+        // and program compile flavors.
+        .update("lib-v7\0")
         .update(cacheTargetIdentity(driver)).update("\0")
         .update(toolchainEnv).update("\0")
         .update(implicitToolchain!).update("\0")
+        .update(runtimeCompilerInvocation!).update("\0")
+        .update(programCompilerInvocation!).update("\0")
         .update(programDependencies).update("\0")
         .update(opts.cacheIdentity!).update("\0")
         .update(driver.argv.join("\x1f")).update("\0")
@@ -1272,8 +1301,13 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       let cacheInputsStable = true;
       let objectImplicitVerification: Promise<boolean> | null = null;
       const objectImplicitToolchainStillMatches = (): Promise<boolean> => {
-        objectImplicitVerification ??= implicitToolchainFingerprint(driver, toolchainEnv).then(
-          (current) => current === implicitToolchain,
+        objectImplicitVerification ??= Promise.all([
+          implicitToolchainFingerprint(driver, toolchainEnv),
+          effectiveCompilerInvocationFingerprint(driver, toolchainEnv, cflags),
+        ]).then(
+          ([currentImplicit, currentInvocation]) =>
+            currentImplicit === implicitToolchain &&
+            currentInvocation === runtimeCompilerInvocation,
           () => false,
         );
         return objectImplicitVerification;
@@ -1286,7 +1320,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
             driver.argv,
             cflags,
             sourcePaths,
-            `lib-obj-v4\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${implicitToolchain}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
+            `lib-obj-v5\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${implicitToolchain}\0${runtimeCompilerInvocation}\0${driver.argv.join(" ")}\0${compilerVersion}\0${runtimeHash}\0`,
             async () =>
               (await runtimeFingerprint(rtDir)) === runtimeHash &&
               (await objectImplicitToolchainStillMatches()),
@@ -1335,10 +1369,19 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         compilerVersion !== "" &&
         archiverVersion !== ""
       ) {
-        const [currentRuntime, currentImplicit, currentProgramDependencies, currentCompiler, currentArchiver] =
+        const [currentRuntime, currentImplicit, currentRuntimeInvocation, currentProgramInvocation, currentProgramDependencies, currentCompiler, currentArchiver] =
           await Promise.all([
             runtimeFingerprint(rtDir).catch(() => null),
             implicitToolchainFingerprint(driver, toolchainEnv).catch(() => null),
+            effectiveCompilerInvocationFingerprint(driver, toolchainEnv, cflags).catch(
+              () => null,
+            ),
+            effectiveCompilerInvocationFingerprint(
+              driver,
+              toolchainEnv,
+              programCompilerArgs,
+              programSourceExtension,
+            ).catch(() => null),
             translationUnitDependencyFingerprint(
               driver,
               cflags,
@@ -1353,6 +1396,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           cacheInputsStable &&
           currentRuntime === runtimeHash &&
           currentImplicit === implicitToolchain &&
+          currentRuntimeInvocation === runtimeCompilerInvocation &&
+          currentProgramInvocation === programCompilerInvocation &&
           currentProgramDependencies === programDependencyHash &&
           currentCompiler === compilerVersion &&
           currentArchiver === archiverVersion;
@@ -1383,6 +1428,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *
  *   bin/<key>       — whole program binaries. key = sha256(resolved clang
  *                     identity/version, target + compiler/linker environment,
+ *                     effective wrapper invocations for the real build flags,
  *                     implicit system-header and resolved linker-input bytes,
  *                     linker/assembler identities, runtime fingerprint
  *                     (every .c/.h in the runtime src dir plus the vendor pin
@@ -1402,8 +1448,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *
  *   lib/<key>       — whole library archives. The identity covers the resolved
  *                     compiler and archiver identities/versions, compiler/linker
- *                     environment and implicit toolchain inputs, runtime fingerprint, target/flags, gated
- *                     source set, caller dependency identity, TU path, and program-TU bytes.
+ *                     environment, effective build-flavor wrapper invocations,
+ *                     implicit toolchain inputs, runtime fingerprint,
+ *                     target/flags, gated source set, caller dependency
+ *                     identity, TU path, and program-TU bytes.
  *                     Checksum-verified hits skip native code generation and ar.
  *
  *   obj/<set>/<f>.o — per-flavor runtime objects for cache-miss builds. The
@@ -1413,7 +1461,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     Library-mode -DSCR_LIB objects use a distinct flavor.
  *                     The clang driver hands every input the same option set,
  *                     so per-TU `-c` compiles with those options plus a final
- *                     link reproduce the single invocation exactly. Every
+ *                     link reproduce the single invocation exactly; the
+ *                     wrapper's effective invocation under that flavor also
+ *                     joins the object-set identity. Every
  *                     cached object carries a verified digest. Object
  *                     compiles go through ccache when it is installed (silent
  *                     fallback when not).
@@ -1659,6 +1709,90 @@ function normalizedProbeInvocation(
     .split(probeDir).join("<probe>")
     .split(probeDir.replace(/\\/g, "\\\\")).join("<probe>")
     .trim();
+}
+
+interface EffectiveCompilerInvocationProbe {
+  compilerIdentity: string;
+  invocation: string;
+}
+
+const effectiveCompilerInvocationFallbacks = new Map<
+  string,
+  EffectiveCompilerInvocationProbe
+>();
+
+/** The effective cc1 invocation for the flags used by real runtime/program
+ * compiles. The broad implicit-toolchain probe below intentionally uses a
+ * target-wide synthetic TU so it can discover every owned system header, but
+ * that generic command is not sufficient identity for a wrapper that injects
+ * environment-derived flags only for a particular build flavor (for example,
+ * only when it sees -O2 or -DSCR_DYNAMIC). */
+async function effectiveCompilerInvocationFingerprint(
+  driver: Pick<CcDriver, "argv">,
+  environmentFingerprint: string,
+  compileArgs: readonly string[],
+  sourceExtension: ".c" | ".ll" = ".c",
+): Promise<string> {
+  const compiler = driver.argv[0] ?? "clang";
+  const fallbackKey = [
+    environmentFingerprint,
+    driver.argv.join("\x1f"),
+    compileArgs.join("\x1f"),
+    sourceExtension,
+  ].join("\0");
+  const compilerIdentity = await resolvedToolIdentity(compiler);
+  const fallback = effectiveCompilerInvocationFallbacks.get(fallbackKey);
+  let probe: EffectiveCompilerInvocationProbe;
+  if (compilerIdentity === null && fallback !== undefined) {
+    probe = fallback;
+  } else if (compilerIdentity === null) {
+    throw new Error("compiler unavailable before effective invocation identity was established");
+  } else {
+    const probeDir = await mkdtemp(join(tmpdir(), "scriptc-effective-cc-probe-"));
+    try {
+      const source = join(probeDir, `program${sourceExtension}`);
+      const output = join(probeDir, "program.o");
+      await writeFile(
+        source,
+        sourceExtension === ".ll"
+          ? "define i32 @scriptc_effective_probe() { ret i32 0 }\n"
+          : "int scriptc_effective_probe(void) { return 0; }\n",
+      );
+      const invocation = await execFileAsync(
+        compiler,
+        [
+          ...driver.argv.slice(1),
+          ...compileArgs,
+          "-###",
+          "-c",
+          source,
+          "-o",
+          output,
+        ],
+        { cwd: probeDir, maxBuffer: 16 * 1024 * 1024 },
+      );
+      probe = {
+        compilerIdentity,
+        invocation: normalizedProbeInvocation(invocation, probeDir),
+      };
+      effectiveCompilerInvocationFallbacks.set(fallbackKey, probe);
+    } finally {
+      await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  return createHash("sha256")
+    .update("effective-compiler-invocation-v1\0")
+    .update(probe.compilerIdentity)
+    .update("\0")
+    .update(driver.argv.join("\x1f"))
+    .update("\0")
+    .update(compileArgs.join("\x1f"))
+    .update("\0")
+    .update(sourceExtension)
+    .update("\0")
+    .update(probe.invocation)
+    .digest("hex");
 }
 
 async function nativeSourceFiles(
@@ -2041,13 +2175,17 @@ async function implicitLinkerFingerprint(
   driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
   environmentFingerprint: string,
   linkArgs: readonly string[],
+  effectiveInvocationArgs?: readonly string[],
 ): Promise<string> {
+  const invocationArgs =
+    effectiveInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
   const fallbackKey = [
     environmentFingerprint,
     driver.argv.join("\x1f"),
     driver.target ?? "<native>",
     driver.targetArgs.join("\x1f"),
     linkArgs.join("\x1f"),
+    invocationArgs.join("\x1f"),
   ].join("\0");
   const compiler = driver.argv[0] ?? "clang";
   const compilerIdentity = await resolvedToolIdentity(compiler);
@@ -2089,7 +2227,7 @@ async function implicitLinkerFingerprint(
       // alone cannot represent those output-affecting flags.
       const driverInvocation = await execFileAsync(
         compiler,
-        [...prefix, object, ...linkArgs, "-###", "-o", output],
+        [...driver.argv.slice(1), ...invocationArgs, object, "-###", "-o", output],
         { cwd: probeDir, maxBuffer: 32 * 1024 * 1024 },
       );
       let trace: { stdout: string; stderr: string };
@@ -2151,6 +2289,8 @@ async function implicitLinkerFingerprint(
     .update(driver.targetArgs.join("\x1f"))
     .update("\0")
     .update(linkArgs.join("\x1f"))
+    .update("\0")
+    .update(invocationArgs.join("\x1f"))
     .update("\0")
     .update(probe.dependencies.join("\x1f"))
     .update("\0")
@@ -2796,6 +2936,10 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(tlsArchive !== null ? ["-I", join(vendorTlsDir(), "include")] : []),
     ...(dynamic ? ["-DSCR_DYNAMIC"] : []),
   ];
+  const programCompilerArgs = opts.cPath.endsWith(".ll")
+    ? [...cflags, "-Wno-override-module"]
+    : cflags;
+  const programSourceExtension = opts.cPath.endsWith(".ll") ? ".ll" : ".c";
   const ccName = driver.argv.join(" ");
   const runClang = async (args: string[]): Promise<void> => {
     try {
@@ -2817,6 +2961,30 @@ export async function compileC(opts: CcOptions): Promise<void> {
       );
     }
   };
+
+  let runtimeCompilerInvocation: string | null = null;
+  let programCompilerInvocation: string | null = null;
+  if (root !== null) {
+    try {
+      runtimeCompilerInvocation = await effectiveCompilerInvocationFingerprint(
+        driver,
+        toolchainEnv,
+        cflags,
+      );
+      programCompilerInvocation = programSourceExtension === ".ll"
+        ? await effectiveCompilerInvocationFingerprint(
+            driver,
+            toolchainEnv,
+            programCompilerArgs,
+            programSourceExtension,
+          )
+        : runtimeCompilerInvocation;
+    } catch {
+      // Preserve the uncached build for wrappers that compile successfully but
+      // cannot provide a dry-run trace for the real build flavor.
+      root = null;
+    }
+  }
 
   if (root === null) {
     // The exact historical command line, byte for byte.
@@ -2884,10 +3052,35 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null ? ["-lz"] : []),
     ...driver.linkArgs,
   ];
+  // The dependency trace above uses only inputs needed to expose implicit
+  // linker files. Its wrapper dry run additionally needs the real build's
+  // compile/link flag shape: wrappers commonly inject flags conditionally on
+  // optimization, sanitizer, dynamic, or platform-link switches.
+  const effectiveLinkInvocationArgs = [
+    ...programCompilerArgs,
+    ...(targetPlatform(driver) === "win32"
+      ? ["-ladvapi32", "-liphlpapi", "-lws2_32"]
+      : []),
+    ...(tls && targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
+    ...(curlStubDir !== null ? [`-L${curlStubDir}`] : []),
+    ...(curlFetch && driver.target === null ? ["-lcurl"] : []),
+    ...(dynamic && !driver.linkArgs.includes("-lm") ? ["-lm"] : []),
+    ...(dynamic && targetPlatform(driver) === "darwin" ? ["-Wl,-dead_strip"] : []),
+    ...(dynamic && targetPlatform(driver) === "win32"
+      ? ["-Wl,--stack,8388608"]
+      : []),
+    ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null ? ["-lz"] : []),
+    ...driver.linkArgs,
+  ];
   let implicitLinker: string | null = null;
   if (cacheCompleteArtifact) {
     try {
-      implicitLinker = await implicitLinkerFingerprint(driver, toolchainEnv, linkProbeArgs);
+      implicitLinker = await implicitLinkerFingerprint(
+        driver,
+        toolchainEnv,
+        linkProbeArgs,
+        effectiveLinkInvocationArgs,
+      );
     } catch {
       // Some compiler wrappers/linkers do not implement trace mode. Runtime
       // objects remain safely cacheable, but a complete executable cannot be
@@ -2908,12 +3101,14 @@ export async function compileC(opts: CcOptions): Promise<void> {
       a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
     );
     const key = createHash("sha256")
-      // v8 adds the program TU's own resolved header graph; the shared probe
-      // only covers runtime/vendor includes.
-      .update("bin-v8\0")
+      // v9 adds effective compiler-wrapper invocations for the real runtime,
+      // program, and link flavors.
+      .update("bin-v9\0")
       .update(cacheTargetIdentity(driver)).update("\0")
       .update(toolchainEnv).update("\0")
       .update(implicitToolchain!).update("\0")
+      .update(runtimeCompilerInvocation!).update("\0")
+      .update(programCompilerInvocation!).update("\0")
       .update(implicitLinker!).update("\0")
       .update(programDependencies!).update("\0")
       .update(opts.cacheIdentity!).update("\0")
@@ -2987,8 +3182,13 @@ export async function compileC(opts: CcOptions): Promise<void> {
     let cacheInputsStable = true;
     let objectImplicitVerification: Promise<boolean> | null = null;
     const objectImplicitToolchainStillMatches = (): Promise<boolean> => {
-      objectImplicitVerification ??= implicitToolchainFingerprint(driver, toolchainEnv).then(
-        (current) => current === implicitToolchain,
+      objectImplicitVerification ??= Promise.all([
+        implicitToolchainFingerprint(driver, toolchainEnv),
+        effectiveCompilerInvocationFingerprint(driver, toolchainEnv, cflags),
+      ]).then(
+        ([currentImplicit, currentInvocation]) =>
+          currentImplicit === implicitToolchain &&
+          currentInvocation === runtimeCompilerInvocation,
         () => false,
       );
       return objectImplicitVerification;
@@ -2999,7 +3199,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
         driver.argv,
         cflags,
         rtInputs,
-        `obj-v4\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${implicitToolchain}\0${ccName}\0${cv}\0${fingerprint}\0`,
+        `obj-v5\0${cacheTargetIdentity(driver)}\0${toolchainEnv}\0${implicitToolchain}\0${runtimeCompilerInvocation}\0${ccName}\0${cv}\0${fingerprint}\0`,
         async () =>
           (await runtimeFingerprint(rtDir)) === fingerprint &&
           (await objectImplicitToolchainStillMatches()),
@@ -3023,10 +3223,19 @@ export async function compileC(opts: CcOptions): Promise<void> {
       // verification above. The final program compile/link can itself race an
       // SDK header, compiler, linker, CRT, or system-library replacement; its
       // bytes must not be published under the pre-build identity in that case.
-      const [currentRuntime, currentImplicit, currentProgramDependencies, currentLinker, currentCompiler] =
+      const [currentRuntime, currentImplicit, currentRuntimeInvocation, currentProgramInvocation, currentProgramDependencies, currentLinker, currentCompiler] =
         await Promise.all([
           runtimeFingerprint(rtDir).catch(() => null),
           implicitToolchainFingerprint(driver, toolchainEnv).catch(() => null),
+          effectiveCompilerInvocationFingerprint(driver, toolchainEnv, cflags).catch(
+            () => null,
+          ),
+          effectiveCompilerInvocationFingerprint(
+            driver,
+            toolchainEnv,
+            programCompilerArgs,
+            programSourceExtension,
+          ).catch(() => null),
           translationUnitDependencyFingerprint(
             driver,
             cflags,
@@ -3034,13 +3243,20 @@ export async function compileC(opts: CcOptions): Promise<void> {
             cBytes,
             toolchainEnv,
           ).catch(() => null),
-          implicitLinkerFingerprint(driver, toolchainEnv, linkProbeArgs).catch(() => null),
+          implicitLinkerFingerprint(
+            driver,
+            toolchainEnv,
+            linkProbeArgs,
+            effectiveLinkInvocationArgs,
+          ).catch(() => null),
           ccVersionOnce(driver.argv, toolchainEnv, true).catch(() => null),
         ]);
       cacheInputsStable =
         cacheInputsStable &&
         currentRuntime === fingerprint &&
         currentImplicit === implicitToolchain &&
+        currentRuntimeInvocation === runtimeCompilerInvocation &&
+        currentProgramInvocation === programCompilerInvocation &&
         currentProgramDependencies === programDependencies &&
         currentLinker === implicitLinker &&
         currentCompiler === cv;

@@ -292,7 +292,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -DSCRIPTC_PATH_PROBE=${value} "$@"
 );
 
 test.skipIf(process.platform === "win32")(
-  "compiler-wrapper environment flags join the cache identity",
+  "build-flavor-specific compiler-wrapper flags join the cache identity",
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-wrapper-env-"));
     scratch.push(dir);
@@ -321,7 +321,14 @@ test.skipIf(process.platform === "win32")(
 if [ "$1" = "--version" ]; then
   exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
 fi
-exec "$SCRIPTC_TEST_REAL_CLANG" "-DSCRIPTC_WRAPPER_VALUE=$SCRIPTC_TEST_WRAPPER_VALUE" "$@"
+inject=0
+for arg in "$@"; do
+  if [ "$arg" = "-O2" ]; then inject=1; fi
+done
+if [ "$inject" = 1 ]; then
+  exec "$SCRIPTC_TEST_REAL_CLANG" "-DSCRIPTC_WRAPPER_VALUE=$SCRIPTC_TEST_WRAPPER_VALUE" "$@"
+fi
+exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
 `,
       );
       await chmod(wrapper, 0o755);
@@ -340,12 +347,15 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "-DSCRIPTC_WRAPPER_VALUE=$SCRIPTC_TEST_WRAPPER_V
       expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("1");
 
       // This variable is intentionally absent from scriptc's fixed environment
-      // allowlist. The wrapper's effective compiler invocation must still make
-      // its injected value part of the cache identity.
+      // allowlist, and the wrapper injects it only for the real -O2 build
+      // flavor. A generic metadata-probe trace must not hide the change.
       process.env["SCRIPTC_TEST_WRAPPER_VALUE"] = "2";
       await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("2");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
+      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      expect(objectSets).toHaveLength(2);
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
       else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
@@ -364,7 +374,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "-DSCRIPTC_WRAPPER_VALUE=$SCRIPTC_TEST_WRAPPER_V
 );
 
 test.skipIf(process.platform === "win32")(
-  "compiler-wrapper link-only flags join the complete artifact identity",
+  "build-flavor-specific compiler-wrapper link flags join the artifact identity",
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-wrapper-link-env-"));
     scratch.push(dir);
@@ -396,12 +406,14 @@ case "$1" in
   --version|-print-prog-name=*) exec "$SCRIPTC_TEST_REAL_CLANG" "$@" ;;
 esac
 link=1
+flavor=0
 for arg in "$@"; do
   case "$arg" in
     -c|-M|-MM|-E|-S) link=0 ;;
+    -O2) flavor=1 ;;
   esac
 done
-if [ "$link" = 1 ]; then
+if [ "$link" = 1 ] && [ "$flavor" = 1 ]; then
   exec "$SCRIPTC_TEST_REAL_CLANG" "-Wl,-rpath,$SCRIPTC_TEST_WRAPPER_RPATH" "$@"
 fi
 exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
@@ -419,8 +431,8 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
       expect((await readFile(outPath)).includes(Buffer.from(firstRpath))).toBe(true);
 
-      // The wrapper's compile-only trace and resolved linker inputs are
-      // unchanged; only its effective link invocation exposes this value.
+      // The wrapper's generic link trace and resolved linker inputs are
+      // unchanged; only the real -O2 link flavor exposes this value.
       process.env["SCRIPTC_TEST_WRAPPER_RPATH"] = secondRpath;
       await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
       const secondBinary = await readFile(outPath);
