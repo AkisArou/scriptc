@@ -3504,6 +3504,22 @@ function validateFunction(
           }
           break;
         }
+        if (e.fn === "fetch.responseText" || e.fn === "fetch.responseBytes") {
+          const valueType = e.fn === "fetch.responseText" ? STRING : BYTES_U8;
+          const inner = e.type.kind === "promise" ? e.type.inner : null;
+          const union = inner?.kind === "union" ? unions.get(inner.unionId) : undefined;
+          if (
+            inner === null ||
+            (!typeEquals(inner, valueType) &&
+              !union?.arms.some((arm) => typeEquals(arm, valueType)))
+          ) {
+            err(
+              `libCall ${e.fn} must return a promise whose value includes ${valueType.kind}`,
+              e.loc,
+            );
+          }
+          break;
+        }
         if (e.fn === "string.fromCharCode") {
           // One packed f64[] or one bytes value (the spread form).
           const t = e.args[0]?.type;

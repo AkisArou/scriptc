@@ -385,6 +385,22 @@ test("RequestInit wrapper tracing respects a later property override", () => {
   }
 });
 
+test("RequestInit spread tracing respects a later undefined override", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.request-init.spread-undefined-override",
+    source:
+      '/// <reference types="node" />\n' +
+      'const unsupported = { cache: "no-store" } as const;\n' +
+      'void fetch("http://127.0.0.1", { ...unsupported, cache: undefined });\n',
+  });
+  for (const dynamic of [false, true]) {
+    const coverage = analyze(file, { dynamic }).coverage;
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+    expect(coverage.stats.statementsFailed).toBe(0);
+  }
+});
+
 test("RequestInit traces const object and tuple binding aliases", () => {
   const file = probeFile({
     id: "stdlib.fetch.request-init.cache.destructured-alias",
@@ -467,6 +483,25 @@ test("fetch handle method calls retain their receiver through bracket spellings"
     expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
     expect(coverage.stats.statementsFailed).toBe(0);
   }
+});
+
+test("static Response method unions retain their declared promise result", () => {
+  const file = probeFile({
+    id: "stdlib.response.computed-body-method-union",
+    source:
+      '/// <reference types="node" />\n' +
+      'async function f(select: boolean): Promise<void> {\n' +
+      '  const response = await fetch("http://127.0.0.1");\n' +
+      '  const member: "text" | "bytes" = select ? "text" : "bytes";\n' +
+      '  const body: string | Uint8Array = await response[member]();\n' +
+      '  void body;\n' +
+      '}\n' +
+      'void f;\n',
+  });
+  const coverage = analyze(file).coverage;
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+  expect(coverage.stats.statementsFailed).toBe(0);
 });
 
 test("fetch companion surplus arguments remain supported under --dynamic", () => {

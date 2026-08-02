@@ -30,6 +30,22 @@ const pendingBytes: Promise<Uint8Array> = (
 const storedBytes = await pendingBytes;
 console.log("stored bytes promise:", storedBytes.length, storedBytes[0]);
 
+async function readComputedBody(
+  response: Response,
+  asBytes: boolean,
+): Promise<string> {
+  const member: "text" | "bytes" = asBytes ? "bytes" : "text";
+  const value: string | Uint8Array = await response[member]();
+  return typeof value === "string"
+    ? `text:${value}`
+    : `bytes:${value.length}:${value[0]}`;
+}
+console.log(
+  "computed response body:",
+  await readComputedBody(await fetch(`${process.argv[2]}/text`), false),
+  await readComputedBody(await fetch(`${process.argv[2]}/text`), true),
+);
+
 const arityHeaders: any = (await fetch(`${process.argv[2]}/text`)).headers;
 try {
   arityHeaders.get();
@@ -264,6 +280,17 @@ try {
   const caught = error as Error;
   console.log("unsupported request init:", caught.name, caught.message);
 }
+
+const unsupportedThenUndefined = { cache: "no-store" } as const;
+const overwrittenUnsupportedInit = {
+  ...unsupportedThenUndefined,
+  cache: undefined,
+} as RequestInit;
+const overwrittenUnsupported = await fetch(
+  `${process.argv[2]}/text`,
+  overwrittenUnsupportedInit,
+);
+console.log("overwritten unsupported request init:", await overwrittenUnsupported.text());
 
 const matchedLength = await fetch(`${process.argv[2]}/post-echo`, {
   method: "POST",

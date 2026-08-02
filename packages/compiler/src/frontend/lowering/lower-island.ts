@@ -644,31 +644,70 @@ function fenceRequestInitObject(
   seen: Set<ts.Symbol>,
 ): void {
   const contextual = L.checker.getContextualType(init);
-  for (const prop of init.properties) {
-    if (ts.isSpreadAssignment(prop)) {
-      fenceRequestInitValueInner(L, prop.expression, seen);
-      continue;
+  const contextualArms =
+    contextual?.isUnionType() ? contextual.getTypes() : contextual ? [contextual] : [];
+  const rows = NODE24_FETCH_COMPAT_PROFILE.inventory.entries.filter((entry) =>
+    entry.owner === "RequestInit" && entry.placement === "dictionary"
+  );
+  const shadowed = new Set<string>();
+  const fence = (
+    row: (typeof rows)[number],
+    value: ts.Expression | null,
+    blame: ts.Node,
+  ): void => {
+    if (L.dynamic ? row.status !== "unsupported" : row.status === "static") return;
+    if (value !== null) {
+      const type = L.typeOf(requestInitValueExpr(value));
+      if (
+        ts.isVoidExpression(requestInitValueExpr(value)) ||
+        (type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0
+      ) {
+        return;
+      }
     }
-    const key = requestInitLiteralKey(L, prop);
-    if (key === null) continue;
-    const row = NODE24_FETCH_COMPAT_PROFILE.inventory.entries.find((entry) =>
-      entry.owner === "RequestInit" &&
-      entry.member === key &&
-      entry.placement === "dictionary"
-    );
-    if (L.dynamic ? row?.status !== "unsupported" : row?.status === "static") continue;
-    const contextualArms =
-      contextual?.isUnionType() ? contextual.getTypes() : contextual ? [contextual] : [];
     const sym = contextualArms
-      .map((arm) => L.checker.getPropertyOfType(arm, key))
+      .map((arm) => L.checker.getPropertyOfType(arm, row.member))
       .find((member) => member !== undefined);
     L.noLowering(
-      `RequestInit option '${key}'${L.dynamic ? "" : " in a static build"}`,
-      prop,
-      row?.reason ??
+      `RequestInit option '${row.member}'${L.dynamic ? "" : " in a static build"}`,
+      blame,
+      row.reason ??
         "the native static RequestInit surface is method, headers, body, duplex, redirect, and signal",
       sym,
     );
+  };
+
+  // Object spread is last-write-wins. Walk from the end and trace only the
+  // effective contributor for each dictionary member; a definite later
+  // `cache: undefined`, for example, suppresses an earlier unsupported
+  // cache value just as WebIDL observes at runtime.
+  for (let index = init.properties.length - 1; index >= 0; index--) {
+    const prop = init.properties[index]!;
+    if (ts.isSpreadAssignment(prop)) {
+      for (const row of rows) {
+        if (shadowed.has(row.member)) continue;
+        const defines = visitRequestInitConstPropertyValues(
+          L,
+          prop.expression,
+          row.member,
+          new Set(seen),
+          (value) => fence(row, value, value),
+        );
+        if (defines) shadowed.add(row.member);
+      }
+      continue;
+    }
+    const key = requestInitLiteralKey(L, prop);
+    if (key === null || shadowed.has(key)) continue;
+    shadowed.add(key);
+    const row = rows.find((entry) => entry.member === key);
+    if (!row) continue;
+    const value = ts.isPropertyAssignment(prop)
+      ? prop.initializer
+      : ts.isShorthandPropertyAssignment(prop) && ts.isIdentifier(prop.name)
+      ? prop.name
+      : null;
+    fence(row, value, prop);
   }
 }
 
@@ -1604,6 +1643,23 @@ export function lowerFetchElementMethodCall(
     type: argument.type,
     loc,
   }));
+  const staticResponsePromise: IrType | null =
+    !L.dynamic &&
+      resolved.owner === "Response" &&
+      call.arguments.length === 0 &&
+      members.every((member) => member === "text" || member === "bytes")
+      ? (() => {
+          // The checker spells this call as
+          // `Promise<string> | Promise<Uint8Array>`, a promise union that
+          // intentionally has no IR representation. At an await site its
+          // result is the ordinary representable value union; use that
+          // contextual type for the bridge's fulfillment adapter.
+          const inner = ts.isAwaitExpression(call.parent)
+            ? L.mapTypeOf(L.typeOf(call.parent))
+            : null;
+          return inner ? { kind: "promise", inner } : null;
+        })()
+      : null;
   const invoke = (member: string): IrExpr =>
     L.dynamic
       ? {
@@ -1612,6 +1668,14 @@ export function lowerFetchElementMethodCall(
           name: member,
           args: [receiverRef, ...argumentRefs],
           type: JSVAL,
+          loc,
+        }
+      : staticResponsePromise !== null
+      ? {
+          kind: "libCall",
+          fn: member === "text" ? "fetch.responseText" : "fetch.responseBytes",
+          args: [receiverRef],
+          type: staticResponsePromise,
           loc,
         }
       : {
@@ -1626,11 +1690,12 @@ export function lowerFetchElementMethodCall(
   // Literal-string unions share the STRING carrier. A cast can therefore
   // smuggle a different runtime key into this call; validate all arms and
   // fail loudly rather than dispatching every mismatch to the last member.
+  const invocationType = staticResponsePromise ?? (L.dynamic ? JSVAL : DYN);
   let result: IrExpr = nodeThrowExpr(
     1,
     "",
     `${access.getText()} is not a function`,
-    L.dynamic ? JSVAL : DYN,
+    invocationType,
     loc,
   );
   for (let index = members.length - 1; index >= 0; index--) {

@@ -4,6 +4,7 @@
 // pinned Node runtime through code executing inside the dynamic island.
 import {
   immediateCancelIterable,
+  requestInitConversionOrder,
   requestInitReadOrder,
   streamFromProtocolProbe,
 } from "stream-from-cancel-probe";
@@ -12,3 +13,4 @@ await ReadableStream.from(immediateCancelIterable() as any).cancel("why");
 console.log("immediate cancel done");
 await streamFromProtocolProbe();
 await requestInitReadOrder(`${process.argv[2]}/text`);
+await requestInitConversionOrder(`${process.argv[2]}/text`);
