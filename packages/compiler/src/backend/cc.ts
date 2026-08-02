@@ -1119,8 +1119,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     configuredCacheRoot !== null &&
     await compilerDriverSupportsPersistentCache(driver, toolchainEnv);
   // A library archive is compile-only from clang's perspective. Link-only
-  // search variables cannot affect it, but any mutable compilation input
-  // or an opaque compiler wrapper makes every persistent tier unsafe to reuse.
+  // search variables cannot affect it, but any mutable compilation input or
+  // opaque compiler wrapper makes every persistent tier unsafe to reuse. An
+  // opaque archiver narrows only the completed-archive tier below.
   let root =
     opts.cacheIdentity === undefined || !persistentDriverCache
       ? null
@@ -1172,6 +1173,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     driver,
     `${toolchainEnv}\0${implicitToolchain ?? "<uncached>"}`,
   );
+  const cacheCompleteArchive =
+    root !== null && await archiverSupportsPersistentCache(arArgv, driver);
   let cachedArchive: string | null = null;
   let compilerVersion = "";
   let archiverVersion = "";
@@ -1180,64 +1183,68 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   let cachedProgramBytes: Buffer | null = null;
   if (root !== null) {
     try {
-      const [cv, av, fingerprint, programBytes] = await Promise.all([
+      const [cv, fingerprint, programBytes] = await Promise.all([
         ccVersionOnce(driver.argv, toolchainEnv, true),
-        toolVersionOnce(arArgv, toolchainEnv, true),
         runtimeFingerprint(rtDir),
         readFile(opts.cPath),
       ]);
-      const programDependencies = await translationUnitDependencyFingerprint(
-        driver,
-        cflags,
-        opts.cPath,
-        programBytes,
-        toolchainEnv,
-      );
       compilerVersion = cv;
-      archiverVersion = av;
       runtimeHash = fingerprint;
-      programDependencyHash = programDependencies;
       cachedProgramBytes = programBytes;
-      const key = createHash("sha256")
-        // v7 adds effective compiler-wrapper invocations for the real runtime
-        // and program compile flavors.
-        .update("lib-v7\0")
-        .update(cacheTargetIdentity(driver)).update("\0")
-        .update(toolchainEnv).update("\0")
-        .update(implicitToolchain!).update("\0")
-        .update(runtimeCompilerInvocation!).update("\0")
-        .update(programCompilerInvocation!).update("\0")
-        .update(programDependencies).update("\0")
-        .update(opts.cacheIdentity!).update("\0")
-        .update(driver.argv.join("\x1f")).update("\0")
-        .update(cv).update("\0")
-        .update(fingerprint).update("\0")
-        .update(arArgv.join("\x1f")).update("\0")
-        .update(av).update("\0")
-        .update(cflags.join("\x1f")).update("\0")
-        .update(sources.join("\x1f")).update("\0")
-        // The compiler-visible spelling and resolved location are both inputs:
-        // __FILE__ observes the former, while relative includes follow the
-        // latter. Archive members also inherit the TU's basename.
-        .update(opts.cPath).update("\0")
-        .update(resolve(opts.cPath)).update("\0")
-        .update(programBytes)
-        .digest("hex");
-      cachedArchive = join(root, "lib", key);
-      const tmpOut = privateSiblingPath(opts.outPath, "lib-hit");
-      try {
-        await mkdir(dirname(opts.outPath), { recursive: true });
-        if (!(await copyValidCachedFile(cachedArchive, tmpOut))) {
-          throw new Error("invalid cached library archive");
+      if (cacheCompleteArchive) {
+        const [av, programDependencies] = await Promise.all([
+          toolVersionOnce(arArgv, toolchainEnv, true),
+          translationUnitDependencyFingerprint(
+            driver,
+            cflags,
+            opts.cPath,
+            programBytes,
+            toolchainEnv,
+          ),
+        ]);
+        archiverVersion = av;
+        programDependencyHash = programDependencies;
+        const key = createHash("sha256")
+          // v7 adds effective compiler-wrapper invocations for the real runtime
+          // and program compile flavors.
+          .update("lib-v7\0")
+          .update(cacheTargetIdentity(driver)).update("\0")
+          .update(toolchainEnv).update("\0")
+          .update(implicitToolchain!).update("\0")
+          .update(runtimeCompilerInvocation!).update("\0")
+          .update(programCompilerInvocation!).update("\0")
+          .update(programDependencies).update("\0")
+          .update(opts.cacheIdentity!).update("\0")
+          .update(driver.argv.join("\x1f")).update("\0")
+          .update(cv).update("\0")
+          .update(fingerprint).update("\0")
+          .update(arArgv.join("\x1f")).update("\0")
+          .update(av).update("\0")
+          .update(cflags.join("\x1f")).update("\0")
+          .update(sources.join("\x1f")).update("\0")
+          // The compiler-visible spelling and resolved location are both inputs:
+          // __FILE__ observes the former, while relative includes follow the
+          // latter. Archive members also inherit the TU's basename.
+          .update(opts.cPath).update("\0")
+          .update(resolve(opts.cPath)).update("\0")
+          .update(programBytes)
+          .digest("hex");
+        cachedArchive = join(root, "lib", key);
+        const tmpOut = privateSiblingPath(opts.outPath, "lib-hit");
+        try {
+          await mkdir(dirname(opts.outPath), { recursive: true });
+          if (!(await copyValidCachedFile(cachedArchive, tmpOut))) {
+            throw new Error("invalid cached library archive");
+          }
+          // Match a fresh `ar` output under the caller's current umask. Cache
+          // entries may have been populated by a less restrictive shell.
+          await chmod(tmpOut, 0o666 & ~process.umask());
+          await rename(tmpOut, opts.outPath);
+          return;
+        } catch {
+          await rm(tmpOut, { force: true }).catch(() => undefined);
+          // Miss (or unreadable cache): compile below and publish best-effort.
         }
-        // Match a fresh `ar` output under the caller's current umask. Cache
-        // entries may have been populated by a less restrictive shell.
-        await chmod(tmpOut, 0o666 & ~process.umask());
-        await rename(tmpOut, opts.outPath);
-        return;
-      } catch {
-        await rm(tmpOut, { force: true }).catch(() => undefined);
-        // Miss (or unreadable cache): compile below and publish best-effort.
       }
     } catch {
       // Cache identity trouble is never a build failure. The fresh path below
@@ -1412,7 +1419,6 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       if (cachedArchive !== null && root !== null && runtimeStillMatchesKey) {
         try {
           await publishCachedFile(archiveOutput, cachedArchive);
-          await pruneCache(root);
         } catch {
           // Publishing is best-effort; the requested archive is already valid.
         }
@@ -1425,6 +1431,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       await rm(transientVendorRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }
+  if (root !== null) await pruneCache(root).catch(() => undefined);
 }
 
 /* -------------------------- persistent build cache ---------------------------
@@ -1482,6 +1489,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * the real source/object topology and inject inputs no synthetic probe sees.
  * Direct Clang/Zig drivers and Apple's immutable /usr/bin/clang handoff retain
  * caching; wrapper-driven builds use private, invocation-local vendor outputs.
+ * Opaque archiver wrappers bypass completed library archives for the same
+ * reason while retaining safely keyed runtime objects.
  * Builds with caller-supplied native link inputs (archive/object paths or
  * `-l<name>` libraries) also bypass the whole binary cache: a thin archive,
  * linker script, or ambient resolution can change transitively without
@@ -1561,7 +1570,6 @@ async function ensurePrivateCacheRoot(
 }
 
 const ccVersionMemos = new Map<string, Promise<string>>();
-const ccVersionFallbacks = new Map<string, Promise<string>>();
 
 interface ResolvedTool {
   canonicalPath: string;
@@ -1629,7 +1637,6 @@ async function resolvedToolIdentity(
   return (await resolvedTool(command, env))?.cacheIdentity ?? null;
 }
 
-const directCompilerDriverFallbacks = new Map<string, boolean>();
 const directCompilerDriverMemos = new Map<string, boolean>();
 
 /** `/usr/bin/clang` on Darwin is Apple's immutable driver shim: its `-###`
@@ -1660,7 +1667,7 @@ async function compilerDriverSupportsPersistentCache(
   // wrapper. This is deliberately undocumented and test-scoped.
   if (process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"] === "1") return true;
 
-  const fallbackKey = [
+  const driverKey = [
     environmentFingerprint,
     driver.argv.join("\x1f"),
     driver.target ?? "<native>",
@@ -1668,19 +1675,14 @@ async function compilerDriverSupportsPersistentCache(
   ].join("\0");
   const compiler = driver.argv[0] ?? "clang";
   const resolvedDriver = await resolvedTool(compiler);
-  if (resolvedDriver === null) {
-    return directCompilerDriverFallbacks.get(fallbackKey) ?? false;
-  }
-  const probeKey = `${fallbackKey}\0${resolvedDriver.fileIdentity}`;
+  // A prior dependency list cannot prove that name resolution is unchanged:
+  // a new header in an earlier search directory leaves every previously
+  // resolved file untouched. Require the driver to be present so each cache
+  // invocation can rediscover its complete dependency graph.
+  if (resolvedDriver === null) return false;
+  const probeKey = `${driverKey}\0${resolvedDriver.fileIdentity}`;
   const memoized = directCompilerDriverMemos.get(probeKey);
-  if (memoized !== undefined) {
-    // PATH is deliberately absent from the environment fingerprint so a
-    // complete hit can survive the compiler disappearing later in this
-    // process. Keep that spelling-level fallback aligned with whichever
-    // resolved driver was observed most recently, even on a memo hit.
-    directCompilerDriverFallbacks.set(fallbackKey, memoized);
-    return memoized;
-  }
+  if (memoized !== undefined) return memoized;
 
   const probeDir = await mkdtemp(join(tmpdir(), "scriptc-driver-probe-"));
   let direct = false;
@@ -1719,9 +1721,40 @@ async function compilerDriverSupportsPersistentCache(
   } finally {
     await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
   }
-  directCompilerDriverFallbacks.set(fallbackKey, direct);
   directCompilerDriverMemos.set(probeKey, direct);
   return direct;
+}
+
+/** Complete library archives may skip `ar`, so the selected archiver must be
+ * as inspectable as the compiler. `zig ar` is the already-validated Zig
+ * executable. For the host spelling, accept only the immutable platform
+ * tool locations; a PATH wrapper can branch on the real member topology or
+ * inject mutable inputs that `ar --version` cannot expose. Other archivers
+ * retain runtime-object reuse but rebuild the program member and archive. */
+async function archiverSupportsPersistentCache(
+  arArgv: readonly string[],
+  driver: Pick<CcDriver, "argv">,
+): Promise<boolean> {
+  if (
+    arArgv.length === 2 &&
+    arArgv[0] === driver.argv[0] &&
+    arArgv[1] === "ar" &&
+    driver.argv[0] === "zig"
+  ) {
+    return true;
+  }
+  if (arArgv.length !== 1) return false;
+  const archiver = await resolvedTool(arArgv[0] ?? "ar");
+  if (archiver === null || !/(?:^|-)ar$/.test(basename(archiver.canonicalPath))) {
+    return false;
+  }
+  if (archiver.canonicalPath.startsWith("/usr/bin/") || archiver.canonicalPath.startsWith("/bin/")) {
+    return true;
+  }
+  return process.platform === "darwin" &&
+    /^\/Applications\/Xcode[^/]*\.app\/Contents\/Developer\/Toolchains\/[^/]+\.xctoolchain\/usr\/bin\/[^/]*ar$/.test(
+      archiver.canonicalPath,
+    );
 }
 
 export async function ccVersionOnce(
@@ -1731,14 +1764,6 @@ export async function ccVersionOnce(
 ): Promise<string> {
   const spellingKey = `${environmentFingerprint}\0${argv.join("\x1f")}`;
   const executableIdentity = await resolvedToolIdentity(argv[0] ?? "clang");
-  // A complete hit may remain useful after the compiler disappears (the
-  // vendor-prerequisite ordering contract). Reuse the identity this process
-  // already established only when resolution now fails; a newly resolved
-  // executable always gets its own key.
-  if (executableIdentity === null) {
-    const fallback = ccVersionFallbacks.get(spellingKey);
-    if (fallback !== undefined) return fallback;
-  }
   const key = `${spellingKey}\0${executableIdentity ?? "<unresolved>"}`;
   const probe = (): Promise<string> =>
     // `zig cc --version` (zig 0.16) drops an empty a.o in its cwd. A private
@@ -1764,7 +1789,6 @@ export async function ccVersionOnce(
   } else if (fresh) {
     ccVersionMemos.set(key, memo);
   }
-  if (executableIdentity !== null) ccVersionFallbacks.set(spellingKey, memo);
   return memo;
 }
 
@@ -1807,8 +1831,6 @@ interface ImplicitToolchainProbe {
   tools: { spelling: string; identity: string | null }[];
 }
 
-const implicitToolchainFallbacks = new Map<string, ImplicitToolchainProbe>();
-
 interface ImplicitLinkerProbe {
   compilerIdentity: string;
   linkerInvocation: string;
@@ -1816,8 +1838,6 @@ interface ImplicitLinkerProbe {
   dependencyFingerprint: string;
   linker: { spelling: string; identity: string | null };
 }
-
-const implicitLinkerFallbacks = new Map<string, ImplicitLinkerProbe>();
 
 function parseMakeDependencies(output: string, cwd: string = process.cwd()): string[] {
   const flattened = output.replace(/\\\r?\n/g, " ");
@@ -1867,11 +1887,6 @@ interface EffectiveCompilerInvocationProbe {
   dependencyFingerprint: string;
 }
 
-const effectiveCompilerInvocationFallbacks = new Map<
-  string,
-  EffectiveCompilerInvocationProbe
->();
-
 /** The effective cc1 invocation and injected dependencies for the flags used
  * by real runtime/program compiles. The broad implicit-toolchain probe below
  * intentionally uses a target-wide synthetic TU so it can discover every
@@ -1885,23 +1900,12 @@ async function effectiveCompilerInvocationFingerprint(
   sourceExtension: ".c" | ".ll" = ".c",
 ): Promise<string> {
   const compiler = driver.argv[0] ?? "clang";
-  const fallbackKey = [
-    environmentFingerprint,
-    driver.argv.join("\x1f"),
-    compileArgs.join("\x1f"),
-    sourceExtension,
-  ].join("\0");
   const compilerIdentity = await resolvedToolIdentity(compiler);
-  const fallback = effectiveCompilerInvocationFallbacks.get(fallbackKey);
-  let probe: EffectiveCompilerInvocationProbe;
-  if (compilerIdentity === null && fallback !== undefined) {
-    probe = {
-      ...fallback,
-      dependencyFingerprint: await fingerprintDependencyFiles(fallback.dependencies),
-    };
-  } else if (compilerIdentity === null) {
+  if (compilerIdentity === null) {
     throw new Error("compiler unavailable before effective invocation identity was established");
-  } else {
+  }
+  let probe: EffectiveCompilerInvocationProbe;
+  {
     const probeDir = await mkdtemp(join(tmpdir(), "scriptc-effective-cc-probe-"));
     try {
       const source = join(probeDir, `program${sourceExtension}`);
@@ -1938,7 +1942,6 @@ async function effectiveCompilerInvocationFingerprint(
         dependencies,
         dependencyFingerprint: await fingerprintDependencyFiles(dependencies),
       };
-      effectiveCompilerInvocationFallbacks.set(fallbackKey, probe);
     } finally {
       await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -1946,6 +1949,8 @@ async function effectiveCompilerInvocationFingerprint(
 
   return createHash("sha256")
     .update("effective-compiler-invocation-v2\0")
+    .update(environmentFingerprint)
+    .update("\0")
     .update(probe.compilerIdentity)
     .update("\0")
     .update(driver.argv.join("\x1f"))
@@ -2047,8 +2052,6 @@ interface TranslationUnitDependencyProbe {
   dependencyFingerprint: string;
 }
 
-const translationUnitDependencyFallbacks = new Map<string, TranslationUnitDependencyProbe>();
-
 /** Exact headers selected while preprocessing the caller's translation unit.
  * The shared toolchain probe covers the runtime/vendor trees, but compileC is
  * also a public API: an opted-in caller can include a system or header-only SDK
@@ -2066,27 +2069,13 @@ async function translationUnitDependencyFingerprint(
     return createHash("sha256").update("translation-unit-dependencies-v1\0llvm-ir").digest("hex");
   }
 
-  const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
-  const fallbackKey = [
-    environmentFingerprint,
-    driver.argv.join("\x1f"),
-    cflags.join("\x1f"),
-    sourcePath,
-    resolve(sourcePath),
-    sourceHash,
-  ].join("\0");
   const compiler = driver.argv[0] ?? "clang";
   const compilerIdentity = await resolvedToolIdentity(compiler);
-  const fallback = translationUnitDependencyFallbacks.get(fallbackKey);
-  let probe: TranslationUnitDependencyProbe;
-  if (compilerIdentity === null && fallback !== undefined) {
-    probe = {
-      ...fallback,
-      dependencyFingerprint: await fingerprintDependencyFiles(fallback.dependencies),
-    };
-  } else if (compilerIdentity === null) {
+  if (compilerIdentity === null) {
     throw new Error("compiler unavailable before translation-unit dependencies were established");
-  } else {
+  }
+  let probe: TranslationUnitDependencyProbe;
+  {
     const probeDir = await mkdtemp(join(tmpdir(), "scriptc-tu-probe-"));
     try {
       const snapshot = join(probeDir, "program.c");
@@ -2116,7 +2105,6 @@ async function translationUnitDependencyFingerprint(
         dependencies,
         dependencyFingerprint: await fingerprintDependencyFiles(dependencies),
       };
-      translationUnitDependencyFallbacks.set(fallbackKey, probe);
     } finally {
       await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -2124,6 +2112,8 @@ async function translationUnitDependencyFingerprint(
 
   return createHash("sha256")
     .update("translation-unit-dependencies-v1\0")
+    .update(environmentFingerprint)
+    .update("\0")
     .update(probe.compilerIdentity)
     .update("\0")
     .update(probe.dependencies.join("\x1f"))
@@ -2140,37 +2130,19 @@ async function translationUnitDependencyFingerprint(
  * Vendored source snapshots remain keyed by their version pins. When the
  * compiler is available, dependency discovery runs afresh so an SDK/config
  * change that redirects includes cannot hide behind an unchanged old path
- * list. The discovered paths are retained only as a same-process fallback,
- * allowing a complete hit after PATH loses the compiler while still
- * re-reading every dependency behind those paths. */
+ * list. Dependency discovery must succeed on every cache-enabled invocation;
+ * a prior path list cannot reveal a new higher-priority header. */
 async function implicitToolchainFingerprint(
   driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
   environmentFingerprint: string,
 ): Promise<string> {
-  const fallbackKey = [
-    environmentFingerprint,
-    driver.argv.join("\x1f"),
-    driver.target ?? "<native>",
-    driver.targetArgs.join("\x1f"),
-  ].join("\0");
   let probe: ImplicitToolchainProbe;
   const compiler = driver.argv[0] ?? "clang";
   const compilerIdentity = await resolvedToolIdentity(compiler);
-  const fallback = implicitToolchainFallbacks.get(fallbackKey);
-  if (compilerIdentity === null && fallback !== undefined) {
-    const fallbackDependencyFingerprint = await fingerprintDependencyFiles(
-      fallback.dependencies,
-    ).catch(() => null);
-    if (fallbackDependencyFingerprint !== fallback.dependencyFingerprint) {
-      throw new Error("implicit toolchain dependencies changed after the compiler became unavailable");
-    }
-    probe = {
-      ...fallback,
-      dependencyFingerprint: fallbackDependencyFingerprint,
-    };
-  } else if (compilerIdentity === null) {
+  if (compilerIdentity === null) {
     throw new Error("compiler unavailable before implicit toolchain identity was established");
-  } else {
+  }
+  {
     const probeDir = await mkdtemp(join(tmpdir(), "scriptc-toolchain-probe-"));
     try {
       const dependencyIncludes = await implicitDependencyProbeIncludes(runtimeSrcDir());
@@ -2249,7 +2221,6 @@ async function implicitToolchainFingerprint(
           })),
         ),
       };
-      implicitToolchainFallbacks.set(fallbackKey, probe);
     } finally {
       await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -2257,6 +2228,8 @@ async function implicitToolchainFingerprint(
 
   const hash = createHash("sha256")
     .update("implicit-toolchain-v2\0")
+    .update(environmentFingerprint)
+    .update("\0")
     .update(probe.compilerIdentity)
     .update("\0")
     .update(probe.compilerInvocation)
@@ -2336,8 +2309,8 @@ export async function parseLinkTraceFiles(
  * runtimes, linker scripts, SDK stubs/import libraries, and every ambient
  * default library without guessing platform search layouts. The caller adds
  * build-flavor flags such as ASan and scriptc's own fixed `-l` arguments.
- * Resolved dependency paths are retained only for the compiler-unavailable
- * same-process hit path; an available compiler always performs a fresh trace. */
+ * Every cache-enabled invocation performs a fresh trace; a prior resolved path
+ * list cannot reveal a newly selected higher-priority linker input. */
 async function implicitLinkerFingerprint(
   driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
   environmentFingerprint: string,
@@ -2348,30 +2321,13 @@ async function implicitLinkerFingerprint(
   const invocationArgs =
     effectiveInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
   const traceArgs = traceInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
-  const fallbackKey = [
-    environmentFingerprint,
-    driver.argv.join("\x1f"),
-    driver.target ?? "<native>",
-    driver.targetArgs.join("\x1f"),
-    linkArgs.join("\x1f"),
-    invocationArgs.join("\x1f"),
-    traceArgs.join("\x1f"),
-  ].join("\0");
   const compiler = driver.argv[0] ?? "clang";
   const compilerIdentity = await resolvedToolIdentity(compiler);
-  const fallback = implicitLinkerFallbacks.get(fallbackKey);
-  let probe: ImplicitLinkerProbe;
-  if (compilerIdentity === null && fallback !== undefined) {
-    const dependencyFingerprint = await fingerprintDependencyFiles(
-      fallback.dependencies,
-    ).catch(() => null);
-    if (dependencyFingerprint !== fallback.dependencyFingerprint) {
-      throw new Error("implicit linker dependencies changed after the compiler became unavailable");
-    }
-    probe = { ...fallback, dependencyFingerprint };
-  } else if (compilerIdentity === null) {
+  if (compilerIdentity === null) {
     throw new Error("compiler unavailable before implicit linker identity was established");
-  } else {
+  }
+  let probe: ImplicitLinkerProbe;
+  {
     const probeDir = await mkdtemp(join(tmpdir(), "scriptc-linker-probe-"));
     try {
       const source = join(probeDir, "empty.c");
@@ -2445,7 +2401,6 @@ async function implicitLinkerFingerprint(
           identity: linkerSpelling === "" ? null : await resolvedToolIdentity(linkerSpelling),
         },
       };
-      implicitLinkerFallbacks.set(fallbackKey, probe);
     } finally {
       await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -2457,6 +2412,8 @@ async function implicitLinkerFingerprint(
       : await resolvedToolIdentity(probe.linker.spelling);
   return createHash("sha256")
     .update("implicit-linker-v3\0")
+    .update(environmentFingerprint)
+    .update("\0")
     .update(probe.compilerIdentity)
     .update("\0")
     .update(probe.linkerInvocation)

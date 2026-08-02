@@ -129,8 +129,8 @@ test("the toolchain environment joins cache identities", () => {
     toolchainEnvironmentFingerprint({ ZIG_LIBC: "/libc/two.conf" }),
   );
   // PATH is deliberately absent from this generic environment hash: the
-  // resolved executable identity is keyed separately, while a process that
-  // already established it can still use a hit after the tool disappears.
+  // resolved executable identity is keyed separately, while the compiler
+  // must still resolve on every cache-enabled call.
   expect(toolchainEnvironmentFingerprint({ PATH: "", CPATH: "/headers/one" })).toBe(base);
   expect(
     toolchainEnvironmentFingerprint({
@@ -323,6 +323,113 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       else process.env["SCRIPTC_TEST_PROGRAM_SOURCE"] = oldProgramSource;
       if (oldWrapperObject === undefined) delete process.env["SCRIPTC_TEST_WRAPPER_OBJECT"];
       else process.env["SCRIPTC_TEST_WRAPPER_OBJECT"] = oldWrapperObject;
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "opaque archiver wrappers rebuild library archives while retaining runtime objects",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-archiver-wrapper-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const binDir = join(dir, "bin");
+    const helperSource = join(dir, "helper.c");
+    const helperObject = join(dir, "helper.o");
+    const cPath = join(dir, "program.c");
+    const archivePath = join(dir, "program.lib.a");
+    const probeSource = join(dir, "probe.c");
+    const probePath = join(dir, "probe");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldDisableCcache = process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+    const oldPath = process.env["PATH"];
+    const oldRealAr = process.env["SCRIPTC_TEST_REAL_AR"];
+    const oldArExtra = process.env["SCRIPTC_TEST_AR_EXTRA"];
+    const originalClang = (oldPath ?? "")
+      .split(delimiter)
+      .map((entry) => join(entry === "" ? process.cwd() : entry, "clang"))
+      .find((candidate) => existsSync(candidate));
+    const originalAr = (oldPath ?? "")
+      .split(delimiter)
+      .map((entry) => join(entry === "" ? process.cwd() : entry, "ar"))
+      .find((candidate) => existsSync(candidate));
+    expect(originalClang).toBeDefined();
+    expect(originalAr).toBeDefined();
+
+    const buildHelper = async (value: number): Promise<void> => {
+      await writeFile(helperSource, `int scriptc_archiver_helper(void) { return ${value}; }\n`);
+      execFileSync(originalClang!, ["-c", helperSource, "-o", helperObject]);
+    };
+    const runProbe = (): string => {
+      execFileSync(originalClang!, [probeSource, archivePath, "-o", probePath]);
+      return execFileSync(probePath, { encoding: "utf8" }).trim();
+    };
+
+    try {
+      await mkdir(binDir);
+      await writeFile(
+        join(binDir, "ar"),
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  exec "$SCRIPTC_TEST_REAL_AR" "$@"
+fi
+exec "$SCRIPTC_TEST_REAL_AR" "$@" "$SCRIPTC_TEST_AR_EXTRA"
+`,
+      );
+      await chmod(join(binDir, "ar"), 0o755);
+      await writeFile(cPath, "int scriptc_program_member = 1;\n");
+      await writeFile(
+        probeSource,
+        '#include <stdio.h>\nint scriptc_archiver_helper(void);\nint main(void) { printf("%d\\n", scriptc_archiver_helper()); return 0; }\n',
+      );
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
+      process.env["SCRIPTC_TEST_REAL_AR"] = originalAr!;
+      process.env["SCRIPTC_TEST_AR_EXTRA"] = helperObject;
+      process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      delete process.env["SCRIPTC_NO_CACHE"];
+
+      await buildHelper(1);
+      await compileLibArchive({
+        cPath,
+        outPath: archivePath,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+      });
+      expect(runProbe()).toBe("1");
+      const objectSets = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      expect(objectSets).toHaveLength(1);
+      await expect(stat(join(cacheRoot, "lib"))).rejects.toMatchObject({ code: "ENOENT" });
+
+      // The wrapper executable/version and every scriptc-owned input remain
+      // unchanged. Only the mutable object it injects into `ar rcs` changes.
+      // A complete archive hit would silently retain the first definition.
+      await buildHelper(2);
+      await compileLibArchive({
+        cPath,
+        outPath: archivePath,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+      });
+      expect(runProbe()).toBe("2");
+      expect(
+        (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
+          .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-")),
+      ).toHaveLength(1);
+      await expect(stat(join(cacheRoot, "lib"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldDisableCcache === undefined) delete process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+      else process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = oldDisableCcache;
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
+      if (oldRealAr === undefined) delete process.env["SCRIPTC_TEST_REAL_AR"];
+      else process.env["SCRIPTC_TEST_REAL_AR"] = oldRealAr;
+      if (oldArExtra === undefined) delete process.env["SCRIPTC_TEST_AR_EXTRA"];
+      else process.env["SCRIPTC_TEST_AR_EXTRA"] = oldArExtra;
     }
   },
 );
@@ -962,6 +1069,57 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$selected" "$@"
 );
 
 test.skipIf(process.platform === "win32")(
+  "a missing compiler cannot reuse a dependency list that may have new higher-priority headers",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-missing-compiler-header-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const cPath = join(dir, "program.c");
+    const outPath = join(dir, "program");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldDisableCcache = process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+    const oldPath = process.env["PATH"];
+
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
+      delete process.env["SCRIPTC_NO_CACHE"];
+      await writeFile(
+        cPath,
+        '#include "scr_runtime.h"\n#include <stdio.h>\n#ifndef SHADOW_VALUE\n#define SHADOW_VALUE "old"\n#endif\nint main(void) { puts(SHADOW_VALUE); return 0; }\n',
+      );
+      await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("old");
+
+      // The old runtime header remains byte-identical, but this new local
+      // header wins quote-include resolution. Without a compiler, rehashing
+      // only the old dependency path cannot discover the new selection.
+      await writeFile(join(dir, "scr_runtime.h"), '#define SHADOW_VALUE "new"\n');
+      process.env["PATH"] = "";
+      await rm(outPath, { force: true });
+      await expect(
+        compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY }),
+      ).rejects.toThrow(/failed compiling/);
+
+      process.env["PATH"] = oldPath;
+      await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("new");
+      expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldDisableCcache === undefined) delete process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+      else process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = oldDisableCcache;
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
   "implicit linker inputs join the complete artifact identity",
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-implicit-link-"));
@@ -1075,12 +1233,21 @@ test.skipIf(process.platform === "win32" || zigExecutable === undefined)(
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(1);
 
       // lld-link rejects GNU ld's `-t`; the Zig `-###` fallback must still
-      // capture every absolute CRT/import-library input. With PATH empty, a
-      // miss cannot compile and therefore proves this is the complete hit.
-      process.env["PATH"] = "";
+      // capture every absolute CRT/import-library input. Pin the object-cache
+      // mtimes: a complete hit never stages them, while a miss promotes them.
+      const [objectSet] = (await readdir(join(cacheRoot, "obj"), { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("build-"));
+      expect(objectSet).toBeDefined();
+      const objectDir = join(cacheRoot, "obj", objectSet!.name);
+      const objectNames = (await readdir(objectDir)).filter((name) => name.endsWith(".o"));
+      const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
+      await Promise.all(objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)));
       const hitOut = join(dir, "hit.exe");
       await compileC({ cPath, outPath: hitOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(await readFile(hitOut)).toEqual(await readFile(firstOut));
+      for (const name of objectNames) {
+        expect((await stat(join(objectDir, name))).mtimeMs).toBe(pinnedTime.getTime());
+      }
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
       else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
@@ -1514,7 +1681,6 @@ test("complete binary hits precede missing vendor prerequisite materialization",
   const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
   const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
   const oldVendorCacheDir = process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
-  const oldPath = process.env["PATH"];
 
   try {
     process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
@@ -1534,10 +1700,10 @@ test("complete binary hits precede missing vendor prerequisite materialization",
     expect((await stat(vendorCacheRoot)).isDirectory()).toBe(true);
 
     // Simulate a package reinstall: the per-package vendor build disappears,
-    // while the per-user complete executable remains. An empty PATH turns any
-    // attempted prerequisite rebuild into an immediate failure.
+    // while the per-user complete executable remains. The hit must not
+    // recreate that directory even though the compiler remains available for
+    // fresh dependency discovery.
     await rm(vendorCacheRoot, { recursive: true, force: true });
-    process.env["PATH"] = "";
     const hitOut = firstOut;
     await compileC({
       cPath,
@@ -1554,8 +1720,6 @@ test("complete binary hits precede missing vendor prerequisite materialization",
     else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     if (oldVendorCacheDir === undefined) delete process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"];
     else process.env["SCRIPTC_TEST_VENDOR_CACHE_DIR"] = oldVendorCacheDir;
-    if (oldPath === undefined) delete process.env["PATH"];
-    else process.env["PATH"] = oldPath;
   }
 });
 
@@ -2309,16 +2473,18 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     const pinnedTime = new Date("2000-01-01T00:00:00.000Z");
     await Promise.all(objectNames.map((name) => utimes(join(objectDir, name), pinnedTime, pinnedTime)));
 
-    // A content hit needs no compiler or archiver. Empty PATH makes any
-    // accidental subprocess invocation fail while filesystem cache access
-    // remains available.
-    process.env["PATH"] = "";
+    // A content hit still performs fresh compiler/toolchain discovery, but it
+    // must not stage or promote the cached runtime objects.
     await rm(outPath, { force: true });
     await compileLibArchive({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(await readFile(outPath)).toEqual(firstArchive);
+    for (const name of objectNames) {
+      expect((await stat(join(objectDir, name))).mtimeMs).toBe(pinnedTime.getTime());
+    }
 
     // The hard disable bypasses the same valid entry in both directions.
     process.env["SCRIPTC_NO_CACHE"] = "1";
+    process.env["PATH"] = "";
     await rm(outPath, { force: true });
     await expect(
       compileLibArchive({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY }),
