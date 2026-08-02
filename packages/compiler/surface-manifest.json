@@ -2158,25 +2158,25 @@
       "id": "stdlib.fetch.request-init.cache",
       "kind": "stdlib",
       "name": "RequestInit.cache",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.credentials",
       "kind": "stdlib",
       "name": "RequestInit.credentials",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.dispatcher",
       "kind": "stdlib",
       "name": "RequestInit.dispatcher",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.duplex",
@@ -2196,17 +2196,17 @@
       "id": "stdlib.fetch.request-init.integrity",
       "kind": "stdlib",
       "name": "RequestInit.integrity",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.keepalive",
       "kind": "stdlib",
       "name": "RequestInit.keepalive",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.method",
@@ -2219,17 +2219,17 @@
       "id": "stdlib.fetch.request-init.mode",
       "kind": "stdlib",
       "name": "RequestInit.mode",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.priority",
       "kind": "stdlib",
       "name": "RequestInit.priority",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.redirect",
@@ -2242,17 +2242,17 @@
       "id": "stdlib.fetch.request-init.referrer",
       "kind": "stdlib",
       "name": "RequestInit.referrer",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.referrerPolicy",
       "kind": "stdlib",
       "name": "RequestInit.referrerPolicy",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.signal",
@@ -2265,9 +2265,9 @@
       "id": "stdlib.fetch.request-init.window",
       "kind": "stdlib",
       "name": "RequestInit.window",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the RequestInit member is outside the native transport projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.headers.append",
@@ -2716,9 +2716,9 @@
       "id": "stdlib.readable-stream.pipeTo",
       "kind": "stdlib",
       "name": "ReadableStream.pipeTo",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the wider Web Streams graph is outside the native readable-stream slice"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation"
     },
     {
       "id": "stdlib.readable-stream.symbol.asyncIterator",
@@ -2732,9 +2732,9 @@
       "id": "stdlib.readable-stream.tee",
       "kind": "stdlib",
       "name": "ReadableStream.tee",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the wider Web Streams graph is outside the native readable-stream slice"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation"
     },
     {
       "id": "stdlib.readable-stream.values",
@@ -2996,9 +2996,9 @@
       "id": "stdlib.response.blob",
       "kind": "stdlib",
       "name": "Response.blob",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the member is outside the native static handle projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation"
     },
     {
       "id": "stdlib.response.body",
@@ -3025,9 +3025,9 @@
       "id": "stdlib.response.clone",
       "kind": "stdlib",
       "name": "Response.clone",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the member is outside the native static handle projection"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation"
     },
     {
       "id": "stdlib.response.constructor",
@@ -3041,9 +3041,9 @@
       "id": "stdlib.response.formData",
       "kind": "stdlib",
       "name": "Response.formData",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; FormData values have no engine-free static representation"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation"
     },
     {
       "id": "stdlib.response.headers",

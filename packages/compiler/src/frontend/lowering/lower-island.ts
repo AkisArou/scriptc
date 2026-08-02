@@ -15,7 +15,6 @@ import {
   STATIC_HEADERS_CALLS,
   STATIC_READABLE_STREAM_CALLS,
   STATIC_READABLE_STREAM_READS,
-  STATIC_REQUEST_INIT_KEYS,
   STATIC_RESPONSE_CALLS,
   STATIC_RESPONSE_READS,
 } from "../../compat/fetch-profile.js";
@@ -256,9 +255,10 @@ function requestInitLiteralKey(
   return null;
 }
 
-/** Fence declared RequestInit members outside the native static slice.
- * Computed runtime keys and non-literal objects are validated again by
- * scr_fetch_static, so no unsupported option can be silently discarded. */
+/** Fence declared RequestInit members outside the selected compiler tier.
+ * Computed runtime keys and non-literal objects are validated again by the
+ * static runtime; source-visible members that neither tier preserves are
+ * rejected before the dynamic bridge can silently discard them. */
 function requestInitValueExpr(expr: ts.Expression): ts.Expression {
   let current = expr;
   while (
@@ -435,7 +435,176 @@ function visitRequestInitConstPropertyValues(
   return sawDeclaration && defines;
 }
 
-function fenceStaticRequestInitProperty(
+function visitRequestInitConstIndexValues(
+  L: Lowerer,
+  value: ts.Expression,
+  index: number,
+  seen: Set<ts.Symbol>,
+  visit: (value: ts.Expression) => void,
+): boolean {
+  const expr = requestInitValueExpr(value);
+  if (ts.isArrayLiteralExpression(expr)) {
+    const element = expr.elements[index];
+    if (
+      element === undefined ||
+      ts.isOmittedExpression(element) ||
+      ts.isSpreadElement(element)
+    ) {
+      return false;
+    }
+    visit(element);
+    return true;
+  }
+  if (ts.isConditionalExpression(expr)) {
+    const selected = requestInitStaticBoolean(L, expr.condition);
+    if (selected !== null) {
+      return visitRequestInitConstIndexValues(
+        L,
+        selected ? expr.whenTrue : expr.whenFalse,
+        index,
+        seen,
+        visit,
+      );
+    }
+    const whenTrue = visitRequestInitConstIndexValues(
+      L,
+      expr.whenTrue,
+      index,
+      new Set(seen),
+      visit,
+    );
+    const whenFalse = visitRequestInitConstIndexValues(
+      L,
+      expr.whenFalse,
+      index,
+      new Set(seen),
+      visit,
+    );
+    return whenTrue && whenFalse;
+  }
+  if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+    const member = ts.isPropertyAccessExpression(expr)
+      ? expr.name.text
+      : foldedStringKeyOf(L, expr.argumentExpression);
+    if (member === null) return false;
+    const nested: ts.Expression[] = [];
+    const receiverDefines = visitRequestInitConstPropertyValues(
+      L,
+      expr.expression,
+      member,
+      new Set(seen),
+      (value) => nested.push(value),
+    );
+    let nestedDefines = nested.length > 0;
+    for (const value of nested) {
+      if (!visitRequestInitConstIndexValues(L, value, index, new Set(seen), visit)) {
+        nestedDefines = false;
+      }
+    }
+    return receiverDefines && nestedDefines;
+  }
+  if (!ts.isIdentifier(expr)) return false;
+  const symbol = L.resolveValueSymbol(expr);
+  if (!symbol || seen.has(symbol)) return false;
+  seen.add(symbol);
+  let sawDeclaration = false;
+  let defines = true;
+  for (const declaration of L.checker.declarationsOf(symbol)) {
+    if (
+      ts.isVariableDeclaration(declaration) &&
+      declaration.initializer !== undefined &&
+      ts.isVariableDeclarationList(declaration.parent) &&
+      (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      sawDeclaration = true;
+      if (!visitRequestInitConstIndexValues(
+        L,
+        declaration.initializer,
+        index,
+        new Set(seen),
+        visit,
+      )) {
+        defines = false;
+      }
+    }
+  }
+  return sawDeclaration && defines;
+}
+
+type RequestInitBindingSelector =
+  | { kind: "property"; key: string }
+  | { kind: "index"; index: number };
+
+function requestInitConstBindingSource(
+  L: Lowerer,
+  declaration: ts.BindingElement,
+): { initializer: ts.Expression; selectors: RequestInitBindingSelector[] } | null {
+  const selectors: RequestInitBindingSelector[] = [];
+  let current = declaration;
+  while (true) {
+    const pattern = current.parent;
+    if (ts.isObjectBindingPattern(pattern)) {
+      if (current.dotDotDotToken) return null;
+      const key = fetchObjectBindingMemberName(L, current);
+      if (key === null) return null;
+      selectors.unshift({ kind: "property", key });
+    } else if (ts.isArrayBindingPattern(pattern)) {
+      if (current.dotDotDotToken) return null;
+      const index = pattern.elements.indexOf(current);
+      if (index < 0) return null;
+      selectors.unshift({ kind: "index", index });
+    } else {
+      return null;
+    }
+
+    const owner = pattern.parent;
+    if (ts.isBindingElement(owner)) {
+      current = owner;
+      continue;
+    }
+    if (
+      !ts.isVariableDeclaration(owner) ||
+      owner.initializer === undefined ||
+      !ts.isVariableDeclarationList(owner.parent) ||
+      (owner.parent.flags & ts.NodeFlags.Const) === 0
+    ) {
+      return null;
+    }
+    return { initializer: owner.initializer, selectors };
+  }
+}
+
+function visitRequestInitConstBindingValues(
+  L: Lowerer,
+  value: ts.Expression,
+  selectors: readonly RequestInitBindingSelector[],
+  seen: Set<ts.Symbol>,
+  visit: (value: ts.Expression) => void,
+): boolean {
+  const selector = selectors[0];
+  if (selector === undefined) {
+    visit(value);
+    return true;
+  }
+  let nestedDefines = true;
+  const visitNested = (nested: ts.Expression): void => {
+    if (!visitRequestInitConstBindingValues(
+      L,
+      nested,
+      selectors.slice(1),
+      new Set(seen),
+      visit,
+    )) {
+      nestedDefines = false;
+    }
+  };
+  const defines = selector.kind === "property"
+    ? visitRequestInitConstPropertyValues(L, value, selector.key, seen, visitNested)
+    : visitRequestInitConstIndexValues(L, value, selector.index, seen, visitNested);
+  return defines && nestedDefines;
+}
+
+function fenceRequestInitProperty(
   L: Lowerer,
   access: ts.PropertyAccessExpression | ts.ElementAccessExpression,
   seen: Set<ts.Symbol>,
@@ -449,7 +618,7 @@ function fenceStaticRequestInitProperty(
     access.expression,
     key,
     new Set(),
-    (value) => fenceStaticRequestInitValueInner(L, value, seen),
+    (value) => fenceRequestInitValueInner(L, value, seen),
   );
   if (!requestInitConstBacked(L, access.expression, new Set())) return;
   const symbol = ts.isPropertyAccessExpression(access)
@@ -459,17 +628,17 @@ function fenceStaticRequestInitProperty(
   seen.add(symbol);
   for (const declaration of L.checker.declarationsOf(symbol)) {
     if (ts.isPropertyAssignment(declaration)) {
-      fenceStaticRequestInitValueInner(L, declaration.initializer, seen);
+      fenceRequestInitValueInner(L, declaration.initializer, seen);
     } else if (
       ts.isShorthandPropertyAssignment(declaration) &&
       ts.isIdentifier(declaration.name)
     ) {
-      fenceStaticRequestInitValueInner(L, declaration.name, seen);
+      fenceRequestInitValueInner(L, declaration.name, seen);
     }
   }
 }
 
-function fenceStaticRequestInitObject(
+function fenceRequestInitObject(
   L: Lowerer,
   init: ts.ObjectLiteralExpression,
   seen: Set<ts.Symbol>,
@@ -477,20 +646,27 @@ function fenceStaticRequestInitObject(
   const contextual = L.checker.getContextualType(init);
   for (const prop of init.properties) {
     if (ts.isSpreadAssignment(prop)) {
-      fenceStaticRequestInitValueInner(L, prop.expression, seen);
+      fenceRequestInitValueInner(L, prop.expression, seen);
       continue;
     }
     const key = requestInitLiteralKey(L, prop);
-    if (key === null || STATIC_REQUEST_INIT_KEYS.has(key)) continue;
+    if (key === null) continue;
+    const row = NODE24_FETCH_COMPAT_PROFILE.inventory.entries.find((entry) =>
+      entry.owner === "RequestInit" &&
+      entry.member === key &&
+      entry.placement === "dictionary"
+    );
+    if (L.dynamic ? row?.status !== "unsupported" : row?.status === "static") continue;
     const contextualArms =
       contextual?.isUnionType() ? contextual.getTypes() : contextual ? [contextual] : [];
     const sym = contextualArms
       .map((arm) => L.checker.getPropertyOfType(arm, key))
       .find((member) => member !== undefined);
     L.noLowering(
-      `RequestInit option '${key}' in a static build`,
+      `RequestInit option '${key}'${L.dynamic ? "" : " in a static build"}`,
       prop,
-      "the native static RequestInit surface is method, headers, body, duplex, redirect, and signal; use --dynamic for the wider fetch options",
+      row?.reason ??
+        "the native static RequestInit surface is method, headers, body, duplex, redirect, and signal",
       sym,
     );
   }
@@ -500,30 +676,30 @@ function fenceStaticRequestInitObject(
  * plumbing, not only when the fetch argument's AST is itself an object
  * literal. Const aliases and object spreads preserve the same dictionary
  * members, so follow their initializers until the profile can make the
- * decision. Runtime-computed values keep scr_fetch_static's defensive
+ * decision. Runtime-computed values keep both fetch runtimes' defensive
  * validation because there is no source member to diagnose. */
-function fenceStaticRequestInitValueInner(
+function fenceRequestInitValueInner(
   L: Lowerer,
   value: ts.Expression,
   seen: Set<ts.Symbol>,
 ): void {
   const expr = requestInitValueExpr(value);
   if (ts.isObjectLiteralExpression(expr)) {
-    fenceStaticRequestInitObject(L, expr, seen);
+    fenceRequestInitObject(L, expr, seen);
     return;
   }
   if (ts.isConditionalExpression(expr)) {
     const selected = requestInitStaticBoolean(L, expr.condition);
     if (selected !== null) {
-      fenceStaticRequestInitValueInner(L, selected ? expr.whenTrue : expr.whenFalse, seen);
+      fenceRequestInitValueInner(L, selected ? expr.whenTrue : expr.whenFalse, seen);
     } else {
-      fenceStaticRequestInitValueInner(L, expr.whenTrue, seen);
-      fenceStaticRequestInitValueInner(L, expr.whenFalse, seen);
+      fenceRequestInitValueInner(L, expr.whenTrue, seen);
+      fenceRequestInitValueInner(L, expr.whenFalse, seen);
     }
     return;
   }
   if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
-    fenceStaticRequestInitProperty(L, expr, seen);
+    fenceRequestInitProperty(L, expr, seen);
     return;
   }
   if (!ts.isIdentifier(expr)) return;
@@ -535,6 +711,19 @@ function fenceStaticRequestInitValueInner(
   if (!symbol || seen.has(symbol)) return;
   seen.add(symbol);
   for (const declaration of L.checker.declarationsOf(symbol)) {
+    if (ts.isBindingElement(declaration)) {
+      const source = requestInitConstBindingSource(L, declaration);
+      if (source !== null) {
+        visitRequestInitConstBindingValues(
+          L,
+          source.initializer,
+          source.selectors,
+          new Set(seen),
+          (bindingValue) => fenceRequestInitValueInner(L, bindingValue, new Set(seen)),
+        );
+      }
+      continue;
+    }
     if (
       !ts.isVariableDeclaration(declaration) ||
       declaration.initializer === undefined ||
@@ -543,16 +732,15 @@ function fenceStaticRequestInitValueInner(
     ) {
       continue;
     }
-    fenceStaticRequestInitValueInner(L, declaration.initializer, seen);
+    fenceRequestInitValueInner(L, declaration.initializer, seen);
   }
 }
 
-function fenceStaticRequestInitValue(
+function fenceRequestInitValue(
   L: Lowerer,
   value: ts.Expression,
 ): void {
-  if (L.dynamic) return;
-  fenceStaticRequestInitValueInner(L, value, new Set());
+  fenceRequestInitValueInner(L, value, new Set());
 }
 
 /** USER-code `fetch(url)` / `fetch(url, init)` — the ambient global
@@ -585,18 +773,17 @@ function fenceStaticRequestInitValue(
     if (!symbol || !L.isStdlibSymbol(symbol)) return null;
     if (call.arguments.length < 1) return null;
     const loc = locOf(call);
+    const initNode = call.arguments[1];
+    if (initNode !== undefined) fenceRequestInitValue(L, initNode);
     if (!L.dynamic) {
       const inputNode = call.arguments[0]!;
       const input = L.lowerExpr(inputNode);
-      const initNode = call.arguments[1];
       let init: IrExpr;
       if (initNode === undefined) {
         init = dynUndefinedExpr(loc);
       } else if (ts.isObjectLiteralExpression(initNode)) {
-        fenceStaticRequestInitValue(L, initNode);
         init = lowerDynObjectLiteral(L, initNode);
       } else {
-        fenceStaticRequestInitValue(L, initNode);
         init = L.lowerExprExpecting(initNode, DYN);
       }
 
@@ -783,6 +970,18 @@ function fetchInventoryStatus(
   )?.status ?? null;
 }
 
+function fetchInventoryReason(
+  owner: string,
+  member: string,
+  placement: "static" | "prototype" | "prototype-symbol",
+): string | undefined {
+  return NODE24_FETCH_COMPAT_PROFILE.inventory.entries.find((entry) =>
+    entry.owner === owner &&
+    entry.member === member &&
+    entry.placement === placement
+  )?.reason;
+}
+
 /** Constructor-object operations are distinct from Response instance
  * methods. The inventory marks the former unsupported in both tiers; fence
  * them explicitly so the generic call fallback cannot report SC1090 for
@@ -875,6 +1074,15 @@ export function fenceStaticResponseMember(
   const member = members.find((candidate) =>
     L.dynamic ? status(candidate) === "unsupported" : !supported(candidate)
   )!;
+  if (status(member) === "unsupported") {
+    L.noLowering(
+      `Response.${member}`,
+      access,
+      fetchInventoryReason("Response", member, "prototype") ??
+        "this Response operation has no compiler lowering in either tier",
+      sym,
+    );
+  }
   L.noLowering(
     `Response.${member} in a static build`,
     access,
@@ -1238,7 +1446,11 @@ export function fenceStaticReadableStreamMember(
     L.noLowering(
       `ReadableStream.${member}`,
       access,
-      "symbol-keyed async iteration has no compiler lowering in either tier; call values() with --dynamic instead",
+      fetchInventoryReason(
+        "ReadableStream",
+        member,
+        member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype",
+      ) ?? "this ReadableStream operation has no compiler lowering in either tier",
       sym,
     );
   }
@@ -1949,8 +2161,8 @@ export function lowerStaticReadableStreamReaderCall(
    * the JSON-safe copy-marshal). The same jsOp the 'any'-contextual
    * literal path emits, callable from lowerings that KNOW the literal is
    * island-bound (fetch's init) even when the contextual type is a union
-   * the generic path declines. Identifier AND string-literal keys — engine
-   * property names have no identifier restriction ("content-type"). Plain
+   * the generic path declines. Spelled and pure const-folded computed keys
+   * are admitted; engine property names have no identifier restriction. Plain
    * spreads copy through the engine's CopyDataProperties operation in
    * source order, including nested RequestInit/header dictionaries. */
   export function lowerIslandObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
@@ -1975,20 +2187,20 @@ export function lowerStaticReadableStreamReaderCall(
         acc = { kind: "jsOp", op: "objSpread", args: [acc, spread], type: JSVAL, loc: locOf(prop) };
         continue;
       }
-      if (
-        !ts.isPropertyAssignment(prop) ||
-        !(ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))
-      ) {
+      const propertyName = ts.isPropertyAssignment(prop)
+        ? requestInitLiteralKey(L, prop)
+        : null;
+      if (!ts.isPropertyAssignment(prop) || propertyName === null) {
         L.unsupported(
           "SC1090",
           prop,
-          "this property form in an island-built object literal (only `name: value` is supported)",
+          "this property form in an island-built object literal (use a spelled or pure const-folded key with `name: value`)",
         );
       }
       const nameLoc = locOf(prop.name);
       args.push({
         kind: "jsMarshal",
-        value: { kind: "strLit", value: prop.name.text, type: STRING, loc: nameLoc },
+        value: { kind: "strLit", value: propertyName, type: STRING, loc: nameLoc },
         type: JSVAL, loc: nameLoc,
       });
       const init = prop.initializer;

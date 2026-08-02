@@ -3226,6 +3226,12 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       ts.isPropertyAccessExpression(expr.expression) &&
       L.isIslandExpr(expr.expression.expression)
     ) {
+      // Typed fetch/Web Streams handles map to island values under
+      // --dynamic, but their inventory still owns which methods exist.
+      // Reject unsupported rows before the universal jsval method path.
+      L.fenceStaticResponseMember(expr.expression, "call");
+      L.fenceStaticHeadersMember(expr.expression, "call");
+      L.fenceStaticReadableStreamMember(expr.expression, "call");
       const receiver = L.lowerExpr(expr.expression.expression);
       // A checker-`any` receiver whose VALUE lives in the checked-dynamic tree (a
       // checked-dynamic local behind the any-typed spelling — the JS
@@ -3947,14 +3953,15 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // and generic-call fallbacks (Response.json otherwise reports the
         // generic SC1090 fence).
         L.fenceUnsupportedFetchConstructorMember(expr.expression) ??
-        L.lowerIslandMethodCall(expr, expr.expression) ??
         // Static fetch responses are checked-dynamic handles, but the
         // adopted undici declaration exposes a wider API than that handle.
-        // Fence the unimplemented members before the generic dyn receiver
-        // path would compile them into a runtime missing-method failure.
+        // Fence unimplemented members before either the island or generic
+        // dyn receiver path can compile them into a runtime missing-method
+        // failure. Dynamic-only rows pass through these checks unchanged.
         L.fenceStaticResponseMember(expr.expression, "call") ??
         L.fenceStaticHeadersMember(expr.expression, "call") ??
         L.fenceStaticReadableStreamMember(expr.expression, "call") ??
+        L.lowerIslandMethodCall(expr, expr.expression) ??
         // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
         // validated-extract, then the static machinery. After the island
         // path (jsval receivers belong there), before the fences.

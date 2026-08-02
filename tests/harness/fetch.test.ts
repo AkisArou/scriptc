@@ -766,3 +766,13 @@ describe(`fetch differential (${cases.length} programs${sanitize ? ", sanitized"
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
 });
+
+test(`dynamic fetch runtime fences computed unsupported RequestInit${sanitize ? " (sanitized)" : ""}`, async () => {
+  const entry = join(fixturesRoot, "unsupported-init-dynamic/main.mts");
+  const binary = await build(entry);
+  const result = await runBinary(binary, []);
+  expect(result.stdout.toString("utf8")).toBe(
+    "TypeError unsupported RequestInit option: cache\n",
+  );
+  expect(result.exitCode).toBe(0);
+}, 120_000);

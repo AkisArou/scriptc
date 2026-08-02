@@ -661,26 +661,24 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       ...["url", "redirected", "status", "ok", "statusText", "headers", "body", "bodyUsed"].map(
         (member) => staticEntry(`stdlib.response.${member}`, "Response", member, "prototype"),
       ),
-      ...["clone", "blob", "arrayBuffer"].map((member) =>
-        dynamicEntry(
+      dynamicEntry(
+        "stdlib.response.arrayBuffer",
+        "Response",
+        "arrayBuffer",
+        "prototype",
+        "free-standing ArrayBuffer values have no static representation; use Response.bytes()",
+      ),
+      ...["clone", "blob", "formData"].map((member) =>
+        unsupportedEntry(
           `stdlib.response.${member}`,
           "Response",
           member,
           "prototype",
-          member === "arrayBuffer"
-            ? "free-standing ArrayBuffer values have no static representation; use Response.bytes()"
-            : widerMemberFence,
+          "the dynamic fetch bridge does not implement this Response operation",
         )
       ),
       ...["text", "json"].map((member) =>
         staticEntry(`stdlib.response.${member}`, "Response", member, "prototype")
-      ),
-      dynamicEntry(
-        "stdlib.response.formData",
-        "Response",
-        "formData",
-        "prototype",
-        "FormData values have no engine-free static representation",
       ),
       staticEntry("stdlib.response.bytes", "Response", "bytes", "prototype"),
       outOfScopeEntry(
@@ -706,13 +704,22 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         "getReader",
         "prototype",
       ),
-      ...["pipeThrough", "pipeTo", "tee", "values"].map((member) =>
+      ...["pipeThrough", "values"].map((member) =>
         dynamicEntry(
           `stdlib.readable-stream.${member}`,
           "ReadableStream",
           member,
           "prototype",
           "the wider Web Streams graph is outside the native readable-stream slice",
+        )
+      ),
+      ...["pipeTo", "tee"].map((member) =>
+        unsupportedEntry(
+          `stdlib.readable-stream.${member}`,
+          "ReadableStream",
+          member,
+          "prototype",
+          "the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation",
         )
       ),
       unsupportedEntry(
@@ -830,12 +837,12 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         const supported = new Set(["body", "duplex", "headers", "method", "redirect", "signal"]);
         return supported.has(member)
           ? staticEntry(id, "RequestInit", member, "dictionary")
-          : dynamicEntry(
+          : unsupportedEntry(
               id,
               "RequestInit",
               member,
               "dictionary",
-              "the RequestInit member is outside the native transport projection",
+              "neither compiler tier preserves this RequestInit member's conversion or transport behavior",
             );
       }),
       ...["headers", "status", "statusText"].map((member) =>
