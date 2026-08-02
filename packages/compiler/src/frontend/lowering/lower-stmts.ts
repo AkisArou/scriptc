@@ -1071,9 +1071,6 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // tsc already rejects this (TS1182); defensive.
       L.unsupported("SC1031", decl);
     }
-    if (ts.isArrayBindingPattern(decl.name)) {
-      L.fenceStaticHeadersIteration(decl.initializer);
-    }
     // A STDLIB-GLOBAL source in a JavaScript file (`const { subtle } =
     // globalThis.crypto`, `const { Console } = console` — the suite's
     // webcrypto/console prologues): each element binds a member IDENTITY
@@ -1261,6 +1258,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     out: IrStmt[],
     dynSpell?: string,): void {
     if (ts.isArrayBindingPattern(pattern)) {
+      L.fenceStaticHeadersIteration(pattern);
       // Tuple sources: each position is a field read of the tuple's record
       // shape — the positional twin of object destructuring below.
       const tupleShape =

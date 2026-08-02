@@ -8,7 +8,7 @@ import { BYTES_U8, DYN, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
-import { lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
+import { foldedStringKeyOf, lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
 import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 import {
   NODE24_FETCH_COMPAT_PROFILE,
@@ -239,6 +239,7 @@ import {
   }
 
 function requestInitLiteralKey(
+  L: Lowerer,
   prop: ts.ObjectLiteralElementLike,
 ): string | null {
   if (
@@ -251,11 +252,7 @@ function requestInitLiteralKey(
   const name = prop.name;
   if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
   if (ts.isNumericLiteral(name)) return String(Number(name.text));
-  if (ts.isComputedPropertyName(name)) {
-    const value = name.expression;
-    if (ts.isStringLiteral(value)) return value.text;
-    if (ts.isNumericLiteral(value)) return String(Number(value.text));
-  }
+  if (ts.isComputedPropertyName(name)) return foldedStringKeyOf(L, name.expression);
   return null;
 }
 
@@ -287,7 +284,7 @@ function fenceStaticRequestInitObject(
       fenceStaticRequestInitValueInner(L, prop.expression, seen);
       continue;
     }
-    const key = requestInitLiteralKey(prop);
+    const key = requestInitLiteralKey(L, prop);
     if (key === null || STATIC_REQUEST_INIT_KEYS.has(key)) continue;
     const contextualArms =
       contextual?.isUnionType() ? contextual.getTypes() : contextual ? [contextual] : [];
@@ -678,12 +675,14 @@ export function fenceStaticHeadersMember(
 
 function isStdlibFetchInterface(
   L: Lowerer,
-  node: ts.Expression,
+  node: ts.Node,
   owner: string,
-): boolean {
+): ts.Symbol | null {
   const type = L.checker.getBaseTypeOfLiteralType(L.typeOf(node));
-  const symbol = type.getAliasSymbol() ?? type.getSymbol();
-  return symbol?.name === owner && L.isStdlibSymbol(symbol);
+  for (const symbol of [type.getSymbol(), type.getAliasSymbol()]) {
+    if (symbol?.name === owner && L.isStdlibSymbol(symbol)) return symbol;
+  }
+  return null;
 }
 
 /** Iteration syntax invokes Headers[Symbol.iterator] without constructing
@@ -693,16 +692,17 @@ function isStdlibFetchInterface(
  * engine's iterator protocol and is intentionally allowed. */
 export function fenceStaticHeadersIteration(
   L: Lowerer,
-  node: ts.Expression,
+  node: ts.Node,
 ): void {
   if (L.dynamic) return;
-  const value = requestInitValueExpr(node);
-  if (!isStdlibFetchInterface(L, value, "Headers")) return;
+  const value = ts.isExpression(node) ? requestInitValueExpr(node) : node;
+  const sym = isStdlibFetchInterface(L, value, "Headers");
+  if (!sym) return;
   L.noLowering(
     "Headers.[Symbol.iterator] in a static build",
     node,
     "Headers iteration requires --dynamic; append/delete/get/getSetCookie/has/set/forEach remain engine-free",
-    (L.typeOf(value).getAliasSymbol() ?? L.typeOf(value).getSymbol()) ?? undefined,
+    sym,
   );
 }
 
@@ -779,11 +779,8 @@ export function fenceStaticReadableStreamMember(
   access: StaticResponseAccess,
   use: "read" | "call",
 ): IrExpr | null {
-  const recvType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
-  const sym = recvType.getAliasSymbol() ?? recvType.getSymbol();
-  if (!sym || sym.name !== "ReadableStream" || !L.isStdlibSymbol(sym)) {
-    return null;
-  }
+  const sym = isStdlibFetchInterface(L, access.expression, "ReadableStream");
+  if (!sym) return null;
   const member = staticResponseMemberName(L, access);
   if (member === null) return null;
   const placement = member.startsWith("[Symbol.") ? "prototype-symbol" : "prototype";

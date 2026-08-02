@@ -142,11 +142,11 @@ const PROBES: Probe[] = [
   },
   {
     id: "stdlib.readable-stream.tee",
-    source: '/// <reference types="node" />\nfunction f(s: ReadableStream<Uint8Array>): void {\n  void s.tee();\n}\nconsole.log(typeof f);\n',
+    source: '/// <reference types="node" />\ntype BodyStream = ReadableStream<Uint8Array>;\nfunction f(s: BodyStream): void {\n  void s.tee();\n}\nconsole.log(typeof f);\n',
   },
   {
     id: "stdlib.headers.symbol.iterator",
-    source: '/// <reference types="node" />\nfunction f(h: Headers): void {\n  void h[Symbol.iterator]();\n  for (const pair of h) void pair;\n  void [...h];\n  const [] = h;\n}\nvoid f;\n',
+    source: '/// <reference types="node" />\nfunction f([first]: Headers): void {\n  void first;\n}\nvoid f;\n',
   },
   { id: "diagnostic.sc2011", source: "const y: any = 1;\nconst z = y * 2;\nconsole.log(0);\n" },
   // status unsupported — refused with the entry's code
@@ -256,6 +256,21 @@ describe("surface manifest sampling harness", () => {
       ).toEqual([entry!.code]);
     }
   });
+});
+
+test("static RequestInit fences const-computed dynamic-only keys", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.request-init.cache.computed",
+    source:
+      '/// <reference types="node" />\nconst option = "cache" as const;\nvoid fetch("http://127.0.0.1", { [option]: "no-store" });\n',
+  });
+  const { coverage } = analyze(file);
+  const entry = entryById.get("stdlib.fetch.request-init.cache");
+  expect(entry).toBeDefined();
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual([entry!.code]);
+  expect(coverage.diagnostics[0]!.message).toContain(
+    "RequestInit option 'cache' in a static build",
+  );
 });
 
 /* ── attestation ↔ fence parity: the ask-5 §4 invariant's ground ─────────

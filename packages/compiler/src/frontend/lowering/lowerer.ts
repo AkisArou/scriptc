@@ -2611,7 +2611,7 @@ export class Lowerer {
     return fenceStaticHeadersMember(this, access, use);
   }
 
-  fenceStaticHeadersIteration(node: ts.Expression): void {
+  fenceStaticHeadersIteration(node: ts.Node): void {
     return fenceStaticHeadersIteration(this, node);
   }
 
