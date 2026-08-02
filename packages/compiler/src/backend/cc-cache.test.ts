@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -246,7 +246,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -DSCRIPTC_PATH_PROBE=${value} "$@"
       expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
 
       process.env["PATH"] = `${secondBinDir}${delimiter}${oldPath ?? ""}`;
-      const secondOut = join(dir, "second");
+      const secondOut = firstOut;
       await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("2");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
@@ -259,6 +259,116 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -DSCRIPTC_PATH_PROBE=${value} "$@"
       else process.env["PATH"] = oldPath;
       if (oldRealClang === undefined) delete process.env["SCRIPTC_TEST_REAL_CLANG"];
       else process.env["SCRIPTC_TEST_REAL_CLANG"] = oldRealClang;
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "compiler-wrapper environment flags join the cache identity",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-wrapper-env-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const binDir = join(dir, "bin");
+    const cPath = join(dir, "program.c");
+    const outPath = join(dir, "program");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldDisableCcache = process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+    const oldPath = process.env["PATH"];
+    const oldRealClang = process.env["SCRIPTC_TEST_REAL_CLANG"];
+    const oldWrapperValue = process.env["SCRIPTC_TEST_WRAPPER_VALUE"];
+    const realClang = (oldPath ?? "")
+      .split(delimiter)
+      .map((entry) => join(entry === "" ? process.cwd() : entry, "clang"))
+      .find((candidate) => existsSync(candidate));
+    expect(realClang).toBeDefined();
+
+    try {
+      await mkdir(binDir);
+      const wrapper = join(binDir, "clang");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
+fi
+exec "$SCRIPTC_TEST_REAL_CLANG" "-DSCRIPTC_WRAPPER_VALUE=$SCRIPTC_TEST_WRAPPER_VALUE" "$@"
+`,
+      );
+      await chmod(wrapper, 0o755);
+      await writeFile(
+        cPath,
+        '#include <stdio.h>\nint main(void) { printf("%d\\n", SCRIPTC_WRAPPER_VALUE); return 0; }\n',
+      );
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
+      process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
+      process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      delete process.env["SCRIPTC_NO_CACHE"];
+
+      process.env["SCRIPTC_TEST_WRAPPER_VALUE"] = "1";
+      await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("1");
+
+      // This variable is intentionally absent from scriptc's fixed environment
+      // allowlist. The wrapper's effective compiler invocation must still make
+      // its injected value part of the cache identity.
+      process.env["SCRIPTC_TEST_WRAPPER_VALUE"] = "2";
+      await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("2");
+      expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldDisableCcache === undefined) delete process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+      else process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = oldDisableCcache;
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
+      if (oldRealClang === undefined) delete process.env["SCRIPTC_TEST_REAL_CLANG"];
+      else process.env["SCRIPTC_TEST_REAL_CLANG"] = oldRealClang;
+      if (oldWrapperValue === undefined) delete process.env["SCRIPTC_TEST_WRAPPER_VALUE"];
+      else process.env["SCRIPTC_TEST_WRAPPER_VALUE"] = oldWrapperValue;
+    }
+  },
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "cached Darwin executables preserve the requested code-signature identifier",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-darwin-identifier-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const cPath = join(dir, "program.c");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+    const codeSignatureIdentifier = (path: string): string | undefined => {
+      const result = spawnSync("codesign", ["-d", "-vv", path], { encoding: "utf8" });
+      expect(result.status).toBe(0);
+      return /^Identifier=(.+)$/m.exec(`${result.stdout}\n${result.stderr}`)?.[1];
+    };
+
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      await writeFile(cPath, "int main(void) { return 0; }\n");
+
+      const firstOut = join(dir, "requested-one");
+      await compileC({ cPath, outPath: firstOut, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(codeSignatureIdentifier(firstOut)).toBe("requested-one");
+
+      const secondOut = join(dir, "requested-two");
+      await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(codeSignatureIdentifier(secondOut)).toBe("requested-two");
+      expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     }
   },
 );
@@ -311,7 +421,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$SCRIPTC_TEST_IMPLICIT_HEADER" "$@"
       // The compiler executable, PATH, source, and environment spellings are
       // unchanged; only a header in the driver's implicit dependency graph moves.
       await writeFile(header, '#define SCRIPTC_IMPLICIT_PROBE "two"\n');
-      const secondOut = join(dir, "second");
+      const secondOut = firstOut;
       await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
@@ -391,7 +501,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$selected" "$@"
       // Only a fresh `clang -M` can observe that the wrapper now selects a
       // different path whose bytes belong to a different cache identity.
       await writeFile(selector, `${secondHeader}\n`);
-      const secondOut = join(dir, "second");
+      const secondOut = firstOut;
       await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
@@ -479,7 +589,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
 
       await buildHelper(2);
-      const secondOut = join(dir, "second");
+      const secondOut = firstOut;
       await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("2");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
@@ -641,7 +751,7 @@ test("cache hits honor the current umask", async () => {
     // A hit populated under a permissive umask adopts the current restrictive
     // one instead of restoring the cached file's broader mode.
     process.umask(0o077);
-    const hitOut = join(dir, "hit");
+    const hitOut = firstOut;
     await compileC({ cPath, outPath: hitOut, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(execFileSync(hitOut, { encoding: "utf8" }).trim()).toBe("one");
     if (process.platform !== "win32") expect((await stat(hitOut)).mode & 0o777).toBe(0o700);
@@ -912,7 +1022,7 @@ test("complete binary hits precede missing vendor prerequisite materialization",
     // attempted prerequisite rebuild into an immediate failure.
     await rm(vendorCacheRoot, { recursive: true, force: true });
     process.env["PATH"] = "";
-    const hitOut = join(dir, "hit");
+    const hitOut = firstOut;
     await compileC({
       cPath,
       outPath: hitOut,
@@ -992,8 +1102,9 @@ test("cached translation units keep the compiler-visible source path in their id
       writeFile(bPath, source),
       writeFile(headerPath, '#define CACHE_PATH_HEADER "header"\n'),
     ]);
-    const aOut = join(dir, "a-out");
-    const bOut = join(dir, "b-out");
+    const aOut = join(dir, "a-out", "program");
+    const bOut = join(dir, "b-out", "program");
+    await Promise.all([mkdir(join(dir, "a-out")), mkdir(join(dir, "b-out"))]);
     await compileC({ cPath: aPath, outPath: aOut, cacheIdentity: TEST_CACHE_IDENTITY });
     await compileC({ cPath: bPath, outPath: bOut, cacheIdentity: TEST_CACHE_IDENTITY });
     expect(execFileSync(aOut, { encoding: "utf8" }).trim()).toBe(`${aPath}\nheader`);
@@ -1103,7 +1214,7 @@ exec "$@"
       expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("two");
 
       await writeFile(cPath, source("one"));
-      const hitOut = join(dir, "hit");
+      const hitOut = firstOut;
       await compileC({ cPath, outPath: hitOut, cacheIdentity: TEST_CACHE_IDENTITY });
       expect(execFileSync(hitOut, { encoding: "utf8" }).trim()).toBe("one");
       expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
@@ -1532,7 +1643,7 @@ test("damaged complete artifacts are rejected and rebuilt", async () => {
 
     await compileC({
       cPath,
-      outPath: join(dir, "first"),
+      outPath: join(dir, "program"),
       cacheIdentity: TEST_CACHE_IDENTITY,
     });
     const [cachedBinary] = await completeArtifacts(cacheRoot, "bin");
@@ -1540,7 +1651,7 @@ test("damaged complete artifacts are rejected and rebuilt", async () => {
     expect((await stat(`${join(cacheRoot, "bin", cachedBinary!)}.sha256`)).isFile()).toBe(true);
     await writeFile(join(cacheRoot, "bin", cachedBinary!), corruption);
 
-    const repairedBinary = join(dir, "repaired");
+    const repairedBinary = join(dir, "program");
     await compileC({
       cPath,
       outPath: repairedBinary,

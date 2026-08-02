@@ -1361,8 +1361,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     linker/assembler identities, runtime fingerprint
  *                     (every .c/.h in the runtime src dir plus the vendor pin
  *                     QJS_COMMIT), the caller's dependency identity, the
- *                     compiler-visible TU path, the FULL normalized command
- *                     line, and the emitted C bytes). Emitted C is
+ *                     compiler-visible TU path, Darwin output basename, the
+ *                     FULL normalized command line, and the emitted C bytes).
+ *                     Emitted C is
  *                     byte-stable by project invariant, so unchanged programs
  *                     hit; any flag difference — e.g. the sanitized lane's
  *                     -O1/-fsanitize=address/-DSCR_RC_AUDIT — lands in a
@@ -1575,6 +1576,7 @@ async function toolVersionOnce(
 
 interface ImplicitToolchainProbe {
   compilerIdentity: string;
+  compilerInvocation: string;
   dependencies: string[];
   dependencyFingerprint: string;
   tools: { spelling: string; identity: string | null }[];
@@ -1748,11 +1750,14 @@ async function implicitToolchainFingerprint(
         dependencyIncludes.filter((include) => include === "<intrin.h>"),
       ].filter((group) => group.length > 0);
       const sources = sourceGroups.map((_, index) => join(probeDir, `empty-${index}.c`));
-      await Promise.all(
-        sources.map((source, index) =>
+      const driverSource = join(probeDir, "driver-empty.c");
+      const driverOutput = join(probeDir, "driver-output.o");
+      await Promise.all([
+        ...sources.map((source, index) =>
           writeFile(source, sourceGroups[index]!.map(implicitDependencyIncludeDirective).join("")),
         ),
-      );
+        writeFile(driverSource, "int scriptc_driver_probe;\n"),
+      ]);
       const prefix = [...driver.argv.slice(1), ...driver.targetArgs];
       const probeArgs = [
         ...prefix,
@@ -1767,7 +1772,7 @@ async function implicitToolchainFingerprint(
         "-I", join(vendorCurlDir(), "include"),
         "-M",
       ];
-      const [dependencyResults, linker, assembler] = await Promise.all([
+      const [dependencyResults, linker, assembler, compilerInvocation] = await Promise.all([
         Promise.all(
           sources.map((source) =>
             execFileAsync(compiler, [...probeArgs, source], {
@@ -1778,6 +1783,16 @@ async function implicitToolchainFingerprint(
         ),
         execFileAsync(compiler, [...prefix, "-print-prog-name=ld"], { cwd: probeDir }),
         execFileAsync(compiler, [...prefix, "-print-prog-name=as"], { cwd: probeDir }),
+        // `-###` exposes the effective cc1 invocation after compiler-driver
+        // config and ordinary wrappers have injected their implicit flags. A
+        // wrapper can read environment variables unknown to scriptc; hashing
+        // this trace keeps those flags from hiding behind an unchanged wrapper
+        // executable/version and dependency set.
+        execFileAsync(
+          compiler,
+          [...prefix, "-std=c11", "-###", "-c", driverSource, "-o", driverOutput],
+          { cwd: probeDir, maxBuffer: 16 * 1024 * 1024 },
+        ),
       ]);
       const toolSpellings = [linker.stdout.trim(), assembler.stdout.trim()].filter(
         (value, index, all) => value !== "" && all.indexOf(value) === index,
@@ -1792,6 +1807,13 @@ async function implicitToolchainFingerprint(
       ].sort();
       probe = {
         compilerIdentity: compilerIdentity ?? `<unresolved>\0${compiler}`,
+        compilerInvocation: `${compilerInvocation.stdout}\n${compilerInvocation.stderr}`
+          // Probe-local paths vary on every invocation and carry no toolchain
+          // identity. Both ordinary and shell-escaped Windows spellings can
+          // appear in a driver's quoted trace.
+          .split(probeDir).join("<probe>")
+          .split(probeDir.replace(/\\/g, "\\\\")).join("<probe>")
+          .trim(),
         dependencies: dependencyPaths,
         dependencyFingerprint: await fingerprintDependencyFiles(dependencyPaths),
         tools: await Promise.all(
@@ -1808,8 +1830,10 @@ async function implicitToolchainFingerprint(
   }
 
   const hash = createHash("sha256")
-    .update("implicit-toolchain-v1\0")
+    .update("implicit-toolchain-v2\0")
     .update(probe.compilerIdentity)
+    .update("\0")
+    .update(probe.compilerInvocation)
     .update("\0")
     .update(driver.argv.join("\x1f"))
     .update("\0")
@@ -2704,16 +2728,17 @@ export async function compileC(opts: CcOptions): Promise<void> {
   let cachedBin: string | null = null;
   if (cacheCompleteArtifact) {
     // The key sees the full command line with the two program-specific paths
-    // normalized out (their CONTENT is what matters: the C bytes are hashed,
-    // the out path is where the result lands). Runtime and vendor paths stay
-    // verbatim — their contents are covered by the fingerprint and the pin.
+    // normalized out. The C bytes are hashed separately; Darwin additionally
+    // keys the output basename because ld embeds it in the ad-hoc signature.
+    // Runtime and vendor paths stay verbatim — their contents are covered by
+    // the fingerprint and the pin.
     const identityArgs = buildArgs((p) => p).map((a) =>
       a === opts.cPath ? "<program.c>" : a === opts.outPath ? "<out>" : a,
     );
     const key = createHash("sha256")
-      // v6 adds the exact driver-resolved implicit link input set and fresh
-      // dependency-graph discovery to the executable contract.
-      .update("bin-v6\0")
+      // v7 preserves the requested Darwin output basename because ld embeds
+      // it in the artifact's ad-hoc CodeDirectory identifier.
+      .update("bin-v7\0")
       .update(cacheTargetIdentity(driver)).update("\0")
       .update(toolchainEnv).update("\0")
       .update(implicitToolchain!).update("\0")
@@ -2723,6 +2748,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       // to resolve relative includes. The top-level bytes are not sufficient.
       .update(opts.cPath).update("\0")
       .update(resolve(opts.cPath)).update("\0")
+      .update(targetPlatform(driver) === "darwin" ? basename(opts.outPath) : "<out>").update("\0")
       // The driver spelling joins the version string: `zig cc --version`
       // reports the clang underneath and could otherwise collide with a
       // same-version host clang.
@@ -2789,7 +2815,17 @@ export async function compileC(opts: CcOptions): Promise<void> {
     // other's key. The prefix map preserves the original __FILE__/debug-file
     // spelling while clang reads this invocation-private snapshot.
     const programPath = join(buildDir, `program${opts.cPath.endsWith(".ll") ? ".ll" : ".c"}`);
-    const privateOut = join(buildDir, process.platform === "win32" ? "artifact.exe" : "artifact");
+    // Preserve the caller-visible basename while keeping Darwin builds on a
+    // private inode: ld uses this spelling as the embedded ad-hoc signing
+    // identifier. Other targets retain the basename-independent cache key.
+    const privateOut = join(
+      buildDir,
+      targetPlatform(driver) === "darwin"
+        ? basename(opts.outPath)
+        : process.platform === "win32"
+          ? "artifact.exe"
+          : "artifact",
+    );
     await writeFile(programPath, cBytes);
 
     let objects: Map<string, string> | null = null;
