@@ -89,7 +89,8 @@ responseHeaders.forEach((value, name) => {
   if (name === "x-kind") console.log("header walk thisArg:", name, value);
 }, { label: "ignored by the arrow callback" });
 try {
-  const member = JSON.parse('"delete"') as "get" | "has";
+  const computedHeaderMember = (): "get" | "has" => "missing" as "get";
+  const member = computedHeaderMember();
   responseHeaders[member]("x-kind");
   console.log("computed header member unexpectedly accepted");
 } catch (error) {

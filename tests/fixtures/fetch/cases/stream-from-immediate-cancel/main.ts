@@ -1,7 +1,14 @@
 // @dynamic
-// Canceling ReadableStream.from() before its first pull does not start or
-// close the source iterator. Byte-exact against the pinned Node runtime.
-import { immediateCancelIterable } from "stream-from-cancel-probe";
+// ReadableStream.from() iterator acquisition, async chunk identity, immediate
+// cancellation, and fetch's RequestInit getter census. Byte-exact against the
+// pinned Node runtime through code executing inside the dynamic island.
+import {
+  immediateCancelIterable,
+  requestInitReadOrder,
+  streamFromProtocolProbe,
+} from "stream-from-cancel-probe";
 
 await ReadableStream.from(immediateCancelIterable() as any).cancel("why");
 console.log("immediate cancel done");
+await streamFromProtocolProbe();
+await requestInitReadOrder(`${process.argv[2]}/text`);

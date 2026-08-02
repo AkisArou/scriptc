@@ -509,6 +509,27 @@ test("fetch interface object bindings retain the inventory fence code", () => {
   expect(dynamic.diagnostics.filter((d) => d.code === "SC2020")).toHaveLength(2);
 });
 
+test("static fetch data properties remain destructurable in JavaScript", () => {
+  const dir = join(probeRoot, "fetch-static-data-binding");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "main.js");
+  writeFileSync(
+    file,
+      '/** @param {Response} response */\n' +
+      'function readResponse(response) {\n' +
+      '  const { status, ok } = response;\n' +
+      '  console.log(status, ok);\n' +
+      '}\n' +
+      'void readResponse;\n',
+  );
+  for (const dynamic of [false, true]) {
+    const coverage = analyze(file, { dynamic }).coverage;
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+    expect(coverage.stats.statementsFailed).toBe(0);
+  }
+});
+
 test("unimplemented Response and ReadableStream calls stay fenced under --dynamic", () => {
   const file = probeFile({
     id: "stdlib.fetch.unimplemented-dynamic-methods",

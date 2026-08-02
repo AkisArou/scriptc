@@ -23,7 +23,8 @@ async function main(baseUrl: string): Promise<void> {
     if (k.startsWith("x-")) console.log("hdr:", k, "=", v);
   });
   try {
-    const member = JSON.parse('"delete"') as "get" | "has";
+    const computedHeaderMember = (): "get" | "has" => "missing" as "get";
+    const member = computedHeaderMember();
     r.headers[member]("x-kind");
     console.log("computed member unexpectedly accepted");
   } catch (error) {

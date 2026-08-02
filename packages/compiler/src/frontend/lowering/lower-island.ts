@@ -1329,6 +1329,15 @@ function fenceFetchObjectMembers(
     );
     if (!row || row.status === "out-of-scope") continue;
     if (L.dynamic && row.status !== "unsupported") continue;
+    // Static data properties retain the ordinary checked-dynamic keyed-read
+    // lowering. Only a method extraction loses the receiver that its direct
+    // call bridge would preserve; non-static rows keep their inventory fence.
+    const operation = NODE24_FETCH_COMPAT_PROFILE.operations.find(
+      (candidate) => candidate.id === row.id,
+    );
+    if (!L.dynamic && row.status === "static" && operation?.kind === "property") {
+      continue;
+    }
     L.noLowering(
       `${owner}.${member}${L.dynamic ? "" : " through object destructuring in a static build"}`,
       node,
