@@ -1122,7 +1122,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       : configuredCacheRoot;
   if (root !== null) {
     try {
-      await ensurePrivateCacheRoot(root);
+      await ensurePrivateCacheRoot(
+        root,
+        process.env["SCRIPTC_CACHE_DIR"] === undefined,
+      );
     } catch {
       root = null;
     }
@@ -1482,10 +1485,12 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * command line.
  *
  * Eviction: size-capped LRU over the whole cache root (SCRIPTC_CACHE_MAX_MB,
- * default 4096) swept after the first write and periodically in long-lived
- * processes; reads bump mtimes. The harness's oracle cache lives under the
- * same root and is swept by the same pass. Cache trouble is never a build
- * failure — every cache error falls back to a real compile. */
+ * default 4096). Explicit caps are checked after every successful write; the
+ * large default is swept on the first and every 64th write so corpus/watch
+ * loops do not repeatedly walk a growing tree. Reads bump mtimes. The harness's
+ * oracle cache lives under the same root and is swept by the same pass. Cache
+ * trouble is never a build failure — every cache error falls back to a real
+ * compile. */
 
 /** Resolve the build cache without touching the filesystem. Exported from this
  * internal module so its platform and override behavior can be pinned directly. */
@@ -1516,11 +1521,35 @@ function cacheRootDir(): string | null {
 /** The production cache can contain complete user executables/archives with
  * embedded source literals or comptime values. Its root is therefore private
  * regardless of the caller's ordinary output umask. Windows inherits the
- * per-user LOCALAPPDATA ACL; POSIX needs an explicit mode, including for roots
- * created by an older scriptc release. */
-async function ensurePrivateCacheRoot(root: string): Promise<void> {
+ * per-user LOCALAPPDATA ACL. POSIX platform-default roots are hardened for
+ * upgrades; an arbitrary existing SCRIPTC_CACHE_DIR override is never chmod'd
+ * and participates only when its caller-provided mode is already private. */
+async function ensurePrivateCacheRoot(
+  root: string,
+  hardenExisting: boolean,
+): Promise<void> {
+  const existing = await stat(root).then(
+    (info) => info,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    },
+  );
+  if (existing !== null && !existing.isDirectory()) {
+    throw new Error("native cache root is not a directory");
+  }
+  if (
+    process.platform !== "win32" &&
+    existing !== null &&
+    !hardenExisting &&
+    (existing.mode & 0o077) !== 0
+  ) {
+    throw new Error("existing native cache override is not private");
+  }
   await mkdir(root, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") await chmod(root, 0o700);
+  if (process.platform !== "win32" && (existing === null || hardenExisting)) {
+    await chmod(root, 0o700);
+  }
 }
 
 const ccVersionMemos = new Map<string, Promise<string>>();
@@ -1714,6 +1743,8 @@ function normalizedProbeInvocation(
 interface EffectiveCompilerInvocationProbe {
   compilerIdentity: string;
   invocation: string;
+  dependencies: string[];
+  dependencyFingerprint: string;
 }
 
 const effectiveCompilerInvocationFallbacks = new Map<
@@ -1721,12 +1752,12 @@ const effectiveCompilerInvocationFallbacks = new Map<
   EffectiveCompilerInvocationProbe
 >();
 
-/** The effective cc1 invocation for the flags used by real runtime/program
- * compiles. The broad implicit-toolchain probe below intentionally uses a
- * target-wide synthetic TU so it can discover every owned system header, but
- * that generic command is not sufficient identity for a wrapper that injects
- * environment-derived flags only for a particular build flavor (for example,
- * only when it sees -O2 or -DSCR_DYNAMIC). */
+/** The effective cc1 invocation and injected dependencies for the flags used
+ * by real runtime/program compiles. The broad implicit-toolchain probe below
+ * intentionally uses a target-wide synthetic TU so it can discover every
+ * owned system header, but that generic command is not sufficient identity for
+ * a wrapper that injects flags or preincluded files only for a particular build
+ * flavor (for example, only when it sees -O2 or -DSCR_DYNAMIC). */
 async function effectiveCompilerInvocationFingerprint(
   driver: Pick<CcDriver, "argv">,
   environmentFingerprint: string,
@@ -1744,7 +1775,10 @@ async function effectiveCompilerInvocationFingerprint(
   const fallback = effectiveCompilerInvocationFallbacks.get(fallbackKey);
   let probe: EffectiveCompilerInvocationProbe;
   if (compilerIdentity === null && fallback !== undefined) {
-    probe = fallback;
+    probe = {
+      ...fallback,
+      dependencyFingerprint: await fingerprintDependencyFiles(fallback.dependencies),
+    };
   } else if (compilerIdentity === null) {
     throw new Error("compiler unavailable before effective invocation identity was established");
   } else {
@@ -1758,22 +1792,31 @@ async function effectiveCompilerInvocationFingerprint(
           ? "define i32 @scriptc_effective_probe() { ret i32 0 }\n"
           : "int scriptc_effective_probe(void) { return 0; }\n",
       );
-      const invocation = await execFileAsync(
-        compiler,
-        [
-          ...driver.argv.slice(1),
-          ...compileArgs,
-          "-###",
-          "-c",
-          source,
-          "-o",
-          output,
-        ],
-        { cwd: probeDir, maxBuffer: 16 * 1024 * 1024 },
-      );
+      const prefix = [...driver.argv.slice(1), ...compileArgs];
+      const [invocation, dependencyResult] = await Promise.all([
+        execFileAsync(
+          compiler,
+          [...prefix, "-###", "-c", source, "-o", output],
+          { cwd: probeDir, maxBuffer: 16 * 1024 * 1024 },
+        ),
+        sourceExtension === ".c"
+          ? execFileAsync(compiler, [...prefix, "-M", source], {
+              cwd: probeDir,
+              maxBuffer: 16 * 1024 * 1024,
+            })
+          : Promise.resolve(null),
+      ]);
+      const dependencies =
+        dependencyResult === null
+          ? []
+          : parseMakeDependencies(dependencyResult.stdout, probeDir).filter(
+              (path) => path !== resolve(source),
+            );
       probe = {
         compilerIdentity,
         invocation: normalizedProbeInvocation(invocation, probeDir),
+        dependencies,
+        dependencyFingerprint: await fingerprintDependencyFiles(dependencies),
       };
       effectiveCompilerInvocationFallbacks.set(fallbackKey, probe);
     } finally {
@@ -1782,7 +1825,7 @@ async function effectiveCompilerInvocationFingerprint(
   }
 
   return createHash("sha256")
-    .update("effective-compiler-invocation-v1\0")
+    .update("effective-compiler-invocation-v2\0")
     .update(probe.compilerIdentity)
     .update("\0")
     .update(driver.argv.join("\x1f"))
@@ -1792,6 +1835,10 @@ async function effectiveCompilerInvocationFingerprint(
     .update(sourceExtension)
     .update("\0")
     .update(probe.invocation)
+    .update("\0")
+    .update(probe.dependencies.join("\x1f"))
+    .update("\0")
+    .update(probe.dependencyFingerprint)
     .digest("hex");
 }
 
@@ -2176,9 +2223,11 @@ async function implicitLinkerFingerprint(
   environmentFingerprint: string,
   linkArgs: readonly string[],
   effectiveInvocationArgs?: readonly string[],
+  traceInvocationArgs?: readonly string[],
 ): Promise<string> {
   const invocationArgs =
     effectiveInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
+  const traceArgs = traceInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
   const fallbackKey = [
     environmentFingerprint,
     driver.argv.join("\x1f"),
@@ -2186,6 +2235,7 @@ async function implicitLinkerFingerprint(
     driver.targetArgs.join("\x1f"),
     linkArgs.join("\x1f"),
     invocationArgs.join("\x1f"),
+    traceArgs.join("\x1f"),
   ].join("\0");
   const compiler = driver.argv[0] ?? "clang";
   const compilerIdentity = await resolvedToolIdentity(compiler);
@@ -2230,13 +2280,27 @@ async function implicitLinkerFingerprint(
         [...driver.argv.slice(1), ...invocationArgs, object, "-###", "-o", output],
         { cwd: probeDir, maxBuffer: 32 * 1024 * 1024 },
       );
-      let trace: { stdout: string; stderr: string };
-      let driverDryRun = false;
+      // The dry run exposes absolute files a wrapper injects for this exact
+      // build flavor. Its unresolved -l spellings are supplemented by the
+      // real trace below, which runs with the same flavor flags but omits
+      // not-yet-materialized scriptc-owned vendor prerequisites.
+      const driverDependencies = await parseLinkTraceFiles(
+        `${driverInvocation.stdout}\n${driverInvocation.stderr}`,
+        probeDir,
+        probeDir,
+        true,
+      );
+      let tracedDependencies: string[] = [];
       try {
-        trace = await execFileAsync(
+        const trace = await execFileAsync(
           compiler,
-          [...prefix, object, ...linkArgs, "-Wl,-t", "-o", output],
+          [...driver.argv.slice(1), ...traceArgs, object, "-Wl,-t", "-o", output],
           { cwd: probeDir, maxBuffer: 32 * 1024 * 1024 },
+        );
+        tracedDependencies = await parseLinkTraceFiles(
+          `${trace.stdout}\n${trace.stderr}`,
+          probeDir,
+          probeDir,
         );
       } catch (error) {
         // Zig's COFF linker deliberately rejects GNU ld's `-t`, but `zig cc
@@ -2245,15 +2309,8 @@ async function implicitLinkerFingerprint(
         // drivers' dry runs commonly leave `-lc`/`-lSystem` unresolved, so
         // they must not use this fallback as a complete artifact identity.
         if (driver.argv[0] !== "zig" || driver.argv[1] !== "cc") throw error;
-        trace = driverInvocation;
-        driverDryRun = true;
       }
-      const dependencies = await parseLinkTraceFiles(
-        `${trace.stdout}\n${trace.stderr}`,
-        probeDir,
-        probeDir,
-        driverDryRun,
-      );
+      const dependencies = [...new Set([...driverDependencies, ...tracedDependencies])].sort();
       if (dependencies.length === 0) {
         throw new Error("linker trace reported no resolved input files");
       }
@@ -2279,7 +2336,7 @@ async function implicitLinkerFingerprint(
       ? null
       : await resolvedToolIdentity(probe.linker.spelling);
   return createHash("sha256")
-    .update("implicit-linker-v2\0")
+    .update("implicit-linker-v3\0")
     .update(probe.compilerIdentity)
     .update("\0")
     .update(probe.linkerInvocation)
@@ -2291,6 +2348,8 @@ async function implicitLinkerFingerprint(
     .update(linkArgs.join("\x1f"))
     .update("\0")
     .update(invocationArgs.join("\x1f"))
+    .update("\0")
+    .update(traceArgs.join("\x1f"))
     .update("\0")
     .update(probe.dependencies.join("\x1f"))
     .update("\0")
@@ -2523,18 +2582,20 @@ export async function stageRuntimeObjects(
   return new Map(staged);
 }
 
-/** Size-capped LRU sweep of the whole cache root after the first write and
- * every 64th later write in a long-lived process. Ordinary CLI invocations
- * write once; the periodic arm keeps library API/watch loops bounded without
- * putting a full cache-tree walk on every edit. Oldest-mtime files go first
- * until the tree is back under 75% of the cap; reads bump mtimes. Active links
- * use private staged names/hard links, so cache names can be unlinked safely. */
+/** Size-capped LRU sweep of the whole cache root. A caller-configured cap is
+ * enforced after every successful cache write. The 4 GiB default is checked on
+ * the first and every 64th write in a long-lived process: a full tree walk per
+ * corpus program would otherwise become quadratic as the cache grows. Oldest-
+ * mtime files go first until the tree is back under 75% of the cap; reads bump
+ * mtimes. Active links use private staged names/hard links, so cache names can
+ * be unlinked safely. */
 const rootWriteCounts = new Map<string, number>();
 async function pruneCache(root: string): Promise<void> {
+  const configuredCap = process.env["SCRIPTC_CACHE_MAX_MB"];
   const writes = (rootWriteCounts.get(root) ?? 0) + 1;
   rootWriteCounts.set(root, writes);
-  if (writes !== 1 && writes % 64 !== 0) return;
-  const capBytes = Number(process.env["SCRIPTC_CACHE_MAX_MB"] ?? "4096") * 1024 * 1024;
+  if (configuredCap === undefined && writes !== 1 && writes % 64 !== 0) return;
+  const capBytes = Number(configuredCap ?? "4096") * 1024 * 1024;
   if (!Number.isFinite(capBytes) || capBytes <= 0) return;
   const files: { path: string; size: number; mtimeMs: number }[] = [];
   const walk = async (dir: string): Promise<void> => {
@@ -2652,7 +2713,10 @@ export async function compileC(opts: CcOptions): Promise<void> {
       : configuredCacheRoot;
   if (root !== null) {
     try {
-      await ensurePrivateCacheRoot(root);
+      await ensurePrivateCacheRoot(
+        root,
+        process.env["SCRIPTC_CACHE_DIR"] === undefined,
+      );
     } catch {
       root = null;
     }
@@ -3052,10 +3116,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null ? ["-lz"] : []),
     ...driver.linkArgs,
   ];
-  // The dependency trace above uses only inputs needed to expose implicit
-  // linker files. Its wrapper dry run additionally needs the real build's
-  // compile/link flag shape: wrappers commonly inject flags conditionally on
-  // optimization, sanitizer, dynamic, or platform-link switches.
+  // Both the wrapper dry run and dependency trace need the real build's
+  // compile/link flag shape: wrappers commonly inject flags or native inputs
+  // conditionally on optimization, sanitizer, dynamic, or platform switches.
   const effectiveLinkInvocationArgs = [
     ...programCompilerArgs,
     ...(targetPlatform(driver) === "win32"
@@ -3072,6 +3135,13 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null ? ["-lz"] : []),
     ...driver.linkArgs,
   ];
+  // A complete hit is checked before cross-target curl's generated import stub
+  // is materialized. Its -L spelling still joins the dry-run identity, while
+  // the real trace omits only that not-yet-existing scriptc-owned directory.
+  const linkTraceInvocationArgs =
+    curlStubDir === null
+      ? effectiveLinkInvocationArgs
+      : effectiveLinkInvocationArgs.filter((arg) => arg !== `-L${curlStubDir}`);
   let implicitLinker: string | null = null;
   if (cacheCompleteArtifact) {
     try {
@@ -3080,6 +3150,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
         toolchainEnv,
         linkProbeArgs,
         effectiveLinkInvocationArgs,
+        linkTraceInvocationArgs,
       );
     } catch {
       // Some compiler wrappers/linkers do not implement trace mode. Runtime
@@ -3248,6 +3319,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
             toolchainEnv,
             linkProbeArgs,
             effectiveLinkInvocationArgs,
+            linkTraceInvocationArgs,
           ).catch(() => null),
           ccVersionOnce(driver.argv, toolchainEnv, true).catch(() => null),
         ]);
