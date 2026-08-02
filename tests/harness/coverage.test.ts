@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { globSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -110,6 +111,62 @@ test("import fences no longer stop analysis: percentage plus module blockers", a
   await expect(
     report(join(repoRoot, "tests/fixtures/node-types/import-fences.ts")),
   ).toMatchFileSnapshot("__snapshots__/coverage-import-fences.txt");
+});
+
+test("external host declarations unblock application coverage without inventing runtime semantics", () => {
+  const root = fixture("external-types");
+  const entry = join(root, "main.ts");
+  const externalTypes = { "@native-sdk/core": join(root, "native-sdk-core.d.ts") };
+
+  const unmapped = analyze(entry).coverage;
+  expect(unmapped.preflightFailed).toBe(true);
+  expect(unmapped.diagnostics.some((d) => d.code === "SC0001" && d.message.includes("@native-sdk/core"))).toBe(true);
+
+  const { coverage } = analyze(entry, { externalTypes });
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.stats.statementsTotal).toBeGreaterThan(0);
+  expect(coverage.diagnostics.some((d) => d.code === "SC0001")).toBe(false);
+  expect(
+    coverage.diagnostics.some(
+      (d) => d.code === "SC1010" && d.message.includes("external host module") && d.message.includes("--external-types"),
+    ),
+  ).toBe(true);
+  const out = renderCoverage({ ...coverage, file: "tests/coverage-fixtures/external-types/main.ts" });
+  expect(out).toContain("statements analyzed");
+  expect(out).toContain("@native-sdk/core");
+});
+
+test("external host declarations used only as types leave local code fully analyzable", () => {
+  const root = fixture("external-types");
+  const { coverage } = analyze(join(root, "type-only.ts"), {
+    externalTypes: { "@native-sdk/core": join(root, "native-sdk-core.d.ts") },
+  });
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.diagnostics).toEqual([]);
+  expect(coverage.stats.statementsFailed).toBe(0);
+});
+
+test("CLI accepts repeatable --external-types mappings for coverage", () => {
+  const root = fixture("external-types");
+  const scriptcCli = join(repoRoot, "packages/cli/src/main.ts");
+  const out = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      scriptcCli,
+      "coverage",
+      join(root, "main.ts"),
+      "--external-types",
+      `@native-sdk/core=${join(root, "native-sdk-core.d.ts")}`,
+      "--external-types",
+      `@native-sdk/unused=${join(root, "native-sdk-core.d.ts")}`,
+    ],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  expect(out).toContain("statements analyzed");
+  expect(out).toContain("@native-sdk/core");
+  expect(out).not.toContain("Cannot find module");
 });
 
 test("type errors block analysis", () => {

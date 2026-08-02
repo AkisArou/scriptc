@@ -47,6 +47,12 @@ Three tiers, always explicit:
 2. **Runs dynamically** (`--dynamic`) — an embedded JavaScript engine ([quickjs-ng](https://github.com/quickjs-ng/quickjs), ~620KB) executes what can't be static: npm dependencies' shipped JS, `any`-typed code. Every value crossing back into static code is validated at runtime — a lying type throws a catchable `TypeError` instead of corrupting memory.
 3. **Rejected** — everything else fails with a specific error code, a code frame, and usually a rewrite hint. Nothing is ever silently miscompiled.
 
+Projects whose runtime is supplied by an embedder can still measure their
+application code: `scriptc coverage` accepts repeatable
+`--external-types <specifier=file.d.ts>` mappings. The declaration supplies
+checker types; runtime uses remain explicit external-boundary blockers until
+the embedder provides executable semantics.
+
 ## What compiles
 
 The static surface covers the language and the standard library real programs use:

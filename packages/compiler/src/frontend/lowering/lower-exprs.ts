@@ -120,6 +120,21 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     const chainRecv = L.chainRecvByNode.get(expr);
     if (chainRecv) return { ...chainRecv, loc };
 
+    // --external-types supplies CHECKER truth only. A value rooted in one
+    // of those declarations has no runtime implementation in scriptc, so
+    // every use fences at its expression instead of accidentally lowering
+    // as an ambient ReferenceError or a structural value. This keeps the
+    // rest of coverage measurable without overstating the host boundary.
+    const externalTypeSpecifier = L.externalTypeSpecifierOf(expr);
+    if (externalTypeSpecifier !== null) {
+      L.unsupported(
+        "SC1010",
+        expr,
+        `values from the '${externalTypeSpecifier}' external host module (types supplied by --external-types, but no runtime implementation or scriptc lowering was provided)`,
+        "the declaration mapping is analysis-only: coverage continues through project code, while executing this value requires an embedder integration with explicit runtime semantics",
+      );
+    }
+
     if (ts.isNumericLiteral(expr)) {
       const value = Number(expr.text.replace(/_/g, ""));
       // Ask 4's representability input: a DECIMAL INTEGER source spelling

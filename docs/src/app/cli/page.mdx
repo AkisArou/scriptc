@@ -11,6 +11,8 @@ Usage:
   scriptc run <file.ts|.js> [options]       compile and run
   scriptc coverage <file.ts|.js>            how much compiles statically, and why not
   scriptc coverage <file.ts|.js> --dynamic  what a --dynamic build compiles, and what still blocks it
+  scriptc coverage <file.ts|.js> --external-types <specifier=file.d.ts>
+                                            type-resolve an embedder-provided module for analysis
 ```
 
 ## scriptc build
@@ -68,6 +70,9 @@ Analyzes the program without producing a binary and reports, statement by statem
 
   <dt><code>--provenance-sources</code></dt>
   <dd>EXPERIMENTAL. Compile npm dependencies from their provenance-attested source, fetched at the attested commit, as static program modules; packages without a usable attestation keep the engine path (a note, never a failure).</dd>
+
+  <dt><code>--external-types &lt;specifier=file.d.ts&gt;</code></dt>
+  <dd>Coverage only. Map an exact bare module specifier to a local declaration file supplied by an embedder. Repeat the option for multiple modules. The declaration supplies checker types so application coverage can continue; runtime imports and values remain explicit <code>SC1010</code> blockers. Relative paths resolve from the current working directory. Accepted files end in <code>.d.ts</code>, <code>.d.mts</code>, or <code>.d.cts</code>.</dd>
 
   <dt><code>--sanitize</code></dt>
   <dd>Build with AddressSanitizer plus the runtime reference-count audit — the same lane the compiler's own test corpus runs under. Useful when a program misbehaves and you want leaks or memory errors to be loud.</dd>

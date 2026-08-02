@@ -12,7 +12,8 @@
  * - Lexical scoping is resolved here: locals get function-unique ids
  *   ("x.0", "x.1" for shadowing); the IR is scope-flat.
  */
-import { isRelativeSpecifier } from "../shared.js";
+import { resolve } from "node:path";
+import { isRelativeSpecifier, tsgoPath } from "../shared.js";
 import * as ts from "../ts7/adapter.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import {
@@ -351,6 +352,9 @@ export interface LowerOptions {
    * imports; without this option ambient declarations keep Node's ordinary
    * ReferenceError behavior. */
   ffiImports?: readonly IrFfiImport[];
+  /** Coverage-only external host type surfaces. Their declarations inform
+   * the checker, while every runtime value use remains an SC1010 fence. */
+  externalTypes?: ReadonlyMap<string, string>;
 }
 
 /** The Lowerer's pass configuration (see lowerToIr). */
@@ -377,6 +381,8 @@ export interface LowererMode {
   /** Program-validated ambient declaration symbols for each FFI name.
    * Undefined in discovery's legacy call-local validation path. */
   ffiBindingSymbols?: ReadonlyMap<string, ReadonlySet<ts.Symbol>>;
+  /** LowerOptions.externalTypes, threaded through every lowering pass. */
+  externalTypes?: ReadonlyMap<string, string>;
 }
 
 /** Build lowering runs in two passes over the same ts.Program:
@@ -424,9 +430,11 @@ export function lowerToIr(
     });
   }
   const ffiImports = options.ffiImports ?? [];
+  const externalTypes = options.externalTypes ?? new Map<string, string>();
   const validation = new Lowerer(program, entry, moduleOrder, dynamic, {
     targetPlatform,
     ffiImports,
+    externalTypes,
   });
   const ffiValidation = validateFfiImports(validation);
   // Discovery must use the same exact-symbol ownership as emit. Otherwise a
@@ -440,6 +448,7 @@ export function lowerToIr(
     : new Lowerer(program, entry, moduleOrder, dynamic, {
         targetPlatform,
         ffiImports,
+        externalTypes,
         ffiBindingSymbols: ffiValidation.symbolsByName,
       });
   const reachable = discovery.discover(options.libRoots);
@@ -449,6 +458,7 @@ export function lowerToIr(
     startupCrash,
     ffiImports,
     ffiBindingSymbols: ffiValidation.symbolsByName,
+    externalTypes,
   });
   for (const d of dynamicCycleDiags) emit.pushDiag(d);
   for (const d of ffiValidation.diagnostics) emit.pushDiag(d);
@@ -461,6 +471,7 @@ export function lowerToIr(
     targetPlatform,
     ffiImports,
     ffiBindingSymbols: ffiValidation.symbolsByName,
+    externalTypes,
   });
   const rem = remainder.run();
   return { ...result, unreached: { diagnostics: rem.diagnostics, stats: rem.stats } };
@@ -1175,6 +1186,9 @@ export class Lowerer {
   readonly ffiImportsByName: ReadonlyMap<string, IrFfiImport>;
   /** Non-null after whole-program FFI declaration validation. */
   readonly ffiBindingSymbols: ReadonlyMap<string, ReadonlySet<ts.Symbol>> | null;
+  /** Exact specifier mappings and their reverse declaration-file lookup. */
+  readonly externalTypes: ReadonlyMap<string, string>;
+  readonly externalTypeSpecifierByFile: ReadonlyMap<string, string>;
   /** Symbols a POISONED declaration statement would have bound: the
    * declaration's own diagnostic is already recorded, and no local/global
    * registered, so later references fall through every resolution step —
@@ -1230,6 +1244,10 @@ export class Lowerer {
     this.ffiImports = mode.ffiImports ?? [];
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
+    this.externalTypes = mode.externalTypes ?? new Map();
+    this.externalTypeSpecifierByFile = new Map(
+      [...this.externalTypes].map(([specifier, file]) => [tsgoPath(resolve(file)), specifier]),
+    );
     this.checker = program.getTypeChecker();
     this.typeCtx = {
       checker: this.checker,
@@ -1246,6 +1264,8 @@ export class Lowerer {
       mixinIntersectionInstance: (widened) => mixinIntersectionInstanceType(this, widened),
       isStdlibFile: this.isStdlibFile,
       isNpmFile: this.isNpmFile,
+      isExternalTypeFile: (sf) =>
+        this.externalTypeSpecifierByFile.has(tsgoPath(resolve(sf.fileName))),
       dynamic: this.dynamic,
       // fileTag is filled just below; the hook is only ever CALLED during
       // lowering, long after the constructor completes.
@@ -1379,6 +1399,63 @@ export class Lowerer {
     if (cjsValue) symbol = cjsValue;
     this.flushDeferred(symbol);
     return symbol;
+  }
+
+  /** The configured external host module owning an expression's runtime
+   * value, or null. Alias chains are followed to their declaration file so
+   * direct imports and local re-export facades classify identically. Type
+   * references never call this helper and remain ordinary checker input. */
+  externalTypeSpecifierOf(expr: ts.Expression): string | null {
+    let value: ts.Expression = expr;
+    while (
+      ts.isParenthesizedExpression(value) ||
+      ts.isAsExpression(value) ||
+      ts.isTypeAssertion(value) ||
+      ts.isNonNullExpression(value)
+    ) {
+      value = value.expression;
+    }
+    if (ts.isCallExpression(value) || ts.isNewExpression(value)) {
+      return this.externalTypeSpecifierOf(value.expression);
+    }
+    if (ts.isTaggedTemplateExpression(value)) {
+      return this.externalTypeSpecifierOf(value.tag);
+    }
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      // Follow the runtime RECEIVER, not the property's declaration: a
+      // project-owned record may use an interface declared by the mapped
+      // file and remains ordinary static data (`const x: HostType = ...;
+      // x.field`). Only a value rooted in the imported module is external.
+      return this.externalTypeSpecifierOf(value.expression);
+    }
+    if (!ts.isIdentifier(value)) return null;
+    return this.externalTypeSpecifierOfSymbol(this.checker.getSymbolAtLocation(value));
+  }
+
+  private externalTypeSpecifierOfSymbol(symbol: ts.Symbol | undefined): string | null {
+    let current = symbol;
+    for (let hop = 0; current !== undefined && hop < 32; hop++) {
+      for (const decl of this.checker.declarationsOf(current)) {
+        const byFile = this.externalTypeSpecifierByFile.get(tsgoPath(resolve(decl.getSourceFile().fileName)));
+        if (byFile !== undefined) return byFile;
+        let importDecl: ts.ImportDeclaration | null = null;
+        let candidate: ts.Node | undefined;
+        if (ts.isImportSpecifier(decl)) candidate = decl.parent.parent.parent;
+        else if (ts.isNamespaceImport(decl)) candidate = decl.parent.parent;
+        else if (ts.isImportClause(decl)) candidate = decl.parent;
+        if (candidate !== undefined && ts.isImportDeclaration(candidate)) importDecl = candidate;
+        if (
+          importDecl !== null &&
+          ts.isStringLiteral(importDecl.moduleSpecifier) &&
+          this.externalTypes.has(importDecl.moduleSpecifier.text)
+        ) {
+          return importDecl.moduleSpecifier.text;
+        }
+      }
+      if ((current.flags & ts.SymbolFlags.Alias) === 0) break;
+      current = this.checker.getAliasedSymbol(current);
+    }
+    return null;
   }
 
   /** The default-snapshot storage symbol a DEFAULT-import alias chain

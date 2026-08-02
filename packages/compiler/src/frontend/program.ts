@@ -195,6 +195,10 @@ export interface LoadResult {
    * checkPreflight. */
   startupCrash?: StartupCrash | null;
   configDiags: ScrDiagnostic[];
+  /** Coverage-only external host modules: exact bare specifier → local
+   * declaration file. These participate in checker resolution but never
+   * become runtime module edges. */
+  externalTypes: ReadonlyMap<string, string>;
   projectWorld: () => ts.Program;
 }
 
@@ -209,7 +213,11 @@ export interface StartupCrash {
   loc: { file: string; start: number; end: number };
 }
 
-function loadProgram7(host: ts.Ts7Host, entryPath: string): LoadResult & { disposeAll: () => void } {
+function loadProgram7(
+  host: ts.Ts7Host,
+  entryPath: string,
+  externalTypes: ReadonlyMap<string, string> = new Map(),
+): LoadResult & { disposeAll: () => void } {
   const config = adoptProjectConfig7(host, entryPath);
   const nodeTypes = config.configFile ? resolveNodeTypes7(entryPath) : null;
   // skipLibCheck is FORCED with @types/node in the program: checking a
@@ -227,8 +235,14 @@ function loadProgram7(host: ts.Ts7Host, entryPath: string): LoadResult & { dispo
   // so tsgo's OWN resolution of the bare specifiers lands on the same
   // source files the preflight resolver answers — the checker types the
   // driver against the package's real TypeScript, not its shipped .d.ts.
-  const paths = provenancePaths();
-  if (paths !== null) options = { ...options, paths };
+  const provenance = provenancePaths();
+  if (provenance !== null || externalTypes.size > 0) {
+    const paths: Record<string, string[]> = { ...(provenance ?? {}) };
+    for (const [specifier, declarationPath] of externalTypes) {
+      paths[specifier] = [declarationPath];
+    }
+    options = { ...options, paths };
+  }
   const coreRoots = [entryPath, ambientDtsPath(), nodeTypes ?? fallbackDtsPath()];
   const program = ts.createProgram([...coreRoots, overridesDtsPath()], options, host);
   const entry = program.getSourceFile(entryPath);
@@ -239,6 +253,7 @@ function loadProgram7(host: ts.Ts7Host, entryPath: string): LoadResult & { dispo
     entry,
     moduleOrder: [],
     configDiags: config.diags,
+    externalTypes,
     projectWorld: () => (projectWorld ??= ts.createProgram(coreRoots, options, host)),
     disposeAll: () => {
       projectWorld?.dispose();
@@ -258,11 +273,17 @@ export function loadProgram(
      * modules this load (npm-static.ts owns the doctrine). Every load
      * RESETS the module state, so flagless loads always start clean. */
     npmStatic?: Iterable<string>;
+    /** Coverage-only type surfaces for modules supplied by an embedder.
+     * Exact bare specifiers only; values never become runtime edges. */
+    externalTypes?: ReadonlyMap<string, string> | Readonly<Record<string, string>> | undefined;
   },
 ): LoadResult & { dispose: () => void } {
   // Absolute from the start: tsgo's world is absolute-path-keyed (the CLI
   // resolves before calling; this covers direct API callers too).
   entryPath = resolve(entryPath);
+  const externalTypes = opts?.externalTypes instanceof Map
+    ? new Map([...opts.externalTypes].map(([specifier, file]) => [specifier, resolve(file)]))
+    : new Map(Object.entries(opts?.externalTypes ?? {}).map(([specifier, file]) => [specifier, resolve(file)]));
   setNpmStaticPackages(opts?.npmStatic ?? []);
   // Workspace-package registrations reset per load (same discipline as the
   // npm-static set), then the opted-in names are probed UP FRONT: a
@@ -293,7 +314,7 @@ export function loadProgram(
       (npmShadow?.hideFile(path) ?? false) || projectDtsRuntimeSibling(path) !== null,
   };
   const host = new ts.Ts7Host({ cwd: dirname(entryPath), fsShadow });
-  const load = loadProgram7(host, entryPath);
+  const load = loadProgram7(host, entryPath, externalTypes);
   return {
     ...load,
     dispose: () => {
@@ -1630,6 +1651,17 @@ function preflight7(load: LoadResult): {
       const specNode: ts.Expression | undefined = stmt.moduleSpecifier;
       if (specNode === undefined || !ts.isStringLiteral(specNode)) continue;
       const spec = specNode.text;
+      if (load.externalTypes.has(spec)) {
+        diags.push(
+          unsupportedDiag(
+            "SC1010",
+            locOf7(stmt),
+            `the '${spec}' external host module (types supplied by --external-types, but no runtime implementation or scriptc lowering was provided)`,
+            "the declaration mapping is analysis-only: coverage continues through project code, while executing this module requires an embedder integration with explicit runtime semantics",
+          ),
+        );
+        continue;
+      }
       const isRelative = isRelativeSpecifier(spec);
       const isBare = !isRelative && !ambientModules.has(spec);
       // --npm-static: an opted-in package importing node:module admits
