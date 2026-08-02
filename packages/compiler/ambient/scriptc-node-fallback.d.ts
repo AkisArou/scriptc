@@ -663,6 +663,7 @@ interface Headers {
     callbackfn: (value: string, key: string, parent: Headers) => void,
     thisArg?: unknown,
   ): void;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
 }
 declare var Headers: {
   new (init?: Record<string, string> | readonly (readonly [string, string])[]): Headers;

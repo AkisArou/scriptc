@@ -37,6 +37,28 @@ SCRIPTC_FETCH_CONFORMANCE_TRACES=50 \
 pnpm test:fetch-conformance
 ```
 
+The same profile now carries the denominator, not just the supported rows.
+It reflects the public constructor/static/prototype surface of AbortController,
+AbortSignal, Headers, Request, Response, ReadableStream, its default reader,
+and its default controller. Proxy-backed constructor probes record Node's exact
+RequestInit and ResponseInit WebIDL dictionary reads (including runtime members
+that may be newer than the installed declarations). Every item is classified:
+
+- `static`: engine-free and tied one-to-one to a differential-evidence row;
+- `dynamic-only`: fenced from static builds with SC2020, accepted under
+  `--dynamic`;
+- `unsupported`: SC2020 in both tiers; this is implementation work rather than
+  an implicit omission;
+- `out-of-scope`: reflection metadata such as `Symbol.toStringTag`, retained so
+  the scope boundary is machine-readable.
+
+The selected adjacent interface families excluded from the census carry
+reasons too. A Node upgrade that adds/removes a public member or dictionary key
+fails the focused suite until that member is classified. The static,
+dynamic-only, and unsupported rows project into the shipped surface manifest;
+filter `NODE24_FETCH_COMPAT_PROFILE.inventory.entries` by `status`/`owner` for
+the next cohesive implementation queue.
+
 When Node changes, update `.node-version` and the profile's Node/Undici tuple
 together, regenerate with `pnpm manifest`, then run the focused plain and
 sanitized conformance lanes before the full sandbox gate. When the static fetch

@@ -1729,6 +1729,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // no lowering above claimed ([1,2].entries, Math.SQRT2, Promise.all,
       // re.exec as a value, ...) reports SC2020 here.
       L.fenceStaticResponseMember(expr, "read");
+      L.fenceStaticHeadersMember(expr, "read");
       L.fenceStaticReadableStreamMember(expr, "read");
       L.stdlibMemberFence(expr);
       // The npm chokepoint: a member on a package-typed receiver in a
@@ -3606,9 +3607,11 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         // and the arm literals must BUILD as this element type).
         let srcNode: ts.Expression = el.expression;
         while (ts.isParenthesizedExpression(srcNode)) srcNode = srcNode.expression;
-        let src = ts.isConditionalExpression(srcNode)
-          ? lowerTernary(L, srcNode, type)
-          : L.lowerExpr(el.expression);
+        L.fenceStaticHeadersIteration(el.expression);
+        let src = L.lowerDynamicHeadersSpread(el.expression, type) ??
+          (ts.isConditionalExpression(srcNode)
+            ? lowerTernary(L, srcNode, type)
+            : L.lowerExpr(el.expression));
         // `[...someSet]`: a same-element Set drains into a fresh array in
         // insertion order (setIntrinsic toArray); the spread machinery
         // then copies like any array source.
@@ -3878,12 +3881,31 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
    * dyn's String() for dyn operands — `{ [field]: v }` where field is a
    * checked-dynamic param). Values convert through the usual dyn boundary
    * (dynFrom's domain, functions box); a value with no dyn representation
-   * fences per property. Spreads, accessors, and methods stay fenced —
-   * none co-occur with the computed-key idiom in the wild. */
+   * fences per property. Spreads copy through dyn.assign in source order;
+   * accessors stay fenced. */
   export function lowerDynObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
     const loc = locOf(expr);
-    const fields: { key: IrExpr; value: IrExpr }[] = [];
+    let fields: { key: IrExpr; value: IrExpr }[] = [];
+    let acc: IrExpr | null = null;
+    const flushFields = (): void => {
+      if (fields.length === 0) return;
+      const chunk: IrExpr = { kind: "dynObjLit", fields, type: DYN, loc };
+      acc = acc === null
+        ? chunk
+        : { kind: "libCall", fn: "dyn.assign", args: [acc, chunk], type: DYN, loc };
+      fields = [];
+    };
     for (const prop of expr.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        flushFields();
+        const source = L.coerceToExpected(L.lowerExpr(prop.expression), DYN);
+        if (source.type.kind !== "dyn") {
+          L.unsupported("SC1101", prop.expression, `spreading '${L.fmt(source.type)}' into a checked-dynamic object literal`);
+        }
+        acc ??= { kind: "dynObjLit", fields: [], type: DYN, loc };
+        acc = { kind: "libCall", fn: "dyn.assign", args: [acc, source], type: DYN, loc: locOf(prop) };
+        continue;
+      }
       if (
         !ts.isPropertyAssignment(prop) &&
         !ts.isShorthandPropertyAssignment(prop) &&
@@ -3892,7 +3914,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         L.unsupported(
           "SC1090",
           prop,
-          "spreads and accessors in a runtime-keyed (computed-key) object literal",
+          "accessors in a runtime-keyed (computed-key) object literal",
         );
       }
       const name = prop.name;
@@ -4035,7 +4057,8 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       }
       fields.push({ key, value: v });
     }
-    return { kind: "dynObjLit", fields, type: DYN, loc };
+    flushFields();
+    return acc ?? { kind: "dynObjLit", fields: [], type: DYN, loc };
   }
 
 /** Spreading a source whose shape carries accessor slots: Node's copy
@@ -5602,6 +5625,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // checked-dynamic element-read path can turn it into a runtime missing
     // member.
     L.fenceStaticResponseMember(expr, "read");
+    L.fenceStaticHeadersMember(expr, "read");
     L.fenceStaticReadableStreamMember(expr, "read");
     // `globalThis[<expr>]` — the dynamic global probe (the harness's
     // conditional-globals sweep): a compiled binary's globals are
