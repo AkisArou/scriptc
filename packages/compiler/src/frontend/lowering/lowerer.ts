@@ -1429,6 +1429,8 @@ export class Lowerer {
    * direct imports and local re-export facades classify identically. Type
    * references never call this helper and remain ordinary checker input. */
   externalTypeSpecifierOf(expr: ts.Expression): string | null {
+    if (this.externalTypes.size === 0) return null;
+
     let value: ts.Expression = expr;
     while (
       ts.isParenthesizedExpression(value) ||
