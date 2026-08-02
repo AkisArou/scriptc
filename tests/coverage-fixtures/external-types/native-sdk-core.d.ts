@@ -1,6 +1,3 @@
-export interface HostPoint {
-  x: number;
-  y: number;
-}
+export type { HostPoint } from "./native-sdk-point.js";
 
 export function hostVersion(): string;

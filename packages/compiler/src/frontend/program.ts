@@ -70,6 +70,7 @@ import {
   overridesDtsPath,
   registerWorkspacePackage,
   SUPPORTED_NODE_MODULES,
+  tsgoPath,
   unsupportedModuleFeatureOf,
   workspacePackageOfPath,
 } from "./shared.js";
@@ -199,6 +200,10 @@ export interface LoadResult {
    * declaration file. These participate in checker resolution but never
    * become runtime module edges. */
   externalTypes: ReadonlyMap<string, string>;
+  /** The mapped declarations plus their relative declaration-file closure,
+   * keyed by normalized file name and attributed to the owning external
+   * specifier. */
+  externalTypeSpecifierByFile: ReadonlyMap<string, string>;
   projectWorld: () => ts.Program;
 }
 
@@ -211,6 +216,72 @@ export interface StartupCrash {
   message: string;
   className: "%Error" | "%TypeError" | "%SyntaxError";
   loc: { file: string; start: number; end: number };
+}
+
+/** True when a coverage mapping names one exact bare host module. TypeScript
+ * gives `paths` keys containing `*` pattern semantics, so accepting one here
+ * would silently broaden the mapping beyond the specifier the caller named. */
+export function isExactExternalTypeSpecifier(specifier: string): boolean {
+  return (
+    specifier !== "" &&
+    !specifier.startsWith(".") &&
+    !specifier.startsWith("/") &&
+    !specifier.startsWith("#") &&
+    !specifier.startsWith("node:") &&
+    !specifier.includes("*")
+  );
+}
+
+/** Expand each mapped declaration entry through RELATIVE declaration
+ * dependencies. Declaration packages commonly expose a barrel index.d.ts;
+ * the structural types declared in its sibling files are part of the same
+ * checker-only host surface. Bare imports deliberately do not inherit this
+ * trust: they name a separate package/surface and need their own mapping. */
+function externalTypeFileClosure7(
+  program: ts.Program,
+  externalTypes: ReadonlyMap<string, string>,
+): ReadonlyMap<string, string> {
+  const byFile = new Map<string, string>();
+  for (const [specifier, file] of externalTypes) {
+    byFile.set(tsgoPath(resolve(file)), specifier);
+  }
+
+  const queue: ts.SourceFile[] = [];
+  for (const file of byFile.keys()) {
+    const sf = program.getSourceFile(file);
+    if (sf?.isDeclarationFile) queue.push(sf);
+  }
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const sf = queue.shift()!;
+    const file = tsgoPath(resolve(sf.fileName));
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const owner = byFile.get(file);
+    if (owner === undefined) continue;
+
+    const admit = (dep: ts.SourceFile | null): void => {
+      if (dep === null || !dep.isDeclarationFile) return;
+      const depFile = tsgoPath(resolve(dep.fileName));
+      if (byFile.has(depFile)) return;
+      byFile.set(depFile, owner);
+      queue.push(dep);
+    };
+    // SourceFile.imports includes import/export declarations, import =
+    // require(), and import("…") type nodes. Only relative edges inherit
+    // the mapped entry's ownership.
+    for (const node of sf.imports) {
+      if (ts.isStringLiteralLike(node) && isRelativeSpecifier(node.text)) {
+        admit(resolveImport7(program, sf, node.text));
+      }
+    }
+    // Triple-slash path references are the other declaration-local edge.
+    for (const ref of sf.referencedFiles) {
+      const depPath = tsgoPath(resolve(dirname(sf.fileName), ref.fileName));
+      admit(program.getSourceFile(depPath) ?? null);
+    }
+  }
+  return byFile;
 }
 
 function loadProgram7(
@@ -247,6 +318,7 @@ function loadProgram7(
   const program = ts.createProgram([...coreRoots, overridesDtsPath()], options, host);
   const entry = program.getSourceFile(entryPath);
   if (!entry) throw new Error(`could not load ${entryPath}`);
+  const externalTypeSpecifierByFile = externalTypeFileClosure7(program, externalTypes);
   let projectWorld: ts.Program | null = null;
   return {
     program,
@@ -254,6 +326,7 @@ function loadProgram7(
     moduleOrder: [],
     configDiags: config.diags,
     externalTypes,
+    externalTypeSpecifierByFile,
     projectWorld: () => (projectWorld ??= ts.createProgram(coreRoots, options, host)),
     disposeAll: () => {
       projectWorld?.dispose();
@@ -284,6 +357,13 @@ export function loadProgram(
   const externalTypes = opts?.externalTypes instanceof Map
     ? new Map([...opts.externalTypes].map(([specifier, file]) => [specifier, resolve(file)]))
     : new Map(Object.entries(opts?.externalTypes ?? {}).map(([specifier, file]) => [specifier, resolve(file)]));
+  for (const specifier of externalTypes.keys()) {
+    if (!isExactExternalTypeSpecifier(specifier)) {
+      throw new TypeError(
+        `invalid external type specifier ${JSON.stringify(specifier)} (expected an exact bare package specifier)`,
+      );
+    }
+  }
   setNpmStaticPackages(opts?.npmStatic ?? []);
   // Workspace-package registrations reset per load (same discipline as the
   // npm-static set), then the opted-in names are probed UP FRONT: a

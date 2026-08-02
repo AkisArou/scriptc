@@ -4,7 +4,7 @@ import { readFileSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { analyze, compile, compileC, compileLibrary, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
+import { analyze, compile, compileC, compileLibrary, isExactExternalTypeSpecifier, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
 import { defaultExecutableName } from "./paths.js";
 
 const USAGE = `scriptc — TypeScript/JavaScript to native executables (experimental)
@@ -201,13 +201,7 @@ async function main(): Promise<number> {
     }
     const specifier = mapping.slice(0, equals).trim();
     const declarationArg = mapping.slice(equals + 1).trim();
-    if (
-      specifier === "" ||
-      specifier.startsWith(".") ||
-      specifier.startsWith("/") ||
-      specifier.startsWith("#") ||
-      specifier.startsWith("node:")
-    ) {
+    if (!isExactExternalTypeSpecifier(specifier)) {
       fail(`invalid --external-types specifier ${JSON.stringify(specifier)} (expected an exact bare package specifier)`);
     }
     if (!/\.d\.(?:ts|mts|cts)$/.test(declarationArg)) {

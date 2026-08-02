@@ -355,6 +355,9 @@ export interface LowerOptions {
   /** Coverage-only external host type surfaces. Their declarations inform
    * the checker, while every runtime value use remains an SC1010 fence. */
   externalTypes?: ReadonlyMap<string, string>;
+  /** The mapped entries plus relative declaration dependencies, attributed
+   * to their owning external specifier. */
+  externalTypeSpecifierByFile?: ReadonlyMap<string, string>;
 }
 
 /** The Lowerer's pass configuration (see lowerToIr). */
@@ -383,6 +386,8 @@ export interface LowererMode {
   ffiBindingSymbols?: ReadonlyMap<string, ReadonlySet<ts.Symbol>>;
   /** LowerOptions.externalTypes, threaded through every lowering pass. */
   externalTypes?: ReadonlyMap<string, string>;
+  /** LowerOptions.externalTypeSpecifierByFile, shared by every pass. */
+  externalTypeSpecifierByFile?: ReadonlyMap<string, string>;
 }
 
 /** Build lowering runs in two passes over the same ts.Program:
@@ -431,10 +436,14 @@ export function lowerToIr(
   }
   const ffiImports = options.ffiImports ?? [];
   const externalTypes = options.externalTypes ?? new Map<string, string>();
+  const externalTypeSpecifierByFile = options.externalTypeSpecifierByFile ?? new Map(
+    [...externalTypes].map(([specifier, file]) => [tsgoPath(resolve(file)), specifier]),
+  );
   const validation = new Lowerer(program, entry, moduleOrder, dynamic, {
     targetPlatform,
     ffiImports,
     externalTypes,
+    externalTypeSpecifierByFile,
   });
   const ffiValidation = validateFfiImports(validation);
   // Discovery must use the same exact-symbol ownership as emit. Otherwise a
@@ -449,6 +458,7 @@ export function lowerToIr(
         targetPlatform,
         ffiImports,
         externalTypes,
+        externalTypeSpecifierByFile,
         ffiBindingSymbols: ffiValidation.symbolsByName,
       });
   const reachable = discovery.discover(options.libRoots);
@@ -459,6 +469,7 @@ export function lowerToIr(
     ffiImports,
     ffiBindingSymbols: ffiValidation.symbolsByName,
     externalTypes,
+    externalTypeSpecifierByFile,
   });
   for (const d of dynamicCycleDiags) emit.pushDiag(d);
   for (const d of ffiValidation.diagnostics) emit.pushDiag(d);
@@ -472,6 +483,7 @@ export function lowerToIr(
     ffiImports,
     ffiBindingSymbols: ffiValidation.symbolsByName,
     externalTypes,
+    externalTypeSpecifierByFile,
   });
   const rem = remainder.run();
   return { ...result, unreached: { diagnostics: rem.diagnostics, stats: rem.stats } };
@@ -1245,7 +1257,7 @@ export class Lowerer {
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
     this.externalTypes = mode.externalTypes ?? new Map();
-    this.externalTypeSpecifierByFile = new Map(
+    this.externalTypeSpecifierByFile = mode.externalTypeSpecifierByFile ?? new Map(
       [...this.externalTypes].map(([specifier, file]) => [tsgoPath(resolve(file)), specifier]),
     );
     this.checker = program.getTypeChecker();

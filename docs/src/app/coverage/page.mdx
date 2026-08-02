@@ -132,7 +132,8 @@ The option is repeatable. Relative declaration paths resolve from the current
 working directory; `.d.ts`, `.d.mts`, and `.d.cts` files are accepted. The
 declaration participates in type checking, so project-owned modules and local
 values using its structural types can be measured. Type-only imports add no
-runtime boundary.
+runtime boundary. Relative declaration imports and re-exports are included, so
+the mapped file may be a conventional `index.d.ts` barrel.
 
 This mapping deliberately does not claim that the host module can execute in a
 scriptc binary. Value imports and uses appear as `SC1010` external-host

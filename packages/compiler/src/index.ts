@@ -100,7 +100,7 @@ export {
 export { validateSidecar } from "./library/sidecar-validate.js";
 export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
-export { ambientDtsPath, overridesDtsPath } from "./frontend/program.js";
+export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export {
   setProvenanceSources,
@@ -566,6 +566,7 @@ function runFrontend(
       ...opts,
       startupCrash: finalLoad.startupCrash ?? null,
       externalTypes: finalLoad.externalTypes,
+      externalTypeSpecifierByFile: finalLoad.externalTypeSpecifierByFile,
     }),
     npmStatic: statuses,
     npmImportSites: npmSites,

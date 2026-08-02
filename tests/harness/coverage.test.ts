@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { globSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -136,7 +136,7 @@ test("external host declarations unblock application coverage without inventing 
   expect(out).toContain("@native-sdk/core");
 });
 
-test("external host declarations used only as types leave local code fully analyzable", () => {
+test("external declaration barrels leave type-only local code fully analyzable", () => {
   const root = fixture("external-types");
   const { coverage } = analyze(join(root, "type-only.ts"), {
     externalTypes: { "@native-sdk/core": join(root, "native-sdk-core.d.ts") },
@@ -167,6 +167,32 @@ test("CLI accepts repeatable --external-types mappings for coverage", () => {
   expect(out).toContain("statements analyzed");
   expect(out).toContain("@native-sdk/core");
   expect(out).not.toContain("Cannot find module");
+});
+
+test("external type mappings reject TypeScript paths patterns", () => {
+  const root = fixture("external-types");
+  const entry = join(root, "type-only.ts");
+  const declaration = join(root, "native-sdk-core.d.ts");
+  expect(() => analyze(entry, { externalTypes: { "@native-sdk/*": declaration } })).toThrow(
+    "expected an exact bare package specifier",
+  );
+
+  const scriptcCli = join(repoRoot, "packages/cli/src/main.ts");
+  const cli = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      scriptcCli,
+      "coverage",
+      entry,
+      "--external-types",
+      `@native-sdk/*=${declaration}`,
+    ],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  expect(cli.status).toBe(1);
+  expect(cli.stderr).toContain("expected an exact bare package specifier");
 });
 
 test("type errors block analysis", () => {
