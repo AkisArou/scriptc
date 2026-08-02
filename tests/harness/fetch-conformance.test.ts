@@ -160,10 +160,17 @@ interface RuntimeInterfaceSurface {
   symbols: string[];
 }
 
+const publicWellKnownSymbols = new Map<symbol, string>();
+for (const name of Object.getOwnPropertyNames(Symbol)) {
+  const value = (Symbol as unknown as Record<string, unknown>)[name];
+  if (typeof value === "symbol") {
+    publicWellKnownSymbols.set(value, `[Symbol.${name}]`);
+  }
+}
+
 function publicSymbolName(symbol: symbol): string | null {
-  if (symbol === Symbol.iterator) return "[Symbol.iterator]";
-  if (symbol === Symbol.asyncIterator) return "[Symbol.asyncIterator]";
-  if (symbol === Symbol.toStringTag) return "[Symbol.toStringTag]";
+  const publicName = publicWellKnownSymbols.get(symbol);
+  if (publicName !== undefined) return publicName;
   // Node-private transfer/inspection symbols are implementation details,
   // not the public WebIDL surface this profile promises to classify.
   return null;
@@ -294,6 +301,14 @@ describe("Node 24 fetch compatibility profile", () => {
       );
     }
     expect(typeof globalThis.fetch).toBe("function");
+  });
+
+  test("the public-symbol classifier covers every well-known symbol", () => {
+    expect(publicWellKnownSymbols.size).toBeGreaterThan(0);
+    for (const [symbol, name] of publicWellKnownSymbols) {
+      expect(publicSymbolName(symbol)).toBe(name);
+    }
+    expect(publicSymbolName(Symbol("nodejs.private"))).toBeNull();
   });
 
   test("the WebIDL dictionary census matches Node's conversion reads", () => {

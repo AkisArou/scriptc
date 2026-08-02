@@ -4888,6 +4888,8 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     loc: SrcLoc,): { stmts: IrStmt[]; value: IrExpr } {
     if (ts.isArrayLiteralExpression(target)) {
       L.fenceStaticHeadersIteration(rhs);
+    } else {
+      L.fenceFetchObjectAssignment(target, rhs);
     }
     return destructuringAssignInto(L, target, L.lowerExpr(rhs), rhs, rhs, loc);
   }

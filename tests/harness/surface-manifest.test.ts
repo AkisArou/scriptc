@@ -303,6 +303,68 @@ test("static RequestInit fences dynamic-only keys through imported const aliases
   );
 });
 
+test("static RequestInit fences statically traceable property and conditional values", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.request-init.cache.traced-expressions",
+    source:
+      '/// <reference types="node" />\n' +
+      'const options = { init: { cache: "no-store" } } as const;\n' +
+      'void fetch("http://127.0.0.1", options.init);\n' +
+      'const enabled = true;\n' +
+      'const init: RequestInit = enabled ? { cache: "no-store" } : { method: "GET" };\n' +
+      'void fetch("http://127.0.0.1", init);\n' +
+      'const disabled = false;\n' +
+      'const safe: RequestInit = disabled ? { cache: "no-store" } : { method: "GET" };\n' +
+      'void fetch("http://127.0.0.1", safe);\n',
+  });
+  const entry = entryById.get("stdlib.fetch.request-init.cache");
+  expect(entry).toBeDefined();
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual([entry!.code]);
+  expect(coverage.diagnostics.filter((d) => d.code === entry!.code)).toHaveLength(2);
+  const dynamic = analyze(file, { dynamic: true }).coverage;
+  expect(
+    dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`),
+  ).toEqual([]);
+});
+
+test("fetch interface object bindings retain the inventory fence code", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.object-binding-fences",
+    source:
+      '/// <reference types="node" />\n' +
+      'function headers(value: Headers): void { const { entries } = value; }\n' +
+      'function response(value: Response): void { const { clone } = value; }\n' +
+      'function stream(value: ReadableStream<Uint8Array>): void { const { tee } = value; }\n' +
+      'function assign(value: Headers, entries: unknown): void { ({ entries } = value); }\n' +
+      'void headers; void response; void stream; void assign;\n',
+  });
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual(["SC2020"]);
+  expect(coverage.diagnostics.filter((d) => d.code === "SC2020")).toHaveLength(4);
+  const dynamic = analyze(file, { dynamic: true }).coverage;
+  expect(dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+});
+
+test("unsupported symbol object bindings remain fenced under --dynamic", () => {
+  const file = probeFile({
+    id: "stdlib.fetch.object-binding-unsupported-symbol",
+    source:
+      '/// <reference types="node" />\n' +
+      'function stream(value: ReadableStream<Uint8Array>): void {\n' +
+      '  const { [Symbol.asyncIterator]: iterator } = value;\n' +
+      '}\n' +
+      'void stream;\n',
+  });
+  for (const dynamic of [false, true]) {
+    const coverage = analyze(file, { dynamic }).coverage;
+    expect(coverage.preflightFailed).toBe(false);
+    expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual(["SC2020"]);
+  }
+});
+
 test("constructing a spread RequestInit does not apply fetch conversion fences", () => {
   const root = mkdtempSync(join(tmpdir(), "scr-request-init-value-"));
   const file = join(root, "main.ts");

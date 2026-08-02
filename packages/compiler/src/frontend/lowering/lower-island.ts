@@ -273,6 +273,76 @@ function requestInitValueExpr(expr: ts.Expression): ts.Expression {
   return current;
 }
 
+function requestInitStaticBoolean(L: Lowerer, value: ts.Expression): boolean | null {
+  const expr = requestInitValueExpr(value);
+  if (expr.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (expr.kind === ts.SyntaxKind.FalseKeyword) return false;
+  const text = L.checker.typeToString(L.typeOf(expr));
+  return text === "true" ? true : text === "false" ? false : null;
+}
+
+function requestInitConstBacked(
+  L: Lowerer,
+  value: ts.Expression,
+  seen: Set<ts.Symbol>,
+): boolean {
+  const expr = requestInitValueExpr(value);
+  if (ts.isObjectLiteralExpression(expr)) return true;
+  if (ts.isConditionalExpression(expr)) {
+    const selected = requestInitStaticBoolean(L, expr.condition);
+    if (selected !== null) {
+      return requestInitConstBacked(
+        L,
+        selected ? expr.whenTrue : expr.whenFalse,
+        new Set(seen),
+      );
+    }
+    return requestInitConstBacked(L, expr.whenTrue, new Set(seen)) &&
+      requestInitConstBacked(L, expr.whenFalse, new Set(seen));
+  }
+  if (!ts.isIdentifier(expr)) return false;
+  const symbol = L.resolveValueSymbol(expr);
+  if (!symbol || seen.has(symbol)) return false;
+  seen.add(symbol);
+  const declarations = L.checker.declarationsOf(symbol).filter(
+    (declaration): declaration is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(declaration) &&
+      declaration.initializer !== undefined &&
+      ts.isVariableDeclarationList(declaration.parent) &&
+      (declaration.parent.flags & ts.NodeFlags.Const) !== 0,
+  );
+  return declarations.length > 0 && declarations.every((declaration) =>
+    requestInitConstBacked(L, declaration.initializer!, new Set(seen))
+  );
+}
+
+function fenceStaticRequestInitProperty(
+  L: Lowerer,
+  access: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  seen: Set<ts.Symbol>,
+): void {
+  if (!requestInitConstBacked(L, access.expression, new Set())) return;
+  const key = ts.isPropertyAccessExpression(access)
+    ? access.name.text
+    : foldedStringKeyOf(L, access.argumentExpression);
+  if (key === null) return;
+  const symbol = ts.isPropertyAccessExpression(access)
+    ? L.checker.getSymbolAtLocation(access.name)
+    : L.checker.getPropertyOfType(L.typeOf(access.expression), key);
+  if (!symbol || seen.has(symbol)) return;
+  seen.add(symbol);
+  for (const declaration of L.checker.declarationsOf(symbol)) {
+    if (ts.isPropertyAssignment(declaration)) {
+      fenceStaticRequestInitValueInner(L, declaration.initializer, seen);
+    } else if (
+      ts.isShorthandPropertyAssignment(declaration) &&
+      ts.isIdentifier(declaration.name)
+    ) {
+      fenceStaticRequestInitValueInner(L, declaration.name, seen);
+    }
+  }
+}
+
 function fenceStaticRequestInitObject(
   L: Lowerer,
   init: ts.ObjectLiteralExpression,
@@ -314,6 +384,20 @@ function fenceStaticRequestInitValueInner(
   const expr = requestInitValueExpr(value);
   if (ts.isObjectLiteralExpression(expr)) {
     fenceStaticRequestInitObject(L, expr, seen);
+    return;
+  }
+  if (ts.isConditionalExpression(expr)) {
+    const selected = requestInitStaticBoolean(L, expr.condition);
+    if (selected !== null) {
+      fenceStaticRequestInitValueInner(L, selected ? expr.whenTrue : expr.whenFalse, seen);
+    } else {
+      fenceStaticRequestInitValueInner(L, expr.whenTrue, seen);
+      fenceStaticRequestInitValueInner(L, expr.whenFalse, seen);
+    }
+    return;
+  }
+  if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+    fenceStaticRequestInitProperty(L, expr, seen);
     return;
   }
   if (!ts.isIdentifier(expr)) return;
@@ -524,7 +608,13 @@ function staticResponseMemberName(
   access: StaticResponseAccess,
 ): string | null {
   if (ts.isPropertyAccessExpression(access)) return access.name.text;
-  const keyExpr = access.argumentExpression;
+  return fetchElementMemberName(L, access.argumentExpression);
+}
+
+function fetchElementMemberName(
+  L: Lowerer,
+  keyExpr: ts.Expression,
+): string | null {
   if (
     ts.isPropertyAccessExpression(keyExpr) &&
     L.isStdlibGlobal(keyExpr.expression, "Symbol") &&
@@ -534,7 +624,7 @@ function staticResponseMemberName(
   ) {
     return `[Symbol.${keyExpr.name.text}]`;
   }
-  const key = L.typeOf(access.argumentExpression);
+  const key = L.typeOf(keyExpr);
   return key.isStringLiteralType() ? key.value : null;
 }
 
@@ -687,6 +777,112 @@ function isStdlibFetchInterface(
     if (symbol?.name === owner && L.isStdlibSymbol(symbol)) return symbol;
   }
   return null;
+}
+
+function fetchObjectBindingMemberName(
+  L: Lowerer,
+  element: ts.BindingElement,
+): string | null {
+  const name = element.propertyName ??
+    (element.name !== undefined && ts.isIdentifier(element.name) ? element.name : undefined);
+  if (name === undefined) return null;
+  if (ts.isIdentifier(name)) return name.text;
+  if (ts.isStringLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return String(Number(name.text));
+  if (ts.isComputedPropertyName(name)) return fetchElementMemberName(L, name.expression);
+  return null;
+}
+
+function fetchObjectAssignmentMemberName(
+  L: Lowerer,
+  property: ts.ObjectLiteralElementLike,
+): string | null {
+  if (ts.isSpreadAssignment(property)) return null;
+  const name = property.name;
+  if (name === undefined) return null;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return String(Number(name.text));
+  if (ts.isComputedPropertyName(name)) return fetchElementMemberName(L, name.expression);
+  return null;
+}
+
+function fetchInterfaceInventoryOwner(
+  L: Lowerer,
+  node: ts.Node,
+): { owner: string; symbol: ts.Symbol } | null {
+  const type = L.checker.getBaseTypeOfLiteralType(L.typeOf(node));
+  const symbol = [type.getSymbol(), type.getAliasSymbol()].find((candidate) =>
+    candidate !== undefined &&
+    NODE24_FETCH_COMPAT_PROFILE.inventory.interfaces.includes(candidate.name) &&
+    L.isStdlibSymbol(candidate)
+  );
+  return symbol ? { owner: symbol.name, symbol } : null;
+}
+
+function fenceFetchObjectMembers(
+  L: Lowerer,
+  ownerNode: ts.Node,
+  members: readonly { member: string; node: ts.Node }[],
+): void {
+  const resolved = fetchInterfaceInventoryOwner(L, ownerNode);
+  if (!resolved) return;
+  const { owner, symbol } = resolved;
+  for (const { member, node } of members) {
+    const row = NODE24_FETCH_COMPAT_PROFILE.inventory.entries.find((entry) =>
+      entry.owner === owner &&
+      entry.member === member &&
+      (entry.placement === "prototype" ||
+        entry.placement === "prototype-inherited" ||
+        entry.placement === "prototype-symbol")
+    );
+    if (!row || row.status === "out-of-scope") continue;
+    if (L.dynamic && row.status !== "unsupported") continue;
+    L.noLowering(
+      `${owner}.${member}${L.dynamic ? "" : " through object destructuring in a static build"}`,
+      node,
+      row.reason ??
+        "the direct lowered read/call form has a compiler bridge, but extracting this member as a value does not",
+      symbol,
+    );
+  }
+}
+
+/** Object binding syntax reads members without constructing property-access
+ * nodes, so the ordinary Response/Headers/ReadableStream chokepoints never
+ * see it. Attribute those reads to the same inventory rows before generic
+ * dyn/jsval destructuring either reports SC1031 or admits an unsupported
+ * member in the dynamic tier. */
+export function fenceFetchObjectBinding(
+  L: Lowerer,
+  pattern: ts.ObjectBindingPattern,
+): void {
+  fenceFetchObjectMembers(
+    L,
+    pattern,
+    pattern.elements.flatMap((element) => {
+      if (element.dotDotDotToken) return [];
+      const member = fetchObjectBindingMemberName(L, element);
+      return member === null ? [] : [{ member, node: element }];
+    }),
+  );
+}
+
+/** Assignment-position object destructuring is the same member-read form as
+ * a binding pattern, but its source type lives on the right-hand expression
+ * instead of the target AST. */
+export function fenceFetchObjectAssignment(
+  L: Lowerer,
+  target: ts.ObjectLiteralExpression,
+  source: ts.Expression,
+): void {
+  fenceFetchObjectMembers(
+    L,
+    source,
+    target.properties.flatMap((property) => {
+      const member = fetchObjectAssignmentMemberName(L, property);
+      return member === null ? [] : [{ member, node: property }];
+    }),
+  );
 }
 
 /** Iteration syntax invokes Headers[Symbol.iterator] without constructing
