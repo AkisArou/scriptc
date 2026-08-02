@@ -2174,9 +2174,9 @@
       "id": "stdlib.fetch.request-init.dispatcher",
       "kind": "stdlib",
       "name": "RequestInit.dispatcher",
-      "status": "unsupported",
+      "status": "dynamic-only",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic tier accepts Vercel CLI's EnvProxyDispatcher as a compatibility no-op because native fetch applies NODE_USE_ENV_PROXY directly"
     },
     {
       "id": "stdlib.fetch.request-init.duplex",

@@ -177,7 +177,7 @@ const PROBES: Probe[] = [
   },
   {
     id: "stdlib.fetch.request-init.dispatcher",
-    source: '/// <reference types="node" />\nvoid fetch("http://127.0.0.1", { dispatcher: {} as never });\n',
+    source: '/// <reference types="node" />\nvoid fetch("http://127.0.0.1", { dispatcher: JSON.parse("{}") });\n',
   },
   {
     id: "stdlib.readable-stream.symbol.asyncIterator",

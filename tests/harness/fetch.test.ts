@@ -770,10 +770,14 @@ describe(`fetch differential (${cases.length} programs${sanitize ? ", sanitized"
 test(`dynamic fetch runtime fences computed unsupported RequestInit${sanitize ? " (sanitized)" : ""}`, async () => {
   const entry = join(fixturesRoot, "unsupported-init-dynamic/main.mts");
   const binary = await build(entry);
-  const result = await runBinary(binary, []);
+  const result = await runBinary(binary, [], {
+    ...process.env,
+    NODE_USE_ENV_PROXY: "1",
+  });
   expect(result.stdout.toString("utf8")).toBe(
     "cache TypeError unsupported RequestInit option: cache\n" +
       "dispatcher TypeError unsupported RequestInit option: dispatcher\n" +
+      "env dispatcher string env dispatcher accepted\n" +
       "stream from: false 7\n" +
       "stream constructor: false\n",
   );

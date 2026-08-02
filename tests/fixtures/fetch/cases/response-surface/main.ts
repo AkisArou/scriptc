@@ -22,6 +22,13 @@ async function main(baseUrl: string): Promise<void> {
   r.headers.forEach((v, k) => {
     if (k.startsWith("x-")) console.log("hdr:", k, "=", v);
   });
+  try {
+    const member = JSON.parse('"delete"') as "get" | "has";
+    r.headers[member]("x-kind");
+    console.log("computed member unexpectedly accepted");
+  } catch (error) {
+    console.log("computed member:", (error as Error).name);
+  }
   const explicitIterator = r.headers[Symbol.iterator]();
   const explicitFirst = explicitIterator.next();
   console.log(

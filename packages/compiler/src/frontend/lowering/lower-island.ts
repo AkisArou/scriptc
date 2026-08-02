@@ -9,7 +9,7 @@ import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg }
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
 import { foldedStringKeyOf, lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
-import { PoisonError, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
+import { PoisonError, dynUndefinedExpr, newFnCtx, nodeThrowExpr, own } from "./lowerer.js";
 import {
   NODE24_FETCH_COMPAT_PROFILE,
   STATIC_HEADERS_CALLS,
@@ -1340,8 +1340,19 @@ export function lowerDynamicHeadersIteratorCall(
       type: JSVAL,
       loc,
     });
-    let result: IrExpr = invoke(members[members.length - 1]!);
-    for (let i = members.length - 2; i >= 0; i--) {
+    // Same-kind literal unions erase to STRING in IR, so a lying assertion
+    // can carry a runtime key outside `members`. Validate every arm instead
+    // of treating the last member as an unconditional default: substituting
+    // another method is silent corruption. The trust-but-verify fallback is
+    // the catchable TypeError used by the compiler's other erased casts.
+    let result: IrExpr = nodeThrowExpr(
+      1,
+      "",
+      `${access.getText()} is not a function`,
+      JSVAL,
+      loc,
+    );
+    for (let i = members.length - 1; i >= 0; i--) {
       const member = members[i]!;
       result = {
         kind: "ternary",
@@ -1481,8 +1492,17 @@ export function lowerFetchElementMethodCall(
           type: DYN,
           loc,
         };
-  let result = invoke(members[members.length - 1]!);
-  for (let index = members.length - 2; index >= 0; index--) {
+  // Literal-string unions share the STRING carrier. A cast can therefore
+  // smuggle a different runtime key into this call; validate all arms and
+  // fail loudly rather than dispatching every mismatch to the last member.
+  let result: IrExpr = nodeThrowExpr(
+    1,
+    "",
+    `${access.getText()} is not a function`,
+    L.dynamic ? JSVAL : DYN,
+    loc,
+  );
+  for (let index = members.length - 1; index >= 0; index--) {
     const member = members[index]!;
     result = {
       kind: "ternary",

@@ -837,6 +837,14 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         const supported = new Set(["body", "duplex", "headers", "method", "redirect", "signal"]);
         return supported.has(member)
           ? staticEntry(id, "RequestInit", member, "dictionary")
+          : member === "dispatcher"
+            ? dynamicEntry(
+                id,
+                "RequestInit",
+                member,
+                "dictionary",
+                "the dynamic tier accepts Vercel CLI's EnvProxyDispatcher as a compatibility no-op because native fetch applies NODE_USE_ENV_PROXY directly",
+              )
           : unsupportedEntry(
               id,
               "RequestInit",

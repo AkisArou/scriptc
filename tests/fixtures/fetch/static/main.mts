@@ -88,6 +88,13 @@ responseHeaders.forEach((value, name) => {
 responseHeaders.forEach((value, name) => {
   if (name === "x-kind") console.log("header walk thisArg:", name, value);
 }, { label: "ignored by the arrow callback" });
+try {
+  const member = JSON.parse('"delete"') as "get" | "has";
+  responseHeaders[member]("x-kind");
+  console.log("computed header member unexpectedly accepted");
+} catch (error) {
+  console.log("computed header member:", (error as Error).name);
+}
 await headerResponse.text();
 
 const latin1HeaderResponse = await fetch(`${process.argv[2]}/header-echo`, {
