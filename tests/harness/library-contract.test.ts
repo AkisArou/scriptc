@@ -590,6 +590,12 @@ describe("the V1-V14 validator", () => {
     });
   });
 
+  test("V1: a synthesized struct marker is absent or literal true", () => {
+    expectViolation("V1", (d) => {
+      d["types"].structs[0].synthesized = false;
+    });
+  });
+
   test("V2: hashes are exactly 16 lowercase hex digits", () => {
     expectViolation("V2", (d) => {
       d["build_id"] = "B01DFACE00C0FFEE";

@@ -86,6 +86,9 @@ export type PayloadDescriptor =
 
 export interface SidecarStruct {
   name: string;
+  /** Present, with the literal value `true`, only when the compiler
+   * synthesized this table entry for an anonymous inline record. Omitted
+   * for records declared by name in the entry module. */
   synthesized?: true;
   fields: { name: string; type: TypeRef }[];
 }

@@ -184,6 +184,11 @@ export function validateSidecar(doc: unknown): string[] {
 
   /* ── V3 (inner uniqueness) + table entry shapes ───────────────────── */
   for (const [name, s] of structs) {
+    // Format 1 marks compiler-created anonymous inline records with the
+    // optional literal `synthesized: true`; source-declared records omit it.
+    if ("synthesized" in s && s["synthesized"] !== true) {
+      bad("V1", `struct '${name}' has a synthesized marker other than literal true`);
+    }
     const fields = s["fields"];
     if (!Array.isArray(fields)) {
       bad("V1", `struct '${name}' has no fields array`);
