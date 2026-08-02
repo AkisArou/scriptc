@@ -1,9 +1,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { afterAll, afterEach, expect, test } from "vitest";
+import { afterAll, afterEach, expect, test as vitestTest } from "vitest";
 import {
   cacheTargetIdentity,
   ccVersionOnce,
@@ -23,7 +24,42 @@ import {
 
 const scratch: string[] = [];
 const TEST_CACHE_IDENTITY = "cc-cache-tests-v1";
+const originalStableToolchain = process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"];
+// This file is the strict-path contract: its fixtures replace wrappers,
+// headers, SDK selectors, and native inputs in place between invocations.
+// The rest of the immutable differential harness may memoize those probes.
+delete process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"];
 const originalTrustedCompilerWrapper = process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"];
+
+/** The cache suite mutates process-wide compiler state and must stay serial
+ * within one worker, but CI/Sandbox workers can safely divide its independent
+ * tests across processes. Unset runs the complete file for ordinary focused
+ * use; i/n uses the same stable hash partition as the corpus harness. */
+function cacheTestSelected(name: string): boolean {
+  const spec = process.env["SCRIPTC_CACHE_TEST_SHARD"];
+  if (spec === undefined || spec === "") return true;
+  const match = /^(\d+)\/(\d+)$/.exec(spec);
+  if (match === null) throw new Error(`invalid SCRIPTC_CACHE_TEST_SHARD '${spec}' (expected i/n)`);
+  const index = Number(match[1]);
+  const total = Number(match[2]);
+  if (index < 1 || total < 1 || index > total) {
+    throw new Error(`invalid SCRIPTC_CACHE_TEST_SHARD '${spec}' (expected 1 <= i <= n)`);
+  }
+  return createHash("sha1").update(name).digest().readUInt32BE(0) % total === index - 1;
+}
+
+const test = Object.assign(
+  (name: string, ...args: unknown[]) =>
+    Reflect.apply(cacheTestSelected(name) ? vitestTest : vitestTest.skip, undefined, [name, ...args]),
+  {
+    skipIf: (condition: boolean) => (name: string, ...args: unknown[]) =>
+      Reflect.apply(condition || !cacheTestSelected(name) ? vitestTest.skip : vitestTest, undefined, [
+        name,
+        ...args,
+      ]),
+  },
+) as typeof vitestTest;
+
 const trustInstrumentedCompilerWrapper = (): void => {
   process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"] = "1";
 };
@@ -48,6 +84,11 @@ const cacheTreeBytes = async (root: string): Promise<number> => {
 
 afterAll(async () => {
   await Promise.all(scratch.map((dir) => rm(dir, { recursive: true, force: true })));
+  if (originalStableToolchain === undefined) {
+    delete process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"];
+  } else {
+    process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"] = originalStableToolchain;
+  }
 });
 
 afterEach(() => {
