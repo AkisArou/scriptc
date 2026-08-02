@@ -1113,11 +1113,16 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const arArgv = driver.argv[0] === "zig" ? [driver.argv[0]!, "ar"] : ["ar"];
   const cachePolicy = toolchainEnvironmentCachePolicy();
   const configuredCacheRoot = cacheRootDir();
+  const toolchainEnv = toolchainEnvironmentFingerprint();
+  const persistentDriverCache =
+    cachePolicy.runtimeObjects &&
+    configuredCacheRoot !== null &&
+    await compilerDriverSupportsPersistentCache(driver, toolchainEnv);
   // A library archive is compile-only from clang's perspective. Link-only
   // search variables cannot affect it, but any mutable compilation input
-  // makes both its complete artifact and runtime objects unsafe to reuse.
+  // or an opaque compiler wrapper makes every persistent tier unsafe to reuse.
   let root =
-    opts.cacheIdentity === undefined || !cachePolicy.runtimeObjects
+    opts.cacheIdentity === undefined || !persistentDriverCache
       ? null
       : configuredCacheRoot;
   if (root !== null) {
@@ -1130,11 +1135,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
       root = null;
     }
   }
-  const toolchainEnv = toolchainEnvironmentFingerprint();
   let implicitToolchain: string | null = null;
   let runtimeCompilerInvocation: string | null = null;
   let programCompilerInvocation: string | null = null;
-  if (cachePolicy.runtimeObjects && configuredCacheRoot !== null) {
+  if (persistentDriverCache) {
     try {
       implicitToolchain = await implicitToolchainFingerprint(driver, toolchainEnv);
     } catch {
@@ -1242,7 +1246,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     }
   }
 
-  const transientVendorRoot = cachePolicy.runtimeObjects && configuredCacheRoot !== null && implicitToolchain !== null
+  const transientVendorRoot = persistentDriverCache && implicitToolchain !== null
     ? null
     : join(
         tmpdir(),
@@ -1431,7 +1435,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *
  *   bin/<key>       — whole program binaries. key = sha256(resolved clang
  *                     identity/version, target + compiler/linker environment,
- *                     effective wrapper invocations for the real build flags,
+ *                     effective driver invocations for the real build flags,
  *                     implicit system-header and resolved linker-input bytes,
  *                     linker/assembler identities, runtime fingerprint
  *                     (every .c/.h in the runtime src dir plus the vendor pin
@@ -1451,7 +1455,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *
  *   lib/<key>       — whole library archives. The identity covers the resolved
  *                     compiler and archiver identities/versions, compiler/linker
- *                     environment, effective build-flavor wrapper invocations,
+ *                     environment, effective build-flavor driver invocations,
  *                     implicit toolchain inputs, runtime fingerprint,
  *                     target/flags, gated source set, caller dependency
  *                     identity, TU path, and program-TU bytes.
@@ -1465,7 +1469,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *                     The clang driver hands every input the same option set,
  *                     so per-TU `-c` compiles with those options plus a final
  *                     link reproduce the single invocation exactly; the
- *                     wrapper's effective invocation under that flavor also
+ *                     driver's effective invocation under that flavor also
  *                     joins the object-set identity. Every
  *                     cached object carries a verified digest. Object
  *                     compiles go through ccache when it is installed (silent
@@ -1474,6 +1478,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * Frontend-generated production builds supply a dependency identity and use a
  * per-user platform cache by default. Arbitrary low-level TUs omit the identity
  * and bypass this cache because their include graph is caller-owned.
+ * Compiler wrappers also bypass every persistent tier: a wrapper can branch on
+ * the real source/object topology and inject inputs no synthetic probe sees.
+ * Direct Clang/Zig drivers and Apple's immutable /usr/bin/clang handoff retain
+ * caching; wrapper-driven builds use private, invocation-local vendor outputs.
  * Builds with caller-supplied native link inputs (archive/object paths or
  * `-l<name>` libraries) also bypass the whole binary cache: a thin archive,
  * linker script, or ambient resolution can change transitively without
@@ -1555,15 +1563,21 @@ async function ensurePrivateCacheRoot(
 const ccVersionMemos = new Map<string, Promise<string>>();
 const ccVersionFallbacks = new Map<string, Promise<string>>();
 
+interface ResolvedTool {
+  canonicalPath: string;
+  cacheIdentity: string;
+  fileIdentity: string;
+}
+
 /** Resolve the executable the OS will select for an argv[0] spelling. The
  * path and inode metadata join the version output below: two PATH postures
  * must not share cache entries merely because both drivers call themselves
  * `clang` or print the same upstream version. ctime catches an in-place tool
  * replacement even when a package manager preserves its size and mtime. */
-async function resolvedToolIdentity(
+async function resolvedTool(
   command: string,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<string | null> {
+): Promise<ResolvedTool | null> {
   const hasSeparator = command.includes("/") || command.includes("\\");
   const configuredPath = (env["PATH"] ?? (process.platform === "win32" ? "" : "/usr/bin:/bin"))
     .split(delimiter);
@@ -1587,8 +1601,7 @@ async function resolvedToolIdentity(
         await access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
         const [canonical, info] = await Promise.all([realpath(candidate), stat(candidate)]);
         if (!info.isFile()) continue;
-        return [
-          resolve(candidate),
+        const fileIdentity = [
           canonical,
           info.dev,
           info.ino,
@@ -1596,12 +1609,119 @@ async function resolvedToolIdentity(
           info.mtimeMs,
           info.ctimeMs,
         ].join("\0");
+        return {
+          canonicalPath: canonical,
+          fileIdentity,
+          cacheIdentity: [resolve(candidate), fileIdentity].join("\0"),
+        };
       } catch {
         // Keep searching PATH/PATHEXT exactly as process spawning would.
       }
     }
   }
   return null;
+}
+
+async function resolvedToolIdentity(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  return (await resolvedTool(command, env))?.cacheIdentity ?? null;
+}
+
+const directCompilerDriverFallbacks = new Map<string, boolean>();
+const directCompilerDriverMemos = new Map<string, boolean>();
+
+/** `/usr/bin/clang` on Darwin is Apple's immutable driver shim: its `-###`
+ * trace names the selected Xcode/CommandLineTools clang rather than the shim
+ * itself. The ordinary implicit-toolchain fingerprint below captures that
+ * selected executable and its dependencies, so this trusted system handoff is
+ * the one intentional exception to the same-executable rule. */
+function isAppleSystemClangHandoff(
+  driver: ResolvedTool,
+  effectiveCompiler: ResolvedTool,
+): boolean {
+  return process.platform === "darwin" &&
+    driver.canonicalPath === "/usr/bin/clang" &&
+    basename(effectiveCompiler.canonicalPath) === "clang";
+}
+
+/** Persistent caches require an inspectable compiler driver. A general
+ * wrapper can branch on the real source/object paths or argument topology and
+ * inject inputs only into the final invocation; no synthetic metadata probe
+ * can safely represent that behavior. Accept direct Clang/Zig drivers (plus
+ * Apple's system shim) and conservatively keep wrapper-driven builds on the
+ * uncached path. */
+async function compilerDriverSupportsPersistentCache(
+  driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
+  environmentFingerprint: string,
+): Promise<boolean> {
+  // Cache-race tests exercise publication below an intentionally instrumented
+  // wrapper. This is deliberately undocumented and test-scoped.
+  if (process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"] === "1") return true;
+
+  const fallbackKey = [
+    environmentFingerprint,
+    driver.argv.join("\x1f"),
+    driver.target ?? "<native>",
+    driver.targetArgs.join("\x1f"),
+  ].join("\0");
+  const compiler = driver.argv[0] ?? "clang";
+  const resolvedDriver = await resolvedTool(compiler);
+  if (resolvedDriver === null) {
+    return directCompilerDriverFallbacks.get(fallbackKey) ?? false;
+  }
+  const probeKey = `${fallbackKey}\0${resolvedDriver.fileIdentity}`;
+  const memoized = directCompilerDriverMemos.get(probeKey);
+  if (memoized !== undefined) {
+    // PATH is deliberately absent from the environment fingerprint so a
+    // complete hit can survive the compiler disappearing later in this
+    // process. Keep that spelling-level fallback aligned with whichever
+    // resolved driver was observed most recently, even on a memo hit.
+    directCompilerDriverFallbacks.set(fallbackKey, memoized);
+    return memoized;
+  }
+
+  const probeDir = await mkdtemp(join(tmpdir(), "scriptc-driver-probe-"));
+  let direct = false;
+  try {
+    const source = join(probeDir, "empty.c");
+    const object = join(probeDir, "empty.o");
+    await writeFile(source, "int scriptc_driver_probe;\n");
+    const trace = await execFileAsync(
+      compiler,
+      [
+        ...driver.argv.slice(1),
+        ...driver.targetArgs,
+        "-###",
+        "-std=c11",
+        "-c",
+        source,
+        "-o",
+        object,
+      ],
+      { cwd: probeDir, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const effectiveSpellings: string[] = [];
+    for (const line of `${trace.stdout}\n${trace.stderr}`.split(/\r?\n/)) {
+      const tokens = driverTraceCandidates(line);
+      const cc1 = tokens.indexOf("-cc1");
+      if (cc1 > 0) effectiveSpellings.push(tokens[cc1 - 1]!);
+    }
+    if (effectiveSpellings.length === 1) {
+      const effectiveCompiler = await resolvedTool(effectiveSpellings[0]!);
+      direct = effectiveCompiler !== null &&
+        (effectiveCompiler.fileIdentity === resolvedDriver.fileIdentity ||
+          isAppleSystemClangHandoff(resolvedDriver, effectiveCompiler));
+    }
+  } catch {
+    direct = false;
+  } finally {
+    await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+  directCompilerDriverFallbacks.set(fallbackKey, direct);
+  directCompilerDriverMemos.set(probeKey, direct);
+  return direct;
 }
 
 export async function ccVersionOnce(
@@ -2703,12 +2823,16 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const cachePolicy = toolchainEnvironmentCachePolicy();
   const configuredCacheRoot = cacheRootDir();
   const toolchainEnv = toolchainEnvironmentFingerprint();
+  const persistentDriverCache =
+    cachePolicy.runtimeObjects &&
+    configuredCacheRoot !== null &&
+    await compilerDriverSupportsPersistentCache(driver, toolchainEnv);
   // Only compiler-generated TUs opt in. Arbitrary `compileC` / `--from-c`
   // inputs may include caller-owned headers whose contents are not otherwise
   // represented in this key, so they retain the fully uncached historical
   // path unless the caller supplies its own complete dependency identity.
   let root =
-    opts.cacheIdentity === undefined || !cachePolicy.runtimeObjects
+    opts.cacheIdentity === undefined || !persistentDriverCache
       ? null
       : configuredCacheRoot;
   if (root !== null) {
@@ -2722,7 +2846,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     }
   }
   let implicitToolchain: string | null = null;
-  if (cachePolicy.runtimeObjects && configuredCacheRoot !== null) {
+  if (persistentDriverCache) {
     try {
       implicitToolchain = await implicitToolchainFingerprint(driver, toolchainEnv);
     } catch {
@@ -2740,7 +2864,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   // must follow the same rule instead of silently surviving in package-local
   // .cache. A private root gives this invocation the usual vendor build recipe
   // without publishing or reusing those prerequisites.
-  const transientVendorRoot = cachePolicy.runtimeObjects && configuredCacheRoot !== null && implicitToolchain !== null
+  const transientVendorRoot = persistentDriverCache && implicitToolchain !== null
     ? null
     : join(
         tmpdir(),

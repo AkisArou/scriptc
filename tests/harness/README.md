@@ -29,7 +29,7 @@ Test runs are dominated by clang (~275 corpus programs × two lanes at -O2/-O1+A
 
 Escape hatches: `SCRIPTC_NO_CACHE=1` bypasses every cache in both directions (no reads, no writes — the run behaves exactly like the uncached path). An explicitly empty `SCRIPTC_CACHE_DIR` does the same; a non-empty value overrides the production default. Eviction is a size-capped LRU sweep over each cache root (`SCRIPTC_CACHE_MAX_MB`, default 4096), run after the first write and periodically in long-lived processes; reads bump mtimes.
 
-Compiler environment variables that can resolve mutable compilation inputs (`CPATH`, `SDKROOT`, clang config directories, and their peers) conservatively bypass persistent artifacts and runtime objects. Link-only search variables and explicit native link inputs bypass complete executables but retain safe runtime-object reuse.
+Compiler environment variables that can resolve mutable compilation inputs (`CPATH`, `SDKROOT`, clang config directories, and their peers) conservatively bypass persistent artifacts and runtime objects. Compiler wrappers do the same because they can inject inputs conditionally on the real source/object topology; direct Clang, Apple's system Clang shim, and `zig cc` retain caching. Link-only search variables and explicit native link inputs bypass complete executables but retain safe runtime-object reuse.
 
 `pnpm test:cache-identity` (optionally `--san`) is the acceptance artifact: it runs the full suite uncached, cache-populating, and cached, then diffs every test's name/status/failure output between the cached and uncached passes and exits nonzero on any drift.
 

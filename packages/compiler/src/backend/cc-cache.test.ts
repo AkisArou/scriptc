@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { afterAll, expect, test } from "vitest";
+import { afterAll, afterEach, expect, test } from "vitest";
 import {
   cacheTargetIdentity,
   ccVersionOnce,
@@ -23,6 +23,10 @@ import {
 
 const scratch: string[] = [];
 const TEST_CACHE_IDENTITY = "cc-cache-tests-v1";
+const originalTrustedCompilerWrapper = process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"];
+const trustInstrumentedCompilerWrapper = (): void => {
+  process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"] = "1";
+};
 const zigExecutable = (process.env["PATH"] ?? "")
   .split(delimiter)
   .map((entry) => join(entry === "" ? process.cwd() : entry, "zig"))
@@ -44,6 +48,14 @@ const cacheTreeBytes = async (root: string): Promise<number> => {
 
 afterAll(async () => {
   await Promise.all(scratch.map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+afterEach(() => {
+  if (originalTrustedCompilerWrapper === undefined) {
+    delete process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"];
+  } else {
+    process.env["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"] = originalTrustedCompilerWrapper;
+  }
 });
 
 test("the production cache root follows overrides, platform defaults, and the hard disable", () => {
@@ -224,69 +236,93 @@ test("implicit dependency seeds include separately compiled vendor system header
 });
 
 test.skipIf(process.platform === "win32")(
-  "compiler resolution through PATH joins the cache identity",
+  "opaque compiler wrappers bypass persistent caches",
   async () => {
-    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-compiler-path-"));
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-cache-compiler-wrapper-"));
     scratch.push(dir);
     const cacheRoot = join(dir, "cache");
-    const firstBinDir = join(dir, "compiler-one");
-    const secondBinDir = join(dir, "compiler-two");
+    const binDir = join(dir, "bin");
+    const helperSource = join(dir, "helper.c");
+    const helperObject = join(dir, "helper.o");
     const cPath = join(dir, "program.c");
+    const outPath = join(dir, "program");
     const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
     const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldDisableCcache = process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
     const oldPath = process.env["PATH"];
     const oldRealClang = process.env["SCRIPTC_TEST_REAL_CLANG"];
+    const oldProgramSource = process.env["SCRIPTC_TEST_PROGRAM_SOURCE"];
+    const oldWrapperObject = process.env["SCRIPTC_TEST_WRAPPER_OBJECT"];
     const originalClang = (oldPath ?? "")
       .split(delimiter)
       .map((entry) => join(entry === "" ? process.cwd() : entry, "clang"))
       .find((candidate) => existsSync(candidate));
     expect(originalClang).toBeDefined();
 
-    const installWrapper = async (binDir: string, value: number): Promise<void> => {
+    const buildHelper = async (value: number): Promise<void> => {
+      await writeFile(helperSource, `int scriptc_wrapper_helper(void) { return ${value}; }\n`);
+      execFileSync(originalClang!, ["-c", helperSource, "-o", helperObject]);
+    };
+
+    try {
       await mkdir(binDir);
       const wrapper = join(binDir, "clang");
       await writeFile(
         wrapper,
         `#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "scriptc cache-test clang ${value}.0"
-  exit 0
+link=1
+real_build=0
+for arg in "$@"; do
+  case "$arg" in
+    -c|-M|-MM|-E|-S) link=0 ;;
+    "$SCRIPTC_TEST_PROGRAM_SOURCE"|*/scriptc-cache-build-*/program.c) real_build=1 ;;
+  esac
+done
+if [ "$link" = 1 ] && [ "$real_build" = 1 ]; then
+  exec "$SCRIPTC_TEST_REAL_CLANG" "$SCRIPTC_TEST_WRAPPER_OBJECT" "$@"
 fi
-exec "$SCRIPTC_TEST_REAL_CLANG" -DSCRIPTC_PATH_PROBE=${value} "$@"
+exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
 `,
       );
       await chmod(wrapper, 0o755);
-    };
-
-    try {
-      await Promise.all([installWrapper(firstBinDir, 1), installWrapper(secondBinDir, 2)]);
       await writeFile(
         cPath,
-        '#include <stdio.h>\nint main(void) { printf("%d\\n", SCRIPTC_PATH_PROBE); return 0; }\n',
+        '#include <stdio.h>\nint scriptc_wrapper_helper(void);\nint main(void) { printf("%d\\n", scriptc_wrapper_helper()); return 0; }\n',
       );
       process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
       process.env["SCRIPTC_TEST_REAL_CLANG"] = originalClang!;
+      process.env["SCRIPTC_TEST_PROGRAM_SOURCE"] = cPath;
+      process.env["SCRIPTC_TEST_WRAPPER_OBJECT"] = helperObject;
+      process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
       delete process.env["SCRIPTC_NO_CACHE"];
 
-      process.env["PATH"] = `${firstBinDir}${delimiter}${oldPath ?? ""}`;
-      const firstOut = join(dir, "first");
-      await compileC({ cPath, outPath: firstOut, cacheIdentity: TEST_CACHE_IDENTITY });
-      expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
+      await buildHelper(1);
+      await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("1");
 
-      process.env["PATH"] = `${secondBinDir}${delimiter}${oldPath ?? ""}`;
-      const secondOut = firstOut;
-      await compileC({ cPath, outPath: secondOut, cacheIdentity: TEST_CACHE_IDENTITY });
-      expect(execFileSync(secondOut, { encoding: "utf8" }).trim()).toBe("2");
-      expect(await completeArtifacts(cacheRoot, "bin")).toHaveLength(2);
+      // The wrapper injects this same-path object only for the actual program
+      // link, not for scriptc's synthetic metadata probes. Reusing the first
+      // complete artifact here would return the stale value.
+      await buildHelper(2);
+      await compileC({ cPath, outPath, cacheIdentity: TEST_CACHE_IDENTITY });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("2");
+      await expect(stat(cacheRoot)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
       else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
       if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
       else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldDisableCcache === undefined) delete process.env["SCRIPTC_TEST_DISABLE_CCACHE"];
+      else process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = oldDisableCcache;
       if (oldPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = oldPath;
       if (oldRealClang === undefined) delete process.env["SCRIPTC_TEST_REAL_CLANG"];
       else process.env["SCRIPTC_TEST_REAL_CLANG"] = oldRealClang;
+      if (oldProgramSource === undefined) delete process.env["SCRIPTC_TEST_PROGRAM_SOURCE"];
+      else process.env["SCRIPTC_TEST_PROGRAM_SOURCE"] = oldProgramSource;
+      if (oldWrapperObject === undefined) delete process.env["SCRIPTC_TEST_WRAPPER_OBJECT"];
+      else process.env["SCRIPTC_TEST_WRAPPER_OBJECT"] = oldWrapperObject;
     }
   },
 );
@@ -340,6 +376,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       process.env["SCRIPTC_TEST_WRAPPER_VALUE"] = "1";
@@ -441,6 +478,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["SCRIPTC_TEST_WRAPPER_HEADER"] = header;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       await writeFile(header, "#define SCRIPTC_WRAPPER_HEADER_VALUE 1\n");
@@ -526,6 +564,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       process.env["SCRIPTC_TEST_WRAPPER_RPATH"] = firstRpath;
@@ -618,6 +657,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["SCRIPTC_TEST_WRAPPER_OBJECT"] = helperObject;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       await buildHelper(1);
@@ -723,6 +763,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$SCRIPTC_TEST_IMPLICIT_HEADER" "$@"
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["SCRIPTC_TEST_IMPLICIT_HEADER"] = header;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       await writeFile(header, '#define SCRIPTC_IMPLICIT_PROBE "one"\n');
@@ -800,6 +841,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -isystem "$SCRIPTC_TEST_PROGRAM_HEADER_DIR" "$@"
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["SCRIPTC_TEST_PROGRAM_HEADER_DIR"] = headers;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       await writeFile(header, '#define SCRIPTC_PROGRAM_HEADER "one"\n');
@@ -886,6 +928,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$selected" "$@"
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["SCRIPTC_TEST_IMPLICIT_SELECTOR"] = selector;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       await writeFile(selector, `${firstHeader}\n`);
@@ -977,6 +1020,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       process.env["SCRIPTC_TEST_REAL_CLANG"] = realClang!;
       process.env["SCRIPTC_TEST_IMPLICIT_OBJECT"] = helperObject;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       await buildHelper(1);
@@ -1660,6 +1704,7 @@ exec "$@"
       process.env["SCRIPTC_TEST_RACE_SIGNAL"] = signal;
       process.env["SCRIPTC_TEST_RACE_RELEASE"] = release;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       const firstOut = join(dir, "first");
@@ -1809,6 +1854,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" -include "$SCRIPTC_TEST_IMPLICIT_HEADER" "$@"
       process.env["SCRIPTC_TEST_FINAL_RACE_SIGNAL"] = signal;
       process.env["SCRIPTC_TEST_FINAL_RACE_RELEASE"] = release;
       process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       const firstOut = join(dir, "first");
@@ -1923,6 +1969,7 @@ exec "$SCRIPTC_TEST_REAL_CLANG" "$@"
       // the cache under test and can obscure which compiler read happened.
       process.env["SCRIPTC_TEST_DISABLE_CCACHE"] = "1";
       process.env["PATH"] = `${binDir}${delimiter}/usr/bin${delimiter}/bin`;
+      trustInstrumentedCompilerWrapper();
       delete process.env["SCRIPTC_NO_CACHE"];
 
       const firstOut = join(dir, "first");
