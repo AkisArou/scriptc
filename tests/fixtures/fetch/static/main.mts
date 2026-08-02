@@ -30,6 +30,22 @@ const pendingBytes: Promise<Uint8Array> = (
 const storedBytes = await pendingBytes;
 console.log("stored bytes promise:", storedBytes.length, storedBytes[0]);
 
+async function readComputedBody(
+  response: Response,
+  asBytes: boolean,
+): Promise<string> {
+  const member: "text" | "bytes" = asBytes ? "bytes" : "text";
+  const value: string | Uint8Array = await response[member]();
+  return typeof value === "string"
+    ? `text:${value}`
+    : `bytes:${value.length}:${value[0]}`;
+}
+console.log(
+  "computed response body:",
+  await readComputedBody(await fetch(`${process.argv[2]}/text`), false),
+  await readComputedBody(await fetch(`${process.argv[2]}/text`), true),
+);
+
 const arityHeaders: any = (await fetch(`${process.argv[2]}/text`)).headers;
 try {
   arityHeaders.get();
@@ -88,6 +104,14 @@ responseHeaders.forEach((value, name) => {
 responseHeaders.forEach((value, name) => {
   if (name === "x-kind") console.log("header walk thisArg:", name, value);
 }, { label: "ignored by the arrow callback" });
+try {
+  const computedHeaderMember = (): "get" | "has" => "missing" as "get";
+  const member = computedHeaderMember();
+  responseHeaders[member]("x-kind");
+  console.log("computed header member unexpectedly accepted");
+} catch (error) {
+  console.log("computed header member:", (error as Error).name);
+}
 await headerResponse.text();
 
 const latin1HeaderResponse = await fetch(`${process.argv[2]}/header-echo`, {
@@ -134,7 +158,7 @@ try {
 const emptyHeaderResponse = await fetch(`${process.argv[2]}/header-empty`);
 console.log(
   "empty duplicate header:",
-  JSON.stringify(emptyHeaderResponse.headers.get("x-empty")),
+  JSON.stringify(emptyHeaderResponse.headers["get"]("x-empty")),
 );
 await emptyHeaderResponse.text();
 
@@ -244,10 +268,11 @@ const scalarMethodEcho = await (
 ).json() as { method: string };
 console.log("coerced scalar method:", scalarMethodEcho.method);
 
-const unsupportedInit = {
-  method: "GET",
-  integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-};
+// A runtime-computed dictionary cannot be source-profiled, so the native
+// RequestInit validator remains the defensive backstop for unsupported keys.
+const unsupportedInit = JSON.parse(
+  '{"method":"GET","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}',
+) as RequestInit;
 try {
   await fetch(`${process.argv[2]}/text`, unsupportedInit);
   console.log("unsupported request init unexpectedly accepted");
@@ -255,6 +280,17 @@ try {
   const caught = error as Error;
   console.log("unsupported request init:", caught.name, caught.message);
 }
+
+const unsupportedThenUndefined = { cache: "no-store" } as const;
+const overwrittenUnsupportedInit = {
+  ...unsupportedThenUndefined,
+  cache: undefined,
+} as RequestInit;
+const overwrittenUnsupported = await fetch(
+  `${process.argv[2]}/text`,
+  overwrittenUnsupportedInit,
+);
+console.log("overwritten unsupported request init:", await overwrittenUnsupported.text());
 
 const matchedLength = await fetch(`${process.argv[2]}/post-echo`, {
   method: "POST",

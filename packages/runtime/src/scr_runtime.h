@@ -4178,6 +4178,7 @@ ScrJsval *scr_jsval_destr_check(ScrJsval *v, const char *spell, const char *firs
 ScrJsval *scr_jsval_iter_n(ScrJsval *v, double n);
 int scr_jsval_set_idx(ScrJsval *o, ScrJsval *key, ScrJsval *v);
 ScrJsval *scr_jsval_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv);
+ScrJsval *scr_jsval_call_this(ScrJsval *f, ScrJsval *receiver, int argc, ScrJsval **argv);
 /* `o.name?.(...)`: a nullish member answers the engine's undefined;
  * anything else calls with this = o (non-callables throw in the engine). */
 ScrJsval *scr_jsval_opt_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv);

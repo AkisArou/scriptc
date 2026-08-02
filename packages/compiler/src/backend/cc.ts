@@ -9,6 +9,33 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+/** Test lanes run against one immutable checkout and one immutable toolchain
+ * for the lifetime of each Vitest worker. Production deliberately rediscovers
+ * compiler/linker inputs on every invocation, but doing that thousands of
+ * times in the differential corpus costs far more than the compile itself.
+ * This test-only opt-in lets those workers reuse metadata probes for their
+ * session; the cache-correctness suite removes the flag and exercises the
+ * strict production path. */
+function stableTestToolchainSession(): boolean {
+  return process.env["SCRIPTC_TEST_STABLE_TOOLCHAIN"] === "1";
+}
+
+function stableTestMemo<T>(
+  cache: Map<string, Promise<T>>,
+  key: string,
+  probe: () => Promise<T>,
+): Promise<T> {
+  if (!stableTestToolchainSession()) return probe();
+  const existing = cache.get(key);
+  if (existing !== undefined) return existing;
+  const pending = probe();
+  cache.set(key, pending);
+  void pending.catch(() => {
+    if (cache.get(key) === pending) cache.delete(key);
+  });
+  return pending;
+}
+
 const RUNTIME_SOURCES = ["scr_number.c", "scr_string.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_path.c", "scr_url.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"];
 
 /** The pinned quickjs-ng snapshot under packages/runtime/vendor/quickjs-ng
@@ -1782,11 +1809,12 @@ export async function ccVersionOnce(
         await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
       }
     })();
-  let memo = fresh && executableIdentity !== null ? probe() : ccVersionMemos.get(key);
+  const requireFreshProbe = fresh && !stableTestToolchainSession();
+  let memo = requireFreshProbe && executableIdentity !== null ? probe() : ccVersionMemos.get(key);
   if (memo === undefined) {
     memo = probe();
     ccVersionMemos.set(key, memo);
-  } else if (fresh) {
+  } else if (requireFreshProbe) {
     ccVersionMemos.set(key, memo);
   }
   return memo;
@@ -1893,7 +1921,7 @@ interface EffectiveCompilerInvocationProbe {
  * owned system header, but that generic command is not sufficient identity for
  * a wrapper that injects flags or preincluded files only for a particular build
  * flavor (for example, only when it sees -O2 or -DSCR_DYNAMIC). */
-async function effectiveCompilerInvocationFingerprint(
+async function effectiveCompilerInvocationFingerprintFresh(
   driver: Pick<CcDriver, "argv">,
   environmentFingerprint: string,
   compileArgs: readonly string[],
@@ -1965,6 +1993,29 @@ async function effectiveCompilerInvocationFingerprint(
     .update("\0")
     .update(probe.dependencyFingerprint)
     .digest("hex");
+}
+
+const stableEffectiveCompilerInvocationMemos = new Map<string, Promise<string>>();
+function effectiveCompilerInvocationFingerprint(
+  driver: Pick<CcDriver, "argv">,
+  environmentFingerprint: string,
+  compileArgs: readonly string[],
+  sourceExtension: ".c" | ".ll" = ".c",
+): Promise<string> {
+  const key = [
+    environmentFingerprint,
+    driver.argv.join("\x1f"),
+    compileArgs.join("\x1f"),
+    sourceExtension,
+  ].join("\0");
+  return stableTestMemo(stableEffectiveCompilerInvocationMemos, key, () =>
+    effectiveCompilerInvocationFingerprintFresh(
+      driver,
+      environmentFingerprint,
+      compileArgs,
+      sourceExtension,
+    ),
+  );
 }
 
 async function nativeSourceFiles(
@@ -2058,7 +2109,7 @@ interface TranslationUnitDependencyProbe {
  * surface that no runtime source names. Probe an invocation-private snapshot
  * of the keyed bytes with the real compile flags, preserving the original
  * quote-include directory and compiler-visible source spelling. */
-async function translationUnitDependencyFingerprint(
+async function translationUnitDependencyFingerprintFresh(
   driver: Pick<CcDriver, "argv">,
   cflags: readonly string[],
   sourcePath: string,
@@ -2122,6 +2173,38 @@ async function translationUnitDependencyFingerprint(
     .digest("hex");
 }
 
+const stableTranslationUnitDependencyMemos = new Map<string, Promise<string>>();
+function translationUnitDependencyFingerprint(
+  driver: Pick<CcDriver, "argv">,
+  cflags: readonly string[],
+  sourcePath: string,
+  sourceBytes: Buffer,
+  environmentFingerprint: string,
+): Promise<string> {
+  const key = createHash("sha256")
+    .update(environmentFingerprint)
+    .update("\0")
+    .update(driver.argv.join("\x1f"))
+    .update("\0")
+    .update(cflags.join("\x1f"))
+    .update("\0")
+    .update(sourcePath)
+    .update("\0")
+    .update(resolve(sourcePath))
+    .update("\0")
+    .update(sourceBytes)
+    .digest("hex");
+  return stableTestMemo(stableTranslationUnitDependencyMemos, key, () =>
+    translationUnitDependencyFingerprintFresh(
+      driver,
+      cflags,
+      sourcePath,
+      sourceBytes,
+      environmentFingerprint,
+    ),
+  );
+}
+
 /** Identity of implicit compiler inputs that do not appear in buildArgs:
  * default SDK/system headers and the assembler/linker selected by the driver.
  * Small preprocessor dependency probes include every header spelling used by
@@ -2132,7 +2215,7 @@ async function translationUnitDependencyFingerprint(
  * change that redirects includes cannot hide behind an unchanged old path
  * list. Dependency discovery must succeed on every cache-enabled invocation;
  * a prior path list cannot reveal a new higher-priority header. */
-async function implicitToolchainFingerprint(
+async function implicitToolchainFingerprintFresh(
   driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
   environmentFingerprint: string,
 ): Promise<string> {
@@ -2253,6 +2336,23 @@ async function implicitToolchainFingerprint(
   return hash.digest("hex");
 }
 
+const stableImplicitToolchainMemos = new Map<string, Promise<string>>();
+function implicitToolchainFingerprint(
+  driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
+  environmentFingerprint: string,
+): Promise<string> {
+  const key = [
+    environmentFingerprint,
+    driver.argv.join("\x1f"),
+    driver.target ?? "<native>",
+    driver.targetArgs.join("\x1f"),
+    runtimeSrcDir(),
+  ].join("\0");
+  return stableTestMemo(stableImplicitToolchainMemos, key, () =>
+    implicitToolchainFingerprintFresh(driver, environmentFingerprint),
+  );
+}
+
 function linkTraceCandidate(line: string): string[] {
   const trimmed = line.trim().replace(/^(?:LOAD|load)\s+/, "");
   if (trimmed === "") return [];
@@ -2311,7 +2411,7 @@ export async function parseLinkTraceFiles(
  * build-flavor flags such as ASan and scriptc's own fixed `-l` arguments.
  * Every cache-enabled invocation performs a fresh trace; a prior resolved path
  * list cannot reveal a newly selected higher-priority linker input. */
-async function implicitLinkerFingerprint(
+async function implicitLinkerFingerprintFresh(
   driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
   environmentFingerprint: string,
   linkArgs: readonly string[],
@@ -2438,6 +2538,36 @@ async function implicitLinkerFingerprint(
     .digest("hex");
 }
 
+const stableImplicitLinkerMemos = new Map<string, Promise<string>>();
+function implicitLinkerFingerprint(
+  driver: Pick<CcDriver, "argv" | "targetArgs" | "target">,
+  environmentFingerprint: string,
+  linkArgs: readonly string[],
+  effectiveInvocationArgs?: readonly string[],
+  traceInvocationArgs?: readonly string[],
+): Promise<string> {
+  const invocationArgs = effectiveInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
+  const traceArgs = traceInvocationArgs ?? [...driver.targetArgs, ...linkArgs];
+  const key = [
+    environmentFingerprint,
+    driver.argv.join("\x1f"),
+    driver.target ?? "<native>",
+    driver.targetArgs.join("\x1f"),
+    linkArgs.join("\x1f"),
+    invocationArgs.join("\x1f"),
+    traceArgs.join("\x1f"),
+  ].join("\0");
+  return stableTestMemo(stableImplicitLinkerMemos, key, () =>
+    implicitLinkerFingerprintFresh(
+      driver,
+      environmentFingerprint,
+      linkArgs,
+      effectiveInvocationArgs,
+      traceInvocationArgs,
+    ),
+  );
+}
+
 let ccacheMemo: Promise<boolean> | null = null;
 function ccacheAvailable(): Promise<boolean> {
   ccacheMemo ??= execFileAsync("ccache", ["--version"]).then(
@@ -2454,7 +2584,7 @@ function ccacheAvailable(): Promise<boolean> {
  * vendor archives are pinned by their version constants). The small source
  * tree is hashed on every identity calculation: a stat-only memo can miss a
  * same-size edit whose timestamp was preserved by a copy/sync tool. */
-export async function runtimeFingerprint(rtDir: string): Promise<string> {
+async function runtimeFingerprintFresh(rtDir: string): Promise<string> {
   const groups = await Promise.all(
     [
       { label: "runtime", dir: rtDir },
@@ -2471,6 +2601,12 @@ export async function runtimeFingerprint(rtDir: string): Promise<string> {
     }
   }
   return h.digest("hex");
+}
+
+const stableRuntimeFingerprintMemos = new Map<string, Promise<string>>();
+export function runtimeFingerprint(rtDir: string): Promise<string> {
+  const key = resolve(rtDir);
+  return stableTestMemo(stableRuntimeFingerprintMemos, key, () => runtimeFingerprintFresh(rtDir));
 }
 
 class CacheInputsChangedError extends Error {

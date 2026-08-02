@@ -502,6 +502,30 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
 });
 
 describe(`proxy env opt-in (NODE_USE_ENV_PROXY${sanitize ? ", sanitized" : ""})`, () => {
+  test.for(["HTTP_PROXY", "ALL_PROXY"] as const)(
+    "Vercel EnvProxyDispatcher activates %s without the Node opt-in",
+    async (proxyVariable) => {
+      const entry = join(fixturesRoot, "vercel-env-proxy/main.mts");
+      const binary = await build(entry);
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of [
+        "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+        "all_proxy", "ALL_PROXY", "NODE_USE_ENV_PROXY",
+      ]) {
+        delete env[key];
+      }
+      env[proxyVariable] = proxyUrl;
+      env.no_proxy = "";
+      env.NO_PROXY = "";
+      const before = servers.proxiedRequests();
+      const result = await runBinary(binary, [baseUrl], env);
+      expect(result.stdout.toString("utf8")).toBe("héllo wörld 😀\n");
+      expect(result.exitCode).toBe(0);
+      expect(servers.proxiedRequests() - before).toBe(1);
+    },
+    120_000,
+  );
+
   // The other half of the proxy parity: WITH NODE_USE_ENV_PROXY=1 both
   // lanes honor http_proxy and route through the local forward proxy —
   // outputs stay byte-identical AND the proxy sees exactly one relayed
@@ -766,3 +790,20 @@ describe(`fetch differential (${cases.length} programs${sanitize ? ", sanitized"
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
 });
+
+test(`dynamic fetch runtime fences computed unsupported RequestInit${sanitize ? " (sanitized)" : ""}`, async () => {
+  const entry = join(fixturesRoot, "unsupported-init-dynamic/main.mts");
+  const binary = await build(entry);
+  const result = await runBinary(binary, [], {
+    ...process.env,
+    NODE_USE_ENV_PROXY: "1",
+  });
+  expect(result.stdout.toString("utf8")).toBe(
+    "cache TypeError unsupported RequestInit option: cache\n" +
+      "dispatcher TypeError unsupported RequestInit option: dispatcher\n" +
+      "env dispatcher string env dispatcher accepted\n" +
+      "stream from: false 7\n" +
+      "stream constructor: false\n",
+  );
+  expect(result.exitCode).toBe(0);
+}, 120_000);

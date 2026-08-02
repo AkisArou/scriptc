@@ -31,7 +31,16 @@ const laneCaseShardedFiles = [
 // It still case-shards across the selected lane so every corpus entry is
 // checked, but running the same sweep in the second lane adds no coverage.
 const invariantCaseShardedFiles = ["tests/harness/coverage.test.ts"];
-const caseShardedFiles = [...laneCaseShardedFiles, ...invariantCaseShardedFiles];
+// Native-cache invalidation cases mutate process-wide compiler inputs and
+// therefore stay serial inside a worker. They are sanitizer-invariant, but
+// use their own shard variable so the independent cases can spread across the
+// once lane's Sandboxes without colliding with corpus case selection.
+const cacheCaseShardedFiles = ["packages/compiler/src/backend/cc-cache.test.ts"];
+const caseShardedFiles = [
+  ...laneCaseShardedFiles,
+  ...invariantCaseShardedFiles,
+  ...cacheCaseShardedFiles,
+];
 
 // These files neither consume SCRIPTC_SAN nor delegate to a helper that does.
 // Run their full coverage once. Files absent from this allowlist remain in
@@ -610,7 +619,9 @@ try {
       };
       const workerCaseFiles = [
         ...laneCaseShardedFiles,
-        ...(worker.lane === onceLane ? invariantCaseShardedFiles : []),
+        ...(worker.lane === onceLane
+          ? [...invariantCaseShardedFiles, ...cacheCaseShardedFiles]
+          : []),
       ];
       const cases = () =>
         execIn(
@@ -620,6 +631,7 @@ try {
           {
             ...sharedTestEnv,
             SCRIPTC_TEST_SHARD: `${worker.shard}/${shardCount}`,
+            SCRIPTC_CACHE_TEST_SHARD: `${worker.shard}/${shardCount}`,
             SCRIPTC_TEST_WORKERS: caseWorkers,
           },
           "cases",

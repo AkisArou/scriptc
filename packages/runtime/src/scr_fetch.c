@@ -3251,6 +3251,7 @@ static ScrUrl *sf_url_parse_quiet(ScrStr *text) {
 static bool sf_proxy_enabled;
 static char *sf_http_proxy;
 static char *sf_https_proxy;
+static char *sf_all_proxy;
 static char *sf_no_proxy;
 
 static char *sf_env_copy(const char *lower, const char *upper) {
@@ -3270,14 +3271,16 @@ static void sf_proxy_snapshot(void) {
   if (!sf_proxy_enabled) return;
   sf_http_proxy = sf_env_copy("http_proxy", "HTTP_PROXY");
   sf_https_proxy = sf_env_copy("https_proxy", "HTTPS_PROXY");
+  sf_all_proxy = sf_env_copy("all_proxy", "ALL_PROXY");
   sf_no_proxy = sf_env_copy("no_proxy", "NO_PROXY");
 }
 
 static void sf_proxy_snapshot_free(void) {
   free(sf_http_proxy);
   free(sf_https_proxy);
+  free(sf_all_proxy);
   free(sf_no_proxy);
-  sf_http_proxy = sf_https_proxy = sf_no_proxy = NULL;
+  sf_http_proxy = sf_https_proxy = sf_all_proxy = sf_no_proxy = NULL;
 }
 
 static int sf_hex_value(char c) {
@@ -3399,6 +3402,7 @@ static ScrUrl *sf_proxy_for(const ScrUrl *target, bool https,
   *invalid = false;
   if (!sf_proxy_enabled) return NULL;
   const char *proxy = https ? sf_https_proxy : sf_http_proxy;
+  if (!proxy) proxy = sf_all_proxy;
   if (!proxy) return NULL;
   if (sf_no_proxy &&
       sf_no_proxy_match(sf_no_proxy, target->host, target_port)) {
@@ -4600,12 +4604,25 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
   if (init && init->kind == SCR_DYN_OBJ) {
     for (size_t i = 0; i < init->v.obj.len; i++) {
       const ScrDynEntry *entry = &init->v.obj.entries[i];
-      if (!sf_name(entry->key, entry->key_len, "method") &&
-          !sf_name(entry->key, entry->key_len, "headers") &&
-          !sf_name(entry->key, entry->key_len, "body") &&
-          !sf_name(entry->key, entry->key_len, "duplex") &&
-          !sf_name(entry->key, entry->key_len, "redirect") &&
-          !sf_name(entry->key, entry->key_len, "signal")) {
+      bool supported = sf_name(entry->key, entry->key_len, "method") ||
+                       sf_name(entry->key, entry->key_len, "headers") ||
+                       sf_name(entry->key, entry->key_len, "body") ||
+                       sf_name(entry->key, entry->key_len, "duplex") ||
+                       sf_name(entry->key, entry->key_len, "redirect") ||
+                       sf_name(entry->key, entry->key_len, "signal");
+      bool recognized_unsupported =
+          sf_name(entry->key, entry->key_len, "cache") ||
+          sf_name(entry->key, entry->key_len, "credentials") ||
+          sf_name(entry->key, entry->key_len, "dispatcher") ||
+          sf_name(entry->key, entry->key_len, "integrity") ||
+          sf_name(entry->key, entry->key_len, "keepalive") ||
+          sf_name(entry->key, entry->key_len, "mode") ||
+          sf_name(entry->key, entry->key_len, "priority") ||
+          sf_name(entry->key, entry->key_len, "referrer") ||
+          sf_name(entry->key, entry->key_len, "referrerPolicy") ||
+          sf_name(entry->key, entry->key_len, "window");
+      if (!supported && recognized_unsupported && entry->value &&
+          entry->value->kind != SCR_DYN_UNDEF) {
         return sf_reject_now(promise, "fetch failed");
       }
     }
@@ -5075,6 +5092,7 @@ typedef struct FxTransfer {
   int hops;
   bool redirected;
   bool request_streaming;
+  bool use_env_proxy;
   bool request_ended;
   bool request_has_content_length;
   size_t request_content_length;
@@ -5398,6 +5416,7 @@ static bool fx_bad_port(int port) {
 static bool fx_proxy_enabled;
 static char *fx_http_proxy;
 static char *fx_https_proxy;
+static char *fx_all_proxy;
 static char *fx_no_proxy;
 
 static char *fx_env_copy(const char *lower, const char *upper) {
@@ -5414,17 +5433,20 @@ static char *fx_env_copy(const char *lower, const char *upper) {
 static void fx_proxy_snapshot(void) {
   const char *optin = getenv("NODE_USE_ENV_PROXY");
   fx_proxy_enabled = optin != NULL && strcmp(optin, "1") == 0;
-  if (!fx_proxy_enabled) return;
+  /* Snapshot even without Node's global opt-in: Vercel's dispatcher is a
+   * request-local proxy activation over the same startup environment. */
   fx_http_proxy = fx_env_copy("http_proxy", "HTTP_PROXY");
   fx_https_proxy = fx_env_copy("https_proxy", "HTTPS_PROXY");
+  fx_all_proxy = fx_env_copy("all_proxy", "ALL_PROXY");
   fx_no_proxy = fx_env_copy("no_proxy", "NO_PROXY");
 }
 
 static void fx_proxy_snapshot_free(void) {
   free(fx_http_proxy);
   free(fx_https_proxy);
+  free(fx_all_proxy);
   free(fx_no_proxy);
-  fx_http_proxy = fx_https_proxy = fx_no_proxy = NULL;
+  fx_http_proxy = fx_https_proxy = fx_all_proxy = fx_no_proxy = NULL;
 }
 
 static int fx_hex_value(char c) {
@@ -5544,10 +5566,11 @@ static bool fx_no_proxy_match(const char *list, const ScrStr *host, int port) {
 
 /* The proxy for this hop's target, parsed (+1), or NULL for direct. */
 static ScrUrl *fx_proxy_for(const ScrUrl *target, bool https, int target_port,
-                            bool *invalid) {
+                            bool enabled, bool *invalid) {
   *invalid = false;
-  if (!fx_proxy_enabled) return NULL;
+  if (!enabled) return NULL;
   const char *proxy = https ? fx_https_proxy : fx_http_proxy;
+  if (proxy == NULL) proxy = fx_all_proxy;
   if (proxy == NULL) return NULL;
   if (fx_no_proxy != NULL &&
       fx_no_proxy_match(fx_no_proxy, target->host, target_port)) {
@@ -5599,7 +5622,8 @@ static void fx_start_hop(FxTransfer *t) {
     return;
   }
   bool invalid_proxy = false;
-  ScrUrl *proxy = fx_proxy_for(u, https, port, &invalid_proxy);
+  ScrUrl *proxy = fx_proxy_for(
+      u, https, port, fx_proxy_enabled || t->use_env_proxy, &invalid_proxy);
   bool proxy_http = proxy && fx_str_is(proxy->scheme, "http");
   bool proxy_https = proxy && fx_str_is(proxy->scheme, "https");
   if (invalid_proxy || (proxy && !proxy_http && !proxy_https) ||
@@ -6094,6 +6118,10 @@ static JSValue fx_host_start(JSContext *ctx, JSValueConst this_val, int argc,
   t->request_streaming = JS_ToBool(ctx, streamingv) > 0;
   JS_FreeValue(ctx, streamingv);
 
+  JSValue envproxyv = JS_GetPropertyStr(ctx, req, "useEnvProxy");
+  t->use_env_proxy = JS_ToBool(ctx, envproxyv) > 0;
+  JS_FreeValue(ctx, envproxyv);
+
   JSValue methodv = JS_GetPropertyStr(ctx, req, "method");
   const char *method = JS_ToCString(ctx, methodv);
   JS_FreeValue(ctx, methodv);
@@ -6268,44 +6296,111 @@ static const char fx_glue[] =
     "      let headers = null;\n"
     "      let body = null;\n"
     "      let signal = null;\n"
+    "      let redirect = 'follow';\n"
     "      if (input instanceof g.Request) {\n"
     "        url = input.url;\n"
     "        method = input.method;\n"
     "        headers = new g.Headers(input.headers);\n"
     "        body = input._body instanceof Uint8Array || input._body instanceof g.ReadableStream ? input._body : null;\n"
     "        signal = input._signal;\n"
+    "        redirect = input.redirect;\n"
     "      } else {\n"
     "        url = String(input);\n"
     "      }\n"
     "      init = init === undefined || init === null ? {} : init;\n"
+    "      // WebIDL observes dictionary members in lexical order, exactly\n"
+    "      // once each, and converts each value before reading the next.\n"
+    "      const initBody = init.body;\n"
+    "      let initBodyValue = null;\n"
+    "      let initBodyContentType = null;\n"
+    "      if (initBody !== undefined && initBody !== null) {\n"
+    "        const convertedBody = new g.Request('http://localhost/', { method: 'POST', body: initBody, duplex: 'half' });\n"
+    "        initBodyValue = convertedBody._body;\n"
+    "        initBodyContentType = convertedBody.headers.get('content-type');\n"
+    "      }\n"
+    "      const initCache = init.cache;\n"
+    "      if (initCache !== undefined) throw new TypeError('unsupported RequestInit option: cache');\n"
+    "      const initCredentials = init.credentials;\n"
+    "      if (initCredentials !== undefined) throw new TypeError('unsupported RequestInit option: credentials');\n"
+    "      let useEnvProxy = g.process?.env?.NODE_USE_ENV_PROXY === '1';\n"
+    "      const initDispatcher = init.dispatcher;\n"
+    "      // Vercel's dynamic CLI installs its EnvProxyDispatcher when\n"
+    "      // ordinary proxy environment variables are present. Validate the\n"
+    "      // known public shape and activate equivalent native proxy routing\n"
+    "      // for this request. Do not silently accept arbitrary custom\n"
+    "      // dispatchers whose routing behavior the bridge cannot preserve.\n"
+    "      if (initDispatcher !== undefined) {\n"
+    "        const dispatcher = initDispatcher;\n"
+    "        const envProxyMethods = ['dispatch', 'close', 'destroy', 'agents', 'getAgent', 'shouldProxy', 'parseNoProxy'];\n"
+    "        const isVercelEnvProxy = dispatcher !== null && typeof dispatcher === 'object' &&\n"
+    "          dispatcher.constructor?.name === 'EnvProxyDispatcher' &&\n"
+    "          envProxyMethods.every((member) => typeof dispatcher[member] === 'function');\n"
+    "        if (!isVercelEnvProxy) {\n"
+    "          throw new TypeError('unsupported RequestInit option: dispatcher');\n"
+    "        }\n"
+    "        useEnvProxy = true;\n"
+    "      }\n"
+    "      const initDuplex = init.duplex;\n"
+    "      let duplex;\n"
+    "      if (initDuplex !== undefined) {\n"
+    "        duplex = String(initDuplex);\n"
+    "        if (duplex !== 'half') throw new TypeError(\"RequestInit.duplex must be 'half'\");\n"
+    "      }\n"
+    "      const initHeaders = init.headers;\n"
+    "      const convertedHeaders = initHeaders === undefined ? undefined : new g.Headers(initHeaders);\n"
+    "      const initIntegrity = init.integrity;\n"
+    "      if (initIntegrity !== undefined) throw new TypeError('unsupported RequestInit option: integrity');\n"
+    "      const initKeepalive = init.keepalive;\n"
+    "      if (initKeepalive !== undefined) throw new TypeError('unsupported RequestInit option: keepalive');\n"
+    "      const initMethod = init.method;\n"
+    "      const convertedMethod = initMethod === undefined ? undefined : String(initMethod);\n"
+    "      const initMode = init.mode;\n"
+    "      if (initMode !== undefined) throw new TypeError('unsupported RequestInit option: mode');\n"
+    "      const initPriority = init.priority;\n"
+    "      if (initPriority !== undefined) throw new TypeError('unsupported RequestInit option: priority');\n"
+    "      const initRedirect = init.redirect;\n"
+    "      if (initRedirect !== undefined) {\n"
+    "        redirect = String(initRedirect);\n"
+    "        if (redirect !== 'follow' && redirect !== 'error' && redirect !== 'manual') {\n"
+    "          throw new TypeError(`undefined: ${redirect} is not an accepted type. Expected one of follow, manual, error.`);\n"
+    "        }\n"
+    "      }\n"
+    "      const initReferrer = init.referrer;\n"
+    "      if (initReferrer !== undefined) throw new TypeError('unsupported RequestInit option: referrer');\n"
+    "      const initReferrerPolicy = init.referrerPolicy;\n"
+    "      if (initReferrerPolicy !== undefined) throw new TypeError('unsupported RequestInit option: referrerPolicy');\n"
+    "      const initSignal = init.signal;\n"
     "      // An explicit init.signal overrides the Request's, null included.\n"
-    "      if (init.signal !== undefined) {\n"
-    "        if (init.signal !== null && !(init.signal instanceof g.AbortSignal)) {\n"
+    "      if (initSignal !== undefined) {\n"
+    "        if (initSignal !== null && !(initSignal instanceof g.AbortSignal)) {\n"
     "          throw new TypeError('fetch init.signal must be an AbortSignal or null');\n"
     "        }\n"
-    "        signal = init.signal;\n"
+    "        signal = initSignal;\n"
     "      }\n"
-    "      const redirect = init.redirect === undefined ? (input instanceof g.Request ? input.redirect : 'follow') : String(init.redirect);\n"
+    "      const initWindow = init.window;\n"
+    "      if (initWindow !== undefined) throw new TypeError('unsupported RequestInit option: window');\n"
+    "      // Request validation follows the complete dictionary conversion.\n"
+    "      if (convertedMethod !== undefined) {\n"
+    "        method = new g.Request('http://localhost/', { method: convertedMethod }).method;\n"
+    "      }\n"
+    "      if (convertedHeaders !== undefined) headers = convertedHeaders;\n"
+    "      if (headers === null) headers = new g.Headers();\n"
     "      let redirectMode = 0;\n"
     "      if (redirect === 'error') redirectMode = 1;\n"
     "      else if (redirect === 'manual') redirectMode = 2;\n"
-    "      else if (redirect !== 'follow') {\n"
-    "        throw new TypeError(`undefined: ${redirect} is not an accepted type. Expected one of follow, manual, error.`);\n"
+    "      // The effective body includes one inherited from an input Request.\n"
+    "      // A GET/HEAD method override must reject that body as well.\n"
+    "      if ((body !== null || initBodyValue !== null) && (method === 'GET' || method === 'HEAD')) {\n"
+    "        throw new TypeError('Request with GET/HEAD method cannot have body.');\n"
     "      }\n"
-    "      // Reuse Request's init handling: method normalization, header\n"
-    "      // collection, body coercion with its implicit content-type, and the\n"
-    "      // GET/HEAD-with-body TypeError.\n"
-    "      const reqInit = {};\n"
-    "      if (init.method !== undefined) reqInit.method = init.method;\n"
-    "      if (init.headers !== undefined) reqInit.headers = init.headers;\n"
-    "      if (init.body !== undefined && init.body !== null) reqInit.body = init.body;\n"
-    "      if (init.duplex !== undefined) reqInit.duplex = init.duplex;\n"
-    "      if (reqInit.method !== undefined || reqInit.headers !== undefined || reqInit.body !== undefined || reqInit.duplex !== undefined || headers === null) {\n"
-    "        const base = input instanceof g.Request ? input : url;\n"
-    "        const r = new g.Request(base, reqInit);\n"
-    "        method = r.method;\n"
-    "        headers = r.headers;\n"
-    "        body = r._body instanceof Uint8Array || r._body instanceof g.ReadableStream ? r._body : null;\n"
+    "      if (initBodyValue !== null) {\n"
+    "        if (initBodyValue instanceof g.ReadableStream && duplex !== 'half') {\n"
+    "          throw new TypeError('RequestInit: duplex option is required when sending a body.');\n"
+    "        }\n"
+    "        body = initBodyValue;\n"
+    "        if (initBodyContentType !== null && !headers.has('content-type')) {\n"
+    "          headers.set('content-type', initBodyContentType);\n"
+    "        }\n"
     "      }\n"
     "      if (body !== null && !(body instanceof Uint8Array) && !(body instanceof g.ReadableStream)) {\n"
     "        throw new TypeError('unsupported request body in the scriptc island');\n"
@@ -6413,6 +6508,7 @@ static const char fx_glue[] =
     "            headers: flat,\n"
     "            body: body instanceof Uint8Array ? body : undefined,\n"
     "            streaming: body instanceof g.ReadableStream,\n"
+    "            useEnvProxy,\n"
     "            redirectMode,\n"
     "          },\n"
     "          {\n"

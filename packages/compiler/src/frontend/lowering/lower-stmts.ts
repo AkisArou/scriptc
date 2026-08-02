@@ -1260,6 +1260,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     out: IrStmt[],
     dynSpell?: string,): void {
     if (ts.isArrayBindingPattern(pattern)) {
+      L.fenceStaticHeadersIteration(pattern);
       // Tuple sources: each position is a field read of the tuple's record
       // shape — the positional twin of object destructuring below.
       const tupleShape =
@@ -4888,6 +4889,11 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
   export function lowerDestructuringAssignParts(L: Lowerer, target: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
     rhs: ts.Expression,
     loc: SrcLoc,): { stmts: IrStmt[]; value: IrExpr } {
+    if (ts.isArrayLiteralExpression(target)) {
+      L.fenceStaticHeadersIteration(rhs);
+    } else {
+      L.fenceFetchObjectAssignment(target, rhs);
+    }
     return destructuringAssignInto(L, target, L.lowerExpr(rhs), rhs, rhs, loc);
   }
 
@@ -5804,6 +5810,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       }
       L.unsupported("SC1070", stmt, "'for await' (async iteration over anything but process.stdin and readable streams)");
     }
+    L.fenceStaticHeadersIteration(stmt.expression);
     // A stored numeric value iterator declared in this function keeps its
     // built-in protocol state in hidden locals (lowerVarStatement). The
     // iterator's own [Symbol.iterator]() returns itself, so for-of resumes

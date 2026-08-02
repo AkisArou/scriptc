@@ -4845,7 +4845,7 @@ export type IrExpr =
    * pinned prelude closures, not C reimplementations). `args` are
    * jsval-typed and borrowed. Result `type` per op: arithmetic
    * (add/sub/mul/div/mod/pow), unary neg/plus, getProp/getIdx,
-   * callMethod/callFn/globalGet → jsval (+1); comparisons
+   * callMethod/callFn/callFnThis/globalGet → jsval (+1); comparisons
    * (lt/le/gt/ge/eq/neq), truthy, not → bool; typeof, toStr → string (+1);
    * setProp/setIdx → void. `name` carries the property/method identifier
    * for getProp/setProp/callMethod/globalGet, absent otherwise. MAY THROW
@@ -4893,6 +4893,10 @@ export type IrJsOp =
   | "truthy" | "not" | "typeof" | "toStr"
   | "getProp" | "setProp" | "getIdx" | "setIdx"
   | "callMethod" | "callFn"
+  /** Calls an already-resolved island function with an explicit receiver.
+   * Args are (callee, receiver, ...arguments); this preserves computed
+   * method evaluation order without reading a getter twice. */
+  | "callFnThis"
   /** Spread application on an island callee — `f(...pre, ...s)`, the
    * rest-forwarding idiom (`(...args) => g(...args)` under --dynamic).
    * Args are exactly (callee, pre, spread): `pre` is the engine array of
@@ -4955,7 +4959,7 @@ export function jsOpResultKind(op: IrJsOp): "jsval" | "bool" | "string" | "void"
   switch (op) {
     case "add": case "sub": case "mul": case "div": case "mod": case "pow":
     case "neg": case "plus":
-    case "getProp": case "getIdx": case "callMethod": case "callFn":
+    case "getProp": case "getIdx": case "callMethod": case "callFn": case "callFnThis":
     case "callSpread":
     case "construct":
     case "globalGet":

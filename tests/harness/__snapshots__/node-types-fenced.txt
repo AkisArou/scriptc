@@ -77,14 +77,14 @@ fenced.ts:30:15 - error SC2020: 'Response.type in a static build' is typed by @t
 
   hint: the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API
 
-fenced.ts:31:3 - error SC2020: 'Response.clone in a static build' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:31:3 - error SC2020: 'Response.clone' is typed by @types/node but has no scriptc lowering yet
 
   30 |   console.log(response.type);
   31 |   response.clone();
      |   ^~~~~~~~~~~~~~
   32 | }
 
-  hint: the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API
+  hint: the dynamic fetch bridge does not implement this Response operation
 
 fenced.ts:34:21 - error SC2020: 'ReadableStream.from() over Set<number> iterables' is part of the standard library types but has no scriptc lowering yet
 
@@ -219,40 +219,40 @@ fenced.ts:85:3 - error SC2020: 'RequestInit option 'integrity' in a static build
      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   86 | });
 
-  hint: the native static RequestInit surface is method, headers, body, duplex, redirect, and signal; use --dynamic for the wider fetch options
+  hint: neither compiler tier preserves this RequestInit member's conversion or transport behavior
 
-fenced.ts:89:3 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:89:3 - error SC2020: 'ReadableStream.tee' is typed by @types/node but has no scriptc lowering yet
 
   88 |   const body = (await fetch(url)).body!;
   89 |   body.tee();
      |   ^~~~~~~~
   90 |   const tee = body.tee;
 
-  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+  hint: the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation
 
-fenced.ts:90:15 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:90:15 - error SC2020: 'ReadableStream.tee' is typed by @types/node but has no scriptc lowering yet
 
   89 |   body.tee();
   90 |   const tee = body.tee;
      |               ^~~~~~~~
   91 |   body["tee"]();
 
-  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+  hint: the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation
 
-fenced.ts:91:3 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:91:3 - error SC2020: 'ReadableStream.tee' is typed by @types/node but has no scriptc lowering yet
 
   90 |   const tee = body.tee;
   91 |   body["tee"]();
      |   ^~~~~~~~~~~
   92 |   const bracketTee = body["tee"];
 
-  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+  hint: the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation
 
-fenced.ts:92:22 - error SC2020: 'ReadableStream.tee in a static build' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:92:22 - error SC2020: 'ReadableStream.tee' is typed by @types/node but has no scriptc lowering yet
 
   91 |   body["tee"]();
   92 |   const bracketTee = body["tee"];
      |                      ^~~~~~~~~~~
   93 | }
 
-  hint: the native static ReadableStream surface is locked plus cancel() and getReader(); use a reader directly or --dynamic for the wider Web Streams API
+  hint: the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation
