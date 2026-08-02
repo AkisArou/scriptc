@@ -127,12 +127,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     // rest of coverage measurable without overstating the host boundary.
     const externalTypeSpecifier = L.externalTypeSpecifierOf(expr);
     if (externalTypeSpecifier !== null) {
-      L.unsupported(
-        "SC1010",
-        expr,
-        `values from the '${externalTypeSpecifier}' external host module (types supplied by --external-types, but no runtime implementation or scriptc lowering was provided)`,
-        "the declaration mapping is analysis-only: coverage continues through project code, while executing this value requires an embedder integration with explicit runtime semantics",
-      );
+      L.externalHostFence(externalTypeSpecifier, expr);
     }
 
     if (ts.isNumericLiteral(expr)) {

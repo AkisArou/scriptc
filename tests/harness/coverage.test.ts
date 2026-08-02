@@ -146,6 +146,54 @@ test("external declaration barrels leave type-only local code fully analyzable",
   expect(coverage.stats.statementsFailed).toBe(0);
 });
 
+test("external host mappings fence dynamic imports even with the island enabled", () => {
+  const root = fixture("external-types");
+  const { coverage } = analyze(join(root, "dynamic.ts"), {
+    dynamic: true,
+    externalTypes: { "@native-sdk/core": join(root, "native-sdk-core.d.ts") },
+  });
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.stats.statementsFailed).toBeGreaterThan(0);
+  expect(coverage.stats.statementsIsland).toBe(0);
+  expect(
+    coverage.diagnostics.some(
+      (d) => d.code === "SC1010" && d.message.includes("@native-sdk/core") && d.message.includes("--external-types"),
+    ),
+  ).toBe(true);
+});
+
+test("external host mappings fence side-effect CommonJS requires", () => {
+  const root = fixture("external-types");
+  const { coverage } = analyze(join(root, "side-effect.cjs"), {
+    externalTypes: { "@native-sdk/core": join(root, "native-sdk-core.d.ts") },
+  });
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.stats.statementsFailed).toBeGreaterThan(0);
+  const blockers = [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])];
+  expect(
+    blockers.some(
+      (d) => d.code === "SC1010" && d.message.includes("@native-sdk/core") && d.message.includes("external host module"),
+    ),
+  ).toBe(true);
+});
+
+test("shared external declarations retain the specifier selected by each local facade", () => {
+  const root = fixture("external-types");
+  const declaration = join(root, "native-sdk-core.d.ts");
+  const { coverage } = analyze(join(root, "facade-consumer.ts"), {
+    externalTypes: {
+      "@native-sdk/core": declaration,
+      "@native-sdk/unused": declaration,
+    },
+  });
+  expect(coverage.preflightFailed).toBe(false);
+  const valueBlockers = coverage.diagnostics.filter(
+    (d) => d.code === "SC1010" && d.message.startsWith("values from"),
+  );
+  expect(valueBlockers.some((d) => d.message.includes("@native-sdk/core"))).toBe(true);
+  expect(valueBlockers.some((d) => d.message.includes("@native-sdk/unused"))).toBe(true);
+});
+
 test("CLI accepts repeatable --external-types mappings for coverage", () => {
   const root = fixture("external-types");
   const scriptcCli = join(repoRoot, "packages/cli/src/main.ts");

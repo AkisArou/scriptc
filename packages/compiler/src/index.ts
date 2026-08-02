@@ -566,7 +566,7 @@ function runFrontend(
       ...opts,
       startupCrash: finalLoad.startupCrash ?? null,
       externalTypes: finalLoad.externalTypes,
-      externalTypeSpecifierByFile: finalLoad.externalTypeSpecifierByFile,
+      externalTypeSpecifiersByFile: finalLoad.externalTypeSpecifiersByFile,
     }),
     npmStatic: statuses,
     npmImportSites: npmSites,

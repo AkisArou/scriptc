@@ -201,9 +201,10 @@ export interface LoadResult {
    * become runtime module edges. */
   externalTypes: ReadonlyMap<string, string>;
   /** The mapped declarations plus their relative declaration-file closure,
-   * keyed by normalized file name and attributed to the owning external
-   * specifier. */
-  externalTypeSpecifierByFile: ReadonlyMap<string, string>;
+   * keyed by normalized file name and attributed to every owning external
+   * specifier. Multiple exact module names may deliberately share one
+   * declaration surface. */
+  externalTypeSpecifiersByFile: ReadonlyMap<string, readonly string[]>;
   projectWorld: () => ts.Program;
 }
 
@@ -232,6 +233,15 @@ export function isExactExternalTypeSpecifier(specifier: string): boolean {
   );
 }
 
+function externalHostModuleDiag7(specifier: string, node: ts.Node): ScrDiagnostic {
+  return unsupportedDiag(
+    "SC1010",
+    locOf7(node),
+    `the '${specifier}' external host module (types supplied by --external-types, but no runtime implementation or scriptc lowering was provided)`,
+    "the declaration mapping is analysis-only: coverage continues through project code, while executing this module requires an embedder integration with explicit runtime semantics",
+  );
+}
+
 /** Expand each mapped declaration entry through RELATIVE declaration
  * dependencies. Declaration packages commonly expose a barrel index.d.ts;
  * the structural types declared in its sibling files are part of the same
@@ -240,32 +250,41 @@ export function isExactExternalTypeSpecifier(specifier: string): boolean {
 function externalTypeFileClosure7(
   program: ts.Program,
   externalTypes: ReadonlyMap<string, string>,
-): ReadonlyMap<string, string> {
-  const byFile = new Map<string, string>();
+): ReadonlyMap<string, readonly string[]> {
+  const ownersByFile = new Map<string, Set<string>>();
+  const addOwner = (file: string, specifier: string): boolean => {
+    let owners = ownersByFile.get(file);
+    if (owners === undefined) {
+      owners = new Set();
+      ownersByFile.set(file, owners);
+    }
+    if (owners.has(specifier)) return false;
+    owners.add(specifier);
+    return true;
+  };
   for (const [specifier, file] of externalTypes) {
-    byFile.set(tsgoPath(resolve(file)), specifier);
+    addOwner(tsgoPath(resolve(file)), specifier);
   }
 
-  const queue: ts.SourceFile[] = [];
-  for (const file of byFile.keys()) {
+  const queue: { sf: ts.SourceFile; owner: string }[] = [];
+  for (const [owner, entry] of externalTypes) {
+    const file = tsgoPath(resolve(entry));
     const sf = program.getSourceFile(file);
-    if (sf?.isDeclarationFile) queue.push(sf);
+    if (sf?.isDeclarationFile) queue.push({ sf, owner });
   }
   const visited = new Set<string>();
   while (queue.length > 0) {
-    const sf = queue.shift()!;
+    const { sf, owner } = queue.shift()!;
     const file = tsgoPath(resolve(sf.fileName));
-    if (visited.has(file)) continue;
-    visited.add(file);
-    const owner = byFile.get(file);
-    if (owner === undefined) continue;
+    const visitKey = `${file}\0${owner}`;
+    if (visited.has(visitKey)) continue;
+    visited.add(visitKey);
 
     const admit = (dep: ts.SourceFile | null): void => {
       if (dep === null || !dep.isDeclarationFile) return;
       const depFile = tsgoPath(resolve(dep.fileName));
-      if (byFile.has(depFile)) return;
-      byFile.set(depFile, owner);
-      queue.push(dep);
+      if (!addOwner(depFile, owner)) return;
+      queue.push({ sf: dep, owner });
     };
     // SourceFile.imports includes import/export declarations, import =
     // require(), and import("…") type nodes. Only relative edges inherit
@@ -281,7 +300,9 @@ function externalTypeFileClosure7(
       admit(program.getSourceFile(depPath) ?? null);
     }
   }
-  return byFile;
+  return new Map(
+    [...ownersByFile].map(([file, owners]) => [file, [...owners]] as const),
+  );
 }
 
 function loadProgram7(
@@ -318,7 +339,7 @@ function loadProgram7(
   const program = ts.createProgram([...coreRoots, overridesDtsPath()], options, host);
   const entry = program.getSourceFile(entryPath);
   if (!entry) throw new Error(`could not load ${entryPath}`);
-  const externalTypeSpecifierByFile = externalTypeFileClosure7(program, externalTypes);
+  const externalTypeSpecifiersByFile = externalTypeFileClosure7(program, externalTypes);
   let projectWorld: ts.Program | null = null;
   return {
     program,
@@ -326,7 +347,7 @@ function loadProgram7(
     moduleOrder: [],
     configDiags: config.diags,
     externalTypes,
-    externalTypeSpecifierByFile,
+    externalTypeSpecifiersByFile,
     projectWorld: () => (projectWorld ??= ts.createProgram(coreRoots, options, host)),
     disposeAll: () => {
       projectWorld?.dispose();
@@ -1649,7 +1670,12 @@ function preflight7(load: LoadResult): {
         // fence); `import type x = require(...)` is pure type surface and
         // lowers to nothing.
         if (ts.isExternalModuleReference(stmt.moduleReference) && !stmt.isTypeOnly) {
-          diags.push(unsupportedDiag("SC1013", locOf7(stmt), "import = require(...) assignments"));
+          const spec = stmt.moduleReference.expression;
+          if (spec !== undefined && ts.isStringLiteralLike(spec) && load.externalTypes.has(spec.text)) {
+            diags.push(externalHostModuleDiag7(spec.text, stmt));
+          } else {
+            diags.push(unsupportedDiag("SC1013", locOf7(stmt), "import = require(...) assignments"));
+          }
         }
         continue;
       }
@@ -1663,6 +1689,10 @@ function preflight7(load: LoadResult): {
         if (stmt.isTypeOnly || erasedTypeOnlyReexport(stmt)) continue;
         if (!stmt.moduleSpecifier) continue;
         const fromSpec = ts.isStringLiteral(stmt.moduleSpecifier) ? stmt.moduleSpecifier.text : "";
+        if (load.externalTypes.has(fromSpec)) {
+          diags.push(externalHostModuleDiag7(fromSpec, stmt));
+          continue;
+        }
         if (!isRelativeSpecifier(fromSpec)) {
           // NAMED re-exports from a SUPPORTED builtin pass (`export { ok }
           // from "node:assert"` — a universal re-export facade facade): the
@@ -1732,14 +1762,7 @@ function preflight7(load: LoadResult): {
       if (specNode === undefined || !ts.isStringLiteral(specNode)) continue;
       const spec = specNode.text;
       if (load.externalTypes.has(spec)) {
-        diags.push(
-          unsupportedDiag(
-            "SC1010",
-            locOf7(stmt),
-            `the '${spec}' external host module (types supplied by --external-types, but no runtime implementation or scriptc lowering was provided)`,
-            "the declaration mapping is analysis-only: coverage continues through project code, while executing this module requires an embedder integration with explicit runtime semantics",
-          ),
-        );
+        diags.push(externalHostModuleDiag7(spec, stmt));
         continue;
       }
       const isRelative = isRelativeSpecifier(spec);
@@ -1974,6 +1997,9 @@ function preflight7(load: LoadResult): {
             );
             continue;
           }
+          if (load.externalTypes.has(req.spec)) {
+            continue;
+          }
           if (req.decl && ts.isArrayBindingPattern(req.decl.name)) {
             diags.push(unsupportedDiag("SC1012", loc, "array-destructuring require() bindings"));
             continue;
@@ -2046,6 +2072,9 @@ function preflight7(load: LoadResult): {
         for (const call of nestedBareRequiresOf7(sf)) {
           const spec = requireSpecOf7(call)!;
           const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
+          if (load.externalTypes.has(spec)) {
+            continue;
+          }
           if (!isRelativeSpecifier(spec)) {
             // --npm-static: opted-in packages ride the program-module edge
             // (the statement-level require branch above).
