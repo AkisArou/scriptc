@@ -41,3 +41,13 @@ function localRoundTrip(s: string): string {
   return labelledDecoder.decode(localEncoder.encode(s));
 }
 console.log(localRoundTrip("local ✓"));
+
+// A switch clause is still one straight-line execution region: the
+// declaration dominates the call when both live in that clause.
+const codecCase = 1;
+switch (codecCase) {
+  case 1:
+    const caseEncoder = new TextEncoder();
+    console.log(caseEncoder.encode("same clause").length);
+    break;
+}

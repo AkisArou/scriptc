@@ -18,4 +18,8 @@ switch (codecCase) {
     };
     console.log(new Encoded().bytes.length);
     break;
+  case 2:
+    // @ts-expect-error -- dispatch can enter here while caseEncoder is in its TDZ
+    console.log(caseEncoder.encode("should fence directly").length);
+    break;
 }

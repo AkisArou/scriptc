@@ -6235,6 +6235,31 @@ type TextCodecCtor = {
       }
     };
     if (executionScope(receiver) !== executionScope(decl) || receiver.getStart() < decl.end) return null;
+    // All switch clauses share one lexical environment, but dispatch can
+    // enter a later clause without executing a const in an earlier one.
+    // TypeScript normally diagnoses the direct read; an @ts-expect-error
+    // can deliberately retain the runtime TDZ shape, so source order alone
+    // is not a sufficient proof. A codec declared in a clause is erasable
+    // only for uses inside that exact clause's subtree (nested switches are
+    // fine; closures and instance initializers already fail executionScope).
+    const switchClauseOf = (node: ts.Node): ts.CaseOrDefaultClause | null => {
+      for (let cur: ts.Node | undefined = node.parent; cur !== undefined; cur = cur.parent) {
+        if (ts.isCaseClause(cur) || ts.isDefaultClause(cur)) return cur;
+        if (ts.isFunctionLike(cur) || ts.isSourceFile(cur)) return null;
+      }
+      return null;
+    };
+    const declClause = switchClauseOf(decl);
+    if (declClause !== null) {
+      let insideDeclClause = false;
+      for (let cur: ts.Node | undefined = receiver; cur !== undefined; cur = cur.parent) {
+        if (cur === declClause) {
+          insideDeclClause = true;
+          break;
+        }
+      }
+      if (!insideDeclClause) return null;
+    }
     return directTextCodecCtorOf(L, decl.initializer);
   }
 
