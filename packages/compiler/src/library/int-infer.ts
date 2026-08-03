@@ -1400,6 +1400,7 @@ class FnAnalyzer {
       case "fieldGet":
         return this.staticAccessPath(e) !== null;
       case "unionIsTag":
+      case "unionDisc":
         return this.stablePathGuard(e.value);
       case "unionNarrow":
         return this.stablePathGuard(e.value);
