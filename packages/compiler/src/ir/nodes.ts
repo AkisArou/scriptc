@@ -5350,7 +5350,7 @@ function canConvertToDynAt(
   // in records/arrays/unions. isJsonSafeType rejects them, but dynFrom
   // needs only that the walker can build the dyn value, so this composite
   // fold extends the JSON-safe core.
-  if (canBoxDynComposite(t, getRecord, getUnion)) return true;
+  if (canBoxDynComposite(t, getRecord, getUnion, next)) return true;
   if (t.kind === "bytes" && t.elem === "u8") return true;
   // %Error converts as the checked-dynamic tree's error encoding ({%error, name, message,
   // code?} — the caughtToDyn shape, scr_dyn_from_error): the dyn 'error'
@@ -5408,7 +5408,7 @@ function canBoxDynComposite(
     case "bytes":
       return t.elem === "u8";
     case "func":
-      return canBoxFuncIntoDyn(t, getRecord, getUnion);
+      return canBoxFuncIntoDynAt(t, getRecord, getUnion, visiting);
     case "array":
       return canBoxDynComposite(t.elem, getRecord, getUnion, visiting);
     case "record": {
