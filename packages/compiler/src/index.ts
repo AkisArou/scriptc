@@ -370,6 +370,14 @@ function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set
   return hits;
 }
 
+/** The package-wide --npm-static name containing an exact bare specifier.
+ * External mappings are exact (subpaths included), while npm-static owns a
+ * whole package, so any mapped subpath conflicts with that package opt-in. */
+function packageNameOfBareSpecifier(specifier: string): string {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+}
+
 /** The one frontend, three npm postures: `undefined`/explicit package
  * lists and `"auto"` are the executable lane's (--npm-static; fallback =
  * island). `"lib"` is library mode's mandatory auto twin — the same
@@ -411,6 +419,31 @@ function runFrontend(
     }
   } else if (npmStatic !== undefined) {
     requested = [...new Set(npmStatic)];
+  }
+
+  // One exact --external-types mapping makes the containing package an
+  // external host boundary, which cannot simultaneously be compiled as a
+  // package-wide --npm-static program graph. External wins; retain the
+  // ordinary npm-static fallback record so explicit and auto requests both
+  // explain why the package did not compile statically.
+  if (requested.length > 0 && externalTypes !== undefined) {
+    const externalSpecifiersByPackage = new Map<string, string[]>();
+    for (const specifier of Object.keys(externalTypes)) {
+      const pkg = packageNameOfBareSpecifier(specifier);
+      const specs = externalSpecifiersByPackage.get(pkg) ?? [];
+      specs.push(specifier);
+      externalSpecifiersByPackage.set(pkg, specs);
+    }
+    requested = requested.filter((pkg) => {
+      const specs = externalSpecifiersByPackage.get(pkg);
+      if (specs === undefined) return true;
+      statuses.push({
+        package: pkg,
+        status: "fallback",
+        detail: `mapped as an external host module by --external-types (${specs.map((s) => JSON.stringify(s)).join(", ")})`,
+      });
+      return false;
+    });
   }
 
   // The all-or-nothing fallback loop: a preflight diagnostic ANCHORED in

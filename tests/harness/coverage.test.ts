@@ -194,6 +194,41 @@ test("shared external declarations retain the specifier selected by each local f
   expect(valueBlockers.some((d) => d.message.includes("@native-sdk/unused"))).toBe(true);
 });
 
+test("external star facades do not claim local exports", () => {
+  const root = fixture("external-types");
+  const { coverage } = analyze(join(root, "mixed-star-consumer.ts"), {
+    externalTypes: { "@native-sdk/core": join(root, "native-sdk-core.d.ts") },
+  });
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.stats.statementsTotal).toBe(2);
+  expect(coverage.stats.statementsFailed).toBe(0);
+  expect(
+    coverage.diagnostics.some(
+      (d) => d.code === "SC1010" && d.message.includes("the '@native-sdk/core' external host module"),
+    ),
+  ).toBe(true);
+  expect(coverage.diagnostics.some((d) => d.code === "SC1010" && d.message.startsWith("values from"))).toBe(false);
+});
+
+test("external host mappings take precedence over overlapping npm-static packages", () => {
+  const root = fixture("external-types");
+  const entry = join(repoRoot, "tests/fixtures/npm-static/slash-cli.ts");
+  const { coverage } = analyze(entry, {
+    npmStatic: ["slash"],
+    externalTypes: { slash: join(root, "slash-host.d.ts") },
+  });
+  expect(coverage.preflightFailed).toBe(false);
+  expect(coverage.npmStatic).toEqual([
+    {
+      package: "slash",
+      status: "fallback",
+      detail: 'mapped as an external host module by --external-types ("slash")',
+    },
+  ]);
+  expect(coverage.diagnostics.some((d) => d.code === "SC2013")).toBe(false);
+  expect(coverage.diagnostics.some((d) => d.code === "SC1010" && d.message.includes("'slash'"))).toBe(true);
+});
+
 test("CLI accepts repeatable --external-types mappings for coverage", () => {
   const root = fixture("external-types");
   const scriptcCli = join(repoRoot, "packages/cli/src/main.ts");
@@ -241,6 +276,17 @@ test("external type mappings reject TypeScript paths patterns", () => {
   );
   expect(cli.status).toBe(1);
   expect(cli.stderr).toContain("expected an exact bare package specifier");
+});
+
+test("external type mappings reject non-declaration and unreadable API paths", () => {
+  const root = fixture("external-types");
+  const entry = join(root, "type-only.ts");
+  expect(() => analyze(entry, { externalTypes: { "@native-sdk/core": join(root, "main.ts") } })).toThrow(
+    "expected a .d.ts, .d.mts, or .d.cts file",
+  );
+  expect(() => analyze(entry, { externalTypes: { "@native-sdk/core": join(root, "missing.d.ts") } })).toThrow(
+    "does not name a readable file",
+  );
 });
 
 test("type errors block analysis", () => {

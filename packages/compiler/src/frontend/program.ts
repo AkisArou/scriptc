@@ -41,6 +41,7 @@
  *    that path (no snapshot pins it). */
 
 import { builtinModules } from "node:module";
+import { statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import * as ts from "./ts7/adapter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -375,15 +376,30 @@ export function loadProgram(
   // Absolute from the start: tsgo's world is absolute-path-keyed (the CLI
   // resolves before calling; this covers direct API callers too).
   entryPath = resolve(entryPath);
-  const externalTypes = opts?.externalTypes instanceof Map
-    ? new Map([...opts.externalTypes].map(([specifier, file]) => [specifier, resolve(file)]))
-    : new Map(Object.entries(opts?.externalTypes ?? {}).map(([specifier, file]) => [specifier, resolve(file)]));
-  for (const specifier of externalTypes.keys()) {
+  const externalTypeEntries = opts?.externalTypes instanceof Map
+    ? [...opts.externalTypes]
+    : Object.entries(opts?.externalTypes ?? {});
+  const externalTypes = new Map<string, string>();
+  for (const [specifier, file] of externalTypeEntries) {
     if (!isExactExternalTypeSpecifier(specifier)) {
       throw new TypeError(
         `invalid external type specifier ${JSON.stringify(specifier)} (expected an exact bare package specifier)`,
       );
     }
+    if (!/\.d\.(?:ts|mts|cts)$/.test(file)) {
+      throw new TypeError(
+        `invalid external type declaration ${JSON.stringify(file)} for ${JSON.stringify(specifier)} (expected a .d.ts, .d.mts, or .d.cts file)`,
+      );
+    }
+    const declarationPath = resolve(file);
+    try {
+      if (!statSync(declarationPath).isFile()) throw new Error("not a file");
+    } catch {
+      throw new TypeError(
+        `external type declaration for ${JSON.stringify(specifier)} does not name a readable file: ${declarationPath}`,
+      );
+    }
+    externalTypes.set(specifier, declarationPath);
   }
   setNpmStaticPackages(opts?.npmStatic ?? []);
   // Workspace-package registrations reset per load (same discipline as the

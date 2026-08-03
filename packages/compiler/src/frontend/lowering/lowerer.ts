@@ -1492,10 +1492,9 @@ export class Lowerer {
     return isRelativeSpecifier(spec.text) ? resolveImport(this.program, from, spec.text) : null;
   }
 
-  /** Follow one project-module export by source syntax. Unlike
-   * getAliasedSymbol (which jumps directly to the final declaration), this
-   * preserves the exact external specifier selected by a local re-export
-   * facade even when several specifiers share one .d.ts file. */
+  /** Follow one project-module export through the checker's resolved export
+   * table, then recover its exact external route where alias declarations
+   * retain one. */
   private externalTypeSpecifierOfModuleExport(
     sf: ts.SourceFile,
     exportName: string,
@@ -1505,46 +1504,16 @@ export class Lowerer {
     const exportKey = `${tsgoPath(resolve(sf.fileName))}\0${exportName}`;
     if (seenExports.has(exportKey)) return null;
     seenExports.add(exportKey);
-
-    const follow = (specNode: ts.Expression, targetName: string): string | null => {
-      if (!ts.isStringLiteral(specNode)) return null;
-      if (this.externalTypes.has(specNode.text)) return specNode.text;
-      const dep = this.moduleSourceFileOf(sf, specNode);
-      return dep !== null && !dep.isDeclarationFile
-        ? this.externalTypeSpecifierOfModuleExport(dep, targetName, seenSymbols, seenExports)
-        : null;
-    };
-
-    for (const stmt of sf.statements) {
-      if (!ts.isExportDeclaration(stmt) || stmt.isTypeOnly) continue;
-      const clause = stmt.exportClause;
-      if (clause !== undefined && ts.isNamedExports(clause)) {
-        for (const el of clause.elements) {
-          if (el.isTypeOnly || el.name.text !== exportName) continue;
-          const targetName = (el.propertyName ?? el.name).text;
-          if (stmt.moduleSpecifier !== undefined) {
-            const origin = follow(stmt.moduleSpecifier, targetName);
-            if (origin !== null) return origin;
-          } else {
-            const local = this.checker.getSymbolAtLocation(el.propertyName ?? el.name);
-            const origin = this.externalTypeSpecifierOfSymbol(local, seenSymbols, seenExports);
-            if (origin !== null) return origin;
-          }
-        }
-        continue;
-      }
-      if (clause !== undefined && ts.isNamespaceExport(clause)) {
-        if (clause.name.text === exportName && stmt.moduleSpecifier !== undefined) {
-          const origin = follow(stmt.moduleSpecifier, "*");
-          if (origin !== null) return origin;
-        }
-        continue;
-      }
-      if (clause !== undefined || exportName === "default" || stmt.moduleSpecifier === undefined) continue;
-      const origin = follow(stmt.moduleSpecifier, exportName);
-      if (origin !== null) return origin;
-    }
-    return null;
+    // Ask the checker which symbol the module ACTUALLY exports under this
+    // name. Syntax-only `export *` scanning cannot answer shadowing: a local
+    // or explicit export wins over a same-named star export, and a star
+    // contributes only names its target really exports. The resolved symbol
+    // retains route-aware ExportSpecifier/NamespaceExport declarations for
+    // exact mappings, while star exports resolve to the mapped declaration
+    // owner through externalTypeSpecifiersByFile.
+    const moduleSymbol = this.checker.getSymbolAtLocation(sf);
+    const exported = moduleSymbol?.getExports().get(exportName as ts.__String);
+    return this.externalTypeSpecifierOfSymbol(exported, seenSymbols, seenExports);
   }
 
   private externalTypeSpecifierOfNamespaceMember(expr: ts.Expression, member: string): string | null {
