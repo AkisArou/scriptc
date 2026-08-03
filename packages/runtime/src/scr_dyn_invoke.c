@@ -222,9 +222,10 @@ static ScrDyn *scr_dynh_dispatch(ScrDyn *recv, const char *method, ScrDyn *const
 }
 
 /* JS Array.prototype.sort over a dyn array: the spec's snapshot-sort —
- * elements copy (retained) into a work list, a stable merge sort orders
- * it (undefined elements sink to the end before any comparator runs),
- * and the ordered list writes back index by index, so a comparator that
+ * present elements copy (retained) into a work list, a stable merge sort
+ * orders them (undefined elements sink before the omitted holes, without
+ * invoking the comparator), and the ordered list writes back followed by
+ * holes, so a comparator that
  * mutates the receiver mid-sort never dangles the items being ordered.
  * The default comparator compares ToString images (scr_dyn_display_buf —
  * join's conversion) bytewise: code-POINT order, where JS orders UTF-16
@@ -277,27 +278,34 @@ static bool dyn_arr_sort_range(ScrDyn **work, ScrDyn **tmp, size_t lo, size_t hi
 }
 static bool dyn_arr_sort(ScrDyn *recv, ScrDyn *cmp) {
   size_t len = recv->v.arr.len;
-  ScrDyn **buf = (ScrDyn **)malloc(2 * len * sizeof(ScrDyn *));
+  size_t present = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (scr_dyn_arr_has_index(recv, i)) present++;
+  }
+  if (present == 0) return true;
+  ScrDyn **buf = (ScrDyn **)malloc(2 * present * sizeof(ScrDyn *));
   if (!buf) return true; /* OOM: answer the array unsorted over crashing */
-  ScrDyn **work = buf, **tmp = buf + len;
-  for (size_t i = 0; i < len; i++) work[i] = scr_dyn_retain(recv->v.arr.items[i]);
-  bool ok = dyn_arr_sort_range(work, tmp, 0, len, cmp);
+  ScrDyn **work = buf, **tmp = buf + present;
+  for (size_t i = 0, j = 0; i < len; i++) {
+    if (scr_dyn_arr_has_index(recv, i)) work[j++] = scr_dyn_retain(recv->v.arr.items[i]);
+  }
+  bool ok = dyn_arr_sort_range(work, tmp, 0, present, cmp);
   if (ok) {
-    /* Write back into whatever the array holds NOW (a mutating comparator
-     * may have replaced entries): the work list's +1 moves in, the
-     * displaced entry releases. Elements beyond the current length (a
-     * shrinking comparator) just release. */
-    for (size_t i = 0; i < len; i++) {
-      if (i < recv->v.arr.len) {
-        ScrDyn *old = recv->v.arr.items[i];
-        recv->v.arr.items[i] = work[i];
-        scr_dyn_release(old);
-      } else {
-        scr_dyn_release(work[i]);
-      }
+    /* Write every sorted snapshot element even when the comparator shrank
+     * the receiver. Set operations regrow through the last present element;
+     * deleting trailing snapshot indices does not itself extend length.
+     * Comparator additions beyond the snapshot survive. */
+    while (recv->v.arr.len < present) scr_dyn_arr_push_hole(recv);
+    for (size_t i = 0; i < present; i++) {
+      ScrDyn *old = recv->v.arr.items[i];
+      recv->v.arr.items[i] = work[i];
+      scr_dyn_release(old);
+    }
+    for (size_t i = present; i < len && i < recv->v.arr.len; i++) {
+      scr_dyn_arr_set_hole(recv, i);
     }
   } else {
-    for (size_t i = 0; i < len; i++) scr_dyn_release(work[i]);
+    for (size_t i = 0; i < present; i++) scr_dyn_release(work[i]);
   }
   free(buf);
   return ok;
@@ -430,7 +438,7 @@ static ScrDyn *scr_dyn_invoke_impl(
         return NULL;
       }
       scr_dyn_this_push_dyn(thisv);
-      ScrDyn *r = scr_dyn_call(recv, list->v.arr.items, list->v.arr.len, what);
+      ScrDyn *r = scr_dyn_apply(recv, list, what);
       scr_dyn_this_pop();
       return r;
     }
@@ -502,14 +510,17 @@ static ScrDyn *scr_dyn_invoke_impl(
     }
     if (dyn_name_is(method, "pop")) {
       if (len == 0) return scr_dyn_retain(scr_dyn_undefined());
-      return recv->v.arr.items[--recv->v.arr.len]; /* ownership moves out */
+      bool present = scr_dyn_arr_has_index(recv, len - 1);
+      ScrDyn *last = recv->v.arr.items[--recv->v.arr.len];
+      return present ? last : scr_dyn_retain(scr_dyn_undefined()); /* ownership moves out when present */
     }
     if (dyn_name_is(method, "shift")) {
       if (len == 0) return scr_dyn_retain(scr_dyn_undefined());
+      bool present = scr_dyn_arr_has_index(recv, 0);
       ScrDyn *first = recv->v.arr.items[0];
       memmove(recv->v.arr.items, recv->v.arr.items + 1, (len - 1) * sizeof(ScrDyn *));
       recv->v.arr.len = len - 1;
-      return first; /* ownership moves out */
+      return present ? first : scr_dyn_retain(scr_dyn_undefined()); /* ownership moves out when present */
     }
     if (dyn_name_is(method, "unshift")) {
       /* Append first (the push path grows capacity and takes the +1s),
@@ -529,26 +540,30 @@ static ScrDyn *scr_dyn_invoke_impl(
       size_t start = dyn_rel_index(startD, len);
       size_t end = dyn_rel_index(endD, len);
       ScrDyn *out = scr_dyn_new_arr();
-      for (size_t i = start; i < end; i++) scr_dyn_arr_push(out, scr_dyn_retain(recv->v.arr.items[i]));
+      for (size_t i = start; i < end; i++) {
+        if (scr_dyn_arr_has_index(recv, i)) scr_dyn_arr_push(out, scr_dyn_retain(recv->v.arr.items[i]));
+        else scr_dyn_arr_push_hole(out);
+      }
       return out;
     }
     if (dyn_name_is(method, "at")) {
       double iD = dyn_index_arg(args, argc, 0, 0, what);
       if (scr_exc_pending()) return NULL;
       double idx = iD < 0 ? (double)len + iD : iD;
-      if (idx < 0 || idx >= (double)len) return scr_dyn_retain(scr_dyn_undefined());
-      return scr_dyn_retain(recv->v.arr.items[(size_t)idx]);
+      return scr_dyn_arr_at(recv, idx);
     }
     if (dyn_name_is(method, "indexOf") || dyn_name_is(method, "lastIndexOf") ||
         dyn_name_is(method, "includes")) {
       ScrDyn *needle = argc > 0 ? args[0] : scr_dyn_undefined();
       if (dyn_name_is(method, "lastIndexOf")) {
         for (size_t i = len; i > 0; i--) {
+          if (!scr_dyn_arr_has_index(recv, i - 1)) continue;
           if (scr_dyn_strict_eq(recv->v.arr.items[i - 1], needle)) return scr_dyn_new_num((double)(i - 1));
         }
         return scr_dyn_new_num(-1);
       }
       for (size_t i = 0; i < len; i++) {
+        if (!dyn_name_is(method, "includes") && !scr_dyn_arr_has_index(recv, i)) continue;
         if (scr_dyn_strict_eq(recv->v.arr.items[i], needle)) {
           return dyn_name_is(method, "includes") ? scr_dyn_new_bool(true) : scr_dyn_new_num((double)i);
         }
@@ -574,11 +589,15 @@ static ScrDyn *scr_dyn_invoke_impl(
     }
     if (dyn_name_is(method, "concat")) {
       ScrDyn *out = scr_dyn_new_arr();
-      for (size_t i = 0; i < len; i++) scr_dyn_arr_push(out, scr_dyn_retain(recv->v.arr.items[i]));
+      for (size_t i = 0; i < len; i++) {
+        if (scr_dyn_arr_has_index(recv, i)) scr_dyn_arr_push(out, scr_dyn_retain(recv->v.arr.items[i]));
+        else scr_dyn_arr_push_hole(out);
+      }
       for (size_t a = 0; a < argc; a++) {
         if (args[a]->kind == SCR_DYN_ARR) {
           for (size_t i = 0; i < args[a]->v.arr.len; i++) {
-            scr_dyn_arr_push(out, scr_dyn_retain(args[a]->v.arr.items[i]));
+            if (scr_dyn_arr_has_index(args[a], i)) scr_dyn_arr_push(out, scr_dyn_retain(args[a]->v.arr.items[i]));
+            else scr_dyn_arr_push_hole(out);
           }
         } else {
           scr_dyn_arr_push(out, scr_dyn_retain(args[a]));
@@ -601,16 +620,20 @@ static ScrDyn *scr_dyn_invoke_impl(
       if (!dyn_cb_check(args, argc)) return NULL;
       ScrDyn *cb = args[0];
       ScrDyn *out = (dyn_name_is(method, "map") || dyn_name_is(method, "filter")) ? scr_dyn_new_arr() : NULL;
-      /* Array iteration methods snapshot length before the first callback.
-       * A shrinking callback can remove a later dense entry; an expanding
-       * callback must not make the new tail observable to this pass. Live
-       * Web-boundary capsules are the externally visible receiver, so pass
-       * that capsule as callback arg 3: mutations through the callback's
-       * array argument then commit directly to the original static array. */
+      /* Every method snapshots length before the first callback. Presence
+       * remains live per index: deletions are skipped by the HasProperty
+       * methods and observed as undefined by find/findIndex. Live Web-
+       * boundary capsules remain the externally visible callback receiver. */
       size_t n = len;
       ScrDyn *visible_recv = callback_recv ? callback_recv : recv;
-      for (size_t i = 0; i < n && i < recv->v.arr.len; i++) {
-        ScrDyn *item = scr_dyn_retain(recv->v.arr.items[i]);
+      for (size_t i = 0; i < n; i++) {
+        bool present = scr_dyn_arr_has_index(recv, i);
+        bool visitsHoles = dyn_name_is(method, "find") || dyn_name_is(method, "findIndex");
+        if (!present && !visitsHoles) {
+          if (dyn_name_is(method, "map")) scr_dyn_arr_push_hole(out);
+          continue;
+        }
+        ScrDyn *item = present ? scr_dyn_retain(recv->v.arr.items[i]) : scr_dyn_retain(scr_dyn_undefined());
         ScrDyn *r = dyn_call_cb(cb, item, i, visible_recv);
         if (!r) { scr_dyn_release(item); scr_dyn_release(out); return NULL; }
         if (dyn_name_is(method, "map")) {
@@ -647,6 +670,7 @@ static ScrDyn *scr_dyn_invoke_impl(
       ScrDyn *out = scr_dyn_new_arr();
       size_t n = recv->v.arr.len;
       for (size_t i = 0; i < n && i < recv->v.arr.len; i++) {
+        if (!scr_dyn_arr_has_index(recv, i)) continue;
         ScrDyn *item = scr_dyn_retain(recv->v.arr.items[i]);
         ScrDyn *r = dyn_call_cb(
             cb, item, i, callback_recv ? callback_recv : recv);
@@ -654,7 +678,7 @@ static ScrDyn *scr_dyn_invoke_impl(
         if (!r) { scr_dyn_release(out); return NULL; }
         if (r->kind == SCR_DYN_ARR) {
           for (size_t j = 0; j < r->v.arr.len; j++) {
-            scr_dyn_arr_push(out, scr_dyn_retain(r->v.arr.items[j]));
+            if (scr_dyn_arr_has_index(r, j)) scr_dyn_arr_push(out, scr_dyn_retain(r->v.arr.items[j]));
           }
           scr_dyn_release(r);
         } else if (scr_dyn_isl_is_array(r)) {
@@ -670,6 +694,17 @@ static ScrDyn *scr_dyn_invoke_impl(
             char idx[24];
             int ilen = snprintf(idx, sizeof idx, "%zu", j);
             ScrStr *jk = scr_str_new(idx, (size_t)ilen);
+            bool present = scr_dyn_has_key(r, jk);
+            if (scr_exc_pending()) {
+              scr_str_release(jk);
+              scr_dyn_release(r);
+              scr_dyn_release(out);
+              return NULL;
+            }
+            if (!present) {
+              scr_str_release(jk);
+              continue;
+            }
             ScrDyn *el = scr_dyn_isl_key_get(r, jk);
             scr_str_release(jk);
             if (!el) { scr_dyn_release(r); scr_dyn_release(out); return NULL; }

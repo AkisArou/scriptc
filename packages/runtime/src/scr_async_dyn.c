@@ -131,9 +131,8 @@ void scr_als_disable(double id) {
  * dyn function with the forwarded arguments, restore — the finally, so a
  * throw still restores before propagating. Result +1 or NULL pending. */
 static ScrDyn *scr_als_call_in(ScrAlsCtx *prev, ScrDyn *fn, ScrDyn *args) {
-  size_t argc = args->kind == SCR_DYN_ARR ? args->v.arr.len : 0;
-  ScrDyn *const *items = args->kind == SCR_DYN_ARR ? args->v.arr.items : NULL;
-  ScrDyn *r = scr_dyn_call(fn, items, argc, "callback");
+  ScrDyn *r = args->kind == SCR_DYN_ARR ? scr_dyn_apply(fn, args, "callback")
+                                        : scr_dyn_call(fn, NULL, 0, "callback");
   scr_als_restore(prev);
   return r;
 }

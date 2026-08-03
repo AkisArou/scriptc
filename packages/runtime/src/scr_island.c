@@ -1000,6 +1000,7 @@ static const char *isl_dyn_unmarshalable(const ScrDyn *d) {
     return "a promise";
   case SCR_DYN_ARR:
     for (size_t i = 0; i < d->v.arr.len; i++) {
+      if (!scr_dyn_arr_has_index(d, i)) continue;
       const char *r = isl_dyn_unmarshalable(d->v.arr.items[i]);
       if (r != NULL) return r;
     }
@@ -1042,12 +1043,17 @@ static JSValue isl_from_dyn(const ScrDyn *d) {
     JSValue arr = JS_NewArray(isl_ctx);
     if (JS_IsException(arr)) return arr;
     for (size_t i = 0; i < d->v.arr.len; i++) {
+      if (!scr_dyn_arr_has_index(d, i)) continue;
       JSValue item = isl_from_dyn(d->v.arr.items[i]);
       if (JS_IsException(item) ||
           JS_SetPropertyUint32(isl_ctx, arr, (uint32_t)i, item) < 0) {
         JS_FreeValue(isl_ctx, arr);
         return JS_EXCEPTION;
       }
+    }
+    if (JS_SetPropertyStr(isl_ctx, arr, "length", JS_NewFloat64(isl_ctx, (double)d->v.arr.len)) < 0) {
+      JS_FreeValue(isl_ctx, arr);
+      return JS_EXCEPTION;
     }
     return arr;
   }
@@ -1311,6 +1317,18 @@ static int isl_dynjs_has_own(ScrJsval *cell, const ScrStr *k) {
   return b > 0 ? 1 : 0;
 }
 
+static int isl_dynjs_has_property(ScrJsval *cell, const ScrStr *k) {
+  isl_entry();
+  JSAtom key = JS_NewAtomLen(isl_ctx, k->data, k->len);
+  int has = JS_HasProperty(isl_ctx, cell->v, key);
+  JS_FreeAtom(isl_ctx, key);
+  if (has < 0) {
+    isl_bridge_exception();
+    return -1;
+  }
+  return has != 0 ? 1 : 0;
+}
+
 static bool isl_dynjs_assign(ScrJsval *cell, const ScrDyn *src) {
   ScrJsval *sj = scr_jsval_from_dyn(src);
   if (!sj) return false;
@@ -1373,6 +1391,7 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_is_nullish,
   isl_dynjs_obj_walk,
   isl_dynjs_has_own,
+  isl_dynjs_has_property,
   isl_dynjs_assign,
   isl_dynjs_to_json,
   isl_dynjs_iter_drain,

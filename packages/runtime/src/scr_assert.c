@@ -516,6 +516,10 @@ static bool scr_assert_dyn_deep_eq(const ScrDyn *a, const ScrDyn *b) {
     case SCR_DYN_ARR: {
       if (a->v.arr.len != b->v.arr.len) return false;
       for (size_t i = 0; i < a->v.arr.len; i++) {
+        bool ah = scr_dyn_arr_has_index(a, i);
+        bool bh = scr_dyn_arr_has_index(b, i);
+        if (ah != bh) return false;
+        if (!ah) continue;
         if (!scr_assert_dyn_deep_eq(a->v.arr.items[i], b->v.arr.items[i])) return false;
       }
       return true;
@@ -681,11 +685,22 @@ static void scr_assert_cf_value(ScrAssertBuf *b, const ScrDyn *d, size_t indent,
         return;
       }
       ab_char(b, '[');
-      for (size_t i = 0; i < d->v.arr.len; i++) {
+      for (size_t i = 0; i < d->v.arr.len;) {
         ab_char(b, '\n');
         scr_assert_cf_pad(b, indent + 2);
-        scr_assert_cf_value(b, d->v.arr.items[i], indent + 2, depth - 1);
-        if (i + 1 < d->v.arr.len) ab_char(b, ',');
+        if (!scr_dyn_arr_has_index(d, i)) {
+          size_t end = i + 1;
+          while (end < d->v.arr.len && !scr_dyn_arr_has_index(d, end)) end++;
+          size_t n = end - i;
+          char empty[48];
+          int len = snprintf(empty, sizeof empty, "<%zu empty item%s>", n, n == 1 ? "" : "s");
+          ab_bytes(b, empty, (size_t)len);
+          i = end;
+        } else {
+          scr_assert_cf_value(b, d->v.arr.items[i], indent + 2, depth - 1);
+          i++;
+        }
+        if (i < d->v.arr.len) ab_char(b, ',');
       }
       ab_char(b, '\n');
       scr_assert_cf_pad(b, indent);

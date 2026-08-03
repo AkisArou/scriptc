@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canConvertToDyn, canDynCheckTo, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_HANDLE_IDENTITY_KINDS, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1709,7 +1709,7 @@ function validateFunction(
             e.left.type.kind === "promise" ||
             // Runtime handles are objects to === (one handle per socket/
             // request — pointer identity is JS's object equality).
-            DYN_HANDLE_KINDS.has(e.left.type.kind))
+            RUNTIME_HANDLE_IDENTITY_KINDS.has(e.left.type.kind))
         ) {
           // Reference identity: both operands must be the same ref type.
           if (!typeEquals(e.left.type, e.right.type)) {
@@ -4524,32 +4524,8 @@ function validateFunction(
       case "dynCheck": {
         checkExpr(e.value);
         expectType(e.value, DYN, "dynCheck operand");
-        // The target drives the emitted validator/builder: non-dyn,
-        // non-void, JSON-representable (closures/class instances can never
-        // be found inside a JSON dyn — the frontend rejects those casts).
-        // Bare undefined-armed unions of JSON-safe arms are additionally
-        // valid: the checked-dynamic tree holds a first-class undefined value (overflow
-        // reads), which matches exactly the undefined arm.
-        const jsonOk = (t: IrType): boolean =>
-          isJsonSafeType(t, (id) => records.get(id), (id) => unions.get(id));
-        const undefArmedOk =
-          e.type.kind === "union" &&
-          (unions.get(e.type.unionId)?.arms.every((a) => a.kind === "undefinedT" || jsonOk(a)) ??
-            false);
-        // bytes<u8> targets extract the checked-dynamic tree's bytes kind (a copy).
-        const bytesOk = e.type.kind === "bytes" && e.type.elem === "u8";
-        // The %Error root extracts the checked-dynamic tree's error encoding (the "%error"
-        // marker object caughtToDyn builds) as a fresh runtime error.
-        const errorOk = e.type.kind === "object" && e.type.className === "%Error";
-        // ADAPTABLE function targets unwrap or wrap the checked-dynamic tree's function
-        // kind (the checked-dynamic function boundary, nodes.ts).
-        const funcOk =
-          e.type.kind === "func" &&
-          canAdaptDynFuncTo(e.type, (id) => records.get(id), (id) => unions.get(id));
-        // Runtime HANDLE targets unwrap the checked-dynamic tree's handle kind by tag (a
-        // retained reference, no copy — DYN_HANDLE_KINDS).
-        const handleOk = DYN_HANDLE_KINDS.has(e.type.kind);
-        if (!jsonOk(e.type) && !undefArmedOk && !bytesOk && !errorOk && !funcOk && !handleOk) {
+        const dynCheckOk = canDynCheckTo(e.type, (id) => records.get(id), (id) => unions.get(id));
+        if (!dynCheckOk) {
           err(`dynCheck against non-JSON-representable type ${e.type.kind}`, e.loc);
         }
         break;

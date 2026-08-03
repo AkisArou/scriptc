@@ -752,17 +752,33 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
       if (d->v.arr.len == 0) return scr_str_new("[]", 2);
       if (recurse > depth) return scr_str_new("[Array]", 7);
       scr_insp_begin(recurse + 1);
-      size_t shown = d->v.arr.len < 100 ? d->v.arr.len : 100;
-      for (size_t i = 0; i < shown; i++) {
+      size_t i = 0;
+      size_t entries_shown = 0;
+      while (i < d->v.arr.len && entries_shown < 100) {
+        if (!scr_dyn_arr_has_index(d, i)) {
+          size_t end = i + 1;
+          while (end < d->v.arr.len && !scr_dyn_arr_has_index(d, end)) end++;
+          size_t n = end - i;
+          char empty[48];
+          int len = snprintf(empty, sizeof empty, "<%zu empty item%s>", n, n == 1 ? "" : "s");
+          ScrStr *s = scr_str_new(empty, (size_t)len);
+          scr_insp_entry(s, false);
+          scr_str_release(s);
+          i = end;
+          entries_shown++;
+          continue;
+        }
         ScrDyn *item = d->v.arr.items[i];
         ScrStr *s = scr_insp_dyn(item, recurse + 1, depth);
         scr_insp_entry(s, item->kind == SCR_DYN_NUM);
         scr_str_release(s);
+        i++;
+        entries_shown++;
       }
-      bool more = d->v.arr.len > 100;
+      bool more = i < d->v.arr.len;
       if (more) {
-        ScrStr *m = scr_insp_more_items((double)(d->v.arr.len - 100));
-        scr_insp_entry(m, d->v.arr.items[100]->kind == SCR_DYN_NUM);
+        ScrStr *m = scr_insp_more_items((double)(d->v.arr.len - i));
+        scr_insp_entry(m, scr_dyn_arr_has_index(d, i) && d->v.arr.items[i]->kind == SCR_DYN_NUM);
         scr_str_release(m);
       }
       ScrStr *base = scr_str_new("", 0);

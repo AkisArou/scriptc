@@ -432,9 +432,15 @@ ScrDyn *scr_dyn_obj_get(const ScrDyn *d, const char *key, size_t key_len) {
   return NULL;
 }
 
-/* Public: the compiler-emitted static→dyn converters push through this
- * too. Ownership of the item moves in. */
-void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item) {
+/* A distinct immortal undefined-shaped sentinel preserves array-property
+ * absence internally. Reads expose ordinary undefined; presence-sensitive
+ * operations recognize the sentinel. */
+static ScrDyn *scr_dyn_hole(void) {
+  static ScrDyn hole = { SIZE_MAX, SCR_DYN_UNDEF, { false } };
+  return &hole;
+}
+
+static void scr_dyn_arr_push_raw(ScrDyn *arr, ScrDyn *item) {
   if (arr->v.arr.len == arr->v.arr.cap) {
     size_t cap = arr->v.arr.cap ? arr->v.arr.cap * 2 : 4;
     ScrDyn **items = realloc(arr->v.arr.items, cap * sizeof *items);
@@ -443,6 +449,27 @@ void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item) {
     arr->v.arr.cap = cap;
   }
   arr->v.arr.items[arr->v.arr.len++] = item; /* ownership moves in */
+}
+
+/* Public: the compiler-emitted static→dyn converters push through these
+ * too. Ownership of an ordinary item moves in. */
+void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item) {
+  if (item == scr_dyn_hole()) item = scr_dyn_retain(scr_dyn_undefined());
+  scr_dyn_arr_push_raw(arr, item);
+}
+
+void scr_dyn_arr_push_hole(ScrDyn *arr) {
+  scr_dyn_arr_push_raw(arr, scr_dyn_hole());
+}
+
+bool scr_dyn_arr_has_index(const ScrDyn *arr, size_t i) {
+  return arr->kind == SCR_DYN_ARR && i < arr->v.arr.len && arr->v.arr.items[i] != scr_dyn_hole();
+}
+
+void scr_dyn_arr_set_hole(ScrDyn *arr, size_t i) {
+  if (arr->kind != SCR_DYN_ARR || i >= arr->v.arr.len || !scr_dyn_arr_has_index(arr, i)) return;
+  scr_dyn_release(arr->v.arr.items[i]);
+  arr->v.arr.items[i] = scr_dyn_hole();
 }
 
 /* Spread completion for a runtime-arity argument list (`f(...xs)` in the
@@ -578,6 +605,7 @@ ScrDyn *scr_dyn_arr_at(const ScrDyn *d, double i) {
   if (d->kind != SCR_DYN_ARR || i < 0 || i >= (double)d->v.arr.len) {
     return scr_dyn_retain(scr_dyn_undefined());
   }
+  if (!scr_dyn_arr_has_index(d, (size_t)i)) return scr_dyn_retain(scr_dyn_undefined());
   return scr_dyn_retain(d->v.arr.items[(size_t)i]);
 }
 
@@ -871,7 +899,20 @@ ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const ch
  * (`f(...args)` after the emitted argument array is built). Borrows both;
  * result owned (+1), or NULL with the exception pending. */
 ScrDyn *scr_dyn_apply(const ScrDyn *d, const ScrDyn *args, const char *what) {
-  return scr_dyn_call(d, args->v.arr.items, args->v.arr.len, what);
+  size_t argc = args->v.arr.len;
+  bool sparse = false;
+  for (size_t i = 0; i < argc; i++) {
+    if (!scr_dyn_arr_has_index(args, i)) { sparse = true; break; }
+  }
+  if (!sparse) return scr_dyn_call(d, args->v.arr.items, argc, what);
+  ScrDyn **items = malloc(argc * sizeof *items);
+  if (!items) scr_trap("scriptc: out of memory\n");
+  for (size_t i = 0; i < argc; i++) {
+    items[i] = scr_dyn_arr_has_index(args, i) ? args->v.arr.items[i] : scr_dyn_undefined();
+  }
+  ScrDyn *r = scr_dyn_call(d, items, argc, what);
+  free(items);
+  return r;
 }
 
 /* ── native handles in the checked-dynamic tree (SCR_DYN_HANDLE) ───────────────────────
@@ -1807,6 +1848,9 @@ bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key) {
     scr_dyn_release(materialized);
     return out;
   }
+  if (v->kind == SCR_DYN_JSVAL) {
+    return scr_dyn_jsval_ops()->has_property(v->v.jsval.cell, key) == 1;
+  }
   if (v->kind == SCR_DYN_OBJ) return scr_dyn_obj_get(v, key->data, key->len) != NULL;
   if (v->kind == SCR_DYN_ARR) {
     if (key->len == 6 && memcmp(key->data, "length", 6) == 0) return true;
@@ -1818,7 +1862,7 @@ bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key) {
       if (i > 0 && idx == 0) return false; /* a leading zero is no canonical index */
       idx = idx * 10 + (size_t)(c - '0');
     }
-    return idx < v->v.arr.len;
+    return scr_dyn_arr_has_index(v, idx);
   }
   return false;
 }
@@ -1847,9 +1891,7 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
       else idx = idx * 10 + (size_t)(key->data[i] - '0');
     }
     if (is_index) {
-      while (recv->v.arr.len <= idx) {
-        scr_dyn_arr_push(recv, scr_dyn_retain(scr_dyn_undefined()));
-      }
+      while (recv->v.arr.len <= idx) scr_dyn_arr_push_hole(recv);
       scr_dyn_release(recv->v.arr.items[idx]);
       recv->v.arr.items[idx] = scr_dyn_retain(value);
       return;
@@ -2700,6 +2742,10 @@ static ScrDyn *scr_sc_clone(const ScrDyn *v, const ScrScParent *up) {
     if (v->kind == SCR_DYN_ARR) {
       ScrDyn *out = scr_dyn_new_arr();
       for (size_t i = 0; i < v->v.arr.len; i++) {
+        if (!scr_dyn_arr_has_index(v, i)) {
+          scr_dyn_arr_push_hole(out);
+          continue;
+        }
         ScrDyn *c = scr_sc_clone(v->v.arr.items[i], &self);
         if (c == NULL) { /* threw */
           scr_dyn_release(out);
@@ -2905,6 +2951,7 @@ static ScrDyn *scr_dyn_objwalk(const ScrDyn *v, ScrObjWalk mode) {
   if (v->kind == SCR_DYN_ARR || v->kind == SCR_DYN_BYTES) {
     size_t n = v->kind == SCR_DYN_ARR ? v->v.arr.len : v->v.bytes->len;
     for (size_t i = 0; i < n; i++) {
+      if (v->kind == SCR_DYN_ARR && !scr_dyn_arr_has_index(v, i)) continue;
       char key[24];
       int klen = snprintf(key, sizeof key, "%zu", i);
       ScrDyn *val = NULL;
@@ -3160,7 +3207,7 @@ bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key) {
       if (key->data[i] < '0' || key->data[i] > '9') is_index = 0;
       else idx = idx * 10 + (size_t)(key->data[i] - '0');
     }
-    return is_index != 0 && idx < v->v.arr.len;
+    return is_index != 0 && scr_dyn_arr_has_index(v, idx);
   }
   return false;
 }

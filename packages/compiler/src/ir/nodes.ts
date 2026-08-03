@@ -5308,25 +5308,42 @@ export function canMarshalTypedFuncIntoIsland(
  * crossing); other handle kinds keep the honest cannot-box fence. Each
  * entry carries the runtime tag spelling and the class display name
  * (dynCheck's "expected IncomingMessage ..." texts). */
-export const DYN_HANDLE_KINDS: ReadonlyMap<string, { tag: string; cls: string }> = new Map([
-  ["httpReq", { tag: "SCR_DYNH_HTTP_REQ", cls: "IncomingMessage" }],
-  ["httpRes", { tag: "SCR_DYNH_HTTP_RES", cls: "ServerResponse" }],
-  ["netSocket", { tag: "SCR_DYNH_NET_SOCKET", cls: "Socket" }],
-  ["netServer", { tag: "SCR_DYNH_NET_SERVER", cls: "Server" }],
-  ["http2Session", { tag: "SCR_DYNH_H2_SESSION", cls: "Http2Session" }],
-  ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", cls: "Http2Stream" }],
-  ["httpClientReq", { tag: "SCR_DYNH_HTTP_CLIENT", cls: "ClientRequest" }],
+/** Runtime handles whose dyn box/unbox ABI is complete in both C and LLVM. */
+export const DYN_CONVERTIBLE_HANDLE_KINDS: ReadonlyMap<string, { tag: string; tagNum: number; cls: string }> = new Map([
+  ["httpReq", { tag: "SCR_DYNH_HTTP_REQ", tagNum: 0, cls: "IncomingMessage" }],
+  ["httpRes", { tag: "SCR_DYNH_HTTP_RES", tagNum: 1, cls: "ServerResponse" }],
+  ["netSocket", { tag: "SCR_DYNH_NET_SOCKET", tagNum: 2, cls: "Socket" }],
+  ["netServer", { tag: "SCR_DYNH_NET_SERVER", tagNum: 3, cls: "Server" }],
+]);
+
+/** Every runtime handle represented by one stable native pointer. Static
+ * same-type ===/!== is valid independently of dyn conversion support. */
+export const RUNTIME_HANDLE_IDENTITY_KINDS: ReadonlySet<string> = new Set([
+  "child", "childStream", "dgramSocket", "fsWatcher", "secureCtx", "testCtx",
+  "netServer", "netSocket", "httpReq", "httpRes", "httpClientReq", "http2Session", "http2Stream",
 ]);
 
 /** A static type that CONVERTS into a dyn value — the dynFrom domain:
  * JSON-safe data, bytes<u8> (payload copied), undefined-armed unions of
  * JSON-safe arms, boxable function types, and the runtime HANDLE kinds
- * (boxed by reference — DYN_HANDLE_KINDS). */
+ * (boxed by reference — DYN_CONVERTIBLE_HANDLE_KINDS). */
 export function canConvertToDyn(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
+  return canConvertToDynAt(t, getRecord, getUnion, new Set());
+}
+
+function canConvertToDynAt(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+  getUnion: (unionId: string) => IrUnionDef | undefined,
+  visiting: Set<string>,
+): boolean {
+  const visitKey = `convert:${typeKey(t)}`;
+  if (visiting.has(visitKey)) return true;
+  const next = new Set(visiting).add(visitKey);
   if (isJsonSafeType(t, getRecord, getUnion)) return true;
   // bytes<u8> and boxable functions are dyn kinds the walker boxes
   // ANYWHERE (bytes copied, functions held by identity), including nested
@@ -5339,8 +5356,8 @@ export function canConvertToDyn(
   // code?} — the caughtToDyn shape, scr_dyn_from_error): the dyn 'error'
   // listener boundary (a mustCall-wrapped handler receiving the payload).
   if (t.kind === "object" && t.className === "%Error") return true;
-  if (t.kind === "func") return canBoxFuncIntoDyn(t, getRecord, getUnion);
-  if (DYN_HANDLE_KINDS.has(t.kind)) return true;
+  if (t.kind === "func") return canBoxFuncIntoDynAt(t, getRecord, getUnion, next);
+  if (DYN_CONVERTIBLE_HANDLE_KINDS.has(t.kind)) return true;
   // Promises box by REFERENCE (SCR_DYN_PROMISE): promise<dyn> carries its
   // ScrPromise directly (the payload is already a dyn value), any other
   // convertible-or-void inner boxes an ADAPTER promise whose emitted
@@ -5351,7 +5368,7 @@ export function canConvertToDyn(
     return (
       t.inner.kind === "dyn" ||
       t.inner.kind === "void" ||
-      canConvertToDyn(t.inner, getRecord, getUnion)
+      canConvertToDynAt(t.inner, getRecord, getUnion, next)
     );
   }
   if (t.kind === "union") {
@@ -5362,7 +5379,7 @@ export function canConvertToDyn(
     // boundary exactly like a bare func dynFrom).
     return !!def && def.arms.every((a) =>
       a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion) ||
-      (a.kind === "func" && canBoxFuncIntoDyn(a, getRecord, getUnion)),
+      (a.kind === "func" && canBoxFuncIntoDynAt(a, getRecord, getUnion, next)),
     );
   }
   return false;
@@ -5419,22 +5436,95 @@ function canBoxDynComposite(
  * JSON-safe data, bytes<u8> (a fresh copy out), the %Error extraction,
  * undefined-armed unions of JSON-safe arms, adaptable function types,
  * and the runtime HANDLE kinds (a tag-checked reference unwrap —
- * DYN_HANDLE_KINDS). */
+ * DYN_CONVERTIBLE_HANDLE_KINDS). */
 export function canDynCheckTo(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
-  if (isJsonSafeType(t, getRecord, getUnion)) return true;
-  if (t.kind === "bytes" && t.elem === "u8") return true;
-  if (t.kind === "object" && t.className === "%Error") return true;
-  if (t.kind === "func") return canAdaptDynFuncTo(t, getRecord, getUnion);
-  if (DYN_HANDLE_KINDS.has(t.kind)) return true;
-  if (t.kind === "union") {
-    const def = getUnion(t.unionId);
-    return !!def && def.arms.every((a) => a.kind === "undefinedT" || isJsonSafeType(a, getRecord, getUnion));
+  return canDynCheckAt(t, getRecord, getUnion, new Set(), false);
+}
+
+function canDynCheckAt(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+  getUnion: (unionId: string) => IrUnionDef | undefined,
+  visiting: Set<string>,
+  requireMatch: boolean,
+): boolean {
+  switch (t.kind) {
+    case "f64":
+    case "string":
+    case "bool":
+    case "dyn":
+      return true;
+    // Unit builders exist only in the union builder. Bare unit targets
+    // would reach dynCheckHelper's unsupported default.
+    case "undefinedT":
+    case "nullT":
+      return false;
+    case "bytes":
+      return t.elem === "u8";
+    case "object":
+      return !requireMatch && t.className === "%Error";
+    case "func": {
+      const key = `func:${typeKey(t)}`;
+      if (visiting.has(key)) return true;
+      return canAdaptDynFuncAt(t, getRecord, getUnion, new Set(visiting).add(key));
+    }
+    case "array": {
+      if (!canAllocateDynCheckArrayElem(t.elem)) return false;
+      const key = `array:${typeKey(t)}:${requireMatch}`;
+      if (visiting.has(key)) return true;
+      const next = new Set(visiting).add(key);
+      return canDynCheckAt(t.elem, getRecord, getUnion, next, requireMatch);
+    }
+    case "record": {
+      const shape = getRecord(t.shapeId);
+      if (!shape) return false;
+      const key = `record:${t.shapeId}:${requireMatch}`;
+      if (visiting.has(key)) return true;
+      const next = new Set(visiting).add(key);
+      return shape.fields.every((f) => canDynCheckAt(f.type, getRecord, getUnion, next, requireMatch)) &&
+        (!shape.indexValue || canDynCheckAt(shape.indexValue, getRecord, getUnion, next, requireMatch));
+    }
+    case "union": {
+      const def = getUnion(t.unionId);
+      if (!def) return false;
+      const key = `union:${t.unionId}`;
+      if (visiting.has(key)) return true;
+      const next = new Set(visiting).add(key);
+      return def.arms.every((a) =>
+        a.kind === "undefinedT" || a.kind === "nullT" ||
+        canDynCheckAt(a, getRecord, getUnion, next, true)
+      );
+    }
+    default:
+      return !requireMatch && DYN_CONVERTIBLE_HANDLE_KINDS.has(t.kind);
   }
-  return false;
+}
+
+/** Element representations accepted by BOTH arrNewC and arrNewCall for a
+ * dynCheck-built static array. The recursive predicate separately verifies
+ * that the element itself has a builder (and, when needed, a matcher). */
+function canAllocateDynCheckArrayElem(t: IrType): boolean {
+  switch (t.kind) {
+    case "f64":
+    case "bool":
+    case "string":
+    case "array":
+    case "bytes":
+    case "record":
+    case "object":
+    case "union":
+    case "func":
+    // The one runtime-handle kind represented by both backends' REF-array
+    // allocation tables. Other handles remain directly extractable only.
+    case "netServer":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /** A closure type that can BOX into the checked-dynamic tree's function kind (dynFrom):
@@ -5446,17 +5536,28 @@ export function canBoxFuncIntoDyn(
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
+  return canBoxFuncIntoDynAt(t, getRecord, getUnion, new Set());
+}
+
+function canBoxFuncIntoDynAt(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+  getUnion: (unionId: string) => IrUnionDef | undefined,
+  visiting: Set<string>,
+): boolean {
   return (
     t.kind === "func" &&
     // A jsval (island) param converts through scr_jsval_from_dyn in the
     // thunk (wrapped cells unwrap by reference, dyn data deep-copies) —
     // the checker-'any' callback params of the routed-dispatch lane
     // (`bag.list.map((x) => ...)` with x typed any).
-    t.params.every((p) => p.kind === "dyn" || p.kind === "jsval" || canDynCheckTo(p, getRecord, getUnion)) &&
+    t.params.every((p) => p.kind === "dyn" || p.kind === "jsval" ||
+      canDynCheckAt(p, getRecord, getUnion, visiting, false)) &&
     // A jsval return converts through the by-reference wrap
     // (dynFromJsval — the thunk's result conversion), so engine-returning
     // callbacks box too: the routed-dispatch lane's flatMap shape.
-    (t.ret.kind === "void" || t.ret.kind === "dyn" || t.ret.kind === "jsval" || canConvertToDyn(t.ret, getRecord, getUnion))
+    (t.ret.kind === "void" || t.ret.kind === "dyn" || t.ret.kind === "jsval" ||
+      canConvertToDynAt(t.ret, getRecord, getUnion, visiting))
   );
 }
 
@@ -5469,14 +5570,24 @@ export function canAdaptDynFuncTo(
   getRecord: (shapeId: string) => IrRecordShape | undefined,
   getUnion: (unionId: string) => IrUnionDef | undefined,
 ): boolean {
+  return canAdaptDynFuncAt(t, getRecord, getUnion, new Set());
+}
+
+function canAdaptDynFuncAt(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+  getUnion: (unionId: string) => IrUnionDef | undefined,
+  visiting: Set<string>,
+): boolean {
   return (
     t.kind === "func" &&
     // A variadic (rest-marked) target would need the trailing rest-array
     // param synthesized by the adapter — no adapter models that; variadic
     // values live boxed and are called through their own thunks.
     t.rest !== true &&
-    t.params.every((p) => p.kind === "dyn" || canConvertToDyn(p, getRecord, getUnion)) &&
-    (t.ret.kind === "void" || t.ret.kind === "dyn" || canDynCheckTo(t.ret, getRecord, getUnion))
+    t.params.every((p) => p.kind === "dyn" || canConvertToDynAt(p, getRecord, getUnion, visiting)) &&
+    (t.ret.kind === "void" || t.ret.kind === "dyn" ||
+      canDynCheckAt(t.ret, getRecord, getUnion, visiting, false))
   );
 }
 
@@ -6768,6 +6879,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.cloneTransferFail",
   // the dyn Object walks throw on null/undefined receivers
   "dyn.objKeys",
+  // HasProperty on an engine-held Proxy can throw through its `has` trap.
+  "dyn.hasKey",
   "dyn.hasOwn",
   "dyn.assign",
   // variadic Object.assign: spread flattening throws V8's spread-call

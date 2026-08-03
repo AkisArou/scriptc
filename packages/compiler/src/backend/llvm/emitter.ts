@@ -6409,13 +6409,10 @@ class LlEmitter {
         if (e.key === "length") {
           B.line(`store i1 true, ptr ${slot}`);
         } else if (/^(0|[1-9][0-9]*)$/.test(e.key) && Number(e.key) <= Number.MAX_SAFE_INTEGER) {
-          const lenp = B.tmp();
-          const len = B.tmp();
-          const inR = B.tmp();
-          B.line(`${lenp} = getelementptr inbounds i8, ptr ${d.name}, i64 16 ; ->v.arr.len`);
-          B.line(`${len} = load i64, ptr ${lenp}`);
-          B.line(`${inR} = icmp ugt i64 ${len}, ${e.key}`);
-          B.line(`store i1 ${inR}, ptr ${slot}`);
+          this.declare(`declare zeroext i1 @scr_dyn_arr_has_index(ptr, i64)`);
+          const hasIndex = B.tmp();
+          B.line(`${hasIndex} = call zeroext i1 @scr_dyn_arr_has_index(ptr ${d.name}, i64 ${e.key})`);
+          B.line(`store i1 ${hasIndex}, ptr ${slot}`);
         }
         B.br(lj);
         // An ISLAND-held receiver fences loudly (Node asks the real

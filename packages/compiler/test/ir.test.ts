@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
-import { arrayOf, BOOL, F64, type IrModule } from "../src/ir/nodes.js";
+import { arrayOf, BOOL, canDynCheckTo, F64, funcOf, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, NETSERVER_T, NETSOCKET_T, NULL_T, RUNTIME_HANDLE_IDENTITY_KINDS, UNDEFINED_T, type IrModule, type IrRecordShape, type IrType, type IrUnionDef } from "../src/ir/nodes.js";
 import { markDenseArrayReads } from "../src/ir/dense-arrays.js";
 
 test("hand-built fib module validates", () => {
@@ -12,6 +12,115 @@ test("hand-built fib module validates", () => {
 test("fib module JSON round-trips", () => {
   const json = serializeModule(fibModule);
   expect(deserializeModule(json)).toEqual(fibModule);
+});
+
+test("runtime handle identity set covers every stable pointer handle", () => {
+  expect([...RUNTIME_HANDLE_IDENTITY_KINDS].sort()).toEqual([
+    "child", "childStream", "dgramSocket", "fsWatcher", "http2Session", "http2Stream",
+    "httpClientReq", "httpReq", "httpRes", "netServer", "netSocket", "secureCtx", "testCtx",
+  ]);
+  expect(RUNTIME_HANDLE_IDENTITY_KINDS.has("procStream")).toBe(false);
+  expect(RUNTIME_HANDLE_IDENTITY_KINDS.has("stats")).toBe(false);
+  expect(RUNTIME_HANDLE_IDENTITY_KINDS.has("spawnRes")).toBe(false);
+});
+
+test("validator rejects runtime-handle identity for scalar and snapshot kinds", () => {
+  const loc = { file: "identity.ts", start: 0, end: 0 };
+  const kinds: IrType[] = [{ kind: "procStream" }, { kind: "stats" }, { kind: "spawnRes" }];
+  const mod: IrModule = {
+    irVersion: 3,
+    sourceFile: "identity.ts",
+    entry: "eq0",
+    functions: kinds.map((type, i) => ({
+      name: `eq${i}`,
+      params: [
+        { localId: "a.0", name: "a", type },
+        { localId: "b.0", name: "b", type },
+      ],
+      returnType: BOOL,
+      locals: [
+        { id: "a.0", name: "a", type, mutable: false },
+        { id: "b.0", name: "b", type, mutable: false },
+      ],
+      body: [{
+        kind: "return" as const,
+        value: {
+          kind: "bin" as const,
+          op: "===" as const,
+          left: { kind: "varRef" as const, localId: "a.0", type, loc },
+          right: { kind: "varRef" as const, localId: "b.0", type, loc },
+          type: BOOL,
+          loc,
+        },
+        loc,
+      }],
+      loc,
+    })),
+  };
+  expect(validateModule(mod).map((e) => e.message)).toEqual([
+    "in eq0: bin === left: expected f64, got procStream",
+    "in eq0: bin === right: expected f64, got procStream",
+    "in eq1: bin === left: expected f64, got stats",
+    "in eq1: bin === right: expected f64, got stats",
+    "in eq2: bin === left: expected f64, got spawnRes",
+    "in eq2: bin === right: expected f64, got spawnRes",
+  ]);
+});
+
+test("dynCheck eligibility matches recursive builders and union matchers", () => {
+  const recursive: IrType = { kind: "union", unionId: "recursive" };
+  const callable = funcOf([], recursive);
+  const functionUnion: IrType = { kind: "union", unionId: "functionUnion" };
+  const errorT: IrType = { kind: "object", className: "%Error" };
+  const errorUnion: IrType = { kind: "union", unionId: "errorUnion" };
+  const handleUnion: IrType = { kind: "union", unionId: "handleUnion" };
+  const recordT: IrType = { kind: "record", shapeId: "functionRecord" };
+  const wrappedErrorT: IrType = { kind: "record", shapeId: "errorRecord" };
+  const wrappedHandleT: IrType = { kind: "record", shapeId: "handleRecord" };
+  const wrappedErrorUnion: IrType = { kind: "union", unionId: "wrappedErrorUnion" };
+  const wrappedHandleUnion: IrType = { kind: "union", unionId: "wrappedHandleUnion" };
+  const records = new Map<string, IrRecordShape>([
+    ["functionRecord", { id: "functionRecord", fields: [{ name: "item", type: functionUnion }] }],
+    ["errorRecord", { id: "errorRecord", fields: [{ name: "error", type: errorT }] }],
+    ["handleRecord", { id: "handleRecord", fields: [{ name: "request", type: HTTPREQ_T }] }],
+  ]);
+  const unions = new Map<string, IrUnionDef>([
+    ["recursive", { id: "recursive", arms: [F64, callable] }],
+    ["functionUnion", { id: "functionUnion", arms: [F64, funcOf([], F64)] }],
+    ["errorUnion", { id: "errorUnion", arms: [F64, errorT] }],
+    ["handleUnion", { id: "handleUnion", arms: [F64, HTTPREQ_T] }],
+    ["wrappedErrorUnion", { id: "wrappedErrorUnion", arms: [F64, wrappedErrorT] }],
+    ["wrappedHandleUnion", { id: "wrappedHandleUnion", arms: [F64, wrappedHandleT] }],
+  ]);
+  const can = (t: IrType): boolean => canDynCheckTo(t, (id) => records.get(id), (id) => unions.get(id));
+
+  expect(can(recursive)).toBe(true);
+  expect(can(recordT)).toBe(true);
+  expect(can(errorT)).toBe(true);
+  expect(can(HTTPREQ_T)).toBe(true);
+  expect(can(HTTPRES_T)).toBe(true);
+  expect(can(NETSOCKET_T)).toBe(true);
+  expect(can(NETSERVER_T)).toBe(true);
+  expect(can(HTTP2SESSION_T)).toBe(false);
+  expect(can(HTTP2STREAM_T)).toBe(false);
+  expect(can(HTTPCLIENTREQ_T)).toBe(false);
+  expect(can(arrayOf(errorT))).toBe(true);
+  expect(can(arrayOf(functionUnion))).toBe(true);
+  expect(can(arrayOf({ kind: "bytes", elem: "u8" }))).toBe(true);
+  expect(can(arrayOf(arrayOf(F64)))).toBe(true);
+  expect(can(arrayOf(NETSERVER_T))).toBe(true);
+  expect(can(arrayOf(HTTPREQ_T))).toBe(false);
+  expect(can(arrayOf(HTTPRES_T))).toBe(false);
+  expect(can(arrayOf(NETSOCKET_T))).toBe(false);
+  expect(can(arrayOf(HTTP2SESSION_T))).toBe(false);
+  expect(can(wrappedErrorT)).toBe(true);
+  expect(can(wrappedHandleT)).toBe(true);
+  expect(can(NULL_T)).toBe(false);
+  expect(can(UNDEFINED_T)).toBe(false);
+  expect(can(errorUnion)).toBe(false);
+  expect(can(handleUnion)).toBe(false);
+  expect(can(wrappedErrorUnion)).toBe(false);
+  expect(can(wrappedHandleUnion)).toBe(false);
 });
 
 test("validator rejects type mismatches and bad references", () => {

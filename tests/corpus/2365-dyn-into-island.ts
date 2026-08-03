@@ -45,6 +45,41 @@ const u: unknown = rec;
 const island: any = u;
 console.log(`${island.a * 2} ${island.b}`);
 
+// Sparse checked-dynamic arrays rebuild as sparse engine arrays: holes are
+// absent own properties, explicit undefined remains present, and a trailing
+// hole still contributes to length.
+const sparseStatic: (number | undefined)[] = Array<number | undefined>(4);
+sparseStatic[1] = undefined;
+sparseStatic[2] = 7;
+const sparseUnknown: unknown = sparseStatic;
+const sparseIsland: any = sparseUnknown;
+let sparseIslandVisits = "";
+sparseIsland.forEach((_value: any, index: number) => { sparseIslandVisits += index; });
+console.log(`${sparseIsland.length} ${sparseIslandVisits} ${JSON.stringify(sparseIsland)}`);
+
+// Typed helpers use HasProperty, not hasOwn: inherited array indices are
+// visited and read through the engine prototype chain.
+const inheritedArray: any = [2];
+inheritedArray.length = 2;
+const inheritedProto: any = {};
+inheritedProto[1] = 7;
+inheritedProto.__proto__ = inheritedArray.__proto__;
+inheritedArray.__proto__ = inheritedProto;
+const inheritedUnknown: unknown = inheritedArray;
+if (Array.isArray(inheritedUnknown)) {
+  let inheritedFilterVisits = "";
+  const inheritedFiltered: number[] = inheritedUnknown.filter((value: unknown, index: number): value is number => {
+    inheritedFilterVisits += index;
+    return typeof value === "number";
+  });
+  let inheritedFlatVisits = "";
+  const inheritedFlat: number[] = inheritedUnknown.flatMap((value: unknown, index: number): number[] => {
+    inheritedFlatVisits += index;
+    return typeof value === "number" ? [value] : [];
+  });
+  console.log(`${inheritedFilterVisits} ${inheritedFiltered.join(",")} ${inheritedFlatVisits} ${inheritedFlat.join(",")}`);
+}
+
 async function main(): Promise<void> {
   for (const k of ["gh", "sl"]) {
     const e = REGISTRY[k]!;

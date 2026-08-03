@@ -22,7 +22,7 @@
  *   ScrBytes { rc +0; len +8; elem +16; data +24 }.
  *   ScrDynPath { parent, key, index } — the %ScrDynPath type. */
 import type { IrType } from "../../ir/nodes.js";
-import { DYN_HANDLE_KINDS, isRefCounted, typeKey } from "../../ir/nodes.js";
+import { DYN_CONVERTIBLE_HANDLE_KINDS, isRefCounted, typeKey } from "../../ir/nodes.js";
 import { mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import { arrNewCall, elemAccess, llFieldType, releaseSym, traceAdapter, traceArg, vAdapters } from "./shapes.js";
@@ -30,14 +30,6 @@ import { LlvmUnsupportedError } from "./unsupported.js";
 import type { WalkerHost } from "./walkers.js";
 
 /** ScrDynKind values (scr_runtime.h). */
-/** ScrDynHandleTag numeric values (scr_runtime.h's enum order). */
-export const DYN_HANDLE_TAG_NUM: Record<string, number> = {
-  httpReq: 0,
-  httpRes: 1,
-  netSocket: 2,
-  netServer: 3,
-};
-
 export const DK = {
   NULL: 0,
   BOOL: 1,
@@ -319,7 +311,7 @@ export class LlDyn {
       case "func":
         return "function";
       default: {
-        const h = DYN_HANDLE_KINDS.get(t.kind);
+        const h = DYN_CONVERTIBLE_HANDLE_KINDS.get(t.kind);
         if (h) return h.cls;
         throw new Error(`llvm emitter bug: dynDesc of non-JSON type ${t.kind}`);
       }
@@ -397,6 +389,10 @@ export class LlDyn {
         if (t.elem !== "u8") throw new Error(`llvm emitter bug: dynMatch of bytes<${t.elem}>`);
         kindIs(DK.BYTES);
         break;
+      case "func":
+        // Any boxed function can adapt through dynCheck's per-target shim.
+        kindIs(DK.FUNC);
+        break;
       case "record": {
         const shape = this.host.recordsById.get(t.shapeId);
         if (!shape) throw new Error(`llvm emitter bug: dynCheck of unknown shape ${t.shapeId}`);
@@ -416,11 +412,14 @@ export class LlDyn {
           const l2 = B.newLabel("dm.l");
           B.condBr(lenOk, l2, fail);
           B.startBlock(l2);
-          const items = this.itemsOf(B, "%d");
+          this.host.declare(`declare ptr @scr_dyn_arr_at(ptr, double)`);
+          this.host.declare(`declare void @scr_dyn_release(ptr)`);
           for (const [i, f] of byIndex.entries()) {
-            const e = this.itemAt(B, items, `${i}`);
+            const e = B.tmp();
             const m = B.tmp();
+            B.line(`${e} = call ptr @scr_dyn_arr_at(ptr %d, double ${f64Lit(i)})`);
             B.line(`${m} = call zeroext i1 @${this.dynMatchHelper(f.type)}(ptr ${e})`);
+            B.line(`call void @scr_dyn_release(ptr ${e})`);
             const ln = B.newLabel("dm.i");
             B.condBr(m, ln, fail);
             B.startBlock(ln);
@@ -509,7 +508,16 @@ export class LlDyn {
         B.startBlock(l0);
         const n = this.lenOf(B, "%d");
         const items = this.itemsOf(B, "%d");
-        this.i64Loop(B, "dm.el", n, (i) => {
+        this.host.declare(`declare zeroext i1 @scr_dyn_arr_has_index(ptr, i64)`);
+        this.i64Loop(B, "dm.el", n, (i, brNext) => {
+          const present = B.tmp();
+          B.line(`${present} = call zeroext i1 @scr_dyn_arr_has_index(ptr %d, i64 ${i})`);
+          const lCheck = B.newLabel("dm.ep");
+          const lSkip = B.newLabel("dm.eh");
+          B.condBr(present, lCheck, lSkip);
+          B.startBlock(lSkip);
+          brNext();
+          B.startBlock(lCheck);
           const e = this.itemAt(B, items, i);
           const ok = B.tmp();
           B.line(`${ok} = call zeroext i1 @${m}(ptr ${e})`);
@@ -843,12 +851,15 @@ export class LlDyn {
           B.terminate(`ret ptr null`);
           B.startBlock(lGo);
           B.line(`%r0 = call ptr @${mangleRecordNew(t.shapeId)}()`);
-          const items = this.itemsOf(B, "%d");
+          host.declare(`declare ptr @scr_dyn_arr_at(ptr, double)`);
+          host.declare(`declare void @scr_dyn_release(ptr)`);
           byIndex.forEach((f, i) => {
             setPath(null, `${i}`);
-            const e = this.itemAt(B, items, `${i}`);
+            const e = B.tmp();
             const v = B.tmp();
+            B.line(`${e} = call ptr @scr_dyn_arr_at(ptr %d, double ${f64Lit(i)})`);
             B.line(`${v} = call ${this.valTy(f.type)} @${this.dynCheckHelper(f.type)}(ptr ${e}, ptr ${pathSlot})`);
+            B.line(`call void @scr_dyn_release(ptr ${e})`);
             storeInto(f.name, f.type, v);
             this.pendingBail(B, "dct", releaseR, "ptr null");
           });
@@ -981,16 +992,36 @@ export class LlDyn {
         requireKind(DK.ARR, "dca");
         const n = this.lenOf(B, "%d");
         const a = B.tmp();
-        B.line(`${a} = ${arrNewCall(host, elem, n)}`);
+        B.line(`${a} = ${arrNewCall(host, elem, "0")}`);
+        let fill = "null";
+        if (elem.kind === "union") {
+          const tag = host.undefinedArmTag(elem);
+          if (tag >= 0) fill = host.unitInstanceRef(elem.unionId, tag);
+        }
+        host.declare(`declare void @scr_arr_set_sparse_len(ptr, double, ptr)`);
+        const nDouble = B.tmp();
+        B.line(`${nDouble} = uitofp i64 ${n} to double`);
+        B.line(`call void @scr_arr_set_sparse_len(ptr ${a}, double ${nDouble}, ptr ${fill})`);
+        this.pendingBail(B, "dca", () => {
+          host.declare(`declare void @scr_arr_release(ptr)`);
+          B.line(`call void @scr_arr_release(ptr ${a})`);
+        }, "ptr null");
         const items = this.itemsOf(B, "%d");
         const pathSlot = "%dcp";
         B.entryAllocas.push(`${pathSlot} = alloca %ScrDynPath`);
         const acc = elemAccess(elem);
         const accTy = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
-        host.declare(
-          `declare double @scr_arr_push_${acc}(ptr, ${acc === "bool" ? "i1 zeroext" : accTy})`,
-        );
-        this.i64Loop(B, "dca", n, (i) => {
+        host.declare(`declare void @scr_arr_set_${acc}(ptr, double, ${acc === "bool" ? "i1 zeroext" : accTy})`);
+        host.declare(`declare zeroext i1 @scr_dyn_arr_has_index(ptr, i64)`);
+        this.i64Loop(B, "dca", n, (i, brNext) => {
+          const present = B.tmp();
+          B.line(`${present} = call zeroext i1 @scr_dyn_arr_has_index(ptr %d, i64 ${i})`);
+          const lCheck = B.newLabel("dca.p");
+          const lSkip = B.newLabel("dca.h");
+          B.condBr(present, lCheck, lSkip);
+          B.startBlock(lSkip);
+          brNext();
+          B.startBlock(lCheck);
           const pp = B.tmp();
           const kp = B.tmp();
           const ip = B.tmp();
@@ -1007,8 +1038,9 @@ export class LlDyn {
             host.declare(`declare void @scr_arr_release(ptr)`);
             B.line(`call void @scr_arr_release(ptr ${a})`);
           }, "ptr null");
-          const pushed = B.tmp();
-          B.line(`${pushed} = call double @scr_arr_push_${acc}(ptr ${a}, ${accTy} ${v})`);
+          const index = B.tmp();
+          B.line(`${index} = uitofp i64 ${i} to double`);
+          B.line(`call void @scr_arr_set_${acc}(ptr ${a}, double ${index}, ${accTy} ${v})`);
         });
         B.terminate(`ret ptr ${a}`);
         break;
@@ -1181,11 +1213,11 @@ export class LlDyn {
         // Runtime HANDLE targets: a tag-checked reference unwrap (+1 —
         // identity, no copy; the runtime throws the path-annotated
         // TypeError on any other kind or tag).
-        const h = DYN_HANDLE_KINDS.get(t.kind);
+        const h = DYN_CONVERTIBLE_HANDLE_KINDS.get(t.kind);
         if (h) {
           host.declare(`declare ptr @scr_dyn_handle_unbox(ptr, i32, ptr, ptr)`);
           const r = B.tmp();
-          B.line(`${r} = call ptr @scr_dyn_handle_unbox(ptr %d, i32 ${DYN_HANDLE_TAG_NUM[t.kind]}, ptr %path, ptr ${want})`);
+          B.line(`${r} = call ptr @scr_dyn_handle_unbox(ptr %d, i32 ${h.tagNum}, ptr %path, ptr ${want})`);
           B.terminate(`ret ptr ${r}`);
           break;
         }
@@ -1432,7 +1464,9 @@ export class LlDyn {
         const elem = t.elem;
         host.declare(`declare ptr @scr_dyn_new_arr()`);
         host.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
+        host.declare(`declare void @scr_dyn_arr_push_hole(ptr)`);
         host.declare(`declare double @scr_arr_len(ptr)`);
+        host.declare(`declare zeroext i1 @scr_arr_has(ptr, double)`);
         // Cycle-capable arrays guard the deep copy like records above.
         const cyclicArr = traceAdapter(host, t) !== null;
         if (cyclicArr) {
@@ -1449,6 +1483,9 @@ export class LlDyn {
         B.line(`store double ${f64Lit(0)}, ptr ${iSlot}`);
         const lc = B.newLabel("tda.c");
         const lb = B.newLabel("tda.b");
+        const lp = B.newLabel("tda.p");
+        const lh = B.newLabel("tda.h");
+        const ln = B.newLabel("tda.n");
         const le = B.newLabel("tda.e");
         B.br(lc);
         B.startBlock(lc);
@@ -1458,6 +1495,13 @@ export class LlDyn {
         B.line(`${cont} = fcmp olt double ${i}, ${len}`);
         B.condBr(cont, lb, le);
         B.startBlock(lb);
+        const present = B.tmp();
+        B.line(`${present} = call zeroext i1 @scr_arr_has(ptr %v, double ${i})`);
+        B.condBr(present, lp, lh);
+        B.startBlock(lh);
+        B.line(`call void @scr_dyn_arr_push_hole(ptr ${d})`);
+        B.br(ln);
+        B.startBlock(lp);
         if (elem.kind === "f64" || elem.kind === "bool") {
           const acc = elem.kind;
           const accTy = elem.kind === "f64" ? "double" : "i1";
@@ -1482,6 +1526,8 @@ export class LlDyn {
           B.line(`call void @scr_dyn_arr_push(ptr ${d}, ptr ${conv})`);
           B.line(`call void ${releaseSym(host, elem)}(ptr ${e})`);
         }
+        B.br(ln);
+        B.startBlock(ln);
         const i2 = B.tmp();
         B.line(`${i2} = fadd double ${i}, ${f64Lit(1)}`);
         B.line(`store double ${i2}, ptr ${iSlot}`);
@@ -1580,11 +1626,11 @@ export class LlDyn {
         // Runtime HANDLE kinds box by REFERENCE (identity — no copy):
         // scr_dyn_new_handle retains the borrowed operand through the
         // tag's installed ops.
-        const h = DYN_HANDLE_KINDS.get(t.kind);
+        const h = DYN_CONVERTIBLE_HANDLE_KINDS.get(t.kind);
         if (h) {
           host.declare(`declare ptr @scr_dyn_new_handle(ptr, i32)`);
           const r = B.tmp();
-          B.line(`${r} = call ptr @scr_dyn_new_handle(ptr %v, i32 ${DYN_HANDLE_TAG_NUM[t.kind]})`);
+          B.line(`${r} = call ptr @scr_dyn_new_handle(ptr %v, i32 ${h.tagNum})`);
           B.terminate(`ret ptr ${r}`);
           break;
         }
@@ -2501,9 +2547,11 @@ export class LlDyn {
         const lHit = B.newLabel("kg.ah");
         B.condBr(inR, lHit, lMiss);
         B.startBlock(lHit);
-        const items = this.itemsOf(B, "%d");
-        const e = this.itemAt(B, items, idx);
-        const r = this.retainDyn(B, e);
+        host.declare(`declare ptr @scr_dyn_arr_at(ptr, double)`);
+        const idxArrD = B.tmp();
+        const r = B.tmp();
+        B.line(`${idxArrD} = uitofp i64 ${idx} to double`);
+        B.line(`${r} = call ptr @scr_dyn_arr_at(ptr %d, double ${idxArrD})`);
         B.terminate(`ret ptr ${r}`);
         B.startBlock(lStr);
         host.declare(`declare ptr @scr_str_char_at(ptr, double)`);

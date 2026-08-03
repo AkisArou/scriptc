@@ -7,7 +7,7 @@
 import * as ts from "../ts7/adapter.js";
 import { dirname } from "node:path";
 import type { Lowerer } from "./lowerer.js";
-import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
+import { BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, RUNTIME_HANDLE_IDENTITY_KINDS, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
@@ -6789,54 +6789,22 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
     const target = L.mapTypeOf(targetTs);
     if (!target) L.badType(expr.type, targetTs);
     if (target.kind === "dyn") return inner; // `as unknown`: erasure
-    if (target.kind === "void" || !L.jsonSafe(target)) {
-      // Bare undefined-armed targets pass when every OTHER arm is
-      // JSON-safe: the checked-dynamic tree holds a first-class undefined value now
-      // (index-signature overflow reads produce it for missing keys), and
-      // the undefined arm matches exactly it — `p[key] as string |
-      // undefined` is the missing-key idiom. Parsed JSON still never
-      // contains undefined, so casts over parse results keep failing on
-      // non-string values with the usual path-annotated TypeError.
-      if (target.kind === "union" && L.dynConvertible(target)) {
-        return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
-      }
-      // Uint8Array targets: the checked-dynamic tree carries a bytes kind now (converted
-      // stdin chunks) — the extraction validates the kind and copies out.
-      if (target.kind === "bytes" && target.elem === "u8") {
-        return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
-      }
-      // ADAPTABLE function targets (`u as (x: number) => number` — the
-      // checked-dynamic function boundary): kind check, then exact unwrap
-      // or the per-target adapter shim. Non-adaptable signatures keep the
-      // fence below.
+    // An all-`unknown`-fields record target (`err as { code?: unknown }`)
+    // is pure typing: reads can stay on the original dyn value.
+    if (target.kind === "record") {
+      const shape = L.shapes.get(target.shapeId);
       if (
-        target.kind === "func" &&
-        canAdaptDynFuncTo(target, (id) => L.shapes.get(id), (id) => L.unions.get(id))
+        shape && !shape.tuple &&
+        shape.fields.every((f) => f.type.kind === "dyn") &&
+        (!shape.indexValue || shape.indexValue.kind === "dyn")
       ) {
-        return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
+        return inner;
       }
-      // Runtime HANDLE targets (`u as IncomingMessage` — a boxed handle
-      // coming back out of an untyped wrapper): a tag-checked reference
-      // unwrap, identity preserved (DYN_HANDLE_KINDS).
-      if (DYN_HANDLE_KINDS.has(target.kind)) {
-        return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
-      }
-      // An all-`unknown`-fields record target (`err as { code?: unknown }`
-      // — the errno-probing idiom): there is nothing to validate (every
-      // field is unknown, exactly what the dyn value already answers) and
-      // nothing to build — the cast is pure typing, so it ERASES and the
-      // reads ride the dyn keyed read.
-      if (target.kind === "record") {
-        const shape = L.shapes.get(target.shapeId);
-        if (
-          shape &&
-          !shape.tuple &&
-          shape.fields.every((f) => f.type.kind === "dyn") &&
-          (!shape.indexValue || shape.indexValue.kind === "dyn")
-        ) {
-          return inner;
-        }
-      }
+    }
+    if (
+      target.kind === "void" ||
+      !canDynCheckTo(target, (id) => L.shapes.get(id), (id) => L.unions.get(id))
+    ) {
       L.unsupported(
         "SC1090",
         expr,
@@ -7643,7 +7611,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         // Runtime HANDLES are objects to === too: one handle per socket/
         // request/response, so pointer identity IS JS's object equality
         // (`c.pause() === c` — Node's chaining assertions). */
-        if (DYN_HANDLE_KINDS.has(idLeft.type.kind) && typeEquals(idLeft.type, idRight.type)) {
+        if (RUNTIME_HANDLE_IDENTITY_KINDS.has(idLeft.type.kind) && typeEquals(idLeft.type, idRight.type)) {
           return { kind: "bin", op: negated ? "!==" : "===", left: idLeft, right: idRight, type: BOOL, loc };
         }
         L.unsupported("SC1043", expr);

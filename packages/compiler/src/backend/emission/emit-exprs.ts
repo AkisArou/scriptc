@@ -2556,7 +2556,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           e.key === "length"
             ? "true"
             : /^(0|[1-9][0-9]*)$/.test(e.key) && Number(e.key) <= Number.MAX_SAFE_INTEGER
-              ? `${d.name}->v.arr.len > ${e.key}`
+              ? `scr_dyn_arr_has_index(${d.name}, ${e.key})`
               : "false";
         const test = `(${d.name}->kind == SCR_DYN_OBJ ? (${objTest}) : ${d.name}->kind == SCR_DYN_ARR ? (${arrTest}) : scr_dyn_isl_fence(${d.name}, "'in'"))`;
         return E.fallibleTemp(e.type, e.negated ? `!${test}` : test);

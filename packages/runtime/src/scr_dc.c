@@ -328,10 +328,9 @@ ScrDyn *scr_dc_chan_run_stores(double handle, ScrDyn *data, ScrDyn *fn, ScrDyn *
   scr_dc_publish(handle, data);
   ScrDyn *r = NULL;
   if (!scr_exc_pending()) {
-    size_t argc = args->kind == SCR_DYN_ARR ? args->v.arr.len : 0;
-    ScrDyn *const *items = args->kind == SCR_DYN_ARR ? args->v.arr.items : NULL;
     scr_dyn_this_push_dyn(this_arg);
-    r = scr_dyn_call(fn, items, argc, "runStores");
+    r = args->kind == SCR_DYN_ARR ? scr_dyn_apply(fn, args, "runStores")
+                                  : scr_dyn_call(fn, NULL, 0, "runStores");
     scr_dyn_this_pop();
   }
   dc_stores_restore(prevs, entered);
@@ -484,9 +483,18 @@ static void dc_tc_publish(ScrDcTracing *tc, int ev, ScrDyn *ctx) {
 /* The traced call: thisArg bound as the ambient receiver. Result +1 or
  * NULL with the exception pending. */
 static ScrDyn *dc_tc_apply(ScrDyn *fn, ScrDyn *this_arg, ScrDyn *const *items, size_t n,
-                            const char *what) {
+                             const char *what) {
   scr_dyn_this_push_dyn(this_arg);
   ScrDyn *r = scr_dyn_call(fn, items, n, what);
+  scr_dyn_this_pop();
+  return r;
+}
+
+static ScrDyn *dc_tc_apply_args(ScrDyn *fn, ScrDyn *this_arg, ScrDyn *args,
+                                const char *what) {
+  scr_dyn_this_push_dyn(this_arg);
+  ScrDyn *r = args->kind == SCR_DYN_ARR ? scr_dyn_apply(fn, args, what)
+                                        : scr_dyn_call(fn, NULL, 0, what);
   scr_dyn_this_pop();
   return r;
 }
@@ -495,10 +503,10 @@ static ScrDyn *dc_tc_apply(ScrDyn *fn, ScrDyn *this_arg, ScrDyn *const *items, s
  * (start.runStores — Node wraps the WHOLE body: the start publish, the
  * traced call, and the finally end publish). */
 static ScrDyn *dc_tc_trace_sync_body(ScrDcTracing *tc, ScrDyn *fn, ScrDyn *ctx,
-                                     ScrDyn *this_arg, ScrDyn *const *items, size_t argc) {
+                                      ScrDyn *this_arg, ScrDyn *args) {
   dc_tc_publish(tc, DC_TC_START, ctx);
   if (scr_exc_pending()) return NULL;
-  ScrDyn *r = dc_tc_apply(fn, this_arg, items, argc, "traceSync");
+  ScrDyn *r = dc_tc_apply_args(fn, this_arg, args, "traceSync");
   if (r == NULL) {
     /* context.error = err; error.publish; end.publish (finally); rethrow */
     ScrCaught *c = scr_exc_take();
@@ -521,16 +529,14 @@ static ScrDyn *dc_tc_trace_sync_body(ScrDcTracing *tc, ScrDyn *fn, ScrDyn *ctx,
 
 ScrDyn *scr_dc_tc_trace_sync(double h, ScrDyn *fn, ScrDyn *ctx, ScrDyn *this_arg, ScrDyn *args) {
   ScrDcTracing *tc = dc_tc_of(h);
-  size_t argc = args->kind == SCR_DYN_ARR ? args->v.arr.len : 0;
-  ScrDyn *const *items = args->kind == SCR_DYN_ARR ? args->v.arr.items : NULL;
   if (!scr_dc_tc_has_subscribers(h)) {
-    return dc_tc_apply(fn, this_arg, items, argc, "traceSync");
+    return dc_tc_apply_args(fn, this_arg, args, "traceSync");
   }
   /* start.runStores: the body runs inside the start channel's stores. */
   size_t entered = 0;
   ScrAlsCtx **prevs = dc_stores_enter(&dc_channels[tc->ch[DC_TC_START]], ctx, &entered);
   ScrDyn *r = scr_exc_pending() ? NULL
-                                : dc_tc_trace_sync_body(tc, fn, ctx, this_arg, items, argc);
+                                 : dc_tc_trace_sync_body(tc, fn, ctx, this_arg, args);
   dc_stores_restore(prevs, entered);
   return r;
 }
@@ -601,10 +607,8 @@ static ScrPromise *dc_tp_promise_of(ScrDyn *r) {
 ScrPromise *scr_dc_tc_trace_promise(double h, ScrDyn *fn, ScrDyn *ctx, ScrDyn *this_arg,
                                      ScrDyn *args) {
   ScrDcTracing *tc = dc_tc_of(h);
-  size_t argc = args->kind == SCR_DYN_ARR ? args->v.arr.len : 0;
-  ScrDyn *const *items = args->kind == SCR_DYN_ARR ? args->v.arr.items : NULL;
   if (!scr_dc_tc_has_subscribers(h)) {
-    ScrDyn *r = dc_tc_apply(fn, this_arg, items, argc, "tracePromise");
+    ScrDyn *r = dc_tc_apply_args(fn, this_arg, args, "tracePromise");
     if (r == NULL) return NULL;
     ScrPromise *p = dc_tp_promise_of(r);
     scr_dyn_release(r);
@@ -623,7 +627,7 @@ ScrPromise *scr_dc_tc_trace_promise(double h, ScrDyn *fn, ScrDyn *ctx, ScrDyn *t
   if (!scr_exc_pending()) {
     dc_tc_publish(tc, DC_TC_START, ctx);
     if (!scr_exc_pending()) {
-      ScrDyn *r = dc_tc_apply(fn, this_arg, items, argc, "tracePromise");
+      ScrDyn *r = dc_tc_apply_args(fn, this_arg, args, "tracePromise");
       if (r == NULL) {
         /* ctx.error = err; error.publish; end.publish (finally); rethrow */
         ScrCaught *c = scr_exc_take();
@@ -718,12 +722,14 @@ ScrDyn *scr_dc_tc_trace_callback(double h, ScrDyn *fn, double position, ScrDyn *
   size_t argc = args->kind == SCR_DYN_ARR ? args->v.arr.len : 0;
   ScrDyn *const *items = args->kind == SCR_DYN_ARR ? args->v.arr.items : NULL;
   if (!scr_dc_tc_has_subscribers(h)) {
-    return dc_tc_apply(fn, this_arg, items, argc, "traceCallback");
+    return dc_tc_apply_args(fn, this_arg, args, "traceCallback");
   }
   /* args.at(position), JS-style negative indexing */
   double pos = position < 0 ? (double)argc + position : position;
   size_t idx = (size_t)pos;
-  ScrDyn *cb = (pos >= 0 && idx < argc) ? items[idx] : NULL;
+  ScrDyn *cb = (pos >= 0 && idx < argc)
+    ? (scr_dyn_arr_has_index(args, idx) ? items[idx] : scr_dyn_undefined())
+    : NULL;
   if (cb == NULL || cb->kind != SCR_DYN_FUNC) {
     dc_throw_bad_fn_arg(cb, "callback");
     return NULL;
@@ -746,7 +752,10 @@ ScrDyn *scr_dc_tc_trace_callback(double h, ScrDyn *fn, double position, ScrDyn *
       fputs("scriptc: out of memory\n", stderr);
       abort();
     }
-    for (size_t i = 0; i < argc; i++) call_items[i] = i == idx ? wrapped : items[i];
+    for (size_t i = 0; i < argc; i++) {
+      ScrDyn *item = scr_dyn_arr_has_index(args, i) ? items[i] : scr_dyn_undefined();
+      call_items[i] = i == idx ? wrapped : item;
+    }
   }
   /* start.runStores: the start publish, the traced call, and the finally
    * end publish run inside the start channel's entered stores. */

@@ -2894,9 +2894,10 @@ ScrDyn *scr_dyn_obj_entries(const ScrDyn *v);
 /* dyn construction — the compiler-emitted static→dyn converters (sc_td_*)
  * and index-signature overflow machinery build dyn values directly.
  * Constructors return +1; _new_str RETAINS the string into the node.
- * arr_push and obj_set take OWNERSHIP of the value (+1 moves in); obj_set
- * COPIES the key bytes and replaces a duplicate key's value (later wins,
- * like JS). scr_dyn_undefined returns THE immortal undefined value
+ * arr_push and obj_set take OWNERSHIP of the value (+1 moves in);
+ * arr_push_hole appends an absent indexed property while retaining length.
+ * obj_set COPIES the key bytes and replaces a duplicate key's value (later
+ * wins, like JS). scr_dyn_undefined returns THE immortal undefined value
  * (rc == SIZE_MAX — retains/releases are no-ops). */
 ScrDyn *scr_dyn_undefined(void);
 ScrDyn *scr_dyn_new_null(void);
@@ -2946,6 +2947,9 @@ void scr_dyn_typed_ref_cache_cast(
  * extraction (`u as Uint8Array`). */
 ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d);
 void scr_dyn_arr_push(ScrDyn *arr, ScrDyn *item);
+void scr_dyn_arr_push_hole(ScrDyn *arr);
+bool scr_dyn_arr_has_index(const ScrDyn *arr, size_t i);
+void scr_dyn_arr_set_hole(ScrDyn *arr, size_t i);
 /* Spread completion for a runtime-arity argument list (`f(...xs)` in the
  * checked-dynamic tier): flattens `src` into `arr` per JS's spread over the
  * dyn's iterable kinds — arrays element-by-element (retained), strings by
@@ -3204,6 +3208,7 @@ typedef struct ScrDynJsvalOps {
    * dyn pairs. NULL with the engine's exception pending on refusal. */
   ScrDyn *(*obj_walk)(ScrJsval *cell, int mode);
   int (*has_own)(ScrJsval *cell, const ScrStr *k); /* 0/1; -1 = pending */
+  int (*has_property)(ScrJsval *cell, const ScrStr *k); /* JS HasProperty; 0/1; -1 = pending */
   /* Object.assign(target, src) with the ENGINE target: src converts per
    * member semantics (a wrapped src spreads by reference; dyn data
    * enters as the usual deep copy). false = pending. */

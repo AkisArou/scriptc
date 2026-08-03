@@ -6,7 +6,7 @@
  * interning ORDER is part of the emitted C, so the registries stay on
  * CEmitter and these functions only consult them through it. */
 import type { CEmitter } from "./emitter.js";
-import { DYN_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey } from "../../ir/nodes.js";
+import { DYN_CONVERTIBLE_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey } from "../../ir/nodes.js";
 import { cDecl, cStringLiteral, cType, elemAccess, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleField, mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -65,7 +65,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       default: {
         // Runtime HANDLE targets name the class ("expected
         // IncomingMessage at $, got string").
-        const h = DYN_HANDLE_KINDS.get(t.kind);
+        const h = DYN_CONVERTIBLE_HANDLE_KINDS.get(t.kind);
         if (h) return h.cls;
         throw new Error(`emitter bug: dynDesc of non-JSON type ${t.kind}`);
       }
@@ -798,6 +798,10 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         if (t.elem !== "u8") throw new Error(`emitter bug: dynMatch of bytes<${t.elem}>`);
         d.push(`  return d->kind == SCR_DYN_BYTES;`);
         break;
+      case "func":
+        // Any boxed function can adapt through dynCheck's per-target shim.
+        d.push(`  return d->kind == SCR_DYN_FUNC;`);
+        break;
       case "record": {
         const shape = E.recordsById.get(t.shapeId);
         if (!shape) throw new Error(`emitter bug: dynCheck of unknown shape ${t.shapeId}`);
@@ -808,7 +812,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           const byIndex = [...shape.fields].sort((a, b) => Number(a.name) - Number(b.name));
           d.push(`  if (d->kind != SCR_DYN_ARR || d->v.arr.len != ${byIndex.length}) return false;`);
           byIndex.forEach((f, i) => {
-            d.push(`  if (!${E.dynMatchHelper(f.type)}(d->v.arr.items[${i}])) return false;`);
+            d.push(`  {`);
+            d.push(`    ScrDyn *e = scr_dyn_arr_at(d, ${i}.0);`);
+            d.push(`    bool ok = ${E.dynMatchHelper(f.type)}(e);`);
+            d.push(`    scr_dyn_release(e);`);
+            d.push(`    if (!ok) return false;`);
+            d.push(`  }`);
           });
           d.push(`  return true;`);
           break;
@@ -855,6 +864,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         const m = E.dynMatchHelper(t.elem);
         d.push(`  if (d->kind != SCR_DYN_ARR) return false;`);
         d.push(`  for (size_t i = 0; i < d->v.arr.len; i++) {`);
+        d.push(`    if (!scr_dyn_arr_has_index(d, i)) continue;`);
         d.push(`    if (!${m}(d->v.arr.items[i])) return false;`);
         d.push(`  }`);
         d.push(`  return true;`);
@@ -1095,7 +1105,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     d.push(`        if (k->data[i] < '0' || k->data[i] > '9' || idx > (SIZE_MAX - 9) / 10) { digits = false; break; }`);
     d.push(`        idx = idx * 10 + (size_t)(k->data[i] - '0');`);
     d.push(`      }`);
-    d.push(`      if (digits && d->kind == SCR_DYN_ARR && idx < d->v.arr.len) return scr_dyn_retain(d->v.arr.items[idx]);`);
+    d.push(`      if (digits && d->kind == SCR_DYN_ARR && idx < d->v.arr.len) return scr_dyn_arr_at(d, (double)idx);`);
     d.push(`      if (digits && d->kind == SCR_DYN_STR && (double)idx < scr_str_utf16_len(d->v.str)) {`);
     d.push(`        ScrStr *c = scr_str_char_at(d->v.str, (double)idx);`);
     d.push(`        ScrDyn *r = scr_dyn_new_str(c);`);
@@ -1266,7 +1276,9 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           byIndex.forEach((f, i) => {
             d.push(`  {`);
             d.push(`    ScrDynPath p = { path, NULL, ${i} };`);
-            d.push(`    r->${mangleField(f.name)} = ${E.dynCheckHelper(f.type)}(d->v.arr.items[${i}], &p);`);
+            d.push(`    ScrDyn *e = scr_dyn_arr_at(d, ${i}.0);`);
+            d.push(`    r->${mangleField(f.name)} = ${E.dynCheckHelper(f.type)}(e, &p);`);
+            d.push(`    scr_dyn_release(e);`);
             d.push(`    if (scr_exc_pending()) { ${rel("r")}; return NULL; }`);
             d.push(`  }`);
           });
@@ -1348,13 +1360,21 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       case "array": {
         const elem = t.elem;
         const c = E.dynCheckHelper(elem);
+        let fill = "NULL";
+        if (elem.kind === "union") {
+          const tag = E.undefinedArmTag(elem);
+          if (tag >= 0) fill = E.unitInstanceRef(elem.unionId, tag);
+        }
         d.push(`  if (d->kind != SCR_DYN_ARR) { scr_dyn_check_fail(path, ${want}, d); return NULL; }`);
-        d.push(`  ScrArr *a = ${E.arrNewC(elem, "d->v.arr.len")};`);
+        d.push(`  ScrArr *a = ${E.arrNewC(elem, "0")};`);
+        d.push(`  scr_arr_set_sparse_len(a, (double)d->v.arr.len, ${fill});`);
+        d.push(`  if (scr_exc_pending()) { scr_arr_release(a); return NULL; }`);
         d.push(`  for (size_t i = 0; i < d->v.arr.len; i++) {`);
+        d.push(`    if (!scr_dyn_arr_has_index(d, i)) continue;`);
         d.push(`    ScrDynPath p = { path, NULL, i };`);
         d.push(`    ${cDecl(elem, "e")} = ${c}(d->v.arr.items[i], &p);`);
         d.push(`    if (scr_exc_pending()) { scr_arr_release(a); return NULL; }`);
-        d.push(`    scr_arr_push_${elemAccess(elem)}(a, e);`);
+        d.push(`    scr_arr_set_${elemAccess(elem)}(a, (double)i, e);`);
         d.push(`  }`);
         d.push(`  return a;`);
         break;
@@ -1460,7 +1480,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // Runtime HANDLE targets: a tag-checked reference unwrap (+1 —
         // identity, no copy; the runtime throws the path-annotated
         // TypeError on any other kind or tag).
-        const h = DYN_HANDLE_KINDS.get(t.kind);
+        const h = DYN_CONVERTIBLE_HANDLE_KINDS.get(t.kind);
         if (h) {
           d.push(`  return (${cType(t).trim()})scr_dyn_handle_unbox(d, ${h.tag}, path, ${want});`);
           break;
@@ -1627,6 +1647,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         if (cyclicArr) d.push(`  scr_dyn_from_enter(v);`);
         d.push(`  ScrDyn *d = scr_dyn_new_arr();`);
         d.push(`  for (size_t i = 0; i < v->len; i++) {`);
+        d.push(`    if (!scr_arr_has(v, (double)i)) { scr_dyn_arr_push_hole(d); continue; }`);
         if (elem.kind === "f64") {
           d.push(`    scr_dyn_arr_push(d, scr_dyn_new_num(scr_arr_get_f64(v, (double)i)));`);
         } else if (elem.kind === "bool") {
@@ -1683,7 +1704,7 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // Runtime HANDLE kinds box by REFERENCE (identity — no copy):
         // scr_dyn_new_handle retains the borrowed operand through the
         // tag's installed ops.
-        const h = DYN_HANDLE_KINDS.get(t.kind);
+        const h = DYN_CONVERTIBLE_HANDLE_KINDS.get(t.kind);
         if (h) {
           d.push(`  return scr_dyn_new_handle(v, ${h.tag});`);
           break;

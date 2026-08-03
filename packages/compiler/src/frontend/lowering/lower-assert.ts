@@ -26,7 +26,7 @@ import type { Lowerer } from "./lowerer.js";
 import { jsFuncNameOf, own } from "./lowerer.js";
 import { NARROW_FIRST } from "./surfaces.js";
 import { typeReachesItself } from "./lower-inspect.js";
-import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrLibFn, IrStmt, IrType, REGEX, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
+import { BOOL, CAUGHT, DYN, DYN_CONVERTIBLE_HANDLE_KINDS, F64, IrExpr, IrLibFn, IrStmt, IrType, REGEX, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, VOID, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
 /** node:assert/strict binds the loose NAMES to the strict comparisons —
  * Node's own aliasing (`strict.equal === assert.strictEqual`). */
@@ -273,7 +273,7 @@ function lowerAssertEqual(
         // strict compare is honest: assert.strictEqual(this, server) —
         // the ambient-receiver suite shape. The runtime's deep arm
         // answers same-handle only (its documented stance).
-        DYN_HANDLE_KINDS.has(k) ||
+        DYN_CONVERTIBLE_HANDLE_KINDS.has(k) ||
         // %Error crosses as the checked-dynamic tree's error encoding ({%error, name,
         // message, code?}) through scr_dyn_from_error's IDENTITY CACHE —
         // one error instance is ONE dyn node however it crosses. Strict

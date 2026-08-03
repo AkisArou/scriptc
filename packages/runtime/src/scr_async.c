@@ -1520,7 +1520,7 @@ ScrPromise *scr_tp_set_immediate(void) {
 static void scr_imm_dyn_fire(ScrClosure *c) {
   ScrDyn *fn = (ScrDyn *)scr_box_get_ref(c->caps[0]);
   ScrDyn *args = (ScrDyn *)scr_box_get_ref(c->caps[1]);
-  ScrDyn *r = scr_dyn_call(fn, args->v.arr.items, args->v.arr.len, "immediate callback");
+  ScrDyn *r = scr_dyn_apply(fn, args, "immediate callback");
   if (r != NULL) scr_dyn_release(r);
   scr_dyn_release(fn);
   scr_dyn_release(args);

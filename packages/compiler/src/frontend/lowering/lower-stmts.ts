@@ -7221,14 +7221,17 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
 
 /** for-in over an ARRAY: Node's canonical ascending index strings.
    *
-   *   { const %inarr = <expr>; const %inlen = %inarr.length;
-   *     for (let %ini = 0; %ini < %inlen; %ini += 1) {
-   *       if (%ini in %inarr) { const k = String(%ini); <body> } } }
+   *   { const %inarr = <expr>; const %inkeys = [];
+   *     for (let %ini = 0, %inlen = %inarr.length; %ini < %inlen; %ini += 1)
+   *       if (%ini in %inarr) %inkeys.push(%ini);
+   *     for (%ini = 0; %ini < %inkeys.length; %ini += 1) {
+   *       const %inidx = %inkeys[%ini];
+   *       if (%inidx in %inarr) { const k = String(%inidx); <body> } } }
    *
-   * The length SNAPSHOT bounds the walk (keys added during the body are
-   * not visited — V8's own-keys snapshot, verified against Node) and the
-   * arrayHas guard is the per-visit HasProperty re-check, so holes and keys
-   * removed by the body are skipped exactly like Node. */
+   * The first loop snapshots the PRESENT indices, not merely length: filling
+   * an initial hole during the body must not add a candidate. The second
+   * arrayHas is the live HasProperty re-check, so candidates deleted before
+   * their turn are skipped. */
   function lowerForInArray(L: Lowerer, stmt: ts.ForInStatement, labels: string[] | undefined): IrStmt {
     const loc = locOf(stmt);
     const arrExpr = L.lowerExpr(stmt.expression);
@@ -7237,10 +7240,15 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     try {
       const arr = L.declareHiddenLocal("%inarr", arrExpr.type);
       const len = L.declareHiddenLocal("%inlen", F64);
+      const keysT = arrayOf(F64);
+      const keys = L.declareHiddenLocal("%inkeys", keysT);
       const i = L.declareHiddenLocal("%ini", F64);
+      const index = L.declareHiddenLocal("%inidx", F64);
       i.mutable = true;
       const arrRef = (): IrExpr => ({ kind: "varRef", localId: arr.id, type: arrExpr.type, loc });
+      const keysRef = (): IrExpr => ({ kind: "varRef", localId: keys.id, type: keysT, loc });
       const iRef = (): IrExpr => ({ kind: "varRef", localId: i.id, type: F64, loc });
+      const indexRef = (): IrExpr => ({ kind: "varRef", localId: index.id, type: F64, loc });
       const liveLen = (): IrExpr => ({
         kind: "arrIntrinsic",
         method: "length",
@@ -7249,7 +7257,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         type: F64,
         loc,
       });
-      const keyInit: IrExpr = { kind: "toString", operand: iRef(), type: STRING, loc };
+      const keyInit: IrExpr = { kind: "toString", operand: indexRef(), type: STRING, loc };
 
       // The three binding forms, sharing the per-visit key declaration.
       let keyDecl: IrStmt;
@@ -7305,6 +7313,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         body: [
           { kind: "varDecl", localId: arr.id, init: arrExpr, loc },
           { kind: "varDecl", localId: len.id, init: liveLen(), loc },
+          { kind: "varDecl", localId: keys.id, init: { kind: "arrayLit", elems: [], type: keysT, loc }, loc },
           {
             kind: "for",
             init: { kind: "varDecl", localId: i.id, init: { kind: "numLit", value: 0, type: F64, loc }, loc },
@@ -7322,10 +7331,41 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
               value: { kind: "bin", op: "+", left: iRef(), right: { kind: "numLit", value: 1, type: F64, loc }, type: F64, loc },
               loc,
             },
+            body: [{
+              kind: "if",
+              cond: { kind: "arrayHas", arr: arrRef(), index: iRef(), type: BOOL, loc },
+              then: [{
+                kind: "exprStmt",
+                expr: { kind: "arrIntrinsic", method: "push", receiver: keysRef(), args: [iRef()], type: F64, loc },
+                loc,
+              }],
+              else_: null,
+              loc,
+            }],
+            loc,
+          },
+          {
+            kind: "for",
+            init: { kind: "varDecl", localId: i.id, init: { kind: "numLit", value: 0, type: F64, loc }, loc },
+            cond: {
+              kind: "bin",
+              op: "<",
+              left: iRef(),
+              right: { kind: "arrIntrinsic", method: "length", receiver: keysRef(), args: [], type: F64, loc },
+              type: BOOL,
+              loc,
+            },
+            update: {
+              kind: "assign",
+              localId: i.id,
+              value: { kind: "bin", op: "+", left: iRef(), right: { kind: "numLit", value: 1, type: F64, loc }, type: F64, loc },
+              loc,
+            },
             body: [
+              { kind: "varDecl", localId: index.id, init: { kind: "arrayGet", arr: keysRef(), index: iRef(), type: F64, loc }, loc },
               {
                 kind: "if",
-                cond: { kind: "arrayHas", arr: arrRef(), index: iRef(), type: BOOL, loc },
+                cond: { kind: "arrayHas", arr: arrRef(), index: indexRef(), type: BOOL, loc },
                 then: [keyDecl, ...writes, ...body],
                 else_: null,
                 loc,

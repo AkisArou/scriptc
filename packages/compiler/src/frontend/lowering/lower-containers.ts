@@ -7839,48 +7839,70 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
         update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: ref("i.0", F64), right: num(1), type: F64, loc }, loc },
         body: [
           {
-            kind: "varDecl",
-            localId: "v.0",
-            init: { kind: "dynKeyGet", key: { kind: "toString", operand: ref("i.0", F64), type: STRING, loc }, value: d, type: DYN, loc },
-            loc,
-          },
-          {
-            kind: "varDecl",
-            localId: "r.0",
-            init: {
-              kind: "callValue",
-              callee: ref("f.0", fnT),
-              args: [ref("v.0", DYN), ref("i.0", F64), d].slice(0, arity),
-              type: retT,
+            kind: "if",
+            cond: {
+              kind: "libCall",
+              fn: "dyn.hasKey",
+              args: [d, { kind: "toString", operand: ref("i.0", F64), type: STRING, loc }],
+              type: BOOL,
               loc,
             },
-            loc,
-          },
-          {
-            kind: "varDecl",
-            localId: "rn.0",
-            init: { kind: "arrIntrinsic", method: "length", receiver: ref("r.0", retT), args: [], type: F64, loc },
-            loc,
-          },
-          {
-            kind: "for",
-            init: { kind: "varDecl", localId: "j.0", init: num(0), loc },
-            cond: { kind: "bin", op: "<", left: ref("j.0", F64), right: ref("rn.0", F64), type: BOOL, loc },
-            update: { kind: "assign", localId: "j.0", value: { kind: "bin", op: "+", left: ref("j.0", F64), right: num(1), type: F64, loc }, loc },
-            body: [
+            then: [
               {
-                kind: "exprStmt",
-                expr: {
-                  kind: "arrIntrinsic",
-                  method: "push",
-                  receiver: ref("out.0", outT),
-                  args: [{ kind: "arrayGet", arr: ref("r.0", retT), index: ref("j.0", F64), type: elemT, loc }],
-                  type: F64,
+                kind: "varDecl",
+                localId: "v.0",
+                init: { kind: "dynKeyGet", key: { kind: "toString", operand: ref("i.0", F64), type: STRING, loc }, value: d, type: DYN, loc },
+                loc,
+              },
+              {
+                kind: "varDecl",
+                localId: "r.0",
+                init: {
+                  kind: "callValue",
+                  callee: ref("f.0", fnT),
+                  args: [ref("v.0", DYN), ref("i.0", F64), d].slice(0, arity),
+                  type: retT,
                   loc,
                 },
                 loc,
               },
+              {
+                kind: "varDecl",
+                localId: "rn.0",
+                init: { kind: "arrIntrinsic", method: "length", receiver: ref("r.0", retT), args: [], type: F64, loc },
+                loc,
+              },
+              {
+                kind: "for",
+                init: { kind: "varDecl", localId: "j.0", init: num(0), loc },
+                cond: { kind: "bin", op: "<", left: ref("j.0", F64), right: ref("rn.0", F64), type: BOOL, loc },
+                update: { kind: "assign", localId: "j.0", value: { kind: "bin", op: "+", left: ref("j.0", F64), right: num(1), type: F64, loc }, loc },
+                body: [
+                  {
+                    kind: "if",
+                    cond: { kind: "arrayHas", arr: ref("r.0", retT), index: ref("j.0", F64), type: BOOL, loc },
+                    then: [
+                      {
+                        kind: "exprStmt",
+                        expr: {
+                          kind: "arrIntrinsic",
+                          method: "push",
+                          receiver: ref("out.0", outT),
+                          args: [{ kind: "arrayGet", arr: ref("r.0", retT), index: ref("j.0", F64), type: elemT, loc }],
+                          type: F64,
+                          loc,
+                        },
+                        loc,
+                      },
+                    ],
+                    else_: null,
+                    loc,
+                  },
+                ],
+                loc,
+              },
             ],
+            else_: null,
             loc,
           },
         ],
@@ -7929,9 +7951,10 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
 /** out = []; n = d.length; for (i..n) { v = d[i]; if (f(v, i, d)) out.push(
  * check<T>(v)); } return out; — with the receiver-kind gate up front. The
  * length reads ONCE (the checked-dynamic tree is immutable under the static surface), the
- * element reads through the canonical-index keyed read, the callback gets
- * whatever prefix of (element, index, receiver) it declares — the element
- * and receiver as dyn values, exactly what `unknown` code sees. */
+ * own-property guard skips holes before the canonical-index keyed read;
+ * the callback gets whatever prefix of (element, index, receiver) it
+ * declares — the element and receiver as dyn values, exactly what
+ * `unknown` code sees. */
   function buildDynFilterFn(name: string, elemT: IrType, arity: number, loc: SrcLoc): IrFunction {
     const outT = arrayOf(elemT);
     const fnT = funcOf([DYN, F64, DYN].slice(0, arity), BOOL);
@@ -7965,31 +7988,45 @@ function dynRecvThrows(dRef: IrExpr, mRef: IrExpr, fullRef: IrExpr, loc: SrcLoc)
         update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: ref("i.0", F64), right: num(1), type: F64, loc }, loc },
         body: [
           {
-            kind: "varDecl",
-            localId: "v.0",
-            init: { kind: "dynKeyGet", key: { kind: "toString", operand: ref("i.0", F64), type: STRING, loc }, value: d, type: DYN, loc },
-            loc,
-          },
-          {
             kind: "if",
             cond: {
-              kind: "callValue",
-              callee: ref("f.0", fnT),
-              args: [ref("v.0", DYN), ref("i.0", F64), d].slice(0, arity),
+              kind: "libCall",
+              fn: "dyn.hasKey",
+              args: [d, { kind: "toString", operand: ref("i.0", F64), type: STRING, loc }],
               type: BOOL,
               loc,
             },
             then: [
               {
-                kind: "exprStmt",
-                expr: {
-                  kind: "arrIntrinsic",
-                  method: "push",
-                  receiver: ref("out.0", outT),
-                  args: [{ kind: "dynCheck", value: ref("v.0", DYN), type: elemT, loc }],
-                  type: F64,
+                kind: "varDecl",
+                localId: "v.0",
+                init: { kind: "dynKeyGet", key: { kind: "toString", operand: ref("i.0", F64), type: STRING, loc }, value: d, type: DYN, loc },
+                loc,
+              },
+              {
+                kind: "if",
+                cond: {
+                  kind: "callValue",
+                  callee: ref("f.0", fnT),
+                  args: [ref("v.0", DYN), ref("i.0", F64), d].slice(0, arity),
+                  type: BOOL,
                   loc,
                 },
+                then: [
+                  {
+                    kind: "exprStmt",
+                    expr: {
+                      kind: "arrIntrinsic",
+                      method: "push",
+                      receiver: ref("out.0", outT),
+                      args: [{ kind: "dynCheck", value: ref("v.0", DYN), type: elemT, loc }],
+                      type: F64,
+                      loc,
+                    },
+                    loc,
+                  },
+                ],
+                else_: null,
                 loc,
               },
             ],
