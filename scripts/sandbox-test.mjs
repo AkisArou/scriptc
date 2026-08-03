@@ -32,9 +32,14 @@ const laneCaseShardedFiles = [
 // checked, but running the same sweep in the second lane adds no coverage.
 const invariantCaseShardedFiles = ["tests/harness/coverage.test.ts"];
 // Native-cache invalidation cases mutate process-wide compiler inputs and
-// therefore stay serial inside a worker. They are sanitizer-invariant, but
-// use their own shard variable so the independent cases can spread across the
-// once lane's Sandboxes without colliding with corpus case selection.
+// deliberately disable the immutable-toolchain memo used by the differential
+// corpus. Keep them in their own Vitest process, matching CI: co-scheduling
+// this file with the corpus can consume one of the corpus workers with the
+// strict (and intentionally expensive) production probe path.
+//
+// They are sanitizer-invariant and use their own shard variable so the
+// independent cases can spread across the once lane's Sandboxes without
+// colliding with corpus case selection.
 const cacheCaseShardedFiles = ["packages/compiler/src/backend/cc-cache.test.ts"];
 const caseShardedFiles = [
   ...laneCaseShardedFiles,
@@ -619,9 +624,7 @@ try {
       };
       const workerCaseFiles = [
         ...laneCaseShardedFiles,
-        ...(worker.lane === onceLane
-          ? [...invariantCaseShardedFiles, ...cacheCaseShardedFiles]
-          : []),
+        ...(worker.lane === onceLane ? invariantCaseShardedFiles : []),
       ];
       const cases = () =>
         execIn(
@@ -631,7 +634,6 @@ try {
           {
             ...sharedTestEnv,
             SCRIPTC_TEST_SHARD: `${worker.shard}/${shardCount}`,
-            SCRIPTC_CACHE_TEST_SHARD: `${worker.shard}/${shardCount}`,
             SCRIPTC_TEST_WORKERS: caseWorkers,
           },
           "cases",
@@ -662,11 +664,32 @@ try {
           },
           "files",
         );
+      const cacheCases = () =>
+        execIn(
+          worker,
+          "pnpm",
+          ["test", "--reporter=dot", ...cacheCaseShardedFiles],
+          {
+            ...sharedTestEnv,
+            SCRIPTC_CACHE_TEST_SHARD: `${worker.shard}/${shardCount}`,
+            // This is the strict production-path contract. Keep it out of
+            // the memoized corpus process and pin the opt-out explicitly,
+            // just as the GitHub Actions matrix does.
+            SCRIPTC_TEST_STABLE_TOOLCHAIN: "0",
+            SCRIPTC_TEST_WORKERS: "1",
+          },
+          "cache",
+        );
       if (remoteWorkerCount === 1) {
         await cases();
         await files();
+        if (worker.lane === onceLane) await cacheCases();
       } else {
-        await Promise.all([cases(), files()]);
+        await Promise.all([
+          cases(),
+          files(),
+          ...(worker.lane === onceLane ? [cacheCases()] : []),
+        ]);
       }
     });
 
