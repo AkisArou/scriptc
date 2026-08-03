@@ -586,6 +586,40 @@ describe("straight-line ordinary-field refinement", () => {
     expect(v.provenHi).toBe(65535);
   });
 
+  test("a union discriminant read preserves an existing field fact", () => {
+    const msgRef = (): IrExpr => ({ kind: "varRef", localId: "msg.0", type: RESIZE_MSG, loc });
+    const isResized: IrExpr = {
+      kind: "strEq",
+      negated: false,
+      left: {
+        kind: "unionDisc",
+        unionId: RESIZE_MSG.unionId,
+        field: "kind",
+        value: msgRef(),
+        type: STRING,
+        loc,
+      },
+      right: { kind: "strLit", value: "resized", type: STRING, loc },
+      type: BOOL,
+      loc,
+    };
+    const mod = recordCase([
+      iff(bin(">=", countRead(), num(0)), [
+        iff(and(isResized, bin("<=", countRead(), num(100))), [
+          send(math("trunc", countRead()), "sendU64"),
+        ]),
+      ]),
+    ], ["m", "msg"], [sink("sendU64")]);
+    mod.functions[1]!.params[1]!.type = RESIZE_MSG;
+    mod.functions[1]!.locals[1]!.type = RESIZE_MSG;
+    mod.unions = [{ id: RESIZE_MSG.unionId, arms: [NOOP, RESIZED] }];
+
+    const v = only(mod);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(0);
+    expect(v.provenHi).toBe(100);
+  });
+
   test("ordered comparisons refine a repeated class field into Math.trunc", () => {
     const v = onlyOrdinaryClass([
       iff(and(bin(">=", classCountRead(), num(0)), bin("<=", classCountRead(), num(100))), [

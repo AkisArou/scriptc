@@ -1488,6 +1488,7 @@ class FnAnalyzer {
         this.evalExpr(e.right, env);
         return { ...TOP };
       case "unionIsTag":
+      case "unionDisc":
         this.evalExpr(e.value, env);
         return { ...TOP };
       case "unary": {
@@ -1524,7 +1525,10 @@ class FnAnalyzer {
         const left = this.evalExpr(e.left, env);
         const rightEnv = cloneEnv(env);
         const right = this.evalExpr(e.right, rightEnv);
-        mergeInto(env, joinEnv(env, rightEnv));
+        // A stable logical tree cannot change the environment, so its
+        // short-circuit join must not discard an access-path fact merely
+        // because the RHS may not execute.
+        if (!this.stablePathGuard(e)) mergeInto(env, joinEnv(env, rightEnv));
         return numberCarrierKind(e.type, this.mod) !== null ? join(left, right) : { ...TOP };
       }
       case "optChain": {
