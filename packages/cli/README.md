@@ -32,6 +32,12 @@ Builds use a bounded persistent cache by default. Unchanged executables and libr
 - `scriptc run <file.ts>` — compile and run
 - `scriptc coverage <file.ts>` — what compiles statically, and why the rest doesn't
 
+For embedder-hosted modules that are not installed npm packages, coverage can
+map an exact bare specifier to a local declaration with repeatable
+`--external-types <specifier=file.d.ts>` options. This is analysis-only: the
+types unblock application measurement, while runtime module uses remain
+reported as blockers.
+
 No annotations, no dialect, no special stdlib: the same TypeScript you run on Node, type-checked by the real TypeScript compiler. Programs outside the static tier can opt into `--dynamic`, which embeds a small JavaScript engine (~620KB) for the parts that can't be static; everything else fails the build with a specific error code and usually a rewrite hint.
 
 Native code can be called through an explicit, link-time C ABI manifest: declare the function signature in TypeScript, bind it to a C symbol, and build with `--ffi <manifest.json>`. See the [Native FFI guide](https://scriptc.dev/ffi).

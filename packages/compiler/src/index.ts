@@ -105,7 +105,7 @@ export {
 export { validateSidecar } from "./library/sidecar-validate.js";
 export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
-export { ambientDtsPath, overridesDtsPath } from "./frontend/program.js";
+export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export {
   setProvenanceSources,
@@ -221,6 +221,11 @@ export interface AnalyzeOptions {
   npmStatic?: readonly string[] | "auto";
   /** Analyze with the outbound native bindings from this FFI manifest. */
   ffiProfilePath?: string;
+  /** Coverage-only external host type surfaces: exact bare module
+   * specifier → local declaration file. The checker uses the declarations
+   * to analyze project code, but imported runtime values remain explicit
+   * SC1010 blockers rather than being counted as executable. */
+  externalTypes?: Readonly<Record<string, string>>;
 }
 
 /* ── the frontend, one pipeline shape ───────────────────────────────────
@@ -365,6 +370,14 @@ function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set
   return hits;
 }
 
+/** The package-wide --npm-static name containing an exact bare specifier.
+ * External mappings are exact (subpaths included), while npm-static owns a
+ * whole package, so any mapped subpath conflicts with that package opt-in. */
+function packageNameOfBareSpecifier(specifier: string): string {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+}
+
 /** The one frontend, three npm postures: `undefined`/explicit package
  * lists and `"auto"` are the executable lane's (--npm-static; fallback =
  * island). `"lib"` is library mode's mandatory auto twin — the same
@@ -372,7 +385,11 @@ function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set
  * status the shared loops record becomes compileLibrary's SC4020
  * static-or-refuse teaching, and the detection closes over the opted-in
  * packages' own bare edges (no island exists to serve a dep from). */
-function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" | "lib"): Frontend {
+function runFrontend(
+  entryPath: string,
+  npmStatic?: readonly string[] | "auto" | "lib",
+  externalTypes?: Readonly<Record<string, string>>,
+): Frontend {
   const statuses: NpmStaticStatus[] = [];
   const npmSites = new Map<string, SrcLoc>();
   const judged = new Set<string>();
@@ -380,7 +397,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
   let reusableScout: ReturnType<typeof loadProgram> | null = null;
   let reusablePreflight: ScrDiagnostic[] | null = null;
   if (npmStatic === "auto" || npmStatic === "lib") {
-    const scout = loadProgram(entryPath);
+    const scout = loadProgram(entryPath, { externalTypes });
     let retained = false;
     try {
       const scoutPreflight = checkPreflight(scout);
@@ -404,6 +421,31 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
     requested = [...new Set(npmStatic)];
   }
 
+  // One exact --external-types mapping makes the containing package an
+  // external host boundary, which cannot simultaneously be compiled as a
+  // package-wide --npm-static program graph. External wins; retain the
+  // ordinary npm-static fallback record so explicit and auto requests both
+  // explain why the package did not compile statically.
+  if (requested.length > 0 && externalTypes !== undefined) {
+    const externalSpecifiersByPackage = new Map<string, string[]>();
+    for (const specifier of Object.keys(externalTypes)) {
+      const pkg = packageNameOfBareSpecifier(specifier);
+      const specs = externalSpecifiersByPackage.get(pkg) ?? [];
+      specs.push(specifier);
+      externalSpecifiersByPackage.set(pkg, specs);
+    }
+    requested = requested.filter((pkg) => {
+      const specs = externalSpecifiersByPackage.get(pkg);
+      if (specs === undefined) return true;
+      statuses.push({
+        package: pkg,
+        status: "fallback",
+        detail: `mapped as an external host module by --external-types (${specs.map((s) => JSON.stringify(s)).join(", ")})`,
+      });
+      return false;
+    });
+  }
+
   // The all-or-nothing fallback loop: a preflight diagnostic ANCHORED in
   // an opted-in package's files (an unsupported require form, a builtin
   // fence) — or an offender the resolution itself reported — drops that
@@ -423,7 +465,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
   // island with a note, never a failed gate. Explicit opt-ins degrade
   // exactly like auto's — "the user asked for these packages" buys the
   // attempt, not a broken build.
-  let load = reusableScout ?? loadProgram(entryPath, { npmStatic: requested });
+  let load = reusableScout ?? loadProgram(entryPath, { npmStatic: requested, externalTypes });
   let preflight = reusablePreflight ?? checkPreflight(load);
   // Library mode's fixpoint: the opted-in packages' files joined the
   // program just now, and THEIR bare edges (import statements and
@@ -438,7 +480,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
       if (grown.length === 0) break;
       requested = [...requested, ...grown];
       load.dispose();
-      load = loadProgram(entryPath, { npmStatic: requested });
+      load = loadProgram(entryPath, { npmStatic: requested, externalTypes });
       preflight = checkPreflight(load);
     }
   }
@@ -471,7 +513,7 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
       statuses.push({ package: p, status: "fallback", detail: reasons.get(p)! });
     }
     load.dispose();
-    load = loadProgram(entryPath, { npmStatic: effective });
+    load = loadProgram(entryPath, { npmStatic: effective, externalTypes });
     preflight = checkPreflight(load);
   }
   // The last resort, ALL modes: an opt-in can change the PROGRAM's OWN
@@ -506,18 +548,18 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
     // import sites), then reload with the survivors; interaction effects
     // that still fail drop everything left.
     for (const p of [...effective]) {
-      const probe = loadProgram(entryPath, { npmStatic: [p] });
+      const probe = loadProgram(entryPath, { npmStatic: [p], externalTypes });
       const probeDiags = checkPreflight(probe);
       probe.dispose();
       if (probeDiags.some((d) => d.code === "SC0001")) dropWithNote(p);
     }
     load.dispose();
-    load = loadProgram(entryPath, { npmStatic: effective });
+    load = loadProgram(entryPath, { npmStatic: effective, externalTypes });
     preflight = checkPreflight(load);
     if (preflight.some((d) => d.code === "SC0001") && effective.size > 0) {
       for (const p of [...effective]) dropWithNote(p);
       load.dispose();
-      load = loadProgram(entryPath, { npmStatic: effective });
+      load = loadProgram(entryPath, { npmStatic: effective, externalTypes });
       preflight = checkPreflight(load);
     }
   }
@@ -558,7 +600,12 @@ function runFrontend(entryPath: string, npmStatic?: readonly string[] | "auto" |
           (sf) => [sf.fileName, sf.text],
         ),
       ),
-    lower: (opts) => lowerToIr(finalLoad.program, finalLoad.entry, finalLoad.moduleOrder, { ...opts, startupCrash: finalLoad.startupCrash ?? null }),
+    lower: (opts) => lowerToIr(finalLoad.program, finalLoad.entry, finalLoad.moduleOrder, {
+      ...opts,
+      startupCrash: finalLoad.startupCrash ?? null,
+      externalTypes: finalLoad.externalTypes,
+      externalTypeSpecifiersByFile: finalLoad.externalTypeSpecifiersByFile,
+    }),
     npmStatic: statuses,
     npmImportSites: npmSites,
     dispose: finalLoad.dispose,
@@ -585,7 +632,7 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
     }
     ffi = loaded.profile;
   }
-  const fe = runFrontend(entryPath, opts.npmStatic);
+  const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes);
   try {
     const emptyStats = { statementsTotal: 0, statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 };
 

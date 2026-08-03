@@ -255,6 +255,12 @@ export interface FileParts {
           continue;
         }
         const spec = specNode.text;
+        // --external-types owns this exact module interpretation. Even when
+        // an install happens to resolve the same name (or --npm-static auto
+        // selects its package), the declaration mapping promises no npm or
+        // island runtime implementation; the preflight/import-use SC1010
+        // fences are the whole story.
+        if (L.externalTypes.has(spec)) continue;
         const npm = resolveNpmImport(fp.sf.fileName, spec);
         // --npm-static: an opted-in package that made it through preflight
         // is a PROGRAM-MODULE dependency — its entry sits in the module
@@ -402,6 +408,10 @@ export interface FileParts {
         ts.isStringLiteralLike(node.arguments[0])
       ) {
         const spec = node.arguments[0].text;
+        if (L.externalTypes.has(spec)) {
+          ts.forEachChild(node, visit);
+          return;
+        }
         const mapKey = `${sf.fileName}\u0000${spec}`;
         if (!L.dynImports.has(mapKey)) {
           // The program's OWN modules first, by the checker's resolution

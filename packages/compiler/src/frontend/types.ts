@@ -546,6 +546,11 @@ export interface TypeMapperCtx {
    * under --dynamic: the package's implementation runs in the embedded
    * engine, so its values are island handles. */
   isNpmFile: (sf: ts.SourceFile) => boolean;
+  /** True for a declaration file explicitly mapped by coverage's
+   * --external-types option. These declarations are trusted as structural
+   * type descriptions for project-owned values, but their imported runtime
+   * bindings are fenced separately by the Lowerer. */
+  isExternalTypeFile: (sf: ts.SourceFile) => boolean;
   /** --dynamic: `any` maps to the island handle type (jsval). Off, `any`
    * stays unmapped and the requires-dynamic diagnostic fires per site. */
   dynamic: boolean;
@@ -845,10 +850,12 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // rule fires only when the type's own identity is declaration-file-
   // declared — interfaces, classes, type literals, and aliases from the
   // .d.ts. The standard library's declaration files are carved out (their
-  // surfaces have static lowerings), and the program's own compiled
-  // modules are never declaration files. Without --dynamic it stays
-  // unmapped; badType reports the per-package requires-dynamic diagnostic
-  // for node_modules types and the generic story otherwise.
+  // surfaces have static lowerings), as are declarations explicitly mapped
+  // by --external-types: those describe project-owned structural data while
+  // the Lowerer fences their imported runtime bindings. The program's own
+  // compiled modules are never declaration files. Without --dynamic this
+  // stays unmapped; badType reports the per-package requires-dynamic
+  // diagnostic for node_modules types and the generic story otherwise.
   const npmSym = widened.getAliasSymbol() ?? widened.getSymbol();
   const npmDecls = npmSym ? checker.declarationsOf(npmSym) : undefined;
   if (
@@ -856,7 +863,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     npmDecls.length > 0 &&
     npmDecls.every((d) => {
       const sf = d.getSourceFile();
-      return sf.isDeclarationFile && !ctx.isStdlibFile(sf);
+      return sf.isDeclarationFile && !ctx.isStdlibFile(sf) && !ctx.isExternalTypeFile(sf);
     })
   ) {
     return ctx.dynamic ? JSVAL : null;
@@ -2894,15 +2901,17 @@ function isMappedShape(t: ts.Type): boolean {
 }
 
 /** The record path's provenance fence. Declared shapes (object literals,
- * interfaces, type literals) must come from user code, never a .d.ts — the
- * empty ambient interfaces (Object, Function, Boolean, ...) exist only to
+ * interfaces, type literals) must come from user code or an explicitly
+ * mapped external type surface, never an arbitrary .d.ts — the empty
+ * ambient interfaces (Object, Function, Boolean, ...) exist only to
  * satisfy tsc and must not become zero-field records. Checker-COMPUTED
  * shapes (mapped-type results, intersections) have no user declaration to
  * point at: mapped types pass here and get per-MEMBER provenance in the
  * field walk instead; an intersection passes when every part is itself an
  * ordinary provenance-passing object type (class parts keep their nominal
  * identity and never flatten into a struct). */
-function recordProvenanceOk(t: ts.Type, checker: ts.TypeChecker): boolean {
+function recordProvenanceOk(t: ts.Type, ctx: TypeMapperCtx): boolean {
+  const { checker } = ctx;
   if (t.isIntersectionType()) {
     return t.getTypes().every(
       (part) => {
@@ -2911,7 +2920,7 @@ function recordProvenanceOk(t: ts.Type, checker: ts.TypeChecker): boolean {
           !(partSym && partSym.flags & ts.SymbolFlags.Class) &&
           checker.getCallSignatures(part).length === 0 &&
           checker.getConstructSignatures(part).length === 0 &&
-          recordProvenanceOk(part, checker);
+          recordProvenanceOk(part, ctx);
       },
     );
   }
@@ -2919,7 +2928,10 @@ function recordProvenanceOk(t: ts.Type, checker: ts.TypeChecker): boolean {
   const tSym = t.getSymbol();
   const decls = tSym ? checker.declarationsOf(tSym) : undefined;
   if (!decls || decls.length === 0) return false;
-  return !decls.some((d) => d.getSourceFile().isDeclarationFile);
+  return !decls.some((d) => {
+    const sf = d.getSourceFile();
+    return sf.isDeclarationFile && !ctx.isExternalTypeFile(sf);
+  });
 }
 
 /** A GENERIC-callable member type (`m<T>(x: T): T` / `f: <T>(x: T) => T` in
@@ -3119,7 +3131,7 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
     !widened.isIntersectionType() &&
     indexValue === undefined &&
     checker.getPropertiesOfType(widened).length === 0;
-  if (!recordProvenanceOk(widened, checker) && !pureIndexShape && !anonymousEmpty) return null;
+  if (!recordProvenanceOk(widened, ctx) && !pureIndexShape && !anonymousEmpty) return null;
   // Checker-computed shapes (no user declaration) need two extra fences in
   // the member walk below; see the comments there.
   const computed = widened.isIntersectionType() || isMappedShape(widened);
@@ -3216,7 +3228,13 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
       // lib interface (`Readonly<Date>`) is still the lib's type world, not
       // a data shape. Synthesized members (a literal-key Record's) have no
       // declarations and pass.
-      if (computed && checker.declarationsOf(p).some((d) => d.getSourceFile().isDeclarationFile)) {
+      if (
+        computed &&
+        checker.declarationsOf(p).some((d) => {
+          const sf = d.getSourceFile();
+          return sf.isDeclarationFile && !ctx.isExternalTypeFile(sf);
+        })
+      ) {
         return null;
       }
       const fieldTs = checker.getTypeOfSymbol(p);
@@ -3516,7 +3534,13 @@ export function describeRecordMemberBlocker(widened: ts.Type, ctx: TypeMapperCtx
     // Computed shapes over LIBRARY members (`Readonly<Date>`): the record
     // fence there is per-member PROVENANCE (mapRecordTypeInner's rule), not
     // any one member's type — that story stays with the residual fence.
-    if (computed && checker.declarationsOf(p).some((d) => d.getSourceFile().isDeclarationFile)) {
+    if (
+      computed &&
+      checker.declarationsOf(p).some((d) => {
+        const sf = d.getSourceFile();
+        return sf.isDeclarationFile && !ctx.isExternalTypeFile(sf);
+      })
+    ) {
       return null;
     }
     const fieldTs = checker.getTypeOfSymbol(p);

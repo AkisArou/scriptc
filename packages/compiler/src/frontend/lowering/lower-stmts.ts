@@ -879,8 +879,10 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         requireSpecOf(decl.initializer) !== null &&
         isJsSourceFile(decl.getSourceFile())
       ) {
+        const spec = requireSpecOf(decl.initializer)!;
+        if (L.externalTypes.has(spec)) L.externalHostFence(spec, decl, false);
         if (ts.isSourceFile(stmt.parent)) {
-          const init = L.requireInitStmt(requireSpecOf(decl.initializer)!, decl);
+          const init = L.requireInitStmt(spec, decl);
           return init ? [init] : [];
         }
         // A nested BUILTIN require (`get inFreeBSDJail() { const { execSync }
@@ -890,7 +892,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         // same routing top-level requires use, and no statement remains.
         // Relative requires keep the fence: their module-init-at-position
         // semantics needs storage this model doesn't represent.
-        if (canonicalBuiltinModule(requireSpecOf(decl.initializer)!) !== null) {
+        if (canonicalBuiltinModule(spec) !== null) {
           return [];
         }
         L.unsupported(
@@ -4075,6 +4077,8 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       createRequireCalleeFileOf(L, expr.expression) === null
     ) {
       const sf = expr.getSourceFile();
+      const spec = requireSpecOf(expr)!;
+      if (L.externalTypes.has(spec)) L.externalHostFence(spec, expr, false);
       // A bare require of a package NOTHING INSTALLED resolves, in ANY
       // CommonJS JS file (the export-assignment spellings tsgo marks
       // external included): Node throws MODULE_NOT_FOUND at exactly this
@@ -4082,7 +4086,6 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       // optional-dependency try/require pattern. The compiled statement
       // IS that throw, wherever it sits.
       if (isCjsJsFile(sf)) {
-        const spec = requireSpecOf(expr)!;
         if (
           !isRelativeSpecifier(spec) &&
           canonicalBuiltinModule(spec) === null
@@ -4105,7 +4108,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         }
       }
       if (isJsSourceFile(sf) && !ts.isExternalModule(sf)) {
-        const init = L.requireInitStmt(requireSpecOf(expr)!, expr);
+        const init = L.requireInitStmt(spec, expr);
         if (init) return init;
         return { kind: "block", body: [], loc: locOf(expr) };
       }
