@@ -4,12 +4,16 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+<!-- release:start -->
+
+## 0.0.22
+
 ### Features
 
 - **Coverage can analyze projects with embedder-provided module surfaces.** Repeatable `--external-types <specifier=file.d.ts>` mappings give the checker a local declaration for an otherwise unresolvable bare specifier, so project-owned statements remain measurable. The mapping is coverage-only and never invents execution semantics: value imports and uses stay explicit SC1010 external-host blockers, while type-only structural use can remain fully static.
 - **Production and library builds persist compilation work.** A bounded content-addressed cache is enabled by default: unchanged executables and library archives skip native code generation/linking, while source edits reuse separately keyed runtime objects (including library mode's `-DSCR_LIB` flavor) and rebuild only the program translation unit. Identities include resolved system-header dependency bytes plus linker/assembler identities, and checksums protect complete artifacts as well as runtime objects. The compiler remains required so every cache-enabled invocation rediscovers dependency selection; metadata-probe failures fall back to an ordinary build, and the configured size cap is enforced after writes. FFI builds with archive/object inputs or ambient `system_libraries` deliberately relink on every invocation so a transitive or in-place native rebuild cannot return stale code; their runtime objects remain cached. Mutable compiler input paths such as `CPATH` and `SDKROOT`, and opaque compiler wrappers, conservatively bypass persistent artifacts and objects; opaque archiver wrappers rebuild library program members and archives while retaining runtime-object reuse. Direct Clang, Apple's system Clang shim, `zig cc`, trusted platform archivers, and `zig ar` retain their applicable persistent tiers. Complete binary hits are checked before any missing vendor prerequisite is rebuilt. Library graphs with no npm package to opt in also retain the auto-detection frontend instead of loading the same graph twice. `SCRIPTC_CACHE_DIR` overrides the platform cache root, and `SCRIPTC_NO_CACHE=1` preserves a fully uncached path.
 
-<!-- release:start -->
+<!-- release:end -->
 
 ## 0.0.21
 
@@ -17,8 +21,6 @@ All notable changes to scriptc will be documented in this file.
 
 - **Contract integer attestations cover synthesized tagged-record payloads.** Integer slots declared on lowered payload paths such as `TextInputEvent_set_composition.cursor` and `Msg_audio_event.at` now carry compile-time write obligations, so fractional writes refuse instead of surviving until runtime encoding. Distinct inline records whose underscore-joined synthesized names collide now refuse instead of reusing the wrong table entry and dropping an obligation.
 - Same-shaped contract integer slots with the same declared class now share one lowered proof obligation while retaining every source slot path in refusals. Differing-class collisions remain SC4009 until arm provenance can keep their assumptions distinct.
-
-<!-- release:end -->
 
 ## 0.0.20
 
