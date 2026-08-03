@@ -20,7 +20,7 @@ import type { ClassInfo, ClassIteratorInfo } from "./lower-classes.js";
 import { genericIfaceBindingKeepsClass } from "./lower-classes.js";
 import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from "./lower-stream.js";
 import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
-import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireCalleeFileOf, createRequireNamespaceDecl } from "./lower-builtins.js";
+import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireCalleeFileOf, createRequireNamespaceDecl, textCodecBindingDecl } from "./lower-builtins.js";
 import { lowerEnumDeclaration } from "./lower-enums.js";
 import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
@@ -2990,6 +2990,13 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // `const process = globalThis.process` — a stdlib-global snapshot:
     // alias plumbing (see stdlibGlobalAliasDecl), no storage, no code.
     if (!isLet && stdlibGlobalAliasDecl(L, decl.name, decl.initializer)) return null;
+
+    // `const encoder = new TextEncoder()` and the default TextDecoder
+    // twin: the codec has no general value representation, but calls
+    // through this stable binding resolve back to the initializer. The
+    // supported constructors are effect-free, so the declaration itself
+    // is compile-time alias plumbing with no storage or code.
+    if (!isLet && textCodecBindingDecl(L, decl.name, decl.initializer)) return null;
 
     // `const f = <T>(x: T) => x` — a generic function value binding: the
     // initializer monomorphizes per call-site-resolved signature exactly

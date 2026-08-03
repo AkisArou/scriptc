@@ -3817,12 +3817,12 @@ export type IrLibFn =
   /** WHATWG TextDecoder.decode over u8 bytes (scr_bytes.c): utf-8 with
    * default options — the same maximal-subpart replacement decode as
    * Buffer.toString("utf8"), with the leading BOM stripped (the one
-   * behavioral difference; ignoreBOM defaults to false). Only the
-   * COMPOSED `new TextDecoder().decode(bytes)` form lowers — decoder
-   * values have no representation. TextEncoder.encode needs no libFn:
-   * `new TextEncoder().encode(s)` lowers to buffer.fromStr(s, "utf8")
-   * (identical bytes — ScrStr storage is well-formed UTF-8). Borrowed
-   * arg; owned (+1) string; never throws. */
+   * behavioral difference; ignoreBOM defaults to false). The composed
+   * `new TextDecoder().decode(bytes)` form and its same-scope const
+   * store-then-call twin lower — decoder values still have no general
+   * representation. TextEncoder.encode needs no libFn: its matching forms
+   * lower to buffer.fromStr(s, "utf8") (identical bytes — ScrStr storage
+   * is well-formed UTF-8). Borrowed arg; owned (+1) string; never throws. */
   | "text.decode"
   /** The wider sync fs slice (scr_lib.c), all throwing catchably with
    * Node's errno message shapes and `.code` stamped like the rest of

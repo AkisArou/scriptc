@@ -7485,6 +7485,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/text-codec-value.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/text-codec-value.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/tuples.ts": {
    "order": [
     "<repo>/tests/diagnostics/tuples.ts"
