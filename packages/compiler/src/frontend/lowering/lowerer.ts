@@ -51,7 +51,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
+import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canDynCheckTo, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
 import { type DynamicImportResolution, type NpmBuiltinUse, type NpmLazyTrap } from "../npm.js";
 import { provenanceActive } from "../provenance-registry.js";
 import {
@@ -2997,6 +2997,13 @@ export class Lowerer {
     );
   }
 
+  dynCheckable(t: IrType): boolean {
+    const getRecord = (id: string) => this.shapes.get(id);
+    const getUnion = (id: string) => this.unions.get(id);
+    return canDynCheckTo(t, getRecord, getUnion) ||
+      (t.kind === "func" && canAdaptDynFuncTo(t, getRecord, getUnion));
+  }
+
   /** True when a type is a BARE undefined-armed union — the one JSON-unsafe
    * shape whose rejections deserve their own wording: Node's stringify of
    * bare undefined is not a string at all and JSON text never matches the
@@ -3368,23 +3375,7 @@ export class Lowerer {
     // undefined-armed unions of those, bytes<u8>, the %Error root)
     // converts; everything else keeps requireExactShape's SC1100 fence.
     if (expr.type.kind === "dyn" && expected.kind !== "dyn") {
-      const undefArmedOk =
-        expected.kind === "union" &&
-        (this.unions
-          .get(expected.unionId)
-          ?.arms.every((a) => a.kind === "undefinedT" || this.jsonSafe(a)) ??
-          false);
-      const bytesOk = expected.kind === "bytes" && expected.elem === "u8";
-      const errorOk = expected.kind === "object" && expected.className === "%Error";
-      // ADAPTABLE function targets (the checked-dynamic function
-      // boundary's OUT direction — `const wrapped: F = mustCall(fn)`):
-      // check callable-kind, then unwrap an identical boxed signature
-      // directly or adapt through a per-target shim that dynChecks
-      // arguments/results per F.
-      const funcOk =
-        expected.kind === "func" &&
-        canAdaptDynFuncTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id));
-      if (this.jsonSafe(expected) || undefArmedOk || bytesOk || errorOk || funcOk) {
+      if (this.dynCheckable(expected)) {
         return { kind: "dynCheck", value: expr, type: expected, loc: expr.loc };
       }
       return expr;
@@ -4698,10 +4689,7 @@ export class Lowerer {
       // mechanical set: a dyn result landing in an adaptable func slot
       // takes dynCheck's per-target shim (coerceToExpected's funcOk rule
       // — the production/development function-choice ternary shape).
-      return (
-        this.jsonSafe(dst) ||
-        (dst.kind === "func" && canAdaptDynFuncTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
-      );
+      return this.dynCheckable(dst);
     }
     if (dst.kind === "union") {
       if (src.kind === "union") return this.unionRetagMappable(src.unionId, dst.unionId);

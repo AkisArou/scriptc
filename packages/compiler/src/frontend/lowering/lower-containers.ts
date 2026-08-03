@@ -6508,7 +6508,7 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
         `Object.fromEntries over '${L.fmt(argIr)}' (the tuple's '${L.fmt(valT)}' value cannot flow into the '${L.fmt(iv)}' signature slot)`,
       );
     }
-    const receiver = L.lowerExpr(argNode);
+    const receiver = L.coerceToExpected(L.lowerExpr(argNode), argIr);
     const key = `obj.fromEntries:${argIr.elem.shapeId}:${resultT.shapeId}`;
     let helper = L.arrHofHelpers.get(key);
     if (!helper) {
@@ -6586,7 +6586,7 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
       kind: "record",
       shapeId: L.shapes.intern([], false, valT, []),
     };
-    const receiver = L.lowerExpr(argNode);
+    const receiver = L.coerceToExpected(L.lowerExpr(argNode), argIr);
     const key = `obj.fromEntries:strrows:${resultT.shapeId}`;
     let helper = L.arrHofHelpers.get(key);
     if (!helper) {

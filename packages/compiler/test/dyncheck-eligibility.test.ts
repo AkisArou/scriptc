@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { analyze } from "../src/index.js";
 
-test("frontend preserves static handle identity while rejecting unsupported dyn handles", () => {
+test("frontend preserves static handle identity while rejecting unsupported dyn handle arrays", () => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-dyncheck-"));
   const file = join(dir, "main.ts");
   writeFileSync(file, `
@@ -34,9 +34,6 @@ console.log(cloned, staticClient === staticClient, staticSession === staticSessi
     "SC1090: a checked cast of 'unknown' to 'number | IncomingMessage' (a dynamic value can only be validated against JSON-representable types: number, string, boolean, records, arrays, and unions of those) is not supported yet",
     "SC2009: values of type 'IncomingMessage[]' cannot be compiled: the array shape is supported, but 'IncomingMessage' elements have no array representation yet",
     "SC1090: a checked cast of 'unknown' to 'Http2Session[]' (a dynamic value can only be validated against JSON-representable types: number, string, boolean, records, arrays, and unions of those) is not supported yet",
-    "SC1090: a checked cast of 'unknown' to 'Http2Session' (a dynamic value can only be validated against JSON-representable types: number, string, boolean, records, arrays, and unions of those) is not supported yet",
-    "SC1090: a checked cast of 'unknown' to 'Http2Stream' (a dynamic value can only be validated against JSON-representable types: number, string, boolean, records, arrays, and unions of those) is not supported yet",
-    "SC1090: a checked cast of 'unknown' to 'ClientRequest' (a dynamic value can only be validated against JSON-representable types: number, string, boolean, records, arrays, and unions of those) is not supported yet",
   ]);
 
   const identityFile = join(dir, "identity.ts");

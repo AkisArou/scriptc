@@ -38,7 +38,7 @@
  * cleanly before. The validator stays the backstop for anything else. */
 import type { Lowerer } from "./lowerer.js";
 import { PoisonError } from "./lowerer.js";
-import { canAdaptDynFuncTo, canMarshalTypedFuncIntoIsland, DYN, IrExpr, IrType, JSVAL, SrcLoc, STRING, isUnitType, typeEquals } from "../../ir/nodes.js";
+import { canAdaptDynFuncTo, canDynCheckTo, canMarshalTypedFuncIntoIsland, DYN, IrExpr, IrType, JSVAL, SrcLoc, STRING, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { LIB_FN_SIGS, REGEX_INTRINSIC_SIGS, STR_INTRINSIC_SIGS } from "../../ir/validate.js";
 import { unionMismatchDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 
@@ -48,17 +48,10 @@ import { unionMismatchDiag, unsupportedDiag } from "../../diagnostics/diagnostic
  * callback flowing into setTimeout's `() => void` slot adapts through
  * the per-target shim). */
 function dynCheckable(L: Lowerer, want: IrType): boolean {
-  if (L.jsonSafe(want)) return true;
-  if (want.kind === "bytes" && want.elem === "u8") return true;
-  if (want.kind === "object" && want.className === "%Error") return true;
-  if (want.kind === "func") {
-    return canAdaptDynFuncTo(want, (id) => L.shapes.get(id), (id) => L.unions.get(id));
-  }
-  if (want.kind === "union") {
-    const def = L.unions.get(want.unionId);
-    return !!def && def.arms.every((a) => a.kind === "undefinedT" || L.jsonSafe(a));
-  }
-  return false;
+  const getRecord = (id: string) => L.shapes.get(id);
+  const getUnion = (id: string) => L.unions.get(id);
+  return canDynCheckTo(want, getRecord, getUnion) ||
+    (want.kind === "func" && canAdaptDynFuncTo(want, getRecord, getUnion));
 }
 
 /** The checked coercion for one argument slot, or the named fence. Returns

@@ -5314,6 +5314,9 @@ export const DYN_CONVERTIBLE_HANDLE_KINDS: ReadonlyMap<string, { tag: string; ta
   ["httpRes", { tag: "SCR_DYNH_HTTP_RES", tagNum: 1, cls: "ServerResponse" }],
   ["netSocket", { tag: "SCR_DYNH_NET_SOCKET", tagNum: 2, cls: "Socket" }],
   ["netServer", { tag: "SCR_DYNH_NET_SERVER", tagNum: 3, cls: "Server" }],
+  ["http2Session", { tag: "SCR_DYNH_H2_SESSION", tagNum: 4, cls: "Http2Session" }],
+  ["http2Stream", { tag: "SCR_DYNH_H2_STREAM", tagNum: 5, cls: "Http2Stream" }],
+  ["httpClientReq", { tag: "SCR_DYNH_HTTP_CLIENT", tagNum: 6, cls: "ClientRequest" }],
 ]);
 
 /** Every runtime handle represented by one stable native pointer. Static

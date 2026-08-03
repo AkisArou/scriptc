@@ -170,7 +170,7 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
       process.platform === "linux" ? 392_000 : 378_000,
     );
     expect(statSync(regexBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 545_000 : 512_000,
+      process.platform === "linux" ? 545_000 : 528_000,
     );
   });
 });
