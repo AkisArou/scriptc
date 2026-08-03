@@ -1,3 +1,4 @@
+import { chmodSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
@@ -6,9 +7,20 @@ import { defineConfig } from "vitest/config";
 // SCRIPTC_NO_CACHE=1 in the caller's environment bypasses every cache in both
 // directions (no reads, no writes). Production builds use the platform cache;
 // this explicit override keeps test artifacts repo-local and disposable.
+const configuredCacheDir = process.env["SCRIPTC_CACHE_DIR"];
 const cacheDir =
-  process.env["SCRIPTC_CACHE_DIR"] ??
+  configuredCacheDir ??
   fileURLToPath(new URL("./node_modules/.cache/scriptc-tests/cas", import.meta.url));
+
+// The production cache refuses an existing explicit override that is visible
+// to other users. This repository owns the default test-only override, so
+// create (or repair) it before any oracle subdirectory can implicitly create
+// the root with the process umask (normally 0755). Otherwise native caching is
+// silently disabled and every corpus case recompiles the complete C runtime.
+if (configuredCacheDir === undefined && process.env["SCRIPTC_NO_CACHE"] !== "1") {
+  mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(cacheDir, 0o700);
+}
 
 // Contention control for concurrent agents: SCRIPTC_TEST_WORKERS caps the vitest
 // worker pool (the default — all cores — is unchanged when unset). Full-suite
