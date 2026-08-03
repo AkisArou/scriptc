@@ -15,3 +15,12 @@ text-codec-value.ts:5:10 - error SC2020: 'TextEncoder.encode' is part of the sta
   6 | }
 
   hint: the inline new TextEncoder().encode(s) form and same-scope const store-then-call (const encoder = new TextEncoder(); encoder.encode(s)) compile; captured/imported instances and other members need a runtime object representation
+
+text-codec-value.ts:17:15 - error SC2020: 'TextEncoder.encode' is part of the standard library types but has no scriptc lowering yet
+
+  16 |     const Encoded = class {
+  17 |       bytes = caseEncoder.encode("should fence");
+     |               ^~~~~~~~~~~~~~~~~~
+  18 |     };
+
+  hint: the inline new TextEncoder().encode(s) form and same-scope const store-then-call (const encoder = new TextEncoder(); encoder.encode(s)) compile; captured/imported instances and other members need a runtime object representation

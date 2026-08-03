@@ -6218,9 +6218,21 @@ type TextCodecCtor = {
     // imported binding can be observed during a module cycle; both need
     // real runtime storage rather than this deliberately trivial rewrite.
     const executionScope = (node: ts.Node): ts.Node => {
-      let cur = node;
-      while (!ts.isFunctionLike(cur) && !ts.isSourceFile(cur)) cur = cur.parent;
-      return cur;
+      let child = node;
+      for (let cur = node.parent; ; child = cur, cur = cur.parent) {
+        if (ts.isFunctionLike(cur) || ts.isSourceFile(cur)) return cur;
+        // An instance field initializer runs when an object is constructed,
+        // not when its enclosing class expression evaluates. Treat it like
+        // a closure boundary: a later source position does not prove the
+        // codec declaration ran (a switch can enter a following case and
+        // instantiate the class while the binding is still in its TDZ).
+        if (
+          ts.isPropertyDeclaration(cur) && cur.initializer === child &&
+          (ts.getCombinedModifierFlags(cur) & ts.ModifierFlags.Static) === 0
+        ) {
+          return cur;
+        }
+      }
     };
     if (executionScope(receiver) !== executionScope(decl) || receiver.getStart() < decl.end) return null;
     return directTextCodecCtorOf(L, decl.initializer);
