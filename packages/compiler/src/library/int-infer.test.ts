@@ -27,6 +27,9 @@ const VOID = { kind: "void" } as const;
 const MODEL = { kind: "record", shapeId: "model-shape" } as const;
 const MODEL_CLASS = { kind: "object", className: "Model" } as const;
 const OPTIONAL_NUMBER = { kind: "union", unionId: "optional-number" } as const;
+const RESIZE_MSG = { kind: "union", unionId: "resize-msg" } as const;
+const RESIZED = { kind: "record", shapeId: "resized-shape" } as const;
+const NOOP = { kind: "record", shapeId: "noop-shape" } as const;
 
 const num = (value: number, spelling?: string): IrExpr =>
   spelling === undefined
@@ -531,6 +534,87 @@ describe("straight-line ordinary-field refinement", () => {
     const v = onlyOrdinaryRecord([
       iff(and(labelIsNotSkip, range), [send(math("trunc", countRead()))]),
     ]);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(0);
+    expect(v.provenHi).toBe(100);
+  });
+
+  test("a union discriminant conjunct preserves narrowed payload-field facts", () => {
+    const msgRef = (): IrExpr => ({ kind: "varRef", localId: "msg.0", type: RESIZE_MSG, loc });
+    const widthRead = (): IrExpr => ({
+      kind: "recordGet",
+      obj: {
+        kind: "unionNarrow",
+        unionId: RESIZE_MSG.unionId,
+        tag: 1,
+        value: msgRef(),
+        type: RESIZED,
+        loc,
+      },
+      shapeId: RESIZED.shapeId,
+      field: "w",
+      type: F64,
+      loc,
+    });
+    const isResized: IrExpr = {
+      kind: "strEq",
+      negated: false,
+      left: {
+        kind: "unionDisc",
+        unionId: RESIZE_MSG.unionId,
+        field: "kind",
+        value: msgRef(),
+        type: STRING,
+        loc,
+      },
+      right: { kind: "strLit", value: "resized", type: STRING, loc },
+      type: BOOL,
+      loc,
+    };
+    const mod = recordCase([
+      iff(and(isResized, and(bin(">=", widthRead(), num(0)), bin("<=", widthRead(), num(65535)))), [
+        send(math("trunc", widthRead())),
+      ]),
+    ], ["msg"], [sink("send")]);
+    mod.functions[1]!.params[0]!.type = RESIZE_MSG;
+    mod.functions[1]!.locals[0]!.type = RESIZE_MSG;
+    mod.unions = [{ id: RESIZE_MSG.unionId, arms: [NOOP, RESIZED] }];
+
+    const v = only(mod);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(0);
+    expect(v.provenHi).toBe(65535);
+  });
+
+  test("a union discriminant read preserves an existing field fact", () => {
+    const msgRef = (): IrExpr => ({ kind: "varRef", localId: "msg.0", type: RESIZE_MSG, loc });
+    const isResized: IrExpr = {
+      kind: "strEq",
+      negated: false,
+      left: {
+        kind: "unionDisc",
+        unionId: RESIZE_MSG.unionId,
+        field: "kind",
+        value: msgRef(),
+        type: STRING,
+        loc,
+      },
+      right: { kind: "strLit", value: "resized", type: STRING, loc },
+      type: BOOL,
+      loc,
+    };
+    const mod = recordCase([
+      iff(bin(">=", countRead(), num(0)), [
+        iff(and(isResized, bin("<=", countRead(), num(100))), [
+          send(math("trunc", countRead()), "sendU64"),
+        ]),
+      ]),
+    ], ["m", "msg"], [sink("sendU64")]);
+    mod.functions[1]!.params[1]!.type = RESIZE_MSG;
+    mod.functions[1]!.locals[1]!.type = RESIZE_MSG;
+    mod.unions = [{ id: RESIZE_MSG.unionId, arms: [NOOP, RESIZED] }];
+
+    const v = only(mod);
     expect(v.outcome).toBe("prove");
     expect(v.provenLo).toBe(0);
     expect(v.provenHi).toBe(100);

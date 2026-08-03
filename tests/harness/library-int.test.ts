@@ -1201,6 +1201,51 @@ export function update(m: Model, msg: Msg): Model {
     expect(r.diagnostics[0]!.message).toContain("wholeness failed");
   });
 
+  test("a compound discriminant guard refines a narrowed msg payload field", async () => {
+    const source = `export interface Model { width: number; }
+export type Msg =
+  | { kind: "resized"; w: number }
+  | { kind: "noop" };
+export function init(): Model { return { width: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  if (msg.kind === "resized" && msg.w >= 0 && msg.w <= 65535) {
+    return { width: Math.trunc(msg.w) };
+  }
+  return m;
+}
+`;
+    const r = await buildCase(
+      "sidecar-prove-compound-msg-payload-guard",
+      source,
+      sidecarProfile([{ slot: "Model.width", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+  });
+
+  test("a discriminant read preserves a prior model-field refinement", async () => {
+    const source = `export interface Model { width: number; }
+export type Msg =
+  | { kind: "resized"; w: number }
+  | { kind: "noop" };
+export function init(): Model { return { width: 0 }; }
+export function update(m: Model, msg: Msg): Model {
+  if (m.width >= 0) {
+    if (msg.kind === "resized" && m.width <= 100) {
+      return acceptWidth(m, Math.trunc(m.width));
+    }
+  }
+  return m;
+}
+export function acceptWidth(m: Model, width: number): Model { return m; }
+`;
+    const r = await buildCase(
+      "sidecar-prove-discriminant-preserves-field-fact",
+      source,
+      sidecarProfile([{ slot: "helpers.acceptWidth.params[0]", class: "u64" }], { exports: [] }),
+    );
+    expect(r.ok, r.ok ? "" : r.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+  });
+
   test("an unproven write into a synthesized named-union payload field refuses", async () => {
     const source = `export type TextInputEvent =
   | { kind: "set_composition"; text: string; cursor: number }
