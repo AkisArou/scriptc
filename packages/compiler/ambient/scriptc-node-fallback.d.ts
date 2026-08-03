@@ -473,10 +473,11 @@ interface BufferConstructor {
 }
 declare var Buffer: BufferConstructor;
 
-/* The WHATWG encoders (Node globals). Only the COMPOSED forms lower —
- * `new TextEncoder().encode(s)` and `new TextDecoder().decode(bytes)`;
- * the label is typed as the utf-8 spellings (the one supported decoder;
- * other labels and the fatal/ignoreBOM options fence at the use site). */
+/* The WHATWG encoders (Node globals). The COMPOSED forms lower —
+ * `new TextEncoder().encode(s)` and `new TextDecoder().decode(bytes)` —
+ * as do same-scope const store-then-call forms. The label is typed as the
+ * utf-8 spellings (the one supported decoder; other labels and the
+ * fatal/ignoreBOM options fence at the use site). */
 interface TextEncoder {
   encode(input?: string): Uint8Array;
 }
