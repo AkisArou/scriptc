@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   sandboxImageConfig,
   sandboxRunnerConfig,
+  sandboxTestWorkerAllocation,
 } from "./sandbox-config.mjs";
 import {
   sandboxHostSchedule,
@@ -197,7 +198,6 @@ const remoteWorkerCount = Number(testWorkers);
 if (!Number.isInteger(remoteWorkerCount) || remoteWorkerCount < 1) {
   throw new Error(`SCRIPTC_TEST_WORKERS must be a positive integer (got ${testWorkers})`);
 }
-const caseWorkers = String(Math.max(1, remoteWorkerCount - 1));
 const fileWorkers = "1";
 const localCaseShardCount = Number(localCaseShards);
 if (!Number.isInteger(localCaseShardCount) || localCaseShardCount < 1) {
@@ -517,6 +517,12 @@ async function allWorkers(phase, task, concurrency = workers.length) {
   console.log(`${phase} completed in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
 
+async function runTaskQueue(tasks, concurrency) {
+  for (let offset = 0; offset < tasks.length; offset += concurrency) {
+    await Promise.all(tasks.slice(offset, offset + concurrency).map((task) => task()));
+  }
+}
+
 async function cleanup() {
   if (values.keep || created.size === 0) return;
   if (!cleanupPromise) {
@@ -626,6 +632,11 @@ try {
         ...laneCaseShardedFiles,
         ...(worker.lane === onceLane ? invariantCaseShardedFiles : []),
       ];
+      const runCacheCases = worker.lane === onceLane;
+      const { caseWorkers, sideConcurrency } = sandboxTestWorkerAllocation(
+        remoteWorkerCount,
+        runCacheCases ? 2 : 1,
+      );
       const cases = () =>
         execIn(
           worker,
@@ -634,7 +645,7 @@ try {
           {
             ...sharedTestEnv,
             SCRIPTC_TEST_SHARD: `${worker.shard}/${shardCount}`,
-            SCRIPTC_TEST_WORKERS: caseWorkers,
+            SCRIPTC_TEST_WORKERS: String(caseWorkers),
           },
           "cases",
         );
@@ -680,15 +691,16 @@ try {
           },
           "cache",
         );
-      if (remoteWorkerCount === 1) {
+      // The corpus owns the remaining pool while file/cache processes share
+      // the reserved side slots (serially when only one slot is available).
+      const sideTasks = [files, ...(runCacheCases ? [cacheCases] : [])];
+      if (sideConcurrency === 0) {
         await cases();
-        await files();
-        if (worker.lane === onceLane) await cacheCases();
+        await runTaskQueue(sideTasks, 1);
       } else {
         await Promise.all([
           cases(),
-          files(),
-          ...(worker.lane === onceLane ? [cacheCases()] : []),
+          runTaskQueue(sideTasks, sideConcurrency),
         ]);
       }
     });

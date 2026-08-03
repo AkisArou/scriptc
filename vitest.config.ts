@@ -17,7 +17,7 @@ const cacheDir =
 // create (or repair) it before any oracle subdirectory can implicitly create
 // the root with the process umask (normally 0755). Otherwise native caching is
 // silently disabled and every corpus case recompiles the complete C runtime.
-if (configuredCacheDir === undefined) {
+if (configuredCacheDir === undefined && process.env["SCRIPTC_NO_CACHE"] !== "1") {
   mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") chmodSync(cacheDir, 0o700);
 }
