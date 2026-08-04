@@ -101,9 +101,9 @@ test("dynCheck eligibility matches recursive builders and union matchers", () =>
   expect(can(HTTPRES_T)).toBe(true);
   expect(can(NETSOCKET_T)).toBe(true);
   expect(can(NETSERVER_T)).toBe(true);
-  expect(can(HTTP2SESSION_T)).toBe(false);
-  expect(can(HTTP2STREAM_T)).toBe(false);
-  expect(can(HTTPCLIENTREQ_T)).toBe(false);
+  expect(can(HTTP2SESSION_T)).toBe(true);
+  expect(can(HTTP2STREAM_T)).toBe(true);
+  expect(can(HTTPCLIENTREQ_T)).toBe(true);
   expect(can(arrayOf(errorT))).toBe(true);
   expect(can(arrayOf(functionUnion))).toBe(true);
   expect(can(arrayOf({ kind: "bytes", elem: "u8" }))).toBe(true);
