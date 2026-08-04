@@ -1,4 +1,4 @@
-// structuredClone: the JSON-safe + bytes subset clones deep (option
+// structuredClone: JSON-safe values and the bytes subset clone deep (option
 // validation with Node's exact errors, DataCloneError on non-empty
 // transfer lists, DOMException per WebIDL serialization), and builtin
 // error classes answer instanceof on checked-dynamic values through the
