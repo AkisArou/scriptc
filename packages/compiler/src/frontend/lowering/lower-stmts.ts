@@ -27,6 +27,7 @@ import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } fr
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
 import { probeNodeRequireRefusal } from "../npm.js";
+import { requireArrayGetSafe } from "./array-density.js";
 
 /** `const X = /* @__PURE__ *\/ makeX()` at a module's top level: every
  * declarator initialized by a call (or `new`) carrying the bundler PURE
@@ -996,6 +997,9 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       )
     ) {
       L.badType(sourceNode, L.typeOf(sourceNode));
+    }
+    if (source.type.kind === "array") {
+      requireArrayGetSafe(L, sourceNode, source.type.elem, decl.initializer!, "stored array value iteration");
     }
     const loc = locOf(decl);
     const indexedSource = L.declareHiddenLocal("%numiterSource", source.type);
@@ -5898,6 +5902,15 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         if (recv?.kind === "array" && (proj === "keys" || proj === "entries")) {
           const container = L.lowerExpr(src.expression.expression);
           if (container.type.kind === "array") {
+            if (proj === "entries") {
+              requireArrayGetSafe(
+                L,
+                src.expression.expression,
+                container.type.elem,
+                stmt.expression,
+                "Array.entries iteration",
+              );
+            }
             return lowerForOfArrayIter(L, stmt, container as IrExpr & { type: IrType & { kind: "array" } }, proj);
           }
         }
@@ -6102,6 +6115,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         L.badType(stmt.expression, L.typeOf(stmt.expression));
       }
     }
+    requireArrayGetSafe(L, iterSrc, iterable.type.elem, stmt.expression, "array for-of iteration");
     if (!ts.isVariableDeclarationList(stmt.initializer)) {
       // `for (x of xs)` over a PRE-DECLARED writable binding: JS assigns
       // the existing binding once per pass — one shared binding across

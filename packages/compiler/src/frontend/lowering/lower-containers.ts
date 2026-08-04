@@ -12,6 +12,7 @@ import { isJsSourceFile, locOf } from "../program.js";
 import { DYN_DISPATCH_METHODS, islandPrimitiveExit } from "./lower-calls.js";
 import { typeKey } from "../types.js";
 import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
+import { requireArrayGetSafe } from "./array-density.js";
 
 /** Lower an expression whose checker type is statically `undefined`/`void`.
  * Optional builtin arguments use this before their ordinary expected-type
@@ -190,6 +191,7 @@ function lowerOptionalDefaultArg(
       if (call.arguments.length !== 0) {
         L.noLowering(`.toReversed with ${call.arguments.length} arguments`, call);
       }
+      requireArrayGetSafe(L, access.expression, elem, call, "Array.toReversed");
       return {
         kind: "arrIntrinsic",
         method: "toReversed",
@@ -203,6 +205,7 @@ function lowerOptionalDefaultArg(
       if (call.arguments.length !== 2 || call.arguments.some(ts.isSpreadElement)) {
         L.noLowering(`.with with ${call.arguments.length} arguments`, call);
       }
+      requireArrayGetSafe(L, access.expression, elem, call, "Array.with");
       const receiver = L.lowerExpr(access.expression);
       const index = L.lowerExprExpecting(call.arguments[0]!, F64);
       const value = L.coerceInto(
@@ -223,6 +226,7 @@ function lowerOptionalDefaultArg(
       if (call.arguments.some(ts.isSpreadElement)) {
         L.unsupported("SC1090", call, "spread arguments to Array.toSpliced");
       }
+      requireArrayGetSafe(L, access.expression, elem, call, "Array.toSpliced");
       const receiver = L.lowerExpr(access.expression);
       const start = call.arguments[0]
         ? L.lowerExprExpecting(call.arguments[0], F64)
@@ -319,6 +323,9 @@ function lowerOptionalDefaultArg(
             spreadArg,
             `pushing a spread of '${L.fmt(src.type)}' onto a '${L.fmt(receiverIr)}' array (only a same-element-type array spreads)`,
           );
+        }
+        if (L.mapTypeOf(L.typeOf(spreadArg.expression))?.kind === "array") {
+          requireArrayGetSafe(L, spreadArg.expression, elem, spreadArg, "array argument spread");
         }
         return { kind: "arrIntrinsic", method: "pushSpread", receiver, args: [src], type: F64, loc };
       }
@@ -1015,6 +1022,9 @@ function lowerOptionalDefaultArg(
     const loc = locOf(call);
     const receiver = L.lowerExpr(access.expression);
     const arrT = arrayOf(elem);
+    if (method !== "some" && method !== "every") {
+      requireArrayGetSafe(L, access.expression, elem, call, `Array.${method}`);
+    }
     const argNode = call.arguments[0];
     if (!argNode) L.unsupported("SC1090", call, "this call form"); // tsc-guarded
     const { fnArg, arity } = hofCallbackArg(L, argNode, [elem], arrT);
@@ -1583,6 +1593,7 @@ function lowerOptionalDefaultArg(
     const loc = locOf(call);
     const method = access.name.text === "toSorted" ? "toSorted" : "sort";
     const copyFirst = method === "toSorted";
+    if (copyFirst) requireArrayGetSafe(L, access.expression, elem, call, "Array.toSorted");
     if (call.arguments.length === 0 && elem.kind === "string") {
       const receiver = L.lowerExpr(access.expression);
       const cmp = defaultStringCmpHelper(L, loc);
@@ -1691,14 +1702,16 @@ function lowerOptionalDefaultArg(
     return name;
   }
 
-/** The insertion-sort loop, from existing IR nodes. Present elements compact
-   * to the front first; CompareArrayElements then sinks undefined past every
-   * value without calling the comparator, so the order is values, then
-   * undefineds. The tail beyond the present count is deleted for the
-   * in-place sort (holes land last, SortIndexedProperties' SKIP-HOLES) and
-   * assigned the interned undefined arm for toSorted (`undefExpr`, dense
-   * per READ-THROUGH-HOLES); a toSorted element type with no undefined arm
-   * cannot represent a read-through hole and keeps the holes.
+/** The insertion-sort loop, from existing IR nodes. Both methods first take a
+   * shallow working snapshot. Present elements compact within that private
+   * array; CompareArrayElements then sinks undefined past every value without
+   * calling the comparator, so the order is values, then undefineds. sort
+   * commits the sorted prefix and hole tail to the receiver only after every
+   * comparator call succeeds. This preserves the original receiver during
+   * comparator observation and leaves it untouched when a comparator throws.
+   * toSorted returns the working array directly; its hole tail becomes present
+   * undefined (the call site fences scalar receivers unless they are proven
+   * dense).
    *
    *   n = a.length;
     *   for (i = 1; i < n; i++) {
@@ -1728,7 +1741,9 @@ function lowerOptionalDefaultArg(
     const i = ref("i.0", F64);
     const j = ref("j.0", F64);
     const m = ref("m.0", F64);
-    const at = (index: IrExpr): IrExpr => ({ kind: "arrayGet", arr: ref("a.0", arrT), index, type: elem, loc });
+    const working = (): IrExpr => ref("w.0", arrT);
+    const at = (index: IrExpr): IrExpr => ({ kind: "arrayGet", arr: working(), index, type: elem, loc });
+    const hasWorking: IrExpr = { kind: "arrayHas", arr: working(), index: i, type: BOOL, loc };
     const jPlus1: IrExpr = { kind: "bin", op: "+", left: j, right: num(1), type: F64, loc };
     const isUndefined = (value: IrExpr): IrExpr | null => {
       if (elem.kind === "union" && undefinedTag !== null) {
@@ -1806,7 +1821,7 @@ function lowerOptionalDefaultArg(
           kind: "if",
           cond: shouldShift,
           then: [
-            { kind: "arraySet", arr: ref("a.0", arrT), index: jPlus1, value: at(j), loc },
+            { kind: "arraySet", arr: working(), index: jPlus1, value: at(j), loc },
             { kind: "assign", localId: "j.0", value: { kind: "bin", op: "-", left: j, right: num(1), type: F64, loc }, loc },
           ],
           else_: [{ kind: "break", loc }],
@@ -1816,28 +1831,26 @@ function lowerOptionalDefaultArg(
       loc,
     };
     const body: IrStmt[] = [
-      ...(copyFirst
-        ? [{
-            kind: "assign" as const,
-            localId: "a.0",
-            value: {
-              kind: "arrIntrinsic" as const,
-              method: "slice" as const,
-              receiver: ref("a.0", arrT),
-              args: [],
-              type: arrT,
-              loc,
-            },
-            loc,
-          }]
-        : []),
       readLenStmt(arrT, loc),
+      {
+        kind: "varDecl",
+        localId: "w.0",
+        init: {
+          kind: "arrIntrinsic",
+          method: "slice",
+          receiver: ref("a.0", arrT),
+          args: [],
+          type: arrT,
+          loc,
+        },
+        loc,
+      },
       { kind: "varDecl", localId: "m.0", init: num(0), loc },
       countedForLoop(loc, [{
         kind: "if",
-        cond: hasElemExpr(arrT, loc),
+        cond: hasWorking,
         then: [
-          { kind: "arraySet", arr: ref("a.0", arrT), index: m, value: at(i), loc },
+          { kind: "arraySet", arr: working(), index: m, value: at(i), loc },
           { kind: "assign", localId: "m.0", value: { kind: "bin", op: "+", left: m, right: num(1), type: F64, loc }, loc },
         ],
         else_: null,
@@ -1850,8 +1863,8 @@ function lowerOptionalDefaultArg(
         update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: i, right: num(1), type: F64, loc }, loc },
         body: [
           copyFirst && undefExpr !== null
-            ? { kind: "arraySet", arr: ref("a.0", arrT), index: i, value: undefExpr, loc }
-            : { kind: "arrayDelete", arr: ref("a.0", arrT), index: i, loc },
+            ? { kind: "arraySet", arr: working(), index: i, value: undefExpr, loc }
+            : { kind: "arrayDelete", arr: working(), index: i, loc },
         ],
         loc,
       },
@@ -1866,14 +1879,44 @@ function lowerOptionalDefaultArg(
           loc,
         },
         body: [
-          { kind: "varDecl", localId: "v.0", init: getElemExpr(arrT, elem, loc), loc },
+          { kind: "varDecl", localId: "v.0", init: at(i), loc },
           { kind: "varDecl", localId: "j.0", init: { kind: "bin", op: "-", left: ref("i.0", F64), right: num(1), type: F64, loc }, loc },
           shiftLoop,
-          { kind: "arraySet", arr: ref("a.0", arrT), index: jPlus1, value: ref("v.0", elem), loc },
+          { kind: "arraySet", arr: working(), index: jPlus1, value: ref("v.0", elem), loc },
         ],
         loc,
       },
-      { kind: "return", value: ref("a.0", arrT), loc },
+      ...(copyFirst
+        ? []
+        : [
+            {
+              kind: "for" as const,
+              init: { kind: "varDecl" as const, localId: "i.0", init: num(0), loc },
+              cond: { kind: "bin" as const, op: "<" as const, left: i, right: m, type: BOOL, loc },
+              update: {
+                kind: "assign" as const,
+                localId: "i.0",
+                value: { kind: "bin" as const, op: "+" as const, left: i, right: num(1), type: F64, loc },
+                loc,
+              },
+              body: [{ kind: "arraySet" as const, arr: ref("a.0", arrT), index: i, value: at(i), loc }],
+              loc,
+            },
+            {
+              kind: "for" as const,
+              init: { kind: "varDecl" as const, localId: "i.0", init: m, loc },
+              cond: { kind: "bin" as const, op: "<" as const, left: i, right: ref("n.0", F64), type: BOOL, loc },
+              update: {
+                kind: "assign" as const,
+                localId: "i.0",
+                value: { kind: "bin" as const, op: "+" as const, left: i, right: num(1), type: F64, loc },
+                loc,
+              },
+              body: [{ kind: "arrayDelete" as const, arr: ref("a.0", arrT), index: i, loc }],
+              loc,
+            },
+          ]),
+      { kind: "return", value: copyFirst ? working() : ref("a.0", arrT), loc },
     ];
     return {
       name,
@@ -1885,6 +1928,7 @@ function lowerOptionalDefaultArg(
       locals: [
         { id: "a.0", name: "a", type: arrT, mutable: true },
         { id: "f.0", name: "f", type: fnT, mutable: true },
+        { id: "w.0", name: "w", type: arrT, mutable: false },
         { id: "n.0", name: "n", type: F64, mutable: false },
         { id: "i.0", name: "i", type: F64, mutable: true },
         { id: "m.0", name: "m", type: F64, mutable: true },
@@ -2388,6 +2432,13 @@ function lowerOptionalDefaultArg(
         {
           kind: "if",
           cond: { kind: "bin", op: ">=", left: t, right: n, type: BOOL, loc },
+          then: [{ kind: "return", value: miss, loc }],
+          else_: null,
+          loc,
+        },
+        {
+          kind: "if",
+          cond: { kind: "unary", op: "!", operand: { kind: "arrayHas", arr: ref("a.0", arrT), index: t, type: BOOL, loc }, type: BOOL, loc },
           then: [{ kind: "return", value: miss, loc }],
           else_: null,
           loc,

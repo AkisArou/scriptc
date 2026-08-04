@@ -25,6 +25,7 @@ import { mixinFnOfCallee } from "./lower-mixins.js";
 import { isConstAssertionTypeNode, isGenericCallableMemberType, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
+import { requireArrayGetSafe } from "./array-density.js";
 
 /** An assignable `obj.field` target — a class field, a record field, or a
  * class ACCESSOR property (reads become getter calls, writes setter calls;
@@ -3679,6 +3680,10 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
             el,
             `spreading '${L.fmt(src.type)}' into a '${L.fmt(type)}' literal (only a same-element-type array spreads)`,
           );
+        }
+        const sourceType = L.mapTypeOf(L.typeOf(el.expression));
+        if (sourceType?.kind === "array") {
+          requireArrayGetSafe(L, el.expression, sourceType.elem, el, "array spread");
         }
         spreads.push(i);
         return src;

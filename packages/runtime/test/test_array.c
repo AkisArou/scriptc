@@ -4,8 +4,9 @@
  *   (no args)          run all assertions; prints "N/N cases passed"
  *   --crash-get-oob    read past the end        → RangeError + abort()
  *   --crash-get-frac   read a fractional index  → RangeError + abort()
- *   --crash-set-oob    write past len (holes)   → RangeError + abort()
+ *   --crash-set-max    write at 2^32-1          → RangeError + abort()
  *   --crash-pop-empty  pop an empty array       → RangeError + abort()
+ *   --crash-copy-hole  densify a scalar hole    → TypeError + abort()
  *
  * The RC-recursion cases (array of strings, array of arrays of strings)
  * assert live counts directly: releasing the outer array must release
@@ -436,6 +437,30 @@ static void test_sparse(void) {
   scr_arr_release(slice);
   scr_arr_release(a);
 
+  ScrArr *far = scr_arr_new(SCR_ELEM_F64, 0);
+  scr_arr_push_f64(far, 1);
+  scr_arr_set_f64(far, 4, 5);
+  check_f64(scr_arr_len(far), 5, "far indexed write grows length");
+  check(scr_arr_has(far, 0) && !scr_arr_has(far, 1) &&
+            !scr_arr_has(far, 2) && !scr_arr_has(far, 3) &&
+            scr_arr_has(far, 4),
+        "far indexed write creates intermediate holes");
+  check_f64(scr_arr_get_f64(far, 0), 1, "far write preserves prefix");
+  check_f64(scr_arr_get_f64(far, 4), 5, "far write stores endpoint");
+  scr_arr_set_f64(far, 5, 6);
+  check_f64(scr_arr_len(far), 6, "write at sparse length appends");
+  check(!scr_arr_has(far, 3) && scr_arr_has(far, 5),
+        "sparse append preserves existing holes");
+  scr_arr_release(far);
+
+  ScrArr *far_refs = scr_arr_new(SCR_ELEM_STR, 0);
+  scr_arr_push_ref(far_refs, scr_str_new("a", 1));
+  scr_arr_set_ref(far_refs, 3, scr_str_new("d", 1));
+  check_f64(scr_arr_len(far_refs), 4, "far ref write grows length");
+  check(!scr_arr_has(far_refs, 1) && !scr_arr_has(far_refs, 2),
+        "far ref write leaves unowned holes");
+  scr_arr_release(far_refs);
+
   ScrArr *dst = scr_arr_new(SCR_ELEM_F64, 0);
   ScrArr *src = scr_arr_new(SCR_ELEM_F64, 1);
   scr_arr_push_f64(src, 1);
@@ -453,6 +478,76 @@ static void test_sparse(void) {
 #endif
 }
 
+static void test_copying_holes(void) {
+  long live0 = mock_live;
+  MockRec *undefined_fill = mock_new(-1);
+  ScrArr *src = scr_arr_new_ref(&mock_retain, &mock_release, NULL, 0);
+  scr_arr_push_ref(src, mock_new(1));
+  scr_arr_set_sparse_len(src, 4, undefined_fill);
+  scr_arr_set_ref(src, 2, mock_new(3));
+
+  ScrArr *reversed = scr_arr_to_reversed(src);
+  check(reversed->present == NULL, "toReversed densifies represented holes");
+  check(scr_arr_has(reversed, 0) && scr_arr_has(reversed, 1) &&
+            scr_arr_has(reversed, 2) && scr_arr_has(reversed, 3),
+        "toReversed result has every index");
+  MockRec *v = scr_arr_get_ref(reversed, 0);
+  check(v == undefined_fill, "toReversed reads a hole as undefined backing");
+  mock_release(v);
+  check(undefined_fill->rc == 3,
+        "toReversed retains each densified undefined backing");
+  scr_arr_release(reversed);
+  check(undefined_fill->rc == 1,
+        "toReversed releases densified undefined backings");
+
+  ScrArr *items = scr_arr_new_ref(&mock_retain, &mock_release, NULL, 0);
+  scr_arr_push_ref(items, mock_new(2));
+  ScrArr *spliced = scr_arr_to_spliced(src, 1, 1, items);
+  check(spliced->present == NULL, "toSpliced densifies kept holes");
+  check_f64(scr_arr_len(spliced), 4, "toSpliced keeps expected length");
+  v = scr_arr_get_ref(spliced, 3);
+  check(v == undefined_fill, "toSpliced reads a kept hole as undefined backing");
+  mock_release(v);
+  check(undefined_fill->rc == 2,
+        "toSpliced retains a kept undefined backing");
+  scr_arr_release(spliced);
+  check(undefined_fill->rc == 1,
+        "toSpliced releases a kept undefined backing");
+
+  MockRec *replacement = mock_new(9);
+  ScrArr *with = scr_arr_with_ref(src, 0, replacement);
+  check(with->present == NULL, "with densifies represented holes");
+  check(undefined_fill->rc == 3, "with retains densified undefined backings");
+  check(replacement->rc == 2, "with retains the borrowed replacement");
+  scr_arr_release(with);
+  check(undefined_fill->rc == 1, "with releases densified undefined backings");
+  check(replacement->rc == 1, "with releases its replacement reference");
+  mock_release(replacement);
+
+  ScrArr *plain = scr_arr_new(SCR_ELEM_F64, 0);
+  scr_arr_push_f64(plain, 1);
+  scr_arr_set_f64(plain, 2, 3);
+  ScrArr *no_items = scr_arr_new(SCR_ELEM_F64, 0);
+  ScrArr *deleted = scr_arr_to_spliced(plain, 1, 1, no_items);
+  check(deleted->present == NULL && scr_arr_len(deleted) == 2,
+        "toSpliced does not Get a deleted unrepresentable hole");
+  check_f64(scr_arr_get_f64(deleted, 0), 1, "toSpliced deleted-hole prefix");
+  check_f64(scr_arr_get_f64(deleted, 1), 3, "toSpliced deleted-hole suffix");
+  ScrArr *replaced = scr_arr_with_f64(plain, 1, 2);
+  check(replaced->present == NULL && scr_arr_has(replaced, 1),
+        "with does not Get its replaced hole");
+  check_f64(scr_arr_get_f64(replaced, 1), 2, "with stores over a scalar hole");
+  scr_arr_release(replaced);
+  scr_arr_release(deleted);
+  scr_arr_release(no_items);
+  scr_arr_release(plain);
+
+  scr_arr_release(items);
+  scr_arr_release(src);
+  mock_release(undefined_fill);
+  check(mock_live == live0, "copying methods balance ref elements");
+}
+
 int main(int argc, char **argv) {
   if (argc > 1) {
     ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
@@ -461,11 +556,15 @@ int main(int argc, char **argv) {
       scr_arr_get_f64(a, 1); /* len is 1 */
     } else if (strcmp(argv[1], "--crash-get-frac") == 0) {
       scr_arr_get_f64(a, 0.5);
-    } else if (strcmp(argv[1], "--crash-set-oob") == 0) {
-      scr_arr_set_f64(a, 2, 9); /* would create a hole */
+    } else if (strcmp(argv[1], "--crash-set-max") == 0) {
+      scr_arr_set_f64(a, 4294967295.0, 9);
     } else if (strcmp(argv[1], "--crash-pop-empty") == 0) {
       scr_arr_pop_f64(a);
       scr_arr_pop_f64(a); /* now empty */
+    } else if (strcmp(argv[1], "--crash-copy-hole") == 0) {
+      scr_arr_set_sparse_len(a, 2, NULL);
+      ScrArr *copy = scr_arr_to_reversed(a);
+      scr_arr_release(copy);
     } else {
       fprintf(stderr, "unknown mode %s\n", argv[1]);
       return 2;
@@ -481,6 +580,7 @@ int main(int argc, char **argv) {
   test_index_of_includes();
   test_ref_elements();
   test_ref_cycle();
+  test_copying_holes();
   test_join();
   test_sparse();
 

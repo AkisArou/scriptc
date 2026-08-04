@@ -719,10 +719,10 @@ ScrStr *scr_b64_missing_arg(void);
  * layout is untouched (interned-literal statics depend on it), so the
  * element kind lives here instead of in a shared object header.
  *
- * Index arguments are doubles (JS numbers). A valid index is a non-negative
- * integer; reads must be < len, writes may also be == len (append — JS
- * would create a hole past the end; scriptc traps instead, see
- * SEMANTICS.md). Anything else prints
+ * Index arguments are doubles (JS numbers). A valid array index is an
+ * integer in [0, 2^32-2]. Reads must also be < len; writes grow length to
+ * index + 1 and create holes between the old end and the written slot.
+ * Anything else prints
  *   scriptc: RangeError: array index <i> out of bounds (length <n>)
  * to stderr and abort()s. pop() on an empty array likewise traps (JS
  * returns undefined — unrepresentable here).
@@ -825,20 +825,26 @@ double scr_arr_get_dense_f64(ScrArr *a, double i);
 bool scr_arr_get_dense_bool(ScrArr *a, double i);
 void *scr_arr_get_dense_ref(ScrArr *a, double i);
 
-/* i == len appends; the _ref variant releases the old element (when
- * replacing) and takes ownership of the new one. */
+/* A write at or beyond len grows through i + 1, leaving intermediate slots
+ * as holes. The _ref variants release the old element (when replacing) and
+ * take ownership of the new one. _ref_fill stores fill as inert backing for
+ * new holes, allowing a statically known undefined union arm to answer Get. */
 void scr_arr_set_f64(ScrArr *a, double i, double v);
 void scr_arr_set_bool(ScrArr *a, double i, bool v);
 void scr_arr_set_ref(ScrArr *a, double i, void *v);
+void scr_arr_set_ref_fill(ScrArr *a, double i, void *v, void *fill);
 
 /* slice(start?, end?): a fresh +1 shallow copy of the index range —
  * ToIntegerOrInfinity indices, negatives from the end, clamping; ref
  * elements retain into the copy. Borrows a. */
 ScrArr *scr_arr_slice(ScrArr *a, double start, double end);
 
-/* ES2023 copying methods. All borrow their inputs and return fresh +1
- * shallow copies. with() raises Node's catchable RangeError for an invalid
- * relative index; the ref variant retains the borrowed replacement. */
+/* ES2023 copying methods. All borrow their inputs and return fresh packed +1
+ * shallow copies; source holes densify to present undefined values via a
+ * REF array's non-NULL hole backing. A hole whose typed element ABI cannot
+ * encode undefined traps rather than becoming 0/NULL. with() raises Node's
+ * catchable RangeError for an invalid relative index; the ref variant
+ * retains the borrowed replacement. */
 ScrArr *scr_arr_to_reversed(const ScrArr *a);
 ScrArr *scr_arr_to_spliced(const ScrArr *a, double start,
                            double delete_count, const ScrArr *items);

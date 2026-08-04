@@ -1340,15 +1340,26 @@ function deepEqHelper(L: Lowerer, t: IrType, loc: SrcLoc): string {
     case "array": {
       const len = (arr: IrExpr): IrExpr => ({ kind: "arrIntrinsic", method: "length", receiver: arr, args: [], type: F64, loc });
       const at = (arr: IrExpr, i: IrExpr): IrExpr => ({ kind: "arrayGet", arr, index: i, type: t.elem, loc });
+      const has = (arr: IrExpr, i: IrExpr): IrExpr => ({ kind: "arrayHas", arr, index: i, type: BOOL, loc });
+      const i = (): IrExpr => ref("i.0", F64);
       locals.push({ id: "i.0", name: "i", type: F64, mutable: true });
       body = [
         bailIf(neq(len(a()), len(b()))),
         {
           kind: "for",
           init: { kind: "varDecl", localId: "i.0", init: num(0), loc },
-          cond: { kind: "bin", op: "<", left: ref("i.0", F64), right: len(a()), type: BOOL, loc },
-          update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: ref("i.0", F64), right: num(1), type: F64, loc }, loc },
-          body: [bailIf(not(deq(t.elem, at(a(), ref("i.0", F64)), at(b(), ref("i.0", F64)))))],
+          cond: { kind: "bin", op: "<", left: i(), right: len(a()), type: BOOL, loc },
+          update: { kind: "assign", localId: "i.0", value: { kind: "bin", op: "+", left: i(), right: num(1), type: F64, loc }, loc },
+          body: [
+            bailIf(neq(has(a(), i()), has(b(), i()))),
+            {
+              kind: "if",
+              cond: has(a(), i()),
+              then: [bailIf(not(deq(t.elem, at(a(), i()), at(b(), i()))))],
+              else_: null,
+              loc,
+            },
+          ],
           loc,
         },
         ret(boolLit(true)),

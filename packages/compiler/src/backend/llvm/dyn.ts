@@ -668,6 +668,7 @@ export class LlDyn {
                 { index: 1, type: "i64" as const, name: "length" },
                 { index: 2, type: "i64" as const, name: "capacity" },
                 { index: 7, type: "ptr" as const, name: "data" },
+                { index: 8, type: "ptr" as const, name: "present" },
               ];
           members.forEach((member) => {
             const cachedPtr = B.tmp();

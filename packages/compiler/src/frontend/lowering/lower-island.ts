@@ -10,6 +10,7 @@ import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagno
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
 import { foldedStringKeyOf, lowerDynObjectLiteral, pureReemittable } from "./lower-exprs.js";
 import { PoisonError, dynUndefinedExpr, newFnCtx, nodeThrowExpr, own } from "./lowerer.js";
+import { requireArrayGetSafe } from "./array-density.js";
 import {
   NODE24_FETCH_COMPAT_PROFILE,
   STATIC_HEADERS_CALLS,
@@ -2947,6 +2948,7 @@ export function lowerStaticReadableStreamReaderCall(
           `spreading '${L.fmt(src.type)}' into Math.${name} (only a number[] spreads)`,
         );
       }
+      requireArrayGetSafe(L, spread.expression, F64, spread, `array spread into Math.${name}`);
       return {
         kind: "libCall",
         fn: name === "max" ? "math.maxArr" : "math.minArr",

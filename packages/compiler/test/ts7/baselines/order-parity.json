@@ -5482,9 +5482,33 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2672-http-request-response-callback.ts": {
+   "order": [
+    "<repo>/tests/corpus/2672-http-request-response-callback.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2673-sparse-array-js.js": {
    "order": [
     "<repo>/tests/corpus/2673-sparse-array-js.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2684-sparse-live-array-payload.ts": {
+   "order": [
+    "<repo>/tests/corpus/2684-sparse-live-array-payload.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2693-sparse-far-index-copy.ts": {
+   "order": [
+    "<repo>/tests/corpus/2693-sparse-far-index-copy.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2695-sparse-frontend-review-fixes.ts": {
+   "order": [
+    "<repo>/tests/corpus/2695-sparse-frontend-review-fixes.ts"
    ],
    "diags": []
   },
@@ -7458,6 +7482,12 @@
   "<repo>/tests/diagnostics/sets.ts": {
    "order": [
     "<repo>/tests/diagnostics/sets.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/sparse-get-scalar-fences.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/sparse-get-scalar-fences.ts"
    ],
    "diags": []
   },

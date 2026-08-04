@@ -44,29 +44,15 @@ static bool copying_arr_present_at(const ScrArr *a, size_t i) {
   return !a->present || (a->present[i >> 3] & (uint8_t)(1u << (i & 7))) != 0;
 }
 
-static void copying_arr_mark_hole(ScrArr *a, size_t i) {
-  if (!a->present) {
-    size_t bytes = (a->cap + 7) / 8;
-    a->present = malloc(bytes ? bytes : 1);
-    if (!a->present) scr_trap("scriptc: out of memory\n");
-    memset(a->present, 0xff, bytes);
-    if (a->cap & 7) a->present[bytes - 1] &= (uint8_t)((1u << (a->cap & 7)) - 1u);
-  }
-  a->present[i >> 3] &= (uint8_t)~(1u << (i & 7));
-}
-
 /* The ES2023 copying methods read every index (Get), so a source hole
- * densifies to its backing where that carries the value Get answers — the
- * interned undefined arm of a union element (nonzero). A zero backing
- * (f64/bool/plain ref) has no undefined to give: the slot stays a hole so
- * reads keep the deliberate trap instead of silently answering 0/NULL. */
+ * densifies to the undefined value carried in a REF hole's backing slot.
+ * Scalar and NULL-backed holes cannot encode undefined in their typed ABI;
+ * fail explicitly rather than fabricating 0/NULL or preserving the hole. */
 static void copying_arr_copy_slot(ScrArr *out, const ScrArr *src, size_t i) {
   uint64_t slot = src->data[i];
-  if (!copying_arr_present_at(src, i) && slot == 0) {
-    out->data[out->len] = 0;
-    copying_arr_mark_hole(out, out->len);
-    out->len++;
-    return;
+  if (!copying_arr_present_at(src, i) &&
+      (src->elem != SCR_ELEM_REF || slot == 0)) {
+    scr_trap("scriptc: TypeError: array hole cannot be represented as undefined by the element type\n");
   }
   out->data[out->len++] = copying_arr_retain_slot(src, slot);
 }
@@ -95,31 +81,25 @@ ScrArr *scr_arr_to_spliced(const ScrArr *a, double start,
   size_t out_len = a->len - ndelete + items->len;
   ScrArr *out = copying_arr_new_like(a, out_len);
   for (size_t i = 0; i < from; i++) copying_arr_copy_slot(out, a, i);
-  for (size_t i = 0; i < items->len; i++) {
-    out->data[out->len++] =
-        copying_arr_retain_slot(a, items->data[i]);
-  }
+  for (size_t i = 0; i < items->len; i++)
+    copying_arr_copy_slot(out, items, i);
   for (size_t i = from + ndelete; i < a->len; i++) {
     copying_arr_copy_slot(out, a, i);
   }
   return out;
 }
 
-/* `with` builds on slice (which preserves holes); densify the copy under
- * the same representability rule as copying_arr_copy_slot. */
-static void copying_arr_densify(ScrArr *out) {
-  if (!out->present) return;
-  bool all_present = true;
-  for (size_t i = 0; i < out->len; i++) {
-    uint8_t mask = (uint8_t)(1u << (i & 7));
-    if (out->present[i >> 3] & mask) continue;
-    if (out->data[i] != 0) out->present[i >> 3] |= mask;
-    else all_present = false;
+static ScrArr *copying_arr_with_slot(ScrArr *a, size_t index,
+                                     uint64_t replacement) {
+  ScrArr *out = copying_arr_new_like(a, a->len);
+  for (size_t i = 0; i < a->len; i++) {
+    if (i == index) {
+      out->data[out->len++] = copying_arr_retain_slot(a, replacement);
+    } else {
+      copying_arr_copy_slot(out, a, i);
+    }
   }
-  if (all_present) {
-    free(out->present);
-    out->present = NULL;
-  }
+  return out;
 }
 
 static bool copying_arr_with_index(const ScrArr *a, double index,
@@ -142,30 +122,21 @@ static bool copying_arr_with_index(const ScrArr *a, double index,
 ScrArr *scr_arr_with_f64(ScrArr *a, double index, double value) {
   size_t i;
   if (!copying_arr_with_index(a, index, &i)) return NULL;
-  ScrArr *out = scr_arr_slice(a, 0, INFINITY);
-  copying_arr_densify(out);
-  scr_arr_set_f64(out, (double)i, value);
-  return out;
+  uint64_t slot;
+  memcpy(&slot, &value, sizeof slot);
+  return copying_arr_with_slot(a, i, slot);
 }
 
 ScrArr *scr_arr_with_bool(ScrArr *a, double index, bool value) {
   size_t i;
   if (!copying_arr_with_index(a, index, &i)) return NULL;
-  ScrArr *out = scr_arr_slice(a, 0, INFINITY);
-  copying_arr_densify(out);
-  scr_arr_set_bool(out, (double)i, value);
-  return out;
+  return copying_arr_with_slot(a, i, value ? 1 : 0);
 }
 
 ScrArr *scr_arr_with_ref(ScrArr *a, double index, void *value) {
   size_t i;
   if (!copying_arr_with_index(a, index, &i)) return NULL;
-  ScrArr *out = scr_arr_slice(a, 0, INFINITY);
-  copying_arr_densify(out);
-  uint64_t retained =
-      copying_arr_retain_slot(a, copying_slot_from_ptr(value));
-  scr_arr_set_ref(out, (double)i, copying_slot_to_ptr(retained));
-  return out;
+  return copying_arr_with_slot(a, i, copying_slot_from_ptr(value));
 }
 
 ScrBytes *scr_bytes_to_reversed(const ScrBytes *b) {

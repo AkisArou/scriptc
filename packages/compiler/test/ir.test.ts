@@ -208,11 +208,17 @@ test("dense-array pass bypasses hole checks only for untouched packed locals", (
         name: "holey", params: [], returnType: F64, locals: [{ id: "a.0", name: "a", type: arr, mutable: false }], loc,
         body: [{ kind: "varDecl", localId: "a.0", init: { kind: "arrayLit", elems: [{ kind: "numLit", value: 1, type: F64, loc }], type: arr, loc }, loc }, { kind: "arrayDelete", arr: { kind: "varRef", localId: "a.0", type: arr, loc }, index: { kind: "numLit", value: 0, type: F64, loc }, loc }, { kind: "return", value: get("a.0"), loc }],
       },
+      {
+        name: "written", params: [], returnType: F64, locals: [{ id: "a.0", name: "a", type: arr, mutable: false }], loc,
+        body: [{ kind: "varDecl", localId: "a.0", init: { kind: "arrayLit", elems: [{ kind: "numLit", value: 1, type: F64, loc }], type: arr, loc }, loc }, { kind: "arraySet", arr: { kind: "varRef", localId: "a.0", type: arr, loc }, index: { kind: "numLit", value: 4, type: F64, loc }, value: { kind: "numLit", value: 5, type: F64, loc }, loc }, { kind: "return", value: get("a.0"), loc }],
+      },
     ],
   };
   markDenseArrayReads(mod);
   const dense = mod.functions[0]!.body[1]!;
   const holey = mod.functions[1]!.body[2]!;
+  const written = mod.functions[2]!.body[2]!;
   expect(dense.kind === "return" && dense.value?.kind === "arrayGet" && dense.value.dense).toBe(true);
   expect(holey.kind === "return" && holey.value?.kind === "arrayGet" && holey.value.dense).toBeFalsy();
+  expect(written.kind === "return" && written.value?.kind === "arrayGet" && written.value.dense).toBeFalsy();
 });

@@ -3169,9 +3169,18 @@ class LlEmitter {
         const idx = this.emitExpr(s.index);
         const v = this.emitExpr(s.value);
         if (s.arr.type.kind !== "array") throw new Error("llvm emitter bug: arraySet on non-array");
-        const acc = elemAccess(s.arr.type.elem);
+        const elem = s.arr.type.elem;
+        const acc = elemAccess(elem);
         if (acc === "ref") this.moveTemp(v);
         const argTy = acc === "f64" ? "double" : acc === "bool" ? "i1" : "ptr";
+        if (elem.kind === "union") {
+          const tag = this.undefinedArmTag(elem);
+          if (tag >= 0) {
+            this.declare(`declare void @scr_arr_set_ref_fill(ptr, double, ptr, ptr)`);
+            B.line(`call void @scr_arr_set_ref_fill(ptr ${arr.name}, double ${idx.name}, ptr ${v.name}, ptr ${this.unitInstanceRef(elem.unionId, tag)})`);
+            break;
+          }
+        }
         this.declare(`declare void @scr_arr_set_${acc}(ptr, double, ${argTy === "i1" ? "i1 zeroext" : argTy})`);
         B.line(`call void @scr_arr_set_${acc}(ptr ${arr.name}, double ${idx.name}, ${argTy} ${v.name})`);
         break;
@@ -10148,6 +10157,12 @@ class LlEmitter {
         `  %next_data = load ptr, ptr %next_data_ptr`,
         `  store ptr %next_data, ptr %target_data_ptr`,
         `  store ptr %target_data, ptr %next_data_ptr`,
+        `  %target_present_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 8`,
+        `  %next_present_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 8`,
+        `  %target_present = load ptr, ptr %target_present_ptr`,
+        `  %next_present = load ptr, ptr %next_present_ptr`,
+        `  store ptr %next_present, ptr %target_present_ptr`,
+        `  store ptr %target_present, ptr %next_present_ptr`,
         `  call void @scr_arr_release(ptr %next)`,
         `  br label %done`,
         `done:`,
@@ -10416,7 +10431,9 @@ class LlEmitter {
       const elem = t.elem;
       this.declare(`declare ptr @scr_dyn_new_arr()`);
       this.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
+      this.declare(`declare void @scr_dyn_arr_push_hole(ptr)`);
       this.declare(`declare double @scr_arr_len(ptr)`);
+      this.declare(`declare zeroext i1 @scr_arr_has(ptr, double)`);
       const out = B.tmp();
       B.line(`${out} = call ptr @scr_dyn_new_arr()`);
       const len = B.tmp();
@@ -10426,6 +10443,9 @@ class LlEmitter {
       B.line(`store double ${f64Lit(0)}, ptr ${iSlot}`);
       const condition = B.newLabel("strm.c");
       const body = B.newLabel("strm.b");
+      const present = B.newLabel("strm.p");
+      const hole = B.newLabel("strm.h");
+      const next = B.newLabel("strm.n");
       const done = B.newLabel("strm.e");
       B.br(condition);
       B.startBlock(condition);
@@ -10435,6 +10455,13 @@ class LlEmitter {
       B.line(`${more} = fcmp olt double ${index}, ${len}`);
       B.condBr(more, body, done);
       B.startBlock(body);
+      const has = B.tmp();
+      B.line(`${has} = call zeroext i1 @scr_arr_has(ptr %p, double ${index})`);
+      B.condBr(has, present, hole);
+      B.startBlock(hole);
+      B.line(`call void @scr_dyn_arr_push_hole(ptr ${out})`);
+      B.br(next);
+      B.startBlock(present);
       let value: string;
       if (elem.kind === "f64" || elem.kind === "bool") {
         const valueTy = elem.kind === "f64" ? "double" : "i1";
@@ -10453,9 +10480,11 @@ class LlEmitter {
       if (isRefCounted(elem)) {
         B.line(`call void ${releaseSym(this, elem)}(ptr ${value})`);
       }
-      const next = B.tmp();
-      B.line(`${next} = fadd double ${index}, ${f64Lit(1)}`);
-      B.line(`store double ${next}, ptr ${iSlot}`);
+      B.br(next);
+      B.startBlock(next);
+      const nextIndex = B.tmp();
+      B.line(`${nextIndex} = fadd double ${index}, ${f64Lit(1)}`);
+      B.line(`store double ${nextIndex}, ptr ${iSlot}`);
       B.br(condition);
       B.startBlock(done);
       B.terminate(`ret ptr ${out}`);

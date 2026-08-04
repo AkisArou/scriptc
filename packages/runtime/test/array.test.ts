@@ -19,6 +19,7 @@ beforeAll(async () => {
     "-o", bin,
     join(testDir, "test_array.c"),
     join(testDir, "../src/scr_array.c"),
+    join(testDir, "../src/scr_copying.c"),
     join(testDir, "../src/scr_string.c"),
     join(testDir, "../src/scr_number.c"),
     join(testDir, "../src/scr_bytes.c"),
@@ -35,13 +36,12 @@ test("array runtime: push/pop/set/get, RC recursion, growth", async () => {
   expect(stderr.trim()).toMatch(/^(\d+)\/\1 cases passed$/);
 });
 
-// JS returns undefined for OOB reads and creates holes for far writes; both
-// are unrepresentable, so the runtime must trap (documented divergence).
 test.each([
-  ["--crash-get-oob", "array index 1 out of bounds (length 1)"],
-  ["--crash-get-frac", "array index 0.5 out of bounds (length 1)"],
-  ["--crash-set-oob", "array index 2 out of bounds (length 1)"],
-  ["--crash-pop-empty", "pop() on an empty array"],
+  ["--crash-get-oob", "RangeError: array index 1 out of bounds (length 1)"],
+  ["--crash-get-frac", "RangeError: array index 0.5 out of bounds (length 1)"],
+  ["--crash-set-max", "RangeError: array index 4294967295 out of bounds (length 1)"],
+  ["--crash-pop-empty", "RangeError: pop() on an empty array"],
+  ["--crash-copy-hole", "TypeError: array hole cannot be represented as undefined by the element type"],
 ])("trap aborts (%s)", async (mode, message) => {
   const err = await execFileAsync(bin, [mode]).then(
     () => {
@@ -50,5 +50,5 @@ test.each([
     (e: Error & { signal?: string; stderr?: string }) => e,
   );
   expect(err.signal).toBe("SIGABRT");
-  expect(err.stderr).toContain(`scriptc: RangeError: ${message}`);
+  expect(err.stderr).toContain(`scriptc: ${message}`);
 });

@@ -27,6 +27,7 @@ import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUn
 import { declSymbolOf } from "./lower-modules.js";
 import { expandoMemberRead } from "./lower-expando.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
+import { requireArrayGetSafe } from "./array-density.js";
 
 /** How a parameter participates in CALL-SITE COMPLETION (the frontend
  * completes every call to the one full signature, so the IR and backends
@@ -478,6 +479,10 @@ export interface GenericInstance {
               a,
               `spreading '${L.fmt(src.type)}' into a '${L.fmt(restType)}' rest parameter (only a same-element-type array spreads)`,
             );
+          }
+          const sourceType = L.mapTypeOf(L.typeOf(a.expression));
+          if (sourceType?.kind === "array") {
+            requireArrayGetSafe(L, a.expression, sourceType.elem, a, "array argument spread");
           }
           spreads.push(i);
           return src;

@@ -1,0 +1,76 @@
+sparse-get-scalar-fences.ts:3:1 - error SC1090: Array.find on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  2 | // Direct Get-based methods cannot materialize undefined in number slots.
+  3 | scalarHoles.find((value) => value > 0);
+    | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  4 | scalarHoles.findIndex((value) => value > 0);
+
+sparse-get-scalar-fences.ts:4:1 - error SC1090: Array.findIndex on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  3 | scalarHoles.find((value) => value > 0);
+  4 | scalarHoles.findIndex((value) => value > 0);
+    | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  5 | scalarHoles.findLast((value) => value > 0);
+
+sparse-get-scalar-fences.ts:5:1 - error SC1090: Array.findLast on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  4 | scalarHoles.findIndex((value) => value > 0);
+  5 | scalarHoles.findLast((value) => value > 0);
+    | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  6 | scalarHoles.findLastIndex((value) => value > 0);
+
+sparse-get-scalar-fences.ts:6:1 - error SC1090: Array.findLastIndex on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  5 | scalarHoles.findLast((value) => value > 0);
+  6 | scalarHoles.findLastIndex((value) => value > 0);
+    | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  7 | // Iteration and spread have the same read-through-holes behavior.
+
+sparse-get-scalar-fences.ts:8:21 - error SC1090: array for-of iteration on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  7 | // Iteration and spread have the same read-through-holes behavior.
+  8 | for (const value of scalarHoles) console.log(value);
+    |                     ^~~~~~~~~~~
+  9 | const copied = [...scalarHoles];
+
+sparse-get-scalar-fences.ts:9:17 - error SC1090: array spread on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+   8 | for (const value of scalarHoles) console.log(value);
+   9 | const copied = [...scalarHoles];
+     |                 ^~~~~~~~~~~~~~
+  10 | console.log(copied.length);
+
+sparse-get-scalar-fences.ts:15:9 - error SC1090: array argument spread on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  14 | }
+  15 | takeAll(...scalarHoles);
+     |         ^~~~~~~~~~~~~~
+  16 | Math.max(...scalarHoles);
+
+sparse-get-scalar-fences.ts:16:10 - error SC1090: array spread into Math.max on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  15 | takeAll(...scalarHoles);
+  16 | Math.max(...scalarHoles);
+     |          ^~~~~~~~~~~~~~
+  17 | String.fromCharCode(...scalarHoles);
+
+sparse-get-scalar-fences.ts:17:21 - error SC1090: array argument spread on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  16 | Math.max(...scalarHoles);
+  17 | String.fromCharCode(...scalarHoles);
+     |                     ^~~~~~~~~~~~~~
+  18 | // Copying sort reads through holes and produces present undefined entries.
+
+sparse-get-scalar-fences.ts:19:1 - error SC1090: Array.toSorted on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  18 | // Copying sort reads through holes and produces present undefined entries.
+  19 | scalarHoles.toSorted((a, b) => a - b);
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  20 | // A later write cannot make this earlier Get safe.
+
+sparse-get-scalar-fences.ts:22:1 - error SC1090: Array.find on a sparse 'number[]' value (a hole must be observed as undefined, which 'number' element slots cannot represent - use an undefined-capable element type or a dense array) is not supported yet
+
+  21 | const writtenLater = new Array<number>(2);
+  22 | writtenLater.find((value) => value > 0);
+     | ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  23 | writtenLater[0] = 1;

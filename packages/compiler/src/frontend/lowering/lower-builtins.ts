@@ -32,6 +32,7 @@ import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "
 import { timerStyleCallback } from "./lower-calls.js";
 import { registerHttpClientFnBinding } from "./lower-server.js";
 import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
+import { requireArrayGetSafe } from "./array-density.js";
 
 
 
@@ -1326,6 +1327,10 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       if (spread) {
         if (expr.arguments.length === 1) {
           // The whole-array form forwards the operand directly (no copy).
+          const sourceType = L.mapTypeOf(L.typeOf(spread.expression));
+          if (sourceType?.kind === "array") {
+            requireArrayGetSafe(L, spread.expression, sourceType.elem, spread, "array argument spread");
+          }
           const packed = L.lowerExprExpecting(spread.expression, arrayOf(STRING));
           return { kind: "libCall", fn: fn.fn, args: [packed], type: fn.result, loc };
         }
@@ -1333,6 +1338,13 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         // tmpdir.resolve: plain arguments and spread arrays pack into one
         // fresh string[] (arrayLit's spread positions copy element-wise,
         // JS-exact; a dyn spread source rides the validated extraction).
+        for (const arg of expr.arguments) {
+          if (!ts.isSpreadElement(arg)) continue;
+          const sourceType = L.mapTypeOf(L.typeOf(arg.expression));
+          if (sourceType?.kind === "array") {
+            requireArrayGetSafe(L, arg.expression, sourceType.elem, arg, "array argument spread");
+          }
+        }
         const elems = expr.arguments.map((a) =>
           ts.isSpreadElement(a)
             ? L.lowerExprExpecting(a.expression, arrayOf(STRING))
@@ -6415,6 +6427,7 @@ type TextCodecCtor = {
         return { kind: "libCall", fn: "string.fromCharCode", args: [packed], type: STRING, loc };
       }
       const packed = L.lowerExprExpecting(spread.expression, arrayOf(F64));
+      requireArrayGetSafe(L, spread.expression, F64, spread, "array argument spread");
       return { kind: "libCall", fn: "string.fromCharCode", args: [packed], type: STRING, loc };
     }
     const elems = call.arguments.map((a) => L.lowerExprExpecting(a, F64));

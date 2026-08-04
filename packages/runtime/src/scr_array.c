@@ -16,9 +16,9 @@ static void scr_arr_oom(void) {
   scr_trap("scriptc: out of memory\n");
 }
 
-/* JS would return undefined for an OOB read and create holes for a far OOB
- * write; both are unrepresentable here (see SEMANTICS.md), so any invalid
- * index — negative, fractional, NaN, or past the allowed end — traps. */
+/* Reads outside length and values that are not array indices remain
+ * unrepresentable. Writes accept every JS array index (through 2^32-2),
+ * growing length and creating holes as needed. */
 static void scr_arr_trap_oob(double i, size_t len) {
   char buf[32];
   scr_f64_to_str(i, buf);
@@ -26,12 +26,10 @@ static void scr_arr_trap_oob(double i, size_t len) {
                buf, len);
 }
 
-/* Validate i as an element index. limit is a->len for reads, a->len + 1 for
- * writes (i == len appends). NaN fails the >= 0 test; fractional indices
- * fail the trunc test. */
-static size_t scr_arr_check_index(const ScrArr *a, double i, bool allow_append) {
-  size_t limit = a->len + (allow_append ? 1 : 0);
-  if (!(i >= 0) || i != trunc(i) || i >= (double)limit) {
+/* 2^32-1 is the maximum array length and therefore not an array index. */
+static size_t scr_arr_check_index(const ScrArr *a, double i, bool write) {
+  double limit = write ? 4294967295.0 : (double)a->len;
+  if (!(i >= 0) || i != trunc(i) || i >= limit) {
     scr_arr_trap_oob(i, a->len);
   }
   return (size_t)i;
@@ -93,6 +91,16 @@ static void scr_arr_grow(ScrArr *a, size_t need) {
 
 static bool scr_arr_present_at(const ScrArr *a, size_t i) {
   return !a->present || (a->present[i >> 3] & (uint8_t)(1u << (i & 7))) != 0;
+}
+
+static void scr_arr_make_sparse(ScrArr *a) {
+  if (a->present) return;
+  size_t bytes = (a->cap + 7) / 8;
+  a->present = calloc(bytes ? bytes : 1, 1);
+  if (!a->present) scr_arr_oom();
+  for (size_t i = 0; i < a->len; i++) {
+    a->present[i >> 3] |= (uint8_t)(1u << (i & 7));
+  }
 }
 
 static void scr_arr_mark_present(ScrArr *a, size_t i, bool present) {
@@ -233,12 +241,7 @@ void scr_arr_set_sparse_len(ScrArr *a, double n, void *fill) {
   }
   if (len == a->len) return;
   scr_arr_grow(a, len);
-  if (!a->present) {
-    size_t bytes = (a->cap + 7) / 8;
-    a->present = calloc(bytes ? bytes : 1, 1);
-    if (!a->present) scr_arr_oom();
-    for (size_t i = 0; i < a->len; i++) scr_arr_mark_present(a, i, true);
-  }
+  scr_arr_make_sparse(a);
   uint64_t slot = scr_slot_from_ptr(fill);
   for (size_t i = a->len; i < len; i++) {
     a->data[i] = slot;
@@ -360,15 +363,35 @@ void *scr_arr_get_dense_ref(ScrArr *a, double i) {
   return p;
 }
 
-/* ── writes: i == len appends ──────────────────────────────────────────── */
+/* ── writes: far indices grow length and create holes ──────────────────── */
 
-static void scr_arr_set_slot(ScrArr *a, double i, uint64_t slot) {
+static void scr_arr_set_slot(ScrArr *a, double i, uint64_t slot,
+                             uint64_t hole) {
   size_t idx = scr_arr_check_index(a, i, true);
-  if (idx == a->len) {
-    scr_arr_grow(a, a->len + 1);
-    a->len++;
+  if (idx >= a->len) {
+    size_t old_len = a->len;
+    /* An already-sparse REF array can carry the undefined union singleton
+     * in its holes. Extend with the same inert backing when the caller did
+     * not supply the static element type's undefined arm. */
+    if (idx > old_len && hole == 0 && a->present && a->elem == SCR_ELEM_REF) {
+      for (size_t j = 0; j < old_len; j++) {
+        if (!scr_arr_present_at(a, j)) {
+          hole = a->data[j];
+          break;
+        }
+      }
+    }
+    scr_arr_grow(a, idx + 1);
+    if (idx > old_len) {
+      scr_arr_make_sparse(a);
+      for (size_t j = old_len; j < idx; j++) {
+        a->data[j] = hole;
+        scr_arr_mark_present(a, j, false);
+      }
+    }
     a->data[idx] = slot;
     scr_arr_mark_present(a, idx, true);
+    a->len = idx + 1;
     return;
   }
   /* Unlink-then-release: a release can trigger a cycle collection, which
@@ -382,15 +405,19 @@ static void scr_arr_set_slot(ScrArr *a, double i, uint64_t slot) {
 }
 
 void scr_arr_set_f64(ScrArr *a, double i, double v) {
-  scr_arr_set_slot(a, i, scr_slot_from_f64(v));
+  scr_arr_set_slot(a, i, scr_slot_from_f64(v), 0);
 }
 
 void scr_arr_set_bool(ScrArr *a, double i, bool v) {
-  scr_arr_set_slot(a, i, (uint64_t)(v ? 1 : 0));
+  scr_arr_set_slot(a, i, (uint64_t)(v ? 1 : 0), 0);
 }
 
 void scr_arr_set_ref(ScrArr *a, double i, void *v) {
-  scr_arr_set_slot(a, i, scr_slot_from_ptr(v));
+  scr_arr_set_slot(a, i, scr_slot_from_ptr(v), 0);
+}
+
+void scr_arr_set_ref_fill(ScrArr *a, double i, void *v, void *fill) {
+  scr_arr_set_slot(a, i, scr_slot_from_ptr(v), scr_slot_from_ptr(fill));
 }
 
 /* ── push / pop ────────────────────────────────────────────────────────── */

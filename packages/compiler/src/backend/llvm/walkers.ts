@@ -874,6 +874,7 @@ export class LlWalkers {
     host.declare(`declare void @scr_jb_init(ptr)`);
     host.declare(`declare ptr @scr_jb_finish(ptr)`);
     host.declare(`declare double @scr_arr_len(ptr)`);
+    host.declare(`declare zeroext i1 @scr_arr_has(ptr, double)`);
     host.declare(`declare ptr @scr_arr_get_ref(ptr, double)`);
     host.declare(`declare void @scr_union_release(ptr)`);
     host.declare(`declare void @scr_str_release(ptr)`);
@@ -900,13 +901,18 @@ export class LlWalkers {
     // `if (i) put sep bytes` — separators between elements only.
     const nz = B.tmp();
     const lsep = B.newLabel("uj.s");
-    const lel = B.newLabel("uj.v");
+    const lhas = B.newLabel("uj.h");
+    const lval = B.newLabel("uj.v");
     B.line(`${nz} = fcmp ogt double ${i}, ${f64Lit(0)}`);
-    B.condBr(nz, lsep, lel);
+    B.condBr(nz, lsep, lhas);
     B.startBlock(lsep);
     this.putScrStr(B, buf, "%sep");
-    B.br(lel);
-    B.startBlock(lel);
+    B.br(lhas);
+    B.startBlock(lhas);
+    const present = B.tmp();
+    B.line(`${present} = call i1 @scr_arr_has(ptr %a, double ${i})`);
+    B.condBr(present, lval, ln);
+    B.startBlock(lval);
     const u = B.tmp();
     B.line(`${u} = call ptr @scr_arr_get_ref(ptr %a, double ${i}) ; element (+1)`);
     if (unitTags.length > 0) {

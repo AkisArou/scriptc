@@ -1155,10 +1155,10 @@ export type IrStmt =
       labels?: string[];
       loc: SrcLoc;
     }
-  /** Element write `a[i] = v` — statement-only, like `assign`. Valid indices
-   * are [0, length]; i == length appends (JS would create a hole past that —
-   * scriptc traps instead, see SEMANTICS.md). Ownership of a refcounted
-   * value MOVES into the array; the replaced element is released. */
+  /** Element write `a[i] = v` — statement-only, like `assign`. Valid array
+   * indices are [0, 2^32-2]; writes at or beyond length grow through i + 1
+   * and leave intermediate holes. Ownership of a refcounted value MOVES
+   * into the array; the replaced element is released. */
   | { kind: "arraySet"; arr: IrExpr; index: IrExpr; value: IrExpr; loc: SrcLoc }
   /** `delete a[i]`: clears presence without changing length. */
   | { kind: "arrayDelete"; arr: IrExpr; index: IrExpr; loc: SrcLoc }

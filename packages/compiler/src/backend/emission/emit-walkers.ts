@@ -260,6 +260,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       `  size_t n = (size_t)scr_arr_len(a);`,
       `  for (size_t i = 0; i < n; i++) {`,
       `    if (i) for (size_t j = 0; j < sep->len; j++) scr_jb_putc(&b, sep->data[j]);`,
+      `    if (!scr_arr_has(a, (double)i)) continue;`,
       `    ScrUnion *u = (ScrUnion *)scr_arr_get_ref(a, (double)i);`,
       ...(unitTags.length > 0
         ? [`    if (${unitTags.map((t) => `u->tag == ${t}`).join(" || ")}) { scr_union_release(u); continue; }`]
@@ -1197,12 +1198,15 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             `      size_t sc_old_len = sc_cached->len;`,
             `      size_t sc_old_cap = sc_cached->cap;`,
             `      uint64_t *sc_old_data = sc_cached->data;`,
+            `      uint8_t *sc_old_present = sc_cached->present;`,
             `      sc_cached->len = sc_out->len;`,
             `      sc_cached->cap = sc_out->cap;`,
             `      sc_cached->data = sc_out->data;`,
+            `      sc_cached->present = sc_out->present;`,
             `      sc_out->len = sc_old_len;`,
             `      sc_out->cap = sc_old_cap;`,
             `      sc_out->data = sc_old_data;`,
+            `      sc_out->present = sc_old_present;`,
             `      scr_arr_release(sc_out);`,
             `      return sc_cached;`,
             `    }`,

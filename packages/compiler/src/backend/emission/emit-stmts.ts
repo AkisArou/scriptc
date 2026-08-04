@@ -360,8 +360,16 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         const idx = E.emitExpr(s.index);
         const v = E.emitExpr(s.value);
         if (s.arr.type.kind !== "array") throw new Error("emitter bug: arraySet on non-array");
-        const acc = elemAccess(s.arr.type.elem);
+        const elem = s.arr.type.elem;
+        const acc = elemAccess(elem);
         if (acc === "ref") E.moveTemp(v);
+        if (elem.kind === "union") {
+          const tag = E.undefinedArmTag(elem);
+          if (tag >= 0) {
+            E.line(`scr_arr_set_ref_fill(${arr.name}, ${idx.name}, ${v.name}, ${E.unitInstanceRef(elem.unionId, tag)});${E.srcComment(s.loc)}`);
+            break;
+          }
+        }
         E.line(`scr_arr_set_${acc}(${arr.name}, ${idx.name}, ${v.name});${E.srcComment(s.loc)}`);
         break;
       }

@@ -45,12 +45,15 @@ function streamTypedRefCommitAdapter(
       `  size_t sc_target_len = sc_target->len;`,
       `  size_t sc_target_cap = sc_target->cap;`,
       `  uint64_t *sc_target_data = sc_target->data;`,
+      `  uint8_t *sc_target_present = sc_target->present;`,
       `  sc_target->len = sc_next->len;`,
       `  sc_target->cap = sc_next->cap;`,
       `  sc_target->data = sc_next->data;`,
+      `  sc_target->present = sc_next->present;`,
       `  sc_next->len = sc_target_len;`,
       `  sc_next->cap = sc_target_cap;`,
       `  sc_next->data = sc_target_data;`,
+      `  sc_next->present = sc_target_present;`,
       `  scr_arr_release(sc_next);`,
       `}`,
       ``,
@@ -200,6 +203,7 @@ function streamTypedRefAdapter(
     lines.push(
       `  ScrDyn *d = scr_dyn_new_arr();`,
       `  for (size_t sc_i = 0; sc_i < v->len; sc_i++) {`,
+      `    if (!scr_arr_has(v, (double)sc_i)) { scr_dyn_arr_push_hole(d); continue; }`,
     );
     if (elem.kind === "f64") {
       lines.push(

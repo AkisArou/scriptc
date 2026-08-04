@@ -88,7 +88,10 @@ function markFunction(fn: IrFunction): void {
         case "exprStmt": expr(s.expr); break;
         case "arraySet": {
           const id = directCandidate(s.arr);
-          if (id === null) expr(s.arr);
+          // A dynamic index can now grow past length and introduce holes.
+          // Without a range proof, later reads must inspect presence.
+          if (id !== null) invalidate(id);
+          else expr(s.arr);
           expr(s.index);
           expr(s.value);
           break;
