@@ -646,15 +646,34 @@ function nestedBareRequiresOf7(sf: ts.SourceFile): ts.CallExpression[] {
   return out;
 }
 
+/** A top-level await expression is ESM-only syntax in Node's ambiguous-file
+ * detector. TypeScript's externalModuleIndicator does NOT count it (and then
+ * raises TS1375 asking for `export {}`), so retain that one Node-specific
+ * piece of module syntax explicitly. Await inside a function does not make
+ * its containing file an ES module. */
+function hasNodeTopLevelAwait7(sf: ts.SourceFile): boolean {
+  let found = false;
+  ts.walkPreorder(sf, (node) => {
+    if (node !== sf && ts.isFunctionLike(node)) return "skip";
+    if (ts.isAwaitExpression(node)) {
+      found = true;
+      return "stop";
+    }
+    return undefined;
+  });
+  return found;
+}
+
 /** True when Node would treat this file as an ES MODULE (never defining
  * require/__dirname there): .mjs always, .cjs never, and .js/.ts by
  * syntactic module detection — spelled to 5.9.3's OBSERVED bundler-mode
  * behavior (it set impliedNodeFormat only for the mjs/cjs families; 7's
- * client SourceFile has no impliedNodeFormat at all). */
+ * client SourceFile has no impliedNodeFormat at all), plus Node's top-level
+ * await detection above. */
 function isNodeEsmFile7(sf: ts.SourceFile): boolean {
   if (sf.fileName.endsWith(".cjs") || sf.fileName.endsWith(".cts")) return false;
   if (sf.fileName.endsWith(".mjs") || sf.fileName.endsWith(".mts")) return true;
-  return ts.isExternalModule(sf);
+  return ts.isExternalModule(sf) || hasNodeTopLevelAwait7(sf);
 }
 
 /** A JavaScript source file Node treats as CommonJS (not an ES module):
@@ -1505,6 +1524,16 @@ function preflight7(load: LoadResult): {
     (isNodeModulesPath(file) || workspacePackageOfPath(file) !== null);
   const nodeModulesJsSuppressed = (d: ts.Diagnostic): boolean =>
     d.fileName !== undefined && islandJsFile(d.fileName);
+  /* Node 24's ambiguous-file syntax detection treats top-level await as an
+   * ES-module marker. TypeScript's bundler-mode checker does not: it emits
+   * TS1375 for every such await until the source spells an import/export.
+   * Suppress exactly that classification diagnostic when Node's additional
+   * marker is present; all other syntax and type diagnostics remain gates. */
+  const nodeTopLevelAwaitModuleSuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
+    if (d.code !== 1375 || d.fileName === undefined) return false;
+    const sf = p.getSourceFile(d.fileName);
+    return sf !== undefined && isNodeEsmFile7(sf);
+  };
   /* JSDoc TYPE positions in JS files are documentation Node never reads:
    * a name-resolution failure THERE (2304/2552 — the pattern's utilities.js
    * spells a mapped type over a @template name it never declared) types
@@ -1566,6 +1595,7 @@ function preflight7(load: LoadResult): {
         !suppressedJsStrictness7(d) &&
         !npmStaticFileSuppressed(d) &&
         !nodeModulesJsSuppressed(d) &&
+        !nodeTopLevelAwaitModuleSuppressed(p, d) &&
         !namespaceCalleeSuppressed(p, d) &&
         !workspaceImplicitAnySuppressed(p, d) &&
         !jsdocTypeSuppressed(p, d, commentDup),
