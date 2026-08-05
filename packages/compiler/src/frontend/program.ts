@@ -646,16 +646,19 @@ function nestedBareRequiresOf7(sf: ts.SourceFile): ts.CallExpression[] {
   return out;
 }
 
-/** A top-level await expression is ESM-only syntax in Node's ambiguous-file
- * detector. TypeScript's externalModuleIndicator does NOT count it (and then
- * raises TS1375 asking for `export {}`), so retain that one Node-specific
- * piece of module syntax explicitly. Await inside a function does not make
- * its containing file an ES module. */
+/** Top-level await syntax is an ESM marker in Node's ambiguous-file detector.
+ * TypeScript's externalModuleIndicator does NOT count either an await
+ * expression or a for-await loop (and then raises TS1375/TS1431 asking for
+ * `export {}`), so retain those Node-specific forms explicitly. Await inside
+ * a function does not make its containing file an ES module. */
 function hasNodeTopLevelAwait7(sf: ts.SourceFile): boolean {
   let found = false;
   ts.walkPreorder(sf, (node) => {
     if (node !== sf && ts.isFunctionLike(node)) return "skip";
-    if (ts.isAwaitExpression(node)) {
+    if (
+      ts.isAwaitExpression(node) ||
+      (ts.isForOfStatement(node) && node.awaitModifier !== undefined)
+    ) {
       found = true;
       return "stop";
     }
@@ -1526,11 +1529,12 @@ function preflight7(load: LoadResult): {
     d.fileName !== undefined && islandJsFile(d.fileName);
   /* Node 24's ambiguous-file syntax detection treats top-level await as an
    * ES-module marker. TypeScript's bundler-mode checker does not: it emits
-   * TS1375 for every such await until the source spells an import/export.
-   * Suppress exactly that classification diagnostic when Node's additional
-   * marker is present; all other syntax and type diagnostics remain gates. */
+   * TS1375 for await expressions and TS1431 for for-await loops until the
+   * source spells an import/export. Suppress exactly those classification
+   * diagnostics when Node's additional marker is present; all other syntax
+   * and type diagnostics remain gates. */
   const nodeTopLevelAwaitModuleSuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
-    if (d.code !== 1375 || d.fileName === undefined) return false;
+    if ((d.code !== 1375 && d.code !== 1431) || d.fileName === undefined) return false;
     const sf = p.getSourceFile(d.fileName);
     return sf !== undefined && isNodeEsmFile7(sf);
   };
@@ -2114,38 +2118,42 @@ function preflight7(load: LoadResult): {
           if (dep) deps.push({ dep });
         }
       }
-      if (!ts.isExternalModule(sf)) {
-        for (const call of nestedBareRequiresOf7(sf)) {
-          const spec = requireSpecOf7(call)!;
-          const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
-          if (load.externalTypes.has(spec)) {
-            continue;
-          }
-          if (!isRelativeSpecifier(spec)) {
-            // --npm-static: opted-in packages ride the program-module edge
-            // (the statement-level require branch above).
-            const npmReq = !spec.startsWith("#") ? resolveNpmImport7(sf.fileName, spec) : null;
-            if (npmReq !== null && isNpmStaticPackage(npmReq.packageName)) {
-              const nDep = npmStaticProgramDep(program, npmReq.packageName, npmReq.typesFile);
-              if (nDep !== null) deps.push({ dep: nDep });
-              continue;
-            }
-            if (canonicalBuiltinModule(spec) === null && !processModuleAliasRequire7(spec, null)) {
-              // Binding-less by construction — same require-site throw
-              // channel as the statement-level form above.
-              if (probeNodeRequireRefusal(sf.fileName, spec) === null) {
-                diags.push(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(spec)));
-              }
-            }
-            continue;
-          }
-          const dep = resolveImport7(program, sf, spec);
-          if (dep && dep.fileName.endsWith(".json")) {
-            diags.push(unsupportedDiag("SC1012", loc, "require() of JSON modules"));
-            continue;
-          }
-          if (dep) deps.push({ dep });
+      for (const call of nestedBareRequiresOf7(sf)) {
+        const spec = requireSpecOf7(call)!;
+        const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
+        if (isNodeEsmFile7(sf)) {
+          diags.push(
+            unsupportedDiag("SC1013", loc, "require() in an ES module (Node throws ReferenceError — use import)"),
+          );
+          continue;
         }
+        if (load.externalTypes.has(spec)) {
+          continue;
+        }
+        if (!isRelativeSpecifier(spec)) {
+          // --npm-static: opted-in packages ride the program-module edge
+          // (the statement-level require branch above).
+          const npmReq = !spec.startsWith("#") ? resolveNpmImport7(sf.fileName, spec) : null;
+          if (npmReq !== null && isNpmStaticPackage(npmReq.packageName)) {
+            const nDep = npmStaticProgramDep(program, npmReq.packageName, npmReq.typesFile);
+            if (nDep !== null) deps.push({ dep: nDep });
+            continue;
+          }
+          if (canonicalBuiltinModule(spec) === null && !processModuleAliasRequire7(spec, null)) {
+            // Binding-less by construction — same require-site throw
+            // channel as the statement-level form above.
+            if (probeNodeRequireRefusal(sf.fileName, spec) === null) {
+              diags.push(unsupportedDiag("SC1010", loc, unsupportedModuleFeatureOf(spec)));
+            }
+          }
+          continue;
+        }
+        const dep = resolveImport7(program, sf, spec);
+        if (dep && dep.fileName.endsWith(".json")) {
+          diags.push(unsupportedDiag("SC1012", loc, "require() of JSON modules"));
+          continue;
+        }
+        if (dep) deps.push({ dep });
       }
     }
   }

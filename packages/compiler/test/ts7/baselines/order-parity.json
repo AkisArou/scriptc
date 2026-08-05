@@ -5476,6 +5476,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2672-http-request-response-callback.ts": {
+   "order": [
+    "<repo>/tests/corpus/2672-http-request-response-callback.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2673-top-level-await-implicit-module.ts": {
+   "order": [
+    "<repo>/tests/corpus/2673-top-level-await-implicit-module.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2674-top-level-for-await-implicit-module.ts": {
+   "order": [
+    "<repo>/tests/corpus/2674-top-level-for-await-implicit-module.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -7490,6 +7508,23 @@
     "<repo>/tests/diagnostics/text-codec-value.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/diagnostics/top-level-await-implicit-module-nested-require.js": {
+   "order": [
+    "<repo>/tests/diagnostics/top-level-await-implicit-module-nested-require.js"
+   ],
+   "diags": [
+    {
+     "code": "SC1013",
+     "message": "require() in an ES module (Node throws ReferenceError — use import) is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/diagnostics/top-level-await-implicit-module-nested-require.js",
+      "start": 114,
+      "end": 134
+     },
+     "milestone": "later"
+    }
+   ]
   },
   "<repo>/tests/diagnostics/tuples.ts": {
    "order": [
