@@ -646,6 +646,22 @@ function nestedBareRequiresOf7(sf: ts.SourceFile): ts.CallExpression[] {
   return out;
 }
 
+/** True when a require-shaped call denotes Node's ambient CommonJS global,
+ * rather than a source binding such as
+ * `const require = createRequire(import.meta.url)`. The syntactic require
+ * scanners still collect the latter because those calls carry supported
+ * static module edges; only the ESM "global is undefined" diagnostic must
+ * distinguish them. */
+function isAmbientRequireCall7(program: ts.Program, node: ts.Node): boolean {
+  const call = ts.isVariableDeclaration(node) ? node.initializer : node;
+  if (!call || !ts.isCallExpression(call) || !ts.isIdentifier(call.expression)) return true;
+  const checker = program.getTypeChecker();
+  const symbol = checker.getSymbolAtLocation(call.expression);
+  if (symbol === undefined) return true;
+  const decls = checker.declarationsOf(symbol);
+  return decls.length === 0 || decls.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
 /** Top-level await syntax is an ESM marker in Node's ambiguous-file detector.
  * TypeScript's externalModuleIndicator does NOT count either an await
  * expression or a for-await loop (and then raises TS1375/TS1431 asking for
@@ -667,6 +683,8 @@ function hasNodeTopLevelAwait7(sf: ts.SourceFile): boolean {
   return found;
 }
 
+const nodeEsmFileCache7 = new WeakMap<ts.SourceFile, boolean>();
+
 /** True when Node would treat this file as an ES MODULE (never defining
  * require/__dirname there): .mjs always, .cjs never, and .js/.ts by
  * syntactic module detection — spelled to 5.9.3's OBSERVED bundler-mode
@@ -674,9 +692,15 @@ function hasNodeTopLevelAwait7(sf: ts.SourceFile): boolean {
  * client SourceFile has no impliedNodeFormat at all), plus Node's top-level
  * await detection above. */
 function isNodeEsmFile7(sf: ts.SourceFile): boolean {
-  if (sf.fileName.endsWith(".cjs") || sf.fileName.endsWith(".cts")) return false;
-  if (sf.fileName.endsWith(".mjs") || sf.fileName.endsWith(".mts")) return true;
-  return ts.isExternalModule(sf) || hasNodeTopLevelAwait7(sf);
+  const cached = nodeEsmFileCache7.get(sf);
+  if (cached !== undefined) return cached;
+  const result = sf.fileName.endsWith(".cjs") || sf.fileName.endsWith(".cts")
+    ? false
+    : sf.fileName.endsWith(".mjs") || sf.fileName.endsWith(".mts")
+      ? true
+      : ts.isExternalModule(sf) || hasNodeTopLevelAwait7(sf);
+  nodeEsmFileCache7.set(sf, result);
+  return result;
 }
 
 /** A JavaScript source file Node treats as CommonJS (not an ES module):
@@ -2041,7 +2065,7 @@ function preflight7(load: LoadResult): {
         const stmt = stmts[k]!;
         for (const req of requiresOf7(stmt)) {
           const loc = { file: sf.fileName, start: req.node.getStart(sf), end: req.node.getEnd() };
-          if (isNodeEsmFile7(sf)) {
+          if (isNodeEsmFile7(sf) && isAmbientRequireCall7(program, req.node)) {
             diags.push(
               unsupportedDiag("SC1013", loc, "require() in an ES module (Node throws ReferenceError — use import)"),
             );
@@ -2121,7 +2145,7 @@ function preflight7(load: LoadResult): {
       for (const call of nestedBareRequiresOf7(sf)) {
         const spec = requireSpecOf7(call)!;
         const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
-        if (isNodeEsmFile7(sf)) {
+        if (isNodeEsmFile7(sf) && isAmbientRequireCall7(program, call)) {
           diags.push(
             unsupportedDiag("SC1013", loc, "require() in an ES module (Node throws ReferenceError — use import)"),
           );
