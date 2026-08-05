@@ -28,11 +28,10 @@
  *    in tsc codes at all: cjsExportDiscardReason (lowering) names every
  *    genuinely discarded export, so relaxing the checker's stricter
  *    modeling loses nothing.
- *  - isNodeEsmFile: 5.9.3 under bundler sets impliedNodeFormat ONLY for
- *    .mjs/.cjs-family files (probed) and falls back to syntactic module
- *    detection for .js/.ts; 7's client SourceFile has no impliedNodeFormat,
- *    so this lane spells exactly that observed behavior: extensions first,
- *    then externalModuleIndicator.
+ *  - isNodeEsmFile: 7's client SourceFile has no impliedNodeFormat, so this
+ *    lane spells Node's format decision directly: fixed extensions first,
+ *    then an explicit nearest-package `type`, then syntax detection for
+ *    ambiguous .js/.ts files.
  *  - Malformed tsconfig.json: tsgo's parseConfigFile swallows JSONC syntax
  *    errors (recovers to empty options) where 5.9.3 reported a passthrough
  *    diagnostic, so this lane validates the config's JSONC syntax itself
@@ -50,7 +49,7 @@ import {
   tscPassthroughDiag,
   unsupportedDiag,
 } from "../diagnostics/diagnostic.js";
-import { isNodeModulesPath, nearestPkgJsonPath, projectDtsRuntimeSibling, resolveBareModule, resolveProjectImport, resolveRelativeModule, resolveTypeDirective, setProjectRealm } from "./resolve.js";
+import { isNodeModulesPath, nearestPackageType, nearestPkgJsonPath, projectDtsRuntimeSibling, resolveBareModule, resolveProjectImport, resolveRelativeModule, resolveTypeDirective, setProjectRealm } from "./resolve.js";
 import { probeNodeImportRefusal, probeNodeRequireRefusal } from "./npm.js";
 import { isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
 import { provenanceEntryFor, provenancePaths } from "./provenance-registry.js";
@@ -646,20 +645,108 @@ function nestedBareRequiresOf7(sf: ts.SourceFile): ts.CallExpression[] {
   return out;
 }
 
-/** True when a require-shaped call denotes Node's ambient CommonJS global,
- * rather than a source binding such as
- * `const require = createRequire(import.meta.url)`. The syntactic require
- * scanners still collect the latter because those calls carry supported
- * static module edges; only the ESM "global is undefined" diagnostic must
- * distinguish them. */
-function isAmbientRequireCall7(program: ts.Program, node: ts.Node): boolean {
+type RequireCallBindingKind7 = "ambient" | "createRequire" | "source";
+
+function stripRequireCasts7(expr: ts.Expression): ts.Expression {
+  let cur = expr;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isTypeAssertion(cur) ||
+    ts.isNonNullExpression(cur)
+  ) {
+    cur = cur.expression;
+  }
+  return cur;
+}
+
+/** The supported-builtin provenance of an imported identifier, narrowed to
+ * the one member this preflight distinction needs. Mirrors the lowering's
+ * builtinImportOf alias handling so a re-export facade remains supported. */
+function isCreateRequireImport7(program: ts.Program, ident: ts.Identifier): boolean {
+  const checker = program.getTypeChecker();
+  const symbol = checker.getSymbolAtLocation(ident);
+  const decl = symbol ? checker.declarationsOf(symbol)[0] : undefined;
+  if (decl === undefined || !ts.isImportSpecifier(decl)) return false;
+  const importDecl = decl.parent.parent.parent;
+  if (ts.isImportDeclaration(importDecl) && ts.isStringLiteral(importDecl.moduleSpecifier)) {
+    const module = canonicalBuiltinModule(importDecl.moduleSpecifier.text);
+    const member = decl.propertyName?.text ?? decl.name.text;
+    if (module === "module" && member === "createRequire") return true;
+  }
+  if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    const target = checker.getAliasedSymbol(symbol);
+    const targetDecl = checker.declarationsOf(target)[0];
+    if (targetDecl !== undefined && targetDecl.getSourceFile().isDeclarationFile) {
+      for (let p: ts.Node | undefined = targetDecl.parent; p !== undefined && !ts.isSourceFile(p); p = p.parent) {
+        if (ts.isModuleDeclaration(p) && ts.isStringLiteral(p.name)) {
+          return canonicalBuiltinModule(p.name.text) === "module" && target.name === "createRequire";
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** True only for the createRequire binding shape the lowering recognizes:
+ * a const initialized from node:module's createRequire with a base naming
+ * the current file. Arbitrary source declarations named `require` must not
+ * ride the module-edge lowering, which would erase their calls. */
+function isCreateRequireBinding7(program: ts.Program, callee: ts.Identifier): boolean {
+  const checker = program.getTypeChecker();
+  const symbol = checker.getSymbolAtLocation(callee);
+  const decl = symbol
+    ? checker.declarationsOf(symbol).find((d): d is ts.VariableDeclaration => ts.isVariableDeclaration(d))
+    : undefined;
+  if (
+    decl === undefined ||
+    decl.initializer === undefined ||
+    !ts.isVariableDeclarationList(decl.parent) ||
+    (decl.parent.flags & ts.NodeFlags.Const) === 0
+  ) {
+    return false;
+  }
+  const init = stripRequireCasts7(decl.initializer);
+  if (
+    !ts.isCallExpression(init) ||
+    init.questionDotToken !== undefined ||
+    !ts.isIdentifier(init.expression) ||
+    !isCreateRequireImport7(program, init.expression) ||
+    init.arguments.length !== 1
+  ) {
+    return false;
+  }
+  const base = stripRequireCasts7(init.arguments[0]!);
+  if (ts.isIdentifier(base) && base.text === "__filename") return true;
+  return (
+    ts.isPropertyAccessExpression(base) &&
+    base.questionDotToken === undefined &&
+    ts.isMetaProperty(base.expression) &&
+    base.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+    (base.name.text === "url" || base.name.text === "filename")
+  );
+}
+
+/** Classifies a require-shaped call as Node's ambient CommonJS global, the
+ * one supported createRequire source binding, or another source binding.
+ * The scanners still collect createRequire calls because they carry static
+ * module edges; other source bindings get a pointed fence before lowering
+ * can mistake them for module syntax. */
+function requireCallBindingKind7(program: ts.Program, node: ts.Node): RequireCallBindingKind7 {
   const call = ts.isVariableDeclaration(node) ? node.initializer : node;
-  if (!call || !ts.isCallExpression(call) || !ts.isIdentifier(call.expression)) return true;
+  if (!call || !ts.isCallExpression(call) || !ts.isIdentifier(call.expression)) return "ambient";
   const checker = program.getTypeChecker();
   const symbol = checker.getSymbolAtLocation(call.expression);
-  if (symbol === undefined) return true;
+  if (symbol === undefined) return "ambient";
   const decls = checker.declarationsOf(symbol);
-  return decls.length === 0 || decls.every((d) => d.getSourceFile().isDeclarationFile);
+  if (decls.length === 0 || decls.every((d) => d.getSourceFile().isDeclarationFile)) return "ambient";
+  return isCreateRequireBinding7(program, call.expression) ? "createRequire" : "source";
+}
+
+function esmRequireFeature7(kind: Exclude<RequireCallBindingKind7, "createRequire">): string {
+  return kind === "ambient"
+    ? "require() in an ES module (Node throws ReferenceError — use import)"
+    : "calls through a source binding named 'require' (this spelling is reserved for CommonJS/createRequire module edges — rename the binding)";
 }
 
 /** Top-level await syntax is an ESM marker in Node's ambiguous-file detector.
@@ -686,19 +773,25 @@ function hasNodeTopLevelAwait7(sf: ts.SourceFile): boolean {
 const nodeEsmFileCache7 = new WeakMap<ts.SourceFile, boolean>();
 
 /** True when Node would treat this file as an ES MODULE (never defining
- * require/__dirname there): .mjs always, .cjs never, and .js/.ts by
- * syntactic module detection — spelled to 5.9.3's OBSERVED bundler-mode
- * behavior (it set impliedNodeFormat only for the mjs/cjs families; 7's
- * client SourceFile has no impliedNodeFormat at all), plus Node's top-level
- * await detection above. */
+ * require/__dirname there): fixed extensions first, then an explicit
+ * nearest-package type, then syntax detection for ambiguous .js/.ts files.
+ * The latter includes Node's top-level-await marker above. */
 function isNodeEsmFile7(sf: ts.SourceFile): boolean {
   const cached = nodeEsmFileCache7.get(sf);
   if (cached !== undefined) return cached;
-  const result = sf.fileName.endsWith(".cjs") || sf.fileName.endsWith(".cts")
-    ? false
-    : sf.fileName.endsWith(".mjs") || sf.fileName.endsWith(".mts")
+  let result: boolean;
+  if (sf.fileName.endsWith(".cjs") || sf.fileName.endsWith(".cts")) {
+    result = false;
+  } else if (sf.fileName.endsWith(".mjs") || sf.fileName.endsWith(".mts")) {
+    result = true;
+  } else {
+    const packageType = nearestPackageType(sf.fileName);
+    result = packageType === "module"
       ? true
-      : ts.isExternalModule(sf) || hasNodeTopLevelAwait7(sf);
+      : packageType === "commonjs"
+        ? false
+        : ts.isExternalModule(sf) || hasNodeTopLevelAwait7(sf);
+  }
   nodeEsmFileCache7.set(sf, result);
   return result;
 }
@@ -2065,11 +2158,12 @@ function preflight7(load: LoadResult): {
         const stmt = stmts[k]!;
         for (const req of requiresOf7(stmt)) {
           const loc = { file: sf.fileName, start: req.node.getStart(sf), end: req.node.getEnd() };
-          if (isNodeEsmFile7(sf) && isAmbientRequireCall7(program, req.node)) {
-            diags.push(
-              unsupportedDiag("SC1013", loc, "require() in an ES module (Node throws ReferenceError — use import)"),
-            );
-            continue;
+          if (isNodeEsmFile7(sf)) {
+            const bindingKind = requireCallBindingKind7(program, req.node);
+            if (bindingKind !== "createRequire") {
+              diags.push(unsupportedDiag("SC1013", loc, esmRequireFeature7(bindingKind)));
+              continue;
+            }
           }
           if (load.externalTypes.has(req.spec)) {
             continue;
@@ -2145,11 +2239,12 @@ function preflight7(load: LoadResult): {
       for (const call of nestedBareRequiresOf7(sf)) {
         const spec = requireSpecOf7(call)!;
         const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
-        if (isNodeEsmFile7(sf) && isAmbientRequireCall7(program, call)) {
-          diags.push(
-            unsupportedDiag("SC1013", loc, "require() in an ES module (Node throws ReferenceError — use import)"),
-          );
-          continue;
+        if (isNodeEsmFile7(sf)) {
+          const bindingKind = requireCallBindingKind7(program, call);
+          if (bindingKind !== "createRequire") {
+            diags.push(unsupportedDiag("SC1013", loc, esmRequireFeature7(bindingKind)));
+            continue;
+          }
         }
         if (load.externalTypes.has(spec)) {
           continue;

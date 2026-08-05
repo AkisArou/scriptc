@@ -46,6 +46,7 @@ function realpathOr(path: string): string {
 interface PkgJson {
   name?: string;
   version?: string;
+  type?: string;
   types?: string;
   typings?: string;
   main?: string;
@@ -475,6 +476,17 @@ function resolveImportsField(imports: unknown, specifier: string): string | null
 export function nearestPkgJsonPath(fromFile: string): string | null {
   const dir = nearestPkgDir(dirname(resolve(fromFile)));
   return dir === null ? null : join(dir, "package.json");
+}
+
+/** The explicit module format of the nearest package scope. A package.json
+ * without a recognized `type` keeps the file ambiguous, so callers may
+ * apply Node's syntax detector; an explicit commonjs/module answer must win
+ * over syntax detection for ordinary .js/.ts files. */
+export function nearestPackageType(fromFile: string): "module" | "commonjs" | null {
+  const dir = nearestPkgDir(dirname(resolve(fromFile)));
+  if (dir === null) return null;
+  const type = pkgJsonOf(dir)?.type;
+  return type === "module" || type === "commonjs" ? type : null;
 }
 
 /** Resolves a PROJECT-INTERNAL package.json-mediated specifier from

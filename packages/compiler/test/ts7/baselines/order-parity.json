@@ -5500,6 +5500,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2676-top-level-await-ambiguous/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2676-top-level-await-ambiguous/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -7123,6 +7129,23 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/local-require-binding-esm.js": {
+   "order": [
+    "<repo>/tests/diagnostics/local-require-binding-esm.js"
+   ],
+   "diags": [
+    {
+     "code": "SC1013",
+     "message": "calls through a source binding named 'require' (this spelling is reserved for CommonJS/createRequire module edges — rename the binding) is not supported yet",
+     "loc": {
+      "file": "<repo>/tests/diagnostics/local-require-binding-esm.js",
+      "start": 80,
+      "end": 100
+     },
+     "milestone": "later"
+    }
+   ]
+  },
   "<repo>/tests/diagnostics/maps-surface.ts": {
    "order": [
     "<repo>/tests/diagnostics/maps-surface.ts"
@@ -7514,6 +7537,22 @@
     "<repo>/tests/diagnostics/text-codec-value.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC0001",
+     "message": "'await' expressions are only allowed at the top level of a file when that file is a module, but this file has no imports or exports. Consider adding an empty 'export {}' to make this file a module.",
+     "loc": {
+      "file": "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts",
+      "start": 15,
+      "end": 20
+     }
+    }
+   ]
   },
   "<repo>/tests/diagnostics/top-level-await-implicit-module-nested-require.js": {
    "order": [
