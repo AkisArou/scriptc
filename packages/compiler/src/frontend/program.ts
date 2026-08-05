@@ -45,11 +45,13 @@ import { dirname, resolve } from "node:path";
 import * as ts from "./ts7/adapter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import {
+  commonJsModuleSyntaxDiag,
+  invalidPackageConfigDiag,
   strictNullChecksFloorDiag,
   tscPassthroughDiag,
   unsupportedDiag,
 } from "../diagnostics/diagnostic.js";
-import { isNodeModulesPath, nearestPackageType, nearestPkgJsonPath, projectDtsRuntimeSibling, resolveBareModule, resolveProjectImport, resolveRelativeModule, resolveTypeDirective, setProjectRealm } from "./resolve.js";
+import { isNodeModulesPath, nearestInvalidPackageJsonPath, nearestPackageType, nearestPkgJsonPath, projectDtsRuntimeSibling, resolveBareModule, resolveProjectImport, resolveRelativeModule, resolveTypeDirective, setProjectRealm } from "./resolve.js";
 import { probeNodeImportRefusal, probeNodeRequireRefusal } from "./npm.js";
 import { isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
 import { provenanceEntryFor, provenancePaths } from "./provenance-registry.js";
@@ -83,6 +85,14 @@ const FORCED_OPTIONS: ts.Ts7CompilerOptions = {
   target: ts.ScriptTarget.ESNext as number,
   module: ts.ModuleKind.ESNext as number,
   moduleResolution: ts.ModuleResolutionKind.Bundler,
+  // Every file Node executes has its own lexical module wrapper: ESM has a
+  // module environment and CommonJS has the per-file function wrapper. In
+  // particular, an ambiguous file whose ONLY ESM marker is top-level await
+  // must not remain a TypeScript global script (otherwise declarations in
+  // sibling files merge and reads cross module boundaries). Runtime format
+  // classification is intentionally independent below; this option is only
+  // the binder's scope decision.
+  moduleDetection: ts.ModuleDetectionKind.Force,
   lib: ["lib.es2025.d.ts"],
   types: [],
   allowImportingTsExtensions: true,
@@ -749,20 +759,77 @@ function esmRequireFeature7(kind: Exclude<RequireCallBindingKind7, "createRequir
     : "calls through a source binding named 'require' (this spelling is reserved for CommonJS/createRequire module edges — rename the binding)";
 }
 
-/** Top-level await syntax is an ESM marker in Node's ambiguous-file detector.
- * TypeScript's externalModuleIndicator does NOT count either an await
- * expression or a for-await loop (and then raises TS1375/TS1431 asking for
- * `export {}`), so retain those Node-specific forms explicitly. Await inside
- * a function does not make its containing file an ES module. */
-function hasNodeTopLevelAwait7(sf: ts.SourceFile): boolean {
-  let found = false;
-  ts.walkPreorder(sf, (node) => {
-    if (node !== sf && ts.isFunctionLike(node)) return "skip";
+const CJS_WRAPPER_NAMES = new Set(["require", "module", "exports", "__dirname", "__filename"]);
+
+function bindingDeclaresCjsWrapper7(name: ts.BindingName): ts.Identifier | null {
+  if (ts.isIdentifier(name)) return CJS_WRAPPER_NAMES.has(name.text) ? name : null;
+  for (const el of name.elements) {
+    if (el.name === undefined) continue;
+    const hit = bindingDeclaresCjsWrapper7(el.name);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+function insideFunctionLike7(node: ts.Node): boolean {
+  for (let p = node.parent; p !== undefined && !ts.isSourceFile(p); p = p.parent) {
+    if (ts.isFunctionLike(p)) return true;
+  }
+  return false;
+}
+
+/** The first syntax marker Node's ambiguous-file detector recognizes. This
+ * cannot use ts.isExternalModule: moduleDetection=force deliberately gives
+ * EVERY executable file module-local checker scope, including CommonJS.
+ * Runtime classification remains Node's own narrower question: value-level
+ * import/export forms, import.meta, top-level await/for-await, or a top-level
+ * lexical declaration that would redeclare a CommonJS wrapper binding. */
+function nodeEsmSyntaxMarker7(sf: ts.SourceFile): ts.Node | null {
+  for (const stmt of sf.statements) {
+    if (ts.isImportDeclaration(stmt) && !erasedTypeOnlyImport(stmt)) return stmt;
     if (
-      ts.isAwaitExpression(node) ||
-      (ts.isForOfStatement(node) && node.awaitModifier !== undefined)
+      ts.isExportDeclaration(stmt) &&
+      !stmt.isTypeOnly &&
+      !erasedTypeOnlyReexport(stmt)
     ) {
-      found = true;
+      return stmt;
+    }
+    if (ts.isExportAssignment(stmt)) return stmt;
+    if (
+      ts.canHaveModifiers(stmt) &&
+      ts.getModifiers(stmt)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) === true
+    ) {
+      return stmt;
+    }
+    if (
+      ts.isVariableStatement(stmt) &&
+      (stmt.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0
+    ) {
+      for (const decl of stmt.declarationList.declarations) {
+        const hit = bindingDeclaresCjsWrapper7(decl.name);
+        if (hit !== null) return hit;
+      }
+    }
+    if (ts.isClassDeclaration(stmt) && stmt.name !== undefined && CJS_WRAPPER_NAMES.has(stmt.name.text)) {
+      return stmt.name;
+    }
+  }
+
+  let found: ts.Node | null = null;
+  ts.walkPreorder(sf, (node) => {
+    if (
+      ts.isMetaProperty(node) &&
+      node.keywordToken === ts.SyntaxKind.ImportKeyword
+    ) {
+      found = node;
+      return "stop";
+    }
+    if (
+      !insideFunctionLike7(node) &&
+      (ts.isAwaitExpression(node) ||
+        (ts.isForOfStatement(node) && node.awaitModifier !== undefined))
+    ) {
+      found = node;
       return "stop";
     }
     return undefined;
@@ -774,8 +841,9 @@ const nodeEsmFileCache7 = new WeakMap<ts.SourceFile, boolean>();
 
 /** True when Node would treat this file as an ES MODULE (never defining
  * require/__dirname there): fixed extensions first, then an explicit
- * nearest-package type, then syntax detection for ambiguous .js/.ts files.
- * The latter includes Node's top-level-await marker above. */
+ * nearest-package type, then Node's syntax markers for ambiguous .js/.ts
+ * files. TypeScript's external-module bit is forced for checker scoping and
+ * therefore intentionally plays no part in this runtime decision. */
 function isNodeEsmFile7(sf: ts.SourceFile): boolean {
   const cached = nodeEsmFileCache7.get(sf);
   if (cached !== undefined) return cached;
@@ -790,7 +858,7 @@ function isNodeEsmFile7(sf: ts.SourceFile): boolean {
       ? true
       : packageType === "commonjs"
         ? false
-        : ts.isExternalModule(sf) || hasNodeTopLevelAwait7(sf);
+        : nodeEsmSyntaxMarker7(sf) !== null;
   }
   nodeEsmFileCache7.set(sf, result);
   return result;
@@ -1644,17 +1712,6 @@ function preflight7(load: LoadResult): {
     (isNodeModulesPath(file) || workspacePackageOfPath(file) !== null);
   const nodeModulesJsSuppressed = (d: ts.Diagnostic): boolean =>
     d.fileName !== undefined && islandJsFile(d.fileName);
-  /* Node 24's ambiguous-file syntax detection treats top-level await as an
-   * ES-module marker. TypeScript's bundler-mode checker does not: it emits
-   * TS1375 for await expressions and TS1431 for for-await loops until the
-   * source spells an import/export. Suppress exactly those classification
-   * diagnostics when Node's additional marker is present; all other syntax
-   * and type diagnostics remain gates. */
-  const nodeTopLevelAwaitModuleSuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
-    if ((d.code !== 1375 && d.code !== 1431) || d.fileName === undefined) return false;
-    const sf = p.getSourceFile(d.fileName);
-    return sf !== undefined && isNodeEsmFile7(sf);
-  };
   /* JSDoc TYPE positions in JS files are documentation Node never reads:
    * a name-resolution failure THERE (2304/2552 — the pattern's utilities.js
    * spells a mapped type over a @template name it never declared) types
@@ -1716,7 +1773,6 @@ function preflight7(load: LoadResult): {
         !suppressedJsStrictness7(d) &&
         !npmStaticFileSuppressed(d) &&
         !nodeModulesJsSuppressed(d) &&
-        !nodeTopLevelAwaitModuleSuppressed(p, d) &&
         !namespaceCalleeSuppressed(p, d) &&
         !workspaceImplicitAnySuppressed(p, d) &&
         !jsdocTypeSuppressed(p, d, commentDup),
@@ -1761,6 +1817,28 @@ function preflight7(load: LoadResult): {
         // stay program source — only the island-bound JS steps out.
         !islandJsFile(sf.fileName),
     );
+
+  // Node stops at the nearest package.json even when it is malformed, and
+  // an explicit CommonJS scope (or .cjs/.cts extension) disables ambiguous-
+  // file syntax detection entirely. TypeScript's bundler checker models
+  // neither loader rule, so restore them before any module-edge analysis:
+  // one malformed-scope diagnostic per package file, and one pointed syntax
+  // diagnostic per CommonJS source file.
+  const invalidPackageConfigs = new Set<string>();
+  for (const sf of userFiles) {
+    const invalidConfig = nearestInvalidPackageJsonPath(sf.fileName);
+    if (invalidConfig !== null) {
+      if (!invalidPackageConfigs.has(invalidConfig)) {
+        invalidPackageConfigs.add(invalidConfig);
+        diags.push(invalidPackageConfigDiag(invalidConfig, { file: sf.fileName, start: 0, end: 0 }));
+      }
+      continue;
+    }
+    if (!isNodeEsmFile7(sf)) {
+      const marker = nodeEsmSyntaxMarker7(sf);
+      if (marker !== null) diags.push(commonJsModuleSyntaxDiag(locOf7(marker)));
+    }
+  }
 
   const ambientModules = new Set<string>(SUPPORTED_NODE_MODULES);
 

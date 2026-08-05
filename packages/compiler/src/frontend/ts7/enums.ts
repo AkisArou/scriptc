@@ -8,12 +8,13 @@
  * this module.
  *
  * Placement in 7.0.2 (probed): the AST-world enums ship from unstable/ast,
- * the checker-world enums from unstable/sync. ModuleResolutionKind is the one
- * census enum the package does not re-export from any public entry point —
- * it lives in dist/enums (the #enums/* internal imports), which the exports
- * map hides from bare-specifier imports but NOT from a direct file require;
- * loadHiddenEnum resolves the package root and requires the enum module by
- * path, so the values are still TypeScript 7's own, never copied numbers. */
+ * the checker-world enums from unstable/sync. ModuleResolutionKind and
+ * ModuleDetectionKind are the census/options enums the package does not
+ * re-export from any public entry point — they live in dist/enums (the
+ * #enums/* internal imports), which the exports map hides from bare-
+ * specifier imports but NOT from a direct file require; loadHiddenEnum
+ * resolves the package root and requires the enum module by path, so the
+ * values are still TypeScript 7's own, never copied numbers. */
 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -73,6 +74,18 @@ interface ModuleResolutionKindEnum {
 export const ModuleResolutionKind: ModuleResolutionKindEnum =
   loadHiddenEnum<ModuleResolutionKindEnum>("moduleResolutionKind", "ModuleResolutionKind");
 export type ModuleResolutionKind = number;
+
+interface ModuleDetectionKindEnum {
+  readonly None: number;
+  readonly Auto: number;
+  readonly Legacy: number;
+  readonly Force: number;
+  readonly [key: string | number]: string | number;
+}
+
+export const ModuleDetectionKind: ModuleDetectionKindEnum =
+  loadHiddenEnum<ModuleDetectionKindEnum>("moduleDetectionKind", "ModuleDetectionKind");
+export type ModuleDetectionKind = number;
 
 /** Reverse-maps a numeric enum value to its TS7 key name ("ESNext",
  * "Bundler") — the spelling tsgo's tsconfig JSON parser accepts (lowercased

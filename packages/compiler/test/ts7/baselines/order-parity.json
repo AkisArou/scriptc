@@ -5506,6 +5506,14 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2677-top-level-await-module-scope/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2677-top-level-await-module-scope/a.ts",
+    "<repo>/tests/corpus/2677-top-level-await-module-scope/b.ts",
+    "<repo>/tests/corpus/2677-top-level-await-module-scope/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6789,6 +6797,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/esm-syntax-commonjs/main.js": {
+   "order": [
+    "<repo>/tests/diagnostics/esm-syntax-commonjs/main.js"
+   ],
+   "diags": [
+    {
+     "code": "SC1013",
+     "message": "Node classifies this file as CommonJS, where this ES-module syntax marker is a SyntaxError",
+     "loc": {
+      "file": "<repo>/tests/diagnostics/esm-syntax-commonjs/main.js",
+      "start": 0,
+      "end": 10
+     },
+     "milestone": "later",
+     "hint": "use a .mjs/.mts extension or set the nearest package.json's \"type\" to \"module\""
+    }
+   ]
+  },
   "<repo>/tests/diagnostics/exceptions.ts": {
    "order": [
     "<repo>/tests/diagnostics/exceptions.ts"
@@ -7049,6 +7075,24 @@
     "<repo>/tests/diagnostics/intl.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/diagnostics/invalid-package-config/main.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/invalid-package-config/main.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC1013",
+     "message": "Node cannot load this module because '<repo>/tests/diagnostics/invalid-package-config/package.json' is an invalid package configuration (ERR_INVALID_PACKAGE_CONFIG)",
+     "loc": {
+      "file": "<repo>/tests/diagnostics/invalid-package-config/main.ts",
+      "start": 0,
+      "end": 0
+     },
+     "milestone": "later",
+     "hint": "fix the nearest package.json so it contains valid JSON"
+    }
+   ]
   },
   "<repo>/tests/diagnostics/island-boundary-slots.ts": {
    "order": [
@@ -7544,13 +7588,15 @@
    ],
    "diags": [
     {
-     "code": "SC0001",
-     "message": "'await' expressions are only allowed at the top level of a file when that file is a module, but this file has no imports or exports. Consider adding an empty 'export {}' to make this file a module.",
+     "code": "SC1013",
+     "message": "Node classifies this file as CommonJS, where this ES-module syntax marker is a SyntaxError",
      "loc": {
       "file": "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts",
       "start": 15,
-      "end": 20
-     }
+      "end": 40
+     },
+     "milestone": "later",
+     "hint": "use a .mjs/.mts extension or set the nearest package.json's \"type\" to \"module\""
     }
    ]
   },
@@ -7568,6 +7614,24 @@
       "end": 134
      },
      "milestone": "later"
+    }
+   ]
+  },
+  "<repo>/tests/diagnostics/top-level-await-module-leak/main.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/top-level-await-module-leak/a.ts",
+    "<repo>/tests/diagnostics/top-level-await-module-leak/b.ts",
+    "<repo>/tests/diagnostics/top-level-await-module-leak/main.ts"
+   ],
+   "diags": [
+    {
+     "code": "SC0001",
+     "message": "Cannot find name 'shared'.",
+     "loc": {
+      "file": "<repo>/tests/diagnostics/top-level-await-module-leak/b.ts",
+      "start": 37,
+      "end": 43
+     }
     }
    ]
   },
