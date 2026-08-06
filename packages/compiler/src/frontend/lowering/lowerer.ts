@@ -880,6 +880,13 @@ export class Lowerer {
    * aliases, so this carries the var/let form the checker cannot.
    * Scoped strictly by narrowingAliases (lowerIf / lowerCondition). */
   readonly aliasNarrowTypes = new Map<ts.Symbol, ts.Type>();
+  /** Locals widened beyond the checker's type because an inferred indexed
+   * read can be absent at runtime. Bare reads preserve that union until a
+   * surrounding JavaScript guard/default consumes it. */
+  readonly runtimeOptionalLocals = new Set<string>();
+  /** All storage slots widened for runtime absence, including slots whose
+   * current control-flow branch has temporarily narrowed the value. */
+  readonly runtimeOptionalStorageLocals = new Set<string>();
 
   /** Runs `fn` with the given aliased-typeof narrows applied (and restored
    * after) — the branch-scoping primitive. */
@@ -7476,8 +7483,13 @@ export class Lowerer {
     return lowerElementAccess(this, expr);
   }
 
-  lowerRecordKeyRead(expr: ts.ElementAccessExpression, shapeId: string, shape: IrRecordShape): IrExpr {
-    return lowerRecordKeyRead(this, expr, shapeId, shape);
+  lowerRecordKeyRead(
+    expr: ts.ElementAccessExpression,
+    shapeId: string,
+    shape: IrRecordShape,
+    includeUndefined = false,
+  ): IrExpr {
+    return lowerRecordKeyRead(this, expr, shapeId, shape, includeUndefined);
   }
 
   lowerElementWrite(expr: ts.BinaryExpression): IrStmt {

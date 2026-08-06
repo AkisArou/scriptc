@@ -276,6 +276,7 @@ typedef struct ScrTlsSrv {
  * the handshake with no_application_protocol — Node's h2-only split). */
 static const char *SCR_TLS_ALPN_HTTP11[] = {"http/1.1", NULL};
 static const char *SCR_TLS_ALPN_H2[] = {"h2", NULL};
+static const char *SCR_TLS_ALPN_H2_HTTP11[] = {"h2", "http/1.1", NULL};
 
 static ScrTlsSrv *scr_tls_srv_new(const char *cert, size_t cert_len, const char *key,
                                    size_t key_len, bool alpn_http11) {
@@ -864,7 +865,8 @@ static void scr_tls_on_established(void *tctx) {
     const char *alpn = mbedtls_ssl_get_alpn_protocol(&t->ssl);
     if (alpn != NULL && strcmp(alpn, "h2") == 0) {
       t->srv->h2_conn(t->srv->h2_ctx, t->sock);
-    } else if (alpn != NULL && t->srv->inner_conn != NULL && strcmp(alpn, "http/1.1") == 0) {
+    } else if (t->srv->inner_conn != NULL &&
+               (alpn == NULL || strcmp(alpn, "http/1.1") == 0)) {
       t->srv->inner_conn(t->srv->inner_ctx, t->sock);
     } else {
       scr_net_sock_transport_error(t->sock, NULL);
@@ -1593,13 +1595,20 @@ ScrNetSocket *scr_tls_connect_dyn(double port, ScrStr *host /*borrowed, nullable
 void scr_tls_server_wrap_h2(ScrNetServer *s, const char *cert, size_t cert_len,
                              const char *key, size_t key_len,
                              ScrNetNativeConnFn h2_conn, void *h2_ctx /*moves*/,
-                             void (*h2_ctx_free)(void *)) {
+                             void (*h2_ctx_free)(void *),
+                             ScrClosure *sni_cb /*moves, nullable*/, void *sni_answer_fn) {
   ScrTlsSrv *srv = scr_tls_srv_new(cert, cert_len, key, key_len, false);
-  mbedtls_ssl_conf_alpn_protocols(&srv->conf, SCR_TLS_ALPN_H2);
   srv->h2_conn = h2_conn;
   srv->h2_ctx = h2_ctx;
   srv->h2_ctx_free = h2_ctx_free;
   scr_net_server_get_native_conn(s, &srv->inner_conn, &srv->inner_ctx, &srv->inner_ctx_free);
+  mbedtls_ssl_conf_alpn_protocols(
+      &srv->conf, srv->inner_conn != NULL ? SCR_TLS_ALPN_H2_HTTP11 : SCR_TLS_ALPN_H2);
+  if (sni_cb != NULL) {
+    srv->sni_cb = sni_cb;
+    srv->sni_answer_fn = sni_answer_fn;
+    mbedtls_ssl_conf_sni(&srv->conf, &scr_tls_f_sni, NULL);
+  }
   scr_net_server_set_native_conn(s, &scr_tls_srv_on_conn, srv, &scr_tls_srv_release_v);
   scr_net_server_defer_connections(s); /* 'connection'/'secureConnection' wait for the handshake */
 }

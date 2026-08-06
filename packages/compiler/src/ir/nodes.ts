@@ -2476,6 +2476,8 @@ export type IrLibFn =
    * period, never destroying the socket — Node's semantics). */
   | "http.reqStatusCode"
   | "http.reqSocket"
+  | "http.reqH2Stream"
+  | "http.reqH2StreamOrThrow"
   | "http.reqResume"
   /** req.rawHeaders — [name, value, name, value, ...] in arrival order,
    * names in their ORIGINAL case (Node's shape); a fresh string[] per
@@ -2707,23 +2709,16 @@ export type IrLibFn =
    * http.request). The "https." prefix keeps the TLS unit linked. */
   | "https.requestFn"
   | "https.requestFnCb"
-  /** node:http2, the compatibility slice (SEMANTICS.md divergence 57):
-   * createSecureServer is the https server WITHOUT an eager handler —
-   * the same scr_https_create_server with a NULL closure (ALPN
-   * advertises http/1.1 only; every connection serves HTTP/1.1).
-   * serverOnRequest installs 'request' listeners after creation (the
-   * http adapters pick the (req, res)/(req)/() shape; a once flag rides
-   * along; on a server with no HTTP parser the registration is dead
-   * weight, like Node's never-fired 'request' on a net server).
-   * serverOnSessionError evaluates and releases its callback — no h2
-   * session ever exists, so the event NEVER fires. */
+  /** node:http2 allowHTTP1: one TLS server advertises h2 + http/1.1 and
+   * dispatches to the matching parser after ALPN. Request listeners mirror
+   * into both compatibility lists; the remaining session/req.stream rows
+   * below retain their explicitly limited behavior. */
   | "http2.createSecureServer"
   /** createSecureServer(options, handler) — the eager COMPAT handler as
    * the first 'request' listener (Node's exact route), on both literal
-   * flavors: Req is the allowHTTP1 server (scr_https_create_server with
-   * the closure — HTTP/1.1 req/res handles), H2Req the ALPN=h2 server
-   * (the compat handles over h2 streams — scr_http2.c's layer). Args are
-   * (cert, key, cb). */
+   * flavors: Req is the dual ALPN allowHTTP1 server, H2Req the ALPN=h2-only
+   * server (both use compat handles over h2 streams). Args are
+   * (cert, key, cb, enableConnectProtocol). */
   | "http2.createSecureServerReq"
   | "http2.createSecureServerH2Req"
   /** createSecureServer with a RUNTIME options record (the divergence-66
@@ -2754,10 +2749,7 @@ export type IrLibFn =
   | "http2.createSecureServerH2"
   | "http.serverOnRequest"
   | "http2.serverOnSessionError"
-  /** The guarded h2-only stream call (`req.stream?.on(...)`): stream is
-   * undefined on every connection the allowHTTP1 lowering accepts, so
-   * the optional chain short-circuits — a VOID no-op the emitter drops
-   * (statement position enforced by the frontend). */
+  /** The guarded absent-session compatibility call remains a no-op. */
   | "http2.streamNoop"
   /** The UNGUARDED h2-only stream call (`req.stream.on(...)`): stream is
    * undefined on every connection the allowHTTP1 lowering accepts — and
@@ -4848,6 +4840,11 @@ export type IrExpr =
    * (+1); ownership of a refcounted payload MOVES into the union. Unions are
    * immutable once constructed. */
   | { kind: "unionWrap"; unionId: string; tag: number; value: IrExpr; type: IrType; loc: SrcLoc }
+  /** Strict identity comparison between a function arm of a union and a
+   * function value with a potentially different static signature. This is
+   * non-coercing: closures share one pointer representation, but the value
+   * never enters the union or becomes callable through its arm type. */
+  | { kind: "unionFuncEq"; unionId: string; tag: number; union: IrExpr; func: IrExpr; negated: boolean; type: IrType; loc: SrcLoc }
   /** Runtime test on a catch binding (`value` is a caught-typed varRef,
    * borrowed). The primitive tests ("string"/"number"/"boolean") compare
    * the snapshot's kind tag — exactly what `typeof e === "..."` observes;
@@ -6484,8 +6481,7 @@ export function moduleUsesHttpServer(mod: IrModule): boolean {
  * allowHTTP1 compatibility slice) — they must NOT pull scr_http2.c, so
  * divergence-57 binaries keep their exact link line. */
 const HTTP2_LEGACY_FNS = new Set([
-  "http2.createSecureServer", "http2.createSecureServerSni",
-  "http2.serverOnSessionError", "http2.streamNoop", "http2.streamUndefCall",
+  "http2.streamNoop", "http2.streamUndefCall",
 ]);
 
 /** True when the module uses the REAL h2 surface (scr_http2.c): any core
@@ -6978,6 +6974,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "process.stdinSetRawMode",
   // The unguarded h2-only stream call: always throws Node's TypeError.
   "http2.streamUndefCall",
+  "http.reqH2StreamOrThrow",
   // A read of a declare-d const nothing defines: always throws Node's
   // catchable ReferenceError.
   "global.undefRead",

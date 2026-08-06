@@ -772,7 +772,7 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
     return { kind: "call", callee: helper, args: [snapshot, fnArg], type: arrayOf(fnRet), loc };
   }
 
-/** The OOB-SAFE indexed read for --npm-static package files: `xs[i]`
+/** An OOB-SAFE indexed read: `xs[i]`
    * answers the interned `elem | undefined` union — the element when `i`
    * is an integer in [0, len), JS's property-miss undefined otherwise —
    * instead of the trap divergence 4 documents for program code.
@@ -782,7 +782,7 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
    * (their annotations can prove bounds). Null when the element is
    * union-typed (the re-tag has no story here) — the caller keeps the
    * ordinary read. */
-  export function lowerNpmStaticSafeIndexRead(
+  export function lowerSafeIndexRead(
     L: Lowerer,
     arr: IrExpr & { type: { kind: "array" } },
     index: IrExpr,
@@ -817,6 +817,7 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
       };
       const body: IrStmt[] = [
         readLenStmt(arrT, loc),
+        { kind: "if", cond: { kind: "bin", op: "!==", left: i, right: i, type: BOOL, loc }, then: [{ kind: "return", value: miss, loc }], else_: null, loc },
         { kind: "if", cond: lt(i, num(0)), then: [{ kind: "return", value: miss, loc }], else_: null, loc },
         { kind: "if", cond: { kind: "bin", op: ">=", left: i, right: n, type: BOOL, loc }, then: [{ kind: "return", value: miss, loc }], else_: null, loc },
         // A fractional index is a property miss too (floor(i) < i exactly
@@ -854,6 +855,9 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
     }
     return { kind: "call", callee: name, args: [arr, index], type: resultT, loc };
   }
+
+  /** Backward-compatible name for the npm-static probe path. */
+  export const lowerNpmStaticSafeIndexRead = lowerSafeIndexRead;
 
 /** Interned synthetic function for one (elem, argument-shape) concat —
    * `%arr.concat.<n>(a, x0, x1, ...)`: a fresh array takes a's elements

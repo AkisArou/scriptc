@@ -22,7 +22,7 @@ import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from
 import { lowerHttpResPropertyAssignment, lowerHttpServerTimeoutAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireCalleeFileOf, createRequireNamespaceDecl, textCodecBindingDecl } from "./lower-builtins.js";
 import { lowerEnumDeclaration } from "./lower-enums.js";
-import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
+import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerAbsenceProbe, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, runtimeOptionalTrueIds, symbolFieldInfo, withRuntimeOptionalNarrowed } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { isParseArgsDynTypeName, isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
@@ -674,19 +674,24 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       // else-branch under a FALSE one — the var/let alias narrowing the
       // checker only performs for consts (aliasTypeofNarrows).
       const then = L.narrowingAliases(aliasTypeofNarrows(L, stmt.expression, true), () =>
-        L.lowerScopedBlock(stmt.thenStatement),
+        withRuntimeOptionalNarrowed(L, runtimeOptionalTrueIds(L, stmt.expression), () =>
+          L.lowerScopedBlock(stmt.thenStatement)),
       );
       const else_ = stmt.elseStatement
         ? L.narrowingAliases(aliasTypeofNarrows(L, stmt.expression, false), () =>
             L.lowerScopedBlock(stmt.elseStatement!),
           )
         : null;
+      const narrowedAfter = falsyExitRuntimeOptionalLocal(L, stmt);
+      if (narrowedAfter !== null) L.runtimeOptionalLocals.delete(narrowedAfter);
       return { kind: "if", cond, then, else_, loc: locOf(stmt) };
     }
     if (ts.isWhileStatement(stmt)) {
       const labels = L.takeLabels();
       const cond = L.lowerCondition(stmt.expression);
-      const body = L.inCtl("loop", () => L.lowerScopedBlock(stmt.statement), labels);
+      const body = L.inCtl("loop", () =>
+        withRuntimeOptionalNarrowed(L, runtimeOptionalTrueIds(L, stmt.expression), () =>
+          L.lowerScopedBlock(stmt.statement)), labels);
       return { kind: "while", cond, body, ...(labels && { labels }), loc: locOf(stmt) };
     }
     if (ts.isDoStatement(stmt)) {
@@ -3200,7 +3205,9 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // later references to this name don't produce cascading errors.
     let init: IrExpr;
     try {
-      init = L.lowerExpr(decl.initializer);
+      init = immediatelyGuardedAbsenceProbe(L, decl)
+        ? (lowerAbsenceProbe(L, decl.initializer) ?? L.lowerExpr(decl.initializer))
+        : L.lowerExpr(decl.initializer);
     } catch (e) {
       if (e instanceof PoisonError) {
         const salvaged = L.mapTypeOf(L.typeOf(decl.name));
@@ -3277,16 +3284,19 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         }
       }
     }
-    // A JS binding holding an OOB-SAFE indexed read (`elem | undefined` —
-    // the --npm-static last-element probe) where the checker spells the
-    // bare element: the binding adopts the union — the idiom's next line
-    // is the truthiness guard, which narrows it right back.
+    // An unannotated binding holding an OOB-SAFE indexed read (`elem |
+    // undefined`) where the checker spells the bare element: the binding
+    // adopts the runtime-honest union. This covers both inferred package JS
+    // and TypeScript's fresh-array probe idioms; an explicit annotation keeps
+    // the caller's checked slot contract.
+    let runtimeOptional = false;
     if (
-      type !== null && init.type.kind === "union" && isJsSourceFile(decl.getSourceFile()) &&
+      !decl.type && type !== null && init.type.kind === "union" &&
       L.armTag(init.type.unionId, UNDEFINED_T) >= 0 &&
       typeEquals(L.stripUndefinedArm(init.type), type)
     ) {
       type = init.type;
+      runtimeOptional = true;
     }
     // A JS binding whose checker type spells a FUNCTION but whose VALUE is
     // already checked-dynamic (`const cb = mustCall(fn)` — the helper's
@@ -3424,7 +3434,46 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // subtyping (`const p: {a: number} = wider;`) is rejected, not coerced.
     init = L.coerceInto(decl.initializer, init, type);
     const local = L.declareLocal(decl.name, decl.name.text, type, isLet);
+    if (runtimeOptional) {
+      L.runtimeOptionalLocals.add(local.id);
+      L.runtimeOptionalStorageLocals.add(local.id);
+    }
     return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
+  }
+
+  function immediatelyGuardedAbsenceProbe(L: Lowerer, decl: ts.VariableDeclaration): boolean {
+    if (decl.type || !ts.isIdentifier(decl.name) || !decl.initializer) return false;
+    const statement = decl.parent?.parent;
+    if (!statement || !ts.isVariableStatement(statement)) return false;
+    const container = statement.parent;
+    const statements = ts.isBlock(container) || ts.isSourceFile(container) ? container.statements : null;
+    if (!statements) return false;
+    const index = statements.indexOf(statement);
+    const next = index >= 0 ? statements[index + 1] : undefined;
+    if (!next || !ts.isIfStatement(next)) return false;
+    let condition = next.expression;
+    while (ts.isParenthesizedExpression(condition)) condition = condition.expression;
+    if (!ts.isPrefixUnaryExpression(condition) || condition.operator !== ts.SyntaxKind.ExclamationToken) return false;
+    let operand = condition.operand;
+    while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
+    return ts.isIdentifier(operand) && L.resolveValueSymbol(operand) === L.resolveValueSymbol(decl.name);
+  }
+
+  function falsyExitRuntimeOptionalLocal(L: Lowerer, stmt: ts.IfStatement): string | null {
+    if (stmt.elseStatement) return null;
+    let condition = stmt.expression;
+    while (ts.isParenthesizedExpression(condition)) condition = condition.expression;
+    if (!ts.isPrefixUnaryExpression(condition) || condition.operator !== ts.SyntaxKind.ExclamationToken) return null;
+    let operand = condition.operand;
+    while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
+    if (!ts.isIdentifier(operand)) return null;
+    const local = L.resolveLocal(operand);
+    if (!local || !L.runtimeOptionalLocals.has(local.id)) return null;
+    const exits = ts.isReturnStatement(stmt.thenStatement) || ts.isThrowStatement(stmt.thenStatement) ||
+      (ts.isBlock(stmt.thenStatement) && stmt.thenStatement.statements.length > 0 &&
+        (ts.isReturnStatement(stmt.thenStatement.statements[stmt.thenStatement.statements.length - 1]!) ||
+          ts.isThrowStatement(stmt.thenStatement.statements[stmt.thenStatement.statements.length - 1]!)));
+    return exits ? local.id : null;
   }
 
 /** JS-exact switch (see docs/ir.md): one shared lexical scope for all case
@@ -4493,6 +4542,7 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         const target = L.resolveWritable(expr.left);
         if (!target) L.rejectUnresolved(expr.left, `assignment to '${expr.left.text}' (not a writable local or module global)`);
         const value = L.lowerExprExpecting(expr.right, target.type);
+        if (L.runtimeOptionalStorageLocals.has(target.id)) L.runtimeOptionalLocals.add(target.id);
         return { kind: "assign", localId: target.id, value, loc: locOf(expr) };
       }
       if (opKind === ts.SyntaxKind.QuestionQuestionEqualsToken) {

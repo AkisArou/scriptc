@@ -283,6 +283,27 @@ static const char *scr_net_errname(int err) {
  * The types live in scr_runtime.h: scr_http.c reuses the whole family
  * for its request-body listener lists. */
 
+struct ScrNetOnce {
+  size_t rc;
+  bool fired;
+};
+
+ScrNetOnce *scr_net_once_new(void) {
+  ScrNetOnce *once = calloc(1, sizeof *once);
+  if (!once) scr_net_oom();
+  once->rc = 1;
+  return once;
+}
+
+ScrNetOnce *scr_net_once_retain(ScrNetOnce *once) {
+  once->rc++;
+  return once;
+}
+
+void scr_net_once_release(ScrNetOnce *once) {
+  if (once != NULL && --once->rc == 0) free(once);
+}
+
 void scr_net_ls_add(ScrNetLs *l, ScrClosure *cb, void *fn, bool once) {
   if (l->n == l->cap) {
     l->cap = l->cap ? l->cap * 2 : 2;
@@ -292,11 +313,28 @@ void scr_net_ls_add(ScrNetLs *l, ScrClosure *cb, void *fn, bool once) {
   l->ls[l->n].cb = cb;
   l->ls[l->n].fn = fn;
   l->ls[l->n].once = once;
+  l->ls[l->n].shared_once = NULL;
   l->n++;
 }
 
+void scr_net_ls_add_shared_once(ScrNetLs *l, ScrClosure *cb, void *fn,
+                                ScrNetOnce *once /*moves*/) {
+  scr_net_ls_add(l, cb, fn, true);
+  l->ls[l->n - 1].shared_once = once;
+}
+
+bool scr_net_ls_has_live(const ScrNetLs *l) {
+  for (size_t i = 0; i < l->n; i++) {
+    if (l->ls[i].shared_once == NULL || !l->ls[i].shared_once->fired) return true;
+  }
+  return false;
+}
+
 void scr_net_ls_drop(ScrNetLs *l) {
-  for (size_t i = 0; i < l->n; i++) scr_closure_release(l->ls[i].cb);
+  for (size_t i = 0; i < l->n; i++) {
+    scr_closure_release(l->ls[i].cb);
+    scr_net_once_release(l->ls[i].shared_once);
+  }
   free(l->ls);
   l->ls = NULL;
   l->n = l->cap = 0;
@@ -314,22 +352,32 @@ size_t scr_net_ls_snapshot(ScrNetLs *l, ScrNetL **out) {
   }
   ScrNetL *snap = malloc(n * sizeof *snap);
   if (!snap) scr_net_oom();
-  for (size_t i = 0; i < n; i++) {
-    snap[i] = l->ls[i];
-    scr_closure_retain(snap[i].cb);
-  }
-  /* remove the once entries from the live list */
+  size_t nsnap = 0;
   size_t w = 0;
   for (size_t i = 0; i < l->n; i++) {
+    ScrNetL entry = l->ls[i];
+    bool emit = entry.shared_once == NULL || !entry.shared_once->fired;
+    if (emit) {
+      if (entry.shared_once != NULL) entry.shared_once->fired = true;
+      snap[nsnap] = entry;
+      snap[nsnap].shared_once = NULL;
+      scr_closure_retain(snap[nsnap].cb);
+      nsnap++;
+    }
     if (l->ls[i].once) {
       scr_closure_release(l->ls[i].cb);
+      scr_net_once_release(l->ls[i].shared_once);
     } else {
       l->ls[w++] = l->ls[i];
     }
   }
   l->n = w;
+  if (nsnap == 0) {
+    free(snap);
+    snap = NULL;
+  }
   *out = snap;
-  return n;
+  return nsnap;
 }
 
 /* Fire a zero-payload event list (end/close/connect/listening) with the

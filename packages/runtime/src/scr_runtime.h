@@ -5072,10 +5072,13 @@ typedef void (*ScrNetDataFn)(ScrClosure *cb, ScrBytes *chunk);    /* borrowed */
 
 /* The listener-list family (snapshot firing, once-before-run): owned by
  * scr_net.c, reused by scr_http.c for the request-body event lists. */
+typedef struct ScrNetOnce ScrNetOnce;
+
 typedef struct {
   ScrClosure *cb; /* owned */
   void *fn;       /* adapter with the event's firing ABI */
   bool once;
+  ScrNetOnce *shared_once; /* owned, nullable: one once registration mirrored across lists */
 } ScrNetL;
 
 typedef struct {
@@ -5084,6 +5087,12 @@ typedef struct {
 } ScrNetLs;
 
 void scr_net_ls_add(ScrNetLs *l, ScrClosure *cb, void *fn, bool once);
+ScrNetOnce *scr_net_once_new(void); /* +1 */
+ScrNetOnce *scr_net_once_retain(ScrNetOnce *once); /* +1 */
+void scr_net_once_release(ScrNetOnce *once);
+void scr_net_ls_add_shared_once(ScrNetLs *l, ScrClosure *cb, void *fn,
+                                ScrNetOnce *once /*moves*/);
+bool scr_net_ls_has_live(const ScrNetLs *l);
 void scr_net_ls_drop(ScrNetLs *l);
 size_t scr_net_ls_snapshot(ScrNetLs *l, ScrNetL **out);
 void scr_net_fire0(ScrNetLs *l);
@@ -5410,7 +5419,7 @@ void scr_tls_sock_on_session(ScrNetSocket *s, ScrClosure *cb /*moves*/, void *fn
  * the https-authority client wrap. scr_http2.c calls both directly —
  * every http2-using binary links the TLS unit (the moduleUsesTls
  * switch), so no registration indirection is needed. */
-void scr_tls_server_wrap_h2(ScrNetServer *s, const char *cert, size_t cert_len, const char *key, size_t key_len, ScrNetNativeConnFn h2_conn, void *h2_ctx /*moves*/, void (*h2_ctx_free)(void *));
+void scr_tls_server_wrap_h2(ScrNetServer *s, const char *cert, size_t cert_len, const char *key, size_t key_len, ScrNetNativeConnFn h2_conn, void *h2_ctx /*moves*/, void (*h2_ctx_free)(void *), ScrClosure *sni_cb /*moves, nullable*/, void *sni_answer_fn);
 void scr_tls_h2_client_wrap(ScrNetSocket *sock, ScrStr *host /*borrowed*/, bool reject_unauthorized, const char *ca /*borrowed, len 0 = none*/, size_t ca_len);
 
 /* ── tls.SecureContext + the SNI callback (scr_tls.c) ─────────────────
@@ -5483,6 +5492,7 @@ bool scr_tls_ca_default_override(const char **pem, size_t *len, uint64_t *gen);
 typedef struct ScrHttpReq ScrHttpReq;
 typedef struct ScrHttpRes ScrHttpRes;
 typedef void (*ScrHttpReqFn)(ScrClosure *cb, ScrHttpReq *req, ScrHttpRes *res); /* both +1 */
+typedef void (*ScrHttpConnectH2Fn)(ScrClosure *cb, ScrHttpReq *req, ScrHttpRes *res); /* both +1 */
 /* 'upgrade' listeners, both sides: (req-or-res, socket, head) — all +1.
  * The parser steps aside (native reader cleared) and the socket is the
  * listener's raw stream; `head` carries bytes read past the 101/request
@@ -5525,10 +5535,16 @@ typedef struct ScrHttpH2Ops {
 void scr_http_set_h2_ops(const ScrHttpH2Ops *ops);
 void scr_http_set_h2_request_hook(void (*hook)(void *h2ctx, ScrClosure *cb /*moves*/,
                                                void *fn, bool once));
+void scr_http_set_h2_connect_hook(void (*hook)(void *h2ctx, ScrClosure *cb /*moves*/,
+                                               void *h1_fn, void *h2_fn, bool once));
+void scr_http_set_h2_upgrade_hook(void (*hook)(void *h2ctx, ScrClosure *cb /*moves*/,
+                                               void *fn, bool once));
 
 /* The compat pair, built by scr_http2.c per server stream. */
 ScrHttpReq *scr_http_h2_req_new(ScrNetSocket *sock /*borrowed, nullable*/,
                                  void *stream /*borrowed, nullable*/); /* +1 */
+void *scr_http_req_h2_stream(ScrHttpReq *r); /* +1 or NULL */
+void *scr_http_req_h2_stream_or_throw(ScrHttpReq *r, ScrStr *member /*borrowed*/); /* +1 */
 void scr_http_h2_req_line(ScrHttpReq *r, ScrStr *method /*borrowed, nullable*/,
                            ScrStr *url /*borrowed, nullable*/);
 void scr_http_h2_req_header(ScrHttpReq *r, ScrStr *name /*borrowed*/, ScrStr *value /*borrowed*/);
@@ -5563,6 +5579,12 @@ void scr_http2_stream_undef_call(ScrStr *member);
  * server) the closure releases unregistered: 'request' never fires
  * there, like Node. */
 void scr_http_server_on_request(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrHttpReqFn fn, bool once);
+void scr_http1_ctx_on_request(void *ctx, ScrClosure *cb /*moves*/, ScrHttpReqFn fn, bool once,
+                              ScrNetOnce *shared_once /*moves, nullable*/);
+void scr_http1_ctx_on_connect(void *ctx, ScrClosure *cb /*moves*/, ScrHttpUpgradeFn fn, bool once,
+                              ScrNetOnce *shared_once /*moves, nullable*/);
+void scr_http1_ctx_on_upgrade(void *ctx, ScrClosure *cb /*moves*/, ScrHttpUpgradeFn fn, bool once);
+void scr_http1_ctx_settle(void *ctx);
 ScrStr *scr_http_req_url(ScrHttpReq *r);      /* +1 */
 ScrStr *scr_http_req_method(ScrHttpReq *r);   /* +1 */
 ScrStr *scr_http_req_header(ScrHttpReq *r, ScrStr *name /*borrowed*/); /* +1 or NULL (undefined arm) */
@@ -5610,10 +5632,10 @@ void scr_http_server_join_duplicate_headers(ScrNetServer *s);
 void scr_http_handler_thunk0(ScrClosure *cb, ScrHttpReq *req, ScrHttpRes *res);
 void scr_http_handler_thunk1(ScrClosure *cb, ScrHttpReq *req, ScrHttpRes *res);
 void scr_http_handler_thunk2(ScrClosure *cb, ScrHttpReq *req, ScrHttpRes *res);
-/* server.on("connect", ...) — HTTP CONNECT, the upgrade twin: fired
- * INSTEAD of 'request' for CONNECT-method requests with (req, socket,
- * head); no listener destroys the socket. */
-void scr_http_server_on_connect(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrHttpUpgradeFn fn,
+/* server.on("connect", ...) — fired instead of 'request' for CONNECT.
+ * HTTP/1 uses (req, socket, head); HTTP/2 compatibility uses (req, res). */
+void scr_http_server_on_connect(ScrNetServer *s, ScrClosure *cb /*moves*/,
+                                 ScrHttpUpgradeFn h1_fn, ScrHttpConnectH2Fn h2_fn,
                                  bool once);
 void scr_http_server_on_upgrade(ScrNetServer *s, ScrClosure *cb /*moves*/, ScrHttpUpgradeFn fn, bool once);
 ScrArr *scr_http_req_raw_headers(ScrHttpReq *r); /* +1 — [name, value, ...], arrival order/case */
@@ -5758,6 +5780,8 @@ enum { SCR_NET_PROTO_HTTP1 = 1, SCR_NET_PROTO_H2 = 2 };
 
 typedef struct ScrH2Session ScrH2Session;
 typedef struct ScrH2Stream ScrH2Stream;
+typedef void (*ScrH2SessionErrorFn)(ScrClosure *cb, ScrStr *msg,
+                                    ScrH2Session *session); /* session +1 */
 
 typedef void (*ScrH2StreamFn)(ScrClosure *cb, ScrH2Stream *st, ScrArr *pairs, double flags); /* st, pairs +1 */
 typedef void (*ScrH2RespFn)(ScrClosure *cb, ScrArr *pairs, double status, double flags);     /* pairs +1 */
@@ -5784,11 +5808,12 @@ ScrNetServer *scr_http2_create_server_req(ScrClosure *handler /*moves*/, ScrHttp
 /* The REAL h2-over-TLS server (http2.createSecureServer({ cert, key })):
  * the same session machinery behind an mbedTLS handshake whose ALPN
  * advertises h2 alone — protocol-identical after establishment. */
-ScrNetServer *scr_http2_create_secure_server(const char *cert, size_t cert_len, const char *key, size_t key_len); /* +1 */
+ScrNetServer *scr_http2_create_secure_server(const char *cert, size_t cert_len, const char *key, size_t key_len, bool enable_connect_protocol); /* +1 */
+ScrNetServer *scr_http2_create_secure_server_allow_http1(const char *cert, size_t cert_len, const char *key, size_t key_len, ScrClosure *handler /*moves, nullable*/, ScrHttpReqFn fn, ScrClosure *sni_cb /*moves, nullable*/, void *sni_answer_fn, bool enable_connect_protocol); /* +1 */
 /* createSecureServer(options, handler): the eager COMPAT handler as the
  * first 'request' listener over the ALPN=h2 server (the createServerReq
  * route, secured). */
-ScrNetServer *scr_http2_create_secure_server_req(const char *cert, size_t cert_len, const char *key, size_t key_len, ScrClosure *handler /*moves, nullable*/, ScrHttpReqFn fn); /* +1 */
+ScrNetServer *scr_http2_create_secure_server_req(const char *cert, size_t cert_len, const char *key, size_t key_len, ScrClosure *handler /*moves, nullable*/, ScrHttpReqFn fn, bool enable_connect_protocol); /* +1 */
 /* createSecureServer with a RUNTIME options record (the divergence-66
  * stance): allowHTTP1 picks the flavor at runtime, cert/key ride the
  * shared TLS server walk (out-of-bounds members throw the catchable
@@ -5818,6 +5843,11 @@ void scr_http2_session_close(ScrH2Session *s, ScrClosure *cb /*moves, nullable*/
 void scr_http2_session_destroy(ScrH2Session *s);
 void scr_http2_session_on_close(ScrH2Session *s, ScrClosure *cb /*moves*/, bool once);
 void scr_http2_session_on_error(ScrH2Session *s, ScrClosure *cb /*moves*/, ScrChildErrFn fn, bool once);
+void scr_http2_server_on_session_error(ScrNetServer *s, ScrClosure *cb /*moves*/,
+                                       ScrH2SessionErrorFn fn, bool once);
+void scr_http2_session_error_thunk0(ScrClosure *cb, ScrStr *msg, ScrH2Session *session);
+void scr_http2_session_error_thunk1(ScrClosure *cb, ScrStr *msg, ScrH2Session *session);
+void scr_http2_session_error_thunk2(ScrClosure *cb, ScrStr *msg, ScrH2Session *session);
 void scr_http2_session_on_connect(ScrH2Session *s, ScrClosure *cb /*moves*/, ScrH2ConnectFn fn, bool once);
 void scr_http2_session_on_stream(ScrH2Session *s, ScrClosure *cb /*moves*/, ScrH2StreamFn fn, bool once);
 void scr_http2_session_on_goaway(ScrH2Session *s, ScrClosure *cb /*moves*/, ScrH2GoawayFn fn, bool once);

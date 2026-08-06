@@ -5378,6 +5378,22 @@ class LlEmitter {
         B.line(`${t} = load ${ty}, ptr ${slot}`);
         return this.own({ name: t, type: e.type });
       }
+      case "unionFuncEq": {
+        const u = this.emitExpr(e.union);
+        const f = this.emitExpr(e.func);
+        const tag = this.unionTag(u.name);
+        const tagMatch = B.tmp();
+        B.line(`${tagMatch} = icmp eq i32 ${tag}, ${e.tag}`);
+        const payload = this.unionPeek(u.name);
+        const ptrMatch = B.tmp();
+        B.line(`${ptrMatch} = icmp eq ptr ${payload}, ${f.name}`);
+        const result = B.tmp();
+        B.line(`${result} = and i1 ${tagMatch}, ${ptrMatch}`);
+        if (!e.negated) return this.own({ name: result, type: e.type });
+        const negated = B.tmp();
+        B.line(`${negated} = xor i1 ${result}, true`);
+        return this.own({ name: negated, type: e.type });
+      }
       case "nullish": {
         // `a ?? b`: logical's move/release dance with the left's runtime
         // TAG against its unit arms as the test. Pass-through shape: the

@@ -147,7 +147,7 @@ fenced.ts:72:71 - error SC2020: 'createSecureServer option 'streamResetBurst' wi
      |                                                                       ^~~~~~~~~~~~~~~~~~~~~~~
   73 | http2.connect("https://localhost");
 
-  hint: h2 session-tuning options are accepted with literal values (settings: a literal of literals) and ignored — the allowHTTP1 lowering serves HTTP/1.1 only, which has no h2 sessions to tune
+  hint: h2 session-tuning options are accepted with literal values but are not applied yet
 
 fenced.ts:79:1 - error SC2020: 'crypto.generateKeyPair' is typed by @types/node but has no scriptc lowering yet
 
