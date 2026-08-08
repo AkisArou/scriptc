@@ -1,6 +1,148 @@
 // The engine-free user surface: this is intentionally top-level and has
 // no --dynamic directive. Both backends must compile fetch(url),
 // RequestInit, and Response.json() into the native net/http/tls runtime.
+const constructed = new Response("1");
+console.log(
+  "constructed response:",
+  constructed.status,
+  constructed.ok,
+  JSON.stringify(constructed.statusText),
+  JSON.stringify(constructed.url),
+  constructed.redirected,
+  constructed.headers.get("content-type"),
+  constructed.body !== null,
+  constructed.bodyUsed,
+  await constructed.text(),
+  constructed.bodyUsed,
+);
+
+const configuredResponse = new Response(new Uint8Array([104, 105]), {
+  status: 201,
+  statusText: "Made",
+  headers: { "x-one": "one", connection: "custom" },
+});
+configuredResponse.headers.append("x-one", "two");
+configuredResponse.headers.set("x-two", "set");
+configuredResponse.headers.delete("x-two");
+console.log(
+  "configured response:",
+  configuredResponse.status,
+  configuredResponse.statusText,
+  configuredResponse.headers.get("x-one"),
+  configuredResponse.headers.get("connection"),
+  configuredResponse.headers.has("x-two"),
+  await configuredResponse.text(),
+);
+
+const nullResponse = new Response(null, { status: 204 });
+console.log(
+  "null response:",
+  nullResponse.body === null,
+  nullResponse.bodyUsed,
+  JSON.stringify(await nullResponse.text()),
+  nullResponse.bodyUsed,
+);
+
+const streamResponse = new Response(
+  ReadableStream.from([
+    new Uint8Array([65]),
+    new Uint8Array([66]),
+  ]),
+);
+console.log("stream response:", await streamResponse.text());
+
+try {
+  new Response("bad", { status: 204 });
+} catch (error) {
+  console.log("response null-body status:", (error as Error).name);
+}
+try {
+  new Response(null, { status: 199 });
+} catch (error) {
+  console.log("response status range:", (error as Error).name);
+}
+try {
+  new Response(null, { status: -1e100 });
+} catch (error) {
+  console.log("response negative status range:", (error as Error).name);
+}
+console.log(
+  "response status conversion:",
+  new Response(null, { status: 65736 }).status,
+);
+const stringStatusInit: any = { status: "201" };
+console.log(
+  "response string status conversion:",
+  new Response(null, stringStatusInit).status,
+);
+
+const responseConversionOrder: string[] = [];
+const coercibleResponseBody: any = {
+  toString() {
+    responseConversionOrder.push("body");
+    return "ordered";
+  },
+};
+const coercibleResponseInit: any = {
+  status: {
+    valueOf() {
+      responseConversionOrder.push("status");
+      return "202";
+    },
+  },
+};
+const coercionResponse = new Response(
+  coercibleResponseBody,
+  coercibleResponseInit,
+);
+console.log(
+  "response coercion order:",
+  responseConversionOrder.join(","),
+  coercionResponse.status,
+  await coercionResponse.text(),
+);
+
+const lockedResponseBody = new ReadableStream<Uint8Array>();
+void lockedResponseBody.getReader();
+try {
+  new Response(lockedResponseBody, {
+    headers: { "bad name": "x" },
+    status: 199,
+    statusText: "bad\ntext",
+  });
+} catch (error) {
+  console.log(
+    "response locked body precedence:",
+    (error as Error).name,
+    (error as Error).message,
+  );
+}
+try {
+  new Response(null, {
+    headers: { "bad name": "x" },
+    status: 199,
+    statusText: "bad\ntext",
+  });
+} catch (error) {
+  console.log("response status precedence:", (error as Error).name);
+}
+try {
+  new Response(null, {
+    headers: { "bad name": "x" },
+    statusText: "bad\ntext",
+  });
+} catch (error) {
+  console.log(
+    "response status text precedence:",
+    (error as Error).message,
+  );
+}
+try {
+  new Response(null, { statusText: "bad\ntext" });
+} catch (error) {
+  console.log("response status text:", (error as Error).name);
+}
+
 const res = await fetch(`${process.argv[2]}/json`);
 console.log(await res.json());
 

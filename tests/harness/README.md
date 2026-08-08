@@ -22,7 +22,7 @@ The engine-free fetch/Web Streams slice has one versioned source of truth in
 `packages/compiler/src/compat/fetch-profile.ts`. It pins the exact Node and
 bundled Undici oracle, drives the lowering allowlists, projects every supported
 operation into `packages/compiler/surface-manifest.json`, and names the
-differential evidence for each operation and `RequestInit` member. A new row
+differential evidence for each operation and `RequestInit`/`ResponseInit` member. A new row
 without a real fixture or registered generated scenario fails the profile
 suite.
 

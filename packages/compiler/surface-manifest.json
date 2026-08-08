@@ -2964,25 +2964,22 @@
       "id": "stdlib.response-init.headers",
       "kind": "stdlib",
       "name": "ResponseInit.headers",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response construction has no compiler lowering in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: Headers, record, or sequence-of-pairs snapshot; differential evidence: fixture:static"
     },
     {
       "id": "stdlib.response-init.status",
       "kind": "stdlib",
       "name": "ResponseInit.status",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response construction has no compiler lowering in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: WebIDL unsigned-short conversion followed by the 200–599 range check; differential evidence: fixture:static"
     },
     {
       "id": "stdlib.response-init.statusText",
       "kind": "stdlib",
       "name": "ResponseInit.statusText",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response construction has no compiler lowering in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; conversion: WebIDL ByteString with HTTP reason-phrase validation; differential evidence: fixture:static"
     },
     {
       "id": "stdlib.response.arrayBuffer",
@@ -3033,9 +3030,8 @@
       "id": "stdlib.response.constructor",
       "kind": "stdlib",
       "name": "Response constructor",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the interface constructor has no compiler bridge in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, body-consumption, state-machine, error-shape; supported scope: BodyInit is string, Uint8Array/Buffer, ReadableStream<Uint8Array>, null/undefined, or a checked-dynamic value that follows the supported WebIDL string conversion; ResponseInit is headers/status/statusText; differential evidence: fixture:static"
     },
     {
       "id": "stdlib.response.formData",
@@ -3079,7 +3075,7 @@
       "name": "Response.error",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.static.json",
@@ -3087,7 +3083,7 @@
       "name": "Response.json",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.static.redirect",
@@ -3095,7 +3091,7 @@
       "name": "Response.redirect",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response constructor-object operations have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering in either tier"
     },
     {
       "id": "stdlib.response.status",

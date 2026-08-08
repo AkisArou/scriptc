@@ -240,7 +240,7 @@ describe("Node 24 fetch compatibility profile", () => {
   });
 
   test("the inventory classifies every supported row and every gap", () => {
-    const supported = [...profile.operations, ...profile.requestInit]
+    const supported = [...profile.operations, ...profile.requestInit, ...profile.responseInit]
       .map((row) => row.id)
       .sort();
     const entries = profile.inventory.entries;
@@ -326,7 +326,7 @@ describe("Node 24 fetch compatibility profile", () => {
 
   test("every row has unique ids and resolvable differential evidence", () => {
     expect(profile.schemaVersion).toBe(1);
-    const rows = [...profile.operations, ...profile.requestInit];
+    const rows = [...profile.operations, ...profile.requestInit, ...profile.responseInit];
     const ids = rows.map((row) => row.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(profile.operations.length).toBeGreaterThanOrEqual(35);

@@ -1212,7 +1212,7 @@ export function fenceUnsupportedFetchConstructorMember(
   L.noLowering(
     `Response.${member}`,
     access,
-    "Response constructor-object operations have no compiler lowering in either tier",
+    "Response static constructor-object operations have no compiler lowering in either tier",
   );
 }
 
@@ -2358,6 +2358,79 @@ export function lowerStaticReadableStreamNew(
     kind: "libCall",
     fn: "fetch.streamNew",
     args: [source],
+    type: DYN,
+    loc,
+  };
+}
+
+/** `new Response(body?, init?)`. Dynamic builds construct the island's
+ * Web Response directly. Static builds hand a checked-dynamic BodyInit and
+ * ResponseInit snapshot to the native fetch runtime, which returns the same
+ * opaque Response handle as fetch(). */
+export function lowerResponseNew(
+  L: Lowerer,
+  expr: ts.NewExpression,
+): IrExpr | null {
+  if (
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "Response"
+  ) {
+    return null;
+  }
+  const symbol = L.resolveValueSymbol(expr.expression);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const args = expr.arguments ?? [];
+  if (args.length > 2 || args.some(ts.isSpreadElement)) return null;
+  const loc = locOf(expr);
+
+  if (L.dynamic) {
+    const ctor: IrExpr = {
+      kind: "jsOp",
+      op: "globalGet",
+      name: "Response",
+      args: [],
+      type: JSVAL,
+      loc,
+    };
+    const lowered = args.map((arg) =>
+      ts.isObjectLiteralExpression(arg)
+        ? lowerIslandObjectLiteral(L, arg)
+        : L.jsvalIn(L.lowerExpr(arg), arg)
+    );
+    return {
+      kind: "jsOp",
+      op: "construct",
+      args: [ctor, ...lowered],
+      type: JSVAL,
+      loc,
+    };
+  }
+
+  const toDyn = (node: ts.Expression | undefined, what: string): IrExpr => {
+    if (node === undefined) return dynUndefinedExpr(loc);
+    const value = L.lowerExpr(node);
+    if (value.type.kind === "dyn") return value;
+    if (value.kind === "unitLit" || L.dynConvertible(value.type)) {
+      return { kind: "dynFrom", value, type: DYN, loc: value.loc };
+    }
+    L.noLowering(
+      `new Response with ${what} of type '${L.fmt(value.type)}'`,
+      node,
+      "the static constructor accepts string, Uint8Array, ReadableStream, null, and the declared ResponseInit dictionary",
+    );
+  };
+
+  const body = toDyn(args[0], "a body");
+  const initNode = args[1];
+  const init = initNode === undefined
+    ? dynUndefinedExpr(loc)
+    : ts.isObjectLiteralExpression(initNode)
+      ? lowerDynObjectLiteral(L, initNode)
+      : toDyn(initNode, "an init value");
+  return {
+    kind: "libCall",
+    fn: "fetch.responseNew",
+    args: [body, init],
     type: DYN,
     loc,
   };

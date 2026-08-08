@@ -2826,6 +2826,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "fetch.start":
             E.usesTimers = true;
             return finish(`scr_fetch_static(${arg(0)}, ${arg(1)})`);
+          case "fetch.responseNew":
+            return finish(`scr_fetch_response_new(${arg(0)}, ${arg(1)})`);
           case "fetch.responseJson":
             return finish(`scr_fetch_response_json(${arg(0)})`);
           case "fetch.responseText":

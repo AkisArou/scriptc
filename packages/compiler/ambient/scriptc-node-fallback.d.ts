@@ -688,6 +688,36 @@ interface Response {
   arrayBuffer(): Promise<ArrayBuffer>;
   bytes(): Promise<Uint8Array>;
 }
+interface ResponseInit {
+  headers?:
+    | Headers
+    | Record<string, string>
+    | readonly (readonly [string, string])[];
+  status?: number;
+  statusText?: string;
+}
+declare var Response: {
+  new (
+    body?: string | Uint8Array | ReadableStream<Uint8Array> | null,
+    init?: ResponseInit,
+  ): Response;
+  readonly prototype: Response;
+  error(): Response;
+  json(data: unknown, init?: ResponseInit): Response;
+  redirect(url: string | URL, status?: number): Response;
+};
+interface Request {
+  readonly method: string;
+  readonly url: string;
+  readonly headers: Headers;
+  readonly signal: AbortSignal;
+  readonly body: ReadableStream<Uint8Array> | null;
+  readonly bodyUsed: boolean;
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  bytes(): Promise<Uint8Array>;
+}
 interface RequestInit {
   method?: string;
   headers?:
@@ -699,6 +729,10 @@ interface RequestInit {
   redirect?: "follow" | "error" | "manual";
   signal?: AbortSignal;
 }
+declare var Request: {
+  new (input: string | URL | Request, init?: RequestInit): Request;
+  readonly prototype: Request;
+};
 declare function fetch(input: string | URL, init?: RequestInit): Promise<Response>;
 
 /* The repeating timer pair (setTimeout lives in scriptc.d.ts — always
@@ -1996,6 +2030,8 @@ declare module "node:net" {
 declare module "http" {
   import { Server as NetServer, Socket } from "net";
   export type Server = NetServer;
+  export type RequestListener =
+    (req: IncomingMessage, res: ServerResponse) => void;
   /* The Server VALUE — Node's constructor works with and without `new`
    * (test/parallel's http.Server(fn) spelling); both route to the
    * createServer lowering. */

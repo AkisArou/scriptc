@@ -1617,6 +1617,7 @@ export type IrLibFn =
    * consume the native body stream. AbortSignal and ReadableStream values
    * are opaque checked-dynamic handles. */
   | "fetch.start"
+  | "fetch.responseNew"
   | "fetch.responseJson"
   | "fetch.responseText"
   | "fetch.responseBytes"
@@ -6542,6 +6543,7 @@ export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "fetch.responseNew",
   "fetch.abortTimeout",
   "fetch.abortAny",
   "fetch.streamNew",
