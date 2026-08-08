@@ -31,6 +31,8 @@ console.log(fs.readSync(fdPositioned, first, 0, 4, null), first.toString("utf8")
 console.log(fs.readSync(fdPositioned, next, 0, 4), next.toString("utf8"));
 console.log(fs.readSync(fdPositioned, sentinel, 0, 2, -1), sentinel.toString("utf8"));
 console.log(fs.readSync(fdPositioned, positioned, 0, 5, 9999));
+// Node returns before validating position when the requested window is empty.
+console.log(fs.readSync(fdPositioned, positioned, 0, 0, 1.5));
 try {
   fs.readSync(fdPositioned, positioned, 0, 1, 1.5);
 } catch (e) {

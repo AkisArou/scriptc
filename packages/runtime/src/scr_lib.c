@@ -1742,6 +1742,9 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,
     return 0;
   }
   size_t want = (size_t)length;
+  /* Node short-circuits an empty buffer window after validating its bounds:
+   * neither the descriptor nor position participates in a zero-byte read. */
+  if (want == 0) return 0;
   if (!(isfinite(position) && trunc(position) == position)) {
     char recv[48];
     scr_num_received(position, recv);
