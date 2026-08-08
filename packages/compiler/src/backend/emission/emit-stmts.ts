@@ -8,6 +8,7 @@ import { mangleField, mangleGlobal, mangleLocal, mangleRawParam } from "../mangl
 import { BOOL, CAUGHT, IrExpr, IrStmt, RUNTIME_ERROR_CLASSES, isRefCounted } from "../../ir/nodes.js";
 import { boxAccess, cDecl, cStringLiteral, elemAccess, vAdapters } from "./emit-types.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
+import { emitBytesReceiver } from "./emit-exprs.js";
 
 
 
@@ -367,12 +368,17 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
       }
       case "bytesSet": {
         // Typed-array element write: same evaluation order as arraySet;
-        // the value is a scalar (the runtime coerces JS-exactly), so no
-        // ownership moves. Any invalid index traps — no append.
-        const arr = E.emitExpr(s.arr);
+        // the value is a scalar (the inline kind-specific accessor coerces
+        // JS-exactly), so no ownership moves. Any invalid index traps — no
+        // append. The IR carries the element kind; do not rediscover it in
+        // the generic runtime accessor on every loop iteration.
+        const arr = emitBytesReceiver(E, s.arr, [s.index, s.value]);
         const idx = E.emitExpr(s.index);
         const v = E.emitExpr(s.value);
-        E.line(`scr_bytes_set(${arr.name}, ${idx.name}, ${v.name});${E.srcComment(s.loc)}`);
+        if (s.arr.type.kind !== "bytes") throw new Error("emitter bug: bytesSet on non-bytes");
+        E.line(
+          `${E.bytesElementHelper("set", s.arr.type.elem)}(${arr.name}, ${idx.name}, ${v.name});${E.srcComment(s.loc)}`,
+        );
         break;
       }
       case "fieldSet":

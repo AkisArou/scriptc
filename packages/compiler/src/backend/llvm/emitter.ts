@@ -61,6 +61,7 @@
  * the island surface (jsval/jsExit — the engine bridge).
  */
 import type {
+  IrBytesElem,
   IrExpr,
   IrFfiImport,
   IrFunction,
@@ -1343,6 +1344,11 @@ class LlEmitter {
       // scr_runtime.h's natural alignment: kind at 8, f64 at 16, b at 24,
       // payload at 32).
       `%ScrCaught = type { i64, i32, double, i8, ptr, ptr, ptr, ptr }`,
+      // ScrBytes { rc, len, elem(i32+pad), data, backing }. Indexed
+      // typed-array access GEPs through this directly: the IR type already
+      // fixes elem, so the hot path needs neither a runtime kind load nor
+      // the generic scr_bytes_get/set call.
+      `%ScrBytes = type { i64, i64, i32, ptr, ptr }`,
       // The capture box { rc, kind, obj_retain, obj_release, obj_trace,
       // slot } — TDZ reads peek the payload slot (offset 40) directly.
       `%ScrBox = type { i64, i32, ptr, ptr, ptr, i64 }`,
@@ -3178,13 +3184,15 @@ class LlEmitter {
       }
       case "bytesSet": {
         // Typed-array element write: same evaluation order as arraySet;
-        // the value is a scalar (the runtime coerces JS-exactly), so no
-        // ownership moves. Any invalid index traps — no append.
-        const arr = this.emitExpr(s.arr);
+        // the value is a scalar (the kind-specific inline path coerces
+        // JS-exactly), so no ownership moves. Any invalid index traps — no
+        // append. IrBytesElem is static, so never rediscover it through the
+        // generic runtime switch in a hot loop.
+        const arr = this.emitBytesReceiver(s.arr, [s.index, s.value]);
         const idx = this.emitExpr(s.index);
         const v = this.emitExpr(s.value);
-        this.declare(`declare void @scr_bytes_set(ptr, double, double)`);
-        B.line(`call void @scr_bytes_set(ptr ${arr.name}, double ${idx.name}, double ${v.name})`);
+        if (s.arr.type.kind !== "bytes") throw new Error("llvm emitter bug: bytesSet on non-bytes");
+        this.emitBytesSet(s.arr.type.elem, arr.name, idx.name, v.name);
         break;
       }
       case "fieldSet":
@@ -9302,6 +9310,251 @@ class LlEmitter {
     }
   }
 
+  /** Whether an index/value expression can overwrite a bytes binding.
+   * Kept deliberately conservative; uncertain or calling shapes retain the
+   * ordinary owned-receiver snapshot. */
+  private isStableBytesOperand(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "numLit":
+      case "boolLit":
+      case "varRef":
+      case "incDec":
+        return true;
+      case "assignExpr":
+        // A numeric index/value assignment cannot target the bytes-typed
+        // receiver binding.
+        return this.isStableBytesOperand(e.value);
+      case "bin":
+        return this.isStableBytesOperand(e.left) && this.isStableBytesOperand(e.right);
+      case "unary":
+      case "toBool":
+        return this.isStableBytesOperand(e.operand);
+      case "logical":
+        return this.isStableBytesOperand(e.left) && this.isStableBytesOperand(e.right);
+      case "ternary":
+        return (
+          this.isStableBytesOperand(e.cond) &&
+          this.isStableBytesOperand(e.then) &&
+          this.isStableBytesOperand(e.else_)
+        );
+      case "bytesIntrinsic":
+        return (
+          (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
+          e.receiver.kind === "varRef" &&
+          e.args.every((a) => this.isStableBytesOperand(a))
+        );
+      default:
+        return false;
+    }
+  }
+
+  /** Borrow a direct, unboxed bytes binding when later operands are stable.
+   * Its scope/global owner keeps it alive through the access. */
+  private emitBytesReceiver(receiver: IrExpr, following: IrExpr[]): LlValue {
+    if (receiver.kind === "varRef" && following.every((e) => this.isStableBytesOperand(e))) {
+      const b = this.binding(receiver.localId);
+      if (b.kind !== "boxed") {
+        const value = this.B.tmp();
+        this.B.line(`${value} = load ptr, ptr ${b.slot}`);
+        return { name: value, type: receiver.type };
+      }
+    }
+    return this.emitExpr(receiver);
+  }
+
+  /** Bounds-check a typed-array element index without an out-of-line call
+   * on the valid path. The range test rejects NaN/infinity before fptoui;
+   * the integer round trip then rejects fractions. The error block retains
+   * the runtime's exact trap text. Leaves the builder in the valid block. */
+  private emitBytesIndex(receiver: string, index: string): string {
+    const B = this.B;
+    const lenPtr = B.tmp();
+    const len = B.tmp();
+    const lenF64 = B.tmp();
+    const nonnegative = B.tmp();
+    const belowLen = B.tmp();
+    const inRange = B.tmp();
+    B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 1`);
+    B.line(`${len} = load i64, ptr ${lenPtr}`);
+    B.line(`${lenF64} = uitofp i64 ${len} to double`);
+    B.line(`${nonnegative} = fcmp oge double ${index}, ${f64Lit(0)}`);
+    B.line(`${belowLen} = fcmp olt double ${index}, ${lenF64}`);
+    B.line(`${inRange} = and i1 ${nonnegative}, ${belowLen}`);
+
+    const rangeOk = B.newLabel("bytes.index.range");
+    const invalid = B.newLabel("bytes.index.invalid");
+    const valid = B.newLabel("bytes.index.valid");
+    B.condBr(inRange, rangeOk, invalid);
+
+    B.startBlock(rangeOk);
+    const idx = B.tmp();
+    const roundTrip = B.tmp();
+    const integral = B.tmp();
+    B.line(`${idx} = fptoui double ${index} to i64`);
+    B.line(`${roundTrip} = uitofp i64 ${idx} to double`);
+    B.line(`${integral} = fcmp oeq double ${roundTrip}, ${index}`);
+    B.condBr(integral, valid, invalid);
+
+    B.startBlock(invalid);
+    this.declare(`declare double @scr_bytes_get(ptr, double)`);
+    B.line(`call double @scr_bytes_get(ptr ${receiver}, double ${index})`);
+    B.terminate("unreachable");
+
+    B.startBlock(valid);
+    return idx;
+  }
+
+  /** Load the raw data pointer from ScrBytes after the bounds check. */
+  private emitBytesData(receiver: string): string {
+    const p = this.B.tmp();
+    const data = this.B.tmp();
+    this.B.line(`${p} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 3`);
+    this.B.line(`${data} = load ptr, ptr ${p}`);
+    return data;
+  }
+
+  /** Static typed-array length/byteLength load. */
+  private emitBytesLength(elem: IrBytesElem, receiver: string, bytes: boolean): LlValue {
+    const B = this.B;
+    const p = B.tmp();
+    const len = B.tmp();
+    B.line(`${p} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 1`);
+    B.line(`${len} = load i64, ptr ${p}`);
+    const count = bytes && elem !== "u8" ? B.tmp() : len;
+    if (count !== len) B.line(`${count} = shl i64 ${len}, 2`);
+    const out = B.tmp();
+    B.line(`${out} = uitofp i64 ${count} to double`);
+    return { name: out, type: F64 };
+  }
+
+  /** Kind-specialized typed-array load. */
+  private emitBytesGet(elem: IrBytesElem, receiver: string, index: string): LlValue {
+    const B = this.B;
+    const idx = this.emitBytesIndex(receiver, index);
+    const data = this.emitBytesData(receiver);
+    const p = B.tmp();
+    if (elem === "u8") {
+      const raw = B.tmp();
+      const wide = B.tmp();
+      const out = B.tmp();
+      B.line(`${p} = getelementptr inbounds i8, ptr ${data}, i64 ${idx}`);
+      B.line(`${raw} = load i8, ptr ${p}, align 1`);
+      B.line(`${wide} = zext i8 ${raw} to i32`);
+      B.line(`${out} = uitofp i32 ${wide} to double`);
+      return { name: out, type: F64 };
+    }
+    if (elem === "f32") {
+      const raw = B.tmp();
+      const out = B.tmp();
+      B.line(`${p} = getelementptr inbounds float, ptr ${data}, i64 ${idx}`);
+      B.line(`${raw} = load float, ptr ${p}, align 1`);
+      B.line(`${out} = fpext float ${raw} to double`);
+      return { name: out, type: F64 };
+    }
+    const raw = B.tmp();
+    const out = B.tmp();
+    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, i64 ${idx}`);
+    B.line(`${raw} = load i32, ptr ${p}, align 1`);
+    B.line(`${out} = ${elem === "i32" ? "sitofp" : "uitofp"} i32 ${raw} to double`);
+    return { name: out, type: F64 };
+  }
+
+  /** ToUint32/ToInt32 coercion with the overwhelmingly common finite,
+   * exactly-representable JS-number range on a cast-only path. Exceptional
+   * and huge values remain inline in the program TU so unrelated runtime
+   * binaries do not acquire another exported helper. */
+  private emitBytesU32(value: string): string {
+    const B = this.B;
+    const aboveMin = B.tmp();
+    const belowMax = B.tmp();
+    const fast = B.tmp();
+    B.line(`${aboveMin} = fcmp oge double ${value}, ${f64Lit(-9007199254740992)}`);
+    B.line(`${belowMax} = fcmp ole double ${value}, ${f64Lit(9007199254740992)}`);
+    B.line(`${fast} = and i1 ${aboveMin}, ${belowMax}`);
+
+    const fastLabel = B.newLabel("bytes.coerce.fast");
+    const slowLabel = B.newLabel("bytes.coerce.slow");
+    const done = B.newLabel("bytes.coerce.done");
+    B.condBr(fast, fastLabel, slowLabel);
+
+    B.startBlock(fastLabel);
+    const signed = B.tmp();
+    const fastU32 = B.tmp();
+    B.line(`${signed} = fptosi double ${value} to i64`);
+    B.line(`${fastU32} = trunc i64 ${signed} to i32`);
+    B.br(done);
+
+    B.startBlock(slowLabel);
+    const ordered = B.tmp();
+    const belowInf = B.tmp();
+    const aboveNegInf = B.tmp();
+    const finiteRange = B.tmp();
+    const finite = B.tmp();
+    B.line(`${ordered} = fcmp ord double ${value}, ${value}`);
+    B.line(`${belowInf} = fcmp olt double ${value}, ${F64_INF}`);
+    B.line(`${aboveNegInf} = fcmp ogt double ${value}, ${f64Lit(-Infinity)}`);
+    B.line(`${finiteRange} = and i1 ${belowInf}, ${aboveNegInf}`);
+    B.line(`${finite} = and i1 ${ordered}, ${finiteRange}`);
+    const finiteLabel = B.newLabel("bytes.coerce.finite");
+    const nonfiniteLabel = B.newLabel("bytes.coerce.nonfinite");
+    const slowDone = B.newLabel("bytes.coerce.slow.done");
+    B.condBr(finite, finiteLabel, nonfiniteLabel);
+
+    B.startBlock(finiteLabel);
+    this.declare(`declare double @llvm.trunc.f64(double)`);
+    const truncated = B.tmp();
+    const residue = B.tmp();
+    const negative = B.tmp();
+    const wrapped = B.tmp();
+    const normalized = B.tmp();
+    const finiteU32 = B.tmp();
+    B.line(`${truncated} = call double @llvm.trunc.f64(double ${value})`);
+    B.line(`${residue} = frem double ${truncated}, ${f64Lit(4294967296)}`);
+    B.line(`${negative} = fcmp olt double ${residue}, ${f64Lit(0)}`);
+    B.line(`${wrapped} = fadd double ${residue}, ${f64Lit(4294967296)}`);
+    B.line(`${normalized} = select i1 ${negative}, double ${wrapped}, double ${residue}`);
+    B.line(`${finiteU32} = fptoui double ${normalized} to i32`);
+    B.br(slowDone);
+
+    B.startBlock(nonfiniteLabel);
+    B.br(slowDone);
+
+    B.startBlock(slowDone);
+    const slowU32 = B.tmp();
+    B.line(`${slowU32} = phi i32 [ ${finiteU32}, %${finiteLabel} ], [ 0, %${nonfiniteLabel} ]`);
+    B.br(done);
+
+    B.startBlock(done);
+    const out = B.tmp();
+    B.line(`${out} = phi i32 [ ${fastU32}, %${fastLabel} ], [ ${slowU32}, %${slowDone} ]`);
+    return out;
+  }
+
+  /** Kind-specialized typed-array store. */
+  private emitBytesSet(elem: IrBytesElem, receiver: string, index: string, value: string): void {
+    const B = this.B;
+    const idx = this.emitBytesIndex(receiver, index);
+    const stored = elem === "f32" ? null : this.emitBytesU32(value);
+    const data = this.emitBytesData(receiver);
+    const p = B.tmp();
+    if (elem === "u8") {
+      const byte = B.tmp();
+      B.line(`${byte} = trunc i32 ${stored!} to i8`);
+      B.line(`${p} = getelementptr inbounds i8, ptr ${data}, i64 ${idx}`);
+      B.line(`store i8 ${byte}, ptr ${p}, align 1`);
+      return;
+    }
+    if (elem === "f32") {
+      const narrowed = B.tmp();
+      B.line(`${narrowed} = fptrunc double ${value} to float`);
+      B.line(`${p} = getelementptr inbounds float, ptr ${data}, i64 ${idx}`);
+      B.line(`store float ${narrowed}, ptr ${p}, align 1`);
+      return;
+    }
+    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, i64 ${idx}`);
+    B.line(`store i32 ${stored!}, ptr ${p}, align 1`);
+  }
+
   /** The bytesIntrinsic surface (emit-exprs.ts's switch, .ll flavored).
    * Receiver and args are borrowed frame temps; string/bytes results come
    * back +1. The MAY_THROW methods get the standard pending check after
@@ -9347,18 +9600,30 @@ class LlEmitter {
         : call("scr_bytes_write_var", "double (ptr, double, double, double, i1 zeroext, i1 zeroext)",
             `ptr ${r0.name}, double ${rest[0]!.name}, double ${rest[1]!.name}, double ${rest[2]!.name}, i1 ${spec.sign}, i1 ${spec.le}`, false, true);
     }
-    const r = this.emitExpr(e.receiver);
-    const args = e.args.map((a) => this.emitExpr(a));
     const method = e.method;
+    const directElementAccess = method === "length" || method === "byteLength" || method === "get";
+    const r = directElementAccess
+      ? this.emitBytesReceiver(e.receiver, e.args)
+      : this.emitExpr(e.receiver);
+    const args = e.args.map((a) => this.emitExpr(a));
     const NAN = f64Lit(NaN);
     switch (method) {
       case "length":
-        return call("scr_bytes_len", "double (ptr)", `ptr ${r.name}`, false, false);
+        if (e.receiver.type.kind !== "bytes") {
+          throw new Error("llvm emitter bug: bytesIntrinsic length on non-bytes");
+        }
+        return this.emitBytesLength(e.receiver.type.elem, r.name, false);
       case "byteLength":
-        return call("scr_bytes_byte_len", "double (ptr)", `ptr ${r.name}`, false, false);
+        if (e.receiver.type.kind !== "bytes") {
+          throw new Error("llvm emitter bug: bytesIntrinsic byteLength on non-bytes");
+        }
+        return this.emitBytesLength(e.receiver.type.elem, r.name, true);
       case "get":
         // Any invalid index traps (the array runtime's discipline).
-        return call("scr_bytes_get", "double (ptr, double)", `ptr ${r.name}, double ${args[0]!.name}`, false, false);
+        if (e.receiver.type.kind !== "bytes") {
+          throw new Error("llvm emitter bug: bytesIntrinsic get on non-bytes");
+        }
+        return this.emitBytesGet(e.receiver.type.elem, r.name, args[0]!.name);
       case "slice":
         return call(
           "scr_bytes_slice",

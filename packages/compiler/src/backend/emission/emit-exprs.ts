@@ -474,6 +474,63 @@ function dynPromiseAdapter(
 
 
 
+/** True when evaluating an index/value expression cannot overwrite a bytes
+ * binding. This deliberately small whitelist enables borrowed receivers in
+ * typed-array hot loops while side-effecting/calling shapes retain the full
+ * snapshot ownership required by JS evaluation order. */
+export function isStableBytesOperand(e: IrExpr): boolean {
+  switch (e.kind) {
+    case "numLit":
+    case "boolLit":
+    case "varRef":
+    case "incDec":
+      return true;
+    case "assignExpr":
+      // The enclosing bytes receiver has bytes type, while assignExpr here
+      // must produce the numeric index/value, so it cannot target that
+      // receiver binding.
+      return isStableBytesOperand(e.value);
+    case "bin":
+      return isStableBytesOperand(e.left) && isStableBytesOperand(e.right);
+    case "unary":
+    case "toBool":
+      return isStableBytesOperand(e.operand);
+    case "logical":
+      return isStableBytesOperand(e.left) && isStableBytesOperand(e.right);
+    case "ternary":
+      return (
+        isStableBytesOperand(e.cond) &&
+        isStableBytesOperand(e.then) &&
+        isStableBytesOperand(e.else_)
+      );
+    case "bytesIntrinsic":
+      return (
+        (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
+        e.receiver.kind === "varRef" &&
+        e.args.every(isStableBytesOperand)
+      );
+    default:
+      return false;
+  }
+}
+
+/** Evaluate a bytes receiver as a borrow when it is a direct, unboxed
+ * binding and all later operands are stable. The binding's scope/global
+ * owner then keeps the value alive, avoiding retain/release traffic around
+ * every indexed access. Any uncertain shape falls back to an owned temp. */
+export function emitBytesReceiver(E: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
+  if (receiver.kind === "varRef" && following.every(isStableBytesOperand)) {
+    const local = E.currentLocals.get(receiver.localId);
+    if (local && !local.boxed) {
+      return E.newBorrowedTemp(receiver.type, mangleLocal(receiver.localId));
+    }
+    if (!local && E.globalsById.has(receiver.localId)) {
+      return E.newBorrowedTemp(receiver.type, mangleGlobal(receiver.localId));
+    }
+  }
+  return E.emitExpr(receiver);
+}
+
 export function emitExpr(E: CEmitter, e: IrExpr): Temp {
     switch (e.kind) {
       case "numLit":
@@ -1492,17 +1549,32 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.emitPendingCheck();
           return t;
         }
-        const r = E.emitExpr(e.receiver);
-        const args = e.args.map((a) => E.emitExpr(a));
         const method = e.method;
+        const directElementAccess = method === "length" || method === "byteLength" || method === "get";
+        const r = directElementAccess
+          ? emitBytesReceiver(E, e.receiver, e.args)
+          : E.emitExpr(e.receiver);
+        const args = e.args.map((a) => E.emitExpr(a));
         switch (method) {
           case "length":
-            return E.newTemp(e.type, `scr_bytes_len(${r.name})`);
+            return E.newTemp(e.type, `(double)${r.name}->len`);
           case "byteLength":
-            return E.newTemp(e.type, `scr_bytes_byte_len(${r.name})`);
+            if (e.receiver.type.kind !== "bytes") {
+              throw new Error("emitter bug: bytesIntrinsic byteLength on non-bytes");
+            }
+            return E.newTemp(
+              e.type,
+              `(double)(${r.name}->len * ${e.receiver.type.elem === "u8" ? "1" : "4"})`,
+            );
           case "get":
             // Any invalid index traps (the array runtime's discipline).
-            return E.newTemp(e.type, `scr_bytes_get(${r.name}, ${args[0]!.name})`);
+            if (e.receiver.type.kind !== "bytes") {
+              throw new Error("emitter bug: bytesIntrinsic get on non-bytes");
+            }
+            return E.newTemp(
+              e.type,
+              `${E.bytesElementHelper("get", e.receiver.type.elem)}(${r.name}, ${args[0]!.name})`,
+            );
           case "slice":
             // Omitted relative indices default like string slice: start 0,
             // end +Infinity (math.h is always included). Fresh copy, +1.
