@@ -845,7 +845,11 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         L.lowerExprExpecting(expr.arguments[3]!, F64),
       ];
       const positionNode = expr.arguments[4];
-      if (positionNode === undefined || positionNode.kind === ts.SyntaxKind.NullKeyword) {
+      let positionValueNode = positionNode;
+      while (positionValueNode && ts.isParenthesizedExpression(positionValueNode)) {
+        positionValueNode = positionValueNode.expression;
+      }
+      if (positionNode === undefined || positionValueNode!.kind === ts.SyntaxKind.NullKeyword) {
         args.push({ kind: "numLit", value: -1, type: F64, loc });
       } else {
         const positionType = L.mapTypeOf(L.typeOf(positionNode));

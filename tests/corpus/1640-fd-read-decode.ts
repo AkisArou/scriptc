@@ -24,12 +24,17 @@ const positioned = Buffer.alloc(5);
 const first = Buffer.alloc(4);
 const next = Buffer.alloc(4);
 const sentinel = Buffer.alloc(2);
+const parenthesizedNull = Buffer.alloc(1);
 const start = 10;
 const fdPositioned = fs.openSync(scratch, "r");
 console.log(fs.readSync(fdPositioned, positioned, 0, 5, start), positioned.toString("utf8"));
 console.log(fs.readSync(fdPositioned, first, 0, 4, null), first.toString("utf8"));
 console.log(fs.readSync(fdPositioned, next, 0, 4), next.toString("utf8"));
 console.log(fs.readSync(fdPositioned, sentinel, 0, 2, -1), sentinel.toString("utf8"));
+console.log(
+  fs.readSync(fdPositioned, parenthesizedNull, 0, 1, (null)),
+  parenthesizedNull.toString("utf8"),
+);
 console.log(fs.readSync(fdPositioned, positioned, 0, 5, 9999));
 // Node returns after intrinsic offset validation but before checking the
 // buffer window, position, or descriptor when the requested window is empty.
