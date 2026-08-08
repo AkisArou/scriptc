@@ -3491,7 +3491,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // comes back as f64.
             return finish(`scr_fs_open(${arg(0)}, ${arg(1)})`);
           case "fs.readSync":
-            return finish(`scr_fs_read_sync(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`);
+            return finish(`scr_fs_read_sync(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)})`);
           case "fs.closeSync":
             return finish(`scr_fs_close(${arg(0)})`);
           case "fs.watch":

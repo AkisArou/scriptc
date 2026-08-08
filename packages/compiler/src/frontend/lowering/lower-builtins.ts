@@ -819,6 +819,47 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (bi.module === "fs" && bi.member === "watch") {
       return lowerFsWatchCall(L, expr, loc);
     }
+    // fs.readSync(fd, buffer, offset, length[, position]) — normalize the
+    // current-offset forms to Node/libuv's -1 sentinel so the IR and native
+    // ABI stay fixed-width. A real numeric position is a positioned read
+    // and therefore must not advance the descriptor. Literal null is the
+    // documented current-offset spelling; richer nullable expressions must
+    // narrow first so no effectful evaluation is silently discarded.
+    if (bi.module === "fs" && bi.member === "readSync") {
+      const supported =
+        "use readSync(fd, buffer, offset, length[, position]) with a numeric position or literal null; options objects and bigint positions have no lowering";
+      if (
+        (expr.arguments.length !== 4 && expr.arguments.length !== 5) ||
+        expr.arguments.some(ts.isSpreadElement)
+      ) {
+        L.noLowering(
+          `readSync with ${expr.arguments.length} argument${expr.arguments.length === 1 ? "" : "s"}`,
+          expr,
+          supported,
+        );
+      }
+      const args: IrExpr[] = [
+        L.lowerExprExpecting(expr.arguments[0]!, F64),
+        L.lowerExprExpecting(expr.arguments[1]!, BYTES_U8),
+        L.lowerExprExpecting(expr.arguments[2]!, F64),
+        L.lowerExprExpecting(expr.arguments[3]!, F64),
+      ];
+      const positionNode = expr.arguments[4];
+      if (positionNode === undefined || positionNode.kind === ts.SyntaxKind.NullKeyword) {
+        args.push({ kind: "numLit", value: -1, type: F64, loc });
+      } else {
+        const positionType = L.mapTypeOf(L.typeOf(positionNode));
+        if (positionType?.kind !== "f64") {
+          L.noLowering(
+            `readSync with a '${positionType ? L.fmt(positionType) : L.checker.typeToString(L.typeOf(positionNode))}' position`,
+            positionNode,
+            supported,
+          );
+        }
+        args.push(L.lowerExprExpecting(positionNode, F64));
+      }
+      return { kind: "libCall", fn: "fs.readSync", args, type: F64, loc };
+    }
     if (
       bi.module === "child_process" &&
       (bi.member === "execFileSync" || bi.member === "execSync")

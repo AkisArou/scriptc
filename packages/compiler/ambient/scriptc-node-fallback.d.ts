@@ -991,9 +991,9 @@ declare module "node:fs" {
    * variants), closeSync(fd). */
   export function openSync(path: string, flags: string): number;
   export function closeSync(fd: number): void;
-  /* read(2) into a caller buffer from the fd's current position (the
-   * position argument is declared for parity and fences when non-null);
-   * answers the byte count, 0 at EOF. */
+  /* Read into a caller buffer from the fd's current position when position
+   * is omitted/null, or from a numeric byte position without advancing the
+   * fd. Answers the byte count, 0 at EOF. */
   export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position?: number | null): number;
   /* statSync over an open fd — the same Stats snapshot. */
   export function fstatSync(fd: number): Stats;

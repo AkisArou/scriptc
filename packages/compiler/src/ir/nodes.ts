@@ -3845,11 +3845,15 @@ export type IrLibFn =
   | "fs.chownSync"
   | "fs.copyFileSync"
   | "fs.lstatSync"
-  /** fs.openSync(path, flags) → the raw fd as f64, and fs.closeSync(fd)
-   * — the pair behind spawn's fd-stdio form. flags is Node's string
+  /** fs.openSync(path, flags) → the raw fd as f64, fs.readSync(fd,
+   * buffer, offset, length, position) → a sequential read when position
+   * is -1 and an offset-preserving positioned read otherwise, and
+   * fs.closeSync(fd) — the fd slice behind spawn/log-processing forms.
+   * flags is Node's string
    * grammar ("r", "w", "a" and the +/x variants; unknown flags throw
-   * Node's ERR_INVALID_ARG_VALUE TypeError text). Both throw Node-shaped
-   * fs errors (openSync ENOENT/EACCES..., closeSync EBADF). */
+   * Node's ERR_INVALID_ARG_VALUE TypeError text). All throw Node-shaped
+   * fs errors (openSync ENOENT/EACCES..., readSync EBADF/range errors,
+   * closeSync EBADF). */
   | "fs.openSync"
   | "fs.readSync"
   | "fs.closeSync"
