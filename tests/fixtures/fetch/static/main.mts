@@ -34,6 +34,19 @@ console.log(
   await configuredResponse.text(),
 );
 
+class ClassResponseInit {
+  status = 202;
+  statusText = "Class Made";
+  headers = { "x-class-init": "yes" };
+}
+const classConfiguredResponse = new Response(null, new ClassResponseInit());
+console.log(
+  "class response init:",
+  classConfiguredResponse.status,
+  classConfiguredResponse.statusText,
+  classConfiguredResponse.headers.get("x-class-init"),
+);
+
 const normalizedResponseHeaders = new Response(null, {
   headers: { "X-Mixed-Case": "yes" },
 }).headers;
@@ -116,7 +129,49 @@ try {
   new Response(null, nullResponseHeadersInit);
   console.log("response null headers unexpectedly accepted");
 } catch (error) {
-  console.log("response null headers:", (error as Error).name);
+  console.log(
+    "response null headers:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+
+try {
+  new Response(null, { headers: { "bad name": "x" } });
+} catch (error) {
+  console.log(
+    "response invalid header name:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+try {
+  new Response(null, { headers: { x: "bad\nvalue" } });
+} catch (error) {
+  console.log(
+    "response invalid header value:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+const shortHeaderPairInit: any = { headers: [["x"]] };
+try {
+  new Response(null, shortHeaderPairInit);
+} catch (error) {
+  console.log(
+    "response short header pair:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+try {
+  new Response().headers.append("bad name", "x");
+} catch (error) {
+  console.log(
+    "response header mutation validation:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
 }
 
 const nullResponse = new Response(null, { status: 204 });
@@ -187,6 +242,62 @@ console.log(
   await coercionResponse.text(),
 );
 
+const responseInitConversionOrder: string[] = [];
+const orderedResponseBody: any = {
+  toString() {
+    responseInitConversionOrder.push("body");
+    return "ordered metadata";
+  },
+};
+const orderedResponseHeader: any = {
+  toString() {
+    responseInitConversionOrder.push("headers");
+    return "value";
+  },
+};
+const orderedResponseStatus: any = {
+  valueOf() {
+    responseInitConversionOrder.push("status");
+    return 202;
+  },
+};
+const orderedResponseStatusText: any = {
+  toString() {
+    responseInitConversionOrder.push("statusText");
+    return "Ordered";
+  },
+};
+const orderedResponseInit = JSON.parse("{}");
+orderedResponseInit.headers = JSON.parse("{}");
+orderedResponseInit.headers.x = orderedResponseHeader;
+orderedResponseInit.status = orderedResponseStatus;
+orderedResponseInit.statusText = orderedResponseStatusText;
+new Response(orderedResponseBody, orderedResponseInit);
+console.log(
+  "response init conversion order:",
+  responseInitConversionOrder.join(","),
+);
+
+const deferredResponseInit: {
+  status: number;
+  headers: { x: string };
+} = { status: 201, headers: { x: "before" } };
+const deferredResponse = new Response(
+  null,
+  deferredResponseInit,
+  // @ts-ignore WebIDL ignores surplus constructor arguments.
+  (() => {
+    deferredResponseInit.status = 202;
+    deferredResponseInit.headers.x = "after";
+    return "ignored";
+  })(),
+);
+console.log(
+  "response deferred init snapshot:",
+  deferredResponse.status,
+  deferredResponse.headers.get("x"),
+);
+
 const lockedResponseBody = new ReadableStream<Uint8Array>();
 void lockedResponseBody.getReader();
 try {
@@ -198,6 +309,25 @@ try {
 } catch (error) {
   console.log(
     "response locked body precedence:",
+    (error as Error).name,
+    (error as Error).message,
+  );
+}
+const lockedHeaderConversionBody = new ReadableStream<Uint8Array>();
+void lockedHeaderConversionBody.getReader();
+const throwingResponseHeader: any = {
+  toString() {
+    throw new Error("response header conversion");
+  },
+};
+const throwingResponseHeaderInit = JSON.parse("{}");
+throwingResponseHeaderInit.headers = JSON.parse("{}");
+throwingResponseHeaderInit.headers.x = throwingResponseHeader;
+try {
+  new Response(lockedHeaderConversionBody, throwingResponseHeaderInit);
+} catch (error) {
+  console.log(
+    "response header conversion precedence:",
     (error as Error).name,
     (error as Error).message,
   );

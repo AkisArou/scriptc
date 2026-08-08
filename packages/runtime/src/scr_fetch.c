@@ -2731,13 +2731,31 @@ static bool sf_header_value_ok(const ScrStr *value);
 static ScrStr *sf_header_value_bytestring(ScrStr *value);
 static ScrStr *sf_trim_header_value(const ScrStr *value);
 
-static ScrStr *sf_headers_name(const ScrDyn *value) {
+static void sf_headers_invalid(
+    const char *method, const ScrStr *value, const char *kind) {
+  size_t cap = strlen(method) + value->len + strlen(kind) + 48;
+  char *message = malloc(cap);
+  if (!message) sf_oom();
+  int head = snprintf(message, cap, "Headers.%s: \"", method);
+  if (head < 0 || (size_t)head >= cap) sf_oom();
+  size_t at = (size_t)head;
+  memcpy(message + at, value->data, value->len);
+  at += value->len;
+  int tail = snprintf(
+      message + at, cap - at,
+      "\" is an invalid header %s.", kind);
+  if (tail < 0 || (size_t)tail >= cap - at) sf_oom();
+  sf_type_error(message);
+  free(message);
+}
+
+static ScrStr *sf_headers_name(const ScrDyn *value, const char *method) {
   ScrStr *raw =
       scr_dyn_string_coerce_js(value ? value : scr_dyn_undefined());
   if (!raw) return NULL;
   if (!sf_header_name_ok(raw->data, raw->len)) {
+    sf_headers_invalid(method, raw, "name");
     scr_str_release(raw);
-    sf_type_error("Headers: invalid header name");
     return NULL;
   }
   ScrStr *out = sf_header_name_lower(raw->data, raw->len);
@@ -2812,8 +2830,8 @@ static void sf_headers_delete_name(SfHeaders *h, const ScrStr *name) {
 
 static bool sf_headers_convert_pair(
     const ScrDyn *name_value, const ScrDyn *value_value,
-    ScrStr **name_out, ScrStr **value_out) {
-  ScrStr *name = sf_headers_name(name_value);
+    const char *method, ScrStr **name_out, ScrStr **value_out) {
+  ScrStr *name = sf_headers_name(name_value, method);
   if (!name) return false;
   ScrStr *raw = scr_dyn_string_coerce_js(
       value_value ? value_value : scr_dyn_undefined());
@@ -2824,9 +2842,11 @@ static bool sf_headers_convert_pair(
     return false;
   }
   if (!sf_header_value_ok(bytes)) {
+    ScrStr *display = sf_latin1_to_utf8(bytes);
+    sf_headers_invalid(method, display, "value");
+    scr_str_release(display);
     scr_str_release(bytes);
     scr_str_release(name);
-    sf_type_error("Headers: invalid header value");
     return false;
   }
   ScrStr *trimmed = sf_trim_header_value(bytes);
@@ -2919,7 +2939,7 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
       sf_type_error("Headers.get/has requires a header name");
       return NULL;
     }
-    ScrStr *name = sf_headers_name(args[0]);
+    ScrStr *name = sf_headers_name(args[0], method);
     if (!name) return NULL;
     ScrStr *value = sf_headers_get_value(h, name);
     scr_str_release(name);
@@ -2998,7 +3018,7 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
       return NULL;
     }
     if (strcmp(method, "delete") == 0) {
-      ScrStr *name = sf_headers_name(args[0]);
+      ScrStr *name = sf_headers_name(args[0], method);
       if (!name) return NULL;
       if (h->immutable) {
         scr_str_release(name);
@@ -3011,7 +3031,8 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
     }
     ScrStr *name = NULL;
     ScrStr *value = NULL;
-    if (!sf_headers_convert_pair(args[0], args[1], &name, &value)) {
+    if (!sf_headers_convert_pair(
+            args[0], args[1], method, &name, &value)) {
       return NULL;
     }
     if (h->immutable) {
@@ -3779,14 +3800,18 @@ static ScrStr *sf_trim_header_value(const ScrStr *value) {
 static bool sf_push_header(ScrArr *pairs, const char *name, size_t name_len,
                            ScrStr *value, bool request_guard) {
   if (!sf_header_name_ok(name, name_len)) {
-    sf_type_error("fetch failed");
+    ScrStr *display = scr_str_new(name, name_len);
+    sf_headers_invalid("append", display, "name");
+    scr_str_release(display);
     return false;
   }
   ScrStr *byte_value = sf_header_value_bytestring(value);
   if (!byte_value) return false;
   if (!sf_header_value_ok(byte_value)) {
+    ScrStr *display = sf_latin1_to_utf8(byte_value);
+    sf_headers_invalid("append", display, "value");
+    scr_str_release(display);
     scr_str_release(byte_value);
-    sf_type_error("fetch failed");
     return false;
   }
   ScrStr *normalized = sf_trim_header_value(byte_value);
@@ -3851,55 +3876,111 @@ static bool sf_push_header(ScrArr *pairs, const char *name, size_t name_len,
   return true;
 }
 
-static bool sf_add_headers(
-    ScrArr *pairs, const ScrDyn *headers, bool request_guard) {
+static void sf_headers_constructor_type_error(void) {
+  static const char message[] =
+      "Headers constructor: Argument 1 could not be converted to one of: "
+      "sequence<sequence<ByteString>>, record<ByteString, ByteString>.";
+  sf_type_error(message);
+}
+
+static void sf_headers_pair_length_error(size_t len) {
+  char message[96];
+  int n = snprintf(
+      message, sizeof message,
+      "Headers constructor: expected name/value pair to be length 2, "
+      "found %zu.", len);
+  if (n < 0 || (size_t)n >= sizeof message) sf_oom();
+  sf_type_error(message);
+}
+
+/* The WebIDL HeadersInit conversion phase. It performs the observable
+ * sequence/record walk and every ByteString coercion, but deliberately
+ * leaves header-name/value syntax validation for initialization. Response
+ * construction converts this snapshot before status/statusText and only
+ * validates it after body extraction, matching Undici's two phases. */
+static ScrArr *sf_headers_convert_init(const ScrDyn *headers) {
+  if (headers && headers->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(headers);
+    ScrArr *converted = sf_headers_convert_init(materialized);
+    scr_dyn_release(materialized);
+    return converted;
+  }
+  ScrArr *converted = scr_arr_new(SCR_ELEM_STR, 8);
   if (!headers || headers->kind == SCR_DYN_UNDEF) {
-    return true;
+    return converted;
   }
   if (headers->kind == SCR_DYN_OBJ) {
     for (size_t i = 0; i < headers->v.obj.len; i++) {
       const ScrDynEntry *e = &headers->v.obj.entries[i];
-      ScrStr *name = scr_str_new(e->key, e->key_len);
+      ScrStr *raw_name = scr_str_new(e->key, e->key_len);
+      ScrStr *name_bytes = sf_header_value_bytestring(raw_name);
+      ScrStr *name = name_bytes ? sf_latin1_to_utf8(name_bytes) : NULL;
+      scr_str_release(name_bytes);
+      scr_str_release(raw_name);
       ScrDyn *source = scr_dyn_retain(e->value);
-      ScrStr *value = scr_dyn_string_coerce_js(source);
+      ScrStr *raw_value = name ? scr_dyn_string_coerce_js(source) : NULL;
       scr_dyn_release(source);
-      bool ok = value && sf_push_header(
-          pairs, name->data, name->len, value, request_guard);
-      scr_str_release(value);
-      scr_str_release(name);
-      if (!ok) {
-        if (!scr_exc_pending()) sf_type_error("fetch failed");
-        return false;
+      ScrStr *value_bytes = raw_value
+          ? sf_header_value_bytestring(raw_value)
+          : NULL;
+      ScrStr *value = value_bytes ? sf_latin1_to_utf8(value_bytes) : NULL;
+      scr_str_release(value_bytes);
+      scr_str_release(raw_value);
+      if (!name || !value) {
+        scr_str_release(name);
+        scr_str_release(value);
+        goto fail;
       }
+      scr_arr_push_ref(converted, name);
+      scr_arr_push_ref(converted, value);
     }
-    return true;
+    return converted;
   }
   if (headers->kind == SCR_DYN_ARR) {
     for (size_t i = 0; i < headers->v.arr.len; i++) {
       ScrDyn *pair = scr_dyn_retain(headers->v.arr.items[i]);
       if (pair->kind != SCR_DYN_ARR || pair->v.arr.len != 2) {
+        size_t pair_len = pair->kind == SCR_DYN_ARR ? pair->v.arr.len : 0;
         scr_dyn_release(pair);
-        if (!scr_exc_pending()) sf_type_error("fetch failed");
-        return false;
+        if (!scr_exc_pending()) {
+          if (pair_len > 0 || headers->v.arr.items[i]->kind == SCR_DYN_ARR) {
+            sf_headers_pair_length_error(pair_len);
+          } else {
+            sf_headers_constructor_type_error();
+          }
+        }
+        goto fail;
       }
       ScrDyn *name_source = scr_dyn_retain(pair->v.arr.items[0]);
       ScrDyn *value_source = scr_dyn_retain(pair->v.arr.items[1]);
       scr_dyn_release(pair);
-      ScrStr *name = scr_dyn_string_coerce_js(name_source);
+      ScrStr *raw_name = scr_dyn_string_coerce_js(name_source);
       scr_dyn_release(name_source);
-      ScrStr *value = name ? scr_dyn_string_coerce_js(value_source) : NULL;
+      ScrStr *name_bytes = raw_name
+          ? sf_header_value_bytestring(raw_name)
+          : NULL;
+      ScrStr *name = name_bytes ? sf_latin1_to_utf8(name_bytes) : NULL;
+      scr_str_release(name_bytes);
+      scr_str_release(raw_name);
+      ScrStr *raw_value = name
+          ? scr_dyn_string_coerce_js(value_source)
+          : NULL;
       scr_dyn_release(value_source);
-      bool ok = name && value &&
-                sf_push_header(
-                    pairs, name->data, name->len, value, request_guard);
-      scr_str_release(value);
-      scr_str_release(name);
-      if (!ok) {
-        if (!scr_exc_pending()) sf_type_error("fetch failed");
-        return false;
+      ScrStr *value_bytes = raw_value
+          ? sf_header_value_bytestring(raw_value)
+          : NULL;
+      ScrStr *value = value_bytes ? sf_latin1_to_utf8(value_bytes) : NULL;
+      scr_str_release(value_bytes);
+      scr_str_release(raw_value);
+      if (!name || !value) {
+        scr_str_release(name);
+        scr_str_release(value);
+        goto fail;
       }
+      scr_arr_push_ref(converted, name);
+      scr_arr_push_ref(converted, value);
     }
-    return true;
+    return converted;
   }
   if (headers->kind == SCR_DYN_HANDLE &&
       headers->v.handle.tag == SCR_DYNH_FETCH_HEADERS) {
@@ -3909,16 +3990,44 @@ static bool sf_add_headers(
       ScrStr *name = scr_arr_get_ref(source->pairs, (double)i);
       ScrStr *value =
           scr_arr_get_ref(source->pairs, (double)(i + 1));
-      bool ok = sf_push_header(
-          pairs, name->data, name->len, value, request_guard);
-      scr_str_release(name);
-      scr_str_release(value);
-      if (!ok) return false;
+      scr_arr_push_ref(converted, name);
+      scr_arr_push_ref(converted, value);
     }
-    return true;
+    return converted;
   }
-  sf_type_error("fetch failed");
-  return false;
+  /* Functions are WebIDL objects and an ordinary function has no
+   * enumerable HeadersInit entries. The checked-dynamic function model's
+   * expando properties are non-enumerable by construction. */
+  if (headers->kind == SCR_DYN_FUNC) return converted;
+  sf_headers_constructor_type_error();
+
+fail:
+  scr_arr_release(converted);
+  return NULL;
+}
+
+static bool sf_add_converted_headers(
+    ScrArr *pairs, ScrArr *converted, bool request_guard) {
+  size_t n = (size_t)scr_arr_len(converted);
+  for (size_t i = 0; i + 1 < n; i += 2) {
+    ScrStr *name = scr_arr_get_ref(converted, (double)i);
+    ScrStr *value = scr_arr_get_ref(converted, (double)(i + 1));
+    bool ok = sf_push_header(
+        pairs, name->data, name->len, value, request_guard);
+    scr_str_release(name);
+    scr_str_release(value);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+static bool sf_add_headers(
+    ScrArr *pairs, const ScrDyn *headers, bool request_guard) {
+  ScrArr *converted = sf_headers_convert_init(headers);
+  if (!converted) return false;
+  bool ok = sf_add_converted_headers(pairs, converted, request_guard);
+  scr_arr_release(converted);
+  return ok;
 }
 
 static void sf_push_header_text(ScrArr *pairs, const char *name,
@@ -4735,12 +4844,51 @@ static bool sf_start_hop(SfTransfer *t) {
   return true;
 }
 
+static bool sf_response_init_object_like(const ScrDyn *init) {
+  if (!init) return false;
+  switch (init->kind) {
+  case SCR_DYN_OBJ:
+  case SCR_DYN_ARR:
+  case SCR_DYN_BYTES:
+  case SCR_DYN_FUNC:
+  case SCR_DYN_HANDLE:
+  case SCR_DYN_PROMISE:
+  case SCR_DYN_TYPED_REF:
+  case SCR_DYN_JSVAL:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* Owned property read for the checked-dynamic object kinds that can carry
+ * ResponseInit dictionary members. Arrays/bytes/native handles/promises
+ * have no such expandos in the static model and therefore answer absent. */
+static ScrDyn *sf_response_init_get(
+    const ScrDyn *init, const char *key, size_t len) {
+  if (!init) return NULL;
+  if (init->kind == SCR_DYN_OBJ) {
+    ScrDyn *value = scr_dyn_obj_get(init, key, len);
+    return value ? scr_dyn_retain(value) : NULL;
+  }
+  if (init->kind == SCR_DYN_FUNC) {
+    return scr_dyn_fn_get(init, key, len);
+  }
+  if (init->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(init);
+    ScrDyn *value = sf_response_init_get(materialized, key, len);
+    scr_dyn_release(materialized);
+    return value;
+  }
+  return NULL;
+}
+
 ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init) {
   ScrArr *header_pairs = NULL;
+  ScrArr *converted_headers = NULL;
   ScrBytes *body_bytes = NULL;
   ScrStr *status_text = NULL;
   SfStream *stream = NULL;
-  const ScrDyn *init_headers = NULL;
   bool null_body =
       !body || body->kind == SCR_DYN_UNDEF || body->kind == SCR_DYN_NULL;
   bool text_body = false;
@@ -4770,22 +4918,29 @@ ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init) {
     }
   }
 
-  if (init && init->kind != SCR_DYN_OBJ &&
-      init->kind != SCR_DYN_UNDEF && init->kind != SCR_DYN_NULL) {
+  if (init && init->kind != SCR_DYN_UNDEF && init->kind != SCR_DYN_NULL &&
+      !sf_response_init_object_like(init)) {
     sf_type_error("Response constructor init must be an object");
     goto fail;
   }
 
-  /* ResponseInit's WebIDL dictionary reads/conversions are lexicographic:
-   * headers, status, statusText. HeadersInit's deep validation is part of
-   * response initialization below; status/statusText primitive conversions
-   * happen now, before extracting and checking a stream body. */
-  if (init && init->kind == SCR_DYN_OBJ) {
-    init_headers = scr_dyn_obj_get(init, "headers", 7);
-    const ScrDyn *status_value = scr_dyn_obj_get(init, "status", 6);
+  /* ResponseInit's WebIDL dictionary conversion is lexicographic and the
+   * nested HeadersInit conversion is observable: headers' ByteString
+   * coercions precede status and statusText. Header syntax validation is a
+   * later response-initialization step, after body extraction. */
+  ScrDyn *init_headers = sf_response_init_get(init, "headers", 7);
+  converted_headers = sf_headers_convert_init(init_headers);
+  scr_dyn_release(init_headers);
+  if (!converted_headers) goto fail;
+
+  if (init && sf_response_init_object_like(init)) {
+    ScrDyn *status_value = sf_response_init_get(init, "status", 6);
     if (status_value && status_value->kind != SCR_DYN_UNDEF) {
       double converted;
-      if (!scr_dyn_number_coerce_js(status_value, &converted)) goto fail;
+      if (!scr_dyn_number_coerce_js(status_value, &converted)) {
+        scr_dyn_release(status_value);
+        goto fail;
+      }
       converted = trunc(converted);
       if (!isfinite(converted) || converted < 0.0) {
         status_range_error = true;
@@ -4794,17 +4949,22 @@ ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init) {
         status = (int)converted;
       }
     }
+    scr_dyn_release(status_value);
 
-    const ScrDyn *status_text_value =
-        scr_dyn_obj_get(init, "statusText", 10);
+    ScrDyn *status_text_value =
+        sf_response_init_get(init, "statusText", 10);
     if (status_text_value && status_text_value->kind != SCR_DYN_UNDEF) {
       ScrStr *raw = scr_dyn_string_coerce_js(status_text_value);
       ScrStr *bytes = raw ? sf_header_value_bytestring(raw) : NULL;
       scr_str_release(raw);
       status_text = bytes ? sf_latin1_to_utf8(bytes) : NULL;
       scr_str_release(bytes);
-      if (!status_text) goto fail;
+      if (!status_text) {
+        scr_dyn_release(status_text_value);
+        goto fail;
+      }
     }
+    scr_dyn_release(status_text_value);
   }
   if (!status_text) status_text = scr_str_new("", 0);
 
@@ -4843,7 +5003,10 @@ ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init) {
   }
 
   header_pairs = scr_arr_new(SCR_ELEM_STR, 8);
-  if (!sf_add_headers(header_pairs, init_headers, false)) goto fail;
+  if (!sf_add_converted_headers(
+          header_pairs, converted_headers, false)) goto fail;
+  scr_arr_release(converted_headers);
+  converted_headers = NULL;
 
   if (!null_body &&
       (status == 204 || status == 205 || status == 304)) {
@@ -4880,6 +5043,7 @@ fail:
   scr_bytes_release(body_bytes);
   scr_str_release(status_text);
   scr_arr_release(header_pairs);
+  scr_arr_release(converted_headers);
   return NULL;
 }
 

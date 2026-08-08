@@ -172,4 +172,31 @@ console.log(
   await surplusConstructedResponse.text(),
 );
 
+const responseArgumentBytes = new Uint8Array([65]);
+const responseAfterInitMutation = new Response(
+  responseArgumentBytes,
+  (() => {
+    responseArgumentBytes[0] = 66;
+    return null;
+  })(),
+);
+console.log(
+  "response conversion after arguments:",
+  await responseAfterInitMutation.text(),
+);
+
+const nestedResponseHeaders = { x: "before" };
+const nestedResponseInit = new Response(
+  null,
+  { headers: nestedResponseHeaders },
+  (() => {
+    nestedResponseHeaders.x = "after";
+    return "ignored";
+  })(),
+);
+console.log(
+  "response nested init after surplus:",
+  nestedResponseInit.headers.get("x"),
+);
+
 export {};

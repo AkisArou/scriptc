@@ -1235,8 +1235,12 @@ function hasLiveWebMutableArm(L: Lowerer, type: IrType): boolean {
  * this capsule is deliberately limited to records/arrays/bytes (including
  * those selected at runtime from a union) that the live materializer can
  * snapshot and commit. */
-function lowerLiveWebValue(L: Lowerer, node: ts.Expression): IrExpr {
-  const value = L.lowerExpr(node);
+function lowerLiveWebValue(
+  L: Lowerer,
+  node: ts.Expression,
+  lowered?: IrExpr,
+): IrExpr {
+  const value = lowered ?? L.lowerExpr(node);
   if (
     hasLiveWebMutableArm(L, value.type) &&
     canConvertToDyn(
@@ -2406,10 +2410,49 @@ export function lowerResponseNew(
     };
   }
 
-  const toDyn = (node: ts.Expression | undefined, what: string): IrExpr => {
+  const toDyn = (
+    node: ts.Expression | undefined,
+    value: IrExpr,
+    what: string,
+  ): IrExpr => {
     if (node === undefined) return dynUndefinedExpr(loc);
-    const value = L.lowerExpr(node);
     if (value.type.kind === "dyn") return value;
+    /* A user class can satisfy ResponseInit structurally through plain
+     * fields. Project just the declared dictionary members into a record,
+     * then use the ordinary checked-dynamic copy. objRecordWidthHelper
+     * deliberately declines accessors/methods, whose observable reads
+     * cannot be moved into the runtime WebIDL conversion phase. */
+    if (what === "an init value" && value.type.kind === "object") {
+      const sourceType = L.typeOf(node);
+      const fields: { name: string; type: IrType }[] = [];
+      for (const name of ["headers", "status", "statusText"] as const) {
+        const property = L.checker.getPropertyOfType(sourceType, name);
+        if (!property) continue;
+        const propertyType = L.checker.getTypeOfSymbolAtLocation(property, node);
+        const mapped = L.mapTypeOf(propertyType);
+        if (!mapped || mapped.kind === "void") {
+          L.noLowering(
+            `new Response with ${what} of type '${L.fmt(value.type)}'`,
+            node,
+            `the '${name}' field does not have a checked-dynamic representation`,
+          );
+        }
+        fields.push({ name, type: mapped });
+      }
+      const recordType: IrType = {
+        kind: "record",
+        shapeId: L.shapes.intern(
+          fields,
+          false,
+          undefined,
+          fields.map((field) => field.name),
+        ),
+      };
+      const projected = L.widthCoerce(value, recordType);
+      if (projected && L.dynConvertible(projected.type)) {
+        return { kind: "dynFrom", value: projected, type: DYN, loc: value.loc };
+      }
+    }
     if (value.kind === "unitLit" || L.dynConvertible(value.type)) {
       return { kind: "dynFrom", value, type: DYN, loc: value.loc };
     }
@@ -2420,44 +2463,53 @@ export function lowerResponseNew(
     );
   };
 
-  const body = toDyn(args[0], "a body");
+  const bodyNode = args[0];
+  const body = bodyNode === undefined
+    ? { kind: "unitLit", unit: "undefined", type: { kind: "undefinedT" }, loc } satisfies IrExpr
+    : L.lowerExpr(bodyNode);
   const initNode = args[1];
   const init = initNode === undefined
-    ? dynUndefinedExpr(loc)
+    ? { kind: "unitLit", unit: "undefined", type: { kind: "undefinedT" }, loc } satisfies IrExpr
     : ts.isObjectLiteralExpression(initNode)
-      ? lowerDynObjectLiteral(L, initNode)
-      : toDyn(initNode, "an init value");
-  const response: IrExpr = {
-    kind: "libCall",
-    fn: "fetch.responseNew",
-    args: [body, init],
-    type: DYN,
-    loc,
-  };
-  if (args.length <= 2) return response;
+      ? lowerDynObjectLiteral(
+          L,
+          initNode,
+          (node, value) => lowerLiveWebValue(L, node, value),
+        )
+      : L.lowerExpr(initNode);
 
-  /* WebIDL ignores surplus arguments, but JavaScript evaluates every
-   * argument before the constructor starts converting BodyInit and
-   * ResponseInit. Keep the first two boxed values alive while evaluating
-   * the ignored tail, then enter the native conversion boundary. */
-  const bodyLocal = L.declareHiddenLocal("%responseBody", body.type);
-  const initLocal = L.declareHiddenLocal("%responseInit", init.type);
-  const bodyRef: IrExpr = {
-    kind: "varRef",
-    localId: bodyLocal.id,
-    type: bodyLocal.type,
-    loc,
+  /* JavaScript evaluates every argument expression before WebIDL starts
+   * converting either BodyInit or ResponseInit. Capture the raw values in
+   * source order; only the final libCall boxes/copies them. This is
+   * observable when init/surplus expressions mutate a Uint8Array body or
+   * a typed ResponseInit record. Unit-valued expressions still execute,
+   * then contribute the corresponding undefined/null literal. */
+  const stmts: IrStmt[] = [];
+  const capture = (value: IrExpr, name: string): IrExpr => {
+    if (isUnitType(value.type) || value.type.kind === "void") {
+      if (value.kind !== "unitLit") {
+        stmts.push({ kind: "exprStmt", expr: value, loc: value.loc });
+      }
+      return value.type.kind === "nullT"
+        ? { kind: "unitLit", unit: "null", type: value.type, loc: value.loc }
+        : {
+            kind: "unitLit",
+            unit: "undefined",
+            type: { kind: "undefinedT" },
+            loc: value.loc,
+          };
+    }
+    const local = L.declareHiddenLocal(name, value.type);
+    stmts.push({ kind: "varDecl", localId: local.id, init: value, loc: value.loc });
+    return {
+      kind: "varRef",
+      localId: local.id,
+      type: local.type,
+      loc: value.loc,
+    };
   };
-  const initRef: IrExpr = {
-    kind: "varRef",
-    localId: initLocal.id,
-    type: initLocal.type,
-    loc,
-  };
-  const stmts: IrStmt[] = [
-    { kind: "varDecl", localId: bodyLocal.id, init: body, loc },
-    { kind: "varDecl", localId: initLocal.id, init, loc },
-  ];
+  const bodyRef = capture(body, "%responseBody");
+  const initRef = capture(init, "%responseInit");
   for (const argument of args.slice(2)) {
     const discarded = ts.isVoidExpression(argument)
       ? L.lowerExpr(argument.expression)
@@ -2465,8 +2517,14 @@ export function lowerResponseNew(
     stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
   }
   const result: IrExpr = {
-    ...response,
-    args: [bodyRef, initRef],
+    kind: "libCall",
+    fn: "fetch.responseNew",
+    args: [
+      toDyn(bodyNode, bodyRef, "a body"),
+      toDyn(initNode, initRef, "an init value"),
+    ],
+    type: DYN,
+    loc,
   };
   return { kind: "seqExpr", stmts, result, type: DYN, loc };
 }
