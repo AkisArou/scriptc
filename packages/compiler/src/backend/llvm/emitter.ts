@@ -9310,10 +9310,10 @@ class LlEmitter {
     }
   }
 
-  /** Whether an index/value expression can overwrite a bytes binding.
-   * Kept deliberately conservative; uncertain or calling shapes retain the
-   * ordinary owned-receiver snapshot. */
-  private isStableBytesOperand(e: IrExpr): boolean {
+  /** Whether an index/value expression can overwrite the bytes receiver
+   * binding. Kept deliberately conservative; uncertain or calling shapes
+   * retain the ordinary owned-receiver snapshot. */
+  private isStableBytesOperand(e: IrExpr, receiverLocalId: string): boolean {
     switch (e.kind) {
       case "numLit":
       case "boolLit":
@@ -9321,27 +9321,36 @@ class LlEmitter {
       case "incDec":
         return true;
       case "assignExpr":
-        // A numeric index/value assignment cannot target the bytes-typed
-        // receiver binding.
-        return this.isStableBytesOperand(e.value);
+        // A bytes assignment nested under truthiness/ternary can still
+        // produce the numeric index/value expected by the outer access.
+        return (
+          e.localId !== receiverLocalId &&
+          this.isStableBytesOperand(e.value, receiverLocalId)
+        );
       case "bin":
-        return this.isStableBytesOperand(e.left) && this.isStableBytesOperand(e.right);
+        return (
+          this.isStableBytesOperand(e.left, receiverLocalId) &&
+          this.isStableBytesOperand(e.right, receiverLocalId)
+        );
       case "unary":
       case "toBool":
-        return this.isStableBytesOperand(e.operand);
+        return this.isStableBytesOperand(e.operand, receiverLocalId);
       case "logical":
-        return this.isStableBytesOperand(e.left) && this.isStableBytesOperand(e.right);
+        return (
+          this.isStableBytesOperand(e.left, receiverLocalId) &&
+          this.isStableBytesOperand(e.right, receiverLocalId)
+        );
       case "ternary":
         return (
-          this.isStableBytesOperand(e.cond) &&
-          this.isStableBytesOperand(e.then) &&
-          this.isStableBytesOperand(e.else_)
+          this.isStableBytesOperand(e.cond, receiverLocalId) &&
+          this.isStableBytesOperand(e.then, receiverLocalId) &&
+          this.isStableBytesOperand(e.else_, receiverLocalId)
         );
       case "bytesIntrinsic":
         return (
           (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
           e.receiver.kind === "varRef" &&
-          e.args.every((a) => this.isStableBytesOperand(a))
+          e.args.every((arg) => this.isStableBytesOperand(arg, receiverLocalId))
         );
       default:
         return false;
@@ -9351,7 +9360,10 @@ class LlEmitter {
   /** Borrow a direct, unboxed bytes binding when later operands are stable.
    * Its scope/global owner keeps it alive through the access. */
   private emitBytesReceiver(receiver: IrExpr, following: IrExpr[]): LlValue {
-    if (receiver.kind === "varRef" && following.every((e) => this.isStableBytesOperand(e))) {
+    if (
+      receiver.kind === "varRef" &&
+      following.every((operand) => this.isStableBytesOperand(operand, receiver.localId))
+    ) {
       const b = this.binding(receiver.localId);
       if (b.kind !== "boxed") {
         const value = this.B.tmp();

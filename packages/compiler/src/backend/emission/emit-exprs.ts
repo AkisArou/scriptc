@@ -474,11 +474,11 @@ function dynPromiseAdapter(
 
 
 
-/** True when evaluating an index/value expression cannot overwrite a bytes
- * binding. This deliberately small whitelist enables borrowed receivers in
- * typed-array hot loops while side-effecting/calling shapes retain the full
- * snapshot ownership required by JS evaluation order. */
-export function isStableBytesOperand(e: IrExpr): boolean {
+/** True when evaluating an index/value expression cannot overwrite the bytes
+ * receiver binding. This deliberately small whitelist enables borrowed
+ * receivers in typed-array hot loops while side-effecting/calling shapes
+ * retain the full snapshot ownership required by JS evaluation order. */
+export function isStableBytesOperand(e: IrExpr, receiverLocalId: string): boolean {
   switch (e.kind) {
     case "numLit":
     case "boolLit":
@@ -486,28 +486,33 @@ export function isStableBytesOperand(e: IrExpr): boolean {
     case "incDec":
       return true;
     case "assignExpr":
-      // The enclosing bytes receiver has bytes type, while assignExpr here
-      // must produce the numeric index/value, so it cannot target that
-      // receiver binding.
-      return isStableBytesOperand(e.value);
+      // An assignment nested under truthiness/ternary can still produce the
+      // numeric index/value while overwriting the bytes-typed receiver.
+      return e.localId !== receiverLocalId && isStableBytesOperand(e.value, receiverLocalId);
     case "bin":
-      return isStableBytesOperand(e.left) && isStableBytesOperand(e.right);
+      return (
+        isStableBytesOperand(e.left, receiverLocalId) &&
+        isStableBytesOperand(e.right, receiverLocalId)
+      );
     case "unary":
     case "toBool":
-      return isStableBytesOperand(e.operand);
+      return isStableBytesOperand(e.operand, receiverLocalId);
     case "logical":
-      return isStableBytesOperand(e.left) && isStableBytesOperand(e.right);
+      return (
+        isStableBytesOperand(e.left, receiverLocalId) &&
+        isStableBytesOperand(e.right, receiverLocalId)
+      );
     case "ternary":
       return (
-        isStableBytesOperand(e.cond) &&
-        isStableBytesOperand(e.then) &&
-        isStableBytesOperand(e.else_)
+        isStableBytesOperand(e.cond, receiverLocalId) &&
+        isStableBytesOperand(e.then, receiverLocalId) &&
+        isStableBytesOperand(e.else_, receiverLocalId)
       );
     case "bytesIntrinsic":
       return (
         (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
         e.receiver.kind === "varRef" &&
-        e.args.every(isStableBytesOperand)
+        e.args.every((arg) => isStableBytesOperand(arg, receiverLocalId))
       );
     default:
       return false;
@@ -519,7 +524,10 @@ export function isStableBytesOperand(e: IrExpr): boolean {
  * owner then keeps the value alive, avoiding retain/release traffic around
  * every indexed access. Any uncertain shape falls back to an owned temp. */
 export function emitBytesReceiver(E: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
-  if (receiver.kind === "varRef" && following.every(isStableBytesOperand)) {
+  if (
+    receiver.kind === "varRef" &&
+    following.every((operand) => isStableBytesOperand(operand, receiver.localId))
+  ) {
     const local = E.currentLocals.get(receiver.localId);
     if (local && !local.boxed) {
       return E.newBorrowedTemp(receiver.type, mangleLocal(receiver.localId));

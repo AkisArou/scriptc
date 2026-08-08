@@ -85,3 +85,16 @@ function replaceWriteOrder(): number {
 }
 writeOrder[0] = replaceWriteOrder();
 console.log("write-order", writeOrder[0]);
+
+// Assignment expressions can hide the receiver overwrite beneath a boolean
+// condition while the enclosing ternary still produces a numeric operand.
+let nestedReadOrder = new Uint8Array([66]);
+const nestedReadReplacement = new Uint8Array([77]);
+const nestedReadBeforeReplace =
+  nestedReadOrder[(nestedReadOrder = nestedReadReplacement) ? 0 : 0];
+console.log("nested-read-order", nestedReadBeforeReplace, nestedReadOrder[0]);
+
+let nestedWriteOrder = new Uint8Array([88]);
+const nestedWriteReplacement = new Uint8Array([99]);
+nestedWriteOrder[0] = (nestedWriteOrder = nestedWriteReplacement) ? 55 : 66;
+console.log("nested-write-order", nestedWriteOrder[0]);
