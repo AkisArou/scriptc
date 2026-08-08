@@ -1950,21 +1950,20 @@ export function fenceStaticReadableStreamMember(
  * ambient globals have no first-class constructor-object representation;
  * claim the direct calls by declaration provenance before the general
  * member-call path tries to lower the receiver as a value. */
-function staticCallWithSurplusArgs(
+function staticFirstArgWithSurplusArgs(
   L: Lowerer,
   call: ts.CallExpression,
   first: IrExpr,
-  result: (first: IrExpr) => IrExpr,
 ): IrExpr {
   const loc = locOf(call);
-  if (call.arguments.length === 1) return result(first);
+  if (call.arguments.length <= 1) return first;
   const firstLocal = L.declareHiddenLocal("%fetchArg", first.type);
-  const firstRef = (): IrExpr => ({
+  const firstRef: IrExpr = {
     kind: "varRef",
     localId: firstLocal.id,
     type: first.type,
     loc,
-  });
+  };
   const stmts: IrStmt[] = [
     { kind: "varDecl", localId: firstLocal.id, init: first, loc },
   ];
@@ -1984,8 +1983,22 @@ function staticCallWithSurplusArgs(
       : L.lowerExpr(argument);
     stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
   }
-  const answer = result(firstRef());
-  return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
+  return {
+    kind: "seqExpr",
+    stmts,
+    result: firstRef,
+    type: first.type,
+    loc,
+  };
+}
+
+function staticCallWithSurplusArgs(
+  L: Lowerer,
+  call: ts.CallExpression,
+  first: IrExpr,
+  result: (first: IrExpr) => IrExpr,
+): IrExpr {
+  return result(staticFirstArgWithSurplusArgs(L, call, first));
 }
 
 export function lowerStaticFetchCompanionCall(
@@ -2169,11 +2182,10 @@ export function lowerStaticAbortControllerCall(
   const receiver = L.lowerExpr(access.expression);
   if (receiver.type.kind !== "dyn") return null;
   const loc = locOf(call);
-  const args = call.arguments.map((argument, index) =>
-    index === 0
-      ? lowerLiveWebValue(L, argument)
-      : L.lowerExprExpecting(argument, DYN)
-  );
+  const first = call.arguments[0]
+    ? lowerLiveWebValue(L, call.arguments[0])
+    : dynUndefinedExpr(loc);
+  const args = [staticFirstArgWithSurplusArgs(L, call, first)];
   return lowerStaticFixedFetchMethodCall(
     L,
     call,

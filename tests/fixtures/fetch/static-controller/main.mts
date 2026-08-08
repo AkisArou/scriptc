@@ -49,6 +49,72 @@ const surplusController = new AbortController(constructorSurplus());
 surplusController.abort(undefined, abortSurplus());
 console.log("controller surplus:", surplusEffects);
 
+let ignoredMapEffect = "";
+function ignoredMapSurplus(): Map<string, string> {
+  ignoredMapEffect = "map";
+  return new Map<string, string>();
+}
+const mapSurplusController = new AbortController();
+// @ts-expect-error JavaScript evaluates and ignores every surplus argument.
+mapSurplusController.abort(undefined, ignoredMapSurplus());
+console.log(
+  "controller map surplus:",
+  ignoredMapEffect,
+  mapSurplusController.signal.aborted,
+);
+
+const selfReasonController = new AbortController();
+selfReasonController.abort(selfReasonController);
+console.log(
+  "controller self reason:",
+  selfReasonController.signal.reason === selfReasonController,
+);
+
+const signalReasonController = new AbortController();
+const ownSignalReason = signalReasonController.signal;
+signalReasonController.abort(ownSignalReason);
+console.log(
+  "controller signal reason:",
+  ownSignalReason.reason === ownSignalReason,
+);
+
+const leftReasonController = new AbortController();
+const rightReasonController = new AbortController();
+leftReasonController.abort(rightReasonController);
+rightReasonController.abort(leftReasonController);
+console.log(
+  "controller mutual reasons:",
+  leftReasonController.signal.reason === rightReasonController,
+  rightReasonController.signal.reason === leftReasonController,
+);
+
+const watchedReasonController = new AbortController();
+const watchedReasonSignal = AbortSignal.any([watchedReasonController.signal]);
+watchedReasonController.abort(watchedReasonController);
+let watchedThrowMatches = false;
+try {
+  watchedReasonSignal.throwIfAborted();
+} catch (error) {
+  watchedThrowMatches = error === watchedReasonController;
+}
+console.log(
+  "controller propagated reason:",
+  watchedReasonSignal.reason === watchedReasonController,
+  watchedThrowMatches,
+);
+
+try {
+  await fetch(`${process.argv[2]}/slow`, {
+    signal: selfReasonController.signal,
+  });
+  console.log("controller pre-aborted fetch unexpectedly resolved");
+} catch (error) {
+  console.log(
+    "controller pre-aborted fetch reason:",
+    error === selfReasonController,
+  );
+}
+
 const fetchController = new AbortController();
 setTimeout(() => fetchController.abort(new Error("manual timeout")), 20);
 try {

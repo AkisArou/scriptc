@@ -156,6 +156,10 @@ struct SfSignal {
   bool aborted;
   ScrDyn *reason;
   ScrError *error_reason;
+  bool reason_self;
+  ScrDynHandleTag reason_self_tag;
+  bool reason_tracked;
+  SfSignal *reason_next;
   ScrDyn *onabort;
   size_t onabort_order;
   SfAbortListener *listeners;
@@ -319,9 +323,10 @@ struct SfTransfer {
 
 static SfTransfer *sf_live;
 /* Weak registries: owners unlink themselves on destruction. They let the
- * fetch teardown sever native→callback edges before final cycle collection,
- * including an otherwise-untraceable callback→captured-handle backedge. */
+ * fetch teardown sever opaque native→dyn edges before final cycle collection,
+ * including otherwise-untraceable callback/reason→handle backedges. */
 static SfSignal *sf_callback_signals;
+static SfSignal *sf_reason_signals;
 static SfStream *sf_callback_streams;
 
 static void sf_oom(void) {
@@ -429,6 +434,53 @@ static void sf_signal_untrack_callbacks(SfSignal *s) {
   s->callbacks_next = NULL;
 }
 
+static void sf_signal_track_reason(SfSignal *s) {
+  if (s->reason_tracked) return;
+  s->reason_tracked = true;
+  s->reason_next = sf_reason_signals;
+  sf_reason_signals = s;
+}
+
+static void sf_signal_untrack_reason(SfSignal *s) {
+  if (!s->reason_tracked) return;
+  for (SfSignal **at = &sf_reason_signals; *at;
+       at = &(*at)->reason_next) {
+    if (*at == s) {
+      *at = s->reason_next;
+      break;
+    }
+  }
+  s->reason_tracked = false;
+  s->reason_next = NULL;
+}
+
+/* A controller may abort with itself or its own signal as the reason.
+ * Those handles point back to this SfSignal, so retaining their ScrDyn box
+ * would create an opaque RC cycle. Remember the identity as tag + pointer
+ * instead and mint an equivalent handle whenever the reason is observed;
+ * checked-dynamic strict equality uses that same pair. Other reasons stay
+ * strongly owned and join the teardown registry so larger reason/handle
+ * cycles can be severed once no Web object remains observable. */
+static ScrDyn *sf_signal_reason_ref(SfSignal *s) {
+  if (s->reason_self) {
+    return scr_dyn_new_handle(s, s->reason_self_tag);
+  }
+  return scr_dyn_retain(s->reason);
+}
+
+static void sf_signal_drop_reason(SfSignal *s) {
+  ScrDyn *reason = s->reason;
+  ScrError *error_reason = s->error_reason;
+  sf_signal_untrack_reason(s);
+  s->reason = NULL;
+  s->error_reason = NULL;
+  s->reason_self = false;
+  scr_error_release(error_reason);
+  /* May release a handle that owns s and destroy it reentrantly. All s
+   * fields used by this cleanup are therefore cleared before this call. */
+  scr_dyn_release(reason);
+}
+
 static SfSignal *sf_signal_new(void) {
   SfSignal *s = calloc(1, sizeof *s);
   if (!s) sf_oom();
@@ -491,8 +543,7 @@ static void sf_signal_release(SfSignal *s) {
   free(s->source_watches);
   free(s->sources);
   sf_signal_drop_callbacks(s);
-  scr_dyn_release(s->reason);
-  scr_error_release(s->error_reason);
+  sf_signal_drop_reason(s);
   free(s);
 }
 
@@ -877,7 +928,16 @@ static void sf_signal_abort_full(SfSignal *s, ScrDyn *reason,
                                  ScrError *error_reason) {
   if (s->aborted) return;
   s->aborted = true;
-  s->reason = scr_dyn_retain(reason);
+  if (reason && reason->kind == SCR_DYN_HANDLE &&
+      reason->v.handle.ptr == s &&
+      (reason->v.handle.tag == SCR_DYNH_ABORT_SIGNAL ||
+       reason->v.handle.tag == SCR_DYNH_ABORT_CONTROLLER)) {
+    s->reason_self = true;
+    s->reason_self_tag = reason->v.handle.tag;
+  } else {
+    s->reason = scr_dyn_retain(reason);
+    sf_signal_track_reason(s);
+  }
   s->error_reason = error_reason ? scr_error_retain(error_reason) : NULL;
   while (s->watchers) {
     SfSignalWatch *w = s->watchers;
@@ -976,7 +1036,9 @@ ScrDyn *scr_fetch_abort_now(ScrDyn *reason) {
 
 static void sf_any_source_abort(SfSignalWatch *w, SfSignal *source) {
   SfSignal *out = (SfSignal *)w->owner;
-  sf_signal_abort_full(out, source->reason, source->error_reason);
+  ScrDyn *reason = sf_signal_reason_ref(source);
+  sf_signal_abort_full(out, reason, source->error_reason);
+  scr_dyn_release(reason);
 }
 
 ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
@@ -1005,7 +1067,9 @@ ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
     }
     out->sources[i] = sf_signal_retain(source);
     if (source->aborted) {
-      sf_signal_abort_full(out, source->reason, source->error_reason);
+      ScrDyn *reason = sf_signal_reason_ref(source);
+      sf_signal_abort_full(out, reason, source->error_reason);
+      scr_dyn_release(reason);
     } else {
       out->source_watches[i] =
           sf_signal_watch(source, out, &sf_any_source_abort);
@@ -1120,7 +1184,9 @@ static ScrDyn *sf_signal_invoke(void *ptr, ScrDyn *self, const char *method,
   SfSignal *s = ptr;
   if (strcmp(method, "throwIfAborted") == 0) {
     if (s->aborted) {
-      sf_throw_dyn_reason(s->reason);
+      ScrDyn *reason = sf_signal_reason_ref(s);
+      sf_throw_dyn_reason(reason);
+      scr_dyn_release(reason);
       return NULL;
     }
     return scr_dyn_retain(scr_dyn_undefined());
@@ -1241,7 +1307,7 @@ static ScrDyn *sf_signal_get(void *ptr, const char *key, size_t len) {
   SfSignal *s = ptr;
   if (sf_name(key, len, "aborted")) return scr_dyn_new_bool(s->aborted);
   if (sf_name(key, len, "reason")) {
-    return s->aborted ? scr_dyn_retain(s->reason)
+    return s->aborted ? sf_signal_reason_ref(s)
                       : scr_dyn_retain(scr_dyn_undefined());
   }
   if (sf_name(key, len, "onabort")) {
@@ -3311,6 +3377,7 @@ static void sf_reject_reason(SfTransfer *t, ScrDyn *reason) {
 static void sf_transfer_abort_watch(SfSignalWatch *w, SfSignal *signal) {
   SfTransfer *t = w->owner;
   if (t->done) return;
+  ScrDyn *reason = sf_signal_reason_ref(signal);
   if (t->request_stream && t->request_stream->request_owner == t) {
     SfStream *request = t->request_stream;
     request->request_owner = NULL;
@@ -3322,11 +3389,12 @@ static void sf_transfer_abort_watch(SfSignalWatch *w, SfSignal *signal) {
   }
   if (t->client) scr_http_client_destroy(t->client);
   if (t->response_sent && t->response_stream) {
-    sf_stream_error(t->response_stream, signal->reason);
+    sf_stream_error(t->response_stream, reason);
     sf_settle(t);
   } else {
-    sf_reject_reason(t, signal->reason);
+    sf_reject_reason(t, reason);
   }
+  scr_dyn_release(reason);
 }
 
 static void sf_transfer_stream_error(SfTransfer *t, ScrDyn *reason) {
@@ -5323,7 +5391,9 @@ ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init) {
     scr_arr_release(headers);
     scr_str_release(method);
     scr_url_release(u);
-    sf_reject_promise_reason(promise, signal->reason);
+    ScrDyn *reason = sf_signal_reason_ref(signal);
+    sf_reject_promise_reason(promise, reason);
+    scr_dyn_release(reason);
     return promise;
   }
 
@@ -5406,6 +5476,9 @@ static void sf_teardown(void) {
   }
   while (sf_callback_signals) {
     sf_signal_drop_callbacks(sf_callback_signals);
+  }
+  while (sf_reason_signals) {
+    sf_signal_drop_reason(sf_reason_signals);
   }
   sf_proxy_snapshot_free();
 }
