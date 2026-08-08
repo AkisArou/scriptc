@@ -84,6 +84,7 @@ export const REGEX_INTRINSIC_SIGS: Record<
  * Exported for the frontend's lib-boundary pass (lib-boundary.ts). */
 export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result: IrType }> = {
   "fetch.start": { argTypes: [STRING, DYN], result: { kind: "promise", inner: DYN } },
+  "fetch.responseNew": { argTypes: [DYN, DYN], result: DYN },
   "fetch.responseJson": { argTypes: [DYN], result: { kind: "promise", inner: DYN } },
   "fetch.responseText": { argTypes: [DYN], result: { kind: "promise", inner: STRING } },
   "fetch.responseBytes": { argTypes: [DYN], result: { kind: "promise", inner: BYTES_U8 } },

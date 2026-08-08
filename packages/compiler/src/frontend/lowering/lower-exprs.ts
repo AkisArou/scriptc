@@ -3893,7 +3893,11 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
    * (dynFrom's domain, functions box); a value with no dyn representation
    * fences per property. Spreads copy through dyn.assign in source order;
    * accessors stay fenced. */
-  export function lowerDynObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression): IrExpr {
+  export function lowerDynObjectLiteral(
+    L: Lowerer,
+    expr: ts.ObjectLiteralExpression,
+    boxValue?: (node: ts.Expression, value: IrExpr) => IrExpr,
+  ): IrExpr {
     const loc = locOf(expr);
     let fields: { key: IrExpr; value: IrExpr }[] = [];
     let acc: IrExpr | null = null;
@@ -3908,7 +3912,10 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     for (const prop of expr.properties) {
       if (ts.isSpreadAssignment(prop)) {
         flushFields();
-        const source = L.coerceToExpected(L.lowerExpr(prop.expression), DYN);
+        const raw = L.lowerExpr(prop.expression);
+        const source = boxValue
+          ? boxValue(prop.expression, raw)
+          : L.coerceToExpected(raw, DYN);
         if (source.type.kind !== "dyn") {
           L.unsupported("SC1101", prop.expression, `spreading '${L.fmt(source.type)}' into a checked-dynamic object literal`);
         }
@@ -4013,7 +4020,9 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         });
         raw = { kind: "closure", fnName, captures: [], type: funcOf([], VOID), loc: locOf(prop) };
       }
-      let v = L.coerceToExpected(raw, DYN);
+      let v = boxValue
+        ? boxValue(valueExpr as ts.Expression, raw)
+        : L.coerceToExpected(raw, DYN);
       if (v.type.kind !== "dyn") {
         const convDiagsBefore = L.diags.length;
         try {

@@ -161,16 +161,19 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // the %j dyn stringify walk, and the runtime-encoding readFileSync
     // form (all in always-linked TUs) tipped the regex class one more
     // page; positioned readSync's cross-platform pread seam tipped the
-    // Mach-O class by one further page.
+    // Mach-O regex class by one further page. Native Response construction
+    // and mutable constructed Headers added another page to both Darwin
+    // classes; the Linux bounds were rebased by the same 16KB while
+    // preserving their existing cushion.
     // The canonical Ubuntu 24.04/clang Sandbox measures 387,600 bytes for
     // the plain binary and 540,232 with regex linked. The Linux bounds leave
     // roughly one ELF page of growth. Mach-O keeps its independently
     // calibrated bounds; neither cushion can hide an engine-sized jump.
     expect(statSync(plainBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 392_000 : 378_000,
+      process.platform === "linux" ? 408_000 : 395_000,
     );
     expect(statSync(regexBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 545_000 : 528_000,
+      process.platform === "linux" ? 561_000 : 545_000,
     );
   });
 });

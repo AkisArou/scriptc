@@ -38,6 +38,9 @@ export interface FetchCompatOperation {
   name: string;
   kind: "constructor" | "function" | "method" | "property" | "static-method";
   facets: readonly FetchCompatFacet[];
+  /** The supported call/input subset when the operation is not an entire
+   * WebIDL overload family. The manifest publishes this verbatim. */
+  scope?: string;
   evidence: readonly FetchCompatEvidence[];
 }
 
@@ -99,6 +102,7 @@ export interface FetchCompatProfile {
     undici: string;
   };
   requestInit: readonly FetchCompatOption[];
+  responseInit: readonly FetchCompatOption[];
   members: {
     responseReads: readonly string[];
     responseCalls: readonly string[];
@@ -219,6 +223,26 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       evidence: [fixture("static"), fixture("static-abort-throw")],
     },
   ],
+  responseInit: [
+    {
+      id: "stdlib.response-init.headers",
+      name: "ResponseInit.headers",
+      conversion: "Headers, record, or sequence-of-pairs snapshot",
+      evidence: [fixture("static")],
+    },
+    {
+      id: "stdlib.response-init.status",
+      name: "ResponseInit.status",
+      conversion: "WebIDL unsigned-short conversion followed by the 200–599 range check",
+      evidence: [fixture("static")],
+    },
+    {
+      id: "stdlib.response-init.statusText",
+      name: "ResponseInit.statusText",
+      conversion: "WebIDL ByteString with HTTP reason-phrase validation",
+      evidence: [fixture("static")],
+    },
+  ],
   members: {
     responseReads: [
       "ok",
@@ -235,6 +259,15 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
     readableStreamCalls: ["cancel", "getReader"],
   },
   operations: [
+    {
+      id: "stdlib.response.constructor",
+      name: "Response constructor",
+      kind: "constructor",
+      facets: ["webidl-conversion", "body-consumption", "state-machine", "error-shape"],
+      scope:
+        "BodyInit is string, Uint8Array/Buffer, ReadableStream<Uint8Array>, null/undefined, or a checked-dynamic value that follows the supported WebIDL string conversion; ResponseInit is headers/status/statusText",
+      evidence: [fixture("static")],
+    },
     {
       id: "stdlib.fetch",
       name: "fetch",
@@ -635,12 +668,11 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         metadataExclusion,
       ),
 
-      unsupportedEntry(
+      staticEntry(
         "stdlib.response.constructor",
         "Response",
         "constructor",
         "constructor",
-        constructorUnsupported,
       ),
       ...["error", "json", "redirect"].map((member) =>
         unsupportedEntry(
@@ -648,7 +680,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
           "Response",
           member,
           "static",
-          "Response constructor-object operations have no compiler lowering in either tier",
+          "Response static constructor-object operations have no compiler lowering in either tier",
         )
       ),
       dynamicEntry(
@@ -854,12 +886,11 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
             );
       }),
       ...["headers", "status", "statusText"].map((member) =>
-        unsupportedEntry(
+        staticEntry(
           `stdlib.response-init.${member}`,
           "ResponseInit",
           member,
           "dictionary",
-          "Response construction has no compiler lowering in either tier",
         )
       ),
     ],
