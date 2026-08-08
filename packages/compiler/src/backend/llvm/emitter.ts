@@ -493,6 +493,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fetch.responseJson": "scr_fetch_response_json",
   "fetch.responseText": "scr_fetch_response_text",
   "fetch.responseBytes": "scr_fetch_response_bytes",
+  "fetch.abortControllerNew": "scr_fetch_abort_controller_new",
   "fetch.abortTimeout": "scr_fetch_abort_timeout",
   "fetch.abortNow": "scr_fetch_abort_now",
   "fetch.abortAny": "scr_fetch_abort_any",

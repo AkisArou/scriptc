@@ -2132,6 +2132,67 @@ export function lowerStaticFetchCompanionCall(
   return null;
 }
 
+/** `AbortController.abort(reason?)` mutates the native signal shared with
+ * `.signal` and fetch. Preserve a mutable reason's identity just like
+ * `AbortSignal.abort(reason)`; surplus arguments still evaluate in order and
+ * are ignored by the runtime operation. */
+export function lowerStaticAbortControllerCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.some((argument) => ts.isSpreadElement(argument)) ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken ||
+    staticResponseMemberName(L, access) !== "abort"
+  ) {
+    return null;
+  }
+  const receiverTs = L.checker.getBaseTypeOfLiteralType(
+    L.typeOf(access.expression),
+  );
+  const symbol = receiverTs.getAliasSymbol() ?? receiverTs.getSymbol();
+  if (
+    symbol?.name !== "AbortController" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const receiver = L.lowerExpr(access.expression);
+  if (receiver.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  const args = call.arguments.map((argument, index) =>
+    index === 0
+      ? lowerLiveWebValue(L, argument)
+      : L.lowerExprExpecting(argument, DYN)
+  );
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    "abort",
+    receiver,
+    args,
+    (receiverRef, argumentRefs) => ({
+      kind: "dynInvoke",
+      recv: receiverRef,
+      method: "abort",
+      calleeName: access.getText(),
+      args: argumentRefs,
+      type: DYN,
+      loc,
+    }),
+  );
+}
+
 /** Controller chunks and error reasons are dyn-handle calls, but unlike a
  * general checked-dynamic boundary the Web Streams contract preserves their
  * object identity for the reader/source callbacks that observe them. */
@@ -2310,6 +2371,65 @@ export function lowerStaticAbortSignalListenerCall(
       loc,
     }),
   );
+}
+
+/** `new AbortController()`. Static builds create a native controller handle
+ * over the same signal state consumed by fetch; dynamic builds construct the
+ * island Web object. JavaScript accepts surplus constructor arguments, so
+ * both tiers evaluate them even though AbortController ignores their values. */
+export function lowerAbortControllerNew(
+  L: Lowerer,
+  expr: ts.NewExpression,
+): IrExpr | null {
+  if (
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "AbortController"
+  ) {
+    return null;
+  }
+  const symbol = L.resolveValueSymbol(expr.expression);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const args = expr.arguments ?? [];
+  if (args.some((argument) => ts.isSpreadElement(argument))) return null;
+  const loc = locOf(expr);
+  if (L.dynamic) {
+    const ctor: IrExpr = {
+      kind: "jsOp",
+      op: "globalGet",
+      name: "AbortController",
+      args: [],
+      type: JSVAL,
+      loc,
+    };
+    return {
+      kind: "jsOp",
+      op: "construct",
+      args: [ctor, ...args.map((argument) =>
+        L.jsvalIn(L.lowerExpr(argument), argument)
+      )],
+      type: JSVAL,
+      loc,
+    };
+  }
+  const result: IrExpr = {
+    kind: "libCall",
+    fn: "fetch.abortControllerNew",
+    args: [],
+    type: DYN,
+    loc,
+  };
+  if (args.length === 0) return result;
+  return {
+    kind: "seqExpr",
+    stmts: args.map((argument): IrStmt => ({
+      kind: "exprStmt",
+      expr: L.lowerExpr(argument),
+      loc: locOf(argument),
+    })),
+    result,
+    type: DYN,
+    loc,
+  };
 }
 
 /** `new ReadableStream(source?)`. Static builds box the source record into

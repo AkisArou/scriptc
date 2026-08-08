@@ -1638,7 +1638,7 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
     return scr_str_new("[object Object]", 15);
   case SCR_DYN_HANDLE:
     if (d->v.handle.tag >= SCR_DYNH_ABORT_SIGNAL &&
-        d->v.handle.tag <= SCR_DYNH_EVENT) {
+        d->v.handle.tag <= SCR_DYNH_ABORT_CONTROLLER) {
       ScrJsonBuf b;
       scr_jb_init(&b);
       scr_jb_puts(&b, "[object ");

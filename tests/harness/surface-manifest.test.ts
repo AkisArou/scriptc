@@ -117,6 +117,10 @@ const PROBES: Probe[] = [
   { id: "stdlib.number.toFixed", source: "const n = 1.2345;\nconsole.log(n.toFixed(2));\n" },
   { id: "stdlib.abort-signal.timeout", source: "const signal = AbortSignal.timeout(1000);\nconsole.log(signal.aborted);\n" },
   {
+    id: "stdlib.abort-controller.constructor",
+    source: "const controller = new AbortController();\ncontroller.abort();\nconsole.log(controller.signal.aborted);\n",
+  },
+  {
     id: "stdlib.readable-stream.constructor",
     source: "const stream = new ReadableStream<number>();\nconsole.log(stream.locked);\n",
   },

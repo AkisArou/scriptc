@@ -175,6 +175,7 @@ describe(`static fetch differential${sanitize ? " (sanitized)" : ""}`, () => {
   const staticCases = [
     "static",
     "static-coercion",
+    "static-controller",
     "static-stream",
     "static-stream-this",
     "static-listener-this",

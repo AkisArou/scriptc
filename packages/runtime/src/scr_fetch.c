@@ -1016,6 +1016,47 @@ ScrDyn *scr_fetch_abort_any(ScrDyn *signals) {
   return boxed;
 }
 
+/* AbortController is a distinct public handle over the same native signal
+ * state fetch and AbortSignal.any observe. Reading `.signal` boxes that
+ * state with the AbortSignal tag, so repeated reads preserve JS identity
+ * through the checked-dynamic handle equality rule (tag + pointer). */
+ScrDyn *scr_fetch_abort_controller_new(void) {
+  SfSignal *s = sf_signal_new();
+  ScrDyn *out = scr_dyn_new_handle(s, SCR_DYNH_ABORT_CONTROLLER);
+  sf_signal_release(s);
+  return out;
+}
+
+static ScrDyn *sf_abort_controller_invoke(
+    void *ptr, ScrDyn *self, const char *method, ScrDyn *const *args,
+    size_t argc, const char *what) {
+  SfSignal *s = ptr;
+  if (strcmp(method, "abort") == 0) {
+    if (!s->aborted) {
+      ScrDyn *reason = argc > 0 ? args[0] : NULL;
+      if (!reason || reason->kind == SCR_DYN_UNDEF) {
+        sf_signal_abort_default(s, false);
+      } else {
+        ScrError *e = sf_is_error_dyn(reason) ? scr_error_from_dyn(reason) : NULL;
+        sf_signal_abort_full(s, reason, e);
+        scr_error_release(e);
+      }
+    }
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+  (void)self;
+  sf_not_function(what);
+  return NULL;
+}
+
+static ScrDyn *sf_abort_controller_get(
+    void *ptr, const char *key, size_t len) {
+  if (sf_name(key, len, "signal")) {
+    return scr_dyn_new_handle(ptr, SCR_DYNH_ABORT_SIGNAL);
+  }
+  return NULL;
+}
+
 static bool sf_signal_listener_options(
     ScrDyn *const *args, size_t argc, bool *capture, bool *once,
     SfSignal **option_signal) {
@@ -5323,6 +5364,9 @@ static bool sf_no_set(void *ptr, const char *key, size_t len,
 static const ScrDynHandleOps sf_signal_ops = {
     "AbortSignal", &sf_signal_retain_v, &sf_signal_release_v,
     &sf_signal_invoke, &sf_signal_get, &sf_signal_set, NULL};
+static const ScrDynHandleOps sf_abort_controller_ops = {
+    "AbortController", &sf_signal_retain_v, &sf_signal_release_v,
+    &sf_abort_controller_invoke, &sf_abort_controller_get, &sf_no_set, NULL};
 static const ScrDynHandleOps sf_stream_ops = {
     "ReadableStream", &sf_stream_retain_v, &sf_stream_release_v,
     &sf_stream_invoke, &sf_stream_get, &sf_no_set, NULL};
@@ -5374,6 +5418,8 @@ void scr_fetch_install(void) {
   sf_proxy_snapshot();
   scr_net_install();
   scr_dyn_handle_install(SCR_DYNH_ABORT_SIGNAL, &sf_signal_ops);
+  scr_dyn_handle_install(SCR_DYNH_ABORT_CONTROLLER,
+                         &sf_abort_controller_ops);
   scr_dyn_handle_install(SCR_DYNH_WEB_STREAM, &sf_stream_ops);
   scr_dyn_handle_install(SCR_DYNH_WEB_READER, &sf_reader_ops);
   scr_dyn_handle_install(SCR_DYNH_WEB_CONTROLLER, &sf_controller_ops);

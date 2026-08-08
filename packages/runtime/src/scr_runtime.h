@@ -2760,6 +2760,7 @@ typedef enum {
   SCR_DYNH_FETCH_RESPONSE, /* native static-fetch Response */
   SCR_DYNH_FETCH_HEADERS, /* native static-fetch response Headers */
   SCR_DYNH_EVENT,          /* native static-fetch abort Event */
+  SCR_DYNH_ABORT_CONTROLLER, /* native static-fetch AbortController */
   SCR_DYNH_COUNT,
 } ScrDynHandleTag;
 
@@ -3958,6 +3959,7 @@ ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init); /* borrowed args; +1
 ScrPromise *scr_fetch_response_json(ScrDyn *response); /* +1 promise<dyn> */
 ScrPromise *scr_fetch_response_text(ScrDyn *response); /* +1 promise<dyn> */
 ScrPromise *scr_fetch_response_bytes(ScrDyn *response); /* +1 promise<dyn> */
+ScrDyn *scr_fetch_abort_controller_new(void); /* +1 AbortController handle */
 /* Borrowed number; +1 AbortSignal handle or NULL pending. */
 ScrDyn *scr_fetch_abort_timeout(ScrDyn *delay);
 ScrDyn *scr_fetch_abort_now(ScrDyn *reason); /* borrowed reason; +1 handle */

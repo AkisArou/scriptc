@@ -1870,25 +1870,22 @@
       "id": "stdlib.abort-controller.abort",
       "kind": "stdlib",
       "name": "AbortController.abort",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: callback-order, identity, liveness, state-machine, surplus-arguments; differential evidence: fixture:static-controller"
     },
     {
       "id": "stdlib.abort-controller.constructor",
       "kind": "stdlib",
       "name": "AbortController constructor",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: argument-evaluation, identity, state-machine, surplus-arguments; differential evidence: fixture:static-controller"
     },
     {
       "id": "stdlib.abort-controller.signal",
       "kind": "stdlib",
       "name": "AbortController.signal",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "status": "static",
+      "note": "Node 24.15.0 / Undici 7.24.4; facets: identity, property-read, state-machine; differential evidence: fixture:static-controller"
     },
     {
       "id": "stdlib.abort-signal.abort",

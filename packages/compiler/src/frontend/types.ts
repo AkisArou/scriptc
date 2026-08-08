@@ -11,7 +11,7 @@ export { typeKey };
 
 /** The ambient TYPE names of the fetch slice. Under --dynamic their
  * values live in the embedded engine and map to island handles (jsval).
- * Static fetch gives Response, RequestInit, AbortSignal, response
+ * Static fetch gives Response, RequestInit, AbortController/AbortSignal, response
  * Headers, and the readable Web Streams slice native checked-dynamic
  * handle representations. The Headers constructor itself remains
  * dynamic-only even though response.headers is native.
@@ -23,6 +23,7 @@ export const ISLAND_AMBIENT_TYPES = [
   "RequestInit",
   "Event",
   "EventTarget",
+  "AbortController",
   "AbortSignal",
   "Headers",
   "ReadableStream",
