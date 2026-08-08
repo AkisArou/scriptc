@@ -153,4 +153,23 @@ console.log(
   await surplusFetchResponse.text(),
 );
 
+let responseSurplusOrder = "";
+function responseSurplusBodyToString() {
+  responseSurplusOrder += "body";
+  return "response surplus";
+}
+const surplusConstructedResponse = new Response(
+  { toString: responseSurplusBodyToString },
+  undefined,
+  (() => {
+    responseSurplusOrder += "surplus ";
+    return "ignored";
+  })(),
+);
+console.log(
+  "response surplus arguments:",
+  responseSurplusOrder,
+  await surplusConstructedResponse.text(),
+);
+
 export {};

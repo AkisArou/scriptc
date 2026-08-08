@@ -59,6 +59,32 @@ cookieResponseHeaders.append("cookie", "a");
 cookieResponseHeaders.append("cookie", "b");
 console.log("response cookie append:", cookieResponseHeaders.get("cookie"));
 
+const deleteDuringForEachHeaders = new Response(null, {
+  headers: { a: "1", b: "2", c: "3" },
+}).headers;
+const deleteDuringForEachSeen: string[] = [];
+deleteDuringForEachHeaders.forEach((value, name) => {
+  deleteDuringForEachSeen.push(`${name}=${value}`);
+  if (name === "a") deleteDuringForEachHeaders.delete("b");
+});
+console.log(
+  "response header forEach delete:",
+  deleteDuringForEachSeen.join(","),
+);
+
+const appendDuringForEachHeaders = new Response(null, {
+  headers: { a: "1", c: "3" },
+}).headers;
+const appendDuringForEachSeen: string[] = [];
+appendDuringForEachHeaders.forEach((value, name) => {
+  appendDuringForEachSeen.push(`${name}=${value}`);
+  if (name === "a") appendDuringForEachHeaders.append("b", "2");
+});
+console.log(
+  "response header forEach append:",
+  appendDuringForEachSeen.join(","),
+);
+
 const responseHeaderMutationOrder: string[] = [];
 let responseHeaderNameCalls = 0;
 const responseHeaderName: any = {

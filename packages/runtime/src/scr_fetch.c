@@ -2956,12 +2956,25 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
     ScrDyn *callback = args[0];
     const ScrDyn *this_arg =
         argc > 1 ? args[1] : scr_dyn_undefined();
-    size_t count = 0;
-    ScrStr **names = sf_headers_sorted_names(h, &count);
-    for (size_t i = 0; i < count; i++) {
+    /* Headers iteration is live. Re-sort the current list for each numeric
+     * index so callback mutations have the same effects as Node: deleting
+     * a future name skips it, inserting a later name visits it, and
+     * inserting before the current index can make the current name appear
+     * again. The old one-time snapshot was only safe while every native
+     * Headers handle was immutable. */
+    for (size_t i = 0;; i++) {
+      size_t count = 0;
+      ScrStr **names = sf_headers_sorted_names(h, &count);
+      if (i >= count) {
+        for (size_t j = 0; j < count; j++) scr_str_release(names[j]);
+        free(names);
+        break;
+      }
       ScrStr *value = sf_headers_get_value(h, names[i]);
       ScrDyn *boxed_value = scr_dyn_new_str(value);
       ScrDyn *boxed_name = scr_dyn_new_str(names[i]);
+      for (size_t j = 0; j < count; j++) scr_str_release(names[j]);
+      free(names);
       ScrDyn *call_args[3] = {boxed_value, boxed_name, self};
       scr_dyn_this_push_dyn(this_arg);
       ScrDyn *result =
@@ -2970,17 +2983,11 @@ static ScrDyn *sf_headers_invoke(void *ptr, ScrDyn *self,
       scr_dyn_release(boxed_value);
       scr_dyn_release(boxed_name);
       scr_str_release(value);
-      scr_str_release(names[i]);
       if (!result) {
-        for (size_t j = i + 1; j < count; j++) {
-          scr_str_release(names[j]);
-        }
-        free(names);
         return NULL;
       }
       scr_dyn_release(result);
     }
-    free(names);
     return scr_dyn_retain(scr_dyn_undefined());
   }
   if (strcmp(method, "append") == 0 || strcmp(method, "delete") == 0 ||

@@ -2380,7 +2380,7 @@ export function lowerResponseNew(
   const symbol = L.resolveValueSymbol(expr.expression);
   if (!symbol || !L.isStdlibSymbol(symbol)) return null;
   const args = expr.arguments ?? [];
-  if (args.length > 2 || args.some(ts.isSpreadElement)) return null;
+  if (args.some(ts.isSpreadElement)) return null;
   const loc = locOf(expr);
 
   if (L.dynamic) {
@@ -2427,13 +2427,48 @@ export function lowerResponseNew(
     : ts.isObjectLiteralExpression(initNode)
       ? lowerDynObjectLiteral(L, initNode)
       : toDyn(initNode, "an init value");
-  return {
+  const response: IrExpr = {
     kind: "libCall",
     fn: "fetch.responseNew",
     args: [body, init],
     type: DYN,
     loc,
   };
+  if (args.length <= 2) return response;
+
+  /* WebIDL ignores surplus arguments, but JavaScript evaluates every
+   * argument before the constructor starts converting BodyInit and
+   * ResponseInit. Keep the first two boxed values alive while evaluating
+   * the ignored tail, then enter the native conversion boundary. */
+  const bodyLocal = L.declareHiddenLocal("%responseBody", body.type);
+  const initLocal = L.declareHiddenLocal("%responseInit", init.type);
+  const bodyRef: IrExpr = {
+    kind: "varRef",
+    localId: bodyLocal.id,
+    type: bodyLocal.type,
+    loc,
+  };
+  const initRef: IrExpr = {
+    kind: "varRef",
+    localId: initLocal.id,
+    type: initLocal.type,
+    loc,
+  };
+  const stmts: IrStmt[] = [
+    { kind: "varDecl", localId: bodyLocal.id, init: body, loc },
+    { kind: "varDecl", localId: initLocal.id, init, loc },
+  ];
+  for (const argument of args.slice(2)) {
+    const discarded = ts.isVoidExpression(argument)
+      ? L.lowerExpr(argument.expression)
+      : L.lowerExpr(argument);
+    stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
+  }
+  const result: IrExpr = {
+    ...response,
+    args: [bodyRef, initRef],
+  };
+  return { kind: "seqExpr", stmts, result, type: DYN, loc };
 }
 
 /** A static default reader's read() exits the native checked-dynamic
