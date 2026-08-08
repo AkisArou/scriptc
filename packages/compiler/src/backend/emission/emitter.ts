@@ -21,6 +21,7 @@
  * the mangled form and every statement carries a `source line` comment.
  */
 import type {
+  IrBytesElem,
   IrGlobal,
   IrRecordShape,
   IrExpr,
@@ -83,6 +84,10 @@ export class CEmitter {
   tempCounter = 0;
   /** Interned string literals: UTF-8 text → static symbol name. */
   readonly literals = new Map<string, string>();
+  /** Kind-specialized typed-array access helpers actually used by this
+   * program. Keeping these in the generated TU means unrelated binaries do
+   * not pay even debug/link metadata for byte-loop fast paths. */
+  readonly bytesElementHelpers = new Set<`${"get" | "set"}:${IrBytesElem}`>();
   /** Interned unit-armed union instances: "unionId:tag" → static symbol.
    * A unit arm (undefined/null) has no payload, so every instance of one
    * (union, tag) pair is identical — ONE immortal (rc == SIZE_MAX) static
@@ -559,6 +564,7 @@ export class CEmitter {
       `#include <stdlib.h>`,
       ``,
     ];
+    out.push(...this.emitBytesElementHelpers());
     // Struct defs render into their own buffer BEFORE the unit-instance
     // table flushes: class newFns point undefined-armed union fields at
     // interned unit instances (fields start as JS's undefined, not NULL),
@@ -1300,6 +1306,76 @@ export class CEmitter {
 
   /* ── plumbing ─────────────────────────────────────────────────────── */
 
+  bytesElementHelper(op: "get" | "set", elem: IrBytesElem): string {
+    this.bytesElementHelpers.add(`${op}:${elem}`);
+    return `sc_bytes_${op}_${elem}`;
+  }
+
+  private emitBytesElementHelpers(): string[] {
+    if (this.bytesElementHelpers.size === 0) return [];
+    const out = [
+      `/* Typed-array hot paths specialized from the IR element kind. */`,
+      `static inline size_t sc_bytes_index_checked(const ScrBytes *b, double i) {`,
+      `  if (!(i >= 0.0 && i < (double)b->len)) { (void)scr_bytes_get(b, i); return 0; }`,
+      `  size_t idx = (size_t)i;`,
+      `  if ((double)idx != i) { (void)scr_bytes_get(b, i); return 0; }`,
+      `  return idx;`,
+      `}`,
+    ];
+    if ([...this.bytesElementHelpers].some((key) => key.startsWith("set:") && key !== "set:f32")) {
+      out.push(
+        `static inline uint32_t sc_bytes_coerce_u32(double v) {`,
+        `  if (v >= -9007199254740992.0 && v <= 9007199254740992.0) return (uint32_t)(int64_t)v;`,
+        `  if (v != v || isinf(v)) return 0;`,
+        `  double t = fmod(trunc(v), 4294967296.0);`,
+        `  if (t < 0) t += 4294967296.0;`,
+        `  return (uint32_t)t;`,
+        `}`,
+      );
+    }
+    for (const elem of ["u8", "u32", "i32", "f32"] as const) {
+      if (this.bytesElementHelpers.has(`get:${elem}`)) {
+        if (elem === "u8") {
+          out.push(
+            `static inline double sc_bytes_get_u8(const ScrBytes *b, double i) {`,
+            `  return (double)b->data[sc_bytes_index_checked(b, i)];`,
+            `}`,
+          );
+        } else {
+          const valueType = elem === "f32" ? "float" : elem === "i32" ? "int32_t" : "uint32_t";
+          out.push(
+            `static inline double sc_bytes_get_${elem}(const ScrBytes *b, double i) {`,
+            `  ${valueType} v;`,
+            `  memcpy(&v, b->data + sc_bytes_index_checked(b, i) * 4, 4);`,
+            `  return (double)v;`,
+            `}`,
+          );
+        }
+      }
+      if (this.bytesElementHelpers.has(`set:${elem}`)) {
+        if (elem === "u8") {
+          out.push(
+            `static inline void sc_bytes_set_u8(ScrBytes *b, double i, double v) {`,
+            `  b->data[sc_bytes_index_checked(b, i)] = (uint8_t)sc_bytes_coerce_u32(v);`,
+            `}`,
+          );
+        } else {
+          const valueType = elem === "f32" ? "float" : "uint32_t";
+          const init = elem === "f32" ? `(float)v` : `sc_bytes_coerce_u32(v)`;
+          out.push(
+            `static inline void sc_bytes_set_${elem}(ScrBytes *b, double i, double v) {`,
+            `  size_t idx = sc_bytes_index_checked(b, i);`,
+            `  ${valueType} stored = ${init};`,
+            `  memcpy(b->data + idx * 4, &stored, 4);`,
+            `}`,
+          );
+        }
+      }
+    }
+    out.push("");
+    return out;
+  }
+
   line(text: string): void {
     this.lines.push("  ".repeat(this.indent) + text);
   }
@@ -1319,6 +1395,15 @@ export class CEmitter {
     const name = `sc_t${this.tempCounter++}`;
     this.line(`${cDecl(type, name)} = ${init};`);
     if (isRefCounted(type)) this.currentFrame().push({ name, type });
+    return { name, type };
+  }
+
+  /** A borrowed compiler temp. Used only when a surrounding operation has
+   * proved that evaluation cannot overwrite the owning binding before the
+   * temp's last use. Unlike newTemp, this does not join the release frame. */
+  newBorrowedTemp(type: IrType, init: string): Temp {
+    const name = `sc_t${this.tempCounter++}`;
+    this.line(`${cDecl(type, name)} = ${init};`);
     return { name, type };
   }
 
