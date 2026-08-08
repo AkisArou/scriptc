@@ -34,6 +34,65 @@ console.log(
   await configuredResponse.text(),
 );
 
+const normalizedResponseHeaders = new Response(null, {
+  headers: { "X-Mixed-Case": "yes" },
+}).headers;
+console.log(
+  "response header name normalization:",
+  normalizedResponseHeaders.get("x-mixed-case"),
+  normalizedResponseHeaders.has("X-MIXED-CASE"),
+);
+
+const latin1Response = new Response(null, {
+  statusText: "é",
+  headers: { "x-latin": "é" },
+});
+latin1Response.headers.append("x-latin", "é");
+console.log(
+  "response latin1 metadata:",
+  JSON.stringify(latin1Response.statusText),
+  JSON.stringify(latin1Response.headers.get("x-latin")),
+);
+
+const cookieResponseHeaders = new Response().headers;
+cookieResponseHeaders.append("cookie", "a");
+cookieResponseHeaders.append("cookie", "b");
+console.log("response cookie append:", cookieResponseHeaders.get("cookie"));
+
+const responseHeaderMutationOrder: string[] = [];
+let responseHeaderNameCalls = 0;
+const responseHeaderName: any = {
+  toString() {
+    responseHeaderMutationOrder.push(`name${++responseHeaderNameCalls}`);
+    return "x-atomic";
+  },
+};
+const responseHeaderValue: any = {
+  toString() {
+    responseHeaderMutationOrder.push("value");
+    throw new Error("response header value conversion");
+  },
+};
+const atomicResponseHeaders = new Response(null, {
+  headers: { "x-atomic": "old" },
+}).headers;
+try {
+  atomicResponseHeaders.set(responseHeaderName, responseHeaderValue);
+} catch {}
+console.log(
+  "response header set failure:",
+  responseHeaderMutationOrder.join(","),
+  atomicResponseHeaders.get("x-atomic"),
+);
+
+const nullResponseHeadersInit: any = { headers: null };
+try {
+  new Response(null, nullResponseHeadersInit);
+  console.log("response null headers unexpectedly accepted");
+} catch (error) {
+  console.log("response null headers:", (error as Error).name);
+}
+
 const nullResponse = new Response(null, { status: 204 });
 console.log(
   "null response:",
