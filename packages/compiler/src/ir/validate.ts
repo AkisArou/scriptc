@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1051,7 +1051,29 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "number.isInteger": { argTypes: [F64], result: BOOL },
   "number.isSafeInteger": { argTypes: [F64], result: BOOL },
   "date.now": { argTypes: [], result: F64 },
+  "date.newNow": { argTypes: [], result: DATE_T },
+  "date.newMs": { argTypes: [F64], result: DATE_T },
+  "date.newString": { argTypes: [STRING], result: DATE_T },
+  "date.getTime": { argTypes: [DATE_T], result: F64 },
   "date.toISOString": { argTypes: [F64], result: STRING },
+  "date.toISOStringValue": { argTypes: [DATE_T], result: STRING },
+  "date.getFullYear": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCFullYear": { argTypes: [DATE_T], result: F64 },
+  "date.getMonth": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCMonth": { argTypes: [DATE_T], result: F64 },
+  "date.getDate": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCDate": { argTypes: [DATE_T], result: F64 },
+  "date.getDay": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCDay": { argTypes: [DATE_T], result: F64 },
+  "date.getHours": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCHours": { argTypes: [DATE_T], result: F64 },
+  "date.getMinutes": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCMinutes": { argTypes: [DATE_T], result: F64 },
+  "date.getSeconds": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCSeconds": { argTypes: [DATE_T], result: F64 },
+  "date.getMilliseconds": { argTypes: [DATE_T], result: F64 },
+  "date.getUTCMilliseconds": { argTypes: [DATE_T], result: F64 },
+  "date.getTimezoneOffset": { argTypes: [DATE_T], result: F64 },
   "date.parseGetTime": { argTypes: [STRING], result: F64 },
   "date.utc": { argTypes: [F64, F64, F64, F64, F64, F64, F64], result: F64 },
   "text.decode": { argTypes: [BYTES_U8], result: STRING },

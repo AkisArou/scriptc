@@ -612,7 +612,7 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         const v = E.emitExpr(s.value);
         const t = s.value.type;
         if (isRefCounted(t)) E.moveTemp(v); // the cell takes ownership
-        if (t.kind === "f64") {
+        if (t.kind === "f64" || t.kind === "date") {
           E.line(`scr_throw_f64(${v.name});${E.srcComment(s.loc)}`);
         } else if (t.kind === "bool") {
           E.line(`scr_throw_bool(${v.name});${E.srcComment(s.loc)}`);

@@ -3103,7 +3103,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       const probe = L.lowerExpr(expr.expression);
       if (probe.type.kind === "array") kind = "array";
     }
-    if (kind !== "string" && kind !== "array" && kind !== "map" && kind !== "set" && kind !== "f64" && kind !== "regex" && kind !== "url" && kind !== "searchParams" && kind !== "stats" && kind !== "spawnRes" && kind !== "child" && kind !== "bytes" && kind !== "symbol") {
+    if (kind !== "string" && kind !== "array" && kind !== "map" && kind !== "set" && kind !== "f64" && kind !== "date" && kind !== "regex" && kind !== "url" && kind !== "searchParams" && kind !== "stats" && kind !== "spawnRes" && kind !== "child" && kind !== "bytes" && kind !== "symbol") {
       return null;
     }
     // child receivers also admit the user's own child-shaped interface
@@ -3213,6 +3213,25 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         `Stats.${name}`,
         expr,
         "isFile(), isDirectory(), and size are the supported Stats members",
+        L.checker.getSymbolAtLocation(expr.name),
+      );
+    }
+    if (kind === "date") {
+      const methods = new Set([
+        "getTime", "valueOf", "toISOString",
+        "getFullYear", "getUTCFullYear", "getMonth", "getUTCMonth",
+        "getDate", "getUTCDate", "getDay", "getUTCDay", "getHours",
+        "getUTCHours", "getMinutes", "getUTCMinutes", "getSeconds",
+        "getUTCSeconds", "getMilliseconds", "getUTCMilliseconds",
+        "getTimezoneOffset",
+      ]);
+      if (methods.has(name)) {
+        L.unsupported("SC1090", expr, `Date methods as values (call '${name}' directly)`);
+      }
+      L.noLowering(
+        `Date.prototype.${name}`,
+        expr,
+        "getTime(), valueOf(), toISOString(), the local/UTC calendar getters, and getTimezoneOffset() are supported; Date setters and locale/string formatters have no lowering",
         L.checker.getSymbolAtLocation(expr.name),
       );
     }

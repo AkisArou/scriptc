@@ -428,7 +428,31 @@ describe("library profile fences", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const dateIds = r.profile.fences[0]!.surfaces.map((s) => s.id);
-    expect(dateIds).toEqual(["stdlib.date.UTC", "stdlib.date.getTime", "stdlib.date.now", "stdlib.date.toISOString"]);
+    expect(dateIds).toEqual([
+      "stdlib.date.UTC",
+      "stdlib.date.constructor",
+      "stdlib.date.getDate",
+      "stdlib.date.getDay",
+      "stdlib.date.getFullYear",
+      "stdlib.date.getHours",
+      "stdlib.date.getMilliseconds",
+      "stdlib.date.getMinutes",
+      "stdlib.date.getMonth",
+      "stdlib.date.getSeconds",
+      "stdlib.date.getTime",
+      "stdlib.date.getTimezoneOffset",
+      "stdlib.date.getUTCDate",
+      "stdlib.date.getUTCDay",
+      "stdlib.date.getUTCFullYear",
+      "stdlib.date.getUTCHours",
+      "stdlib.date.getUTCMilliseconds",
+      "stdlib.date.getUTCMinutes",
+      "stdlib.date.getUTCMonth",
+      "stdlib.date.getUTCSeconds",
+      "stdlib.date.now",
+      "stdlib.date.toISOString",
+      "stdlib.date.valueOf",
+    ]);
     expect(r.profile.fences[0]!.surfaces.every((s) => s.detector !== undefined)).toBe(true);
     const processIds = r.profile.fences[1]!.surfaces.map((s) => s.id);
     expect(processIds).toContain("node-builtin.process.env");

@@ -20,7 +20,10 @@ const parsedMs = Date.parse("2024-01-01");
 const fmt = new Intl.NumberFormat();
 
 // Constructors.
-const d = new Date();
+const d = new Date(2024, 0); // the local-time year/month field constructor stays fenced
+const mutableDate = new Date(0);
+mutableDate.setUTCFullYear(2024); // mutation is outside the read-only Date slice
+const sameDate = mutableDate === mutableDate; // scalar storage must not fake object identity
 const wm = new WeakMap();
 const px = new Proxy({ a: 1 }, {});
 const buf = new ArrayBuffer(8);
@@ -30,7 +33,6 @@ const st = new Set(new Set([1, 2])); // array seeds lower; Set/iterable seeds st
 // and the unlowered members of lowered error objects.)
 const agg = new AggregateError([]);
 const stack = new Error("boom").stack;
-
 // Unlowered members on lowered containers.
 const sqrt2 = Math.SQRT2;
 // (n-ary Math.min/max LOWER now — the variadic battery lives in the
@@ -42,7 +44,6 @@ const norm = "abc".normalize();
 const limited = "a,b,c".split(",", 2); // the string-separator split lowers; the limit form stays fenced
 const fixed = (1.5).toFixed(); // digit-free toFixed lowers now (the static ties-up integer)
 const localized = (1234.5).toLocaleString();
-
 // Unlowered call FORMS of lowered members. (push is fully variadic now —
 // no fenced form remains to pin.)
 const nums = [1, 2, 3];
@@ -58,7 +59,6 @@ const toStringify = { a: 1 };
 const replaced = JSON.stringify(toStringify, (_k, v) => v);
 const width = 2;
 const spaced = JSON.stringify(toStringify, null, width);
-
 // The promise surface beyond await.
 async function work(): Promise<number> {
   return 1;
@@ -80,3 +80,4 @@ const picked = pick(1, 2);
 // declaration is a value Node builds and drops — it compiles to nothing).
 const big = 10n;
 console.log(big);
+// End of the diagnostic fixture.

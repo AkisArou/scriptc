@@ -878,15 +878,21 @@ export interface AmbientSurfaceRow {
 }
 
 export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
-  // ── the Date slice (lowerDateCall): Date.now/Date.UTC and the composed
-  // new Date(...).getTime()/.toISOString() forms — the worked-example
-  // "stdlib.date." family of the ask-5 spec.
+  // ── the Date slice (lowerDateCall/lowerNew): statics, construction,
+  // stored read-only values, calendar getters, and ISO formatting.
   {
     id: "stdlib.date.now",
     kind: "stdlib",
     name: "Date.now",
     fns: ["date.now"],
-    note: "the live clock; the zero-argument new Date() compositions read it too",
+    note: "the live clock",
+  },
+  {
+    id: "stdlib.date.constructor",
+    kind: "stdlib",
+    name: "Date constructor",
+    fns: ["date.newNow", "date.newMs", "date.newString"],
+    note: "zero arguments, or one milliseconds/date-string argument; values are the read-only TimeClip scalar slice",
   },
   {
     id: "stdlib.date.UTC",
@@ -899,16 +905,40 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     id: "stdlib.date.getTime",
     kind: "stdlib",
     name: "Date.prototype.getTime",
-    fns: ["date.parseGetTime"],
-    note: "the composed new Date(dateString).getTime() form; new Date().getTime() is stdlib.date.now's surface",
+    fns: ["date.getTime", "date.parseGetTime"],
+    note: "the millisecond value of a stored Date",
+  },
+  {
+    id: "stdlib.date.valueOf",
+    kind: "stdlib",
+    name: "Date.prototype.valueOf",
+    fns: ["date.getTime"],
+    note: "the same millisecond read as getTime()",
   },
   {
     id: "stdlib.date.toISOString",
     kind: "stdlib",
     name: "Date.prototype.toISOString",
-    fns: ["date.toISOString"],
-    note: "the composed new Date(ms?).toISOString() form",
+    fns: ["date.toISOString", "date.toISOStringValue"],
+    note: "UTC ISO formatting over constructed and stored Date values",
   },
+  { id: "stdlib.date.getFullYear", kind: "stdlib", name: "Date.prototype.getFullYear", fns: ["date.getFullYear"] },
+  { id: "stdlib.date.getUTCFullYear", kind: "stdlib", name: "Date.prototype.getUTCFullYear", fns: ["date.getUTCFullYear"] },
+  { id: "stdlib.date.getMonth", kind: "stdlib", name: "Date.prototype.getMonth", fns: ["date.getMonth"] },
+  { id: "stdlib.date.getUTCMonth", kind: "stdlib", name: "Date.prototype.getUTCMonth", fns: ["date.getUTCMonth"] },
+  { id: "stdlib.date.getDate", kind: "stdlib", name: "Date.prototype.getDate", fns: ["date.getDate"] },
+  { id: "stdlib.date.getUTCDate", kind: "stdlib", name: "Date.prototype.getUTCDate", fns: ["date.getUTCDate"] },
+  { id: "stdlib.date.getDay", kind: "stdlib", name: "Date.prototype.getDay", fns: ["date.getDay"] },
+  { id: "stdlib.date.getUTCDay", kind: "stdlib", name: "Date.prototype.getUTCDay", fns: ["date.getUTCDay"] },
+  { id: "stdlib.date.getHours", kind: "stdlib", name: "Date.prototype.getHours", fns: ["date.getHours"] },
+  { id: "stdlib.date.getUTCHours", kind: "stdlib", name: "Date.prototype.getUTCHours", fns: ["date.getUTCHours"] },
+  { id: "stdlib.date.getMinutes", kind: "stdlib", name: "Date.prototype.getMinutes", fns: ["date.getMinutes"] },
+  { id: "stdlib.date.getUTCMinutes", kind: "stdlib", name: "Date.prototype.getUTCMinutes", fns: ["date.getUTCMinutes"] },
+  { id: "stdlib.date.getSeconds", kind: "stdlib", name: "Date.prototype.getSeconds", fns: ["date.getSeconds"] },
+  { id: "stdlib.date.getUTCSeconds", kind: "stdlib", name: "Date.prototype.getUTCSeconds", fns: ["date.getUTCSeconds"] },
+  { id: "stdlib.date.getMilliseconds", kind: "stdlib", name: "Date.prototype.getMilliseconds", fns: ["date.getMilliseconds"] },
+  { id: "stdlib.date.getUTCMilliseconds", kind: "stdlib", name: "Date.prototype.getUTCMilliseconds", fns: ["date.getUTCMilliseconds"] },
+  { id: "stdlib.date.getTimezoneOffset", kind: "stdlib", name: "Date.prototype.getTimezoneOffset", fns: ["date.getTimezoneOffset"] },
   // ── perf_hooks (lowerPerfHooksCall): the monotonic clock.
   {
     id: "node-builtin.perf_hooks.performance.now",

@@ -266,13 +266,35 @@ const LIB_FN_SYMS: Record<string, string> = {
   "process.stderrWrite": "scr_process_stderr_write",
   "process.isTTY": "scr_process_is_tty",
   "date.now": "scr_date_now",
+  "date.newNow": "scr_date_now",
+  "date.newMs": "scr_date_new_ms",
+  "date.newString": "scr_date_parse_get_time",
+  "date.getTime": "scr_date_get_time",
   "date.parseGetTime": "scr_date_parse_get_time",
   "date.utc": "scr_date_utc",
+  "date.getFullYear": "scr_date_get_full_year_local",
+  "date.getUTCFullYear": "scr_date_get_full_year_utc",
+  "date.getMonth": "scr_date_get_month_local",
+  "date.getUTCMonth": "scr_date_get_month_utc",
+  "date.getDate": "scr_date_get_date_local",
+  "date.getUTCDate": "scr_date_get_date_utc",
+  "date.getDay": "scr_date_get_day_local",
+  "date.getUTCDay": "scr_date_get_day_utc",
+  "date.getHours": "scr_date_get_hours_local",
+  "date.getUTCHours": "scr_date_get_hours_utc",
+  "date.getMinutes": "scr_date_get_minutes_local",
+  "date.getUTCMinutes": "scr_date_get_minutes_utc",
+  "date.getSeconds": "scr_date_get_seconds_local",
+  "date.getUTCSeconds": "scr_date_get_seconds_utc",
+  "date.getMilliseconds": "scr_date_get_milliseconds",
+  "date.getUTCMilliseconds": "scr_date_get_milliseconds",
+  "date.getTimezoneOffset": "scr_date_get_timezone_offset",
   "fs.existsSync": "scr_fs_exists",
   // ── the throwing slice (MAY_THROW_LIB_FNS members): the generic path
   // emits the standard pending check after each — emit-exprs.ts's finish.
   "process.cpuPrevValidate": "scr_cpu_prev_validate",
   "date.toISOString": "scr_date_to_iso",
+  "date.toISOStringValue": "scr_date_to_iso",
   "process.chdir": "scr_process_chdir",
   "fs.writeFileSync": "scr_fs_write_file",
   "fs.appendFileSync": "scr_fs_append_file",
@@ -1091,6 +1113,7 @@ class LlEmitter {
   private llType(t: IrType): string {
     switch (t.kind) {
       case "f64":
+      case "date":
         return "double";
       case "bool":
         return "i1";
@@ -2018,6 +2041,7 @@ class LlEmitter {
           tr.push(`  call void @scr_promise_fulfill_void(ptr %pr)`);
           break;
         case "f64":
+        case "date":
           this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
           tr.push(`  call void @scr_promise_fulfill_f64(ptr %pr, double %r)`);
           break;
@@ -2198,6 +2222,7 @@ class LlEmitter {
           tr.push(`  br label %done ; void body: the done value is undefined (NONE)`);
           break;
         case "f64":
+        case "date":
           this.declare(`declare void @scr_gen_out_f64(ptr, double)`);
           tr.push(`  call void @scr_gen_out_f64(ptr %g, double %r)`, `  br label %done`);
           break;
@@ -2448,7 +2473,7 @@ class LlEmitter {
     this.releaseForJump(0, 0);
     const t = this.currentReturnType;
     if (t.kind === "void") this.B.terminate("ret void");
-    else if (t.kind === "f64") this.B.terminate(`ret double ${f64Lit(0)}`);
+    else if (t.kind === "f64" || t.kind === "date") this.B.terminate(`ret double ${f64Lit(0)}`);
     else if (t.kind === "bool") this.B.terminate("ret i1 false");
     else this.B.terminate("ret ptr null");
   }
@@ -2478,7 +2503,7 @@ class LlEmitter {
   private emitThrowValue(v: LlValue): void {
     const B = this.B;
     const t = v.type;
-    if (t.kind === "f64") {
+    if (t.kind === "f64" || t.kind === "date") {
       this.declare(`declare void @scr_throw_f64(double)`);
       B.line(`call void @scr_throw_f64(double ${v.name})`);
     } else if (t.kind === "bool") {
@@ -2524,6 +2549,8 @@ class LlEmitter {
         B.line(`${t} = icmp ne i64 ${len}, 0`);
         return t;
       }
+      case "date":
+        return "true";
       case "array":
       case "record":
       case "object":
@@ -2617,6 +2644,9 @@ class LlEmitter {
               B.line(`store i1 ${t}, ptr ${slot}`);
               break;
             }
+            case "date":
+              B.line(`store i1 true, ptr ${slot} ; Date objects are truthy`);
+              break;
             case "array":
             case "record":
             case "object":
@@ -5595,7 +5625,7 @@ class LlEmitter {
         if (e.value === null) throw new Error("llvm emitter bug: yieldExpr with no operand (frontend fills undefined)");
         const v = this.emitExpr(e.value);
         const yt = e.value.type;
-        if (yt.kind === "f64") {
+        if (yt.kind === "f64" || yt.kind === "date") {
           this.declare(`declare void @scr_gen_yield_f64(double)`);
           B.line(`call void @scr_gen_yield_f64(double ${v.name})`);
         } else if (yt.kind === "bool") {
@@ -5613,7 +5643,7 @@ class LlEmitter {
           return { name: "", type: e.type };
         }
         const t = B.tmp();
-        if (e.type.kind === "f64") {
+        if (e.type.kind === "f64" || e.type.kind === "date") {
           this.declare(`declare double @scr_gen_take_in_f64()`);
           B.line(`${t} = call double @scr_gen_take_in_f64()`);
           return { name: t, type: e.type };
@@ -5642,7 +5672,7 @@ class LlEmitter {
           store(a.name, e.arg!.type);
         };
         const parkIn = (name: string, t: IrType): void => {
-          if (t.kind === "f64") {
+          if (t.kind === "f64" || t.kind === "date") {
             this.declare(`declare void @scr_gen_in_f64(ptr, double)`);
             B.line(`call void @scr_gen_in_f64(ptr ${g.name}, double ${name})`);
           } else if (t.kind === "bool") {
@@ -5682,7 +5712,7 @@ class LlEmitter {
             B.line(`call void @scr_gen_ret_none(ptr ${g.name})`);
           } else {
             sendArg((name, t) => {
-              if (t.kind === "f64") {
+              if (t.kind === "f64" || t.kind === "date") {
                 this.declare(`declare void @scr_gen_ret_f64(ptr, double)`);
                 B.line(`call void @scr_gen_ret_f64(ptr ${g.name}, double ${name})`);
               } else if (t.kind === "bool") {
@@ -5730,7 +5760,7 @@ class LlEmitter {
           return { name: "", type: e.type };
         }
         const t = B.tmp();
-        if (e.type.kind === "f64") {
+        if (e.type.kind === "f64" || e.type.kind === "date") {
           this.declare(`declare double @scr_await_f64(ptr)`);
           B.line(`${t} = call double @scr_await_f64(ptr ${pr.name})`);
         } else if (e.type.kind === "bool") {
@@ -5804,7 +5834,7 @@ class LlEmitter {
         B.startBlock(lp);
         const peek = this.unionPeek(u.name);
         let awaited: LlValue;
-        if (inner.kind === "f64") {
+        if (inner.kind === "f64" || inner.kind === "date") {
           this.declare(`declare double @scr_await_f64(ptr)`);
           const x = B.tmp();
           B.line(`${x} = call double @scr_await_f64(ptr ${peek})`);
@@ -5878,7 +5908,7 @@ class LlEmitter {
           return out;
         }
         let resolve: string;
-        const kindNums: Partial<Record<IrType["kind"], number>> = { f64: 0, bool: 1, string: 2, void: 3 };
+        const kindNums: Partial<Record<IrType["kind"], number>> = { f64: 0, date: 0, bool: 1, string: 2, void: 3 };
         const kindNum = kindNums[inner.kind];
         if (kindNum !== undefined) {
           this.declare(`declare ptr @scr_make_resolve(ptr, i32)`);
@@ -5922,7 +5952,7 @@ class LlEmitter {
         this.declare(`declare ptr @scr_make_reject(ptr)`);
         const p = B.tmp();
         B.line(`${p} = call ptr @scr_promise_new()`);
-        const kindNums: Partial<Record<IrType["kind"], number>> = { f64: 0, bool: 1, string: 2, void: 3 };
+        const kindNums: Partial<Record<IrType["kind"], number>> = { f64: 0, date: 0, bool: 1, string: 2, void: 3 };
         const kindNum = kindNums[inner.kind];
         const resolve = B.tmp();
         if (kindNum !== undefined) {
@@ -6033,7 +6063,7 @@ class LlEmitter {
           }
           const v = this.emitExpr(e.args[0]!);
           const t = e.args[0]!.type;
-          if (t.kind === "f64") {
+          if (t.kind === "f64" || t.kind === "date") {
             this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
             B.line(`call void @scr_promise_fulfill_f64(ptr ${p}, double ${v.name})`);
           } else if (t.kind === "bool") {

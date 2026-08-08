@@ -4446,10 +4446,13 @@ bool scr_num_same_value(double a, double b);
  * en-US is the one embedded locale. Result +1; never throws. */
 ScrStr *scr_intl_num_format_en_us(double x);
 
-/* ── Date, the composed slice (scr_lib.c) ─────────────────────────────
- * Date values have no representation; the runtime surface is exactly
- * Date.now() and toISOString over a millisecond time value. */
+/* ── Date, the read-only value slice (scr_lib.c) ──────────────────────
+ * A Date value is its TimeClip'd epoch-millisecond scalar. Identity and
+ * mutation are frontend-fenced; construction, storage, getters, and ISO
+ * formatting are exact over this representation. */
 double scr_date_now(void); /* integer ms since epoch, like Node */
+double scr_date_new_ms(double ms); /* TimeClip (NaN when invalid) */
+double scr_date_get_time(double ms);
 /* Node's exact ISO 8601 UTC format (expanded ±YYYYYY years outside
  * 0–9999). THROWS Node's "Invalid time value" RangeError on NaN or
  * |ms| > 8.64e15 and returns NULL; +1 otherwise. */
@@ -4463,6 +4466,30 @@ double scr_date_parse_get_time(ScrStr *s);
  * and years past V8's ±1e6 MakeDay bound. Never throws. */
 double scr_date_utc(double y, double mo, double d,
                     double h, double mi, double s, double ms);
+double scr_date_get_full_year(double ms, bool utc);
+double scr_date_get_month(double ms, bool utc);
+double scr_date_get_date(double ms, bool utc);
+double scr_date_get_day(double ms, bool utc);
+double scr_date_get_hours(double ms, bool utc);
+double scr_date_get_minutes(double ms, bool utc);
+double scr_date_get_seconds(double ms, bool utc);
+double scr_date_get_milliseconds(double ms);
+double scr_date_get_timezone_offset(double ms);
+/* One-argument ABI wrappers used by the LLVM lib-call table. */
+double scr_date_get_full_year_local(double ms);
+double scr_date_get_full_year_utc(double ms);
+double scr_date_get_month_local(double ms);
+double scr_date_get_month_utc(double ms);
+double scr_date_get_date_local(double ms);
+double scr_date_get_date_utc(double ms);
+double scr_date_get_day_local(double ms);
+double scr_date_get_day_utc(double ms);
+double scr_date_get_hours_local(double ms);
+double scr_date_get_hours_utc(double ms);
+double scr_date_get_minutes_local(double ms);
+double scr_date_get_minutes_utc(double ms);
+double scr_date_get_seconds_local(double ms);
+double scr_date_get_seconds_utc(double ms);
 
 /* ── bitwise operators (scr_lib.c) ────────────────────────────────────
  * JS-exact ToInt32/ToUint32 semantics: NaN/±Infinity → 0, truncation
