@@ -26,7 +26,7 @@ import type {
 } from "typescript/unstable/sync";
 import type { SourceFile } from "typescript/unstable/ast";
 import { CheckerFacade } from "./checker.js";
-import { enumKeyOf, ModuleKind, ModuleResolutionKind, ScriptTarget } from "./enums.js";
+import { enumKeyOf, ModuleDetectionKind, ModuleKind, ModuleResolutionKind, ScriptTarget } from "./enums.js";
 import { tsgoPath } from "../shared.js";
 
 /** The compiler options our createProgram accepts: TS7's CompilerOptions
@@ -60,6 +60,9 @@ function serializeOptions(options: Ts7CompilerOptions): Record<string, unknown> 
         break;
       case "moduleResolution":
         out[key] = enumKeyOf(ModuleResolutionKind as never, value as number)?.toLowerCase() ?? value;
+        break;
+      case "moduleDetection":
+        out[key] = enumKeyOf(ModuleDetectionKind as never, value as number)?.toLowerCase() ?? value;
         break;
       case "lib":
         // 5.9.3 spells lib entries "lib.es2025.d.ts"; tsconfig wants "es2025".

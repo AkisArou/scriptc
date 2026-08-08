@@ -46,6 +46,7 @@ function realpathOr(path: string): string {
 interface PkgJson {
   name?: string;
   version?: string;
+  type?: string;
   types?: string;
   typings?: string;
   main?: string;
@@ -454,6 +455,21 @@ function nearestPkgDir(dir: string): string | null {
   }
 }
 
+/** The nearest package.json FILE, whether or not its JSON parses. Runtime
+ * module-format lookup must stop at a malformed nearest scope: Node reports
+ * ERR_INVALID_PACKAGE_CONFIG there rather than silently inheriting a parent
+ * package's `type`. The resolver's historical nearestPkgDir stays parseable-
+ * package-only because its callers need a package OBJECT to inspect. */
+function nearestPackageConfigDir(dir: string): string | null {
+  let d = dir;
+  for (;;) {
+    if (existsSync(join(d, "package.json"))) return d;
+    const parent = dirname(d);
+    if (parent === d) return null;
+    d = parent;
+  }
+}
+
 /** package.json "imports" lookup — the exports machinery over "#" keys
  * (exact keys, then '*' patterns, condition objects in key order). */
 function resolveImportsField(imports: unknown, specifier: string): string | null {
@@ -475,6 +491,27 @@ function resolveImportsField(imports: unknown, specifier: string): string | null
 export function nearestPkgJsonPath(fromFile: string): string | null {
   const dir = nearestPkgDir(dirname(resolve(fromFile)));
   return dir === null ? null : join(dir, "package.json");
+}
+
+/** The explicit module format of the nearest package scope. A package.json
+ * without a recognized `type` keeps the file ambiguous, so callers may
+ * apply Node's syntax detector; an explicit commonjs/module answer must win
+ * over syntax detection for ordinary .js/.ts files. */
+export function nearestPackageType(fromFile: string): "module" | "commonjs" | null {
+  const dir = nearestPackageConfigDir(dirname(resolve(fromFile)));
+  if (dir === null) return null;
+  const type = pkgJsonOf(dir)?.type;
+  return type === "module" || type === "commonjs" ? type : null;
+}
+
+/** The malformed nearest package scope Node would reject before loading
+ * `fromFile`, or null when there is no package.json or it parses as an
+ * object. Kept separate from nearestPackageType so an absent/typeless valid
+ * package can still use syntax detection. */
+export function nearestInvalidPackageJsonPath(fromFile: string): string | null {
+  const dir = nearestPackageConfigDir(dirname(resolve(fromFile)));
+  if (dir === null || pkgJsonOf(dir) !== null) return null;
+  return join(dir, "package.json");
 }
 
 /** Resolves a PROJECT-INTERNAL package.json-mediated specifier from

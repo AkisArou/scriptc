@@ -334,6 +334,34 @@ export function tscPassthroughDiag(message: string, loc: SrcLoc): ScrDiagnostic 
   return { code: "SC0001", message, loc };
 }
 
+/** Node's package scope forces CommonJS, but the source contains a marker
+ * that is legal only when the file is parsed as ESM (static import/export,
+ * import.meta, top-level await, or a lexical CommonJS-wrapper redeclaration).
+ * TypeScript's bundler-mode checker does not model this Node loader rule. */
+export function commonJsModuleSyntaxDiag(loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC1013",
+    message: "Node classifies this file as CommonJS, where this ES-module syntax marker is a SyntaxError",
+    loc,
+    milestone: "later",
+    hint: "use a .mjs/.mts extension or set the nearest package.json's \"type\" to \"module\"",
+  };
+}
+
+/** Node stops package-scope lookup at the nearest package.json even when it
+ * is malformed, then refuses the module with ERR_INVALID_PACKAGE_CONFIG.
+ * The compiler must fail before lowering instead of inheriting a parent
+ * package's type and producing a runnable binary. */
+export function invalidPackageConfigDiag(packageJsonPath: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC1013",
+    message: `Node cannot load this module because '${packageJsonPath}' is an invalid package configuration (ERR_INVALID_PACKAGE_CONFIG)`,
+    loc,
+    milestone: "later",
+    hint: "fix the nearest package.json so it contains valid JSON",
+  };
+}
+
 /** The project's tsconfig disables strictNullChecks, which scriptc cannot
  * adopt: null and undefined are DISTINCT STATIC TYPES in the value model
  * (union arms with their own runtime representation) — with the knob off,
