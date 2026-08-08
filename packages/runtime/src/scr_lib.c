@@ -1724,7 +1724,28 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,
    * form, length against the remaining window (validateOffset vs the
    * buffer-bounds check in fs.readSync). */
   char numbuf[40];
-  if (offset < 0 || offset > (double)bytelen) {
+  if (!(isfinite(offset) && trunc(offset) == offset)) {
+    char recv[48];
+    scr_num_received(offset, recv);
+    mlen = snprintf(msg, sizeof msg,
+                    "The value of \"offset\" is out of range. It must be an integer. Received %s",
+                    recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (offset < 0 || offset > 9007199254740991.0) {
+    numbuf[scr_f64_to_str(offset, numbuf)] = 0;
+    mlen = snprintf(msg, sizeof msg,
+                    "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
+                    numbuf);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  /* Node returns after offset's intrinsic validation when the requested
+   * length normalizes to zero: buffer-window bounds, position, and fd are
+   * not consulted. Preserve the existing size_t coercion's [0, 1) case. */
+  if (length >= 0 && length < 1) return 0;
+  if (offset > (double)bytelen) {
     numbuf[scr_f64_to_str(offset, numbuf)] = 0;
     mlen = snprintf(msg, sizeof msg,
                     "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
@@ -1742,9 +1763,6 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,
     return 0;
   }
   size_t want = (size_t)length;
-  /* Node short-circuits an empty buffer window after validating its bounds:
-   * neither the descriptor nor position participates in a zero-byte read. */
-  if (want == 0) return 0;
   if (!(isfinite(position) && trunc(position) == position)) {
     char recv[48];
     scr_num_received(position, recv);
