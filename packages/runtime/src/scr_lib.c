@@ -1675,7 +1675,10 @@ static ssize_t scr_fs_pread(int fd, void *data, size_t length, double position) 
   BOOL ok = ReadFile(handle, data, want, &got, &overlapped);
   DWORD error = ok ? ERROR_SUCCESS : GetLastError();
   if (restore) (void)SetFilePointerEx(handle, original, NULL, FILE_BEGIN);
-  if (ok || error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) {
+  /* ReadFile may report a terminal status after still filling part of the
+   * caller's buffer (notably ERROR_MORE_DATA for a message-mode pipe).
+   * libuv/Node return those bytes and surface the status on the next read. */
+  if (ok || got > 0 || error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) {
     return (ssize_t)got;
   }
 
