@@ -124,6 +124,10 @@ const PROBES: Probe[] = [
     id: "stdlib.readable-stream.from",
     source: "const stream = ReadableStream.from([1, 2]);\nconsole.log(stream.locked);\n",
   },
+  {
+    id: "stdlib.response.constructor",
+    source: '/// <reference types="node" />\nvoid new Response("ok");\n',
+  },
   { id: "node-builtin.process.pid", source: "console.log(process.pid > 0);\n" },
   { id: "node-builtin.perf_hooks.performance.now", source: "console.log(performance.now() >= 0);\n" },
   { id: "node-builtin.path.join", source: 'import { join } from "node:path";\nconsole.log(join("a", "b"));\n' },
@@ -154,10 +158,6 @@ const PROBES: Probe[] = [
   {
     id: "stdlib.headers.constructor",
     source: '/// <reference types="node" />\nvoid new Headers();\n',
-  },
-  {
-    id: "stdlib.response.constructor",
-    source: '/// <reference types="node" />\nvoid new Response(null);\n',
   },
   {
     id: "stdlib.response.static.json",

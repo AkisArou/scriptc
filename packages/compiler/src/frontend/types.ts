@@ -19,6 +19,7 @@ export { typeKey };
  * same names keep their ordinary structural representation. */
 export const ISLAND_AMBIENT_TYPES = [
   "Response",
+  "ResponseInit",
   "RequestInit",
   "Event",
   "EventTarget",

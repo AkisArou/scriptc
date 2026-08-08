@@ -3023,6 +3023,7 @@ ScrStr *scr_dyn_string_coerce(const ScrDyn *d);
  * called, their throws propagating) — the WHATWG USVString conversions.
  * Borrows; +1 or NULL with the exception pending. */
 ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d);
+bool scr_dyn_number_coerce_js(const ScrDyn *d, double *out);
 
 /* `d instanceof TypeError` (and the other builtin error classes) on a
  * checked-dynamic value: the from_error cache resolves the dyn encoding
@@ -3950,6 +3951,7 @@ long scr_promise_live_count(void);
  * emitted main calls scr_fetch_install in either form. */
 void scr_fetch_install(void);
 ScrPromise *scr_fetch_static(ScrStr *url, ScrDyn *init); /* +1 promise<Response handle> */
+ScrDyn *scr_fetch_response_new(ScrDyn *body, ScrDyn *init); /* borrowed args; +1 Response handle or NULL pending */
 ScrPromise *scr_fetch_response_json(ScrDyn *response); /* +1 promise<dyn> */
 ScrPromise *scr_fetch_response_text(ScrDyn *response); /* +1 promise<dyn> */
 ScrPromise *scr_fetch_response_bytes(ScrDyn *response); /* +1 promise<dyn> */

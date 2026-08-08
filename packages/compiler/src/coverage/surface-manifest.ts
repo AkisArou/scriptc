@@ -328,11 +328,29 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
       name: operation.name,
       status: "static",
       note:
-        `${fetchTarget}; facets: ${operation.facets.join(", ")}; ` +
+        `${fetchTarget}; facets: ${operation.facets.join(", ")};` +
+        (operation.scope !== undefined ? ` supported scope: ${operation.scope};` : "") +
+        " " +
         `differential evidence: ${evidence.join(", ")}`,
     });
   }
   for (const option of NODE24_FETCH_COMPAT_PROFILE.requestInit) {
+    const evidence = option.evidence.map((item) =>
+      item.generated !== undefined
+        ? `generated:${item.generated}`
+        : `fixture:${item.fixture!}`
+    );
+    add({
+      id: option.id,
+      kind: "stdlib",
+      name: option.name,
+      status: "static",
+      note:
+        `${fetchTarget}; conversion: ${option.conversion}; ` +
+        `differential evidence: ${evidence.join(", ")}`,
+    });
+  }
+  for (const option of NODE24_FETCH_COMPAT_PROFILE.responseInit) {
     const evidence = option.evidence.map((item) =>
       item.generated !== undefined
         ? `generated:${item.generated}`

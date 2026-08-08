@@ -1637,8 +1637,17 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
   case SCR_DYN_OBJ:
     return scr_str_new("[object Object]", 15);
   case SCR_DYN_HANDLE:
-    /* IncomingMessage/ServerResponse/Socket inherit
-     * Object.prototype.toString — Node's String() answer exactly. */
+    if (d->v.handle.tag >= SCR_DYNH_ABORT_SIGNAL &&
+        d->v.handle.tag <= SCR_DYNH_EVENT) {
+      ScrJsonBuf b;
+      scr_jb_init(&b);
+      scr_jb_puts(&b, "[object ");
+      scr_jb_puts(&b, scr_dyn_handle_cls(d));
+      scr_jb_putc(&b, ']');
+      return scr_jb_finish(&b);
+    }
+    /* IncomingMessage/ServerResponse/Socket and the other Node handles
+     * inherit Object.prototype.toString without a @@toStringTag. */
     return scr_str_new("[object Object]", 15);
   case SCR_DYN_PROMISE:
     /* Object.prototype.toString with the Promise @@toStringTag. */
@@ -1787,6 +1796,81 @@ ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
     return NULL;
   }
   return scr_dyn_string_coerce(d);
+}
+
+/* JS ToNumber over a checked-dynamic value, including OrdinaryToPrimitive's
+ * NUMBER hint for object snapshots. This is the numeric twin of
+ * scr_dyn_string_coerce_js above: valueOf precedes toString, inherited
+ * Object.prototype.valueOf returns the receiver (so conversion continues),
+ * and the inherited toString fallback supplies "[object Object]". Borrows d;
+ * false means an object hook threw or no primitive value could be produced. */
+bool scr_dyn_number_coerce_js(const ScrDyn *d, double *out) {
+  if (d->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
+    bool ok = scr_dyn_number_coerce_js(materialized, out);
+    scr_dyn_release(materialized);
+    return ok;
+  }
+  switch (d->kind) {
+  case SCR_DYN_NULL:
+    *out = 0.0;
+    return true;
+  case SCR_DYN_BOOL:
+    *out = d->v.b ? 1.0 : 0.0;
+    return true;
+  case SCR_DYN_NUM:
+    *out = d->v.num;
+    return true;
+  case SCR_DYN_STR:
+    *out = scr_string_to_number(d->v.str);
+    return true;
+  case SCR_DYN_UNDEF:
+    *out = NAN;
+    return true;
+  case SCR_DYN_OBJ: {
+    static const char *const hint[2] = { "valueOf", "toString" };
+    for (int i = 0; i < 2; i++) {
+      ScrDyn *m = scr_dyn_obj_get(d, hint[i], strlen(hint[i])); /* borrowed */
+      if (!m) {
+        if (!d->null_proto && i == 0) {
+          /* Inherited Object.prototype.valueOf returns the object, so the
+           * number-hint protocol advances to toString. */
+          continue;
+        }
+        if (!d->null_proto && i == 1) {
+          *out = NAN; /* Number("[object Object]") */
+          return true;
+        }
+        continue;
+      }
+      if (m->kind != SCR_DYN_FUNC) continue;
+      scr_dyn_this_push_dyn(d);
+      ScrDyn *r = scr_dyn_call(m, NULL, 0, hint[i]);
+      scr_dyn_this_pop();
+      if (!r) return false;
+      if (scr_dyn_to_primitive_result_is_object(r)) {
+        scr_dyn_release(r);
+        continue;
+      }
+      bool ok = scr_dyn_number_coerce_js(r, out);
+      scr_dyn_release(r);
+      return ok;
+    }
+    static const char msg[] = "Cannot convert object to primitive value";
+    scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
+    return false;
+  }
+  default: {
+    /* Arrays, byte views, functions, promises, and native handles inherit a
+     * valueOf that returns the receiver, then use their existing JS-exact
+     * string rendering for the numeric conversion. */
+    ScrStr *text = scr_dyn_string_coerce(d);
+    if (!text) return false;
+    *out = scr_string_to_number(text);
+    scr_str_release(text);
+    return true;
+  }
+  }
 }
 
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets

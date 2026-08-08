@@ -1,6 +1,429 @@
 // The engine-free user surface: this is intentionally top-level and has
 // no --dynamic directive. Both backends must compile fetch(url),
 // RequestInit, and Response.json() into the native net/http/tls runtime.
+const constructed = new Response("1");
+console.log(
+  "constructed response:",
+  constructed.status,
+  constructed.ok,
+  JSON.stringify(constructed.statusText),
+  JSON.stringify(constructed.url),
+  constructed.redirected,
+  constructed.headers.get("content-type"),
+  constructed.body !== null,
+  constructed.bodyUsed,
+  await constructed.text(),
+  constructed.bodyUsed,
+);
+
+const configuredResponse = new Response(new Uint8Array([104, 105]), {
+  status: 201,
+  statusText: "Made",
+  headers: { "x-one": "one", connection: "custom" },
+});
+configuredResponse.headers.append("x-one", "two");
+configuredResponse.headers.set("x-two", "set");
+configuredResponse.headers.delete("x-two");
+console.log(
+  "configured response:",
+  configuredResponse.status,
+  configuredResponse.statusText,
+  configuredResponse.headers.get("x-one"),
+  configuredResponse.headers.get("connection"),
+  configuredResponse.headers.has("x-two"),
+  await configuredResponse.text(),
+);
+
+const responseAsInitSource = new Response("source", {
+  status: 203,
+  statusText: "Copied",
+  headers: { "x-response-init": "yes" },
+});
+const responseAsInit = new Response(null, responseAsInitSource);
+console.log(
+  "response as init:",
+  responseAsInit.status,
+  responseAsInit.statusText,
+  responseAsInit.headers.get("x-response-init"),
+);
+
+const bodyMutatedResponseInit = {
+  status: 201,
+  headers: { "x-body-mutated": "before" },
+};
+const responseInitMutatingBody: any = {
+  toString() {
+    bodyMutatedResponseInit.status = 202;
+    bodyMutatedResponseInit.headers["x-body-mutated"] = "after";
+    return "mutated";
+  },
+};
+const responseAfterBodyInitMutation = new Response(
+  responseInitMutatingBody,
+  bodyMutatedResponseInit,
+);
+console.log(
+  "response init after body conversion:",
+  responseAfterBodyInitMutation.status,
+  responseAfterBodyInitMutation.headers.get("x-body-mutated"),
+);
+
+const spreadResponseHeaders = { "x-spread-live": "before" };
+const spreadResponseInit = { headers: spreadResponseHeaders };
+const spreadResponseBody: any = {
+  toString() {
+    spreadResponseHeaders["x-spread-live"] = "after";
+    return "spread";
+  },
+};
+const responseWithSpreadInit = new Response(
+  spreadResponseBody,
+  { ...spreadResponseInit },
+);
+console.log(
+  "response spread init after body conversion:",
+  responseWithSpreadInit.headers.get("x-spread-live"),
+);
+
+const responseHandleBody: any = new Response();
+console.log(
+  "response handle body:",
+  await new Response(responseHandleBody).text(),
+);
+
+class ClassResponseInit {
+  status = 202;
+  statusText = "Class Made";
+  headers = { "x-class-init": "yes" };
+}
+const classConfiguredResponse = new Response(null, new ClassResponseInit());
+console.log(
+  "class response init:",
+  classConfiguredResponse.status,
+  classConfiguredResponse.statusText,
+  classConfiguredResponse.headers.get("x-class-init"),
+);
+
+const normalizedResponseHeaders = new Response(null, {
+  headers: { "X-Mixed-Case": "yes" },
+}).headers;
+console.log(
+  "response header name normalization:",
+  normalizedResponseHeaders.get("x-mixed-case"),
+  normalizedResponseHeaders.has("X-MIXED-CASE"),
+);
+
+const latin1Response = new Response(null, {
+  statusText: "é",
+  headers: { "x-latin": "é" },
+});
+latin1Response.headers.append("x-latin", "é");
+console.log(
+  "response latin1 metadata:",
+  JSON.stringify(latin1Response.statusText),
+  JSON.stringify(latin1Response.headers.get("x-latin")),
+);
+
+const cookieResponseHeaders = new Response().headers;
+cookieResponseHeaders.append("cookie", "a");
+cookieResponseHeaders.append("cookie", "b");
+console.log("response cookie append:", cookieResponseHeaders.get("cookie"));
+
+const deleteDuringForEachHeaders = new Response(null, {
+  headers: { a: "1", b: "2", c: "3" },
+}).headers;
+const deleteDuringForEachSeen: string[] = [];
+deleteDuringForEachHeaders.forEach((value, name) => {
+  deleteDuringForEachSeen.push(`${name}=${value}`);
+  if (name === "a") deleteDuringForEachHeaders.delete("b");
+});
+console.log(
+  "response header forEach delete:",
+  deleteDuringForEachSeen.join(","),
+);
+
+const appendDuringForEachHeaders = new Response(null, {
+  headers: { a: "1", c: "3" },
+}).headers;
+const appendDuringForEachSeen: string[] = [];
+appendDuringForEachHeaders.forEach((value, name) => {
+  appendDuringForEachSeen.push(`${name}=${value}`);
+  if (name === "a") appendDuringForEachHeaders.append("b", "2");
+});
+console.log(
+  "response header forEach append:",
+  appendDuringForEachSeen.join(","),
+);
+
+const responseHeaderMutationOrder: string[] = [];
+let responseHeaderNameCalls = 0;
+const responseHeaderName: any = {
+  toString() {
+    responseHeaderMutationOrder.push(`name${++responseHeaderNameCalls}`);
+    return "x-atomic";
+  },
+};
+const responseHeaderValue: any = {
+  toString() {
+    responseHeaderMutationOrder.push("value");
+    throw new Error("response header value conversion");
+  },
+};
+const atomicResponseHeaders = new Response(null, {
+  headers: { "x-atomic": "old" },
+}).headers;
+try {
+  atomicResponseHeaders.set(responseHeaderName, responseHeaderValue);
+} catch {}
+console.log(
+  "response header set failure:",
+  responseHeaderMutationOrder.join(","),
+  atomicResponseHeaders.get("x-atomic"),
+);
+
+const nullResponseHeadersInit: any = { headers: null };
+try {
+  new Response(null, nullResponseHeadersInit);
+  console.log("response null headers unexpectedly accepted");
+} catch (error) {
+  console.log(
+    "response null headers:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+
+try {
+  new Response(null, { headers: { "bad name": "x" } });
+} catch (error) {
+  console.log(
+    "response invalid header name:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+try {
+  new Response(null, { headers: { x: "bad\nvalue" } });
+} catch (error) {
+  console.log(
+    "response invalid header value:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+try {
+  new Response(null, { headers: { x: "bad\0value" } });
+} catch (error) {
+  console.log(
+    "response nul header value:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+const shortHeaderPairInit: any = { headers: [["x"]] };
+try {
+  new Response(null, shortHeaderPairInit);
+} catch (error) {
+  console.log(
+    "response short header pair:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+try {
+  new Response().headers.append("bad name", "x");
+} catch (error) {
+  console.log(
+    "response header mutation validation:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+
+const nullResponse = new Response(null, { status: 204 });
+console.log(
+  "null response:",
+  nullResponse.body === null,
+  nullResponse.bodyUsed,
+  JSON.stringify(await nullResponse.text()),
+  nullResponse.bodyUsed,
+);
+
+const streamResponse = new Response(
+  ReadableStream.from([
+    new Uint8Array([65]),
+    new Uint8Array([66]),
+  ]),
+);
+console.log("stream response:", await streamResponse.text());
+
+try {
+  new Response("bad", { status: 204 });
+} catch (error) {
+  console.log("response null-body status:", (error as Error).name);
+}
+try {
+  new Response(null, { status: 199 });
+} catch (error) {
+  console.log("response status range:", (error as Error).name);
+}
+try {
+  new Response(null, { status: -1e100 });
+} catch (error) {
+  console.log("response negative status range:", (error as Error).name);
+}
+console.log(
+  "response status conversion:",
+  new Response(null, { status: 65736 }).status,
+);
+const stringStatusInit: any = { status: "201" };
+console.log(
+  "response string status conversion:",
+  new Response(null, stringStatusInit).status,
+);
+
+const responseConversionOrder: string[] = [];
+const coercibleResponseBody: any = {
+  toString() {
+    responseConversionOrder.push("body");
+    return "ordered";
+  },
+};
+const coercibleResponseInit: any = {
+  status: {
+    valueOf() {
+      responseConversionOrder.push("status");
+      return "202";
+    },
+  },
+};
+const coercionResponse = new Response(
+  coercibleResponseBody,
+  coercibleResponseInit,
+);
+console.log(
+  "response coercion order:",
+  responseConversionOrder.join(","),
+  coercionResponse.status,
+  await coercionResponse.text(),
+);
+
+const responseInitConversionOrder: string[] = [];
+const orderedResponseBody: any = {
+  toString() {
+    responseInitConversionOrder.push("body");
+    return "ordered metadata";
+  },
+};
+const orderedResponseHeader: any = {
+  toString() {
+    responseInitConversionOrder.push("headers");
+    return "value";
+  },
+};
+const orderedResponseStatus: any = {
+  valueOf() {
+    responseInitConversionOrder.push("status");
+    return 202;
+  },
+};
+const orderedResponseStatusText: any = {
+  toString() {
+    responseInitConversionOrder.push("statusText");
+    return "Ordered";
+  },
+};
+const orderedResponseInit = JSON.parse("{}");
+orderedResponseInit.headers = JSON.parse("{}");
+orderedResponseInit.headers.x = orderedResponseHeader;
+orderedResponseInit.status = orderedResponseStatus;
+orderedResponseInit.statusText = orderedResponseStatusText;
+new Response(orderedResponseBody, orderedResponseInit);
+console.log(
+  "response init conversion order:",
+  responseInitConversionOrder.join(","),
+);
+
+const deferredResponseInit: {
+  status: number;
+  headers: { x: string };
+} = { status: 201, headers: { x: "before" } };
+const deferredResponse = new Response(
+  null,
+  deferredResponseInit,
+  // @ts-ignore WebIDL ignores surplus constructor arguments.
+  (() => {
+    deferredResponseInit.status = 202;
+    deferredResponseInit.headers.x = "after";
+    return "ignored";
+  })(),
+);
+console.log(
+  "response deferred init snapshot:",
+  deferredResponse.status,
+  deferredResponse.headers.get("x"),
+);
+
+const lockedResponseBody = new ReadableStream<Uint8Array>();
+void lockedResponseBody.getReader();
+try {
+  new Response(lockedResponseBody, {
+    headers: { "bad name": "x" },
+    status: 199,
+    statusText: "bad\ntext",
+  });
+} catch (error) {
+  console.log(
+    "response locked body precedence:",
+    (error as Error).name,
+    (error as Error).message,
+  );
+}
+const lockedHeaderConversionBody = new ReadableStream<Uint8Array>();
+void lockedHeaderConversionBody.getReader();
+const throwingResponseHeader: any = {
+  toString() {
+    throw new Error("response header conversion");
+  },
+};
+const throwingResponseHeaderInit = JSON.parse("{}");
+throwingResponseHeaderInit.headers = JSON.parse("{}");
+throwingResponseHeaderInit.headers.x = throwingResponseHeader;
+try {
+  new Response(lockedHeaderConversionBody, throwingResponseHeaderInit);
+} catch (error) {
+  console.log(
+    "response header conversion precedence:",
+    (error as Error).name,
+    (error as Error).message,
+  );
+}
+try {
+  new Response(null, {
+    headers: { "bad name": "x" },
+    status: 199,
+    statusText: "bad\ntext",
+  });
+} catch (error) {
+  console.log("response status precedence:", (error as Error).name);
+}
+try {
+  new Response(null, {
+    headers: { "bad name": "x" },
+    statusText: "bad\ntext",
+  });
+} catch (error) {
+  console.log(
+    "response status text precedence:",
+    (error as Error).message,
+  );
+}
+try {
+  new Response(null, { statusText: "bad\ntext" });
+} catch (error) {
+  console.log("response status text:", (error as Error).name);
+}
+
 const res = await fetch(`${process.argv[2]}/json`);
 console.log(await res.json());
 

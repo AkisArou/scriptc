@@ -14,6 +14,23 @@ async function requestStream(baseUrl: string): Promise<ReadableStream<Uint8Array
 }
 
 async function main(baseUrl: string, refusedUrl: string): Promise<void> {
+  const constructed = new Response("island response", {
+    status: 202,
+    statusText: "Accepted",
+    headers: { "x-constructed": "yes" },
+  });
+  constructed.headers.append("x-constructed", "again");
+  const constructedHeader: string | null =
+    constructed.headers.get("x-constructed");
+  const constructedBody: string = await constructed.text();
+  console.log(
+    "constructed:",
+    constructed.status,
+    constructed.statusText,
+    constructedHeader ?? "none",
+    constructedBody,
+  );
+
   // ok + status through the handle; json() exits through a checked cast.
   const r = await fetch(`${baseUrl}/json`);
   console.log("ok:", r.ok ? "yes" : "no", "status:", `${r.status}`);

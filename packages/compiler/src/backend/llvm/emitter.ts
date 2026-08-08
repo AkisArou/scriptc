@@ -489,6 +489,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   // the generic path emits the standard pending check). typeof and the
   // ambient-this read never throw. The fs dyn read is the sync-fs story.
   "fetch.start": "scr_fetch_static",
+  "fetch.responseNew": "scr_fetch_response_new",
   "fetch.responseJson": "scr_fetch_response_json",
   "fetch.responseText": "scr_fetch_response_text",
   "fetch.responseBytes": "scr_fetch_response_bytes",
