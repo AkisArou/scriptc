@@ -2745,7 +2745,7 @@ static void sf_headers_invalid(
       message + at, cap - at,
       "\" is an invalid header %s.", kind);
   if (tail < 0 || (size_t)tail >= cap - at) sf_oom();
-  sf_type_error(message);
+  scr_throw_error_msg(SCR_ERR_TYPE, message, at + (size_t)tail);
   free(message);
 }
 
@@ -4873,6 +4873,10 @@ static ScrDyn *sf_response_init_get(
   }
   if (init->kind == SCR_DYN_FUNC) {
     return scr_dyn_fn_get(init, key, len);
+  }
+  if (init->kind == SCR_DYN_HANDLE &&
+      init->v.handle.tag == SCR_DYNH_FETCH_RESPONSE) {
+    return sf_response_get(init->v.handle.ptr, key, len);
   }
   if (init->kind == SCR_DYN_TYPED_REF) {
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(init);

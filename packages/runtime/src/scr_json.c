@@ -1637,8 +1637,17 @@ ScrStr *scr_dyn_to_string(const ScrDyn *d, const ScrStr *enc) {
   case SCR_DYN_OBJ:
     return scr_str_new("[object Object]", 15);
   case SCR_DYN_HANDLE:
-    /* IncomingMessage/ServerResponse/Socket inherit
-     * Object.prototype.toString — Node's String() answer exactly. */
+    if (d->v.handle.tag >= SCR_DYNH_ABORT_SIGNAL &&
+        d->v.handle.tag <= SCR_DYNH_EVENT) {
+      ScrJsonBuf b;
+      scr_jb_init(&b);
+      scr_jb_puts(&b, "[object ");
+      scr_jb_puts(&b, scr_dyn_handle_cls(d));
+      scr_jb_putc(&b, ']');
+      return scr_jb_finish(&b);
+    }
+    /* IncomingMessage/ServerResponse/Socket and the other Node handles
+     * inherit Object.prototype.toString without a @@toStringTag. */
     return scr_str_new("[object Object]", 15);
   case SCR_DYN_PROMISE:
     /* Object.prototype.toString with the Promise @@toStringTag. */

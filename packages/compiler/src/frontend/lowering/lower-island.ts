@@ -2450,11 +2450,34 @@ export function lowerResponseNew(
       };
       const projected = L.widthCoerce(value, recordType);
       if (projected && L.dynConvertible(projected.type)) {
-        return { kind: "dynFrom", value: projected, type: DYN, loc: value.loc };
+        return {
+          kind: "dynFrom",
+          value: projected,
+          liveRef: true,
+          type: DYN,
+          loc: value.loc,
+        };
       }
     }
     if (value.kind === "unitLit" || L.dynConvertible(value.type)) {
-      return { kind: "dynFrom", value, type: DYN, loc: value.loc };
+      if (
+        what === "an init value" &&
+        hasLiveWebMutableArm(L, value.type)
+      ) {
+        return {
+          kind: "dynFrom",
+          value,
+          liveRef: true,
+          type: DYN,
+          loc: value.loc,
+        };
+      }
+      return {
+        kind: "dynFrom",
+        value,
+        type: DYN,
+        loc: value.loc,
+      };
     }
     L.noLowering(
       `new Response with ${what} of type '${L.fmt(value.type)}'`,
@@ -2480,10 +2503,11 @@ export function lowerResponseNew(
 
   /* JavaScript evaluates every argument expression before WebIDL starts
    * converting either BodyInit or ResponseInit. Capture the raw values in
-   * source order; only the final libCall boxes/copies them. This is
-   * observable when init/surplus expressions mutate a Uint8Array body or
-   * a typed ResponseInit record. Unit-valued expressions still execute,
-   * then contribute the corresponding undefined/null literal. */
+   * source order; only the final libCall boxes the body and gives typed init
+   * values a live capsule for the runtime's later dictionary reads. This is
+   * observable when argument evaluation or BodyInit coercion mutates a
+   * Uint8Array body or a typed ResponseInit record. Unit-valued expressions
+   * still execute, then contribute the corresponding undefined/null literal. */
   const stmts: IrStmt[] = [];
   const capture = (value: IrExpr, name: string): IrExpr => {
     if (isUnitType(value.type) || value.type.kind === "void") {

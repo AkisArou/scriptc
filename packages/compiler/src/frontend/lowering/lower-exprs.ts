@@ -3912,7 +3912,10 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     for (const prop of expr.properties) {
       if (ts.isSpreadAssignment(prop)) {
         flushFields();
-        const source = L.coerceToExpected(L.lowerExpr(prop.expression), DYN);
+        const raw = L.lowerExpr(prop.expression);
+        const source = boxValue
+          ? boxValue(prop.expression, raw)
+          : L.coerceToExpected(raw, DYN);
         if (source.type.kind !== "dyn") {
           L.unsupported("SC1101", prop.expression, `spreading '${L.fmt(source.type)}' into a checked-dynamic object literal`);
         }

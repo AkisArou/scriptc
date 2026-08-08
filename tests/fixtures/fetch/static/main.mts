@@ -34,6 +34,63 @@ console.log(
   await configuredResponse.text(),
 );
 
+const responseAsInitSource = new Response("source", {
+  status: 203,
+  statusText: "Copied",
+  headers: { "x-response-init": "yes" },
+});
+const responseAsInit = new Response(null, responseAsInitSource);
+console.log(
+  "response as init:",
+  responseAsInit.status,
+  responseAsInit.statusText,
+  responseAsInit.headers.get("x-response-init"),
+);
+
+const bodyMutatedResponseInit = {
+  status: 201,
+  headers: { "x-body-mutated": "before" },
+};
+const responseInitMutatingBody: any = {
+  toString() {
+    bodyMutatedResponseInit.status = 202;
+    bodyMutatedResponseInit.headers["x-body-mutated"] = "after";
+    return "mutated";
+  },
+};
+const responseAfterBodyInitMutation = new Response(
+  responseInitMutatingBody,
+  bodyMutatedResponseInit,
+);
+console.log(
+  "response init after body conversion:",
+  responseAfterBodyInitMutation.status,
+  responseAfterBodyInitMutation.headers.get("x-body-mutated"),
+);
+
+const spreadResponseHeaders = { "x-spread-live": "before" };
+const spreadResponseInit = { headers: spreadResponseHeaders };
+const spreadResponseBody: any = {
+  toString() {
+    spreadResponseHeaders["x-spread-live"] = "after";
+    return "spread";
+  },
+};
+const responseWithSpreadInit = new Response(
+  spreadResponseBody,
+  { ...spreadResponseInit },
+);
+console.log(
+  "response spread init after body conversion:",
+  responseWithSpreadInit.headers.get("x-spread-live"),
+);
+
+const responseHandleBody: any = new Response();
+console.log(
+  "response handle body:",
+  await new Response(responseHandleBody).text(),
+);
+
 class ClassResponseInit {
   status = 202;
   statusText = "Class Made";
@@ -150,6 +207,15 @@ try {
 } catch (error) {
   console.log(
     "response invalid header value:",
+    (error as Error).name,
+    JSON.stringify((error as Error).message),
+  );
+}
+try {
+  new Response(null, { headers: { x: "bad\0value" } });
+} catch (error) {
+  console.log(
+    "response nul header value:",
     (error as Error).name,
     JSON.stringify((error as Error).message),
   );
