@@ -2459,7 +2459,10 @@ ScrStr *scr_path_win32_to_namespaced_path(ScrStr *path);
  * (failure throws the path-less "EBADF: bad file descriptor, close").
  * The pair behind spawn's fd-stdio form. */
 double scr_fs_open(ScrStr *path, ScrStr *flags);
-double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length);
+/* position == -1 reads from and advances the descriptor's current offset;
+ * nonnegative positions leave that offset unchanged (pread/ReadFile seam). */
+double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,
+                        double position);
 void scr_fs_close(double fd);
 
 /* ── WHATWG URL (scr_url.c) ──────────────────────────────────────────

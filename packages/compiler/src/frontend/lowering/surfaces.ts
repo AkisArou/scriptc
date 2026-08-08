@@ -593,10 +593,11 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     // +/x variants — unknown flags throw Node's TypeError text); the
     // numeric-mode third argument fences by arity.
     openSync: { fn: "fs.openSync", params: [STRING, STRING], result: F64 },
-    // The 4-argument buffer form (fd, buffer, offset, length) — what the
-    // Node test harness's parseTestMetadata uses; the position parameter
-    // and options-object forms fence by arity/shape.
-    readSync: { fn: "fs.readSync", params: [F64, BYTES_U8, F64, F64], result: F64 },
+    // The buffer forms (fd, buffer, offset, length[, position]). The
+    // lowering completes an omitted or literal-null position to -1 (the
+    // runtime's current-offset sentinel); numeric positions read without
+    // advancing the fd. The options-object and bigint forms still fence.
+    readSync: { fn: "fs.readSync", params: [F64, BYTES_U8, F64, F64, F64], result: F64 },
     closeSync: { fn: "fs.closeSync", params: [F64], result: VOID },
     // Entirely special-cased (lowerFsWatchCall — the callback needs an
     // adapter per listener shape); this entry only routes the dispatch.

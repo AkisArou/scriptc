@@ -1646,12 +1646,77 @@ double scr_fs_open(ScrStr *path, ScrStr *flags) {
 
 /* fs.closeSync(fd) — close(2); failure throws Node's path-less fs error
  * shape ("EBADF: bad file descriptor, close"). */
-/* fs.readSync(fd, buffer, offset, length) — the 4-argument buffer form.
+
+/* Offset-preserving read for fs.readSync's numeric-position form. POSIX
+ * supplies pread(2). Windows follows libuv's synchronous-handle recipe:
+ * ReadFile with an OVERLAPPED byte offset, then restore the handle position
+ * because synchronous ReadFile updates it even when OVERLAPPED is present. */
+static ssize_t scr_fs_pread(int fd, void *data, size_t length, double position) {
+#ifdef _WIN32
+  HANDLE handle = (HANDLE)_get_osfhandle(fd);
+  if (handle == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+
+  OVERLAPPED overlapped;
+  memset(&overlapped, 0, sizeof overlapped);
+  LARGE_INTEGER at;
+  at.QuadPart = (LONGLONG)position;
+  overlapped.Offset = at.LowPart;
+  overlapped.OffsetHigh = at.HighPart;
+
+  LARGE_INTEGER zero;
+  LARGE_INTEGER original;
+  zero.QuadPart = 0;
+  BOOL restore = SetFilePointerEx(handle, zero, &original, FILE_CURRENT);
+  DWORD got = 0;
+  DWORD want = length > (size_t)UINT32_MAX ? UINT32_MAX : (DWORD)length;
+  BOOL ok = ReadFile(handle, data, want, &got, &overlapped);
+  DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+  if (restore) (void)SetFilePointerEx(handle, original, NULL, FILE_BEGIN);
+  /* ReadFile may report a terminal status after still filling part of the
+   * caller's buffer (notably ERROR_MORE_DATA for a message-mode pipe).
+   * libuv/Node return those bytes and surface the status on the next read. */
+  if (ok || got > 0 || error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) {
+    return (ssize_t)got;
+  }
+
+  /* The read-specific subset of libuv's Win32-to-errno translation. */
+  switch (error) {
+    case ERROR_INVALID_HANDLE:
+    case ERROR_ACCESS_DENIED:
+      errno = EBADF;
+      break;
+    case ERROR_INVALID_FUNCTION:
+    case ERROR_INVALID_PARAMETER:
+      errno = EINVAL;
+      break;
+    case ERROR_NOT_ENOUGH_MEMORY:
+    case ERROR_OUTOFMEMORY:
+      errno = ENOMEM;
+      break;
+    case ERROR_OPERATION_ABORTED:
+      errno = EINTR;
+      break;
+    default:
+      errno = EIO;
+      break;
+  }
+  return -1;
+#else
+  return pread(fd, data, length, (off_t)position);
+#endif
+}
+
+/* fs.readSync(fd, buffer, offset, length[, position]) — the buffer form.
  * Node validates offset/length against the buffer before reading and
  * throws ERR_OUT_OF_RANGE; here the checks clamp to the same contract and
- * throw the RangeError shape. Returns the byte count read(2) reports;
- * errors carry the errno name like the other fd operations. */
-double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length) {
+ * throw the RangeError shape. Position -1 means the fd's current offset;
+ * nonnegative positions do not advance it. Returns the byte count the OS
+ * reports; errors carry the errno name like the other fd operations. */
+double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,
+                        double position) {
   size_t bytelen = buf->len; /* u8 buffers: elem count == byte count */
   char msg[160];
   int mlen;
@@ -1659,7 +1724,28 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length) 
    * form, length against the remaining window (validateOffset vs the
    * buffer-bounds check in fs.readSync). */
   char numbuf[40];
-  if (offset < 0 || offset > (double)bytelen) {
+  if (!(isfinite(offset) && trunc(offset) == offset)) {
+    char recv[48];
+    scr_num_received(offset, recv);
+    mlen = snprintf(msg, sizeof msg,
+                    "The value of \"offset\" is out of range. It must be an integer. Received %s",
+                    recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (offset < 0 || offset > 9007199254740991.0) {
+    numbuf[scr_f64_to_str(offset, numbuf)] = 0;
+    mlen = snprintf(msg, sizeof msg,
+                    "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
+                    numbuf);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  /* Node returns after offset's intrinsic validation when the requested
+   * length normalizes to zero: buffer-window bounds, position, and fd are
+   * not consulted. Preserve the existing size_t coercion's [0, 1) case. */
+  if (length >= 0 && length < 1) return 0;
+  if (offset > (double)bytelen) {
     numbuf[scr_f64_to_str(offset, numbuf)] = 0;
     mlen = snprintf(msg, sizeof msg,
                     "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
@@ -1677,7 +1763,27 @@ double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length) 
     return 0;
   }
   size_t want = (size_t)length;
-  ssize_t n = read((int)fd, buf->data + off, want);
+  if (!(isfinite(position) && trunc(position) == position)) {
+    char recv[48];
+    scr_num_received(position, recv);
+    mlen = snprintf(msg, sizeof msg,
+                    "The value of \"position\" is out of range. It must be an integer. Received %s",
+                    recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (position < -1 || position > 9007199254740991.0) {
+    char recv[48];
+    scr_num_received(position, recv);
+    mlen = snprintf(msg, sizeof msg,
+                    "The value of \"position\" is out of range. It must be >= -1 && <= 9007199254740991. Received %s",
+                    recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)mlen, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  ssize_t n = position == -1
+    ? read((int)fd, buf->data + off, want)
+    : scr_fs_pread((int)fd, buf->data + off, want, position);
   if (n < 0) {
     int e = errno;
     char namebuf[16];
