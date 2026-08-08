@@ -148,7 +148,19 @@ export function lowerGenMethodCall(
       );
     }
     arg = L.lowerExpr(argNode);
-    if (arg.type.kind === "void" || arg.type.kind === "dyn" || arg.type.kind === "caught" || isUnitType(arg.type)) {
+    if (arg.type.kind === "date") {
+      L.unsupported(
+        "SC1090",
+        argNode,
+        ".throw() with a Date value (the exception channel cannot preserve Date's object kind; throw an Error or primitive instead)",
+      );
+    }
+    if (
+      arg.type.kind === "void" ||
+      arg.type.kind === "dyn" ||
+      arg.type.kind === "caught" ||
+      isUnitType(arg.type)
+    ) {
       L.unsupported(
         "SC1090",
         argNode,

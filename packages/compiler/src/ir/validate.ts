@@ -4621,10 +4621,17 @@ function validateFunction(
             err(`return argument ${typeKey(e.arg.type)} != return channel ${typeKey(genT.retT)}`, e.loc);
           }
         } else {
-          // throw: any throwable payload (the throw statement's rule).
+          // throw: any exception-representable payload (the throw
+          // statement's rule). Date cannot retain its object kind in the
+          // untyped exception cell.
           if (e.arg === null) {
             err("genResume throw with no payload", e.loc);
-          } else if (e.arg.type.kind === "void" || e.arg.type.kind === "dyn" || e.arg.type.kind === "caught") {
+          } else if (
+            e.arg.type.kind === "void" ||
+            e.arg.type.kind === "dyn" ||
+            e.arg.type.kind === "caught" ||
+            e.arg.type.kind === "date"
+          ) {
             err(`genResume throw of a ${e.arg.type.kind} value`, e.loc);
           }
         }
@@ -5128,7 +5135,7 @@ function validateFunction(
         checkExpr(s.value);
         // dyn throws are allowed: the dyn node rides the REF cell arm by
         // reference (the JS-lane `throw err` of a dyn argument).
-        if (s.value.type.kind === "void" || s.value.type.kind === "caught") {
+        if (s.value.type.kind === "void" || s.value.type.kind === "caught" || s.value.type.kind === "date") {
           err(`throw of a ${s.value.type.kind} value`, s.loc);
         }
         break;

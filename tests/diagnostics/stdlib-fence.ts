@@ -80,4 +80,12 @@ const picked = pick(1, 2);
 // declaration is a value Node builds and drops — it compiles to nothing).
 const big = 10n;
 console.log(big);
+function throwDate(): void {
+  throw new Date(0); // the exception cell cannot preserve Date's object kind
+}
+throwDate();
+function* dateGenerator(): Generator<number, void, unknown> {
+  yield 1;
+}
+dateGenerator().throw(new Date(0));
 // End of the diagnostic fixture.

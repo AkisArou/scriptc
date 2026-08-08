@@ -6820,7 +6820,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const a = E.emitExpr(e.arg);
           const t = e.arg.type;
           if (isRefCounted(t)) E.moveTemp(a); // the cell takes ownership
-          if (t.kind === "f64" || t.kind === "date") {
+          if (t.kind === "date") {
+            throw new Error("emitter bug: Date generator throw reached backend");
+          } else if (t.kind === "f64") {
             E.line(`scr_throw_f64(${a.name});${E.srcComment(e.loc)}`);
           } else if (t.kind === "bool") {
             E.line(`scr_throw_bool(${a.name});${E.srcComment(e.loc)}`);

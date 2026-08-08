@@ -11,9 +11,11 @@
  */
 #include "scr_runtime.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int checks = 0;
 static int failures = 0;
@@ -77,6 +79,14 @@ int main(int argc, char **argv) {
 #endif
   scr_str_release(pl1);
   scr_str_release(pl2);
+
+  /* Historical local-mean offsets include seconds in the timezone data,
+   * while Date#getTimezoneOffset exposes whole minutes. */
+  setenv("TZ", "America/Chicago", 1);
+  tzset();
+  double historical_offset = scr_date_get_timezone_offset(-5364662400000.0);
+  check(historical_offset == trunc(historical_offset),
+        "historical timezone offset truncates to whole minutes");
 
   /* process.cwd: fresh absolute path. */
   t = scr_process_cwd();

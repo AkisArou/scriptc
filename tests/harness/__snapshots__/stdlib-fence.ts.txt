@@ -326,6 +326,20 @@ stdlib-fence.ts:82:13 - error SC2004: uses of 'big' inherit the blocker on its d
   81 | const big = 10n;
   82 | console.log(big);
      |             ^~~
-  83 | // End of the diagnostic fixture.
+  83 | function throwDate(): void {
 
   hint: the declaration of 'big' did not compile — fix the diagnostic reported there and these sites clear with it
+
+stdlib-fence.ts:84:9 - error SC1090: throwing Date values (catch bindings cannot preserve Date's object kind; throw an Error or primitive instead) are not supported yet
+
+  83 | function throwDate(): void {
+  84 |   throw new Date(0); // the exception cell cannot preserve Date's object kind
+     |         ^~~~~~~~~~~
+  85 | }
+
+stdlib-fence.ts:90:23 - error SC1090: .throw() with a Date value (the exception channel cannot preserve Date's object kind; throw an Error or primitive instead) is not supported yet
+
+  89 | }
+  90 | dateGenerator().throw(new Date(0));
+     |                       ^~~~~~~~~~~
+  91 | // End of the diagnostic fixture.

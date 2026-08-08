@@ -75,3 +75,9 @@ console.log(
   live.getFullYear() >= 2023,
   live.getUTCFullYear() >= 2023,
 );
+
+// Historical timezone data can have offsets with second precision, but the
+// JavaScript API always exposes a whole number of minutes.
+console.log(
+  Number.isInteger(new Date("1800-01-01T00:00:00.000Z").getTimezoneOffset()),
+);

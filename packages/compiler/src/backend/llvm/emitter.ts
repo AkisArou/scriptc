@@ -2503,7 +2503,9 @@ class LlEmitter {
   private emitThrowValue(v: LlValue): void {
     const B = this.B;
     const t = v.type;
-    if (t.kind === "f64" || t.kind === "date") {
+    if (t.kind === "date") {
+      throw new Error("LLVM emitter bug: Date throw reached backend");
+    } else if (t.kind === "f64") {
       this.declare(`declare void @scr_throw_f64(double)`);
       B.line(`call void @scr_throw_f64(double ${v.name})`);
     } else if (t.kind === "bool") {

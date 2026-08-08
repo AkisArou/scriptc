@@ -3622,11 +3622,12 @@ static bool scr_date_local_parts(double ms, ScrDateParts *out) {
   out->milliseconds = (int)(clipped - secd * 1000.0);
   /* Treat the local broken-down fields as UTC. Its distance from the real
    * epoch second is the zone offset; Date#getTimezoneOffset uses the
-   * opposite sign (UTC - local), in minutes. */
+   * opposite sign (UTC - local), in whole minutes. Historical local-mean
+   * offsets can contain seconds, which JavaScript truncates toward zero. */
   double local_as_utc =
     scr_days_from_civil(out->year, out->month + 1, out->date) * 86400.0 +
     out->hours * 3600.0 + out->minutes * 60.0 + out->seconds;
-  out->timezone_offset = (secd - local_as_utc) / 60.0;
+  out->timezone_offset = trunc((secd - local_as_utc) / 60.0);
   return true;
 }
 
