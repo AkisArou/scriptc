@@ -1738,6 +1738,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       // The lib fence's PROPERTY chokepoint: a stdlib-declared member that
       // no lowering above claimed ([1,2].entries, Math.SQRT2, Promise.all,
       // re.exec as a value, ...) reports SC2020 here.
+      L.fenceStaticAbortControllerMemberRead(expr);
       L.fenceStaticResponseMember(expr, "read");
       L.fenceStaticHeadersMember(expr, "read");
       L.fenceStaticReadableStreamMember(expr, "read");
@@ -5643,6 +5644,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // spellings. Fence a statically-known unsupported key before the generic
     // checked-dynamic element-read path can turn it into a runtime missing
     // member.
+    L.fenceStaticAbortControllerMemberRead(expr);
     L.fenceStaticResponseMember(expr, "read");
     L.fenceStaticHeadersMember(expr, "read");
     L.fenceStaticReadableStreamMember(expr, "read");

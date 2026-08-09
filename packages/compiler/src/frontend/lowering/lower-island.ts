@@ -1374,6 +1374,32 @@ export function fenceStaticHeadersMember(
   );
 }
 
+/** The native AbortController handle dispatches `abort()` directly and
+ * exposes `.signal` as data, but it has no first-class function value for
+ * the prototype method. Fence method extraction before the checked-dynamic
+ * keyed-read fallback can silently answer `undefined`. Dynamic builds use
+ * the engine's real AbortController object and retain ordinary method reads. */
+export function fenceStaticAbortControllerMemberRead(
+  L: Lowerer,
+  access: StaticResponseAccess,
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const symbol = isStdlibFetchInterface(
+    L,
+    access.expression,
+    "AbortController",
+  );
+  if (!symbol) return null;
+  const members = fetchAccessMemberNames(L, access);
+  if (members === null || !members.includes("abort")) return null;
+  L.noLowering(
+    "AbortController.abort through method extraction in a static build",
+    access,
+    "call controller.abort(...) directly; the native AbortController handle does not expose abort as a first-class function value",
+    symbol,
+  );
+}
+
 function isStdlibFetchInterface(
   L: Lowerer,
   node: ts.Node,

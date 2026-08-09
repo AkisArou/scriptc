@@ -565,6 +565,33 @@ test("fetch interface object bindings retain the inventory fence code", () => {
   expect(dynamic.diagnostics.filter((d) => d.code === "SC2020")).toHaveLength(2);
 });
 
+test("static AbortController method reads fence instead of yielding undefined", () => {
+  const file = probeFile({
+    id: "stdlib.abort-controller.method-read-fence",
+    source:
+      '/// <reference types="node" />\n' +
+      'const controller = new AbortController();\n' +
+      'void controller.abort;\n' +
+      'void controller["abort"];\n' +
+      'void controller.signal;\n',
+  });
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual(["SC2020"]);
+  expect(coverage.diagnostics).toHaveLength(2);
+  expect(
+    coverage.diagnostics.every((d) =>
+      d.message.includes(
+        "AbortController.abort through method extraction in a static build",
+      )
+    ),
+  ).toBe(true);
+
+  const dynamic = analyze(file, { dynamic: true }).coverage;
+  expect(dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+  expect(dynamic.stats.statementsFailed).toBe(0);
+});
+
 test("static fetch data properties remain destructurable in JavaScript", () => {
   const dir = join(probeRoot, "fetch-static-data-binding");
   mkdirSync(dir, { recursive: true });
