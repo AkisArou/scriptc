@@ -81,9 +81,23 @@ function lowerOptionalDefaultArg(
   defaultValue: IrExpr,
 ): IrExpr {
   const undefinedArg = lowerStaticallyUndefinedArg(L, node);
-  return undefinedArg
-    ? defaultAfterUndefined(undefinedArg, defaultValue)
-    : L.lowerExprExpecting(node, expected);
+  if (undefinedArg) return defaultAfterUndefined(undefinedArg, defaultValue);
+  const value = L.lowerExpr(node);
+  if (value.type.kind === "union") {
+    const def = L.unions.get(value.type.unionId);
+    if (
+      def?.arms.length === 2 &&
+      def.arms.some((arm) => arm.kind === "undefinedT") &&
+      def.arms.some((arm) => typeEquals(arm, expected))
+    ) {
+      // A runtime optional argument uses its API default only on the
+      // undefined arm. The exact two-arm gate deliberately excludes null:
+      // optional parameters do not admit it, and an asserted null must keep
+      // the ordinary checked-narrow failure instead of defaulting.
+      return { kind: "nullish", left: value, right: defaultValue, type: expected, loc: value.loc };
+    }
+  }
+  return L.coerceInto(node, value, expected);
 }
 
 /** Ambient array method calls. `push`/`unshift`/`pop`/`reverse`/
@@ -5506,12 +5520,21 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
           // Keep literals on the canonical, non-throwing fast path.
           enc = { kind: "strLit", value: encName, type: STRING, loc };
         } else {
-          // A BufferEncoding-typed variable selects its decoder at
-          // runtime. The checked intrinsic canonicalizes aliases/case and
-          // raises Node's ERR_UNKNOWN_ENCODING when a cast lets a bad
-          // value through.
-          enc = L.lowerExprExpecting(encNode, STRING);
-          method = "toStringVar";
+          const undefinedArg = lowerStaticallyUndefinedArg(L, encNode);
+          if (undefinedArg) {
+            // An explicit undefined is the omitted-encoding default. Keep
+            // the canonical, non-throwing path while preserving effects
+            // from equivalent spellings such as `void sideEffect()`.
+            enc = defaultAfterUndefined(undefinedArg, enc);
+          } else {
+            // A BufferEncoding-typed variable selects its decoder at
+            // runtime. Optional variables default their undefined arm to
+            // utf8; the checked intrinsic canonicalizes every present
+            // alias/case and raises Node's ERR_UNKNOWN_ENCODING when a cast
+            // lets a bad value through.
+            enc = lowerOptionalDefaultArg(L, encNode, STRING, enc);
+            method = "toStringVar";
+          }
         }
       }
       // The range form toString(enc, start[, end]) decodes the clamped

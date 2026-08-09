@@ -69,9 +69,14 @@ const variableEncodings: BufferEncoding[] = ["hex", "base64url", "binary", "ucs-
 for (const encoding of variableEncodings) {
   console.log("variable", encoding, raw.toString(encoding));
 }
-const runtimeRangeEncoding: BufferEncoding = "hex";
-console.log("variable tail", raw.toString(runtimeRangeEncoding, 2));
-console.log("variable range", raw.toString(runtimeRangeEncoding, 1, 4));
+function variableTail(encoding: BufferEncoding): string {
+  return raw.toString(encoding, 2);
+}
+function variableRange(encoding: BufferEncoding): string {
+  return raw.toString(encoding, 1, 4);
+}
+console.log("variable tail", variableTail("hex"));
+console.log("variable range", variableRange("hex"));
 console.log("variable upper", raw.toString("BASE64" as BufferEncoding));
 try {
   raw.toString("wat" as BufferEncoding);
@@ -81,6 +86,23 @@ try {
     console.log("variable bad", (e as NodeJS.ErrnoException).code, e.message);
   }
 }
+try {
+  variableRange("wat-range" as BufferEncoding);
+  console.log("variable bad range did not throw");
+} catch (e) {
+  if (e instanceof TypeError) {
+    console.log("variable bad range", (e as NodeJS.ErrnoException).code, e.message);
+  }
+}
+
+// Forwarding an optional encoding preserves Buffer.toString(undefined)'s
+// utf8 default instead of treating the absent arm as a failed string cast.
+function optionalEncoding(encoding?: BufferEncoding): string {
+  return raw.toString(encoding);
+}
+console.log("variable optional present", optionalEncoding("hex"));
+console.log("variable optional absent", optionalEncoding());
+console.log("variable explicit undefined", raw.toString(undefined));
 
 // Unknown-encoding messages preserve the complete runtime string,
 // including long values and embedded NULs.
