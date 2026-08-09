@@ -44,36 +44,78 @@ struct ScrStats {
   double mtime_ms;
 };
 
+static bool scr_file_handle_flag_eq(const ScrStr *flags, const char *want) {
+  size_t len = strlen(want);
+  return flags->len == len && memcmp(flags->data, want, len) == 0;
+}
+
+static void scr_file_handle_invalid_flags(const ScrStr *flags) {
+  static const char prefix[] = "The argument 'flags' is invalid. Received '";
+  static const char suffix[] = "'";
+  size_t prefix_len = sizeof prefix - 1;
+  size_t suffix_len = sizeof suffix - 1;
+  if (flags->len > SIZE_MAX - prefix_len - suffix_len - 1) {
+    scr_trap("scriptc: out of memory\n");
+  }
+  size_t len = prefix_len + flags->len + suffix_len;
+  char *msg = malloc(len + 1);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  memcpy(msg, prefix, prefix_len);
+  memcpy(msg + prefix_len, flags->data, flags->len);
+  memcpy(msg + prefix_len + flags->len, suffix, suffix_len);
+  msg[len] = 0;
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, len, "ERR_INVALID_ARG_VALUE");
+  free(msg);
+}
+
 static int scr_file_handle_open_flags(ScrStr *flags) {
-  const char *f = flags->data;
   int of;
-  if (strcmp(f, "r") == 0) of = O_RDONLY;
-  else if (strcmp(f, "rs") == 0 || strcmp(f, "sr") == 0) of = O_RDONLY | O_SYNC;
-  else if (strcmp(f, "r+") == 0) of = O_RDWR;
-  else if (strcmp(f, "rs+") == 0 || strcmp(f, "sr+") == 0) of = O_RDWR | O_SYNC;
-  else if (strcmp(f, "w") == 0) of = O_TRUNC | O_CREAT | O_WRONLY;
-  else if (strcmp(f, "wx") == 0 || strcmp(f, "xw") == 0) of = O_TRUNC | O_CREAT | O_WRONLY | O_EXCL;
-  else if (strcmp(f, "w+") == 0) of = O_TRUNC | O_CREAT | O_RDWR;
-  else if (strcmp(f, "wx+") == 0 || strcmp(f, "xw+") == 0) of = O_TRUNC | O_CREAT | O_RDWR | O_EXCL;
-  else if (strcmp(f, "a") == 0) of = O_APPEND | O_CREAT | O_WRONLY;
-  else if (strcmp(f, "ax") == 0 || strcmp(f, "xa") == 0) of = O_APPEND | O_CREAT | O_WRONLY | O_EXCL;
-  else if (strcmp(f, "as") == 0 || strcmp(f, "sa") == 0) of = O_APPEND | O_CREAT | O_WRONLY | O_SYNC;
-  else if (strcmp(f, "a+") == 0) of = O_APPEND | O_CREAT | O_RDWR;
-  else if (strcmp(f, "ax+") == 0 || strcmp(f, "xa+") == 0) of = O_APPEND | O_CREAT | O_RDWR | O_EXCL;
-  else if (strcmp(f, "as+") == 0 || strcmp(f, "sa+") == 0) of = O_APPEND | O_CREAT | O_RDWR | O_SYNC;
+  if (scr_file_handle_flag_eq(flags, "r")) of = O_RDONLY;
+  else if (scr_file_handle_flag_eq(flags, "rs") || scr_file_handle_flag_eq(flags, "sr")) of = O_RDONLY | O_SYNC;
+  else if (scr_file_handle_flag_eq(flags, "r+")) of = O_RDWR;
+  else if (scr_file_handle_flag_eq(flags, "rs+") || scr_file_handle_flag_eq(flags, "sr+")) of = O_RDWR | O_SYNC;
+  else if (scr_file_handle_flag_eq(flags, "w")) of = O_TRUNC | O_CREAT | O_WRONLY;
+  else if (scr_file_handle_flag_eq(flags, "wx") || scr_file_handle_flag_eq(flags, "xw")) of = O_TRUNC | O_CREAT | O_WRONLY | O_EXCL;
+  else if (scr_file_handle_flag_eq(flags, "w+")) of = O_TRUNC | O_CREAT | O_RDWR;
+  else if (scr_file_handle_flag_eq(flags, "wx+") || scr_file_handle_flag_eq(flags, "xw+")) of = O_TRUNC | O_CREAT | O_RDWR | O_EXCL;
+  else if (scr_file_handle_flag_eq(flags, "a")) of = O_APPEND | O_CREAT | O_WRONLY;
+  else if (scr_file_handle_flag_eq(flags, "ax") || scr_file_handle_flag_eq(flags, "xa")) of = O_APPEND | O_CREAT | O_WRONLY | O_EXCL;
+  else if (scr_file_handle_flag_eq(flags, "as") || scr_file_handle_flag_eq(flags, "sa")) of = O_APPEND | O_CREAT | O_WRONLY | O_SYNC;
+  else if (scr_file_handle_flag_eq(flags, "a+")) of = O_APPEND | O_CREAT | O_RDWR;
+  else if (scr_file_handle_flag_eq(flags, "ax+") || scr_file_handle_flag_eq(flags, "xa+")) of = O_APPEND | O_CREAT | O_RDWR | O_EXCL;
+  else if (scr_file_handle_flag_eq(flags, "as+") || scr_file_handle_flag_eq(flags, "sa+")) of = O_APPEND | O_CREAT | O_RDWR | O_SYNC;
   else {
-    char msg[128];
-    int len = snprintf(msg, sizeof msg,
-                       "The argument 'flags' is invalid. Received '%s'", f);
-    scr_throw_error_msg(SCR_ERR_TYPE, msg, (size_t)len);
+    scr_file_handle_invalid_flags(flags);
     return -1;
   }
   return of;
 }
 
+static bool scr_file_handle_mode_valid(double mode) {
+  char msg[160];
+  char recv[48];
+  scr_num_received(mode, recv);
+  if (!(isfinite(mode) && trunc(mode) == mode)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"mode\" is out of range. It must be an integer. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return false;
+  }
+  if (mode < 0 || mode > 4294967295.0) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"mode\" is out of range. It must be >= 0 && <= 4294967295. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return false;
+  }
+  return true;
+}
+
 ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
   int of = scr_file_handle_open_flags(flags);
   if (of < 0) return NULL;
+  if (!scr_file_handle_mode_valid(mode)) return NULL;
   int fd = open(path->data, of | O_BINARY, (mode_t)mode);
   if (fd < 0) {
     scr_fs_throw(errno, "open", path);
@@ -231,7 +273,9 @@ ScrPromise *scr_file_handle_read_file_promise(ScrFileHandle *h,
   return scr_promise_settled_str(scr_file_handle_read_file(h));
 }
 
-ScrPromise *scr_file_handle_read_file_bytes_promise(ScrFileHandle *h) {
+ScrPromise *scr_file_handle_read_file_bytes_promise(ScrFileHandle *h,
+                                                    ScrStr *encoding) {
+  (void)encoding; /* evaluates the explicit undefined/null default in order */
   ScrBytes *data = scr_file_handle_read_file_bytes(h);
   return scr_promise_settled_ref(data, &scr_bytes_retain_v,
                                  &scr_bytes_release_v, NULL);

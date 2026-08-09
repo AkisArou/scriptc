@@ -774,7 +774,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fileHandle.writeBytes": { argTypes: [FILEHANDLE_T, BYTES_U8, F64, F64, F64, BOOL], result: { kind: "promise", inner: VOID } },
   "fileHandle.writeStr": { argTypes: [FILEHANDLE_T, STRING, F64, STRING], result: { kind: "promise", inner: VOID } },
   "fileHandle.readFile": { argTypes: [FILEHANDLE_T, STRING], result: { kind: "promise", inner: STRING } },
-  "fileHandle.readFileBytes": { argTypes: [FILEHANDLE_T], result: { kind: "promise", inner: BYTES_U8 } },
+  "fileHandle.readFileBytes": { argTypes: [FILEHANDLE_T, STRING], result: { kind: "promise", inner: BYTES_U8 } },
   "fileHandle.writeFile": { argTypes: [FILEHANDLE_T, STRING, STRING], result: { kind: "promise", inner: VOID } },
   "fileHandle.writeFileBytes": { argTypes: [FILEHANDLE_T, BYTES_U8, STRING], result: { kind: "promise", inner: VOID } },
   "fileHandle.stat": { argTypes: [FILEHANDLE_T], result: { kind: "promise", inner: STATS_T } },

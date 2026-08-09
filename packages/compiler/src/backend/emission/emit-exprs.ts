@@ -5542,7 +5542,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "fileHandle.readFile":
             return finish(`scr_file_handle_read_file_promise(${arg(0)}, ${arg(1)})`);
           case "fileHandle.readFileBytes":
-            return finish(`scr_file_handle_read_file_bytes_promise(${arg(0)})`);
+            return finish(`scr_file_handle_read_file_bytes_promise(${arg(0)}, ${arg(1)})`);
           case "fileHandle.writeFile":
             return finish(`scr_file_handle_write_file_promise(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "fileHandle.writeFileBytes":

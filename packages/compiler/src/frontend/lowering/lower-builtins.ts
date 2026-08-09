@@ -26,12 +26,82 @@ import {
   fenceOrDropOptionKey,
   isChildSurfaceMember,
 } from "./surfaces.js";
-import { conditionalSpreadOf, lowerDynObjectLiteral } from "./lower-exprs.js";
+import { conditionalSpreadOf, droppableStatic, lowerDynObjectLiteral } from "./lower-exprs.js";
 import { HTTP2_CONSTANTS } from "./http2-constants.js";
 import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "./crypto-tables.js";
 import { timerStyleCallback } from "./lower-calls.js";
 import { registerHttpClientFnBinding, voidizedCallback } from "./lower-server.js";
 import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FILEHANDLE_T, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
+
+/** Lower an optional builtin argument whose checker type is statically
+ * undefined/void. The returned expression exists only to preserve effects;
+ * callers replace its value with the API default. */
+function lowerStaticallyUndefinedBuiltinArg(L: Lowerer, node: ts.Expression): IrExpr | null {
+  const peel = (value: ts.Expression): ts.Expression => {
+    let expr = value;
+    while (
+      ts.isParenthesizedExpression(expr) ||
+      ts.isAsExpression(expr) ||
+      ts.isTypeAssertion(expr) ||
+      ts.isSatisfiesExpression(expr)
+    ) {
+      expr = expr.expression;
+    }
+    return expr;
+  };
+  let expr = node;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if ((L.typeOf(expr).flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0) return null;
+  expr = peel(expr);
+  let sawVoid = false;
+  while (ts.isVoidExpression(expr)) {
+    sawVoid = true;
+    expr = peel(expr.expression);
+  }
+  return L.lowerExpr(sawVoid ? expr : node);
+}
+
+function defaultAfterUndefined(value: IrExpr, dflt: IrExpr): IrExpr {
+  if (droppableStatic(value)) return dflt;
+  return {
+    kind: "seqExpr",
+    stmts: [{ kind: "exprStmt", expr: value, loc: value.loc }],
+    result: dflt,
+    type: dflt.type,
+    loc: value.loc,
+  };
+}
+
+/** Complete an optional builtin argument. Statically undefined spellings
+ * preserve their effects and select the default; a runtime unit-armed union
+ * uses nullish selection when every non-unit arm is the expected type. */
+function lowerBuiltinOptionalDefault(
+  L: Lowerer,
+  node: ts.Expression,
+  expected: IrType,
+  dflt: IrExpr,
+  nullIsDefault = false,
+): IrExpr {
+  const undefinedArg = lowerStaticallyUndefinedBuiltinArg(L, node);
+  if (undefinedArg) return defaultAfterUndefined(undefinedArg, dflt);
+  if (nullIsDefault && (L.typeOf(node).flags & ts.TypeFlags.Null) !== 0) {
+    return defaultAfterUndefined(L.lowerExpr(node), dflt);
+  }
+  const value = L.lowerExpr(node);
+  if (value.type.kind === "union") {
+    const def = L.unions.get(value.type.unionId);
+    const allowed = def?.arms.every(
+      (arm) =>
+        typeEquals(arm, expected) ||
+        arm.kind === "undefinedT" ||
+        (nullIsDefault && arm.kind === "nullT"),
+    );
+    if (allowed && def!.arms.some((arm) => isUnitType(arm))) {
+      return { kind: "nullish", left: value, right: dflt, type: expected, loc: value.loc };
+    }
+  }
+  return L.coerceInto(node, value, expected);
+}
 
 
 
@@ -832,12 +902,14 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         );
       }
       const path = L.lowerExprExpecting(expr.arguments[0]!, STRING);
+      const defaultFlags = { kind: "strLit", value: "r", type: STRING, loc } satisfies IrExpr;
+      const defaultMode = { kind: "numLit", value: 0o666, type: F64, loc } satisfies IrExpr;
       const flags = expr.arguments[1]
-        ? L.lowerExprExpecting(expr.arguments[1]!, STRING)
-        : { kind: "strLit", value: "r", type: STRING, loc } satisfies IrExpr;
+        ? lowerBuiltinOptionalDefault(L, expr.arguments[1]!, STRING, defaultFlags)
+        : defaultFlags;
       const mode = expr.arguments[2]
-        ? L.lowerExprExpecting(expr.arguments[2]!, F64)
-        : { kind: "numLit", value: 0o666, type: F64, loc } satisfies IrExpr;
+        ? lowerBuiltinOptionalDefault(L, expr.arguments[2]!, F64, defaultMode)
+        : defaultMode;
       return {
         kind: "libCall",
         fn: "fsp.open",
@@ -4315,28 +4387,85 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     const loc = locOf(call);
     const receiver = (): IrExpr => L.lowerExprExpecting(access.expression, FILEHANDLE_T);
     const promise = (inner: IrType): IrType => ({ kind: "promise", inner });
-    const absent = (node: ts.Expression | undefined): boolean =>
-      !node || node.kind === ts.SyntaxKind.NullKeyword;
     const bool = (value: boolean): IrExpr => ({ kind: "boolLit", value, type: BOOL, loc });
-    const num = (node: ts.Expression | undefined, dflt: number): IrExpr => {
-      if (!node || node.kind === ts.SyntaxKind.NullKeyword) {
-        return { kind: "numLit", value: dflt, type: F64, loc };
+    const num = (node: ts.Expression | undefined, dflt: number): { value: IrExpr; defaulted: IrExpr } => {
+      const defaultValue = { kind: "numLit", value: dflt, type: F64, loc } satisfies IrExpr;
+      if (!node) return { value: defaultValue, defaulted: bool(true) };
+      const undefinedArg = lowerStaticallyUndefinedBuiltinArg(L, node);
+      if (undefinedArg) {
+        return { value: defaultAfterUndefined(undefinedArg, defaultValue), defaulted: bool(true) };
       }
-      return L.lowerExprExpecting(node, F64);
+      if ((L.typeOf(node).flags & ts.TypeFlags.Null) !== 0) {
+        return { value: defaultAfterUndefined(L.lowerExpr(node), defaultValue), defaulted: bool(true) };
+      }
+      const value = L.lowerExpr(node);
+      if (value.type.kind === "union") {
+        const def = L.unions.get(value.type.unionId);
+        const units = def?.arms.filter(isUnitType) ?? [];
+        if (
+          units.length > 0 &&
+          def?.arms.every((arm) => typeEquals(arm, F64) || isUnitType(arm))
+        ) {
+          // The normalized number and the separate "length was omitted"
+          // bit must observe one evaluation of a runtime optional union.
+          // Bind it in the numeric argument; the later bool argument reads
+          // the same hidden local (libCall arguments evaluate left-to-right).
+          const saved = L.declareHiddenLocal("%fhOptNum", value.type);
+          const savedRef = (): IrExpr => ({
+            kind: "varRef", localId: saved.id, type: value.type, loc: value.loc,
+          });
+          let defaulted: IrExpr = {
+            kind: "unionIsTag", unionId: value.type.unionId,
+            tag: L.armTag(value.type.unionId, units[0]!), negated: false,
+            value: savedRef(), type: BOOL, loc: value.loc,
+          };
+          for (const unit of units.slice(1)) {
+            defaulted = {
+              kind: "logical", op: "||", left: defaulted,
+              right: {
+                kind: "unionIsTag", unionId: value.type.unionId,
+                tag: L.armTag(value.type.unionId, unit), negated: false,
+                value: savedRef(), type: BOOL, loc: value.loc,
+              },
+              type: BOOL,
+              loc: value.loc,
+            };
+          }
+          return {
+            value: {
+              kind: "seqExpr",
+              stmts: [{ kind: "varDecl", localId: saved.id, init: value, loc: value.loc }],
+              result: {
+                kind: "nullish", left: savedRef(), right: defaultValue,
+                type: F64, loc: value.loc,
+              },
+              type: F64,
+              loc: value.loc,
+            },
+            defaulted,
+          };
+        }
+      }
+      return { value: L.coerceInto(node, value, F64), defaulted: bool(false) };
     };
     const utf8 = (node: ts.Expression | undefined): IrExpr => {
-      if (!node || node.kind === ts.SyntaxKind.NullKeyword) {
-        return { kind: "strLit", value: "utf8", type: STRING, loc };
-      }
-      const t = L.typeOf(node);
-      if (!(t.isStringLiteralType() && (t.value === "utf8" || t.value === "utf-8"))) {
+      const dflt = { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+      if (!node) return dflt;
+      const nodeType = L.typeOf(node);
+      const parts: readonly ts.Type[] = nodeType.isUnionType() ? nodeType.getTypes() : [nodeType];
+      const supported = parts.every(
+        (t) =>
+          (t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null)) !== 0 ||
+          (t.isStringLiteralType() && (t.value === "utf8" || t.value === "utf-8")),
+      );
+      if (!supported) {
         L.noLowering(
           `FileHandle.${name} with a non-utf8 encoding`,
           node,
           "only utf8 data is supported",
         );
       }
-      return L.lowerExprExpecting(node, STRING);
+      return lowerBuiltinOptionalDefault(L, node, STRING, dflt, true);
     };
 
     if (name === "close" || name === "stat") {
@@ -4351,19 +4480,22 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     }
 
     if (name === "readFile") {
-      if (call.arguments.length === 0 || call.arguments[0]?.kind === ts.SyntaxKind.NullKeyword) {
-        return {
-          kind: "libCall", fn: "fileHandle.readFileBytes", args: [receiver()],
-          type: promise(BYTES_U8), loc,
-        };
-      }
-      if (call.arguments.length !== 1) {
+      if (call.arguments.length > 1) {
         L.noLowering(`FileHandle.readFile with ${call.arguments.length} arguments`, call);
       }
+      const type = L.mapTypeOf(L.typeOf(call));
+      if (type?.kind !== "promise") L.badType(call, L.typeOf(call));
       const encoding = utf8(call.arguments[0]);
+      if (typeEquals(type.inner, BYTES_U8)) {
+        return {
+          kind: "libCall", fn: "fileHandle.readFileBytes", args: [receiver(), encoding],
+          type, loc,
+        };
+      }
+      if (!typeEquals(type.inner, STRING)) L.badType(call, L.typeOf(call));
       return {
         kind: "libCall", fn: "fileHandle.readFile", args: [receiver(), encoding],
-        type: promise(STRING), loc,
+        type, loc,
       };
     }
 
@@ -4410,11 +4542,14 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       if (type?.kind !== "promise" || type.inner.kind !== "record") {
         L.badType(call, L.typeOf(call));
       }
+      const offset = num(call.arguments[1], 0);
+      const length = num(call.arguments[2], -1);
+      const position = num(call.arguments[3], -1);
       return {
         kind: "libCall", fn: "fileHandle.read",
         args: [
-          receiver(), buffer, num(call.arguments[1], 0), num(call.arguments[2], -1),
-          num(call.arguments[3], -1), bool(absent(call.arguments[2])),
+          receiver(), buffer, offset.value, length.value,
+          position.value, length.defaulted,
         ],
         type, loc,
       };
@@ -4431,12 +4566,15 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         L.badType(call, L.typeOf(call));
       }
       if (dataT?.kind === "bytes" && dataT.elem === "u8") {
+        const offset = num(call.arguments[1], 0);
+        const length = num(call.arguments[2], -1);
+        const position = num(call.arguments[3], -1);
         return {
           kind: "libCall", fn: "fileHandle.writeBytes",
           args: [
             receiver(), L.lowerExprExpecting(dataNode, BYTES_U8),
-            num(call.arguments[1], 0), num(call.arguments[2], -1), num(call.arguments[3], -1),
-            bool(absent(call.arguments[2])),
+            offset.value, length.value, position.value,
+            length.defaulted,
           ],
           type, loc,
         };
@@ -4449,9 +4587,10 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
             'use write(string[, position[, "utf8"]])',
           );
         }
+        const position = num(call.arguments[1], -1);
         return {
           kind: "libCall", fn: "fileHandle.writeStr",
-          args: [receiver(), L.lowerExprExpecting(dataNode, STRING), num(call.arguments[1], -1), utf8(call.arguments[2])],
+          args: [receiver(), L.lowerExprExpecting(dataNode, STRING), position.value, utf8(call.arguments[2])],
           type, loc,
         };
       }

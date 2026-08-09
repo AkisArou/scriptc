@@ -10,6 +10,41 @@ const scratch = path.join(os.tmpdir(), `scr-2686-${process.pid}.txt`);
 const missing = path.join(os.tmpdir(), `scr-2686-missing-${process.pid}.txt`);
 fs.writeFileSync(scratch, "abcdef");
 
+function optionalFlags(): string | undefined {
+  return process.pid < 0 ? "r" : undefined;
+}
+
+function optionalMode(): number | undefined {
+  return process.pid < 0 ? 0o600 : undefined;
+}
+
+function optionalNumber(): number | null | undefined {
+  if (process.pid < 0) return 1;
+  return process.pid === 0 ? null : undefined;
+}
+
+function optionalUtf8(): "utf8" | undefined {
+  return process.pid < 0 ? "utf8" : undefined;
+}
+
+async function invalidFlags(flags: string): Promise<void> {
+  try {
+    await open(scratch, flags);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log("invalid flags:", flags.length, err.name, err.code);
+  }
+}
+
+async function invalidMode(mode: number): Promise<void> {
+  try {
+    await open(scratch, "r", mode);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log("invalid mode:", mode, err.name, err.code);
+  }
+}
+
 async function main(): Promise<void> {
   const handle = await open(scratch, "r+");
   const alias = handle;
@@ -50,6 +85,11 @@ async function main(): Promise<void> {
   const all = Buffer.alloc(6);
   const allResult = await writer.read(all, null, null, 0);
   console.log("whole writes:", allResult.bytesRead, all.toString());
+  const emptyWrite = await writer.write("", optionalNumber(), optionalUtf8());
+  await writer.writeFile("", optionalUtf8());
+  await writer.appendFile(Buffer.alloc(0), undefined);
+  const emptyRead = await writer.readFile(undefined);
+  console.log("undefined methods:", emptyWrite.bytesWritten, emptyRead.length);
   try {
     await writer.read(Buffer.alloc(1), 0, -1, 0);
   } catch (e) {
@@ -62,6 +102,27 @@ async function main(): Promise<void> {
   const bytes = await defaults.readFile();
   console.log("defaults:", bytes.toString(), defaults.fd >= 0);
   await defaults.close();
+
+  const explicitDefaults = await open(scratch, undefined, undefined);
+  console.log("explicit defaults:", explicitDefaults.fd >= 0);
+  await explicitDefaults.close();
+
+  const optionalDefaults = await open(scratch, optionalFlags(), optionalMode());
+  const optionalBuffer = Buffer.alloc(2);
+  const optionalRead = await optionalDefaults.read(
+    optionalBuffer,
+    optionalNumber(),
+    optionalNumber(),
+    optionalNumber(),
+  );
+  console.log("optional defaults:", optionalRead.bytesRead, optionalBuffer.toString());
+  await optionalDefaults.close();
+
+  await invalidFlags("bad");
+  await invalidFlags("w\0not-a-flag");
+  await invalidFlags("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+  await invalidMode(-1);
+  await invalidMode(1.5);
 
   try {
     await open(missing);

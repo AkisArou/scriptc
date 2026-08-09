@@ -2135,7 +2135,7 @@ ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath);
 ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode);
 ScrPromise *scr_file_handle_close_promise(ScrFileHandle *h);
 ScrPromise *scr_file_handle_read_file_promise(ScrFileHandle *h, ScrStr *encoding);
-ScrPromise *scr_file_handle_read_file_bytes_promise(ScrFileHandle *h);
+ScrPromise *scr_file_handle_read_file_bytes_promise(ScrFileHandle *h, ScrStr *encoding);
 ScrPromise *scr_file_handle_write_file_promise(ScrFileHandle *h, ScrStr *data, ScrStr *encoding);
 ScrPromise *scr_file_handle_write_file_bytes_promise(ScrFileHandle *h, ScrBytes *data, ScrStr *encoding);
 ScrPromise *scr_file_handle_stat_promise(ScrFileHandle *h);
