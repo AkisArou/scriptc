@@ -1293,6 +1293,8 @@ export type IrArrIntrinsicMethod =
   | "length"
   | "push"
   | "pushSpread"
+  | "unshift"
+  | "unshiftSpread"
   | "pop"
   | "indexOf"
   | "includes"
@@ -1300,6 +1302,7 @@ export type IrArrIntrinsicMethod =
   | "slice"
   | "shift"
   | "splice"
+  | "reverse"
   /** ES2023 copying methods. `toSpliced` receives [start, deleteCount,
    * itemsArray], with omitted arguments completed by the frontend;
    * `with` receives [index, value] and throws Node's catchable RangeError
@@ -4192,7 +4195,10 @@ export type IrExpr =
    * ownership of refcounted args MOVES into the array), `pushSpread` (`a.push(...src)`:
    * one arg of the RECEIVER's own array type, BORROWED — its elements
    * append in order, count snapshotted first so `a.push(...a)` duplicates
-   * exactly like JS; returns the new length), `pop` (returns elem — traps on an
+   * exactly like JS; returns the new length), `unshift` (the matching
+   * variadic front insertion; all arguments evaluate before mutation and
+   * ref ownership moves in), `unshiftSpread` (one borrowed same-typed array,
+   * with self-spread snapshot semantics), `pop` (returns elem — traps on an
    * empty array; ownership moves OUT to the caller), `indexOf` (one
    * elem-typed arg, BORROWED; strict equality — NaN never matches; → f64),
    * `includes` (one elem-typed arg, borrowed; SameValueZero — NaN DOES
@@ -4206,7 +4212,9 @@ export type IrExpr =
    * relative/clamped start and clamped count, an omitted count removes to
    * the end [backends fill +Infinity, the slice convention]; the result is
    * a fresh +1 array of the removed elements IN ORDER, their ownership
-   * MOVED from the receiver; insertion forms are frontend-fenced). */
+   * MOVED from the receiver; insertion forms are frontend-fenced), and
+   * `reverse` (zero args; swaps the receiver's slots in place and returns
+   * the same array identity as an owned reference). */
   | {
       kind: "arrIntrinsic";
       method: IrArrIntrinsicMethod;

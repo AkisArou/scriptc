@@ -263,7 +263,9 @@ export const READLINE_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
  * this set hit the SC2020 fence. */
 export const ARRAY_METHODS = new Set([
   "push",
+  "unshift",
   "pop",
+  "reverse",
   "concat",
   "map",
   "filter",

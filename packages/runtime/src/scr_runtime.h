@@ -886,6 +886,15 @@ double scr_arr_push_f64(ScrArr *a, double v);
 double scr_arr_push_bool(ScrArr *a, bool v);
 double scr_arr_push_ref(ScrArr *a, void *v);
 
+/* unshift returns the new length and _ref takes ownership. The spread form
+ * borrows a same-element-kind source, retains copied refs, and snapshots
+ * self-spread. reverse mutates in place and returns the receiver at +1. */
+double scr_arr_unshift_f64(ScrArr *a, double v);
+double scr_arr_unshift_bool(ScrArr *a, bool v);
+double scr_arr_unshift_ref(ScrArr *a, void *v);
+double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src);
+ScrArr *scr_arr_reverse(ScrArr *a);
+
 /* pop traps on an empty array; _ref transfers ownership out (+1 to the
  * caller, no release). */
 double scr_arr_pop_f64(ScrArr *a);

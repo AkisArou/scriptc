@@ -8954,6 +8954,35 @@ class LlEmitter {
         B.line(`${t} = call double @scr_arr_len(ptr ${r.name})`);
         return { name: t, type: e.type };
       }
+      case "unshift": {
+        // Evaluate every argument before the first mutation, then insert
+        // from right to left so the final front order is source order.
+        const vs = e.args.map((a) => this.emitExpr(a));
+        if (acc === "ref") vs.forEach((v) => this.moveTemp(v));
+        this.declare(
+          `declare double @scr_arr_unshift_${acc}(ptr, ${accArg})`,
+        );
+        let last = "";
+        for (let i = vs.length - 1; i >= 0; i--) {
+          last = B.tmp();
+          B.line(
+            `${last} = call double @scr_arr_unshift_${acc}(ptr ${r.name}, ${accTy} ${vs[i]!.name})`,
+          );
+        }
+        if (last !== "") return { name: last, type: e.type };
+        this.declare(`declare double @scr_arr_len(ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call double @scr_arr_len(ptr ${r.name})`);
+        return { name: t, type: e.type };
+      }
+      case "unshiftSpread": {
+        // The runtime snapshots the borrowed source and handles self-spread.
+        const src = this.emitExpr(e.args[0]!);
+        this.declare(`declare double @scr_arr_unshift_spread(ptr, ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call double @scr_arr_unshift_spread(ptr ${r.name}, ptr ${src.name})`);
+        return { name: t, type: e.type };
+      }
       case "pop": {
         // Ownership of a refcounted element moves OUT of the array to
         // this temp (+1 to us, the runtime does not release it).
@@ -9011,6 +9040,13 @@ class LlEmitter {
         this.declare(`declare ptr @scr_arr_to_reversed(ptr)`);
         const t = B.tmp();
         B.line(`${t} = call ptr @scr_arr_to_reversed(ptr ${r.name})`);
+        return this.own({ name: t, type: e.type });
+      }
+      case "reverse": {
+        // Mutates in place and returns the same receiver as a fresh +1.
+        this.declare(`declare ptr @scr_arr_reverse(ptr)`);
+        const t = B.tmp();
+        B.line(`${t} = call ptr @scr_arr_reverse(ptr ${r.name})`);
         return this.own({ name: t, type: e.type });
       }
       case "toSpliced": {

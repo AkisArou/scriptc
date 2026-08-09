@@ -2372,9 +2372,9 @@ function validateFunction(
         }
         const elem = e.receiver.type.elem;
         const sig =
-          e.method === "push"
+          e.method === "push" || e.method === "unshift"
             ? { argTypes: e.args.map(() => elem), result: F64 }
-            : e.method === "pushSpread"
+            : e.method === "pushSpread" || e.method === "unshiftSpread"
               ? { argTypes: [e.receiver.type], result: F64 }
               : e.method === "pop"
               ? { argTypes: [], result: elem }
@@ -2388,6 +2388,8 @@ function validateFunction(
                   ? { argTypes: [F64, F64], result: e.receiver.type }
                   : e.method === "toReversed"
                     ? { argTypes: [], result: e.receiver.type }
+                    : e.method === "reverse"
+                      ? { argTypes: [], result: e.receiver.type }
                     : e.method === "toSpliced"
                       ? { argTypes: [F64, F64, e.receiver.type], result: e.receiver.type }
                       : e.method === "with"
