@@ -569,6 +569,38 @@ async function refusal(
   }));
 }
 
+async function acceptance(
+  source: string,
+  profilePatch: Record<string, unknown>,
+  emission: Emission = "c",
+): Promise<void> {
+  const outDir = join(cacheDir, `acceptance-${refusalCounter++}`);
+  mkdirSync(outDir, { recursive: true });
+  const entry = join(outDir, "lib.ts");
+  writeFileSync(entry, source);
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(
+    profilePath,
+    JSON.stringify({
+      profile_format: 1,
+      name: "acceptance-fixture",
+      entry,
+      emission,
+      abi: {
+        prefix: "kx_",
+        init_symbol: "kx_init",
+        sink_register_symbol: "kx_set_panic_sink",
+        collect_symbol: null,
+        result_reset_symbol: null,
+      },
+      exports: [],
+      ...profilePatch,
+    }),
+  );
+  const result = await compileLibrary({ profilePath, outDir });
+  expect(result.ok, result.ok ? undefined : result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+}
+
 describe("K9: library-mode refusals", () => {
   test("SC4002: unmapped export name", async () => {
     const diags = await refusal(`export function real(): number { return 1; }\n`, {
@@ -785,6 +817,25 @@ describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
     expect(diags[0]!.message).toContain("Date.now");
     expect(diags[0]!.note).toContain("time is an effect");
     expect(diags[0]!.file.endsWith("lib.ts")).toBe(true);
+  });
+
+  test("an exact Date.valueOf fence does not also fence getTime", async () => {
+    const exportProfile = {
+      exports: [{ export: "read", symbol: "kx_read", params: [], returns: "f64" }],
+      determinism: { fences: [{ id: "stdlib.date.valueOf" }] },
+    };
+    await acceptance(
+      `export function read(): number { return new Date(0).getTime(); }\n`,
+      exportProfile,
+      emission,
+    );
+    const diags = await refusal(
+      `export function read(): number { return new Date(0).valueOf(); }\n`,
+      exportProfile,
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'stdlib.date.valueOf'");
   });
 
   test("a process.env read under the full-fence profile refuses SC4008 naming the process entry", async () => {

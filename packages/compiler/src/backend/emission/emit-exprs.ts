@@ -2823,6 +2823,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const t = e.args[0]!.type;
           switch (t.kind) {
             case "f64":
+            case "date":
               E.line(`scr_promise_fulfill_f64(${p.name}, ${v.name});${E.srcComment(e.loc)}`);
               break;
             case "bool":
@@ -6531,7 +6532,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "date.now":
             // Node's integer milliseconds since epoch. Never throws.
             return finish(`scr_date_now()`);
+          case "date.newNow":
+            return finish(`scr_date_now()`);
+          case "date.newMs":
+            return finish(`scr_date_new_ms(${arg(0)})`);
+          case "date.newString":
+            return finish(`scr_date_parse_get_time(${arg(0)})`);
+          case "date.getTime":
+          case "date.valueOf":
+            return finish(`${arg(0)}`);
           case "date.toISOString":
+          case "date.toISOStringValue":
             // +1 string, or Node's "Invalid time value" RangeError
             // (may-throw seed set).
             return finish(`scr_date_to_iso(${arg(0)})`);
@@ -6545,6 +6556,39 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               `scr_date_utc(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)}, ${arg(6)})`,
             );
+          case "date.getFullYear":
+            return finish(`scr_date_get_full_year(${arg(0)}, false)`);
+          case "date.getUTCFullYear":
+            return finish(`scr_date_get_full_year(${arg(0)}, true)`);
+          case "date.getMonth":
+            return finish(`scr_date_get_month(${arg(0)}, false)`);
+          case "date.getUTCMonth":
+            return finish(`scr_date_get_month(${arg(0)}, true)`);
+          case "date.getDate":
+            return finish(`scr_date_get_date(${arg(0)}, false)`);
+          case "date.getUTCDate":
+            return finish(`scr_date_get_date(${arg(0)}, true)`);
+          case "date.getDay":
+            return finish(`scr_date_get_day(${arg(0)}, false)`);
+          case "date.getUTCDay":
+            return finish(`scr_date_get_day(${arg(0)}, true)`);
+          case "date.getHours":
+            return finish(`scr_date_get_hours(${arg(0)}, false)`);
+          case "date.getUTCHours":
+            return finish(`scr_date_get_hours(${arg(0)}, true)`);
+          case "date.getMinutes":
+            return finish(`scr_date_get_minutes(${arg(0)}, false)`);
+          case "date.getUTCMinutes":
+            return finish(`scr_date_get_minutes(${arg(0)}, true)`);
+          case "date.getSeconds":
+            return finish(`scr_date_get_seconds(${arg(0)}, false)`);
+          case "date.getUTCSeconds":
+            return finish(`scr_date_get_seconds(${arg(0)}, true)`);
+          case "date.getMilliseconds":
+          case "date.getUTCMilliseconds":
+            return finish(`scr_date_get_milliseconds(${arg(0)})`);
+          case "date.getTimezoneOffset":
+            return finish(`scr_date_get_timezone_offset(${arg(0)})`);
           case "text.decode":
             // WHATWG utf-8 decode with the leading BOM stripped
             // (scr_bytes.c). Borrowed bytes; +1 string; never throws.
@@ -6705,7 +6749,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         if (e.value === null) throw new Error("emitter bug: yieldExpr with no operand (frontend fills undefined)");
         const v = E.emitExpr(e.value);
         const yt = e.value.type;
-        if (yt.kind === "f64") {
+        if (yt.kind === "f64" || yt.kind === "date") {
           E.line(`scr_gen_yield_f64(${v.name});${E.srcComment(e.loc)}`);
         } else if (yt.kind === "bool") {
           E.line(`scr_gen_yield_bool(${v.name});${E.srcComment(e.loc)}`);
@@ -6720,6 +6764,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // fences value-position yields on this channel).
             return { name: "", type: e.type };
           case "f64":
+          case "date":
             return E.newTemp(e.type, `scr_gen_take_in_f64()`);
           case "bool":
             return E.newTemp(e.type, `scr_gen_take_in_bool()`);
@@ -6753,7 +6798,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           } else {
             const nt = e.arg.type;
             sendArg((a) =>
-              nt.kind === "f64" ? `scr_gen_in_f64(${g.name}, ${a.name});${E.srcComment(e.loc)}`
+              nt.kind === "f64" || nt.kind === "date" ? `scr_gen_in_f64(${g.name}, ${a.name});${E.srcComment(e.loc)}`
               : nt.kind === "bool" ? `scr_gen_in_bool(${g.name}, ${a.name});${E.srcComment(e.loc)}`
               : `scr_gen_in_ref(${g.name}, ${a.name}, ${vAdapters(nt).release});${E.srcComment(e.loc)}`);
           }
@@ -6764,7 +6809,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           } else {
             const rt = e.arg.type;
             sendArg((a) =>
-              rt.kind === "f64" ? `scr_gen_ret_f64(${g.name}, ${a.name});${E.srcComment(e.loc)}`
+              rt.kind === "f64" || rt.kind === "date" ? `scr_gen_ret_f64(${g.name}, ${a.name});${E.srcComment(e.loc)}`
               : rt.kind === "bool" ? `scr_gen_ret_bool(${g.name}, ${a.name});${E.srcComment(e.loc)}`
               : `scr_gen_ret_ref(${g.name}, ${a.name}, ${vAdapters(rt).release});${E.srcComment(e.loc)}`);
           }
@@ -6778,7 +6823,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const a = E.emitExpr(e.arg);
           const t = e.arg.type;
           if (isRefCounted(t)) E.moveTemp(a); // the cell takes ownership
-          if (t.kind === "f64") {
+          if (t.kind === "date") {
+            throw new Error("emitter bug: Date generator throw reached backend");
+          } else if (t.kind === "f64") {
             E.line(`scr_throw_f64(${a.name});${E.srcComment(e.loc)}`);
           } else if (t.kind === "bool") {
             E.line(`scr_throw_bool(${a.name});${E.srcComment(e.loc)}`);
@@ -6807,6 +6854,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         let read: string;
         switch (e.type.kind) {
           case "f64":
+          case "date":
             read = `scr_await_f64(${pr.name})`;
             break;
           case "bool":
@@ -6929,6 +6977,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         let mk: string;
         switch (inner.kind) {
           case "f64":
+          case "date":
             mk = `scr_make_resolve(${p.name}, 0)`;
             break;
           case "bool":
@@ -6992,6 +7041,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         let mk: string;
         switch (inner.kind) {
           case "f64":
+          case "date":
             mk = `scr_make_resolve(${p.name}, 0)`;
             break;
           case "bool":

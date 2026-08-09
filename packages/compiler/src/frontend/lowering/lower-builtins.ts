@@ -6071,13 +6071,32 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
     return null; // other Number statics land on the member fence
   }
 
-/** The Date slice: `Date.now()` and the COMPOSED
-   * `new Date(ms?).toISOString()` — the Date object between the two calls
-   * never exists (the crypto randomBytes(n).toString(enc) precedent). An
-   * omitted constructor argument completes with date.now; a one-argument
-   * form takes the milliseconds. String parsing, Y/M/D fields (local-time
-   * semantics), and Date VALUES stay fenced — lowerNew carries the hint.
-   * Null when this is neither form. */
+const DATE_GETTER_FNS: Readonly<Record<string, IrLibFn>> = {
+  getFullYear: "date.getFullYear",
+  getUTCFullYear: "date.getUTCFullYear",
+  getMonth: "date.getMonth",
+  getUTCMonth: "date.getUTCMonth",
+  getDate: "date.getDate",
+  getUTCDate: "date.getUTCDate",
+  getDay: "date.getDay",
+  getUTCDay: "date.getUTCDay",
+  getHours: "date.getHours",
+  getUTCHours: "date.getUTCHours",
+  getMinutes: "date.getMinutes",
+  getUTCMinutes: "date.getUTCMinutes",
+  getSeconds: "date.getSeconds",
+  getUTCSeconds: "date.getUTCSeconds",
+  getMilliseconds: "date.getMilliseconds",
+  getUTCMilliseconds: "date.getUTCMilliseconds",
+  getTimezoneOffset: "date.getTimezoneOffset",
+};
+
+const DATE_METHOD_HINT =
+  "getTime(), valueOf(), toISOString(), the local/UTC calendar getters, and getTimezoneOffset() are supported; Date setters and locale/string formatters have no lowering";
+
+/** The Date slice: statics plus read-only Date values backed by one
+   * TimeClip'd millisecond scalar. Construction lives in lowerNew;
+   * identity and mutating methods remain fenced. */
   export function lowerDateCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (call.questionDotToken || access.questionDotToken) return null;
@@ -6108,71 +6127,31 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
       }
       return { kind: "libCall", fn: "date.utc", args, type: F64, loc };
     }
-    if (access.name.text !== "toISOString" && access.name.text !== "getTime") return null;
-    const recv = access.expression;
-    if (!ts.isNewExpression(recv) || !ts.isIdentifier(recv.expression)) return null;
-    const sym = L.resolveValueSymbol(recv.expression);
-    if (!sym || sym.name !== "Date" || !L.isStdlibSymbol(sym)) return null;
-    if (access.name.text === "getTime") {
-      // The composed `new Date(x).getTime()` read — the Date value
-      // between the two never materializes (the toISOString precedent).
-      // new Date().getTime() IS Date.now(); the STRING form parses the
-      // bounded date-string grammar (the X509 validity shape portless's
-      // cert-expiry check reads, plus ECMA's own date-time format) and
-      // answers NaN elsewhere — a documented divergence from V8's wider
-      // parser. The ms form is pointless composition; the fence points at
-      // the value.
-      if (call.arguments.length !== 0) {
-        L.noLowering("getTime with arguments", call);
-      }
-      const ctorArgs = recv.arguments ?? [];
-      if (ctorArgs.length === 0) {
-        return { kind: "libCall", fn: "date.now", args: [], type: F64, loc };
-      }
-      if (ctorArgs.length !== 1) {
-        L.noLowering(
-          "new Date with year/month/day arguments",
-          recv,
-          "the field constructor is local-time; only new Date() and new Date(dateString) compose with .getTime()",
-        );
-      }
-      const arg = L.lowerExpr(ctorArgs[0]!);
-      if (arg.type.kind !== "string") {
-        L.noLowering(
-          `new Date of '${L.fmt(arg.type)}' values composed with .getTime()`,
-          ctorArgs[0]!,
-          arg.type.kind === "f64"
-            ? "new Date(ms).getTime() is the ms value — use it directly (or Date.now())"
-            : "the composed form parses date STRINGS — narrow unions first",
-        );
-      }
-      return { kind: "libCall", fn: "date.parseGetTime", args: [arg], type: F64, loc };
-    }
+    if (L.mapTypeOf(L.typeOf(access.expression))?.kind !== "date") return null;
+    if (!L.isStdlibMember(access)) return null;
+    const name = access.name.text;
     if (call.arguments.length !== 0) {
-      L.noLowering("toISOString with arguments", call);
+      L.noLowering(`Date.prototype.${name} with arguments`, call, DATE_METHOD_HINT);
     }
-    const ctorArgs = recv.arguments ?? [];
-    let ms: IrExpr;
-    if (ctorArgs.length === 0) {
-      ms = { kind: "libCall", fn: "date.now", args: [], type: F64, loc };
-    } else if (ctorArgs.length === 1) {
-      const arg = L.lowerExpr(ctorArgs[0]!);
-      if (arg.type.kind !== "f64") {
-        L.noLowering(
-          `new Date of '${L.fmt(arg.type)}' values`,
-          ctorArgs[0]!,
-          "only the milliseconds form composes — new Date(ms).toISOString(); date-string parsing has no lowering",
-        );
-      }
-      ms = arg;
-    } else {
-      L.noLowering(
-        "new Date with year/month/day arguments",
-        recv,
-        "the field constructor is local-time; only new Date() and new Date(ms) compose with .toISOString()",
-      );
+    const receiver = L.lowerExpr(access.expression);
+    if (receiver.type.kind !== "date") L.badType(access.expression, L.typeOf(access.expression));
+    if (name === "getTime" || name === "valueOf") {
+      return {
+        kind: "libCall",
+        fn: name === "getTime" ? "date.getTime" : "date.valueOf",
+        args: [receiver],
+        type: F64,
+        loc,
+      };
     }
-    return { kind: "libCall", fn: "date.toISOString", args: [ms], type: STRING, loc };
+    if (name === "toISOString") {
+      return { kind: "libCall", fn: "date.toISOStringValue", args: [receiver], type: STRING, loc };
+    }
+    const fn = DATE_GETTER_FNS[name];
+    if (fn !== undefined) {
+      return { kind: "libCall", fn, args: [receiver], type: F64, loc };
+    }
+    L.noLowering(`Date.prototype.${name}`, call, DATE_METHOD_HINT, L.checker.getSymbolAtLocation(access.name));
   }
 
 type TextCodecCtor = {

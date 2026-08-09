@@ -791,11 +791,19 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       if (caughtLocal) {
         return { kind: "rethrow", localId: caughtLocal.id, loc: locOf(stmt) };
       }
-      // Any supported value type can be thrown; ownership moves into the
-      // runtime's exception cell. `throw f()` of a void call has no value —
-      // rejected via the type fence.
+      // Exception-representable values move into the runtime's exception
+      // cell. `throw f()` of a void call has no value; Date has numeric
+      // storage internally, but cannot preserve its object kind through the
+      // untyped catch boundary. Reject both rather than changing JS identity.
       const value = L.lowerExpr(stmt.expression);
       if (value.type.kind === "void") L.badType(stmt.expression, L.typeOf(stmt.expression));
+      if (value.type.kind === "date") {
+        L.unsupported(
+          "SC1090",
+          stmt.expression,
+          "throwing Date values (catch bindings cannot preserve Date's object kind; throw an Error or primitive instead)",
+        );
+      }
       // A dyn throw rides the REF cell arm (scr_throw_ref over the checked-dynamic tree
       // node — identity preserved through catch bindings, caughtToDyn
       // passes it back by reference). The JS-lane traced-call shape:

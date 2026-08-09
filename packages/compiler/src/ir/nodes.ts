@@ -31,6 +31,12 @@ export type IrBytesElem = "u8" | "u32" | "i32" | "f32";
 
 export type IrType =
   | { kind: "f64" }
+  /** The supported ES Date value slice: a scalar TimeClip'd millisecond
+   * value. Getters and toISOString observe only this slot, so copying it
+   * through locals/params/fields is exact while Date mutation and object
+   * identity remain frontend-fenced. It is therefore intentionally NOT
+   * refcounted despite being truthy like every JS object. */
+  | { kind: "date" }
   | { kind: "string" } // heap, refcounted, UTF-8
   | { kind: "bool" }
   | { kind: "array"; elem: IrType } // heap, refcounted, monomorphic elements
@@ -307,7 +313,7 @@ export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
   // symbol is not a JS object, but every symbol is truthy — the same
   // constant-true answer.
   "symbol",
-  "array", "map", "set", "regex", "url", "searchParams", "stats", "spawnRes", "child",
+  "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "spawnRes", "child",
   "netServer", "netSocket", "http2Session", "http2Stream", "dgramSocket", "testCtx", "httpReq", "httpRes", "httpClientReq",
   "secureCtx", "fsWatcher", "childStream", "procStream", "bytes", "func", "object", "record", "promise",
   // A generator object is a JS object: always truthy.
@@ -317,6 +323,7 @@ export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 export const F64: IrType = { kind: "f64" };
+export const DATE_T: IrType = { kind: "date" };
 export const BYTES_U8: IrType = { kind: "bytes", elem: "u8" };
 export const STRING: IrType = { kind: "string" };
 export const BOOL: IrType = { kind: "bool" };
@@ -499,6 +506,7 @@ export function unionFuncSetArmsOk(arms: IrType[]): boolean {
 export function typeKey(t: IrType): string {
   switch (t.kind) {
     case "f64":
+    case "date":
     case "string":
     case "bool":
     case "regex":
@@ -3724,17 +3732,40 @@ export type IrLibFn =
   | "number.isNaN"
   | "number.isInteger"
   | "number.isSafeInteger"
-  /** Date, the composed slice (scr_lib.c). Date VALUES have no
-   * representation — exactly `Date.now()` and the composed
-   * `new Date(ms?).toISOString()` forms lower. date.now is Node's integer
-   * milliseconds since epoch (never throws); date.toISOString formats one
-   * f64 millisecond time value with Node's exact rules (UTC,
+  /** Date (scr_lib.c). Values are TimeClip'd epoch-millisecond scalars:
+   * construction/store/pass/getters are exact while identity and mutation
+   * remain fenced. date.now is Node's integer milliseconds since epoch;
+   * date.toISOString formats one raw f64 millisecond time value and
+   * date.toISOStringValue formats a stored Date, both with Node's rules (UTC,
    * YYYY-MM-DDTHH:mm:ss.sssZ, expanded ±YYYYYY years outside 0–9999,
    * ToInteger truncation of fractional ms) and THROWS Node's "Invalid
    * time value" RangeError on NaN / out-of-range input (may-throw seed).
    * Results: f64 / owned (+1) string. */
   | "date.now"
+  | "date.newNow"
+  | "date.newMs"
+  | "date.newString"
+  | "date.getTime"
+  | "date.valueOf"
   | "date.toISOString"
+  | "date.toISOStringValue"
+  | "date.getFullYear"
+  | "date.getUTCFullYear"
+  | "date.getMonth"
+  | "date.getUTCMonth"
+  | "date.getDate"
+  | "date.getUTCDate"
+  | "date.getDay"
+  | "date.getUTCDay"
+  | "date.getHours"
+  | "date.getUTCHours"
+  | "date.getMinutes"
+  | "date.getUTCMinutes"
+  | "date.getSeconds"
+  | "date.getUTCSeconds"
+  | "date.getMilliseconds"
+  | "date.getUTCMilliseconds"
+  | "date.getTimezoneOffset"
   /** The composed `new Date(dateString).getTime()` read: one borrowed
    * string, f64 milliseconds since epoch. The parsed grammar is BOUNDED
    * (documented divergence — V8's parser accepts far more): the ASN.1
@@ -5091,6 +5122,7 @@ function isJsonSafeAt(
     // Regexes are not JSON (JSON.stringify(/a/) is "{}" in Node — the same
     // empty-object husk as Maps; stringify/dynCheck reject instead).
     case "regex":
+    case "date":
     // URLs stringify as "{}" husks in Node too (data properties live on
     // internal slots) — rejected the same way; use url.href instead.
     case "url":
@@ -6847,6 +6879,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.writeFileSyncBytes",
   "zlib.inflateSync",
   "date.toISOString",
+  "date.toISOStringValue",
   "fs.mkdirRecursiveSync",
   "fs.rmOptsSync",
   "fs.rmRetrySync",

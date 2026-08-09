@@ -1487,7 +1487,7 @@ export class CEmitter {
     this.releaseForJump(0, 0);
     const t = this.currentReturnType;
     if (t.kind === "void") this.line(`return;`);
-    else if (t.kind === "f64") this.line(`return 0;`);
+    else if (t.kind === "f64" || t.kind === "date") this.line(`return 0;`);
     else if (t.kind === "bool") this.line(`return false;`);
     else this.line(`return NULL;`);
   }
@@ -1693,6 +1693,10 @@ export class CEmitter {
         return `${t.name} == ${t.name} && ${t.name} != 0`;
       case "string":
         return `${t.name}->len != 0`;
+      case "date":
+        // The scalar payload may be 0 or NaN, but the source Date object
+        // is always truthy.
+        return "true";
       case "jsval":
         // Island truthiness: the engine's ToBoolean (never throws, no
         // ownership change) — jsval operands are legal in `logical`.

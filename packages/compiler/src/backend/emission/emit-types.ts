@@ -17,6 +17,7 @@ import {
 export function cType(t: IrType): string {
   switch (t.kind) {
     case "f64":
+    case "date":
       return "double";
     case "bool":
       return "bool";
@@ -284,6 +285,7 @@ export function releaseCallC(type: IrType, expr: string): string {
 export function boxKindC(t: IrType): string {
   switch (t.kind) {
     case "f64":
+    case "date":
       return "SCR_BOX_F64";
     case "bool":
       return "SCR_BOX_BOOL";
@@ -444,7 +446,7 @@ export function vAdapters(t: IrType): { retain: string; release: string } {
 export function boxAccess(t: IrType): "f64" | "bool" | "ref" {
   // procStream is a scalar (the stream's fd double — boxKindC agrees with
   // SCR_BOX_F64), so its captures ride the f64 slot like any number.
-  return t.kind === "f64" || t.kind === "procStream" ? "f64" : t.kind === "bool" ? "bool" : "ref";
+  return t.kind === "f64" || t.kind === "date" || t.kind === "procStream" ? "f64" : t.kind === "bool" ? "bool" : "ref";
 }
 
 /** C function-pointer cast for calling through a closure: the callee
@@ -505,6 +507,7 @@ export function elemKindC(elem: IrType): string {
     case "map":
     case "set":
     case "regex":
+    case "date":
     case "url":
     case "searchParams":
     case "stats":

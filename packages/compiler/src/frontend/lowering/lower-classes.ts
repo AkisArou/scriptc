@@ -5,7 +5,7 @@
  * hierarchy registration. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { BOOL, DYN, F64, bytesOf, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
+import { BOOL, DATE_T, DYN, F64, bytesOf, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
 import { MAX_GENERIC_INSTANCES, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { cjsClassExprWholeExportOf, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeTypesPath, locOf } from "../program.js";
@@ -494,7 +494,7 @@ export interface GenericClassInfo {
    * level (undefined until the write runs, Node-exact). Null when the
    * inference is unmappable, checked-dynamic (dyn stays out of class
    * fields — KEEP NARROW), or an arm-less kind that cannot join a union
-   * (genResultRecord's list). */
+   * (genResultRecord's list, including scalar-backed Date values). */
   function undefArmedFieldType(L: Lowerer, p: ts.Symbol): IrType | null {
     const t = L.checker.getTypeOfSymbol(p);
     const mapped = L.mapTypeOf(t);
@@ -502,7 +502,10 @@ export interface GenericClassInfo {
     const byKey = new Map<string, IrType>();
     const arms = mapped.kind === "union" ? (L.unions.get(mapped.unionId)?.arms ?? []) : [mapped];
     for (const a of arms) {
-      if (a.kind === "map" || a.kind === "regex" || a.kind === "jsval" || a.kind === "generator") {
+      if (
+        a.kind === "map" || a.kind === "regex" || a.kind === "date" ||
+        a.kind === "jsval" || a.kind === "generator"
+      ) {
         return null;
       }
       byKey.set(typeKey(a), a);
@@ -1948,7 +1951,8 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           const armable =
             declared !== undefined && !isUnitType(declared) &&
             declared.kind !== "union" && declared.kind !== "jsval" && declared.kind !== "dyn" &&
-            declared.kind !== "map" && declared.kind !== "generator" && declared.kind !== "void" &&
+            declared.kind !== "map" && declared.kind !== "date" && declared.kind !== "generator" &&
+            declared.kind !== "void" &&
             declared.kind !== "caught";
           const armed = armable ? L.withUndefinedArm(declared) : null;
           if (armed !== null && armed.kind === "union") {
@@ -5020,14 +5024,37 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
       if (symbol && symbol.name === "URLSearchParams" && L.isStdlibSymbol(symbol)) {
         return lowerSearchParamsNew(L, expr, loc);
       }
-      // `new Date(...)` NOT consumed by the composed toISOString lowering
-      // (lowerDateCall claims that form before the receiver lowers): Date
-      // values have no representation — point at what does compile.
+      // Date's read-only value slice: store the constructor's TimeClip'd
+      // epoch milliseconds as the scalar date kind. That is sufficient
+      // for every getter and toISOString; identity and setters stay
+      // fenced, so copying the scalar cannot create an observable lie.
       if (symbol && symbol.name === "Date" && L.isStdlibSymbol(symbol)) {
+        const args = expr.arguments ?? [];
+        if (args.some(ts.isSpreadElement) || args.length > 1) {
+          L.noLowering(
+            `new Date with ${args.length} arguments`,
+            expr,
+            "new Date(), new Date(milliseconds), and new Date(dateString) are supported; the local-time year/month field constructor has no lowering",
+            symbol,
+          );
+        }
+        if (args.length === 0) {
+          return { kind: "libCall", fn: "date.newNow", args: [], type: DATE_T, loc };
+        }
+        const arg = L.lowerExpr(args[0]!);
+        if (arg.type.kind === "f64") {
+          return { kind: "libCall", fn: "date.newMs", args: [arg], type: DATE_T, loc };
+        }
+        if (arg.type.kind === "string") {
+          return { kind: "libCall", fn: "date.newString", args: [arg], type: DATE_T, loc };
+        }
+        if (arg.type.kind === "date") {
+          return arg;
+        }
         L.noLowering(
-          "new Date",
-          expr,
-          "Date values have no representation — Date.now() and the composed new Date(ms?).toISOString() form compile",
+          `new Date of '${L.fmt(arg.type)}' values`,
+          args[0]!,
+          "pass milliseconds, a date string, or another Date value",
           symbol,
         );
       }

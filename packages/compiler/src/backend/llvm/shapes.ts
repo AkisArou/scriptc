@@ -528,7 +528,7 @@ export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): stri
  * data) for per-shape payloads and cycle-capable arrays. SCR_BOX_* tags
  * from scr_runtime.h. */
 export function boxNewCall(host: ShapeHost, t: IrType): string {
-  const plain: Partial<Record<IrType["kind"], number>> = { f64: 0, bool: 1, string: 2, func: 4 };
+  const plain: Partial<Record<IrType["kind"], number>> = { f64: 0, date: 0, bool: 1, string: 2, func: 4 };
   const kind = plain[t.kind];
   if (kind !== undefined) {
     host.declare(`declare ptr @scr_box_new(i32)`);
@@ -565,7 +565,7 @@ export function boxNewCall(host: ShapeHost, t: IrType): string {
 
 /** Box accessor suffix (boxAccess): scalars unboxed, ref kinds pointers. */
 export function boxAccess(t: IrType): "f64" | "bool" | "ref" {
-  return t.kind === "f64" ? "f64" : t.kind === "bool" ? "bool" : "ref";
+  return t.kind === "f64" || t.kind === "date" ? "f64" : t.kind === "bool" ? "bool" : "ref";
 }
 
 /* ── record shapes ────────────────────────────────────────────────────── */
@@ -575,6 +575,7 @@ export function boxAccess(t: IrType): "f64" | "bool" | "ref" {
 export function llFieldType(t: IrType): "double" | "i8" | "ptr" {
   switch (t.kind) {
     case "f64":
+    case "date":
       return "double";
     case "bool":
       return "i8";

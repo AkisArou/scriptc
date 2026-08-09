@@ -1,6 +1,6 @@
 import * as ts from "./ts7/adapter.js";
 import type { IrRecordShape, IrType, IrUnionDef } from "../ir/nodes.js";
-import { arrayOf, BOOL, bytesOf, canConvertToDyn, CHILD_T, DYN, F64, funcOf, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/nodes.js";
+import { arrayOf, BOOL, bytesOf, canConvertToDyn, CHILD_T, DATE_T, DYN, F64, funcOf, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/nodes.js";
 
 import { isJsSourceFile, isNodeTypesPath } from "./program.js";
 import { accessorSlotProp } from "../ir/nodes.js";
@@ -340,6 +340,8 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
       return "any";
     case "regex":
       return "RegExp";
+    case "date":
+      return "Date";
     case "url":
       return "URL";
     case "searchParams":
@@ -894,7 +896,9 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // declarations intern one immortal closure, and inner closures are
   // allocated once at their definition's evaluation and flow by
   // reference, exactly JS's function identity. map/set/regex/url/dyn and
-  // the other opaque handles stay unsupported.
+  // Date (scalar-backed but identity-bearing in JS) and the other opaque
+  // handles stay unsupported as array elements; ordinary Date locals,
+  // params, fixed record/tuple fields, and promise payloads are supported.
   if (checker.isArrayType(widened)) {
     const elemTs = checker.getTypeArguments(widened as ts.TypeReference)[0];
     if (!elemTs) return null;
@@ -922,6 +926,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (
       !elem ||
       elem.kind === "void" ||
+      elem.kind === "date" ||
       elem.kind === "map" ||
       elem.kind === "set" ||
       elem.kind === "url" ||
@@ -1443,6 +1448,11 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (!elem || !isSupportedSetElem(elem)) return null;
     return setOf(elem);
   }
+  // Date: a TimeClip'd epoch-millisecond scalar in the static runtime.
+  // This supports stored/passed values and the read-only getter slice;
+  // identity and mutation stay fenced because the scalar deliberately
+  // carries no object identity.
+  if (isStdlibInterface("Date")) return DATE_T;
   // RegExp: a reference to the lib RegExp interface — provenance, not the
   // name (a user's own `interface RegExp` maps as a record). Regex values
   // are literals interned as immortal statics; the kind is fenced out of
@@ -2445,7 +2455,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
             // arms map: `x instanceof RegExp` is their narrowing test
             // (the skip-utility `string | RegExp` shape), and the arm
             // rides the ref machinery like array regex elements.
-            a.kind === "map" || a.kind === "set" || a.kind === "dyn" ||
+            a.kind === "map" || a.kind === "set" || a.kind === "date" || a.kind === "dyn" ||
             // Generator arms follow the map/set rule: no narrowing test.
             a.kind === "generator" ||
             // Func arms map beside ANY sibling: `typeof x === "function"`
@@ -2747,7 +2757,7 @@ export function unitOnlyUnion(unions: UnionRegistry): IrType {
  * `.return()`, `.throw()`, the for-of desugar, and mapType's
  * IteratorResult alias mapping all intern through here, so reads agree.
  * Null when the combined union would be illegal (a func/set arm beside
- * data arms, a map/regex arm — kinds with no narrowing test): such
+ * data arms, a map/regex/Date arm — kinds with no narrowing test): such
  * generators stay unmapped. */
 export function genResultRecord(
   yieldT: IrType,
@@ -2766,7 +2776,10 @@ export function genResultRecord(
         for (const a of unions.get(t.unionId)?.arms ?? []) byKey.set(typeKey(a), a);
         return true;
       }
-      if (t.kind === "map" || t.kind === "regex" || t.kind === "jsval" || t.kind === "generator") {
+      if (
+        t.kind === "map" || t.kind === "regex" || t.kind === "date" ||
+        t.kind === "jsval" || t.kind === "generator"
+      ) {
         return false; // no legal union arm exists for these kinds
       }
       byKey.set(typeKey(t), t);
@@ -2816,7 +2829,7 @@ export function isUnitOnlyTsType(t: ts.Type): boolean {
 
 /** IR-level `t | undefined`, canonicalized and fenced exactly like the
  * ts-union branch of mapType (typeKey-sorted arms, deduplicated; map/
- * regex/dyn/void arms unrepresentable; a func arm IS representable — the
+ * regex/Date/dyn/void arms unrepresentable; a func arm IS representable — the
  * result is exactly the nullable-callback shape mapType's union branch
  * admits, `(() => void) | undefined`) so the interned union is IDENTICAL
  * to what mapping the checker's own `T | undefined` produces. */
@@ -2824,13 +2837,14 @@ export function withUndefinedArm(t: IrType, unions: UnionRegistry): IrType | nul
   if (t.kind === "union") {
     const def = unions.get(t.unionId);
     if (!def) return null;
+    if (def.arms.some((a) => a.kind === "date")) return null;
     if (def.arms.some((a) => a.kind === "undefinedT")) return t;
     const arms = [...def.arms, UNDEFINED_T];
     arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
     return { kind: "union", unionId: unions.intern(arms) };
   }
   if (
-    t.kind === "void" || t.kind === "map" || t.kind === "dyn" ||
+    t.kind === "void" || t.kind === "map" || t.kind === "date" || t.kind === "dyn" ||
     // A bare unit field type cannot occur (units live only inside unions),
     // but guard against constructing a single-arm union from one.
     isUnitType(t)
@@ -3355,6 +3369,7 @@ function armHasUnionHome(arm: IrType, siblingCount: number): boolean {
     case "map":
     case "set":
     case "regex":
+    case "date":
     case "generator":
     case "dyn":
       return false;

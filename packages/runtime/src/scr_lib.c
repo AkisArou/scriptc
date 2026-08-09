@@ -3320,9 +3320,10 @@ double scr_str_last_index_of(ScrStr *s, ScrStr *needle) {
   return -1.0;
 }
 
-/* ── Date, the composed slice ──────────────────────────────────────────
- * Date values have no representation — the compiled surface is exactly
- * Date.now() and the composed new Date(ms?).toISOString(). */
+/* ── Date, the read-only value slice ───────────────────────────────────
+ * Values are TimeClip'd epoch-millisecond scalars. Identity/mutation are
+ * frontend-fenced; construction, storage, getters, and ISO formatting
+ * observe exactly this payload. */
 
 double scr_date_now(void) {
   struct timespec ts;
@@ -3330,6 +3331,16 @@ double scr_date_now(void) {
   /* Node's Date.now() is integer milliseconds. */
   return floor((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
 }
+
+/* Date's TimeClip: non-finite/out-of-range values become Invalid Date,
+ * finite values truncate toward zero, and -0 normalizes to +0. */
+double scr_date_new_ms(double ms) {
+  if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return NAN;
+  double clipped = trunc(ms);
+  return clipped == 0 ? 0 : clipped;
+}
+
+double scr_date_get_time(double ms) { return ms; }
 
 /* Node's Date.prototype.toISOString over a millisecond time value:
  * TimeClip's ToInteger truncation, proleptic Gregorian civil-from-days
@@ -3397,7 +3408,7 @@ static double scr_days_from_civil(long long y, int m, int d) {
   return (double)(era * 146097 + (long long)doe - 719468);
 }
 
-static double scr_date_ms_of(long long y, int mo, int d, int hh, int mi, int ss, int ms) {
+static double scr_date_make_ms(long long y, int mo, int d, int hh, int mi, int ss, int ms) {
   /* V8 accepts days 1..31 in every month and ROLLS OVER past the month's
    * end (Feb 30 → Mar 2) — days_from_civil extrapolates linearly, so the
    * rollover falls out; day 0 and 32+ are NaN, like V8. */
@@ -3405,8 +3416,11 @@ static double scr_date_ms_of(long long y, int mo, int d, int hh, int mi, int ss,
   if (hh > 24 || mi > 59 || ss > 59 || (hh == 24 && (mi || ss || ms))) return NAN;
   double t = scr_days_from_civil(y, mo, d) * 86400000.0 +
              hh * 3600000.0 + mi * 60000.0 + ss * 1000.0 + ms;
-  if (fabs(t) > 8640000000000000.0) return NAN;
   return t;
+}
+
+static double scr_date_ms_of(long long y, int mo, int d, int hh, int mi, int ss, int ms) {
+  return scr_date_new_ms(scr_date_make_ms(y, mo, d, hh, mi, ss, ms));
 }
 
 static bool scr_date_digits(const char **p, const char *end, int n, int *out) {
@@ -3464,6 +3478,7 @@ double scr_date_parse_get_time(ScrStr *s) {
       bool neg = *p == '-';
       p++;
       if (!scr_date_digits(&p, end, 6, &y6)) return NAN;
+      if (neg && y6 == 0) return NAN; /* ECMA forbids expanded -000000 */
       yy = neg ? -(long long)y6 : y6;
     } else {
       if (!scr_date_digits(&p, end, 4, &y)) return NAN;
@@ -3499,14 +3514,18 @@ double scr_date_parse_get_time(ScrStr *s) {
       p++;
       if (!scr_date_digits(&p, end, 2, &oh) || p >= end || *p++ != ':') return NAN;
       if (!scr_date_digits(&p, end, 2, &om)) return NAN;
+      if (oh > 23 || om > 59) return NAN;
       off = (oh * 60 + om) * 60000.0;
       if (neg) off = -off;
     } else {
       return NAN;
     }
     if (p != end) return NAN;
-    double t = scr_date_ms_of(yy, mo, d, hh, mi, ss, ms);
-    return isnan(t) ? t : t - off;
+    /* MakeDate can lie just beyond the TimeClip boundary while the
+     * explicit offset brings the final UTC instant back into range. The
+     * spec clips only after that offset has been applied. */
+    double t = scr_date_make_ms(yy, mo, d, hh, mi, ss, ms);
+    return scr_date_new_ms(t - off);
   }
 }
 
@@ -3518,10 +3537,10 @@ double scr_date_parse_get_time(ScrStr *s) {
  * 1900+year (the spec's MakeFullYear), out-of-range months ROLL into the
  * year (Date.UTC(2017, 13) is Feb 2018) and any integer date offsets from
  * day 1 of that month — days_from_civil extrapolates linearly, so both
- * rollovers fall out. V8 bounds MakeDay's year to ±1e6 (kMaxYear/kMinYear,
- * date.h) before TimeClip can see the result, and Node answers NaN past
- * it — matched here, and it keeps days_from_civil's long long exact.
- * Never throws. */
+ * rollovers fall out. V8 bounds MakeDay's input year to ±1e6 and input
+ * month to ±1e7 before normalizing the month (kMaxYear/kMinYear and
+ * kMaxMonth/kMinMonth, date.h); Node answers NaN past either bound even
+ * when the two inputs would normalize back into range. Never throws. */
 double scr_date_utc(double y, double mo, double d,
                     double h, double mi, double s, double ms) {
   if (!isfinite(y) || !isfinite(mo) || !isfinite(d) || !isfinite(h) ||
@@ -3535,14 +3554,148 @@ double scr_date_utc(double y, double mo, double d,
   mi = trunc(mi);
   s = trunc(s);
   ms = trunc(ms);
+  if (fabs(y) > 1000000.0 || fabs(mo) > 10000000.0) return NAN;
   if (y >= 0 && y <= 99) y += 1900;
   double ym = y + floor(mo / 12.0);
   int mn = (int)(mo - floor(mo / 12.0) * 12.0); /* 0..11 */
-  if (fabs(ym) > 1000000.0) return NAN; /* V8's MakeDay year bound */
   double days = scr_days_from_civil((long long)ym, mn + 1, 1) + (d - 1.0);
   double t = days * 86400000.0 + h * 3600000.0 + mi * 60000.0 + s * 1000.0 + ms;
   if (fabs(t) > 8640000000000000.0) return NAN; /* TimeClip */
   return t == 0 ? 0 : t; /* normalize -0 (TimeClip's +0) */
+}
+
+/* ── Date calendar getters ────────────────────────────────────────────
+ * UTC fields use the same proleptic-Gregorian walk as toISOString, so the
+ * whole Date range is portable. Local fields use the host timezone via
+ * localtime, exactly the environment the sibling Node process observes;
+ * a libc that cannot represent an extreme instant answers NaN rather than
+ * inventing a zone. */
+
+typedef struct ScrDateParts {
+  long long year;
+  int month, date, day, hours, minutes, seconds, milliseconds;
+  double timezone_offset;
+} ScrDateParts;
+
+/* Calendar decomposition itself also serves LocalTime(t), which can lie
+ * just outside TimeClip's UTC interval after applying a zone offset at an
+ * endpoint. The checked wrapper is the public UTC-getter gate; the inner
+ * walk accepts those bounded local-time values too. */
+static void scr_date_utc_parts_unchecked(double t, ScrDateParts *out) {
+  double dayd = floor(t / 86400000.0);
+  long long msday = (long long)(t - dayd * 86400000.0);
+  long long z = (long long)dayd + 719468;
+  long long era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned long long doe = (unsigned long long)(z - era * 146097);
+  unsigned long long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  long long y = (long long)yoe + era * 400;
+  unsigned long long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned long long mp = (5 * doy + 2) / 153;
+  unsigned long long d = doy - (153 * mp + 2) / 5 + 1;
+  unsigned long long m = mp < 10 ? mp + 3 : mp - 9;
+  if (m <= 2) y++;
+  long long wday = ((long long)dayd + 4) % 7;
+  if (wday < 0) wday += 7;
+  out->year = y;
+  out->month = (int)m - 1;
+  out->date = (int)d;
+  out->day = (int)wday;
+  out->hours = (int)(msday / 3600000);
+  out->minutes = (int)(msday / 60000 % 60);
+  out->seconds = (int)(msday / 1000 % 60);
+  out->milliseconds = (int)(msday % 1000);
+  out->timezone_offset = 0;
+}
+
+static bool scr_date_utc_parts(double ms, ScrDateParts *out) {
+  if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
+  scr_date_utc_parts_unchecked(trunc(ms), out);
+  return true;
+}
+
+static bool scr_date_localtime(double secd, struct tm *out) {
+  time_t sec = (time_t)secd;
+  if ((double)sec != secd) return false;
+#ifdef _WIN32
+  return localtime_s(out, &sec) == 0;
+#else
+  return localtime_r(&sec, out) != NULL;
+#endif
+}
+
+static bool scr_date_local_parts(double ms, ScrDateParts *out) {
+  if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
+  double clipped = trunc(ms);
+  double secd = floor(clipped / 1000.0);
+  struct tm tmv;
+  double basis_secd = secd;
+  if (!scr_date_localtime(basis_secd, &tmv)) {
+    /* Windows' _localtime64_s rejects pre-epoch instants and years after
+     * 3001 even though both are valid ECMAScript Dates. Query the host's
+     * zone rule at a calendar-equivalent surrogate year in 2000..2399:
+     * Gregorian weekdays/leap years repeat every 400 years. This keeps
+     * every valid Date finite; the OS-vs-Node historical-rule difference
+     * remains the documented timezone-data divergence. */
+    ScrDateParts utc;
+    scr_date_utc_parts_unchecked(clipped, &utc);
+    long long cycle_year = (utc.year - 2000) % 400;
+    if (cycle_year < 0) cycle_year += 400;
+    long long surrogate_year = 2000 + cycle_year;
+    basis_secd =
+      scr_days_from_civil(surrogate_year, utc.month + 1, utc.date) * 86400.0 +
+      utc.hours * 3600.0 + utc.minutes * 60.0 + utc.seconds;
+    if (!scr_date_localtime(basis_secd, &tmv)) return false;
+  }
+  /* Treat the local broken-down fields as UTC. Its distance from the real
+   * (or surrogate) epoch second is the zone offset. Apply that offset to
+   * the original instant and use the portable Gregorian walk for its
+   * fields; Date#getTimezoneOffset uses the
+   * opposite sign (UTC - local), in whole minutes. Historical local-mean
+   * offsets can contain seconds, which JavaScript truncates toward zero. */
+  double local_as_utc =
+    scr_days_from_civil((long long)tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday) * 86400.0 +
+    tmv.tm_hour * 3600.0 + tmv.tm_min * 60.0 + tmv.tm_sec;
+  double local_offset = local_as_utc - basis_secd;
+  scr_date_utc_parts_unchecked(clipped + local_offset * 1000.0, out);
+  double timezone_offset = trunc(-local_offset / 60.0);
+  out->timezone_offset = timezone_offset == 0 ? 0 : timezone_offset;
+  return true;
+}
+
+static bool scr_date_parts(double ms, bool utc, ScrDateParts *out) {
+  return utc ? scr_date_utc_parts(ms, out) : scr_date_local_parts(ms, out);
+}
+
+#define SCR_DATE_PART_GETTER(name, field)                                    \
+  double scr_date_get_##name(double ms, bool utc) {                          \
+    ScrDateParts p;                                                           \
+    return scr_date_parts(ms, utc, &p) ? (double)p.field : NAN;              \
+  }                                                                           \
+  double scr_date_get_##name##_local(double ms) {                            \
+    return scr_date_get_##name(ms, false);                                    \
+  }                                                                           \
+  double scr_date_get_##name##_utc(double ms) {                              \
+    return scr_date_get_##name(ms, true);                                     \
+  }
+
+SCR_DATE_PART_GETTER(full_year, year)
+SCR_DATE_PART_GETTER(month, month)
+SCR_DATE_PART_GETTER(date, date)
+SCR_DATE_PART_GETTER(day, day)
+SCR_DATE_PART_GETTER(hours, hours)
+SCR_DATE_PART_GETTER(minutes, minutes)
+SCR_DATE_PART_GETTER(seconds, seconds)
+
+#undef SCR_DATE_PART_GETTER
+
+double scr_date_get_milliseconds(double ms) {
+  ScrDateParts p;
+  return scr_date_utc_parts(ms, &p) ? (double)p.milliseconds : NAN;
+}
+
+double scr_date_get_timezone_offset(double ms) {
+  ScrDateParts p;
+  return scr_date_local_parts(ms, &p) ? p.timezone_offset : NAN;
 }
 
 /* ── Number statics ────────────────────────────────────────────────────

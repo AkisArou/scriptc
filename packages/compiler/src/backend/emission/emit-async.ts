@@ -46,6 +46,7 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
           lines.push(`    scr_promise_fulfill_void(scr_fiber_promise(sc_self));`);
           break;
         case "f64":
+        case "date":
           lines.push(`    scr_promise_fulfill_f64(scr_fiber_promise(sc_self), sc_r);`);
           break;
         case "bool":
@@ -171,6 +172,7 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
           case "void":
             return null;
           case "f64":
+          case "date":
             return `scr_gen_out_f64(sc_g, sc_r);`;
           case "bool":
             return `scr_gen_out_bool(sc_g, sc_r);`;
@@ -872,7 +874,7 @@ export function emitterInvokeThunkFor(E: CEmitter, cbT: IrType): string {
   const passed: string[] = [];
   cbT.params.forEach((p, i) => {
     const name = `sc_a${i}`;
-    if (p.kind === "f64") {
+    if (p.kind === "f64" || p.kind === "date") {
       reads.push(`  double ${name} = va_arg(sc_ap, double);`);
       passed.push(name);
     } else if (p.kind === "bool") {
