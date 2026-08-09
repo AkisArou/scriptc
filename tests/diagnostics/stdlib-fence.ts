@@ -76,6 +76,13 @@ function pick(a: string | number, b: number | boolean): boolean {
 }
 const picked = pick(1, 2);
 
+// Date values deliberately have no tagged-union payload yet. Nullable
+// Date positions must fence in the frontend instead of reaching a backend
+// scalar/ref mismatch.
+function optionalDate(value: Date | undefined): number {
+  return value === undefined ? -1 : value.getTime();
+}
+optionalDate(undefined);
 // The binding is READ so the fence stays observable (an unread bigint
 // declaration is a value Node builds and drops — it compiles to nothing).
 const big = 10n;

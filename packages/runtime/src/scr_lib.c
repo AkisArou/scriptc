@@ -3571,9 +3571,11 @@ typedef struct ScrDateParts {
   double timezone_offset;
 } ScrDateParts;
 
-static bool scr_date_utc_parts(double ms, ScrDateParts *out) {
-  if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
-  double t = trunc(ms);
+/* Calendar decomposition itself also serves LocalTime(t), which can lie
+ * just outside TimeClip's UTC interval after applying a zone offset at an
+ * endpoint. The checked wrapper is the public UTC-getter gate; the inner
+ * walk accepts those bounded local-time values too. */
+static void scr_date_utc_parts_unchecked(double t, ScrDateParts *out) {
   double dayd = floor(t / 86400000.0);
   long long msday = (long long)(t - dayd * 86400000.0);
   long long z = (long long)dayd + 719468;
@@ -3597,37 +3599,60 @@ static bool scr_date_utc_parts(double ms, ScrDateParts *out) {
   out->seconds = (int)(msday / 1000 % 60);
   out->milliseconds = (int)(msday % 1000);
   out->timezone_offset = 0;
+}
+
+static bool scr_date_utc_parts(double ms, ScrDateParts *out) {
+  if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
+  scr_date_utc_parts_unchecked(trunc(ms), out);
   return true;
+}
+
+static bool scr_date_localtime(double secd, struct tm *out) {
+  time_t sec = (time_t)secd;
+  if ((double)sec != secd) return false;
+#ifdef _WIN32
+  return localtime_s(out, &sec) == 0;
+#else
+  return localtime_r(&sec, out) != NULL;
+#endif
 }
 
 static bool scr_date_local_parts(double ms, ScrDateParts *out) {
   if (!isfinite(ms) || fabs(ms) > 8640000000000000.0) return false;
   double clipped = trunc(ms);
   double secd = floor(clipped / 1000.0);
-  time_t sec = (time_t)secd;
-  if ((double)sec != secd) return false;
   struct tm tmv;
-#ifdef _WIN32
-  if (localtime_s(&tmv, &sec) != 0) return false;
-#else
-  if (localtime_r(&sec, &tmv) == NULL) return false;
-#endif
-  out->year = (long long)tmv.tm_year + 1900;
-  out->month = tmv.tm_mon;
-  out->date = tmv.tm_mday;
-  out->day = tmv.tm_wday;
-  out->hours = tmv.tm_hour;
-  out->minutes = tmv.tm_min;
-  out->seconds = tmv.tm_sec;
-  out->milliseconds = (int)(clipped - secd * 1000.0);
+  double basis_secd = secd;
+  if (!scr_date_localtime(basis_secd, &tmv)) {
+    /* Windows' _localtime64_s rejects pre-epoch instants and years after
+     * 3001 even though both are valid ECMAScript Dates. Query the host's
+     * zone rule at a calendar-equivalent surrogate year in 2000..2399:
+     * Gregorian weekdays/leap years repeat every 400 years. This keeps
+     * every valid Date finite; the OS-vs-Node historical-rule difference
+     * remains the documented timezone-data divergence. */
+    ScrDateParts utc;
+    scr_date_utc_parts_unchecked(clipped, &utc);
+    long long cycle_year = (utc.year - 2000) % 400;
+    if (cycle_year < 0) cycle_year += 400;
+    long long surrogate_year = 2000 + cycle_year;
+    basis_secd =
+      scr_days_from_civil(surrogate_year, utc.month + 1, utc.date) * 86400.0 +
+      utc.hours * 3600.0 + utc.minutes * 60.0 + utc.seconds;
+    if (!scr_date_localtime(basis_secd, &tmv)) return false;
+  }
   /* Treat the local broken-down fields as UTC. Its distance from the real
-   * epoch second is the zone offset; Date#getTimezoneOffset uses the
+   * (or surrogate) epoch second is the zone offset. Apply that offset to
+   * the original instant and use the portable Gregorian walk for its
+   * fields; Date#getTimezoneOffset uses the
    * opposite sign (UTC - local), in whole minutes. Historical local-mean
    * offsets can contain seconds, which JavaScript truncates toward zero. */
   double local_as_utc =
-    scr_days_from_civil(out->year, out->month + 1, out->date) * 86400.0 +
-    out->hours * 3600.0 + out->minutes * 60.0 + out->seconds;
-  out->timezone_offset = trunc((secd - local_as_utc) / 60.0);
+    scr_days_from_civil((long long)tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday) * 86400.0 +
+    tmv.tm_hour * 3600.0 + tmv.tm_min * 60.0 + tmv.tm_sec;
+  double local_offset = local_as_utc - basis_secd;
+  scr_date_utc_parts_unchecked(clipped + local_offset * 1000.0, out);
+  double timezone_offset = trunc(-local_offset / 60.0);
+  out->timezone_offset = timezone_offset == 0 ? 0 : timezone_offset;
   return true;
 }
 

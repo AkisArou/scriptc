@@ -29,7 +29,7 @@ const results = await Promise.all(jobs); // number[] — compiles
 **Standard library**
 
 - The type checker sees the full standard library; only the supported surface compiles. Reaching declared-but-unlowered surface is SC2020 with the supported alternatives in the hint — e.g. parts of the regex API (`re.exec`), `Symbol`, `globalThis`, array/Map/Set methods beyond the lowered sets.
-- `Date` values support zero-argument construction, one number/string argument, storage and passing, `getTime`/`valueOf`, `toISOString`, the local and UTC calendar getters, and `getTimezoneOffset`. The year/month field constructor, setters, identity comparisons, throwing `Date` values, `Date.parse`, and locale/string formatters remain fenced; the supported string grammar is described below.
+- `Date` values support zero-argument construction, one number/string argument, storage and passing, `getTime`/`valueOf`, `toISOString`, the local and UTC calendar getters, and `getTimezoneOffset`. Date-armed unions, the year/month field constructor, setters, identity comparisons, throwing `Date` values, `Date.parse`, and locale/string formatters remain fenced; the supported string grammar is described below.
 - Map keys and Set elements are strings and numbers; other key types are fenced.
 
 **The `any`/`unknown` boundary**
@@ -67,7 +67,7 @@ const who = process.argv.length > 2 ? process.argv[2] : "world";
 
 **Strings are stored as UTF-8.** Invisible through `.length` and the string methods (which compute UTF-16 semantics) — except relational comparison (`<`, `>`), which uses code-point order, and surrogate-splitting operations, which produce U+FFFD.
 
-**Date parsing and timezone data are bounded.** The one-string constructor accepts ECMAScript date-only forms, date-times with an explicit `Z` or numeric offset, and the GMT certificate-validity strings returned by the supported X509 surface; other V8-specific forms and offset-less local date-times produce Invalid Date. Local calendar getters use the operating system's timezone database, so historical results can differ when it and Node's timezone data disagree.
+**Date parsing and timezone data are bounded.** The one-string constructor accepts ECMAScript date-only forms, date-times with an explicit `Z` or numeric offset, and the GMT certificate-validity strings returned by the supported X509 surface; other V8-specific forms and offset-less local date-times produce Invalid Date. Local calendar getters use the operating system's timezone database, so historical results can differ when it and Node's timezone data disagree. When a platform's calendar API cannot represent an otherwise-valid extreme year, scriptc queries its zone rule at a calendar-equivalent year in the 400-year Gregorian cycle.
 
 **Memory is reference-counted.** Acyclic values free deterministically; reference cycles are collected at deterministic collection points, not by a concurrent GC. Cycles that cross the static/island boundary are uncollectable by either side.
 

@@ -2454,7 +2454,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
             // arms map: `x instanceof RegExp` is their narrowing test
             // (the skip-utility `string | RegExp` shape), and the arm
             // rides the ref machinery like array regex elements.
-            a.kind === "map" || a.kind === "set" || a.kind === "dyn" ||
+            a.kind === "map" || a.kind === "set" || a.kind === "date" || a.kind === "dyn" ||
             // Generator arms follow the map/set rule: no narrowing test.
             a.kind === "generator" ||
             // Func arms map beside ANY sibling: `typeof x === "function"`

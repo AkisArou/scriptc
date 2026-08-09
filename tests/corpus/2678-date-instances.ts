@@ -81,3 +81,22 @@ console.log(
 console.log(
   Number.isInteger(new Date("1800-01-01T00:00:00.000Z").getTimezoneOffset()),
 );
+
+// Some CRT localtime implementations cover only 1970..3001 even though
+// ECMAScript Dates span roughly +/-275,000 years. Every local getter must
+// still answer a finite integer for valid instants outside that CRT range.
+function hasLocalParts(edge: Date): boolean {
+  return Number.isInteger(edge.getFullYear()) &&
+    Number.isInteger(edge.getMonth()) &&
+    Number.isInteger(edge.getDate()) &&
+    Number.isInteger(edge.getDay()) &&
+    Number.isInteger(edge.getHours()) &&
+    Number.isInteger(edge.getMinutes()) &&
+    Number.isInteger(edge.getSeconds()) &&
+    Number.isInteger(edge.getMilliseconds()) &&
+    Number.isInteger(edge.getTimezoneOffset());
+}
+console.log(
+  hasLocalParts(new Date("1800-01-01T00:00:00.000Z")),
+  hasLocalParts(new Date("+005000-01-01T00:00:00.000Z")),
+);
