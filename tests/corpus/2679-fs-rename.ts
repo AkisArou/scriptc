@@ -23,6 +23,10 @@ const missing = join(dir, "missing.txt");
 const other = join(dir, "other.txt");
 const workerSource = join(dir, "worker-source.txt");
 const workerDest = join(dir, "worker-dest.txt");
+const checkpointSourceA = join(dir, "checkpoint-a.txt");
+const checkpointDestA = join(dir, "checkpoint-a-dest.txt");
+const checkpointSourceB = join(dir, "checkpoint-b.txt");
+const checkpointDestB = join(dir, "checkpoint-b-dest.txt");
 
 writeFileSync(a, "alpha");
 writeFileSync(b, "stale sync destination");
@@ -90,7 +94,40 @@ async function run(): Promise<void> {
           missingErr?.message.includes("rename"),
           missingErr?.message.includes("missing.txt' -> '"),
         );
-        rmSync(dir, { recursive: true, force: true });
+
+        // Native callback boundaries are event-loop checkpoints: when two
+        // operations are already complete, Node drains the first callback's
+        // nextTicks and microtasks before invoking the second callback.
+        let checkpointCallbacks = 0;
+        let checkpointTicks = 0;
+        let checkpointMicrotasks = 0;
+        const onCheckpointRename = (): void => {
+          checkpointCallbacks++;
+          if (checkpointCallbacks === 2) {
+            console.log(
+              "callback checkpoints:",
+              checkpointTicks === 1,
+              checkpointMicrotasks === 1,
+            );
+            rmSync(dir, { recursive: true, force: true });
+          }
+          process.nextTick(() => {
+            checkpointTicks++;
+          });
+          queueMicrotask(() => {
+            checkpointMicrotasks++;
+          });
+        };
+        writeFileSync(checkpointSourceA, "a");
+        writeFileSync(checkpointSourceB, "b");
+        rename(checkpointSourceA, checkpointDestA, onCheckpointRename);
+        rename(checkpointSourceB, checkpointDestB, onCheckpointRename);
+        while (existsSync(checkpointSourceA) || existsSync(checkpointSourceB)) {
+          Atomics.wait(waitBuffer, 0, 0, 10);
+        }
+        // Both syscalls have returned; leave the workers time to publish
+        // their completions before this callback gives the loop back control.
+        Atomics.wait(waitBuffer, 0, 0, 50);
       });
     });
     return workerErr === null;

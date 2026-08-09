@@ -1583,35 +1583,33 @@ static void *scr_fs_rename_worker(void *payload) {
 
 static bool scr_fs_renames_pending(void) { return scr_fs_rename_pending_count != 0; }
 
-static void scr_fs_renames_dispatch(void) {
-  for (;;) {
-    scr_fs_rename_lock_enter();
-    ScrFsRenameOp *op = scr_fs_rename_done;
-    if (op != NULL) {
-      scr_fs_rename_done = op->next;
-      if (scr_fs_rename_done == NULL) scr_fs_rename_done_tail = &scr_fs_rename_done;
-    }
-    scr_fs_rename_lock_leave();
-    if (op == NULL) return;
-    scr_fs_rename_pending_count--;
-    ScrCaught *caught = NULL;
-    ScrError *err = NULL;
-    if (op->error != 0) {
-      scr_fs_rename_error(op->error, op->oldpath, op->newpath);
-      caught = scr_exc_take();
-      if (caught && caught->kind == SCR_EXC_OBJ && scr_error_is(caught->payload)) {
-        err = (ScrError *)caught->payload;
-      }
-    }
-    op->fn(op->cb, err);
-    scr_caught_release(caught);
-    scr_fs_rename_op_release(op);
-    if (scr_exc_pending()) return;
+static bool scr_fs_renames_dispatch(void) {
+  scr_fs_rename_lock_enter();
+  ScrFsRenameOp *op = scr_fs_rename_done;
+  if (op != NULL) {
+    scr_fs_rename_done = op->next;
+    if (scr_fs_rename_done == NULL) scr_fs_rename_done_tail = &scr_fs_rename_done;
   }
+  scr_fs_rename_lock_leave();
+  if (op == NULL) return false;
+  scr_fs_rename_pending_count--;
+  ScrCaught *caught = NULL;
+  ScrError *err = NULL;
+  if (op->error != 0) {
+    scr_fs_rename_error(op->error, op->oldpath, op->newpath);
+    caught = scr_exc_take();
+    if (caught && caught->kind == SCR_EXC_OBJ && scr_error_is(caught->payload)) {
+      err = (ScrError *)caught->payload;
+    }
+  }
+  op->fn(op->cb, err);
+  scr_caught_release(caught);
+  scr_fs_rename_op_release(op);
+  return true;
 }
 #else
 static bool scr_fs_renames_pending(void) { return false; }
-static void scr_fs_renames_dispatch(void) {}
+static bool scr_fs_renames_dispatch(void) { return false; }
 #endif
 
 void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
@@ -1997,12 +1995,13 @@ bool scr_loop_run(ScrPromise *top_level) {
     scr_cyc_collect_scheduled();
     /* Completed callback-style filesystem work is delivered on the main
      * runtime thread. A worker may have finished while synchronous user code
-     * occupied that thread; dispatching here preserves asynchronous callback
-     * delivery without putting runtime allocation/RC work on the worker. */
+     * occupied that thread. Deliver exactly one completion per checkpoint:
+     * Node drains nextTicks and microtasks after each native callback before
+     * invoking the next ready callback. */
     if (scr_fs_renames_pending()) {
-      scr_fs_renames_dispatch();
+      bool dispatched = scr_fs_renames_dispatch();
       if (scr_exc_pending()) return false;
-      if (scr_ready_len > 0) continue;
+      if (dispatched) continue;
     }
     /* Stream tick dispatch (scr_stream.c, when linked): the deferred
      * next-tick emissions ('data' flow kicks, 'readable'/'end'/'finish'/
