@@ -5514,6 +5514,30 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2678-util-parseargs.ts": {
+   "order": [
+    "<repo>/tests/corpus/2678-util-parseargs.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2679-util-parseargs-cjs.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2679-util-parseargs-cjs.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2680-util-parseargs-default.ts": {
+   "order": [
+    "<repo>/tests/corpus/2680-util-parseargs-default.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2681-util-parseargs-dynamic.js": {
+   "order": [
+    "<repo>/tests/corpus/2681-util-parseargs-dynamic.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"

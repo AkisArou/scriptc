@@ -685,14 +685,19 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     execFileSync: { fn: "cp.execSync", params: [STRING, arrayOf(STRING)], result: STRING },
     execSync: { fn: "cp.execSync", params: [STRING], result: STRING },
   },
-  // node:util lowers through TWO paths, neither tabled here: promisify
+  // node:util lowers through dedicated paths: promisify
   // only in the const-binding-over-execFile shape — recognized in
   // lowerVarDecl / collectGlobals BEFORE any call lowering runs — and
-  // inspect/format/formatWithOptions through the util spoke
+  // inspect/format/formatWithOptions plus parseArgs through the util spoke
   // (lower-inspect.ts: per-type synthesized traversal helpers,
-  // compile-time format strings), which both dispatch paths try before
-  // the member fence below.
-  util: {},
+  // compile-time format strings, checked-dynamic config/result for
+  // parseArgs), which both dispatch paths try before the generic table.
+  // parseArgs is tabled as well so the generated surface manifest records
+  // the dedicated static member; the spoke owns its optional arity and
+  // call-site-specific result type before this canonical signature is used.
+  util: {
+    parseArgs: { fn: "util.parseArgs", params: [DYN], result: DYN },
+  },
   // node:string_decoder's surface is the StringDecoder CLASS — new/write/
   // end are special-cased (lowerNew + lowerStringDecoderMethodCall); no
   // function members exist to table.

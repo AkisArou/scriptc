@@ -175,6 +175,7 @@ function llStrBytes(text: string): string {
  * Throwing members (MAY_THROW_LIB_FNS) and everything unlisted refuse by
  * name. */
 const LIB_FN_SYMS: Record<string, string> = {
+  "util.parseArgs": "scr_util_parse_args",
   "math.maxArr": "scr_math_max_arr",
   "math.minArr": "scr_math_min_arr",
   "math.min": "scr_math_min",
@@ -10625,9 +10626,14 @@ class LlEmitter {
         for (const field of fields) {
           const index = shape.fields.indexOf(field) + 1;
           const fieldPtr = B.tmp();
-          const fieldValue = B.tmp();
+          let fieldValue = B.tmp();
           B.line(`${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`);
           B.line(`${fieldValue} = load ${llFieldType(field.type)}, ptr ${fieldPtr}`);
+          if (llFieldType(field.type) === "i8") {
+            const boolValue = B.tmp();
+            B.line(`${boolValue} = trunc i8 ${fieldValue} to i1`);
+            fieldValue = boolValue;
+          }
           const boxed = this.streamTypedRefBoxValue(
             B,
             field.type,
@@ -10652,9 +10658,14 @@ class LlEmitter {
         for (const field of fields) {
           const index = shape.fields.indexOf(field) + 1;
           const fieldPtr = B.tmp();
-          const fieldValue = B.tmp();
+          let fieldValue = B.tmp();
           B.line(`${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`);
           B.line(`${fieldValue} = load ${llFieldType(field.type)}, ptr ${fieldPtr}`);
+          if (llFieldType(field.type) === "i8") {
+            const boolValue = B.tmp();
+            B.line(`${boolValue} = trunc i8 ${fieldValue} to i1`);
+            fieldValue = boolValue;
+          }
           const boxed = this.streamTypedRefBoxValue(
             B,
             field.type,
