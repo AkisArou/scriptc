@@ -858,11 +858,17 @@ static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
       return scr_str_new(map[i].to, strlen(map[i].to));
     }
   }
-  char msg[128];
-  int n = snprintf(msg, sizeof msg, "Unknown encoding: %.*s",
-                   (int)(raw->len < 64 ? raw->len : 64), raw->data);
-  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)(n < 0 ? 0 : n),
+  static const char prefix[] = "Unknown encoding: ";
+  const size_t prefix_len = sizeof prefix - 1;
+  if (raw->len > SIZE_MAX - prefix_len) scr_bytes_oom();
+  const size_t msg_len = prefix_len + raw->len;
+  char *msg = malloc(msg_len);
+  if (!msg) scr_bytes_oom();
+  memcpy(msg, prefix, prefix_len);
+  memcpy(msg + prefix_len, raw->data, raw->len);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, msg_len,
                            "ERR_UNKNOWN_ENCODING");
+  free(msg);
   return NULL;
 }
 

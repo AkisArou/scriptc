@@ -81,3 +81,19 @@ try {
     console.log("variable bad", (e as NodeJS.ErrnoException).code, e.message);
   }
 }
+
+// Unknown-encoding messages preserve the complete runtime string,
+// including long values and embedded NULs.
+const unusualBadEncodings: BufferEncoding[] = [
+  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" as BufferEncoding,
+  "\u0000wat" as BufferEncoding,
+];
+for (const encoding of unusualBadEncodings) {
+  try {
+    raw.toString(encoding);
+  } catch (e) {
+    if (e instanceof TypeError) {
+      console.log("variable bad exact", (e as NodeJS.ErrnoException).code, JSON.stringify(e.message), e.message.length);
+    }
+  }
+}
