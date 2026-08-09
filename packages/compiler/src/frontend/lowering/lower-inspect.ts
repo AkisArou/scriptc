@@ -1382,7 +1382,20 @@ function lowerParseArgsCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc): I
     } else if (raw.type.kind === "jsval") {
       config = { kind: "dynFromJsval", value: raw, type: DYN, loc };
     } else if (canConvertToDyn(raw.type, (id) => L.shapes.get(id), (id) => L.unions.get(id))) {
-      config = { kind: "dynFrom", value: raw, type: DYN, loc };
+      // parseArgs assigns descriptor default arrays directly into the
+      // returned values object. Keep mutable config composites in typed-ref
+      // capsules so that default arrays can leave the dyn result as the
+      // original static reference; the runtime still snapshots `args` and
+      // the option schema before parsing, matching Node's synchronous read.
+      const liveRef = raw.type.kind === "record" || raw.type.kind === "array" ||
+        raw.type.kind === "bytes";
+      config = {
+        kind: "dynFrom",
+        value: raw,
+        ...(liveRef ? { liveRef: true as const } : {}),
+        type: DYN,
+        loc,
+      };
     } else {
       L.noLowering(
         `util.parseArgs with a '${L.fmt(raw.type)}' configuration`,

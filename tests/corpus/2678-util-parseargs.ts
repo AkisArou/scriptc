@@ -93,6 +93,28 @@ const typedConfig: import("node:util").ParseArgsConfig = {
 console.log("typed", JSON.stringify(parseArgs(typedConfig)));
 console.log("undefined", JSON.stringify(parseArgs(undefined)));
 
+// A one-character long name is also its implicit short spelling. Node only
+// consults an explicit `short` alias first, then falls back to the name.
+console.log("implicit-short", JSON.stringify(parseArgs({
+  args: ["-x"],
+  options: { x: { type: "boolean" } },
+  tokens: true,
+})));
+
+// Defaults are assigned, not cloned: result.values keeps the exact array
+// reference and observes later mutations through either alias.
+const defaultTags = ["fallback"];
+const withArrayDefault = parseArgs({
+  args: [],
+  options: {
+    tag: { type: "string", multiple: true, default: defaultTags },
+  },
+} as const);
+const returnedTags = withArrayDefault.values.tag as string[];
+console.log("default-array-identity", returnedTags === defaultTags);
+defaultTags.push("later");
+console.log("default-array-live", JSON.stringify(returnedTags));
+
 for (const run of [
   (): void => { parseArgs({ args: ["--name"], options: { name: { type: "string" } } }); },
   (): void => { parseArgs({ args: ["--wat"] }); },

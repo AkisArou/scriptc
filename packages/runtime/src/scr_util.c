@@ -200,6 +200,8 @@ static bool pa_default_value_ok(const ScrDyn *v, int type) {
   return type == 1 ? v->kind == SCR_DYN_STR : v->kind == SCR_DYN_BOOL;
 }
 
+static ScrDyn *pa_materialize_js_array(const ScrDyn *value);
+
 static bool pa_validate_option(const ScrStr *name, const ScrDyn *desc) {
   char *base = pa_path("options.", name->data, name->len, "");
   if (desc->kind != SCR_DYN_OBJ) {
@@ -246,26 +248,37 @@ static bool pa_validate_option(const ScrStr *name, const ScrDyn *desc) {
   if (def) {
     char *path = pa_path(base, "", 0, ".default");
     if (pa_desc_multiple(desc)) {
-      if (def->kind != SCR_DYN_ARR) {
-        scr_dyn_prop_type_fail(path, "an instance of Array", def);
+      /* A live typed/island array stays in the descriptor so phase 3 can
+       * return that exact reference. Validate against a temporary snapshot. */
+      ScrDyn *items = pa_materialize_js_array(def);
+      if (!items) {
         free(path);
         free(base);
         return false;
       }
-      for (size_t j = 0; j < def->v.arr.len; j++) {
-        if (!pa_default_value_ok(def->v.arr.items[j], type)) {
+      if (items->kind != SCR_DYN_ARR) {
+        scr_dyn_prop_type_fail(path, "an instance of Array", def);
+        scr_dyn_release(items);
+        free(path);
+        free(base);
+        return false;
+      }
+      for (size_t j = 0; j < items->v.arr.len; j++) {
+        if (!pa_default_value_ok(items->v.arr.items[j], type)) {
           char suffix[48];
           snprintf(suffix, sizeof suffix, "[%zu]", j);
           char *item_path = pa_path(path, "", 0, suffix);
           scr_dyn_prop_type_fail(item_path,
                                  type ? "of type string" : "of type boolean",
-                                 def->v.arr.items[j]);
+                                 items->v.arr.items[j]);
           free(item_path);
+          scr_dyn_release(items);
           free(path);
           free(base);
           return false;
         }
       }
+      scr_dyn_release(items);
     } else if (!pa_default_value_ok(def, type)) {
       scr_dyn_prop_type_fail(path,
                              type ? "of type string" : "of type boolean", def);
@@ -349,7 +362,10 @@ static const ScrDyn *pa_find_short(const ScrDyn *options,
   }
   scr_dyn_release(entries);
   *long_name = pa_str_bytes(short_name->data, short_name->len);
-  return NULL;
+  /* Node falls back to the short spelling itself as the long option name.
+   * Thus `{ x: { type: "boolean" } }` accepts both `--x` and `-x` even
+   * without an explicit `short: "x"` descriptor. */
+  return pa_find_long(options, short_name);
 }
 
 static ScrDyn *pa_option_token(const ScrStr *name, const ScrStr *raw,
@@ -446,6 +462,9 @@ static ScrDyn *pa_default_args(void) {
  * so indexed Gets (including holes -> undefined) and the live length are
  * the relevant semantics; an overridden Symbol.iterator is not. */
 static ScrDyn *pa_materialize_js_array(const ScrDyn *value) {
+  if (value->kind == SCR_DYN_TYPED_REF) {
+    return scr_dyn_typed_ref_materialize(value);
+  }
   if (value->kind != SCR_DYN_JSVAL ||
       !scr_dyn_jsval_ops()->is_array(value->v.jsval.cell)) {
     return scr_dyn_retain((ScrDyn *)value);
@@ -499,6 +518,12 @@ static ScrDyn *pa_owned_member(const ScrDyn *obj, const char *key) {
 }
 
 static ScrDyn *pa_materialize_descriptor(const ScrDyn *desc) {
+  if (desc->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *view = scr_dyn_typed_ref_materialize(desc);
+    ScrDyn *out = pa_materialize_descriptor(view);
+    scr_dyn_release(view);
+    return out;
+  }
   if (desc->kind == SCR_DYN_JSVAL &&
       scr_dyn_jsval_ops()->is_array(desc->v.jsval.cell)) {
     return pa_materialize_js_array(desc);
@@ -518,7 +543,13 @@ static ScrDyn *pa_materialize_descriptor(const ScrDyn *desc) {
       if (scr_exc_pending()) { scr_dyn_release(out); return NULL; }
       continue;
     }
-    ScrDyn *native = pa_materialize_js_array(value);
+    /* Node assigns a descriptor default directly into result.values. Keep
+     * typed array defaults as their original static reference; island arrays
+     * still need the ordinary native snapshot so dynCheck can consume them. */
+    ScrDyn *native = strcmp(fields[i], "default") == 0 &&
+                             value->kind == SCR_DYN_TYPED_REF
+                         ? scr_dyn_retain(value)
+                         : pa_materialize_js_array(value);
     scr_dyn_release(value);
     if (!native) { scr_dyn_release(out); return NULL; }
     scr_dyn_obj_set(out, fields[i], strlen(fields[i]), native);
@@ -527,6 +558,12 @@ static ScrDyn *pa_materialize_descriptor(const ScrDyn *desc) {
 }
 
 static ScrDyn *pa_materialize_options(const ScrDyn *options) {
+  if (options->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *view = scr_dyn_typed_ref_materialize(options);
+    ScrDyn *out = pa_materialize_options(view);
+    scr_dyn_release(view);
+    return out;
+  }
   if (options->kind == SCR_DYN_JSVAL &&
       scr_dyn_jsval_ops()->is_array(options->v.jsval.cell)) {
     return pa_materialize_js_array(options);
@@ -560,6 +597,12 @@ static ScrDyn *pa_materialize_options(const ScrDyn *options) {
  * snapshot, matching parseArgs's synchronous reads, while preserving own
  * property presence (including explicit undefined) across the island. */
 static ScrDyn *pa_materialize_config(const ScrDyn *config) {
+  if (config->kind == SCR_DYN_TYPED_REF) {
+    ScrDyn *view = scr_dyn_typed_ref_materialize(config);
+    ScrDyn *out = pa_materialize_config(view);
+    scr_dyn_release(view);
+    return out;
+  }
   if (config->kind != SCR_DYN_OBJ && config->kind != SCR_DYN_JSVAL) {
     return scr_dyn_retain((ScrDyn *)config);
   }
