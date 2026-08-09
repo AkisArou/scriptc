@@ -1070,6 +1070,12 @@
       "status": "static"
     },
     {
+      "id": "node-builtin.fs.writeSync",
+      "kind": "node-builtin",
+      "name": "fs.writeSync",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.http",
       "kind": "node-builtin",
       "name": "http",

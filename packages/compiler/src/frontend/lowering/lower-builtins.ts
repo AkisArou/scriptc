@@ -922,6 +922,103 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
       return { kind: "libCall", fn: "fs.readSync", args, type: F64, loc };
     }
+    // fs.writeSync has two static families. Buffer writes use the classic
+    // (fd, buffer, offset, length[, position]) shape; string writes accept
+    // (fd, string[, position[, "utf8"]]). The runtime uses -1 for the
+    // current-offset forms. Node treats a negative, fractional, non-finite,
+    // or over-MAX_SAFE numeric write position like null rather than throwing;
+    // preserve the value here so the runtime can make that dispatch.
+    if (bi.module === "fs" && bi.member === "writeSync") {
+      const supported =
+        'use writeSync(fd, buffer, offset, length[, position]) or writeSync(fd, string[, position[, "utf8"]]); options objects, bigint positions, and other encodings have no lowering';
+      if (expr.arguments.some(ts.isSpreadElement) || expr.arguments.length < 2) {
+        L.noLowering(
+          `writeSync with ${expr.arguments.length} argument${expr.arguments.length === 1 ? "" : "s"}`,
+          expr,
+          supported,
+        );
+      }
+      const dataNode = expr.arguments[1]!;
+      const dataType = L.mapTypeOf(L.typeOf(dataNode));
+      const fd = L.lowerExprExpecting(expr.arguments[0]!, F64);
+      const position = (node: ts.Expression | undefined): IrExpr => {
+        let valueNode = node;
+        while (valueNode && ts.isParenthesizedExpression(valueNode)) valueNode = valueNode.expression;
+        if (node === undefined || valueNode!.kind === ts.SyntaxKind.NullKeyword) {
+          return { kind: "numLit", value: -1, type: F64, loc };
+        }
+        const t = L.mapTypeOf(L.typeOf(node));
+        if (t?.kind !== "f64") {
+          L.noLowering(
+            `writeSync with a '${t ? L.fmt(t) : L.checker.typeToString(L.typeOf(node))}' position`,
+            node,
+            supported,
+          );
+        }
+        return L.lowerExprExpecting(node, F64);
+      };
+      if (dataType?.kind === "bytes") {
+        if (dataType.elem !== "u8") {
+          L.noLowering(
+            `writeSync of '${L.fmt(dataType)}' data`,
+            dataNode,
+            "byte writes take Uint8Array/Buffer data",
+          );
+        }
+        if (expr.arguments.length !== 4 && expr.arguments.length !== 5) {
+          L.noLowering(
+            `writeSync of Buffer data with ${expr.arguments.length} arguments`,
+            expr,
+            supported,
+          );
+        }
+        return {
+          kind: "libCall",
+          fn: "fs.writeSync",
+          args: [
+            fd,
+            L.lowerExprExpecting(dataNode, BYTES_U8),
+            L.lowerExprExpecting(expr.arguments[2]!, F64),
+            L.lowerExprExpecting(expr.arguments[3]!, F64),
+            position(expr.arguments[4]),
+          ],
+          type: F64,
+          loc,
+        };
+      }
+      if (dataType?.kind === "string") {
+        if (expr.arguments.length > 4) {
+          L.noLowering(
+            `writeSync of string data with ${expr.arguments.length} arguments`,
+            expr,
+            supported,
+          );
+        }
+        const encNode = expr.arguments[3];
+        if (encNode !== undefined) {
+          const encType = L.typeOf(encNode);
+          if (!encType.isStringLiteralType() || (encType.value !== "utf8" && encType.value !== "utf-8")) {
+            L.noLowering(
+              "writeSync with a non-utf8 encoding",
+              encNode,
+              supported,
+            );
+          }
+        }
+        return {
+          kind: "libCall",
+          fn: "fs.writeStrSync",
+          args: [fd, L.lowerExprExpecting(dataNode, STRING), position(expr.arguments[2])],
+          type: F64,
+          loc,
+        };
+      }
+      L.noLowering(
+        `writeSync of '${dataType ? L.fmt(dataType) : L.checker.typeToString(L.typeOf(dataNode))}' data`,
+        dataNode,
+        supported,
+      );
+    }
     if (
       bi.module === "child_process" &&
       (bi.member === "execFileSync" || bi.member === "execSync")

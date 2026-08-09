@@ -289,6 +289,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fs.lstatSync": { argTypes: [STRING], result: STATS_T },
   "fs.openSync": { argTypes: [STRING, STRING], result: F64 },
   "fs.readSync": { argTypes: [F64, BYTES_U8, F64, F64, F64], result: F64 },
+  "fs.writeSync": { argTypes: [F64, BYTES_U8, F64, F64, F64], result: F64 },
+  "fs.writeStrSync": { argTypes: [F64, STRING, F64], result: F64 },
   // fs.watch's callback func type is program-dependent (zero params, or
   // the eventType string) — the slot pins arity and the path/receiver.
   "fs.watch": { argTypes: [STRING], result: FSWATCHER_T },

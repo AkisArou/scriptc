@@ -604,6 +604,10 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     // runtime's current-offset sentinel); numeric positions read without
     // advancing the fd. The options-object and bigint forms still fence.
     readSync: { fn: "fs.readSync", params: [F64, BYTES_U8, F64, F64, F64], result: F64 },
+    // Entirely special-cased: the classic Buffer window and utf8 string
+    // overloads lower to separate fixed-width runtime ABIs. As with
+    // readSync, -1 is the current-offset sentinel.
+    writeSync: { fn: "fs.writeSync", params: [F64, BYTES_U8, F64, F64, F64], result: F64 },
     closeSync: { fn: "fs.closeSync", params: [F64], result: VOID },
     // Entirely special-cased (lowerFsWatchCall — the callback needs an
     // adapter per listener shape); this entry only routes the dispatch.
@@ -838,6 +842,8 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<string, Record<string, readonly I
     readFileSync: ["fs.readFileSyncBuf", "fs.readFileSyncBytes", "fs.readFileSyncDyn", "fs.readFdSync", "fs.readFdSyncBytes"],
     // The bytes-data form and the { mode } options form.
     writeFileSync: ["fs.writeFileSyncBytes", "fs.writeFileModeSync"],
+    // The utf8 string overload; the table row is the Buffer-window form.
+    writeSync: ["fs.writeStrSync"],
     // The { recursive, mode } option lowerings.
     mkdirSync: ["fs.mkdirModeSync", "fs.mkdirRecursiveSync", "fs.mkdirRecursiveModeSync"],
     // The { recursive, force } and maxRetries/retryDelay option lowerings.

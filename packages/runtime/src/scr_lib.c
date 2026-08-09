@@ -1725,6 +1725,178 @@ static ssize_t scr_fs_pread(int fd, void *data, size_t length, double position) 
 #endif
 }
 
+/* Offset-preserving write for fs.writeSync's numeric-position forms. The
+ * Windows arm mirrors scr_fs_pread: WriteFile receives an OVERLAPPED offset
+ * and the CRT descriptor's current position is restored before returning. */
+static ssize_t scr_fs_pwrite(int fd, const void *data, size_t length, double position) {
+#ifdef _WIN32
+  HANDLE handle = (HANDLE)_get_osfhandle(fd);
+  if (handle == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+
+  OVERLAPPED overlapped;
+  memset(&overlapped, 0, sizeof overlapped);
+  LARGE_INTEGER at;
+  at.QuadPart = (LONGLONG)position;
+  overlapped.Offset = at.LowPart;
+  overlapped.OffsetHigh = at.HighPart;
+
+  LARGE_INTEGER zero;
+  LARGE_INTEGER original;
+  zero.QuadPart = 0;
+  BOOL restore = SetFilePointerEx(handle, zero, &original, FILE_CURRENT);
+  DWORD wrote = 0;
+  DWORD want = length > (size_t)UINT32_MAX ? UINT32_MAX : (DWORD)length;
+  BOOL ok = WriteFile(handle, data, want, &wrote, &overlapped);
+  DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+  if (restore) (void)SetFilePointerEx(handle, original, NULL, FILE_BEGIN);
+  if (ok || wrote > 0) return (ssize_t)wrote;
+
+  switch (error) {
+    case ERROR_INVALID_HANDLE:
+    case ERROR_ACCESS_DENIED:
+      errno = EBADF;
+      break;
+    case ERROR_INVALID_FUNCTION:
+    case ERROR_INVALID_PARAMETER:
+      errno = EINVAL;
+      break;
+    case ERROR_DISK_FULL:
+    case ERROR_HANDLE_DISK_FULL:
+      errno = ENOSPC;
+      break;
+    case ERROR_BROKEN_PIPE:
+    case ERROR_NO_DATA:
+      errno = EPIPE;
+      break;
+    case ERROR_NOT_ENOUGH_MEMORY:
+    case ERROR_OUTOFMEMORY:
+      errno = ENOMEM;
+      break;
+    case ERROR_OPERATION_ABORTED:
+      errno = EINTR;
+      break;
+    default:
+      errno = EIO;
+      break;
+  }
+  return -1;
+#else
+  return pwrite(fd, data, length, (off_t)position);
+#endif
+}
+
+static bool scr_fs_write_fd_valid(double fd) {
+  char msg[160];
+  char recv[48];
+  scr_num_received(fd, recv);
+  if (!(isfinite(fd) && trunc(fd) == fd)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"fd\" is out of range. It must be an integer. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return false;
+  }
+  if (fd < 0 || fd > 2147483647.0) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"fd\" is out of range. It must be >= 0 && <= 2147483647. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return false;
+  }
+  return true;
+}
+
+static double scr_fs_write_bytes(double fd, const void *data, size_t length,
+                                 double position) {
+  if (!scr_fs_write_fd_valid(fd)) return 0;
+  /* Node/libuv treats every position other than a safe nonnegative integer
+   * as the current-offset sentinel for writes (unlike readSync, it does not
+   * throw for negative/fractional positions). */
+  bool positioned = isfinite(position) && trunc(position) == position &&
+                    position >= 0 && position <= 9007199254740991.0;
+  ssize_t n;
+  do {
+    n = positioned
+      ? scr_fs_pwrite((int)fd, data, length, position)
+      : write((int)fd, data, length);
+  } while (n < 0 && errno == EINTR);
+  if (n < 0) {
+    int e = errno;
+    char namebuf[16];
+    const char *name = scr_errno_name(e, namebuf, sizeof namebuf);
+    const char *text = scr_errno_text(e);
+    char msg[160];
+    int len = snprintf(msg, sizeof msg, "%s: %s, write", name, text);
+    scr_throw_error_msg_code(SCR_ERR_ERROR, msg, (size_t)len, name);
+    return 0;
+  }
+  return (double)n;
+}
+
+/* fs.writeSync(fd, buffer, offset, length[, position]) — validates the
+ * caller window before touching the descriptor, then submits one write like
+ * Node/libuv. Positioned writes do not advance the descriptor. */
+double scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length,
+                         double position) {
+  size_t bytelen = buf->len; /* frontend admits u8 buffers only */
+  char msg[160];
+  char recv[48];
+  scr_num_received(offset, recv);
+  if (!(isfinite(offset) && trunc(offset) == offset)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"offset\" is out of range. It must be an integer. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (offset < 0 || offset > 9007199254740991.0) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (offset > (double)bytelen) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"offset\" is out of range. It must be <= %zu. Received %s",
+                       bytelen, recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+
+  scr_num_received(length, recv);
+  if (!(isfinite(length) && trunc(length) == length)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"length\" is out of range. It must be an integer. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (length < 0) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"length\" is out of range. It must be >= 0. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  size_t off = (size_t)offset;
+  if (length > (double)(bytelen - off)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"length\" is out of range. It must be <= %zu. Received %s",
+                       bytelen - off, recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  return scr_fs_write_bytes(fd, buf->data + off, (size_t)length, position);
+}
+
+double scr_fs_write_str_sync(double fd, ScrStr *data, double position) {
+  return scr_fs_write_bytes(fd, data->data, data->len, position);
+}
+
 /* fs.readSync(fd, buffer, offset, length[, position]) — the buffer form.
  * Node validates offset/length against the buffer before reading and
  * throws ERR_OUT_OF_RANGE; here the checks clamp to the same contract and
