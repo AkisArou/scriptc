@@ -2,6 +2,7 @@
 // and the error-first callback runs asynchronously with Error | null.
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rename,
@@ -22,8 +23,19 @@ const missing = join(dir, "missing.txt");
 const other = join(dir, "other.txt");
 
 writeFileSync(a, "alpha");
+writeFileSync(b, "stale sync destination");
 renameSync(a, b);
 console.log("sync:", !existsSync(a), readFileSync(b, "utf8"));
+
+const left = join(dir, "left");
+const right = join(dir, "right");
+const oldNested = join(left, "nested");
+const newNested = join(right, "nested");
+mkdirSync(left);
+mkdirSync(right);
+mkdirSync(oldNested);
+renameSync(oldNested, newNested);
+console.log("directory move:", !existsSync(oldNested), existsSync(newNested));
 try {
   renameSync(missing, other);
 } catch (e) {
@@ -40,6 +52,7 @@ try {
 }
 
 async function run(): Promise<void> {
+  writeFileSync(c, "stale promise destination");
   await renamePromise(b, c);
   console.log("promise:", !existsSync(b), readFileSync(c, "utf8"));
   try {
@@ -51,6 +64,7 @@ async function run(): Promise<void> {
   }
 
   let renameReturned = false;
+  writeFileSync(d, "stale callback destination");
   rename(c, d, (err) => {
     console.log("callback:", renameReturned, err === null, !existsSync(c), readFileSync(d, "utf8"));
     rename(missing, other, (missingErr) => {
