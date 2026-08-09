@@ -86,7 +86,8 @@ function lowerOptionalDefaultArg(
     : L.lowerExprExpecting(node, expected);
 }
 
-/** Ambient array method calls. `push`/`pop`/`indexOf`/`includes`/`join`
+/** Ambient array method calls. `push`/`unshift`/`pop`/`reverse`/
+ * `indexOf`/`includes`/`join`
    * lower to arrIntrinsic; the HOF family — `map`/`filter`/`forEach`/
    * `find`/`some`/`every`/`flatMap`/`reduce`/`reduceRight` — desugars to a
    * direct call of a synthetic loop function (see lowerArrayHofCall and
@@ -199,6 +200,19 @@ function lowerOptionalDefaultArg(
         loc,
       };
     }
+    if (name === "reverse") {
+      if (call.arguments.length !== 0) {
+        L.noLowering(`.reverse with ${call.arguments.length} arguments`, call);
+      }
+      return {
+        kind: "arrIntrinsic",
+        method: "reverse",
+        receiver: L.lowerExpr(access.expression),
+        args: [],
+        type: receiverIr,
+        loc,
+      };
+    }
     if (name === "with") {
       if (call.arguments.length !== 2 || call.arguments.some(ts.isSpreadElement)) {
         L.noLowering(`.with with ${call.arguments.length} arguments`, call);
@@ -265,11 +279,11 @@ function lowerOptionalDefaultArg(
     // indexOf/includes take a fromIndex, join's separator is optional, the
     // predicate/mapping HOFs take a thisArg. Each unlowered form is fenced
     // per site (SC2020), never silently truncated to the supported
-    // arguments. push lowers every declared form (variadic, 0 args
+    // arguments. push/unshift lower every declared form (variadic, 0 args
     // included — Node returns the unchanged length); reduce/reduceRight
     // lower both declared forms (with and without an initial value).
     const arity = {
-      push: [0, Number.MAX_SAFE_INTEGER], pop: [0, 0], indexOf: [1, 1], includes: [1, 1], join: [1, 1],
+      push: [0, Number.MAX_SAFE_INTEGER], unshift: [0, Number.MAX_SAFE_INTEGER], pop: [0, 0], indexOf: [1, 1], includes: [1, 1], join: [1, 1],
       concat: [0, Number.MAX_SAFE_INTEGER],
       slice: [0, 2], shift: [0, 0], splice: [1, 2], at: [1, 1],
       map: [1, 1], filter: [1, 1], forEach: [1, 1], find: [1, 1], findIndex: [1, 1], some: [1, 1],
@@ -277,7 +291,7 @@ function lowerOptionalDefaultArg(
       every: [1, 1], flatMap: [1, 1], reduce: [1, 2], reduceRight: [1, 2],
     }[
       name as
-        | "push" | "pop" | "concat" | "indexOf" | "includes" | "join" | "slice" | "shift" | "splice" | "at" | "map" | "filter"
+        | "push" | "unshift" | "pop" | "concat" | "indexOf" | "includes" | "join" | "slice" | "shift" | "splice" | "at" | "map" | "filter"
         | "forEach" | "find" | "findIndex" | "findLast" | "findLastIndex" | "some" | "every" | "flatMap" | "reduce" | "reduceRight"
     ];
     if (call.arguments.length < arity[0]! || call.arguments.length > arity[1]!) {
@@ -298,17 +312,17 @@ function lowerOptionalDefaultArg(
         hint,
       );
     }
-    if (name === "push" || name === "pop") {
+    if (name === "push" || name === "unshift" || name === "pop") {
       const receiver = L.lowerExpr(access.expression);
-      // `a.push(...src)`: append src's elements in order (count
-      // snapshotted first, so `a.push(...a)` duplicates like JS) and
-      // return the new length.
+      // `a.push(...src)` / `a.unshift(...src)`: copy src's elements in
+      // order (count snapshotted first, so the self-spread forms duplicate
+      // like JS) and return the new length.
       const spreadArg = call.arguments.length === 1 && ts.isSpreadElement(call.arguments[0]!)
         ? call.arguments[0]!
         : null;
-      if (name === "push" && spreadArg && ts.isSpreadElement(spreadArg)) {
+      if ((name === "push" || name === "unshift") && spreadArg && ts.isSpreadElement(spreadArg)) {
         let src = L.lowerExpr(spreadArg.expression);
-        // `a.push(...someSet)`: a same-element Set drains first
+        // `a.push(...someSet)` / `a.unshift(...someSet)`: a same-element Set drains first
         // (setIntrinsic toArray — insertion order), then appends.
         if (src.type.kind === "set" && typeEquals(src.type.elem, elem)) {
           src = { kind: "setIntrinsic", method: "toArray", receiver: src, args: [], type: arrayOf(src.type.elem), loc };
@@ -317,23 +331,30 @@ function lowerOptionalDefaultArg(
           L.unsupported(
             "SC1090",
             spreadArg,
-            `pushing a spread of '${L.fmt(src.type)}' onto a '${L.fmt(receiverIr)}' array (only a same-element-type array spreads)`,
+            `${name === "push" ? "pushing" : "unshifting"} a spread of '${L.fmt(src.type)}' onto a '${L.fmt(receiverIr)}' array (only a same-element-type array spreads)`,
           );
         }
-        return { kind: "arrIntrinsic", method: "pushSpread", receiver, args: [src], type: F64, loc };
+        return {
+          kind: "arrIntrinsic",
+          method: name === "push" ? "pushSpread" : "unshiftSpread",
+          receiver,
+          args: [src],
+          type: F64,
+          loc,
+        };
       }
-      // Pushed values flow into the element slot like an assignment would:
+      // Inserted values flow into the element slot like an assignment would:
       // union-element arrays wrap plain arm values (coerceInto is inert
       // when the types already agree).
       const args = call.arguments.map((a) =>
-        name === "push" ? L.lowerExprExpecting(a, elem) : L.lowerExpr(a),
+        name === "push" || name === "unshift" ? L.lowerExprExpecting(a, elem) : L.lowerExpr(a),
       );
       return {
         kind: "arrIntrinsic",
         method: name,
         receiver,
         args,
-        type: name === "push" ? F64 : elem,
+        type: name === "push" || name === "unshift" ? F64 : elem,
         loc,
       };
     }

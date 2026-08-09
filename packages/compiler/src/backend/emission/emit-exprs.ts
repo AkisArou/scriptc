@@ -1404,6 +1404,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`}`);
             return E.newTemp(e.type, `scr_arr_len(${r.name})`);
           }
+          case "unshift": {
+            // Like push, every argument evaluates before mutation. Apply
+            // them from right to left so their final front order remains
+            // the source order. Ref ownership moves into the array.
+            const vs = e.args.map((a) => E.emitExpr(a));
+            if (acc === "ref") vs.forEach((v) => E.moveTemp(v));
+            let last: Temp | undefined;
+            for (let i = vs.length - 1; i >= 0; i--) {
+              last = E.newTemp(e.type, `scr_arr_unshift_${acc}(${r.name}, ${vs[i]!.name})`);
+            }
+            return last ?? E.newTemp(e.type, `scr_arr_len(${r.name})`);
+          }
+          case "unshiftSpread": {
+            // The runtime snapshots and retains the borrowed source,
+            // including the aliasing `a.unshift(...a)` case.
+            const src = E.emitExpr(e.args[0]!);
+            return E.newTemp(e.type, `scr_arr_unshift_spread(${r.name}, ${src.name})`);
+          }
           case "pop":
             // Ownership of a refcounted element moves OUT of the array to
             // this temp (+1 to us, the runtime does not release it).
@@ -1443,6 +1461,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           case "toReversed":
             return E.newTemp(e.type, `scr_arr_to_reversed(${r.name})`);
+          case "reverse":
+            // Mutates in place and returns a retained reference to the
+            // receiver, preserving Array.prototype.reverse identity.
+            return E.newTemp(e.type, `scr_arr_reverse(${r.name})`);
           case "toSpliced": {
             const start = E.emitExpr(e.args[0]!);
             const count = E.emitExpr(e.args[1]!);

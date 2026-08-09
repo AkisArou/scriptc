@@ -167,12 +167,13 @@ function fenceTaxonomy(): FenceTaxonomy {
 
 /* ── classification: what policing a static entry means ───────────────── */
 
-/** Array methods with a distinct IR trace (arrIntrinsic methods). `push`
- * includes the spread spelling — `a.push(...xs)` lowers to pushSpread and
- * is the same surface. The rest of ARRAY_METHODS desugars to plain loops. */
+/** Array methods whose distinct arrIntrinsic traces can be policed. The
+ * variadic inserters include their spread spellings under the same surface. */
 const ARR_DETECTABLE: Record<string, readonly string[] | undefined> = {
   push: ["push", "pushSpread"],
+  unshift: ["unshift", "unshiftSpread"],
   pop: ["pop"],
+  reverse: ["reverse"],
   indexOf: ["indexOf"],
   includes: ["includes"],
   join: ["join"],
