@@ -6,14 +6,28 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.0.23
+
+### Features
+
+- **Read-only `Date` values compile statically.** Zero-argument and single-value construction, storage and passing, `getTime`/`valueOf`, `toISOString`, UTC and host-local calendar getters, and `getTimezoneOffset` lower through both backends. Construction applies ECMAScript TimeClip behavior, the supported ISO and certificate-date strings parse without an embedded engine, and valid extreme years retain calendar answers even beyond a platform CRT's native range.
+- **The native web surface grows response construction and fetch cancellation.** `new Response(body, init)` covers the supported `BodyInit`, `ResponseInit`, header mutation, conversion, validation, and stream-error semantics, while `AbortController` supplies shared native signal state, abort events and reasons, and preflight or in-flight `fetch` cancellation across the static and dynamic tiers.
+- **`fs.readSync` accepts positioned reads.** A numeric position reads without advancing the descriptor, while omitted, `null`, and `-1` positions preserve current-offset behavior; validation order, zero-length reads, EOF, and partial Windows reads match Node.
+
+### Fixes
+
+- **Top-level `await` marks an implicit ES module.** TypeScript and JavaScript files without an explicit import or export now follow Node 24's syntax detection, package-type precedence, module scoping, and `require` diagnostics instead of being misclassified as CommonJS.
+- **Cycle collection stays fast on large live heaps.** The runtime now collects cycles generationally, promotes survivors, and schedules bounded mature passes, avoiding repeated whole-heap walks while retaining full sweeps for cross-generation garbage and shutdown auditing.
+- **Typed-array reads, writes, and lengths use specialized native lowering.** Both backends emit operations directly from the IR element kind while preserving numeric coercion, bounds behavior, and receiver lifetime across side-effecting index and value expressions.
+
+<!-- release:end -->
+
 ## 0.0.22
 
 ### Features
 
 - **Coverage can analyze projects with embedder-provided module surfaces.** Repeatable `--external-types <specifier=file.d.ts>` mappings give the checker a local declaration for an otherwise unresolvable bare specifier, so project-owned statements remain measurable. The mapping is coverage-only and never invents execution semantics: value imports and uses stay explicit SC1010 external-host blockers, while type-only structural use can remain fully static.
 - **Production and library builds persist compilation work.** A bounded content-addressed cache is enabled by default: unchanged executables and library archives skip native code generation/linking, while source edits reuse separately keyed runtime objects (including library mode's `-DSCR_LIB` flavor) and rebuild only the program translation unit. Identities include resolved system-header dependency bytes plus linker/assembler identities, and checksums protect complete artifacts as well as runtime objects. The compiler remains required so every cache-enabled invocation rediscovers dependency selection; metadata-probe failures fall back to an ordinary build, and the configured size cap is enforced after writes. FFI builds with archive/object inputs or ambient `system_libraries` deliberately relink on every invocation so a transitive or in-place native rebuild cannot return stale code; their runtime objects remain cached. Mutable compiler input paths such as `CPATH` and `SDKROOT`, and opaque compiler wrappers, conservatively bypass persistent artifacts and objects; opaque archiver wrappers rebuild library program members and archives while retaining runtime-object reuse. Direct Clang, Apple's system Clang shim, `zig cc`, trusted platform archivers, and `zig ar` retain their applicable persistent tiers. Complete binary hits are checked before any missing vendor prerequisite is rebuilt. Library graphs with no npm package to opt in also retain the auto-detection frontend instead of loading the same graph twice. `SCRIPTC_CACHE_DIR` overrides the platform cache root, and `SCRIPTC_NO_CACHE=1` preserves a fully uncached path.
-
-<!-- release:end -->
 
 ## 0.0.21
 
