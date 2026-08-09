@@ -119,3 +119,11 @@ for (const encoding of unusualBadEncodings) {
     }
   }
 }
+
+// Node selects the byte window before resolving a runtime encoding. An
+// empty buffer or a range that clamps to empty therefore returns "" even
+// when the encoding name is unknown.
+const emptyBadEncoding = "wat-empty" as BufferEncoding;
+console.log("variable bad empty buffer", JSON.stringify(Buffer.alloc(0).toString(emptyBadEncoding)));
+console.log("variable bad empty tail", JSON.stringify(raw.toString(emptyBadEncoding, raw.length)));
+console.log("variable bad empty range", JSON.stringify(raw.toString(emptyBadEncoding, 2, 2)));

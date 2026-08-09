@@ -669,6 +669,16 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
   return scr_bytes_decode_utf8(pend, np);
 }
 
+static void scr_bytes_to_str_bounds(const ScrBytes *b, double start, double end,
+                                    size_t *s0_out, size_t *e0_out) {
+  size_t len = b->len;
+  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
+  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
+  if (e0 < s0) e0 = s0;
+  *s0_out = s0;
+  *e0_out = e0;
+}
+
 /* toString(enc, start, end): Node slices then decodes — start/end clamp
  * to [0, len] with start > end collapsing to empty and negative ends
  * clamping to 0 (Node's slice-then-decode; an OMITTED end never reaches
@@ -676,10 +686,8 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
  * form). Delegates to the whole-buffer decoder
  * through a stack view — no allocation, no rc traffic. */
 ScrStr *scr_bytes_to_str_range(const ScrBytes *b, const ScrStr *enc, double start, double end) {
-  size_t len = b->len;
-  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
-  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
-  if (e0 < s0) e0 = s0;
+  size_t s0, e0;
+  scr_bytes_to_str_bounds(b, start, end, &s0, &e0);
   ScrBytes view = { .rc = 1, .len = e0 - s0, .elem = b->elem, .data = b->data + s0, .backing = NULL };
   return scr_bytes_to_str(&view, enc);
 }
@@ -873,6 +881,9 @@ static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
 }
 
 ScrStr *scr_bytes_to_str_checked(const ScrBytes *b, const ScrStr *enc) {
+  /* Node returns before resolving the encoding when there are no bytes
+   * to decode, so even an unknown runtime name answers the empty string. */
+  if (b->len == 0) return scr_str_new("", 0);
   ScrStr *normalized = scr_bytes_normalize_encoding(enc);
   if (!normalized) return NULL;
   ScrStr *out = scr_bytes_to_str(b, normalized);
@@ -882,6 +893,11 @@ ScrStr *scr_bytes_to_str_checked(const ScrBytes *b, const ScrStr *enc) {
 
 ScrStr *scr_bytes_to_str_checked_range(const ScrBytes *b, const ScrStr *enc,
                                        double start, double end) {
+  /* The range is selected before Node resolves the encoding. A clamped
+   * empty window therefore answers "" even for an unknown name. */
+  size_t s0, e0;
+  scr_bytes_to_str_bounds(b, start, end, &s0, &e0);
+  if (s0 == e0) return scr_str_new("", 0);
   ScrStr *normalized = scr_bytes_normalize_encoding(enc);
   if (!normalized) return NULL;
   ScrStr *out = scr_bytes_to_str_range(b, normalized, start, end);
