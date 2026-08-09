@@ -6136,7 +6136,13 @@ const DATE_METHOD_HINT =
     const receiver = L.lowerExpr(access.expression);
     if (receiver.type.kind !== "date") L.badType(access.expression, L.typeOf(access.expression));
     if (name === "getTime" || name === "valueOf") {
-      return { kind: "libCall", fn: "date.getTime", args: [receiver], type: F64, loc };
+      return {
+        kind: "libCall",
+        fn: name === "getTime" ? "date.getTime" : "date.valueOf",
+        args: [receiver],
+        type: F64,
+        loc,
+      };
     }
     if (name === "toISOString") {
       return { kind: "libCall", fn: "date.toISOStringValue", args: [receiver], type: STRING, loc };

@@ -1055,6 +1055,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "date.newMs": { argTypes: [F64], result: DATE_T },
   "date.newString": { argTypes: [STRING], result: DATE_T },
   "date.getTime": { argTypes: [DATE_T], result: F64 },
+  "date.valueOf": { argTypes: [DATE_T], result: F64 },
   "date.toISOString": { argTypes: [F64], result: STRING },
   "date.toISOStringValue": { argTypes: [DATE_T], result: STRING },
   "date.getFullYear": { argTypes: [DATE_T], result: F64 },
@@ -1372,15 +1373,24 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     u.arms.forEach((arm, i) => {
       // The unit kinds (undefinedT/nullT) are valid arms — union membership
-      // is the ONLY place they may appear; void/union/map/dyn/jsval
-      // stay out (maps have no discriminant to narrow on). Func/set arm
+      // is the ONLY place they may appear; void/union/map/dyn/jsval/date
+      // stay out (maps and scalar Date values have no supported union
+      // representation/discriminant to narrow on). Func/set arm
       // sibling rules live in unionFuncSetArmsOk (shared with the frontend's
       // union builders): a func arm allows unit and FUNC siblings (the
       // nullable-callback shape, and the primitive-constructor tables where
       // closure pointer identity per tag is the narrowing); a set arm is
       // valid exactly when every other arm is a unit (the defaulted-Set-
       // param ABI); func/set-beside-data stays out.
-      if (arm.kind === "void" || arm.kind === "union" || arm.kind === "map" || arm.kind === "dyn" || arm.kind === "jsval" || arm.kind === "generator") {
+      if (
+        arm.kind === "void" ||
+        arm.kind === "union" ||
+        arm.kind === "map" ||
+        arm.kind === "dyn" ||
+        arm.kind === "jsval" ||
+        arm.kind === "date" ||
+        arm.kind === "generator"
+      ) {
         errors.push({ message: `union ${u.id}: arm ${i} is ${arm.kind}`, loc: noLoc });
       }
       if (

@@ -466,6 +466,24 @@ describe("library profile fences", () => {
     expect(r.profile.fences[2]!.surfaces.map((s) => s.id)).toEqual(["node-builtin.perf_hooks.performance.now"]);
   });
 
+  test("Date getTime and valueOf fences keep distinct IR witnesses", () => {
+    const r = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        determinism: {
+          fences: [{ id: "stdlib.date.getTime" }, { id: "stdlib.date.valueOf" }],
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.fences[0]!.surfaces[0]!.detector?.libFns).toEqual([
+      "date.getTime",
+      "date.parseGetTime",
+    ]);
+    expect(r.profile.fences[1]!.surfaces[0]!.detector?.libFns).toEqual(["date.valueOf"]);
+  });
+
   test("a prefix matching nothing refuses — the spec's illustrative spelling included", () => {
     // The worked example's 'node.fs.' is illustrative prose; the real
     // taxonomy spells 'node-builtin.fs.', and the strict refusal catches

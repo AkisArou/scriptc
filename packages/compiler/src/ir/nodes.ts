@@ -3745,6 +3745,7 @@ export type IrLibFn =
   | "date.newMs"
   | "date.newString"
   | "date.getTime"
+  | "date.valueOf"
   | "date.toISOString"
   | "date.toISOStringValue"
   | "date.getFullYear"

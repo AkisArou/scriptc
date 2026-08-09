@@ -3531,10 +3531,10 @@ double scr_date_parse_get_time(ScrStr *s) {
  * 1900+year (the spec's MakeFullYear), out-of-range months ROLL into the
  * year (Date.UTC(2017, 13) is Feb 2018) and any integer date offsets from
  * day 1 of that month — days_from_civil extrapolates linearly, so both
- * rollovers fall out. V8 bounds MakeDay's year to ±1e6 (kMaxYear/kMinYear,
- * date.h) before TimeClip can see the result, and Node answers NaN past
- * it — matched here, and it keeps days_from_civil's long long exact.
- * Never throws. */
+ * rollovers fall out. V8 bounds MakeDay's input year to ±1e6 and input
+ * month to ±1e7 before normalizing the month (kMaxYear/kMinYear and
+ * kMaxMonth/kMinMonth, date.h); Node answers NaN past either bound even
+ * when the two inputs would normalize back into range. Never throws. */
 double scr_date_utc(double y, double mo, double d,
                     double h, double mi, double s, double ms) {
   if (!isfinite(y) || !isfinite(mo) || !isfinite(d) || !isfinite(h) ||
@@ -3548,10 +3548,10 @@ double scr_date_utc(double y, double mo, double d,
   mi = trunc(mi);
   s = trunc(s);
   ms = trunc(ms);
+  if (fabs(y) > 1000000.0 || fabs(mo) > 10000000.0) return NAN;
   if (y >= 0 && y <= 99) y += 1900;
   double ym = y + floor(mo / 12.0);
   int mn = (int)(mo - floor(mo / 12.0) * 12.0); /* 0..11 */
-  if (fabs(ym) > 1000000.0) return NAN; /* V8's MakeDay year bound */
   double days = scr_days_from_civil((long long)ym, mn + 1, 1) + (d - 1.0);
   double t = days * 86400000.0 + h * 3600000.0 + mi * 60000.0 + s * 1000.0 + ms;
   if (fabs(t) > 8640000000000000.0) return NAN; /* TimeClip */

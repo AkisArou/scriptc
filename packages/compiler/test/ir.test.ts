@@ -8,6 +8,12 @@ test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
 });
 
+test("validator rejects Date union arms unsupported by the backends", () => {
+  const bad = structuredClone(fibModule);
+  bad.unions = [{ id: "u-date", arms: [{ kind: "date" }, { kind: "undefinedT" }] }];
+  expect(validateModule(bad).map((e) => e.message)).toContain("union u-date: arm 0 is date");
+});
+
 test("fib module JSON round-trips", () => {
   const json = serializeModule(fibModule);
   expect(deserializeModule(json)).toEqual(fibModule);

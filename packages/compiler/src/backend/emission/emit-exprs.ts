@@ -6537,6 +6537,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "date.newString":
             return finish(`scr_date_parse_get_time(${arg(0)})`);
           case "date.getTime":
+          case "date.valueOf":
             return finish(`${arg(0)}`);
           case "date.toISOString":
           case "date.toISOStringValue":

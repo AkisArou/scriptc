@@ -270,6 +270,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "date.newMs": "scr_date_new_ms",
   "date.newString": "scr_date_parse_get_time",
   "date.getTime": "scr_date_get_time",
+  "date.valueOf": "scr_date_get_time",
   "date.parseGetTime": "scr_date_parse_get_time",
   "date.utc": "scr_date_utc",
   "date.getFullYear": "scr_date_get_full_year_local",

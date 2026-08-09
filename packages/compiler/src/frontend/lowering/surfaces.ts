@@ -912,7 +912,7 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     id: "stdlib.date.valueOf",
     kind: "stdlib",
     name: "Date.prototype.valueOf",
-    fns: ["date.getTime"],
+    fns: ["date.valueOf"],
     note: "the same millisecond read as getTime()",
   },
   {
