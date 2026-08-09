@@ -27,11 +27,28 @@ console.log("proto-negative", JSON.stringify(parse(JSON.parse(
 console.log("numeric-short-order", JSON.stringify(parse(JSON.parse(
   '{"args":["-x"],"options":{"2":{"type":"boolean","short":"x"},"1":{"type":"boolean","short":"x"}},"tokens":true}',
 ))));
+console.log("numeric-values-order", JSON.stringify(parse({
+  args: ["--9", "--2", "--100", "--a"],
+  options: {
+    "9": { type: "boolean" },
+    "2": { type: "boolean" },
+    "100": { type: "boolean" },
+    a: { type: "boolean" },
+  },
+  tokens: true,
+})));
 
 try {
   parse(JSON.parse('{"args":["--unknown",null]}'));
 } catch (error) {
   console.log("tokenize-error", `${error.code}`, error.message);
+}
+try {
+  parse(JSON.parse(
+    '{"args":["--name","--",null],"options":{"name":{"type":"string"}}}',
+  ));
+} catch (error) {
+  console.log("consumed-terminator-tokenize-error", `${error.code}`, error.message);
 }
 try {
   parse(JSON.parse('{"args":[],"options":{"2":{},"1":{}}}'));

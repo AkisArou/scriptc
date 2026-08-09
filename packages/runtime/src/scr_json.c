@@ -1390,7 +1390,8 @@ ScrStr *scr_dyn_typeof(const ScrDyn *d) {
 /* ── JSON.stringify over a dyn value (util.format's %j) ───────────────
  * The RUNTIME walk the type-directed serializers deliberately avoid for
  * static values — a dyn value has no static type, so the checked-dynamic tree's own kinds
- * drive it, JS-exactly: insertion-ordered objects with undefined/function
+ * drive it, JS-exactly: objects in OrdinaryOwnPropertyKeys order (array
+ * indices ascending, then other strings in insertion order) with undefined/function
  * members OMITTED, arrays rendering those as null, Buffer's toJSON shape
  * ({"type":"Buffer","data":[...]}), shortest-roundtrip numbers, escaped
  * strings. HANDLE values fence loudly (Node walks own enumerable props
@@ -1418,23 +1419,26 @@ static bool scr_dyn_json_write(ScrJsonBuf *b, const ScrDyn *d) {
   case SCR_DYN_OBJ: {
     scr_jb_putc(b, '{');
     bool first = true;
-    for (size_t i = 0; i < d->v.obj.len; i++) {
+    ScrDyn *entries = scr_dyn_obj_entries(d);
+    for (size_t i = 0; i < entries->v.arr.len; i++) {
+      const ScrDyn *pair = entries->v.arr.items[i];
+      const ScrDyn *key = pair->v.arr.items[0];
+      const ScrDyn *value = pair->v.arr.items[1];
       ScrJsonBuf probe;
       scr_jb_init(&probe);
-      if (!scr_dyn_json_write(&probe, d->v.obj.entries[i].value)) {
+      if (!scr_dyn_json_write(&probe, value)) {
         scr_jb_dispose(&probe);
         continue; /* undefined/function members drop, like Node */
       }
       if (!first) scr_jb_putc(b, ',');
       first = false;
-      ScrStr *k = scr_str_new(d->v.obj.entries[i].key, d->v.obj.entries[i].key_len);
-      scr_jb_put_json_str(b, k);
-      scr_str_release(k);
+      scr_jb_put_json_str(b, key->v.str);
       scr_jb_putc(b, ':');
       ScrStr *body = scr_jb_finish(&probe);
       scr_jb_write(b, body->data, body->len);
       scr_str_release(body);
     }
+    scr_dyn_release(entries);
     scr_jb_putc(b, '}');
     return true;
   }

@@ -311,6 +311,20 @@ static bool pa_is_negative_name(const ScrStr *name) {
   return name->len >= 3 && memcmp(name->data, "no-", 3) == 0;
 }
 
+/* Node recognizes an inline long-option value only when an '=' occurs
+ * after at least one name code unit, then splits at the first '='. */
+static size_t pa_long_eq(const ScrStr *arg) {
+  bool has_inline_value = false;
+  for (size_t j = 3; j < arg->len; j++) {
+    if (arg->data[j] == '=') { has_inline_value = true; break; }
+  }
+  if (!has_inline_value) return arg->len;
+  for (size_t j = 2; j < arg->len; j++) {
+    if (arg->data[j] == '=') return j;
+  }
+  return arg->len;
+}
+
 static const ScrDyn *pa_find_short(const ScrDyn *options,
                                    const ScrStr *short_name,
                                    ScrStr **long_name) {
@@ -427,6 +441,174 @@ static ScrDyn *pa_default_args(void) {
   return args;
 }
 
+/* Copy an engine-backed array into the native dyn alphabet without using
+ * its iterator. Node's parseArgs takes args with Array.prototype.slice,
+ * so indexed Gets (including holes -> undefined) and the live length are
+ * the relevant semantics; an overridden Symbol.iterator is not. */
+static ScrDyn *pa_materialize_js_array(const ScrDyn *value) {
+  if (value->kind != SCR_DYN_JSVAL ||
+      !scr_dyn_jsval_ops()->is_array(value->v.jsval.cell)) {
+    return scr_dyn_retain((ScrDyn *)value);
+  }
+  ScrStr *length_key = scr_str_new("length", 6);
+  ScrDyn *length = scr_dyn_jsval_ops()->key_get(value->v.jsval.cell,
+                                                length_key);
+  scr_str_release(length_key);
+  if (!length) return NULL;
+  if (length->kind != SCR_DYN_NUM || !isfinite(length->v.num) ||
+      length->v.num < 0) {
+    scr_dyn_release(length);
+    return scr_dyn_retain((ScrDyn *)value); /* defensive: real arrays cannot */
+  }
+  size_t len = (size_t)length->v.num;
+  scr_dyn_release(length);
+  ScrDyn *out = scr_dyn_new_arr();
+  for (size_t i = 0; i < len; i++) {
+    char index[32];
+    int n = snprintf(index, sizeof index, "%zu", i);
+    ScrStr *key = scr_str_new(index, (size_t)n);
+    ScrDyn *item = scr_dyn_jsval_ops()->key_get(value->v.jsval.cell, key);
+    scr_str_release(key);
+    if (!item) {
+      scr_dyn_release(out);
+      return NULL;
+    }
+    scr_dyn_arr_push(out, item);
+  }
+  return out;
+}
+
+/* Own-member read with an owned answer. Native config objects are already
+ * inert dyn data; engine-backed configs route Object.hasOwn + Get through
+ * the island so a normal `any` config can enter the native parser. */
+static ScrDyn *pa_owned_member(const ScrDyn *obj, const char *key) {
+  if (obj->kind == SCR_DYN_OBJ) {
+    const ScrDyn *value = pa_own_member(obj, key);
+    return value ? scr_dyn_retain((ScrDyn *)value) : NULL;
+  }
+  if (obj->kind != SCR_DYN_JSVAL) return NULL;
+  ScrStr *name = scr_str_new(key, strlen(key));
+  int own = scr_dyn_jsval_ops()->has_own(obj->v.jsval.cell, name);
+  if (own != 1) {
+    scr_str_release(name);
+    return NULL;
+  }
+  ScrDyn *value = scr_dyn_jsval_ops()->key_get(obj->v.jsval.cell, name);
+  scr_str_release(name);
+  return value;
+}
+
+static ScrDyn *pa_materialize_descriptor(const ScrDyn *desc) {
+  if (desc->kind == SCR_DYN_JSVAL &&
+      scr_dyn_jsval_ops()->is_array(desc->v.jsval.cell)) {
+    return pa_materialize_js_array(desc);
+  }
+  if (desc->kind != SCR_DYN_OBJ && desc->kind != SCR_DYN_JSVAL) {
+    return scr_dyn_retain((ScrDyn *)desc);
+  }
+  if (desc->kind == SCR_DYN_JSVAL &&
+      !scr_dyn_isl_typeof_is(desc, "object")) {
+    return scr_dyn_retain((ScrDyn *)desc);
+  }
+  static const char *const fields[] = {"type", "short", "multiple", "default"};
+  ScrDyn *out = scr_dyn_new_obj();
+  for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+    ScrDyn *value = pa_owned_member(desc, fields[i]);
+    if (!value) {
+      if (scr_exc_pending()) { scr_dyn_release(out); return NULL; }
+      continue;
+    }
+    ScrDyn *native = pa_materialize_js_array(value);
+    scr_dyn_release(value);
+    if (!native) { scr_dyn_release(out); return NULL; }
+    scr_dyn_obj_set(out, fields[i], strlen(fields[i]), native);
+  }
+  return out;
+}
+
+static ScrDyn *pa_materialize_options(const ScrDyn *options) {
+  if (options->kind == SCR_DYN_JSVAL &&
+      scr_dyn_jsval_ops()->is_array(options->v.jsval.cell)) {
+    return pa_materialize_js_array(options);
+  }
+  if (options->kind != SCR_DYN_OBJ && options->kind != SCR_DYN_JSVAL) {
+    return scr_dyn_retain((ScrDyn *)options);
+  }
+  if (options->kind == SCR_DYN_JSVAL &&
+      !scr_dyn_isl_typeof_is(options, "object")) {
+    return scr_dyn_retain((ScrDyn *)options);
+  }
+  ScrDyn *entries = scr_dyn_obj_entries(options);
+  if (!entries) return NULL;
+  ScrDyn *out = scr_dyn_new_obj();
+  for (size_t i = 0; i < entries->v.arr.len; i++) {
+    const ScrDyn *pair = entries->v.arr.items[i];
+    const ScrStr *name = pair->v.arr.items[0]->v.str;
+    ScrDyn *desc = pa_materialize_descriptor(pair->v.arr.items[1]);
+    if (!desc) {
+      scr_dyn_release(out);
+      scr_dyn_release(entries);
+      return NULL;
+    }
+    scr_dyn_obj_set(out, name->data, name->len, desc);
+  }
+  scr_dyn_release(entries);
+  return out;
+}
+
+/* Normalize the documented config members only. This is intentionally a
+ * snapshot, matching parseArgs's synchronous reads, while preserving own
+ * property presence (including explicit undefined) across the island. */
+static ScrDyn *pa_materialize_config(const ScrDyn *config) {
+  if (config->kind != SCR_DYN_OBJ && config->kind != SCR_DYN_JSVAL) {
+    return scr_dyn_retain((ScrDyn *)config);
+  }
+  static const char *const fields[] = {
+    "args", "strict", "allowPositionals", "tokens", "allowNegative", "options",
+  };
+  ScrDyn *out = scr_dyn_new_obj();
+  for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+    ScrDyn *value = pa_owned_member(config, fields[i]);
+    if (!value) {
+      if (scr_exc_pending()) { scr_dyn_release(out); return NULL; }
+      continue;
+    }
+    ScrDyn *native = strcmp(fields[i], "options") == 0
+                         ? pa_materialize_options(value)
+                         : pa_materialize_js_array(value);
+    scr_dyn_release(value);
+    if (!native) { scr_dyn_release(out); return NULL; }
+    scr_dyn_obj_set(out, fields[i], strlen(fields[i]), native);
+  }
+  return out;
+}
+
+/* Whether tokenizing this string argument consumes the next array item as
+ * a separate value. This mirrors the greedy string-option cases only; the
+ * processing pass below still owns usage validation and token storage. */
+static bool pa_consumes_next(const ScrDyn *options, const ScrStr *arg) {
+  if (arg->len >= 2 && arg->data[0] == '-' && arg->data[1] == '-') {
+    size_t eq = pa_long_eq(arg);
+    if (eq < arg->len) return false;
+    ScrStr *name = pa_str_bytes(arg->data + 2, eq - 2);
+    const ScrDyn *desc = pa_find_long(options, name);
+    bool consumes = desc && pa_desc_type(desc) == 1;
+    scr_str_release(name);
+    return consumes;
+  }
+  if (arg->len <= 1 || arg->data[0] != '-') return false;
+  double units = scr_str_utf16_len((ScrStr *)arg);
+  for (double at = 1; at < units; at++) {
+    ScrStr *short_name = scr_str_char_at((ScrStr *)arg, at);
+    ScrStr *name = NULL;
+    const ScrDyn *desc = pa_find_short(options, short_name, &name);
+    scr_str_release(name);
+    scr_str_release(short_name);
+    if (desc && pa_desc_type(desc) == 1) return at + 1 >= units;
+  }
+  return false;
+}
+
 ScrDyn *scr_util_parse_args(const ScrDyn *config) {
   /* Omitted config is lowered as {}, while an explicit undefined takes the
    * default parameter just as Node does. Null keeps Object(null)'s useful
@@ -436,7 +618,9 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
     scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
     return NULL;
   }
-  const ScrDyn *cfg = config->kind == SCR_DYN_OBJ ? config : NULL;
+  ScrDyn *owned_config = pa_materialize_config(config);
+  if (!owned_config) return NULL;
+  const ScrDyn *cfg = owned_config->kind == SCR_DYN_OBJ ? owned_config : NULL;
   /* Node validates the args container before every flag and before the
    * option schema. Its element values are intentionally not prevalidated:
    * non-string values can still become loose-mode positional tokens. */
@@ -447,23 +631,25 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
     args = owned_args;
   } else if (args->kind != SCR_DYN_ARR) {
     scr_dyn_arg_type_fail("args", "an instance of Array", args);
+    scr_dyn_release(owned_config);
     return NULL;
   }
 
   bool ok = true;
   bool strict = pa_config_bool(cfg, "strict", true, &ok);
-  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  if (!ok) { scr_dyn_release(owned_args); scr_dyn_release(owned_config); return NULL; }
   bool allow_positionals = pa_config_bool(cfg, "allowPositionals", !strict, &ok);
-  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  if (!ok) { scr_dyn_release(owned_args); scr_dyn_release(owned_config); return NULL; }
   bool return_tokens = pa_config_bool(cfg, "tokens", false, &ok);
-  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  if (!ok) { scr_dyn_release(owned_args); scr_dyn_release(owned_config); return NULL; }
   bool allow_negative = pa_config_bool(cfg, "allowNegative", false, &ok);
-  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  if (!ok) { scr_dyn_release(owned_args); scr_dyn_release(owned_config); return NULL; }
 
   const ScrDyn *options = pa_member(cfg, "options");
   if (options && options->kind == SCR_DYN_NULL) options = NULL;
   if (!pa_validate_options(options)) {
     scr_dyn_release(owned_args);
+    scr_dyn_release(owned_config);
     return NULL;
   }
 
@@ -475,16 +661,23 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
   for (size_t i = 0; i < args->v.arr.len; i++) {
     const ScrDyn *arg_value = args->v.arr.items[i];
     if (scan_after_terminator) continue;
-    if (arg_value->kind == SCR_DYN_STR &&
-        pa_str_eq_c(arg_value->v.str, "--")) {
-      scan_after_terminator = true;
-      continue;
-    }
     if (arg_value->kind == SCR_DYN_NULL ||
         arg_value->kind == SCR_DYN_UNDEF) {
       pa_nullish_arg_length(arg_value);
       scr_dyn_release(owned_args);
+      scr_dyn_release(owned_config);
       return NULL;
+    }
+    if (arg_value->kind != SCR_DYN_STR) continue;
+    if (pa_str_eq_c(arg_value->v.str, "--")) {
+      scan_after_terminator = true;
+      continue;
+    }
+    if (pa_consumes_next(options, arg_value->v.str) &&
+        i + 1 < args->v.arr.len &&
+        args->v.arr.items[i + 1]->kind != SCR_DYN_NULL &&
+        args->v.arr.items[i + 1]->kind != SCR_DYN_UNDEF) {
+      i++;
     }
   }
 
@@ -530,19 +723,10 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
     }
 
     if (arg->len >= 2 && arg->data[0] == '-' && arg->data[1] == '-') {
-      size_t eq = arg->len;
-      bool has_inline_value = false;
+      size_t eq = pa_long_eq(arg);
       /* The presence test starts after one name byte, so `--=x` stays the
        * lone option "=x". Once present, Node splits at the FIRST equals:
        * `--==x` therefore has the empty name and value "=x". */
-      for (size_t j = 3; j < arg->len; j++) {
-        if (arg->data[j] == '=') { has_inline_value = true; break; }
-      }
-      if (has_inline_value) {
-        for (size_t j = 2; j < arg->len; j++) {
-          if (arg->data[j] == '=') { eq = j; break; }
-        }
-      }
       ScrStr *name = pa_str_bytes(arg->data + 2, eq - 2);
       ScrStr *raw = pa_str_bytes(arg->data, eq);
       const ScrDyn *desc = pa_find_long(options, name);
@@ -743,6 +927,7 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
   scr_dyn_obj_set(result, "positionals", 11, positionals);
   if (tokens) scr_dyn_obj_set(result, "tokens", 6, tokens);
   scr_dyn_release(owned_args);
+  scr_dyn_release(owned_config);
   return result;
 
 fail:
@@ -751,5 +936,6 @@ fail:
   scr_dyn_release(values);
   scr_dyn_release(result);
   scr_dyn_release(owned_args);
+  scr_dyn_release(owned_config);
   return NULL;
 }
