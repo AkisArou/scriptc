@@ -1374,6 +1374,32 @@ export function fenceStaticHeadersMember(
   );
 }
 
+/** The native AbortController handle dispatches `abort()` directly and
+ * exposes `.signal` as data, but it has no first-class function value for
+ * the prototype method. Fence method extraction before the checked-dynamic
+ * keyed-read fallback can silently answer `undefined`. Dynamic builds use
+ * the engine's real AbortController object and retain ordinary method reads. */
+export function fenceStaticAbortControllerMemberRead(
+  L: Lowerer,
+  access: StaticResponseAccess,
+): IrExpr | null {
+  if (L.dynamic) return null;
+  const symbol = isStdlibFetchInterface(
+    L,
+    access.expression,
+    "AbortController",
+  );
+  if (!symbol) return null;
+  const members = fetchAccessMemberNames(L, access);
+  if (members === null || !members.includes("abort")) return null;
+  L.noLowering(
+    "AbortController.abort through method extraction in a static build",
+    access,
+    "call controller.abort(...) directly; the native AbortController handle does not expose abort as a first-class function value",
+    symbol,
+  );
+}
+
 function isStdlibFetchInterface(
   L: Lowerer,
   node: ts.Node,
@@ -1950,21 +1976,20 @@ export function fenceStaticReadableStreamMember(
  * ambient globals have no first-class constructor-object representation;
  * claim the direct calls by declaration provenance before the general
  * member-call path tries to lower the receiver as a value. */
-function staticCallWithSurplusArgs(
+function staticFirstArgWithSurplusArgs(
   L: Lowerer,
   call: ts.CallExpression,
   first: IrExpr,
-  result: (first: IrExpr) => IrExpr,
 ): IrExpr {
   const loc = locOf(call);
-  if (call.arguments.length === 1) return result(first);
+  if (call.arguments.length <= 1) return first;
   const firstLocal = L.declareHiddenLocal("%fetchArg", first.type);
-  const firstRef = (): IrExpr => ({
+  const firstRef: IrExpr = {
     kind: "varRef",
     localId: firstLocal.id,
     type: first.type,
     loc,
-  });
+  };
   const stmts: IrStmt[] = [
     { kind: "varDecl", localId: firstLocal.id, init: first, loc },
   ];
@@ -1984,8 +2009,22 @@ function staticCallWithSurplusArgs(
       : L.lowerExpr(argument);
     stmts.push({ kind: "exprStmt", expr: discarded, loc: discarded.loc });
   }
-  const answer = result(firstRef());
-  return { kind: "seqExpr", stmts, result: answer, type: answer.type, loc };
+  return {
+    kind: "seqExpr",
+    stmts,
+    result: firstRef,
+    type: first.type,
+    loc,
+  };
+}
+
+function staticCallWithSurplusArgs(
+  L: Lowerer,
+  call: ts.CallExpression,
+  first: IrExpr,
+  result: (first: IrExpr) => IrExpr,
+): IrExpr {
+  return result(staticFirstArgWithSurplusArgs(L, call, first));
 }
 
 export function lowerStaticFetchCompanionCall(
@@ -2130,6 +2169,66 @@ export function lowerStaticFetchCompanionCall(
     }));
   }
   return null;
+}
+
+/** `AbortController.abort(reason?)` mutates the native signal shared with
+ * `.signal` and fetch. Preserve a mutable reason's identity just like
+ * `AbortSignal.abort(reason)`; surplus arguments still evaluate in order and
+ * are ignored by the runtime operation. */
+export function lowerStaticAbortControllerCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  const access = call.expression;
+  if (
+    L.dynamic ||
+    call.questionDotToken ||
+    call.arguments.some((argument) => ts.isSpreadElement(argument)) ||
+    (!ts.isPropertyAccessExpression(access) &&
+      !ts.isElementAccessExpression(access)) ||
+    access.questionDotToken ||
+    staticResponseMemberName(L, access) !== "abort"
+  ) {
+    return null;
+  }
+  const receiverTs = L.checker.getBaseTypeOfLiteralType(
+    L.typeOf(access.expression),
+  );
+  const symbol = receiverTs.getAliasSymbol() ?? receiverTs.getSymbol();
+  if (
+    symbol?.name !== "AbortController" ||
+    !L.checker.declarationsOf(symbol).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        L.isStdlibFile(d.getSourceFile()),
+    )
+  ) {
+    return null;
+  }
+  const receiver = L.lowerExpr(access.expression);
+  if (receiver.type.kind !== "dyn") return null;
+  const loc = locOf(call);
+  const first = call.arguments[0]
+    ? lowerLiveWebValue(L, call.arguments[0])
+    : dynUndefinedExpr(loc);
+  const args = [staticFirstArgWithSurplusArgs(L, call, first)];
+  return lowerStaticFixedFetchMethodCall(
+    L,
+    call,
+    access,
+    "abort",
+    receiver,
+    args,
+    (receiverRef, argumentRefs) => ({
+      kind: "dynInvoke",
+      recv: receiverRef,
+      method: "abort",
+      calleeName: access.getText(),
+      args: argumentRefs,
+      type: DYN,
+      loc,
+    }),
+  );
 }
 
 /** Controller chunks and error reasons are dyn-handle calls, but unlike a
@@ -2310,6 +2409,65 @@ export function lowerStaticAbortSignalListenerCall(
       loc,
     }),
   );
+}
+
+/** `new AbortController()`. Static builds create a native controller handle
+ * over the same signal state consumed by fetch; dynamic builds construct the
+ * island Web object. JavaScript accepts surplus constructor arguments, so
+ * both tiers evaluate them even though AbortController ignores their values. */
+export function lowerAbortControllerNew(
+  L: Lowerer,
+  expr: ts.NewExpression,
+): IrExpr | null {
+  if (
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "AbortController"
+  ) {
+    return null;
+  }
+  const symbol = L.resolveValueSymbol(expr.expression);
+  if (!symbol || !L.isStdlibSymbol(symbol)) return null;
+  const args = expr.arguments ?? [];
+  if (args.some((argument) => ts.isSpreadElement(argument))) return null;
+  const loc = locOf(expr);
+  if (L.dynamic) {
+    const ctor: IrExpr = {
+      kind: "jsOp",
+      op: "globalGet",
+      name: "AbortController",
+      args: [],
+      type: JSVAL,
+      loc,
+    };
+    return {
+      kind: "jsOp",
+      op: "construct",
+      args: [ctor, ...args.map((argument) =>
+        L.jsvalIn(L.lowerExpr(argument), argument)
+      )],
+      type: JSVAL,
+      loc,
+    };
+  }
+  const result: IrExpr = {
+    kind: "libCall",
+    fn: "fetch.abortControllerNew",
+    args: [],
+    type: DYN,
+    loc,
+  };
+  if (args.length === 0) return result;
+  return {
+    kind: "seqExpr",
+    stmts: args.map((argument): IrStmt => ({
+      kind: "exprStmt",
+      expr: L.lowerExpr(argument),
+      loc: locOf(argument),
+    })),
+    result,
+    type: DYN,
+    loc,
+  };
 }
 
 /** `new ReadableStream(source?)`. Static builds box the source record into

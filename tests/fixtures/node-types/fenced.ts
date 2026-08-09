@@ -15,10 +15,9 @@ const timer = setInterval(() => {
 timer.unref();
 timer.refresh();
 timer.close();
-/* The web-platform globals ride in with @types/node (undici):
- * AbortController fences, while fetch and a typed RequestInit lower. */
-const controller = new AbortController();
-controller.abort();
+/* The web-platform globals ride in with @types/node (undici). Fetch,
+ * AbortController, and a typed RequestInit lower; wider Response members
+ * below retain their profile fences. */
 const fetchInit: RequestInit = {
   method: "POST",
   headers: { "content-type": "application/json" },

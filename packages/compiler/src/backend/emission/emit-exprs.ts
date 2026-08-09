@@ -2930,6 +2930,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             );
             return result;
           }
+          case "fetch.abortControllerNew":
+            return finish(`scr_fetch_abort_controller_new()`);
           case "fetch.abortTimeout":
             E.usesTimers = true;
             return finish(`scr_fetch_abort_timeout(${arg(0)})`);

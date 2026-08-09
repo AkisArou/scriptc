@@ -117,6 +117,10 @@ const PROBES: Probe[] = [
   { id: "stdlib.number.toFixed", source: "const n = 1.2345;\nconsole.log(n.toFixed(2));\n" },
   { id: "stdlib.abort-signal.timeout", source: "const signal = AbortSignal.timeout(1000);\nconsole.log(signal.aborted);\n" },
   {
+    id: "stdlib.abort-controller.constructor",
+    source: "const controller = new AbortController();\ncontroller.abort();\nconsole.log(controller.signal.aborted);\n",
+  },
+  {
     id: "stdlib.readable-stream.constructor",
     source: "const stream = new ReadableStream<number>();\nconsole.log(stream.locked);\n",
   },
@@ -559,6 +563,33 @@ test("fetch interface object bindings retain the inventory fence code", () => {
   const dynamic = analyze(file, { dynamic: true }).coverage;
   expect([...new Set(dynamic.diagnostics.map((d) => d.code))]).toEqual(["SC2020"]);
   expect(dynamic.diagnostics.filter((d) => d.code === "SC2020")).toHaveLength(2);
+});
+
+test("static AbortController method reads fence instead of yielding undefined", () => {
+  const file = probeFile({
+    id: "stdlib.abort-controller.method-read-fence",
+    source:
+      '/// <reference types="node" />\n' +
+      'const controller = new AbortController();\n' +
+      'void controller.abort;\n' +
+      'void controller["abort"];\n' +
+      'void controller.signal;\n',
+  });
+  const { coverage } = analyze(file);
+  expect(coverage.preflightFailed).toBe(false);
+  expect([...new Set(coverage.diagnostics.map((d) => d.code))]).toEqual(["SC2020"]);
+  expect(coverage.diagnostics).toHaveLength(2);
+  expect(
+    coverage.diagnostics.every((d) =>
+      d.message.includes(
+        "AbortController.abort through method extraction in a static build",
+      )
+    ),
+  ).toBe(true);
+
+  const dynamic = analyze(file, { dynamic: true }).coverage;
+  expect(dynamic.diagnostics.map((d) => `${d.code}: ${d.message}`)).toEqual([]);
+  expect(dynamic.stats.statementsFailed).toBe(0);
 });
 
 test("static fetch data properties remain destructurable in JavaScript", () => {

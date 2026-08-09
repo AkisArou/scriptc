@@ -180,6 +180,17 @@ async function main(baseUrl: string, refusedUrl: string): Promise<void> {
     if (e instanceof Error) console.log("timeout:", e.name, e.message);
   }
 
+  // Typed user code can also cancel imperatively under --dynamic; this
+  // exercises the compiler bridge into the island's AbortController.
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 20);
+  try {
+    await fetch(`${baseUrl}/slow`, { signal: controller.signal });
+    console.log("controller: resolved");
+  } catch (e) {
+    if (e instanceof Error) console.log("controller:", e.name, e.message);
+  }
+
   // A 101 is handed to the HTTP client's upgrade path rather than its
   // response path. fetch rejects it instead of leaving the promise pending.
   try {

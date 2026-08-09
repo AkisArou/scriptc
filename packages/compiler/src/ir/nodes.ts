@@ -1621,6 +1621,7 @@ export type IrLibFn =
   | "fetch.responseJson"
   | "fetch.responseText"
   | "fetch.responseBytes"
+  | "fetch.abortControllerNew"
   | "fetch.abortTimeout"
   | "fetch.abortNow"
   | "fetch.abortAny"

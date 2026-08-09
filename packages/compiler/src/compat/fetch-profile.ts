@@ -283,6 +283,27 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       evidence: [fixture("static"), fixture("static-coercion"), fixture("static-network-error")],
     },
     {
+      id: "stdlib.abort-controller.constructor",
+      name: "AbortController constructor",
+      kind: "constructor",
+      facets: ["argument-evaluation", "identity", "state-machine", "surplus-arguments"],
+      evidence: [fixture("static-controller")],
+    },
+    {
+      id: "stdlib.abort-controller.signal",
+      name: "AbortController.signal",
+      kind: "property",
+      facets: ["identity", "property-read", "state-machine"],
+      evidence: [fixture("static-controller")],
+    },
+    {
+      id: "stdlib.abort-controller.abort",
+      name: "AbortController.abort",
+      kind: "method",
+      facets: ["callback-order", "identity", "liveness", "state-machine", "surplus-arguments"],
+      evidence: [fixture("static-controller")],
+    },
+    {
       id: "stdlib.abort-signal.abort",
       name: "AbortSignal.abort",
       kind: "static-method",
@@ -501,26 +522,23 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
     entries: [
       staticEntry("stdlib.fetch", "globalThis", "fetch", "global"),
 
-      unsupportedEntry(
+      staticEntry(
         "stdlib.abort-controller.constructor",
         "AbortController",
         "constructor",
         "constructor",
-        typedInterfaceUnsupported,
       ),
-      unsupportedEntry(
+      staticEntry(
         "stdlib.abort-controller.signal",
         "AbortController",
         "signal",
         "prototype",
-        typedInterfaceUnsupported,
       ),
-      unsupportedEntry(
+      staticEntry(
         "stdlib.abort-controller.abort",
         "AbortController",
         "abort",
         "prototype",
-        typedInterfaceUnsupported,
       ),
       outOfScopeEntry(
         "stdlib.abort-controller.symbol.toStringTag",
