@@ -81,9 +81,23 @@ function lowerOptionalDefaultArg(
   defaultValue: IrExpr,
 ): IrExpr {
   const undefinedArg = lowerStaticallyUndefinedArg(L, node);
-  return undefinedArg
-    ? defaultAfterUndefined(undefinedArg, defaultValue)
-    : L.lowerExprExpecting(node, expected);
+  if (undefinedArg) return defaultAfterUndefined(undefinedArg, defaultValue);
+  const value = L.lowerExpr(node);
+  if (value.type.kind === "union") {
+    const def = L.unions.get(value.type.unionId);
+    if (
+      def?.arms.length === 2 &&
+      def.arms.some((arm) => arm.kind === "undefinedT") &&
+      def.arms.some((arm) => typeEquals(arm, expected))
+    ) {
+      // A runtime optional argument uses its API default only on the
+      // undefined arm. The exact two-arm gate deliberately excludes null:
+      // optional parameters do not admit it, and an asserted null must keep
+      // the ordinary checked-narrow failure instead of defaulting.
+      return { kind: "nullish", left: value, right: defaultValue, type: expected, loc: value.loc };
+    }
+  }
+  return L.coerceInto(node, value, expected);
 }
 
 /** Ambient array method calls. `push`/`unshift`/`pop`/`reverse`/
@@ -5493,10 +5507,36 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
         );
       }
       if (nArgs > 3) L.noLowering(`.toString with ${nArgs} arguments on Buffers`, call);
-      const encNode = call.arguments[0];
-      const encName = encNode ? bufEncoding(L, "Buffer.toString", encNode) : "utf8";
       const receiver = L.lowerExpr(access.expression);
-      const enc: IrExpr = { kind: "strLit", value: encName, type: STRING, loc };
+      const encNode = call.arguments[0];
+      let method: IrBytesIntrinsicMethod = "toString";
+      let enc: IrExpr = { kind: "strLit", value: "utf8", type: STRING, loc };
+      if (encNode) {
+        const encType = L.typeOf(encNode);
+        const encName = encType.isStringLiteralType()
+          ? knownBufEncoding(encType.value)
+          : undefined;
+        if (encName !== undefined) {
+          // Keep literals on the canonical, non-throwing fast path.
+          enc = { kind: "strLit", value: encName, type: STRING, loc };
+        } else {
+          const undefinedArg = lowerStaticallyUndefinedArg(L, encNode);
+          if (undefinedArg) {
+            // An explicit undefined is the omitted-encoding default. Keep
+            // the canonical, non-throwing path while preserving effects
+            // from equivalent spellings such as `void sideEffect()`.
+            enc = defaultAfterUndefined(undefinedArg, enc);
+          } else {
+            // A BufferEncoding-typed variable selects its decoder at
+            // runtime. Optional variables default their undefined arm to
+            // utf8; the checked intrinsic canonicalizes every present
+            // alias/case and raises Node's ERR_UNKNOWN_ENCODING when a cast
+            // lets a bad value through.
+            enc = lowerOptionalDefaultArg(L, encNode, STRING, enc);
+            method = "toStringVar";
+          }
+        }
+      }
       // The range form toString(enc, start[, end]) decodes the clamped
       // [start, end) byte window (Node's slice-then-decode). An omitted
       // end stays omitted (2 intrinsic args) — the emitter supplies the
@@ -5506,11 +5546,11 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
         const start = L.lowerExprExpecting(call.arguments[1]!, F64);
         if (nArgs === 3) {
           const end = L.lowerExprExpecting(call.arguments[2]!, F64);
-          return { kind: "bytesIntrinsic", method: "toString", receiver, args: [enc, start, end], type: STRING, loc };
+          return { kind: "bytesIntrinsic", method, receiver, args: [enc, start, end], type: STRING, loc };
         }
-        return { kind: "bytesIntrinsic", method: "toString", receiver, args: [enc, start], type: STRING, loc };
+        return { kind: "bytesIntrinsic", method, receiver, args: [enc, start], type: STRING, loc };
       }
-      return { kind: "bytesIntrinsic", method: "toString", receiver, args: [enc], type: STRING, loc };
+      return { kind: "bytesIntrinsic", method, receiver, args: [enc], type: STRING, loc };
     }
     // The Buffer-declared comparison/search/mutation surface. All of
     // these resolve against the Buffer interface (the checker keeps most

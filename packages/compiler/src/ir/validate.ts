@@ -2263,7 +2263,7 @@ function validateFunction(
         const isNum =
           e.method === "readNum" || e.method === "writeNum" || e.method === "readNumVar" || e.method === "writeNumVar";
         const U8_ONLY_EXTRA: ReadonlySet<string> = new Set([
-          "toString", "equals", "compareBuf", "indexOf", "lastIndexOf", "includes",
+          "toString", "toStringVar", "equals", "compareBuf", "indexOf", "lastIndexOf", "includes",
           "indexOfNum", "lastIndexOfNum", "includesNum", "fill", "fillNum", "fillStr",
           "copy", "swap16", "swap32", "swap64", "writeStr",
         ]);
@@ -2324,7 +2324,7 @@ function validateFunction(
                       ? { argTypes: [], minArgs: 0, result: arrayOf(F64) }
                 : e.method === "setFrom"
                   ? { argTypes: [bytesOf(recv.elem), F64], minArgs: 1, result: VOID }
-                  : e.method === "toString"
+                  : e.method === "toString" || e.method === "toStringVar"
                     ? { argTypes: [STRING, F64, F64], minArgs: 1, result: STRING }
                     : e.method === "readNum"
                       ? { argTypes: [STRING, F64], minArgs: 2, result: F64 }

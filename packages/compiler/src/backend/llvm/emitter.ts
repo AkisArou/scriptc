@@ -9839,18 +9839,23 @@ class LlEmitter {
           false,
           true,
         );
-      case "toString": {
+      case "toString":
+      case "toStringVar": {
         // The encoding arg is always present (the frontend completes an
-        // omitted one to "utf8"). Never throws; +1 string. Range forms:
-        // [enc, start] decodes to the buffer's end (the element count —
-        // r->len in the C spelling); [enc, start, end] clamps.
+        // omitted one to "utf8"). The runtime-valued form validates and
+        // may throw ERR_UNKNOWN_ENCODING; the literal form is canonical
+        // and cannot throw. Both return +1. Range forms: [enc, start]
+        // decode to the buffer's end (the element count — r->len in the C
+        // spelling); [enc, start, end] clamps.
+        const checked = method === "toStringVar";
+        const stem = checked ? "scr_bytes_to_str_checked" : "scr_bytes_to_str";
         if (e.args.length === 3) {
           return call(
-            "scr_bytes_to_str_range",
+            `${stem}_range`,
             "ptr (ptr, ptr, double, double)",
             `ptr ${r.name}, ptr ${args[0]!.name}, double ${args[1]!.name}, double ${args[2]!.name}`,
             true,
-            false,
+            checked,
           );
         }
         if (e.args.length === 2) {
@@ -9858,14 +9863,14 @@ class LlEmitter {
           const len = B.tmp();
           B.line(`${len} = call double @scr_bytes_len(ptr ${r.name})`);
           return call(
-            "scr_bytes_to_str_range",
+            `${stem}_range`,
             "ptr (ptr, ptr, double, double)",
             `ptr ${r.name}, ptr ${args[0]!.name}, double ${args[1]!.name}, double ${len}`,
             true,
-            false,
+            checked,
           );
         }
-        return call("scr_bytes_to_str", "ptr (ptr, ptr)", `ptr ${r.name}, ptr ${args[0]!.name}`, true, false);
+        return call(stem, "ptr (ptr, ptr)", `ptr ${r.name}, ptr ${args[0]!.name}`, true, checked);
       }
       case "equals":
         return call("scr_bytes_equals", "zeroext i1 (ptr, ptr)", `ptr ${r.name}, ptr ${args[0]!.name}`, false, false);
