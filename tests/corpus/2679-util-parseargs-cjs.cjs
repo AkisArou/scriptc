@@ -21,6 +21,23 @@ console.log("proto-token", JSON.stringify(parse(JSON.parse(
 console.log("proto-default", JSON.stringify(parse(JSON.parse(
   '{"args":[],"options":{"__proto__":{"type":"boolean","default":true}},"tokens":true}',
 ))));
+console.log("proto-negative", JSON.stringify(parse(JSON.parse(
+  '{"args":["--no-__proto__"],"options":{"__proto__":{"type":"boolean"}},"allowNegative":true,"tokens":true}',
+))));
+console.log("numeric-short-order", JSON.stringify(parse(JSON.parse(
+  '{"args":["-x"],"options":{"2":{"type":"boolean","short":"x"},"1":{"type":"boolean","short":"x"}},"tokens":true}',
+))));
+
+try {
+  parse(JSON.parse('{"args":["--unknown",null]}'));
+} catch (error) {
+  console.log("tokenize-error", `${error.code}`, error.message);
+}
+try {
+  parse(JSON.parse('{"args":[],"options":{"2":{},"1":{}}}'));
+} catch (error) {
+  console.log("numeric-validation-order", `${error.code}`, error.message);
+}
 
 for (const config of [
   null,

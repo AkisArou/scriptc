@@ -1060,7 +1060,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
 /** Whether a checker type belongs to node:util.parseArgs's dyn-backed
  * declaration family. Module ancestry disambiguates short private helper
  * names such as `Token` from names in other standard-library modules. */
-function isParseArgsDynCheckerType(L: Lowerer, type: ts.Type): boolean {
+export function isParseArgsDynCheckerType(L: Lowerer, type: ts.Type): boolean {
   const widened = L.checker.getBaseTypeOfLiteralType(type);
   const declarationBelongs = (d: ts.Node): boolean => {
     if (!L.isStdlibFile(d.getSourceFile())) return false;

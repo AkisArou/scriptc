@@ -18,12 +18,20 @@ const { values: fullValues, positionals: fullPositionals } = full;
 console.log("destructured", fullValues.verbose, fullPositionals.length);
 const { values: { output: nestedOutput } } = full;
 console.log("nested", nestedOutput);
+function printParsed({ values }: ReturnType<typeof parseArgs>): void {
+  console.log("param-pattern", values["output"]);
+}
+printParsed(full);
 if (full.tokens !== undefined) {
   const firstToken = full.tokens[0];
   if (firstToken !== undefined && firstToken.kind === "option") {
     console.log("first-token", firstToken.name, firstToken.rawName);
     const { name: tokenName, rawName: tokenRawName } = firstToken;
     console.log("token-pattern", tokenName, tokenRawName);
+  }
+  for (const { kind } of full.tokens) {
+    console.log("loop-pattern", kind);
+    break;
   }
 }
 
@@ -54,6 +62,28 @@ const loose = parseArgs({
   tokens: true,
 });
 console.log("loose", JSON.stringify(loose));
+console.log("equals-1", JSON.stringify(parseArgs({
+  args: ["--==x"],
+  strict: false,
+  tokens: true,
+})));
+console.log("equals-2", JSON.stringify(parseArgs({
+  args: ["--=x=y"],
+  strict: false,
+  tokens: true,
+})));
+console.log("empty-negative-loose", JSON.stringify(parseArgs({
+  args: ["--no-"],
+  strict: false,
+  allowNegative: true,
+  tokens: true,
+})));
+console.log("empty-negative-strict", JSON.stringify(parseArgs({
+  args: ["--no-"],
+  options: { "": { type: "boolean" } },
+  allowNegative: true,
+  tokens: true,
+})));
 
 const typedConfig: import("node:util").ParseArgsConfig = {
   args: ["--mode", "fast"],
@@ -74,6 +104,7 @@ for (const run of [
   (): void => { parseArgs({ args: ["--wat"], allowPositionals: true }); },
   (): void => { parseArgs({ args: ["--name"], options: { name: { type: "string", short: "n" } } }); },
   (): void => { parseArgs({ args: ["--force=yes"], options: { force: { type: "boolean", short: "f" } } }); },
+  (): void => { parseArgs({ args: ["--no-color=yes"], options: { color: { type: "boolean" } }, allowNegative: true }); },
 ]) {
   try {
     run();
@@ -83,3 +114,9 @@ for (const run of [
     }
   }
 }
+
+process.argv.push("--live-flag");
+console.log("live-argv", JSON.stringify(parseArgs({
+  options: { "live-flag": { type: "boolean" } },
+})));
+process.argv.pop();

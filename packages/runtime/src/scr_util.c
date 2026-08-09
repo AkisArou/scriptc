@@ -200,94 +200,105 @@ static bool pa_default_value_ok(const ScrDyn *v, int type) {
   return type == 1 ? v->kind == SCR_DYN_STR : v->kind == SCR_DYN_BOOL;
 }
 
+static bool pa_validate_option(const ScrStr *name, const ScrDyn *desc) {
+  char *base = pa_path("options.", name->data, name->len, "");
+  if (desc->kind != SCR_DYN_OBJ) {
+    scr_dyn_prop_type_fail(base, "of type object", desc);
+    free(base);
+    return false;
+  }
+  const ScrDyn *typev = pa_member(desc, "type");
+  int type = pa_desc_type(desc);
+  if (type < 0) {
+    char *path = pa_path(base, "", 0, ".type");
+    scr_dyn_prop_type_fail(path, "('string|boolean')",
+                           typev ? typev : scr_dyn_undefined());
+    free(path);
+    free(base);
+    return false;
+  }
+  const ScrDyn *shortv = pa_own_member(desc, "short");
+  if (shortv) {
+    char *path = pa_path(base, "", 0, ".short");
+    if (shortv->kind != SCR_DYN_STR) {
+      scr_dyn_prop_type_fail(path, "of type string", shortv);
+      free(path);
+      free(base);
+      return false;
+    }
+    if (scr_str_utf16_len(shortv->v.str) != 1) {
+      scr_dyn_arg_value_fail(path, "must be a single character", shortv);
+      free(path);
+      free(base);
+      return false;
+    }
+    free(path);
+  }
+  const ScrDyn *multiplev = pa_own_member(desc, "multiple");
+  if (multiplev && multiplev->kind != SCR_DYN_BOOL) {
+    char *path = pa_path(base, "", 0, ".multiple");
+    scr_dyn_prop_type_fail(path, "of type boolean", multiplev);
+    free(path);
+    free(base);
+    return false;
+  }
+  const ScrDyn *def = pa_member(desc, "default");
+  if (def) {
+    char *path = pa_path(base, "", 0, ".default");
+    if (pa_desc_multiple(desc)) {
+      if (def->kind != SCR_DYN_ARR) {
+        scr_dyn_prop_type_fail(path, "an instance of Array", def);
+        free(path);
+        free(base);
+        return false;
+      }
+      for (size_t j = 0; j < def->v.arr.len; j++) {
+        if (!pa_default_value_ok(def->v.arr.items[j], type)) {
+          char suffix[48];
+          snprintf(suffix, sizeof suffix, "[%zu]", j);
+          char *item_path = pa_path(path, "", 0, suffix);
+          scr_dyn_prop_type_fail(item_path,
+                                 type ? "of type string" : "of type boolean",
+                                 def->v.arr.items[j]);
+          free(item_path);
+          free(path);
+          free(base);
+          return false;
+        }
+      }
+    } else if (!pa_default_value_ok(def, type)) {
+      scr_dyn_prop_type_fail(path,
+                             type ? "of type string" : "of type boolean", def);
+      free(path);
+      free(base);
+      return false;
+    }
+    free(path);
+  }
+  free(base);
+  return true;
+}
+
 /* Validate the option schema up front, as Node does even when args is
- * empty. Static TypeScript callers already satisfy this ladder; it keeps
- * JS/unknown crossings catchable and prevents malformed dyn reads. */
+ * empty. Object.entries supplies JS own-key order (array-index names first),
+ * which controls both validation precedence and duplicate-short lookup. */
 static bool pa_validate_options(const ScrDyn *options) {
   if (!options) return true; /* null/undefined mean {} */
   if (options->kind != SCR_DYN_OBJ) {
     scr_dyn_arg_type_fail("options", "of type object", options);
     return false;
   }
-  for (size_t i = 0; i < options->v.obj.len; i++) {
-    const ScrDynEntry *entry = &options->v.obj.entries[i];
-    const ScrDyn *desc = entry->value;
-    char *base = pa_path("options.", entry->key, entry->key_len, "");
-    if (desc->kind != SCR_DYN_OBJ) {
-      scr_dyn_prop_type_fail(base, "of type object", desc);
-      free(base);
+  ScrDyn *entries = scr_dyn_obj_entries(options);
+  for (size_t i = 0; i < entries->v.arr.len; i++) {
+    const ScrDyn *pair = entries->v.arr.items[i];
+    const ScrStr *name = pair->v.arr.items[0]->v.str;
+    const ScrDyn *desc = pair->v.arr.items[1];
+    if (!pa_validate_option(name, desc)) {
+      scr_dyn_release(entries);
       return false;
     }
-    const ScrDyn *typev = pa_member(desc, "type");
-    int type = pa_desc_type(desc);
-    if (type < 0) {
-      char *path = pa_path(base, "", 0, ".type");
-      scr_dyn_prop_type_fail(path, "('string|boolean')",
-                             typev ? typev : scr_dyn_undefined());
-      free(path);
-      free(base);
-      return false;
-    }
-    const ScrDyn *shortv = pa_own_member(desc, "short");
-    if (shortv) {
-      char *path = pa_path(base, "", 0, ".short");
-      if (shortv->kind != SCR_DYN_STR) {
-        scr_dyn_prop_type_fail(path, "of type string", shortv);
-        free(path);
-        free(base);
-        return false;
-      }
-      if (scr_str_utf16_len(shortv->v.str) != 1) {
-        scr_dyn_arg_value_fail(path, "must be a single character", shortv);
-        free(path);
-        free(base);
-        return false;
-      }
-      free(path);
-    }
-    const ScrDyn *multiplev = pa_own_member(desc, "multiple");
-    if (multiplev && multiplev->kind != SCR_DYN_BOOL) {
-      char *path = pa_path(base, "", 0, ".multiple");
-      scr_dyn_prop_type_fail(path, "of type boolean", multiplev);
-      free(path);
-      free(base);
-      return false;
-    }
-    const ScrDyn *def = pa_member(desc, "default");
-    if (def) {
-      char *path = pa_path(base, "", 0, ".default");
-      if (pa_desc_multiple(desc)) {
-        if (def->kind != SCR_DYN_ARR) {
-          scr_dyn_prop_type_fail(path, "an instance of Array", def);
-          free(path);
-          free(base);
-          return false;
-        }
-        for (size_t j = 0; j < def->v.arr.len; j++) {
-          if (!pa_default_value_ok(def->v.arr.items[j], type)) {
-            char suffix[48];
-            snprintf(suffix, sizeof suffix, "[%zu]", j);
-            char *item_path = pa_path(path, "", 0, suffix);
-            scr_dyn_prop_type_fail(item_path,
-                                   type ? "of type string" : "of type boolean",
-                                   def->v.arr.items[j]);
-            free(item_path);
-            free(path);
-            free(base);
-            return false;
-          }
-        }
-      } else if (!pa_default_value_ok(def, type)) {
-        scr_dyn_prop_type_fail(path,
-                               type ? "of type string" : "of type boolean", def);
-        free(path);
-        free(base);
-        return false;
-      }
-      free(path);
-    }
-    free(base);
   }
+  scr_dyn_release(entries);
   return true;
 }
 
@@ -296,20 +307,34 @@ static const ScrDyn *pa_find_long(const ScrDyn *options, const ScrStr *name) {
   return scr_dyn_obj_get(options, name->data, name->len);
 }
 
-static const ScrDyn *pa_find_short(const ScrDyn *options, const ScrStr *short_name,
-                                   const char **long_name, size_t *long_len) {
-  if (!options) return NULL;
-  for (size_t i = 0; i < options->v.obj.len; i++) {
-    const ScrDynEntry *entry = &options->v.obj.entries[i];
-    const ScrDyn *shortv = pa_member(entry->value, "short");
+static bool pa_is_negative_name(const ScrStr *name) {
+  return name->len >= 3 && memcmp(name->data, "no-", 3) == 0;
+}
+
+static const ScrDyn *pa_find_short(const ScrDyn *options,
+                                   const ScrStr *short_name,
+                                   ScrStr **long_name) {
+  if (!options) {
+    *long_name = pa_str_bytes(short_name->data, short_name->len);
+    return NULL;
+  }
+  ScrDyn *entries = scr_dyn_obj_entries(options);
+  for (size_t i = 0; i < entries->v.arr.len; i++) {
+    const ScrDyn *pair = entries->v.arr.items[i];
+    const ScrStr *name = pair->v.arr.items[0]->v.str;
+    const ScrDyn *desc = pair->v.arr.items[1];
+    const ScrDyn *shortv = pa_member(desc, "short");
     if (shortv && shortv->kind == SCR_DYN_STR &&
         shortv->v.str->len == short_name->len &&
         memcmp(shortv->v.str->data, short_name->data, short_name->len) == 0) {
-      *long_name = entry->key;
-      *long_len = entry->key_len;
-      return entry->value;
+      *long_name = pa_str_bytes(name->data, name->len);
+      const ScrDyn *found = pa_find_long(options, name);
+      scr_dyn_release(entries);
+      return found;
     }
   }
+  scr_dyn_release(entries);
+  *long_name = pa_str_bytes(short_name->data, short_name->len);
   return NULL;
 }
 
@@ -331,10 +356,13 @@ static ScrDyn *pa_option_token(const ScrStr *name, const ScrStr *raw,
 
 static void pa_store(ScrDyn *values, ScrDyn *tokens, const ScrDyn *desc,
                      const ScrStr *name, const ScrStr *raw, size_t index,
-                     const ScrDyn *value, bool flag_value, int inline_value) {
+                     const ScrDyn *value, bool flag_value, int inline_value,
+                     bool withhold_proto) {
   /* Node deliberately withholds this key from the null-prototype values
-   * dictionary. The already-tokenized occurrence remains observable. */
-  if (pa_str_eq_c(name, "__proto__")) {
+   * dictionary when it was the ORIGINAL option name. A normalized
+   * `--no-__proto__` passes this check before normalization in Node and is
+   * therefore stored safely on the null-prototype dictionary. */
+  if (withhold_proto && pa_str_eq_c(name, "__proto__")) {
     if (tokens) {
       scr_dyn_arr_push(tokens,
                        pa_option_token(name, raw, index, value, inline_value));
@@ -363,16 +391,15 @@ static void pa_store_flag(ScrDyn *values, ScrDyn *tokens,
                           const ScrDyn *options, const ScrDyn *desc,
                           const ScrStr *name, const ScrStr *raw, size_t index,
                           bool allow_negative) {
-  if (allow_negative && name->len > 3 &&
-      memcmp(name->data, "no-", 3) == 0) {
+  if (allow_negative && pa_is_negative_name(name)) {
     ScrStr *positive = pa_str_bytes(name->data + 3, name->len - 3);
     const ScrDyn *positive_desc = pa_find_long(options, positive);
     pa_store(values, tokens, positive_desc, positive, raw, index,
-             NULL, false, -1);
+             NULL, false, -1, false);
     scr_str_release(positive);
     return;
   }
-  pa_store(values, tokens, desc, name, raw, index, NULL, true, -1);
+  pa_store(values, tokens, desc, name, raw, index, NULL, true, -1, true);
 }
 
 static void pa_positional(ScrDyn *positionals, ScrDyn *tokens,
@@ -388,13 +415,15 @@ static void pa_positional(ScrDyn *positionals, ScrDyn *tokens,
 
 static ScrDyn *pa_default_args(void) {
   ScrDyn *args = scr_dyn_new_arr();
-  int argc = scr_lib_arg_count();
-  /* Raw argv[0] is the executable. process.argv's synthetic first two
-   * entries occupy it plus "scriptc", so slice(2) begins at raw argv[1]. */
-  for (int i = 1; i < argc; i++) {
-    const char *arg = scr_lib_arg(i);
-    scr_dyn_arr_push(args, pa_dyn_str_bytes(arg, strlen(arg)));
+  ScrArr *argv = scr_process_argv();
+  /* Read the ONE live interned process.argv array: user pushes, pops, and
+   * replacements before parseArgs() are observable exactly as slice(2). */
+  for (size_t i = 2; i < argv->len; i++) {
+    ScrStr *arg = scr_arr_get_ref(argv, (double)i);
+    scr_dyn_arr_push(args, pa_dyn_str(arg));
+    scr_str_release(arg);
   }
+  scr_arr_release(argv);
   return args;
 }
 
@@ -436,6 +465,27 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
   if (!pa_validate_options(options)) {
     scr_dyn_release(owned_args);
     return NULL;
+  }
+
+  /* Node tokenizes the complete input before applying strict usage checks.
+   * In the checked-dynamic alphabet, the only tokenizer-time exception is
+   * a nullish argument before `--` (other non-strings become positionals),
+   * so preflight that failure before the processing pass below. */
+  bool scan_after_terminator = false;
+  for (size_t i = 0; i < args->v.arr.len; i++) {
+    const ScrDyn *arg_value = args->v.arr.items[i];
+    if (scan_after_terminator) continue;
+    if (arg_value->kind == SCR_DYN_STR &&
+        pa_str_eq_c(arg_value->v.str, "--")) {
+      scan_after_terminator = true;
+      continue;
+    }
+    if (arg_value->kind == SCR_DYN_NULL ||
+        arg_value->kind == SCR_DYN_UNDEF) {
+      pa_nullish_arg_length(arg_value);
+      scr_dyn_release(owned_args);
+      return NULL;
+    }
   }
 
   ScrDyn *result = scr_dyn_new_obj();
@@ -481,31 +531,51 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
 
     if (arg->len >= 2 && arg->data[0] == '-' && arg->data[1] == '-') {
       size_t eq = arg->len;
-      /* `--=x` is the option named "=x", not an empty option with an
-       * inline value. An equals separator is recognized only after at
-       * least one name byte, matching Node's tokenizer. */
+      bool has_inline_value = false;
+      /* The presence test starts after one name byte, so `--=x` stays the
+       * lone option "=x". Once present, Node splits at the FIRST equals:
+       * `--==x` therefore has the empty name and value "=x". */
       for (size_t j = 3; j < arg->len; j++) {
-        if (arg->data[j] == '=') { eq = j; break; }
+        if (arg->data[j] == '=') { has_inline_value = true; break; }
+      }
+      if (has_inline_value) {
+        for (size_t j = 2; j < arg->len; j++) {
+          if (arg->data[j] == '=') { eq = j; break; }
+        }
       }
       ScrStr *name = pa_str_bytes(arg->data + 2, eq - 2);
       ScrStr *raw = pa_str_bytes(arg->data, eq);
       const ScrDyn *desc = pa_find_long(options, name);
       if (eq < arg->len) {
-        if (strict && !desc) {
+        ScrStr *checked_name = NULL;
+        const ScrDyn *checked_desc = desc;
+        if (strict && !checked_desc && allow_negative &&
+            pa_is_negative_name(name)) {
+          checked_name = pa_str_bytes(name->data + 3, name->len - 3);
+          const ScrDyn *positive_desc = pa_find_long(options, checked_name);
+          if (positive_desc && pa_desc_type(positive_desc) == 0) {
+            checked_desc = positive_desc;
+          }
+        }
+        if (strict && !checked_desc) {
           pa_unknown(raw, allow_positionals);
+          scr_str_release(checked_name);
           scr_str_release(raw);
           scr_str_release(name);
           goto fail;
         }
-        if (strict && pa_desc_type(desc) == 0) {
-          pa_takes_no_value(desc, name);
+        if (strict && pa_desc_type(checked_desc) == 0) {
+          pa_takes_no_value(checked_desc,
+                            checked_name ? checked_name : name);
+          scr_str_release(checked_name);
           scr_str_release(raw);
           scr_str_release(name);
           goto fail;
         }
+        scr_str_release(checked_name);
         ScrStr *value = pa_str_bytes(arg->data + eq + 1, arg->len - eq - 1);
         ScrDyn *dyn_value = pa_dyn_str(value);
-        pa_store(values, tokens, desc, name, raw, i, dyn_value, true, 1);
+        pa_store(values, tokens, desc, name, raw, i, dyn_value, true, 1, true);
         scr_dyn_release(dyn_value);
         scr_str_release(value);
       } else if (desc && pa_desc_type(desc) == 1) {
@@ -526,29 +596,27 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
             scr_str_release(name);
             goto fail;
           }
-          pa_store(values, tokens, desc, name, raw, i - 1, next, true, 0);
+          pa_store(values, tokens, desc, name, raw, i - 1, next, true, 0, true);
         } else if (strict) {
           pa_missing_value(desc, name);
           scr_str_release(raw);
           scr_str_release(name);
           goto fail;
         } else {
-          if (allow_negative && name->len > 3 &&
-              memcmp(name->data, "no-", 3) == 0) {
+          if (allow_negative && pa_is_negative_name(name)) {
             ScrStr *positive = pa_str_bytes(name->data + 3, name->len - 3);
             const ScrDyn *positive_desc = pa_find_long(options, positive);
             pa_store(values, tokens, positive_desc, positive, raw, i,
-                     NULL, false, -1);
+                     NULL, false, -1, false);
             scr_str_release(positive);
           } else {
-            pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
+            pa_store(values, tokens, desc, name, raw, i, NULL, true, -1, true);
           }
         }
       } else {
         ScrStr *positive = NULL;
         const ScrDyn *positive_desc = NULL;
-        const bool negative = allow_negative && name->len > 3 &&
-                              memcmp(name->data, "no-", 3) == 0;
+        const bool negative = allow_negative && pa_is_negative_name(name);
         if (negative) {
           positive = pa_str_bytes(name->data + 3, name->len - 3);
           positive_desc = pa_find_long(options, positive);
@@ -563,10 +631,10 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
         }
         if (negative) {
           pa_store(values, tokens, positive_desc, positive, raw, i,
-                   NULL, false, -1);
+                   NULL, false, -1, false);
           scr_str_release(positive);
         } else {
-          pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
+          pa_store(values, tokens, desc, name, raw, i, NULL, true, -1, true);
         }
       }
       scr_str_release(raw);
@@ -578,11 +646,8 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
       double units = scr_str_utf16_len((ScrStr *)arg);
       for (double at = 1; at < units; at++) {
         ScrStr *short_name = scr_str_char_at((ScrStr *)arg, at);
-        const char *long_bytes = short_name->data;
-        size_t long_len = short_name->len;
-        const ScrDyn *desc = pa_find_short(options, short_name,
-                                           &long_bytes, &long_len);
-        ScrStr *name = pa_str_bytes(long_bytes, long_len);
+        ScrStr *name = NULL;
+        const ScrDyn *desc = pa_find_short(options, short_name, &name);
         char *raw_bytes = malloc(short_name->len + 1);
         if (!raw_bytes) {
           fputs("scriptc: out of memory\n", stderr);
@@ -603,7 +668,7 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
           if (at + 1 < units) {
             ScrStr *value = scr_str_slice((ScrStr *)arg, at + 1, INFINITY);
             ScrDyn *dyn_value = pa_dyn_str(value);
-            pa_store(values, tokens, desc, name, raw, i, dyn_value, true, 1);
+            pa_store(values, tokens, desc, name, raw, i, dyn_value, true, 1, true);
             scr_dyn_release(dyn_value);
             scr_str_release(value);
           } else if (i + 1 < args->v.arr.len &&
@@ -625,7 +690,7 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
               scr_str_release(short_name);
               goto fail;
             }
-            pa_store(values, tokens, desc, name, raw, i - 1, value, true, 0);
+            pa_store(values, tokens, desc, name, raw, i - 1, value, true, 0, true);
           } else if (strict) {
             pa_missing_value(desc, name);
             scr_str_release(raw);
@@ -658,17 +723,20 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
   }
 
   if (options) {
-    for (size_t i = 0; i < options->v.obj.len; i++) {
-      const ScrDynEntry *entry = &options->v.obj.entries[i];
-      if (entry->key_len == 9 &&
-          memcmp(entry->key, "__proto__", 9) == 0) continue;
-      if (scr_dyn_obj_get(values, entry->key, entry->key_len)) continue;
-      const ScrDyn *def = pa_member(entry->value, "default");
+    ScrDyn *entries = scr_dyn_obj_entries(options);
+    for (size_t i = 0; i < entries->v.arr.len; i++) {
+      const ScrDyn *pair = entries->v.arr.items[i];
+      const ScrStr *name = pair->v.arr.items[0]->v.str;
+      const ScrDyn *desc = pair->v.arr.items[1];
+      if (pa_str_eq_c(name, "__proto__")) continue;
+      if (scr_dyn_obj_get(values, name->data, name->len)) continue;
+      const ScrDyn *def = pa_member(desc, "default");
       if (def) {
-        scr_dyn_obj_set(values, entry->key, entry->key_len,
+        scr_dyn_obj_set(values, name->data, name->len,
                         scr_dyn_retain((ScrDyn *)def));
       }
     }
+    scr_dyn_release(entries);
   }
 
   scr_dyn_obj_set(result, "values", 6, values);
