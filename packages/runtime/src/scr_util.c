@@ -18,9 +18,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const ScrDyn *pa_member(const ScrDyn *obj, const char *key) {
+static const ScrDyn *pa_own_member(const ScrDyn *obj, const char *key) {
   if (!obj || obj->kind != SCR_DYN_OBJ) return NULL;
-  const ScrDyn *v = scr_dyn_obj_get(obj, key, strlen(key));
+  return scr_dyn_obj_get(obj, key, strlen(key));
+}
+
+/* The ordinary optional-member read: absent and explicit undefined both
+ * answer no value. Descriptor fields whose validation depends on own
+ * presence use pa_own_member directly. */
+static const ScrDyn *pa_member(const ScrDyn *obj, const char *key) {
+  const ScrDyn *v = pa_own_member(obj, key);
   return v && v->kind != SCR_DYN_UNDEF ? v : NULL;
 }
 
@@ -67,31 +74,37 @@ static void pa_throw_text(ScrJsonBuf *b, const char *code) {
   scr_str_release(msg);
 }
 
-static void pa_unknown(const ScrStr *raw) {
+static void pa_unknown(const ScrStr *raw, bool allow_positionals) {
   ScrJsonBuf b;
   scr_jb_init(&b);
   scr_jb_puts(&b, "Unknown option '");
   scr_jb_put_str(&b, raw);
   scr_jb_puts(&b, "'");
+  if (allow_positionals) {
+    scr_jb_puts(&b, ". To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- \"");
+    scr_jb_put_str(&b, raw);
+    scr_jb_putc(&b, '"');
+  }
   pa_throw_text(&b, "ERR_PARSE_ARGS_UNKNOWN_OPTION");
 }
 
-static void pa_missing_long(const ScrStr *raw) {
-  ScrJsonBuf b;
-  scr_jb_init(&b);
-  scr_jb_puts(&b, "Option '");
-  scr_jb_put_str(&b, raw);
-  scr_jb_puts(&b, " <value>' argument missing");
-  pa_throw_text(&b, "ERR_PARSE_ARGS_INVALID_OPTION_VALUE");
+static void pa_option_label(ScrJsonBuf *b, const ScrDyn *desc,
+                            const ScrStr *name) {
+  const ScrDyn *shortv = pa_member(desc, "short");
+  if (shortv && shortv->kind == SCR_DYN_STR && shortv->v.str->len > 0) {
+    scr_jb_putc(b, '-');
+    scr_jb_put_str(b, shortv->v.str);
+    scr_jb_puts(b, ", ");
+  }
+  scr_jb_puts(b, "--");
+  scr_jb_put_str(b, name);
 }
 
-static void pa_missing_short(const ScrStr *raw, const ScrStr *name) {
+static void pa_missing_value(const ScrDyn *desc, const ScrStr *name) {
   ScrJsonBuf b;
   scr_jb_init(&b);
   scr_jb_puts(&b, "Option '");
-  scr_jb_put_str(&b, raw);
-  scr_jb_puts(&b, ", --");
-  scr_jb_put_str(&b, name);
+  pa_option_label(&b, desc, name);
   scr_jb_puts(&b, " <value>' argument missing");
   pa_throw_text(&b, "ERR_PARSE_ARGS_INVALID_OPTION_VALUE");
 }
@@ -116,11 +129,11 @@ static void pa_ambiguous(const ScrStr *raw, const ScrStr *name,
   pa_throw_text(&b, "ERR_PARSE_ARGS_INVALID_OPTION_VALUE");
 }
 
-static void pa_takes_no_value(const ScrStr *raw) {
+static void pa_takes_no_value(const ScrDyn *desc, const ScrStr *name) {
   ScrJsonBuf b;
   scr_jb_init(&b);
   scr_jb_puts(&b, "Option '");
-  scr_jb_put_str(&b, raw);
+  pa_option_label(&b, desc, name);
   scr_jb_puts(&b, "' does not take an argument");
   pa_throw_text(&b, "ERR_PARSE_ARGS_INVALID_OPTION_VALUE");
 }
@@ -134,11 +147,34 @@ static void pa_unexpected(const ScrStr *arg) {
   pa_throw_text(&b, "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL");
 }
 
+static void pa_unexpected_dyn(const ScrDyn *arg) {
+  if (arg->kind == SCR_DYN_STR) {
+    pa_unexpected(arg->v.str);
+    return;
+  }
+  ScrStr *shown = scr_dyn_format_j(arg);
+  if (!shown) return;
+  pa_unexpected(shown);
+  scr_str_release(shown);
+}
+
+static void pa_nullish_arg_length(const ScrDyn *arg) {
+  const char *kind = arg->kind == SCR_DYN_NULL ? "null" : "undefined";
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "Cannot read properties of ");
+  scr_jb_puts(&b, kind);
+  scr_jb_puts(&b, " (reading 'length')");
+  ScrStr *msg = scr_jb_finish(&b);
+  scr_throw_error_msg(SCR_ERR_TYPE, msg->data, msg->len);
+  scr_str_release(msg);
+}
+
 /* A config boolean with Node's default/validation rule. */
 static bool pa_config_bool(const ScrDyn *config, const char *name,
                            bool fallback, bool *ok) {
   const ScrDyn *v = pa_member(config, name);
-  if (!v) return fallback;
+  if (!v || v->kind == SCR_DYN_NULL) return fallback;
   if (v->kind == SCR_DYN_BOOL) return v->v.b;
   scr_dyn_arg_type_fail(name, "of type boolean", v);
   *ok = false;
@@ -192,7 +228,7 @@ static bool pa_validate_options(const ScrDyn *options) {
       free(base);
       return false;
     }
-    const ScrDyn *shortv = pa_member(desc, "short");
+    const ScrDyn *shortv = pa_own_member(desc, "short");
     if (shortv) {
       char *path = pa_path(base, "", 0, ".short");
       if (shortv->kind != SCR_DYN_STR) {
@@ -209,7 +245,7 @@ static bool pa_validate_options(const ScrDyn *options) {
       }
       free(path);
     }
-    const ScrDyn *multiplev = pa_member(desc, "multiple");
+    const ScrDyn *multiplev = pa_own_member(desc, "multiple");
     if (multiplev && multiplev->kind != SCR_DYN_BOOL) {
       char *path = pa_path(base, "", 0, ".multiple");
       scr_dyn_prop_type_fail(path, "of type boolean", multiplev);
@@ -278,14 +314,15 @@ static const ScrDyn *pa_find_short(const ScrDyn *options, const ScrStr *short_na
 }
 
 static ScrDyn *pa_option_token(const ScrStr *name, const ScrStr *raw,
-                               size_t index, const ScrStr *value, int inline_value) {
+                               size_t index, const ScrDyn *value, int inline_value) {
   ScrDyn *token = scr_dyn_new_obj();
   scr_dyn_obj_set(token, "kind", 4, pa_dyn_str_bytes("option", 6));
   scr_dyn_obj_set(token, "name", 4, pa_dyn_str(name));
   scr_dyn_obj_set(token, "rawName", 7, pa_dyn_str(raw));
   scr_dyn_obj_set(token, "index", 5, scr_dyn_new_num((double)index));
   scr_dyn_obj_set(token, "value", 5,
-                  value ? pa_dyn_str(value) : scr_dyn_retain(scr_dyn_undefined()));
+                  value ? scr_dyn_retain((ScrDyn *)value)
+                        : scr_dyn_retain(scr_dyn_undefined()));
   scr_dyn_obj_set(token, "inlineValue", 11,
                   inline_value < 0 ? scr_dyn_retain(scr_dyn_undefined())
                                    : scr_dyn_new_bool(inline_value != 0));
@@ -294,8 +331,18 @@ static ScrDyn *pa_option_token(const ScrStr *name, const ScrStr *raw,
 
 static void pa_store(ScrDyn *values, ScrDyn *tokens, const ScrDyn *desc,
                      const ScrStr *name, const ScrStr *raw, size_t index,
-                     const ScrStr *value, bool flag_value, int inline_value) {
-  ScrDyn *stored = value ? pa_dyn_str(value) : scr_dyn_new_bool(flag_value);
+                     const ScrDyn *value, bool flag_value, int inline_value) {
+  /* Node deliberately withholds this key from the null-prototype values
+   * dictionary. The already-tokenized occurrence remains observable. */
+  if (pa_str_eq_c(name, "__proto__")) {
+    if (tokens) {
+      scr_dyn_arr_push(tokens,
+                       pa_option_token(name, raw, index, value, inline_value));
+    }
+    return;
+  }
+  ScrDyn *stored = value ? scr_dyn_retain((ScrDyn *)value)
+                         : scr_dyn_new_bool(flag_value);
   if (desc && pa_desc_multiple(desc)) {
     ScrDyn *arr = scr_dyn_obj_get(values, name->data, name->len);
     if (!arr) {
@@ -312,14 +359,30 @@ static void pa_store(ScrDyn *values, ScrDyn *tokens, const ScrDyn *desc,
   }
 }
 
+static void pa_store_flag(ScrDyn *values, ScrDyn *tokens,
+                          const ScrDyn *options, const ScrDyn *desc,
+                          const ScrStr *name, const ScrStr *raw, size_t index,
+                          bool allow_negative) {
+  if (allow_negative && name->len > 3 &&
+      memcmp(name->data, "no-", 3) == 0) {
+    ScrStr *positive = pa_str_bytes(name->data + 3, name->len - 3);
+    const ScrDyn *positive_desc = pa_find_long(options, positive);
+    pa_store(values, tokens, positive_desc, positive, raw, index,
+             NULL, false, -1);
+    scr_str_release(positive);
+    return;
+  }
+  pa_store(values, tokens, desc, name, raw, index, NULL, true, -1);
+}
+
 static void pa_positional(ScrDyn *positionals, ScrDyn *tokens,
-                          const ScrStr *value, size_t index) {
-  scr_dyn_arr_push(positionals, pa_dyn_str(value));
+                          const ScrDyn *value, size_t index) {
+  scr_dyn_arr_push(positionals, scr_dyn_retain((ScrDyn *)value));
   if (!tokens) return;
   ScrDyn *token = scr_dyn_new_obj();
   scr_dyn_obj_set(token, "kind", 4, pa_dyn_str_bytes("positional", 10));
   scr_dyn_obj_set(token, "index", 5, scr_dyn_new_num((double)index));
-  scr_dyn_obj_set(token, "value", 5, pa_dyn_str(value));
+  scr_dyn_obj_set(token, "value", 5, scr_dyn_retain((ScrDyn *)value));
   scr_dyn_arr_push(tokens, token);
 }
 
@@ -336,7 +399,6 @@ static ScrDyn *pa_default_args(void) {
 }
 
 ScrDyn *scr_util_parse_args(const ScrDyn *config) {
-  bool ok = true;
   /* Omitted config is lowered as {}, while an explicit undefined takes the
    * default parameter just as Node does. Null keeps Object(null)'s useful
    * failure; other primitive/array wrappers have no config members. */
@@ -346,16 +408,9 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
     return NULL;
   }
   const ScrDyn *cfg = config->kind == SCR_DYN_OBJ ? config : NULL;
-  bool strict = pa_config_bool(cfg, "strict", true, &ok);
-  bool allow_positionals = pa_config_bool(cfg, "allowPositionals", !strict, &ok);
-  bool allow_negative = pa_config_bool(cfg, "allowNegative", false, &ok);
-  bool return_tokens = pa_config_bool(cfg, "tokens", false, &ok);
-  if (!ok) return NULL;
-
-  const ScrDyn *options = pa_member(cfg, "options");
-  if (options && options->kind == SCR_DYN_NULL) options = NULL;
-  if (!pa_validate_options(options)) return NULL;
-
+  /* Node validates the args container before every flag and before the
+   * option schema. Its element values are intentionally not prevalidated:
+   * non-string values can still become loose-mode positional tokens. */
   ScrDyn *owned_args = NULL;
   const ScrDyn *args = pa_member(cfg, "args");
   if (!args || args->kind == SCR_DYN_NULL) {
@@ -365,14 +420,22 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
     scr_dyn_arg_type_fail("args", "an instance of Array", args);
     return NULL;
   }
-  for (size_t i = 0; i < args->v.arr.len; i++) {
-    if (args->v.arr.items[i]->kind != SCR_DYN_STR) {
-      char name[48];
-      snprintf(name, sizeof name, "args[%zu]", i);
-      scr_dyn_prop_type_fail(name, "of type string", args->v.arr.items[i]);
-      scr_dyn_release(owned_args);
-      return NULL;
-    }
+
+  bool ok = true;
+  bool strict = pa_config_bool(cfg, "strict", true, &ok);
+  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  bool allow_positionals = pa_config_bool(cfg, "allowPositionals", !strict, &ok);
+  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  bool return_tokens = pa_config_bool(cfg, "tokens", false, &ok);
+  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+  bool allow_negative = pa_config_bool(cfg, "allowNegative", false, &ok);
+  if (!ok) { scr_dyn_release(owned_args); return NULL; }
+
+  const ScrDyn *options = pa_member(cfg, "options");
+  if (options && options->kind == SCR_DYN_NULL) options = NULL;
+  if (!pa_validate_options(options)) {
+    scr_dyn_release(owned_args);
+    return NULL;
   }
 
   ScrDyn *result = scr_dyn_new_obj();
@@ -382,11 +445,28 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
   bool after_terminator = false;
 
   for (size_t i = 0; i < args->v.arr.len; i++) {
-    const ScrStr *arg = args->v.arr.items[i]->v.str;
+    const ScrDyn *arg_value = args->v.arr.items[i];
     if (after_terminator) {
-      pa_positional(positionals, tokens, arg, i);
+      if (!allow_positionals) {
+        pa_unexpected_dyn(arg_value);
+        goto fail;
+      }
+      pa_positional(positionals, tokens, arg_value, i);
       continue;
     }
+    if (arg_value->kind == SCR_DYN_NULL || arg_value->kind == SCR_DYN_UNDEF) {
+      pa_nullish_arg_length(arg_value);
+      goto fail;
+    }
+    if (arg_value->kind != SCR_DYN_STR) {
+      if (!allow_positionals) {
+        pa_unexpected_dyn(arg_value);
+        goto fail;
+      }
+      pa_positional(positionals, tokens, arg_value, i);
+      continue;
+    }
+    const ScrStr *arg = arg_value->v.str;
     if (pa_str_eq_c(arg, "--")) {
       after_terminator = true;
       if (tokens) {
@@ -412,64 +492,82 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
       const ScrDyn *desc = pa_find_long(options, name);
       if (eq < arg->len) {
         if (strict && !desc) {
-          pa_unknown(raw);
+          pa_unknown(raw, allow_positionals);
           scr_str_release(raw);
           scr_str_release(name);
           goto fail;
         }
         if (strict && pa_desc_type(desc) == 0) {
-          pa_takes_no_value(raw);
+          pa_takes_no_value(desc, name);
           scr_str_release(raw);
           scr_str_release(name);
           goto fail;
         }
         ScrStr *value = pa_str_bytes(arg->data + eq + 1, arg->len - eq - 1);
-        pa_store(values, tokens, desc, name, raw, i, value, true, 1);
+        ScrDyn *dyn_value = pa_dyn_str(value);
+        pa_store(values, tokens, desc, name, raw, i, dyn_value, true, 1);
+        scr_dyn_release(dyn_value);
         scr_str_release(value);
       } else if (desc && pa_desc_type(desc) == 1) {
-        if (i + 1 < args->v.arr.len) {
-          const ScrStr *value = args->v.arr.items[++i]->v.str;
-          if (strict && value->len > 1 && value->data[0] == '-') {
+        const ScrDyn *next = i + 1 < args->v.arr.len
+                                 ? args->v.arr.items[i + 1] : NULL;
+        if (next && next->kind != SCR_DYN_NULL && next->kind != SCR_DYN_UNDEF) {
+          i++;
+          if (strict && next->kind != SCR_DYN_STR) {
+            pa_missing_value(desc, name);
+            scr_str_release(raw);
+            scr_str_release(name);
+            goto fail;
+          }
+          if (strict && next->kind == SCR_DYN_STR &&
+              next->v.str->len > 1 && next->v.str->data[0] == '-') {
             pa_ambiguous(raw, name, false);
             scr_str_release(raw);
             scr_str_release(name);
             goto fail;
           }
-          pa_store(values, tokens, desc, name, raw, i - 1, value, true, 0);
+          pa_store(values, tokens, desc, name, raw, i - 1, next, true, 0);
         } else if (strict) {
-          pa_missing_long(raw);
+          pa_missing_value(desc, name);
           scr_str_release(raw);
           scr_str_release(name);
           goto fail;
         } else {
-          pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
+          if (allow_negative && name->len > 3 &&
+              memcmp(name->data, "no-", 3) == 0) {
+            ScrStr *positive = pa_str_bytes(name->data + 3, name->len - 3);
+            const ScrDyn *positive_desc = pa_find_long(options, positive);
+            pa_store(values, tokens, positive_desc, positive, raw, i,
+                     NULL, false, -1);
+            scr_str_release(positive);
+          } else {
+            pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
+          }
         }
-      } else if (allow_negative && name->len > 3 &&
-                 memcmp(name->data, "no-", 3) == 0) {
-        ScrStr *positive = pa_str_bytes(name->data + 3, name->len - 3);
-        const ScrDyn *positive_desc = pa_find_long(options, positive);
-        if (positive_desc && pa_desc_type(positive_desc) == 0) {
+      } else {
+        ScrStr *positive = NULL;
+        const ScrDyn *positive_desc = NULL;
+        const bool negative = allow_negative && name->len > 3 &&
+                              memcmp(name->data, "no-", 3) == 0;
+        if (negative) {
+          positive = pa_str_bytes(name->data + 3, name->len - 3);
+          positive_desc = pa_find_long(options, positive);
+        }
+        if (strict && !desc &&
+            (!negative || !positive_desc || pa_desc_type(positive_desc) != 0)) {
+          pa_unknown(raw, allow_positionals);
+          scr_str_release(positive);
+          scr_str_release(raw);
+          scr_str_release(name);
+          goto fail;
+        }
+        if (negative) {
           pa_store(values, tokens, positive_desc, positive, raw, i,
                    NULL, false, -1);
           scr_str_release(positive);
         } else {
-          scr_str_release(positive);
-          if (strict && !desc) {
-            pa_unknown(raw);
-            scr_str_release(raw);
-            scr_str_release(name);
-            goto fail;
-          }
           pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
         }
-      } else {
-        if (strict && !desc) {
-          pa_unknown(raw);
-          scr_str_release(raw);
-          scr_str_release(name);
-          goto fail;
-        }
-        pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
       }
       scr_str_release(raw);
       scr_str_release(name);
@@ -495,7 +593,7 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
         ScrStr *raw = pa_str_bytes(raw_bytes, short_name->len + 1);
         free(raw_bytes);
         if (strict && !desc) {
-          pa_unknown(raw);
+          pa_unknown(raw, allow_positionals);
           scr_str_release(raw);
           scr_str_release(name);
           scr_str_release(short_name);
@@ -504,11 +602,23 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
         if (desc && pa_desc_type(desc) == 1) {
           if (at + 1 < units) {
             ScrStr *value = scr_str_slice((ScrStr *)arg, at + 1, INFINITY);
-            pa_store(values, tokens, desc, name, raw, i, value, true, 1);
+            ScrDyn *dyn_value = pa_dyn_str(value);
+            pa_store(values, tokens, desc, name, raw, i, dyn_value, true, 1);
+            scr_dyn_release(dyn_value);
             scr_str_release(value);
-          } else if (i + 1 < args->v.arr.len) {
-            const ScrStr *value = args->v.arr.items[++i]->v.str;
-            if (strict && value->len > 1 && value->data[0] == '-') {
+          } else if (i + 1 < args->v.arr.len &&
+                     args->v.arr.items[i + 1]->kind != SCR_DYN_NULL &&
+                     args->v.arr.items[i + 1]->kind != SCR_DYN_UNDEF) {
+            const ScrDyn *value = args->v.arr.items[++i];
+            if (strict && value->kind != SCR_DYN_STR) {
+              pa_missing_value(desc, name);
+              scr_str_release(raw);
+              scr_str_release(name);
+              scr_str_release(short_name);
+              goto fail;
+            }
+            if (strict && value->kind == SCR_DYN_STR &&
+                value->v.str->len > 1 && value->v.str->data[0] == '-') {
               pa_ambiguous(raw, name, true);
               scr_str_release(raw);
               scr_str_release(name);
@@ -517,20 +627,22 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
             }
             pa_store(values, tokens, desc, name, raw, i - 1, value, true, 0);
           } else if (strict) {
-            pa_missing_short(raw, name);
+            pa_missing_value(desc, name);
             scr_str_release(raw);
             scr_str_release(name);
             scr_str_release(short_name);
             goto fail;
           } else {
-            pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
+            pa_store_flag(values, tokens, options, desc, name, raw, i,
+                          allow_negative);
           }
           scr_str_release(raw);
           scr_str_release(name);
           scr_str_release(short_name);
           break;
         }
-        pa_store(values, tokens, desc, name, raw, i, NULL, true, -1);
+        pa_store_flag(values, tokens, options, desc, name, raw, i,
+                      allow_negative);
         scr_str_release(raw);
         scr_str_release(name);
         scr_str_release(short_name);
@@ -538,16 +650,18 @@ ScrDyn *scr_util_parse_args(const ScrDyn *config) {
       continue;
     }
 
-    if (strict && !allow_positionals) {
+    if (!allow_positionals) {
       pa_unexpected(arg);
       goto fail;
     }
-    pa_positional(positionals, tokens, arg, i);
+    pa_positional(positionals, tokens, arg_value, i);
   }
 
   if (options) {
     for (size_t i = 0; i < options->v.obj.len; i++) {
       const ScrDynEntry *entry = &options->v.obj.entries[i];
+      if (entry->key_len == 9 &&
+          memcmp(entry->key, "__proto__", 9) == 0) continue;
       if (scr_dyn_obj_get(values, entry->key, entry->key_len)) continue;
       const ScrDyn *def = pa_member(entry->value, "default");
       if (def) {

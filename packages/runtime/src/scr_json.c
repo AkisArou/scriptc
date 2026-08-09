@@ -990,10 +990,18 @@ void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const Scr
 void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got) {
   char detail[64];
   const char *d = scr_dyn_specific_type(got, detail, sizeof detail);
-  char msg[224];
-  int len = snprintf(msg, sizeof msg,
-                     "The \"%s\" argument must be %s. Received %s", argname, expected, d);
-  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_TYPE");
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "The \"");
+  scr_jb_puts(&b, argname);
+  scr_jb_puts(&b, "\" argument must be ");
+  scr_jb_puts(&b, expected);
+  scr_jb_puts(&b, ". Received ");
+  scr_jb_puts(&b, d);
+  ScrStr *msg = scr_jb_finish(&b);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg->data, msg->len,
+                           "ERR_INVALID_ARG_TYPE");
+  scr_str_release(msg);
 }
 
 /* The property flavor of the same ladder — Node renders option-bag
@@ -1003,10 +1011,18 @@ void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrD
 void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got) {
   char detail[64];
   const char *d = scr_dyn_specific_type(got, detail, sizeof detail);
-  char msg[224];
-  int len = snprintf(msg, sizeof msg,
-                     "The \"%s\" property must be %s. Received %s", name, expected, d);
-  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_TYPE");
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "The \"");
+  scr_jb_puts(&b, name);
+  scr_jb_puts(&b, "\" property must be ");
+  scr_jb_puts(&b, expected);
+  scr_jb_puts(&b, ". Received ");
+  scr_jb_puts(&b, d);
+  ScrStr *msg = scr_jb_finish(&b);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg->data, msg->len,
+                           "ERR_INVALID_ARG_TYPE");
+  scr_str_release(msg);
 }
 
 /* The compiler-resolved property-typed throw (error.propTypeThrow —
@@ -1055,11 +1071,19 @@ const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap) {
 void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got) {
   char insp[64];
   const char *d = scr_dyn_inspect_lite(got, insp, sizeof insp);
-  char msg[256];
-  int len = snprintf(msg, sizeof msg, "The %s '%s' %s. Received %s",
-                     strchr(name, '.') != NULL ? "property" : "argument", name,
-                     reason != NULL ? reason : "is invalid", d);
-  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)len, "ERR_INVALID_ARG_VALUE");
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  scr_jb_puts(&b, "The ");
+  scr_jb_puts(&b, strchr(name, '.') != NULL ? "property '" : "argument '");
+  scr_jb_puts(&b, name);
+  scr_jb_puts(&b, "' ");
+  scr_jb_puts(&b, reason != NULL ? reason : "is invalid");
+  scr_jb_puts(&b, ". Received ");
+  scr_jb_puts(&b, d);
+  ScrStr *msg = scr_jb_finish(&b);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg->data, msg->len,
+                           "ERR_INVALID_ARG_VALUE");
+  scr_str_release(msg);
 }
 
 /* The deferred JS lowering fence, thrown from a ladder's post-validation

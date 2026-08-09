@@ -40,6 +40,14 @@ const clustered = parseArgs({
 });
 console.log("cluster", JSON.stringify(clustered));
 
+const explicitNegative = parseArgs({
+  args: ["--no-x"],
+  options: { "no-x": { type: "boolean" } },
+  allowNegative: true,
+  tokens: true,
+});
+console.log("explicit-negative", JSON.stringify(explicitNegative));
+
 const loose = parseArgs({
   args: ["--mystery=x", "-qz", "--=odd", "pos"],
   strict: false,
@@ -61,6 +69,11 @@ for (const run of [
   (): void => { parseArgs({ args: ["position"] }); },
   (): void => { parseArgs({ args: ["--name", "--next"], options: { name: { type: "string" } } }); },
   (): void => { parseArgs({ args: ["-n", "-1"], options: { name: { type: "string", short: "n" } } }); },
+  (): void => { parseArgs({ args: ["tail"], strict: false, allowPositionals: false }); },
+  (): void => { parseArgs({ args: ["--", "tail"] }); },
+  (): void => { parseArgs({ args: ["--wat"], allowPositionals: true }); },
+  (): void => { parseArgs({ args: ["--name"], options: { name: { type: "string", short: "n" } } }); },
+  (): void => { parseArgs({ args: ["--force=yes"], options: { force: { type: "boolean", short: "f" } } }); },
 ]) {
   try {
     run();
