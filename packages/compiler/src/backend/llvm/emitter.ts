@@ -8875,7 +8875,13 @@ class LlEmitter {
       case "trimEnd":
         return call("scr_str_trim_end", "ptr (ptr)", `ptr ${r.name}`, "ptr", true);
       case "split":
-        return call("scr_str_split", "ptr (ptr, ptr)", `ptr ${r.name}, ptr ${args[0]!.name}`, "ptr", true);
+        return call(
+          "scr_str_split_limit",
+          "ptr (ptr, ptr, double)",
+          `ptr ${r.name}, ptr ${args[0]!.name}, double ${args[1]!.name}`,
+          "ptr",
+          true,
+        );
       case "padStart":
         return call(
           "scr_str_pad_start",
@@ -10064,7 +10070,16 @@ class LlEmitter {
       case "replaceAll":
         return fallible("scr_regex_replace_all", `ptr ${r.name}, ptr ${args[0]!.name}, ptr ${args[1]!.name}`);
       case "split":
-        return fallible("scr_regex_split", `ptr ${r.name}, ptr ${args[0]!.name}`);
+        this.declare(`declare ptr @scr_regex_split_limit(ptr, ptr, double)`);
+        {
+          const t = B.tmp();
+          B.line(
+            `${t} = call ptr @scr_regex_split_limit(ptr ${r.name}, ptr ${args[0]!.name}, double ${args[1]!.name})`,
+          );
+          const out = this.own({ name: t, type: e.type });
+          this.emitPendingCheck();
+          return out;
+        }
       case "test": {
         this.declare(`declare zeroext i1 @scr_regex_test(ptr, ptr)`);
         const t = B.tmp();

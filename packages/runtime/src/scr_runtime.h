@@ -612,12 +612,14 @@ ScrStr *scr_str_cp_at(ScrStr *s, double i);
 ScrStr *scr_str_trim_start(ScrStr *s);
 ScrStr *scr_str_trim_end(ScrStr *s);
 
-/* split(separator) with a STRING separator, no limit: empty separator
+/* split(separator[, limit]) with a STRING separator: limit uses ToUint32;
+ * the no-limit wrapper supplies 2^32-1. Empty separator
  * splits into single UTF-16 code units (each half of an astral char is
  * U+FFFD — divergence, see above); otherwise splits on every occurrence,
  * empty pieces kept. Borrows both; returns a +1 string[] (SCR_ELEM_STR). */
 struct ScrArr;
 struct ScrArr *scr_str_split(ScrStr *s, ScrStr *sep);
+struct ScrArr *scr_str_split_limit(ScrStr *s, ScrStr *sep, double limit);
 
 /* padStart(maxLength, fill)/padEnd — ECMA StringPad, UTF-16 unit counts.
  * Target at or below the length (or empty fill) returns the receiver
@@ -998,8 +1000,10 @@ ScrStr *scr_regex_flags(ScrRegex *re);        /* +1 */
 ScrStr *scr_regex_replace(ScrStr *s, ScrRegex *re, ScrStr *rep);
 /* replaceAll: throws Node's TypeError when /g is missing (may-throw). */
 ScrStr *scr_regex_replace_all(ScrStr *s, ScrRegex *re, ScrStr *rep);
-/* split: capture-free patterns only — capture groups throw (may-throw). */
+/* split: capture-free patterns only — capture groups throw (may-throw).
+ * limit uses ToUint32; the no-limit wrapper supplies 2^32-1. */
 ScrArr *scr_regex_split(ScrStr *s, ScrRegex *re);
+ScrArr *scr_regex_split_limit(ScrStr *s, ScrRegex *re, double limit);
 /* matchAll drained eagerly: +1 string[][] of honest match slices; throws
  * Node's TypeError on a non-global regex (catchable). */
 ScrArr *scr_regex_match_all(ScrStr *s, ScrRegex *re);
@@ -4533,12 +4537,14 @@ double scr_date_get_minutes_utc(double ms);
 double scr_date_get_seconds_local(double ms);
 double scr_date_get_seconds_utc(double ms);
 
-/* ── bitwise operators (scr_lib.c) ────────────────────────────────────
+/* ── numeric coercion + bitwise operators ─────────────────────────────
  * JS-exact ToInt32/ToUint32 semantics: NaN/±Infinity → 0, truncation
  * toward zero, modular wrap into 32 bits; the operation runs in 32-bit
  * space (shift counts mask to 5 bits, `>>` is an arithmetic shift spelled
  * portably — no C UB/implementation-defined shifts) and the result
- * returns to f64: `>>>` as Uint32, everything else as Int32. */
+ * returns to f64: `>>>` as Uint32, everything else as Int32.
+ * scr_to_uint32 lives in scr_number.c; the bitwise operations in scr_lib.c. */
+uint32_t scr_to_uint32(double d);
 double scr_bit_and(double a, double b);
 double scr_bit_or(double a, double b);
 double scr_bit_xor(double a, double b);

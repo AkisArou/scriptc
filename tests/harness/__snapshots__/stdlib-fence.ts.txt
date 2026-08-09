@@ -204,18 +204,16 @@ stdlib-fence.ts:43:14 - error SC2020: 'string.normalize' is part of the standard
   42 | const arrAt = [1, 2].at(0);
   43 | const norm = "abc".normalize();
      |              ^~~~~~~~~~~~~~~
-  44 | const limited = "a,b,c".split(",", 2); // the string-separator split lowers; the limit form stays fenced
+  44 | const limited = "a,b,c".split(Math.random() ? "," : /,/, 2); // union separators stay fenced; limits lower
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-stdlib-fence.ts:44:17 - error SC2020: '.split with 2 arguments on strings' is part of the standard library types but has no scriptc lowering yet
+stdlib-fence.ts:44:31 - error SC1090: '.split()' on a 'RegExp | string' separator (pass a string, or a regex literal) is not supported yet
 
   43 | const norm = "abc".normalize();
-  44 | const limited = "a,b,c".split(",", 2); // the string-separator split lowers; the limit form stays fenced
-     |                 ^~~~~~~~~~~~~~~~~~~~~
+  44 | const limited = "a,b,c".split(Math.random() ? "," : /,/, 2); // union separators stay fenced; limits lower
+     |                               ^~~~~~~~~~~~~~~~~~~~~~~~~
   45 | const fixed = (1.5).toFixed(); // digit-free toFixed lowers now (the static ties-up integer)
-
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
 stdlib-fence.ts:46:19 - error SC2020: 'Number.prototype.toLocaleString without a locale' is part of the standard library types but has no scriptc lowering yet
 

@@ -100,6 +100,11 @@ function lowerOptionalDefaultArg(
   return L.coerceInto(node, value, expected);
 }
 
+function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: SrcLoc): IrExpr {
+  const defaultValue: IrExpr = { kind: "numLit", value: 4294967295, type: F64, loc };
+  return node ? lowerOptionalDefaultArg(L, node, F64, defaultValue) : defaultValue;
+}
+
 /** Ambient array method calls. `push`/`unshift`/`pop`/`reverse`/
  * `indexOf`/`includes`/`join`
    * lower to arrIntrinsic; the HOF family — `map`/`filter`/`forEach`/
@@ -5011,14 +5016,13 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     ) {
       const arg0 = call.arguments[0];
       if (!arg0 || L.mapTypeOf(L.typeOf(arg0))?.kind !== "regex") return null;
-      // The lib declares forms beyond the lowered slice: split's limit
-      // parameter and function replacement values both typecheck now —
-      // fenced with the regex-surface code (its hint lists what works).
-      if (name === "split" && call.arguments.length !== 1) {
-        L.unsupported("SC1120", call, "'.split()' with a limit argument");
-      }
       const receiver = lowerReceiver();
-      const args = call.arguments.map((a) => L.lowerExpr(a));
+      // Split's omitted or undefined limit is 2^32-1. Complete it here so
+      // both IR backends and the runtime have one required (regex, limit)
+      // shape; an optional-number value selects the default at runtime.
+      const args = name === "split"
+        ? [L.lowerExpr(arg0), lowerSplitLimitArg(L, call.arguments[1], loc)]
+        : call.arguments.map((a) => L.lowerExpr(a));
       if (name !== "split" && args[1]?.type.kind !== "string") {
         L.unsupported(
           "SC1120",
@@ -5075,7 +5079,9 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       );
     }
     const receiver = dynReceiver ? dynReceiver() : L.lowerExpr(access.expression);
-    const args = call.arguments.map((a) => L.lowerExpr(a));
+    const args = entry.method === "split"
+      ? [L.lowerExpr(call.arguments[0]!), lowerSplitLimitArg(L, call.arguments[1], locOf(call))]
+      : call.arguments.map((a) => L.lowerExpr(a));
     // split's separator must BE a string here (a regex argument was
     // claimed by lowerRegexMethodCall before this path) — the lib's
     // `string | RegExp` union has no lowering as a VALUE.

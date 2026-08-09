@@ -1178,7 +1178,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "trimEnd":
             return E.newTemp(e.type, `scr_str_trim_end(${r.name})`);
           case "split":
-            return E.newTemp(e.type, `scr_str_split(${r.name}, ${args[0]!.name})`);
+            return E.newTemp(
+              e.type,
+              `scr_str_split_limit(${r.name}, ${args[0]!.name}, ${args[1]!.name})`,
+            );
           case "padStart":
             return E.newTemp(
               e.type,
@@ -1294,7 +1297,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `scr_regex_replace_all(${r.name}, ${args[0]!.name}, ${args[1]!.name})`,
             );
           case "split":
-            return E.fallibleTemp(e.type, `scr_regex_split(${r.name}, ${args[0]!.name})`);
+            return E.fallibleTemp(
+              e.type,
+              `scr_regex_split_limit(${r.name}, ${args[0]!.name}, ${args[1]!.name})`,
+            );
           default: {
             const _exhaustive: never = method;
             void _exhaustive;

@@ -1367,7 +1367,8 @@ export type IrSetIntrinsicMethod =
  * Conversion via libunicode's tables — scr_regex.c): their presence sets
  * the regex LINK flag like a regex literal does (moduleUsesRegex).
  * `split` is the STRING-separator form (regex separators are
- * regexIntrinsic), no limit: args[0] the separator, result a fresh +1
+ * regexIntrinsic): args[0] is the separator and args[1] the numeric limit
+ * (an omitted source limit is completed to 2^32-1), result a fresh +1
  * string[] — the empty separator splits per UTF-16 code unit (astral
  * halves become U+FFFD, divergence 2). `padStart`/`padEnd` take (target
  * length, fill) — the frontend completes an omitted fill to " ", Node's
@@ -1581,7 +1582,8 @@ export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new 
  * regex and (for the replaces) args[1] the replacement template — string
  * replacements only, function replacements are checker-rejected (the
  * ambient overloads accept only strings). `replaceAll` THROWS Node's
- * TypeError when the regex lacks /g and `split` THROWS on a pattern with
+ * TypeError when the regex lacks /g. For `split`, args[1] is the numeric
+ * limit (an omitted source limit is completed to 2^32-1); it THROWS on a pattern with
  * capture groups (JS would splice the captured values into the result) —
  * both catchable: backends' may-throw analyses must seed on these two
  * methods like a `throw`. */

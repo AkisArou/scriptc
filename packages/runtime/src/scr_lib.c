@@ -3590,10 +3590,6 @@ ScrStr *scr_crypto_x509_valid_to_str(ScrStr *pem) {
 
 /* ── String surface (fromCharCode / lastIndexOf) ─────────────────────── */
 
-/* Forward declaration — scr_to_uint32 lives with the bitwise operators
- * below (ToUint16 is its low 16 bits, per spec). */
-static uint32_t scr_to_uint32(double d);
-
 /* String.fromCharCode core over n UTF-16 code units read through
  * `unit(src, i)` (already ToUint16'd): combine adjacent surrogate pairs,
  * substitute U+FFFD for lone surrogates (divergence 1's storage policy —
@@ -4406,14 +4402,6 @@ bool scr_num_is_safe_integer(double x) {
  * as two's complement, spelled portably (no implementation-defined
  * narrowing casts, no UB shifts of signed values).
  */
-
-static uint32_t scr_to_uint32(double d) {
-  if (!isfinite(d)) return 0; /* NaN, +Infinity, -Infinity */
-  double t = trunc(d);
-  t = fmod(t, 4294967296.0); /* exact for doubles; result in (-2^32, 2^32) */
-  if (t < 0) t += 4294967296.0;
-  return (uint32_t)t;
-}
 
 /* The 32 bits as a SIGNED (Int32) JS number. */
 static double scr_bits_as_int32(uint32_t u) {
