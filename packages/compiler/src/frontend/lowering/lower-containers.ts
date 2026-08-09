@@ -4997,14 +4997,13 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     ) {
       const arg0 = call.arguments[0];
       if (!arg0 || L.mapTypeOf(L.typeOf(arg0))?.kind !== "regex") return null;
-      // The lib declares forms beyond the lowered slice: split's limit
-      // parameter and function replacement values both typecheck now —
-      // fenced with the regex-surface code (its hint lists what works).
-      if (name === "split" && call.arguments.length !== 1) {
-        L.unsupported("SC1120", call, "'.split()' with a limit argument");
-      }
       const receiver = lowerReceiver();
       const args = call.arguments.map((a) => L.lowerExpr(a));
+      // Split's omitted limit is 2^32-1. Complete it here so both IR
+      // backends and the runtime have one required (regex, limit) shape.
+      if (name === "split" && args.length === 1) {
+        args.push({ kind: "numLit", value: 4294967295, type: F64, loc });
+      }
       if (name !== "split" && args[1]?.type.kind !== "string") {
         L.unsupported(
           "SC1120",
@@ -5071,6 +5070,11 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
         call.arguments[0]!,
         `'.split()' on a '${L.fmt(args[0]!.type)}' separator (pass a string, or a regex literal)`,
       );
+    }
+    // Split's omitted limit is 2^32-1 (the default after ToUint32).
+    // Complete it just like pad's default fill so the IR has one shape.
+    if (entry.method === "split" && args.length === 1) {
+      args.push({ kind: "numLit", value: 4294967295, type: F64, loc: locOf(call) });
     }
     // padStart/padEnd with the fill omitted: Node pads with " " — the
     // same call with the default made explicit.

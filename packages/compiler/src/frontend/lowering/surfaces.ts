@@ -366,12 +366,13 @@ export const STR_METHODS: Record<
   // deprecated twins — same behavior, per spec).
   trimLeft: { method: "trimStart", result: STRING, minArgs: 0, maxArgs: 0 },
   trimRight: { method: "trimEnd", result: STRING, minArgs: 0, maxArgs: 0 },
-  // The STRING-separator split, no limit (the lib's limit parameter
-  // fences by arity here; regex separators lowered earlier as
-  // regexIntrinsic). Empty separator splits per UTF-16 code unit —
+  // The STRING-separator split (regex separators lower earlier as a
+  // regexIntrinsic). The optional limit is completed to 2^32-1 by the
+  // lowering so the IR/runtime always see the spec's effective value.
+  // Empty separator splits per UTF-16 code unit —
   // astral halves become U+FFFD (SEMANTICS.md divergence 2, the same
   // substitution the island's boundary marshal applied).
-  split: { method: "split", result: arrayOf(STRING), minArgs: 1, maxArgs: 1 },
+  split: { method: "split", result: arrayOf(STRING), minArgs: 1, maxArgs: 2 },
   // padStart/padEnd with the fill omitted: Node pads with " " — the
   // lowering completes the default (lowerStringMethodCall).
   padStart: { method: "padStart", result: STRING, minArgs: 1, maxArgs: 2 },

@@ -624,8 +624,10 @@ ScrStr *scr_regex_replace_all(ScrStr *s, ScrRegex *re, ScrStr *rep) {
 
 /* ── split ────────────────────────────────────────────────────────────── */
 
-ScrArr *scr_regex_split(ScrStr *s, ScrRegex *re) {
+ScrArr *scr_regex_split_limit(ScrStr *s, ScrRegex *re, double limit_num) {
   uint8_t *bc = scr_regex_bc(re);
+  uint32_t limit = scr_to_uint32(limit_num);
+  if (limit == 0) return scr_arr_new(SCR_ELEM_STR, 0);
   if (lre_get_capture_count(bc) > 1) {
     /* JS splices every capture group's value into the result between the
      * pieces, changing the array's SHAPE per match — not modeled this
@@ -675,6 +677,11 @@ ScrArr *scr_regex_split(ScrStr *s, ScrRegex *re) {
       q = scr_advance(u, len, start, unicode);
     } else {
       scr_arr_push_ref(out, scr_str_from_utf16(u, p, start));
+      if (out->len == limit) {
+        free(capture);
+        free(u);
+        return out;
+      }
       p = end;
       q = p;
     }
@@ -683,6 +690,10 @@ ScrArr *scr_regex_split(ScrStr *s, ScrRegex *re) {
   free(capture);
   free(u);
   return out;
+}
+
+ScrArr *scr_regex_split(ScrStr *s, ScrRegex *re) {
+  return scr_regex_split_limit(s, re, 4294967295.0);
 }
 
 /* ── String.prototype.toLowerCase / toUpperCase (the static path) ──────

@@ -21,3 +21,14 @@ const words = "one two  three".split(" ");
 console.log(words.length, words.indexOf("three"), words.includes("two"));
 const nums = "1,2,3,4".split(",").map((s) => parseInt(s, 10) * 2);
 console.log(nums.join(","));
+
+// The optional limit is ToUint32'd, and truncation happens before wrap.
+function limited(text: string, separator: string, limit: number): string {
+  return JSON.stringify(text.split(separator, limit));
+}
+console.log(limited("a,b,,c,", ",", 0));
+console.log(limited("a,b,,c,", ",", 1), limited("a,b,,c,", ",", 3));
+console.log(limited("a,b,,c,", ",", 99), limited("a,b,,c,", ",", -1));
+console.log(limited("a,b,,c,", ",", 2.9), limited("a,b,,c,", ",", 4294967298));
+console.log(limited("a,b,,c,", ",", 4294967296), limited("a,b,,c,", ",", NaN));
+console.log(limited("abcd", "", 2), limited("", ",", 1));

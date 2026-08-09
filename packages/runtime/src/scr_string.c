@@ -678,7 +678,9 @@ ScrStr *scr_str_trim_end(ScrStr *s) {
 static const struct { size_t rc; size_t len; size_t cap; char data[4]; }
     scr_lit_fffd = {SIZE_MAX, 3, 3, "\xEF\xBF\xBD"};
 
-/* split(separator) with a STRING separator, no limit (ECMA-262 22.1.3.23):
+/* split(separator, limit) with a STRING separator (ECMA-262 22.1.3.23):
+ * limit is ToUint32'd; zero returns [] and reaching the limit stops before
+ * any later separator probes. The no-limit wrapper supplies 2^32-1.
  * an empty separator splits into single UTF-16 code units ("".split("") is
  * [] — no probe matches nothing); a non-empty separator splits on every
  * byte-level occurrence (well-formed UTF-8 is self-synchronizing, so byte
@@ -688,8 +690,10 @@ static const struct { size_t rc; size_t len; size_t cap; char data[4]; }
  * yield the two lone surrogate halves, each half is U+FFFD here
  * (divergence 2 — the same substitution the island's boundary marshal
  * applied). Borrows both; returns a +1 string[]. */
-ScrArr *scr_str_split(ScrStr *s, ScrStr *sep) {
+ScrArr *scr_str_split_limit(ScrStr *s, ScrStr *sep, double limit_num) {
   ScrArr *out = scr_arr_new(SCR_ELEM_STR, 0);
+  uint32_t limit = scr_to_uint32(limit_num);
+  if (limit == 0) return out;
   if (sep->len == 0) {
     size_t i = 0;
     while (i < s->len) {
@@ -697,10 +701,12 @@ ScrArr *scr_str_split(ScrStr *s, ScrStr *sep) {
       uint32_t cp = scr_utf8_decode(s->data + i, &adv);
       if (cp >= 0x10000) { /* two units in JS: both halves become U+FFFD */
         scr_arr_push_ref(out, scr_str_retain((ScrStr *)&scr_lit_fffd));
+        if (out->len == limit) return out;
         scr_arr_push_ref(out, scr_str_retain((ScrStr *)&scr_lit_fffd));
       } else {
         scr_arr_push_ref(out, scr_str_from_span(s->data + i, adv));
       }
+      if (out->len == limit) return out;
       i += adv;
     }
     return out;
@@ -712,10 +718,15 @@ ScrArr *scr_str_split(ScrStr *s, ScrStr *sep) {
     if (!found) break;
     size_t at = (size_t)(found - s->data);
     scr_arr_push_ref(out, scr_str_from_span(s->data + start, at - start));
+    if (out->len == limit) return out;
     start = at + sep->len;
   }
   scr_arr_push_ref(out, scr_str_from_span(s->data + start, s->len - start));
   return out;
+}
+
+ScrArr *scr_str_split(ScrStr *s, ScrStr *sep) {
+  return scr_str_split_limit(s, sep, 4294967295.0);
 }
 
 /* StringPad (ECMA-262 22.1.3.16/17): target length in UTF-16 units, the

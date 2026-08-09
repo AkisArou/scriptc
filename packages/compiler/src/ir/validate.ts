@@ -42,7 +42,7 @@ export const STR_INTRINSIC_SIGS: Record<
   trim: { argTypes: [], minArgs: 0, result: STRING },
   trimStart: { argTypes: [], minArgs: 0, result: STRING },
   trimEnd: { argTypes: [], minArgs: 0, result: STRING },
-  split: { argTypes: [STRING], minArgs: 1, result: arrayOf(STRING) },
+  split: { argTypes: [STRING, F64], minArgs: 2, result: arrayOf(STRING) },
   padStart: { argTypes: [F64, STRING], minArgs: 2, result: STRING },
   padEnd: { argTypes: [F64, STRING], minArgs: 2, result: STRING },
   toLowerCase: { argTypes: [], minArgs: 0, result: STRING },
@@ -72,7 +72,7 @@ export const REGEX_INTRINSIC_SIGS: Record<
   flags: { receiver: REGEX, argTypes: [], result: STRING },
   replace: { receiver: STRING, argTypes: [REGEX, STRING], result: STRING },
   replaceAll: { receiver: STRING, argTypes: [REGEX, STRING], result: STRING },
-  split: { receiver: STRING, argTypes: [REGEX], result: arrayOf(STRING) },
+  split: { receiver: STRING, argTypes: [REGEX, F64], result: arrayOf(STRING) },
 };
 
 /** Closed-union signature table for `libCall` (mirrors ambient/scriptc.d.ts).
