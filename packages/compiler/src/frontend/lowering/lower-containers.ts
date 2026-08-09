@@ -5493,10 +5493,27 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
         );
       }
       if (nArgs > 3) L.noLowering(`.toString with ${nArgs} arguments on Buffers`, call);
-      const encNode = call.arguments[0];
-      const encName = encNode ? bufEncoding(L, "Buffer.toString", encNode) : "utf8";
       const receiver = L.lowerExpr(access.expression);
-      const enc: IrExpr = { kind: "strLit", value: encName, type: STRING, loc };
+      const encNode = call.arguments[0];
+      let method: IrBytesIntrinsicMethod = "toString";
+      let enc: IrExpr = { kind: "strLit", value: "utf8", type: STRING, loc };
+      if (encNode) {
+        const encType = L.typeOf(encNode);
+        const encName = encType.isStringLiteralType()
+          ? knownBufEncoding(encType.value)
+          : undefined;
+        if (encName !== undefined) {
+          // Keep literals on the canonical, non-throwing fast path.
+          enc = { kind: "strLit", value: encName, type: STRING, loc };
+        } else {
+          // A BufferEncoding-typed variable selects its decoder at
+          // runtime. The checked intrinsic canonicalizes aliases/case and
+          // raises Node's ERR_UNKNOWN_ENCODING when a cast lets a bad
+          // value through.
+          enc = L.lowerExprExpecting(encNode, STRING);
+          method = "toStringVar";
+        }
+      }
       // The range form toString(enc, start[, end]) decodes the clamped
       // [start, end) byte window (Node's slice-then-decode). An omitted
       // end stays omitted (2 intrinsic args) — the emitter supplies the
@@ -5506,11 +5523,11 @@ const BYTES_CTORS: Record<string, IrBytesElem | undefined> = {
         const start = L.lowerExprExpecting(call.arguments[1]!, F64);
         if (nArgs === 3) {
           const end = L.lowerExprExpecting(call.arguments[2]!, F64);
-          return { kind: "bytesIntrinsic", method: "toString", receiver, args: [enc, start, end], type: STRING, loc };
+          return { kind: "bytesIntrinsic", method, receiver, args: [enc, start, end], type: STRING, loc };
         }
-        return { kind: "bytesIntrinsic", method: "toString", receiver, args: [enc, start], type: STRING, loc };
+        return { kind: "bytesIntrinsic", method, receiver, args: [enc, start], type: STRING, loc };
       }
-      return { kind: "bytesIntrinsic", method: "toString", receiver, args: [enc], type: STRING, loc };
+      return { kind: "bytesIntrinsic", method, receiver, args: [enc], type: STRING, loc };
     }
     // The Buffer-declared comparison/search/mutation surface. All of
     // these resolve against the Buffer interface (the checker keeps most

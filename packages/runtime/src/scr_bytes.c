@@ -831,6 +831,58 @@ ScrStr *scr_bytes_to_str(const ScrBytes *b, const ScrStr *enc) {
   return scr_bytes_decode_utf8(in, n);
 }
 
+/* Buffer.toString with a runtime-valued encoding. Literal call sites fold
+ * this same alias table in the frontend; variables arrive here, where Node
+ * also accepts ASCII case variants and rejects unknown names catchably. */
+static bool scr_enc_eq_ci(const ScrStr *raw, const char *name) {
+  size_t n = strlen(name);
+  if (raw->len != n) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = raw->data[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+    if (c != name[i]) return false;
+  }
+  return true;
+}
+
+static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
+  static const struct { const char *from; const char *to; } map[] = {
+    {"utf8", "utf8"}, {"utf-8", "utf8"}, {"hex", "hex"},
+    {"base64", "base64"}, {"base64url", "base64url"},
+    {"latin1", "latin1"}, {"binary", "latin1"}, {"ascii", "ascii"},
+    {"utf16le", "utf16le"}, {"utf-16le", "utf16le"},
+    {"ucs2", "utf16le"}, {"ucs-2", "utf16le"},
+  };
+  for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
+    if (scr_enc_eq_ci(raw, map[i].from)) {
+      return scr_str_new(map[i].to, strlen(map[i].to));
+    }
+  }
+  char msg[128];
+  int n = snprintf(msg, sizeof msg, "Unknown encoding: %.*s",
+                   (int)(raw->len < 64 ? raw->len : 64), raw->data);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, (size_t)(n < 0 ? 0 : n),
+                           "ERR_UNKNOWN_ENCODING");
+  return NULL;
+}
+
+ScrStr *scr_bytes_to_str_checked(const ScrBytes *b, const ScrStr *enc) {
+  ScrStr *normalized = scr_bytes_normalize_encoding(enc);
+  if (!normalized) return NULL;
+  ScrStr *out = scr_bytes_to_str(b, normalized);
+  scr_str_release(normalized);
+  return out;
+}
+
+ScrStr *scr_bytes_to_str_checked_range(const ScrBytes *b, const ScrStr *enc,
+                                       double start, double end) {
+  ScrStr *normalized = scr_bytes_normalize_encoding(enc);
+  if (!normalized) return NULL;
+  ScrStr *out = scr_bytes_to_str_range(b, normalized, start, end);
+  scr_str_release(normalized);
+  return out;
+}
+
 static int scr_hex_val(uint8_t c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;

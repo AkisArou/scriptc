@@ -4728,6 +4728,10 @@ void scr_bytes_set_from(ScrBytes *dst, const ScrBytes *src, double offset);
  * compiler fences other encodings). */
 ScrStr *scr_bytes_to_str(const ScrBytes *b, const ScrStr *enc);
 ScrStr *scr_bytes_to_str_range(const ScrBytes *b, const ScrStr *enc, double start, double end);
+/* Runtime-valued Buffer.toString encoding: aliases/case canonicalize;
+ * unknown names throw ERR_UNKNOWN_ENCODING. +1, or NULL when throwing. */
+ScrStr *scr_bytes_to_str_checked(const ScrBytes *b, const ScrStr *enc);
+ScrStr *scr_bytes_to_str_checked_range(const ScrBytes *b, const ScrStr *enc, double start, double end);
 
 /* WHATWG TextDecoder.decode over u8 bytes (utf-8, default options): the
  * same replacement decode as toString("utf8") with the leading BOM

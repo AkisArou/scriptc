@@ -61,3 +61,23 @@ const names = ["utf8", "UTF8", "utf-8", "ascii", "latin1", "binary", "base64", "
 for (const n of names) {
   console.log(n, Buffer.isEncoding(n));
 }
+
+// A BufferEncoding variable dispatches at runtime (including aliases and
+// range forms); casts can expose Node's case-insensitive spellings and its
+// catchable ERR_UNKNOWN_ENCODING path.
+const variableEncodings: BufferEncoding[] = ["hex", "base64url", "binary", "ucs-2", "utf-8"];
+for (const encoding of variableEncodings) {
+  console.log("variable", encoding, raw.toString(encoding));
+}
+const runtimeRangeEncoding: BufferEncoding = "hex";
+console.log("variable tail", raw.toString(runtimeRangeEncoding, 2));
+console.log("variable range", raw.toString(runtimeRangeEncoding, 1, 4));
+console.log("variable upper", raw.toString("BASE64" as BufferEncoding));
+try {
+  raw.toString("wat" as BufferEncoding);
+  console.log("variable bad did not throw");
+} catch (e) {
+  if (e instanceof TypeError) {
+    console.log("variable bad", (e as NodeJS.ErrnoException).code, e.message);
+  }
+}

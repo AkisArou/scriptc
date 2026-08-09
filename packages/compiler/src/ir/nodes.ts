@@ -1466,6 +1466,10 @@ export type IrBytesIntrinsicMethod =
   | "toArray"
   | "setFrom"
   | "toString"
+  /** Buffer.toString with a runtime-valued encoding. Same signature as
+   * toString, but canonicalizes aliases/case and may throw
+   * ERR_UNKNOWN_ENCODING. */
+  | "toStringVar"
   | "readNum"
   | "writeNum"
   | "readNumVar"
@@ -1531,6 +1535,7 @@ export type IrBytesIntrinsicMethod =
 /** The bytesIntrinsic methods that can raise a catchable error — backends'
  * may-throw analyses seed on these exactly like MAY_THROW_LIB_FNS. */
 export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new Set([
+  "toStringVar",
   "with",
   "setFrom",
   "readNum",

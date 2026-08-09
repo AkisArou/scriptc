@@ -16,15 +16,6 @@ node-fallback-fence.ts:17:13 - error SC2020: 'Buffer<ArrayBufferLike>.reverse' i
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-node-fallback-fence.ts:28:49 - error SC2020: 'Buffer.toString with this encoding' is part of the standard library types but has no scriptc lowering yet
-
-  27 | const tmp = mkdtempSync("/tmp/scr-");
-  28 | const raw = readFileSync("/etc/hosts").toString(tty ? "hex" : "latin1"); // the read and every literal encoding lower; a non-literal fences
-     |                                                 ^~~~~~~~~~~~~~~~~~~~~~
-  29 | // The computed encoding remains fenced above.
-
-  hint: a literal "utf8", "hex", "base64", "base64url", "latin1", "binary", "ascii", "utf16le", or "ucs2" spelling is the lowered encoding surface
-
 node-fallback-fence.ts:31:28 - error SC2020: 'deflateSync of 'string' data' is part of the standard library types but has no scriptc lowering yet
 
   30 | import { deflateSync, gzipSync } from "node:zlib";
