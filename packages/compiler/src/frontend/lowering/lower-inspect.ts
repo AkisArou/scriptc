@@ -36,7 +36,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { isJsSourceFile } from "../program.js";
-import { BOOL, DYN, F64, IrExpr, IrStmt, IrType, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, shapeHasAccessorSlots, typeKey } from "../../ir/nodes.js";
+import { BOOL, DYN, F64, IrExpr, IrStmt, IrType, RUNTIME_ERROR_CLASSES, STRING, SrcLoc, canConvertToDyn, canDynCheckTo, shapeHasAccessorSlots, typeKey } from "../../ir/nodes.js";
 import type { ClassInfo } from "./lower-classes.js";
 import { pureReemittable } from "./lower-exprs.js";
 
@@ -1348,11 +1348,78 @@ export function lowerUtilModuleCall(
       return lowerFormatCall(L, expr, loc, false);
     case "formatWithOptions":
       return lowerFormatCall(L, expr, loc, true);
+    case "parseArgs":
+      return lowerParseArgsCall(L, expr, loc);
     case "getCallSites":
       return lowerGetCallSitesCall(L, expr, loc);
     default:
       return null;
   }
+}
+
+/** util.parseArgs(config?): the configuration is ordinary JSON-safe data,
+ * so it crosses into the runtime as a checked-dynamic tree. The native
+ * parser returns the same tree-shaped result Node does (including token
+ * variants and a null-prototype values object); statically typed member
+ * reads leave that tree through the ordinary dyn checks. */
+function lowerParseArgsCall(L: Lowerer, expr: ts.CallExpression, loc: SrcLoc): IrExpr {
+  if (expr.arguments.length > 1 || expr.arguments.some(ts.isSpreadElement)) {
+    L.noLowering(
+      `util.parseArgs with ${expr.arguments.length} arguments`,
+      expr,
+      "the lowered form is parseArgs() or parseArgs(config)",
+    );
+  }
+
+  let config: IrExpr;
+  const configNode = expr.arguments[0];
+  if (!configNode) {
+    config = { kind: "dynObjLit", fields: [], type: DYN, loc };
+  } else {
+    const raw = L.lowerExpr(configNode);
+    if (raw.type.kind === "dyn") {
+      config = raw;
+    } else if (raw.type.kind === "jsval") {
+      config = { kind: "dynFromJsval", value: raw, type: DYN, loc };
+    } else if (canConvertToDyn(raw.type, (id) => L.shapes.get(id), (id) => L.unions.get(id))) {
+      // parseArgs assigns descriptor default arrays directly into the
+      // returned values object. Keep mutable config composites in typed-ref
+      // capsules so that default arrays can leave the dyn result as the
+      // original static reference; the runtime still snapshots `args` and
+      // the option schema before parsing, matching Node's synchronous read.
+      const liveRef = raw.type.kind === "record" || raw.type.kind === "array" ||
+        raw.type.kind === "bytes";
+      config = {
+        kind: "dynFrom",
+        value: raw,
+        ...(liveRef ? { liveRef: true as const } : {}),
+        type: DYN,
+        loc,
+      };
+    } else {
+      L.noLowering(
+        `util.parseArgs with a '${L.fmt(raw.type)}' configuration`,
+        configNode,
+        "pass the documented JSON-safe config object (args/options and boolean flags)",
+      );
+    }
+  }
+
+  const parsed: IrExpr = {
+    kind: "libCall",
+    fn: "util.parseArgs",
+    args: [config],
+    type: DYN,
+    loc,
+  };
+  const result = L.mapTypeOf(L.typeOf(expr));
+  if (
+    result !== null && result.kind !== "dyn" && result.kind !== "jsval" && result.kind !== "void" &&
+    canDynCheckTo(result, (id) => L.shapes.get(id), (id) => L.unions.get(id))
+  ) {
+    return { kind: "dynCheck", value: parsed, type: result, loc };
+  }
+  return parsed;
 }
 
 /** util.getCallSites() in a JS source: compiled binaries keep no runtime

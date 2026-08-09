@@ -5520,15 +5520,45 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2679-fs-rename.ts": {
+  "<repo>/tests/corpus/2678-util-parseargs.ts": {
    "order": [
-    "<repo>/tests/corpus/2679-fs-rename.ts"
+    "<repo>/tests/corpus/2678-util-parseargs.ts"
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/2680-fs-rename-js.cjs": {
+  "<repo>/tests/corpus/2679-util-parseargs-cjs.cjs": {
    "order": [
-    "<repo>/tests/corpus/2680-fs-rename-js.cjs"
+    "<repo>/tests/corpus/2679-util-parseargs-cjs.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2680-util-parseargs-default.ts": {
+   "order": [
+    "<repo>/tests/corpus/2680-util-parseargs-default.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2681-util-parseargs-dynamic.js": {
+   "order": [
+    "<repo>/tests/corpus/2681-util-parseargs-dynamic.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2682-fs-rename.ts": {
+   "order": [
+    "<repo>/tests/corpus/2682-fs-rename.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2683-fs-rename-js.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2683-fs-rename-js.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2684-fs-rename-abort.ts": {
+   "order": [
+    "<repo>/tests/corpus/2684-fs-rename-abort.ts"
    ],
    "diags": []
   },

@@ -720,6 +720,12 @@ void scr_qs_parse_into(ScrMap *out, const ScrStr *qs, const ScrStr *sep,
                        const ScrStr *eq, double max_keys, uint32_t str_tag,
                        uint32_t arr_tag);
 
+/* node:util.parseArgs — the static checked-dynamic boundary. `config` is
+ * the documented JSON-safe configuration object; the returned dyn tree is
+ * a fresh ParsedResults object whose `values` child has null prototype.
+ * Borrows config; returns +1, or NULL with a Node-coded TypeError pending. */
+struct ScrDyn *scr_util_parse_args(const struct ScrDyn *config);
+
 /* querystring.stringify — Node's stringify over a borrowed dyn value (the
  * frontend dynFroms the typed record; JS-world dyn values pass straight
  * through). Non-object dyn values answer "" like Node; object keys iterate in
@@ -3413,6 +3419,8 @@ typedef struct {
 } ScrJsonBuf;
 
 void scr_jb_init(ScrJsonBuf *b);
+/* Append one borrowed runtime string verbatim (no JSON quoting). */
+void scr_jb_put_str(ScrJsonBuf *b, const ScrStr *s);
 /* Push a container onto the circular-detection stack before serializing
  * its members. If `v` is already ON the stack, throws V8's exact
  * "Converting circular structure to JSON" TypeError (the --> starting at /

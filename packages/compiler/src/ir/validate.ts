@@ -284,6 +284,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "qs.stringify": { argTypes: [DYN, STRING, STRING], result: STRING },
   "qs.escape": { argTypes: [STRING], result: STRING },
   "qs.unescape": { argTypes: [STRING], result: STRING },
+  "util.parseArgs": { argTypes: [DYN], result: DYN },
   "fs.statSync": { argTypes: [STRING], result: STATS_T },
   "fs.lstatSync": { argTypes: [STRING], result: STATS_T },
   "fs.openSync": { argTypes: [STRING, STRING], result: F64 },

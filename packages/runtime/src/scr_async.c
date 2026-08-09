@@ -1520,8 +1520,11 @@ static ScrFsRenameOp *scr_fs_rename_done = NULL;
 static ScrFsRenameOp **scr_fs_rename_done_tail = &scr_fs_rename_done;
 static size_t scr_fs_rename_pending_count = 0;
 static size_t scr_fs_rename_worker_count = 0;
+static bool scr_fs_rename_stopping = false;
+static bool scr_fs_rename_shutdown_registered = false;
 
 #ifdef _WIN32
+static HANDLE scr_fs_rename_workers[4];
 static SRWLOCK scr_fs_rename_lock = SRWLOCK_INIT;
 static CONDITION_VARIABLE scr_fs_rename_cond = CONDITION_VARIABLE_INIT;
 static void scr_fs_rename_lock_enter(void) { AcquireSRWLockExclusive(&scr_fs_rename_lock); }
@@ -1530,7 +1533,9 @@ static void scr_fs_rename_wait(void) {
   (void)SleepConditionVariableSRW(&scr_fs_rename_cond, &scr_fs_rename_lock, INFINITE, 0);
 }
 static void scr_fs_rename_signal(void) { WakeConditionVariable(&scr_fs_rename_cond); }
+static void scr_fs_rename_broadcast(void) { WakeAllConditionVariable(&scr_fs_rename_cond); }
 #else
+static pthread_t scr_fs_rename_workers[4];
 static pthread_mutex_t scr_fs_rename_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t scr_fs_rename_cond = PTHREAD_COND_INITIALIZER;
 static void scr_fs_rename_lock_enter(void) { (void)pthread_mutex_lock(&scr_fs_rename_lock); }
@@ -1539,6 +1544,7 @@ static void scr_fs_rename_wait(void) {
   (void)pthread_cond_wait(&scr_fs_rename_cond, &scr_fs_rename_lock);
 }
 static void scr_fs_rename_signal(void) { (void)pthread_cond_signal(&scr_fs_rename_cond); }
+static void scr_fs_rename_broadcast(void) { (void)pthread_cond_broadcast(&scr_fs_rename_cond); }
 #endif
 
 static void scr_fs_rename_op_release(ScrFsRenameOp *op) {
@@ -1551,7 +1557,11 @@ static void scr_fs_rename_op_release(ScrFsRenameOp *op) {
 static void scr_fs_rename_worker_loop(void) {
   for (;;) {
     scr_fs_rename_lock_enter();
-    while (scr_fs_rename_work == NULL) scr_fs_rename_wait();
+    while (scr_fs_rename_work == NULL && !scr_fs_rename_stopping) scr_fs_rename_wait();
+    if (scr_fs_rename_stopping) {
+      scr_fs_rename_lock_leave();
+      return;
+    }
     ScrFsRenameOp *op = scr_fs_rename_work;
     scr_fs_rename_work = op->next;
     if (scr_fs_rename_work == NULL) scr_fs_rename_work_tail = &scr_fs_rename_work;
@@ -1580,6 +1590,47 @@ static void *scr_fs_rename_worker(void *payload) {
   return NULL;
 }
 #endif
+
+/* Runs before the ordinary runtime atexit cleanup/audit (it is registered
+ * lazily by the first rename request, after scr_init/scr_lib_init). Fatal
+ * top-level or callback exceptions can stop the loop with requests still in
+ * flight; join the workers before releasing their retained path/callback
+ * payloads so sanitized builds keep the program's real exit verdict. */
+static void scr_fs_renames_shutdown(void) {
+  scr_fs_rename_lock_enter();
+  scr_fs_rename_stopping = true;
+  scr_fs_rename_broadcast();
+  scr_fs_rename_lock_leave();
+
+  for (size_t i = 0; i < scr_fs_rename_worker_count; i++) {
+#ifdef _WIN32
+    (void)WaitForSingleObject(scr_fs_rename_workers[i], INFINITE);
+    CloseHandle(scr_fs_rename_workers[i]);
+#else
+    (void)pthread_join(scr_fs_rename_workers[i], NULL);
+#endif
+  }
+
+  scr_fs_rename_lock_enter();
+  ScrFsRenameOp *work = scr_fs_rename_work;
+  ScrFsRenameOp *done = scr_fs_rename_done;
+  scr_fs_rename_work = NULL;
+  scr_fs_rename_work_tail = &scr_fs_rename_work;
+  scr_fs_rename_done = NULL;
+  scr_fs_rename_done_tail = &scr_fs_rename_done;
+  scr_fs_rename_pending_count = 0;
+  scr_fs_rename_lock_leave();
+  while (work != NULL) {
+    ScrFsRenameOp *next = work->next;
+    scr_fs_rename_op_release(work);
+    work = next;
+  }
+  while (done != NULL) {
+    ScrFsRenameOp *next = done->next;
+    scr_fs_rename_op_release(done);
+    done = next;
+  }
+}
 
 static bool scr_fs_renames_pending(void) { return scr_fs_rename_pending_count != 0; }
 
@@ -1619,6 +1670,12 @@ void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
   scr_closure_release(cb);
   scr_trap("scriptc: internal error: fs.rename reached in a library build — please report this");
 #else
+  if (!scr_fs_rename_shutdown_registered) {
+    if (atexit(scr_fs_renames_shutdown) != 0) {
+      scr_trap("scriptc: could not register fs.rename worker cleanup\n");
+    }
+    scr_fs_rename_shutdown_registered = true;
+  }
   ScrFsRenameOp *op = calloc(1, sizeof *op);
   if (!op) scr_trap("scriptc: out of memory\n");
   op->oldpath = scr_str_retain(oldpath);
@@ -1634,7 +1691,7 @@ void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
 #ifdef _WIN32
     HANDLE worker = CreateThread(NULL, 0, scr_fs_rename_worker, NULL, 0, NULL);
     if (worker != NULL) {
-      CloseHandle(worker);
+      scr_fs_rename_workers[scr_fs_rename_worker_count] = worker;
       scr_fs_rename_worker_count++;
     } else {
       create_error = EAGAIN;
@@ -1643,7 +1700,7 @@ void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
     pthread_t worker;
     create_error = pthread_create(&worker, NULL, scr_fs_rename_worker, NULL);
     if (create_error == 0) {
-      (void)pthread_detach(worker);
+      scr_fs_rename_workers[scr_fs_rename_worker_count] = worker;
       scr_fs_rename_worker_count++;
     }
 #endif
