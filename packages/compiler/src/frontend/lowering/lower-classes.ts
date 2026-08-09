@@ -494,7 +494,7 @@ export interface GenericClassInfo {
    * level (undefined until the write runs, Node-exact). Null when the
    * inference is unmappable, checked-dynamic (dyn stays out of class
    * fields — KEEP NARROW), or an arm-less kind that cannot join a union
-   * (genResultRecord's list). */
+   * (genResultRecord's list, including scalar-backed Date values). */
   function undefArmedFieldType(L: Lowerer, p: ts.Symbol): IrType | null {
     const t = L.checker.getTypeOfSymbol(p);
     const mapped = L.mapTypeOf(t);
@@ -502,7 +502,10 @@ export interface GenericClassInfo {
     const byKey = new Map<string, IrType>();
     const arms = mapped.kind === "union" ? (L.unions.get(mapped.unionId)?.arms ?? []) : [mapped];
     for (const a of arms) {
-      if (a.kind === "map" || a.kind === "regex" || a.kind === "jsval" || a.kind === "generator") {
+      if (
+        a.kind === "map" || a.kind === "regex" || a.kind === "date" ||
+        a.kind === "jsval" || a.kind === "generator"
+      ) {
         return null;
       }
       byKey.set(typeKey(a), a);
@@ -1948,7 +1951,8 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           const armable =
             declared !== undefined && !isUnitType(declared) &&
             declared.kind !== "union" && declared.kind !== "jsval" && declared.kind !== "dyn" &&
-            declared.kind !== "map" && declared.kind !== "generator" && declared.kind !== "void" &&
+            declared.kind !== "map" && declared.kind !== "date" && declared.kind !== "generator" &&
+            declared.kind !== "void" &&
             declared.kind !== "caught";
           const armed = armable ? L.withUndefinedArm(declared) : null;
           if (armed !== null && armed.kind === "union") {

@@ -66,6 +66,14 @@ console.log(
   new Date("2024-01-01T00:00:00.000+24:00").getTime(),
 );
 
+// TimeClip applies to the final UTC instant, after an explicit timezone
+// offset. These local civil times begin just outside the Date range, but
+// their offsets move them exactly onto its valid upper and lower bounds.
+console.log(
+  new Date("+275760-09-13T23:00:00.000+23:00").toISOString(),
+  new Date("-271821-04-19T01:00:00.000-23:00").toISOString(),
+);
+
 // Zero-argument construction materializes a storable live Date. Assert
 // stable properties rather than printing the wall-clock value itself.
 const live = new Date();

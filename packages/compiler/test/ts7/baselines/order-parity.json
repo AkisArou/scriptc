@@ -6697,6 +6697,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/date-union-fences.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/date-union-fences.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/deep-binary-nesting.ts": {
    "order": [
     "<repo>/tests/diagnostics/deep-binary-nesting.ts"

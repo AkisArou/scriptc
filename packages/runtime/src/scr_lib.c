@@ -3408,7 +3408,7 @@ static double scr_days_from_civil(long long y, int m, int d) {
   return (double)(era * 146097 + (long long)doe - 719468);
 }
 
-static double scr_date_ms_of(long long y, int mo, int d, int hh, int mi, int ss, int ms) {
+static double scr_date_make_ms(long long y, int mo, int d, int hh, int mi, int ss, int ms) {
   /* V8 accepts days 1..31 in every month and ROLLS OVER past the month's
    * end (Feb 30 → Mar 2) — days_from_civil extrapolates linearly, so the
    * rollover falls out; day 0 and 32+ are NaN, like V8. */
@@ -3416,8 +3416,11 @@ static double scr_date_ms_of(long long y, int mo, int d, int hh, int mi, int ss,
   if (hh > 24 || mi > 59 || ss > 59 || (hh == 24 && (mi || ss || ms))) return NAN;
   double t = scr_days_from_civil(y, mo, d) * 86400000.0 +
              hh * 3600000.0 + mi * 60000.0 + ss * 1000.0 + ms;
-  if (fabs(t) > 8640000000000000.0) return NAN;
   return t;
+}
+
+static double scr_date_ms_of(long long y, int mo, int d, int hh, int mi, int ss, int ms) {
+  return scr_date_new_ms(scr_date_make_ms(y, mo, d, hh, mi, ss, ms));
 }
 
 static bool scr_date_digits(const char **p, const char *end, int n, int *out) {
@@ -3518,8 +3521,11 @@ double scr_date_parse_get_time(ScrStr *s) {
       return NAN;
     }
     if (p != end) return NAN;
-    double t = scr_date_ms_of(yy, mo, d, hh, mi, ss, ms);
-    return isnan(t) ? t : scr_date_new_ms(t - off);
+    /* MakeDate can lie just beyond the TimeClip boundary while the
+     * explicit offset brings the final UTC instant back into range. The
+     * spec clips only after that offset has been applied. */
+    double t = scr_date_make_ms(yy, mo, d, hh, mi, ss, ms);
+    return scr_date_new_ms(t - off);
   }
 }
 

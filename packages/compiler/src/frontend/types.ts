@@ -2756,7 +2756,7 @@ export function unitOnlyUnion(unions: UnionRegistry): IrType {
  * `.return()`, `.throw()`, the for-of desugar, and mapType's
  * IteratorResult alias mapping all intern through here, so reads agree.
  * Null when the combined union would be illegal (a func/set arm beside
- * data arms, a map/regex arm — kinds with no narrowing test): such
+ * data arms, a map/regex/Date arm — kinds with no narrowing test): such
  * generators stay unmapped. */
 export function genResultRecord(
   yieldT: IrType,
@@ -2775,7 +2775,10 @@ export function genResultRecord(
         for (const a of unions.get(t.unionId)?.arms ?? []) byKey.set(typeKey(a), a);
         return true;
       }
-      if (t.kind === "map" || t.kind === "regex" || t.kind === "jsval" || t.kind === "generator") {
+      if (
+        t.kind === "map" || t.kind === "regex" || t.kind === "date" ||
+        t.kind === "jsval" || t.kind === "generator"
+      ) {
         return false; // no legal union arm exists for these kinds
       }
       byKey.set(typeKey(t), t);
@@ -2825,7 +2828,7 @@ export function isUnitOnlyTsType(t: ts.Type): boolean {
 
 /** IR-level `t | undefined`, canonicalized and fenced exactly like the
  * ts-union branch of mapType (typeKey-sorted arms, deduplicated; map/
- * regex/dyn/void arms unrepresentable; a func arm IS representable — the
+ * regex/Date/dyn/void arms unrepresentable; a func arm IS representable — the
  * result is exactly the nullable-callback shape mapType's union branch
  * admits, `(() => void) | undefined`) so the interned union is IDENTICAL
  * to what mapping the checker's own `T | undefined` produces. */
@@ -2833,13 +2836,14 @@ export function withUndefinedArm(t: IrType, unions: UnionRegistry): IrType | nul
   if (t.kind === "union") {
     const def = unions.get(t.unionId);
     if (!def) return null;
+    if (def.arms.some((a) => a.kind === "date")) return null;
     if (def.arms.some((a) => a.kind === "undefinedT")) return t;
     const arms = [...def.arms, UNDEFINED_T];
     arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
     return { kind: "union", unionId: unions.intern(arms) };
   }
   if (
-    t.kind === "void" || t.kind === "map" || t.kind === "dyn" ||
+    t.kind === "void" || t.kind === "map" || t.kind === "date" || t.kind === "dyn" ||
     // A bare unit field type cannot occur (units live only inside unions),
     // but guard against constructing a single-arm union from one.
     isUnitType(t)

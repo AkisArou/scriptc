@@ -330,6 +330,7 @@ export interface GenericInstance {
       bodyType.kind === "void" ||
       bodyType.kind === "map" ||
       bodyType.kind === "regex" ||
+      bodyType.kind === "date" ||
       bodyType.kind === "dyn" ||
       bodyType.kind === "jsval" ||
       isUnitType(bodyType)
