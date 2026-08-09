@@ -669,6 +669,16 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
   return scr_bytes_decode_utf8(pend, np);
 }
 
+static void scr_bytes_to_str_bounds(const ScrBytes *b, double start, double end,
+                                    size_t *s0_out, size_t *e0_out) {
+  size_t len = b->len;
+  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
+  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
+  if (e0 < s0) e0 = s0;
+  *s0_out = s0;
+  *e0_out = e0;
+}
+
 /* toString(enc, start, end): Node slices then decodes — start/end clamp
  * to [0, len] with start > end collapsing to empty and negative ends
  * clamping to 0 (Node's slice-then-decode; an OMITTED end never reaches
@@ -676,10 +686,8 @@ ScrStr *scr_strdec_end(const ScrStr *enc, double pending) {
  * form). Delegates to the whole-buffer decoder
  * through a stack view — no allocation, no rc traffic. */
 ScrStr *scr_bytes_to_str_range(const ScrBytes *b, const ScrStr *enc, double start, double end) {
-  size_t len = b->len;
-  size_t s0 = start <= 0 ? 0 : ((size_t)start > len ? len : (size_t)start);
-  size_t e0 = end <= 0 ? 0 : ((size_t)end > len ? len : (size_t)end);
-  if (e0 < s0) e0 = s0;
+  size_t s0, e0;
+  scr_bytes_to_str_bounds(b, start, end, &s0, &e0);
   ScrBytes view = { .rc = 1, .len = e0 - s0, .elem = b->elem, .data = b->data + s0, .backing = NULL };
   return scr_bytes_to_str(&view, enc);
 }
@@ -829,6 +837,72 @@ ScrStr *scr_bytes_to_str(const ScrBytes *b, const ScrStr *enc) {
   if (scr_enc_is(enc, "utf16le")) return scr_bytes_decode_utf16le(in, n);
   /* utf8 (the compiler completes an omitted encoding to "utf8") */
   return scr_bytes_decode_utf8(in, n);
+}
+
+/* Buffer.toString with a runtime-valued encoding. Literal call sites fold
+ * this same alias table in the frontend; variables arrive here, where Node
+ * also accepts ASCII case variants and rejects unknown names catchably. */
+static bool scr_enc_eq_ci(const ScrStr *raw, const char *name) {
+  size_t n = strlen(name);
+  if (raw->len != n) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = raw->data[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+    if (c != name[i]) return false;
+  }
+  return true;
+}
+
+static ScrStr *scr_bytes_normalize_encoding(const ScrStr *raw) {
+  static const struct { const char *from; const char *to; } map[] = {
+    {"utf8", "utf8"}, {"utf-8", "utf8"}, {"hex", "hex"},
+    {"base64", "base64"}, {"base64url", "base64url"},
+    {"latin1", "latin1"}, {"binary", "latin1"}, {"ascii", "ascii"},
+    {"utf16le", "utf16le"}, {"utf-16le", "utf16le"},
+    {"ucs2", "utf16le"}, {"ucs-2", "utf16le"},
+  };
+  for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
+    if (scr_enc_eq_ci(raw, map[i].from)) {
+      return scr_str_new(map[i].to, strlen(map[i].to));
+    }
+  }
+  static const char prefix[] = "Unknown encoding: ";
+  const size_t prefix_len = sizeof prefix - 1;
+  if (raw->len > SIZE_MAX - prefix_len) scr_bytes_oom();
+  const size_t msg_len = prefix_len + raw->len;
+  char *msg = malloc(msg_len);
+  if (!msg) scr_bytes_oom();
+  memcpy(msg, prefix, prefix_len);
+  memcpy(msg + prefix_len, raw->data, raw->len);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, msg_len,
+                           "ERR_UNKNOWN_ENCODING");
+  free(msg);
+  return NULL;
+}
+
+ScrStr *scr_bytes_to_str_checked(const ScrBytes *b, const ScrStr *enc) {
+  /* Node returns before resolving the encoding when there are no bytes
+   * to decode, so even an unknown runtime name answers the empty string. */
+  if (b->len == 0) return scr_str_new("", 0);
+  ScrStr *normalized = scr_bytes_normalize_encoding(enc);
+  if (!normalized) return NULL;
+  ScrStr *out = scr_bytes_to_str(b, normalized);
+  scr_str_release(normalized);
+  return out;
+}
+
+ScrStr *scr_bytes_to_str_checked_range(const ScrBytes *b, const ScrStr *enc,
+                                       double start, double end) {
+  /* The range is selected before Node resolves the encoding. A clamped
+   * empty window therefore answers "" even for an unknown name. */
+  size_t s0, e0;
+  scr_bytes_to_str_bounds(b, start, end, &s0, &e0);
+  if (s0 == e0) return scr_str_new("", 0);
+  ScrStr *normalized = scr_bytes_normalize_encoding(enc);
+  if (!normalized) return NULL;
+  ScrStr *out = scr_bytes_to_str_range(b, normalized, start, end);
+  scr_str_release(normalized);
+  return out;
 }
 
 static int scr_hex_val(uint8_t c) {

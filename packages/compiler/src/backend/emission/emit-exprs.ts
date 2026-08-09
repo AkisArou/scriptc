@@ -1652,18 +1652,27 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return { name: "", type: e.type };
           }
           case "toString":
+          case "toStringVar": {
             // The encoding arg is always present (the frontend completes
-            // an omitted one to "utf8"). Never throws; +1 string. Range
-            // forms: [enc, start] decodes to the buffer's end; [enc,
-            // start, end] clamps the explicit end (negatives empty,
-            // Node's slice-then-decode).
+            // an omitted one to "utf8"). The literal path is already
+            // canonical and cannot throw; toStringVar validates a runtime
+            // encoding and may throw ERR_UNKNOWN_ENCODING. Both return a
+            // +1 string. Range forms: [enc, start] decodes to the buffer's
+            // end; [enc, start, end] clamps the explicit end (negatives
+            // empty, Node's slice-then-decode).
+            const checked = method === "toStringVar";
+            const stem = checked ? "scr_bytes_to_str_checked" : "scr_bytes_to_str";
+            let out: Temp;
             if (args.length === 3) {
-              return E.newTemp(e.type, `scr_bytes_to_str_range(${r.name}, ${args[0]!.name}, ${args[1]!.name}, ${args[2]!.name})`);
+              out = E.newTemp(e.type, `${stem}_range(${r.name}, ${args[0]!.name}, ${args[1]!.name}, ${args[2]!.name})`);
+            } else if (args.length === 2) {
+              out = E.newTemp(e.type, `${stem}_range(${r.name}, ${args[0]!.name}, ${args[1]!.name}, (double)${r.name}->len)`);
+            } else {
+              out = E.newTemp(e.type, `${stem}(${r.name}, ${args[0]!.name})`);
             }
-            if (args.length === 2) {
-              return E.newTemp(e.type, `scr_bytes_to_str_range(${r.name}, ${args[0]!.name}, ${args[1]!.name}, (double)${r.name}->len)`);
-            }
-            return E.newTemp(e.type, `scr_bytes_to_str(${r.name}, ${args[0]!.name})`);
+            if (checked) E.emitPendingCheck();
+            return out;
+          }
           case "equals":
             return E.newTemp(e.type, `scr_bytes_equals(${r.name}, ${args[0]!.name})`);
           case "compareBuf": {

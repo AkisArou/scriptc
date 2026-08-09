@@ -1415,9 +1415,11 @@ export type IrStrIntrinsicMethod =
  * `setFrom` (`dst.set(src, offset?)`) takes a
  * same-elem bytes src and an optional f64 offset (omitted = 0) → void,
  * THROWS Node's RangeError on overflow (may-throw seed); `toString` takes
- * one string encoding arg (the frontend completes an omitted one to
- * "utf8" and fences non-literal / unsupported encodings; u8 receivers
- * only) → owned +1 string, never throws; the numeric families (u8
+ * one canonical literal encoding arg (the frontend completes omitted or
+ * undefined to "utf8"; u8 receivers only) → owned +1 string, never
+ * throws; `toStringVar` has the same signature for runtime-valued
+ * BufferEncoding arguments, normalizes aliases/case, and throws
+ * ERR_UNKNOWN_ENCODING for an invalid cast; the numeric families (u8
  * receivers only) carry their KIND as args[0], always a strLit the
  * backend maps to the runtime's tag: `readNum` [kind, offset] /
  * `writeNum` [kind, value, offset] cover the fixed widths (kind "u8",
@@ -1467,6 +1469,10 @@ export type IrBytesIntrinsicMethod =
   | "toArray"
   | "setFrom"
   | "toString"
+  /** Buffer.toString with a runtime-valued encoding. Same signature as
+   * toString, but canonicalizes aliases/case and may throw
+   * ERR_UNKNOWN_ENCODING. */
+  | "toStringVar"
   | "readNum"
   | "writeNum"
   | "readNumVar"
@@ -1532,6 +1538,7 @@ export type IrBytesIntrinsicMethod =
 /** The bytesIntrinsic methods that can raise a catchable error — backends'
  * may-throw analyses seed on these exactly like MAY_THROW_LIB_FNS. */
 export const MAY_THROW_BYTES_METHODS: ReadonlySet<IrBytesIntrinsicMethod> = new Set([
+  "toStringVar",
   "with",
   "setFrom",
   "readNum",
