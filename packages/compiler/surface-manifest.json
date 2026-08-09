@@ -1772,6 +1772,12 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.util.parseArgs",
+      "kind": "node-builtin",
+      "name": "util.parseArgs",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.util.promisify",
       "kind": "node-builtin",
       "name": "util.promisify",

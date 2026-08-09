@@ -24,7 +24,7 @@ import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRe
 import { lowerEnumDeclaration } from "./lower-enums.js";
 import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
-import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
+import { isParseArgsDynTypeName, isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
 import { probeNodeRequireRefusal } from "../npm.js";
 
@@ -1057,6 +1057,42 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     ];
   }
 
+/** Whether a checker type belongs to node:util.parseArgs's dyn-backed
+ * declaration family. Module ancestry disambiguates short private helper
+ * names such as `Token` from names in other standard-library modules. */
+function isParseArgsDynCheckerType(L: Lowerer, type: ts.Type): boolean {
+  const widened = L.checker.getBaseTypeOfLiteralType(type);
+  const declarationBelongs = (d: ts.Node): boolean => {
+    if (!L.isStdlibFile(d.getSourceFile())) return false;
+    let inParseArgsType = false;
+    for (let node: ts.Node | undefined = d.parent; node; node = node.parent) {
+      if (
+        (ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
+        isParseArgsDynTypeName(node.name.text)
+      ) {
+        inParseArgsType = true;
+      }
+      if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
+        return inParseArgsType && (node.name.text === "util" || node.name.text === "node:util");
+      }
+    }
+    return false;
+  };
+  const sym = widened.getAliasSymbol() ?? widened.getSymbol();
+  if (
+    sym && isParseArgsDynTypeName(sym.name) &&
+    L.checker.declarationsOf(sym).some(declarationBelongs)
+  ) {
+    return true;
+  }
+  // A discriminant check erases the token alias and leaves one anonymous
+  // object arm. Its properties still point into the parseArgs alias, which
+  // is the same stable signal the dotted-member bridge uses.
+  return L.checker.getPropertiesOfType(widened).some((p) =>
+    L.checker.declarationsOf(p).some(declarationBelongs),
+  );
+}
+
 /** Destructuring declarations, desugared as sugar over indexed/field
    * reads: the initializer evaluates ONCE into a hidden temp, then each
    * bound name declares (or assigns its pre-registered module global) from
@@ -1086,6 +1122,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       if (tokenBound !== null) return tokenBound;
     }
     let init = L.lowerExpr(decl.initializer);
+    const parseArgsDynObject =
+      init.type.kind === "dyn" && isParseArgsDynCheckerType(L, L.typeOf(decl.initializer));
     // A TS `any`-origin source whose lowered value is NOT a destructurable
     // shape (`var { x } = <any>0` — the cast erases to the f64; a dyn
     // value — the checked-dynamic tree has no destructure): JS reads the properties off
@@ -1247,6 +1285,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       isLet,
       out,
       dynSpell,
+      parseArgsDynObject,
     );
     return out;
   }
@@ -1258,7 +1297,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     srcType: IrType,
     isLet: boolean,
     out: IrStmt[],
-    dynSpell?: string,): void {
+    dynSpell?: string,
+    allowDynObject = false,): void {
     if (ts.isArrayBindingPattern(pattern)) {
       L.fenceStaticHeadersIteration(pattern);
       // Tuple sources: each position is a field read of the tuple's record
@@ -1575,8 +1615,14 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     // default applied exactly when the read answers undefined (lazily,
     // like a defaulted parameter). Bindings are dyn (the checker's `any`),
     // nested object patterns recurse through this same branch. TS files
-    // keep the fence — annotations exist there.
-    if (srcType.kind === "dyn" && isJsSourceFile(pattern.getSourceFile())) {
+    // keep the fence — annotations exist there. node:util.parseArgs is the
+    // scoped TypeScript exception: its declared result/token types are
+    // deliberately carried by the checked-dynamic tree, so their ordinary
+    // object patterns use the same exact keyed-read desugar.
+    if (
+      srcType.kind === "dyn" &&
+      (isJsSourceFile(pattern.getSourceFile()) || allowDynObject)
+    ) {
       for (const el of pattern.elements) {
         if (el.name === undefined) continue;
         const loc = locOf(el);
@@ -1616,7 +1662,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
             loc,
           };
         }
-        L.bindPatternTarget(el.name, value, isLet, out);
+        L.bindPatternTarget(el.name, value, isLet, out, allowDynObject);
       }
       return;
     }
@@ -2771,7 +2817,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
   export function bindPatternTarget(L: Lowerer, name: ts.BindingName,
     value: IrExpr,
     isLet: boolean,
-    out: IrStmt[],): void {
+    out: IrStmt[],
+    allowDynObject = false,): void {
     const loc = value.loc;
     if (ts.isIdentifier(name)) {
       const symbol = L.checker.getSymbolAtLocation(name);
@@ -2821,6 +2868,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       value.type,
       isLet,
       out,
+      undefined,
+      allowDynObject,
     );
   }
 

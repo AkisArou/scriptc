@@ -2001,6 +2001,11 @@ export type IrLibFn =
   | "qs.stringify"
   | "qs.escape"
   | "qs.unescape"
+  /** node:util.parseArgs: one checked-dynamic config object in, one
+   * checked-dynamic ParsedResults tree out. Statically typed member reads
+   * validate their values when leaving that tree. The native parser may
+   * throw Node's coded validation/grammar TypeErrors. */
+  | "util.parseArgs"
   /** ES Symbol values (scr_symbol.c — link-gated by moduleUsesSymbol).
    * sym.new: `Symbol(desc)` — a fresh runtime-unique identity (+1) whose
    * one arg is the description string (borrowed); sym.newAnon is the
@@ -6090,6 +6095,28 @@ export function moduleUsesQs(mod: IrModule): boolean {
   return found;
 }
 
+/** True when the module uses native util.parseArgs — the link switch for
+ * scr_util.c. The implementation is a pure checked-dynamic data transform,
+ * cross-platform and independent of the island's node:util shim. */
+export function moduleUsesParseArgs(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (node.kind === "libCall" && node.fn === "util.parseArgs") {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
 /** True when the module contains any fs.watch/watcher.* libCall — the
  * link switch that pulls scr_watch.c into the binary and has the emitted
  * main call scr_watch_install (cc.ts + emitter; the scr_net gating
@@ -6752,6 +6779,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "island.import",
   "island.castFail",
   "json.parse",
+  "util.parseArgs",
   // decodeURIComponent throws the spec's URIError on bad hex/invalid
   // UTF-8 octets (encodeURIComponent never throws — see the IrLibFn doc).
   "str.decodeUriComponent",

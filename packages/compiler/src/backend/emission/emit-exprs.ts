@@ -3488,6 +3488,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             );
             return dict;
           }
+          // node:util.parseArgs (scr_util.c): checked-dynamic config in,
+          // checked-dynamic result out; may throw a coded TypeError.
+          case "util.parseArgs":
+            return finish(`scr_util_parse_args(${arg(0)})`);
           // Stats (scr_lib.c): statSync throws like the other sync fs
           // calls; the getters are pure reads.
           case "fs.openSync":

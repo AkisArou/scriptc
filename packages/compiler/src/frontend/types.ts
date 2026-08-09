@@ -34,6 +34,33 @@ export const ISLAND_AMBIENT_TYPES = [
   "ReadableStreamReadDoneResult",
 ] as const;
 
+/** node:util.parseArgs's public and @types/node helper type names. Values
+ * behind this surface use the checked-dynamic tree; see mapTypeInner. */
+const PARSE_ARGS_DYN_TYPES = new Set([
+  "ParseArgsConfig",
+  "ParseArgsOptionDescriptor",
+  "ParseArgsOptionsConfig",
+  "ParseArgsResult",
+  "ParseArgsToken",
+  "ParsedResults",
+  "PreciseParsedResults",
+  "ParsedValues",
+  "ParsedPositionals",
+  "ParsedTokens",
+  "ParsedOptionToken",
+  "ParsedPositionalToken",
+  "PreciseTokenForOptions",
+  "TokenForOptions",
+  "OptionToken",
+  "Token",
+]);
+
+/** True for the parseArgs type family that deliberately rides dyn. Exported
+ * for the property-read bridge after TypeScript narrows a token union arm. */
+export function isParseArgsDynTypeName(name: string): boolean {
+  return PARSE_ARGS_DYN_TYPES.has(name);
+}
+
 /** The frontend's record-shape interner. Records are monomorphic structural
  * shapes: fields sorted by name form the canonical identity, and two types
  * with the same canonical field list share one shapeId (and later one C
@@ -727,6 +754,28 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   if (flags & ts.TypeFlags.Number) return F64;
   if (flags & ts.TypeFlags.String) return STRING;
   if (flags & ts.TypeFlags.Boolean || flags & ts.TypeFlags.BooleanLiteral) return BOOL;
+  // node:util.parseArgs config/results are declaration-heavy conditional
+  // and discriminated-union types over a value that is naturally a checked-
+  // dynamic tree. Keep the named public surface (plus @types/node's private
+  // helper aliases that survive instantiation) in that representation:
+  // typed member reads still exit through ordinary dyn checks, while the
+  // runtime can preserve the three token variants and null-prototype values
+  // object without inventing one false static record shape. Provenance keeps
+  // user aliases with the same names on the normal structural path.
+  {
+    const parseArgsSym = widened.getAliasSymbol() ?? widened.getSymbol();
+    if (
+      parseArgsSym &&
+      PARSE_ARGS_DYN_TYPES.has(parseArgsSym.name) &&
+      checker.declarationsOf(parseArgsSym).some(
+        (d) =>
+          ctx.isStdlibFile(d.getSourceFile()) &&
+          isDeclaredInAmbientModule(d as ts.Declaration, "util"),
+      )
+    ) {
+      return DYN;
+    }
+  }
   // The lib's BOXED wrapper interfaces used as TYPES (`const n: Number =
   // 5`): every value such a slot can hold IS the primitive — `new
   // Number(...)` construction is fenced, so no box object ever exists —

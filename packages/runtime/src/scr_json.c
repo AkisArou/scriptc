@@ -94,6 +94,10 @@ static void scr_jb_write(ScrJsonBuf *b, const char *s, size_t n) {
   b->len += n;
 }
 
+void scr_jb_put_str(ScrJsonBuf *b, const ScrStr *s) {
+  scr_jb_write(b, s->data, s->len);
+}
+
 void scr_jb_puts(ScrJsonBuf *b, const char *s) { scr_jb_write(b, s, strlen(s)); }
 
 void scr_jb_put_f64(ScrJsonBuf *b, double v) {

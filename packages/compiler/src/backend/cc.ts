@@ -305,6 +305,9 @@ export interface CcOptions {
    * line (escape-only programs ride the always-linked component encoder
    * and never flip this). */
   qs?: boolean;
+  /** The program uses static util.parseArgs (index.ts detects its libCall):
+   * compiles scr_util.c, a pure checked-dynamic data transform. */
+  parseArgs?: boolean;
   /** The program uses the node:stream class surface (moduleUsesStream on
    * the IR): compiles scr_stream.c into the binary — always alongside
    * scr_events_emitter.c, which moduleUsesEmitter answers true for
@@ -3086,6 +3089,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(opts.symbol ? [rt(join(rtDir, "scr_symbol.c"))] : []),
     ...(opts.searchParams ? [rt(join(rtDir, "scr_url_params.c"))] : []),
     ...(opts.qs ? [rt(join(rtDir, "scr_qs.c"))] : []),
+    ...(opts.parseArgs ? [rt(join(rtDir, "scr_util.c"))] : []),
     ...(opts.stream ? [rt(join(rtDir, "scr_stream.c"))] : []),
     // The readiness-poller backends (scr_platform.h): kqueue on macOS/BSD,
     // epoll on Linux, WSAPoll on Windows — each TU is empty off its

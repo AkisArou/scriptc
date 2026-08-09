@@ -1584,6 +1584,41 @@ declare module "util" {
     format?: unknown,
     ...args: unknown[]
   ): string;
+  export type ParseArgsOptionsType = "boolean" | "string";
+  export interface ParseArgsOptionDescriptor {
+    type: ParseArgsOptionsType;
+    multiple?: boolean;
+    short?: string;
+    default?: string | boolean | string[] | boolean[];
+  }
+  export interface ParseArgsOptionsConfig {
+    [longOption: string]: ParseArgsOptionDescriptor;
+  }
+  export interface ParseArgsConfig {
+    args?: readonly string[];
+    options?: ParseArgsOptionsConfig;
+    strict?: boolean;
+    allowPositionals?: boolean;
+    allowNegative?: boolean;
+    tokens?: boolean;
+  }
+  export type ParseArgsToken =
+    | {
+        kind: "option";
+        index: number;
+        name: string;
+        rawName: string;
+        value: string | undefined;
+        inlineValue: boolean | undefined;
+      }
+    | { kind: "positional"; index: number; value: string }
+    | { kind: "option-terminator"; index: number };
+  export interface ParseArgsResult {
+    values: { [longOption: string]: undefined | string | boolean | Array<string | boolean> };
+    positionals: string[];
+    tokens?: ParseArgsToken[];
+  }
+  export function parseArgs(config?: ParseArgsConfig): ParseArgsResult;
   /* util.getCallSites (Node ≥22.9): the captured-frame slice harness
    * code reads. No stack bookkeeping exists in a compiled binary — every
    * reached call fences per site. */

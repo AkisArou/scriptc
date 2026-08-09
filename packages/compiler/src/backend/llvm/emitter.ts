@@ -175,6 +175,7 @@ function llStrBytes(text: string): string {
  * Throwing members (MAY_THROW_LIB_FNS) and everything unlisted refuse by
  * name. */
 const LIB_FN_SYMS: Record<string, string> = {
+  "util.parseArgs": "scr_util_parse_args",
   "math.maxArr": "scr_math_max_arr",
   "math.minArr": "scr_math_min_arr",
   "math.min": "scr_math_min",

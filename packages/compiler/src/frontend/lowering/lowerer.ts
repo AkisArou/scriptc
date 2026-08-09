@@ -7145,7 +7145,8 @@ export class Lowerer {
     srcType: IrType,
     isLet: boolean,
     out: IrStmt[],
-    dynSpell?: string,): void {
+    dynSpell?: string,
+    allowDynObject = false,): void {
     if (ts.isObjectBindingPattern(pattern)) {
       fenceFetchObjectBinding(this, pattern);
     }
@@ -7219,7 +7220,7 @@ export class Lowerer {
       }
       return;
     }
-    return lowerBindingPattern(this, pattern, srcRef, srcType, isLet, out, dynSpell);
+    return lowerBindingPattern(this, pattern, srcRef, srcType, isLet, out, dynSpell, allowDynObject);
   }
 
   checkBindingElement(el: ts.BindingElement, allowDefault = false): void {
@@ -7229,8 +7230,9 @@ export class Lowerer {
   bindPatternTarget(name: ts.BindingName,
     value: IrExpr,
     isLet: boolean,
-    out: IrStmt[],): void {
-    return bindPatternTarget(this, name, value, isLet, out);
+    out: IrStmt[],
+    allowDynObject = false,): void {
+    return bindPatternTarget(this, name, value, isLet, out, allowDynObject);
   }
 
   lowerVarDeclList(list: ts.VariableDeclarationList): IrStmt | null {

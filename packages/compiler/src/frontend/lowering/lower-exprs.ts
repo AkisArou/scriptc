@@ -22,7 +22,7 @@ import { lowerSocketInstanceOf, lowerTlsRootCertificates } from "./lower-server.
 import { findGenericMethodOn, lowerStaticFieldRead } from "./lower-classes.js";
 import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, nullishGenericBindingUnitOf, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
 import { mixinFnOfCallee } from "./lower-mixins.js";
-import { isConstAssertionTypeNode, isGenericCallableMemberType, underConstAssertion, unitOnlyUnion } from "../types.js";
+import { isConstAssertionTypeNode, isGenericCallableMemberType, isParseArgsDynTypeName, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
 
@@ -98,6 +98,31 @@ export function abstractPropertyDeclOf(L: Lowerer, expr: ts.PropertyAccessExpres
         ts.isPropertyDeclaration(d) &&
         ts.getModifiers(d)?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword) === true,
     );
+}
+
+/** A field declared by node:util's parseArgs checked-dynamic type family.
+ * Narrowing a ParseArgsToken exposes one anonymous union arm, so its alias
+ * identity no longer reaches mapType; declaration ancestry is the stable
+ * provenance check. */
+function isParseArgsDynProperty(L: Lowerer, expr: ts.PropertyAccessExpression): boolean {
+  const sym = L.checker.getSymbolAtLocation(expr.name);
+  if (!sym) return false;
+  return L.checker.declarationsOf(sym).some((d) => {
+    if (!L.isStdlibFile(d.getSourceFile())) return false;
+    let inParseArgsType = false;
+    for (let node: ts.Node | undefined = d.parent; node; node = node.parent) {
+      if (
+        (ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
+        isParseArgsDynTypeName(node.name.text)
+      ) {
+        inParseArgsType = true;
+      }
+      if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
+        return inParseArgsType && (node.name.text === "util" || node.name.text === "node:util");
+      }
+    }
+    return false;
+  });
 }
 
 export function lowerExpr(L: Lowerer, expr: ts.Expression): IrExpr {
@@ -1716,6 +1741,35 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         if (ambientRoot !== null) {
           const t = ambientUndefReadType(L, expr) ?? contextualUndefReadType(L, expr);
           if (t) return nsUndefRead(L, ambientRoot.text, expr, t);
+        }
+      }
+      // parseArgs results/tokens live in the checked-dynamic tree. A token
+      // discriminant check narrows its checker type to one anonymous arm,
+      // whose ambient property symbols would otherwise hit SC2020 before
+      // the generic dyn receiver path below. Provenance is limited to the
+      // node:util parseArgs family; every other stdlib member keeps its
+      // ordinary surface fence.
+      if (isParseArgsDynProperty(L, expr)) {
+        const recv = L.lowerExpr(expr.expression);
+        if (recv.type.kind === "dyn") {
+          const key: IrExpr = {
+            kind: "strLit",
+            value: expr.name.text,
+            type: STRING,
+            loc: locOf(expr.name),
+          };
+          const opt = chainGuardedByQuestionDot(expr.expression);
+          return L.maybeNarrow(
+            {
+              kind: "dynKeyGet",
+              key,
+              ...(opt ? { optional: true as const } : {}),
+              value: recv,
+              type: DYN,
+              loc,
+            },
+            expr,
+          );
         }
       }
       // A member read through a NULLISH generic binding (`const i: I<A &
