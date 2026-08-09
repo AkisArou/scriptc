@@ -2110,6 +2110,16 @@ ScrPromise *scr_fsp_chmod(ScrStr *path, double mode);
 ScrPromise *scr_fsp_readdir(ScrStr *path);
 ScrPromise *scr_fsp_rm(ScrStr *path);
 ScrPromise *scr_fsp_stat(ScrStr *path);
+ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath);
+
+/* fs.rename: the syscall runs on the next timer turn and the error-first
+ * callback fires through an emitted, program-shaped adapter. Both paths
+ * and the callback are borrowed at entry; the callback MOVES into the
+ * scheduled operation. err is borrowed and NULL on success. */
+typedef void (*ScrFsRenameFn)(ScrClosure *cb, ScrError *err);
+void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
+                         ScrClosure *cb /*moves*/, ScrFsRenameFn fn);
+void scr_fs_rename_thunk0(ScrClosure *cb, ScrError *err);
 
 /* ── node:timers/promises (scr_async.c) ──────────────────────────────
  * The promisified pair: a PENDING void promise a one-shot heap timer /

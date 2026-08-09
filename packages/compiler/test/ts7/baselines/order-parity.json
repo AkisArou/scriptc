@@ -5514,6 +5514,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2678-date-instances.ts": {
+   "order": [
+    "<repo>/tests/corpus/2678-date-instances.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2679-fs-rename.ts": {
+   "order": [
+    "<repo>/tests/corpus/2679-fs-rename.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2680-fs-rename-js.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2680-fs-rename-js.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6005,6 +6023,12 @@
   "<repo>/tests/corpus/756-cycle-inheritance.ts": {
    "order": [
     "<repo>/tests/corpus/756-cycle-inheritance.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/757-cycle-cross-generation.ts": {
+   "order": [
+    "<repo>/tests/corpus/757-cycle-cross-generation.ts"
    ],
    "diags": []
   },

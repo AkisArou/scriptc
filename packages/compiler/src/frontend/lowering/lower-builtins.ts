@@ -819,6 +819,60 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (bi.module === "fs" && bi.member === "watch") {
       return lowerFsWatchCall(L, expr, loc);
     }
+    // fs.rename(oldPath, newPath, callback): the callback is a
+    // program-shaped closure (zero parameters are valid; the ordinary
+    // form receives NodeJS.ErrnoException | null). Keep it typed here so
+    // the backends can emit the same union-building adapter used by
+    // dns.lookup instead of losing the Error arm through a dyn boundary.
+    if (bi.module === "fs" && bi.member === "rename") {
+      if (expr.arguments.length !== 3 || expr.arguments.some(ts.isSpreadElement)) {
+        L.noLowering(
+          `rename with ${expr.arguments.length} argument${expr.arguments.length === 1 ? "" : "s"}`,
+          expr,
+          "the supported form is rename(oldPath, newPath, callback)",
+        );
+      }
+      const oldPath = L.lowerExprExpecting(expr.arguments[0]!, STRING);
+      const newPath = L.lowerExprExpecting(expr.arguments[1]!, STRING);
+      let callback = L.lowerExpr(expr.arguments[2]!);
+      // JS/checkJs callback values may arrive as checked-dynamic callables.
+      // Adapt them to the one error-first slot; the runtime passes a dyn
+      // Error on failure and null on success through the emitted thunk.
+      if (callback.type.kind === "dyn") {
+        callback = {
+          kind: "dynCheck",
+          value: callback,
+          type: funcOf([DYN], VOID),
+          loc: locOf(expr.arguments[2]!),
+        };
+      }
+      let callbackOk = callback.type.kind === "func" &&
+        callback.type.ret.kind === "void" && callback.type.params.length <= 1;
+      if (callbackOk && callback.type.kind === "func" && callback.type.params.length === 1) {
+        const param = callback.type.params[0]!;
+        if (param.kind === "dyn") {
+          callbackOk = true;
+        } else if (param.kind === "union") {
+          const def = L.unions.get(param.unionId);
+          callbackOk = !!def &&
+            def.arms.some((a) => a.kind === "nullT") &&
+            def.arms.some((a) => a.kind === "object" && a.className === "%Error") &&
+            def.arms.every((a) =>
+              a.kind === "nullT" || a.kind === "undefinedT" ||
+              (a.kind === "object" && a.className === "%Error"));
+        } else {
+          callbackOk = false;
+        }
+      }
+      if (!callbackOk) {
+        L.unsupported(
+          "SC1090",
+          expr.arguments[2]!,
+          "fs.rename callbacks must return void and accept at most one Error | null parameter",
+        );
+      }
+      return { kind: "libCall", fn: "fs.renameCb", args: [oldPath, newPath, callback], type: VOID, loc };
+    }
     // fs.readSync(fd, buffer, offset, length[, position]) — normalize the
     // current-offset forms to Node/libuv's -1 sentinel so the IR and native
     // ABI stay fixed-width. A real numeric position is a positioned read

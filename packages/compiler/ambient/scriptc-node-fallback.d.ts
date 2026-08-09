@@ -975,6 +975,8 @@ declare module "node:fs" {
   /* The 2-argument form only (Node's mode flags have no lowering). The
    * destination is created or truncated carrying the SOURCE's mode. */
   export function copyFileSync(src: string, dest: string): void;
+  export function rename(oldPath: string, newPath: string, callback: (err: NodeJS.ErrnoException | null) => void): void;
+  export function renameSync(oldPath: string, newPath: string): void;
   export function rmSync(path: string): void;
   /* maxRetries/retryDelay are accepted no-ops (Node retries around
    * EBUSY-class races; the synchronous lowering has no re-entrancy that
@@ -1099,6 +1101,7 @@ declare module "fs/promises" {
   export function stat(path: string): Promise<import("node:fs").Stats>;
   export function unlink(path: string): Promise<void>;
   export function chmod(path: string, mode: number): Promise<void>;
+  export function rename(oldPath: string, newPath: string): Promise<void>;
 }
 declare module "node:fs/promises" {
   export * from "fs/promises";

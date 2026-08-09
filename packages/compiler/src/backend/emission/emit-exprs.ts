@@ -5297,6 +5297,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "fs.existsChk":
             E.usesTimers = true; // the scheduled answer holds the loop open
             return finish(`scr_fs_exists_async(${arg(0)}, ${arg(1)})`);
+          case "fs.renameCb": {
+            // The callback MOVES into the scheduled operation. Its
+            // adapter constructs the program-specific Error | null union
+            // (or dyn error/null for the JS lane) when the timer fires.
+            E.usesTimers = true;
+            const cbT = e.args[2]!.type;
+            if (cbT.kind !== "func") throw new Error("emitter bug: fs.rename callback not a func");
+            const cb = args[2]!;
+            E.moveTemp(cb);
+            const adapter = E.fsRenameThunkFor(cbT);
+            E.line(`scr_fs_rename_async(${arg(0)}, ${arg(1)}, ${cb.name}, &${adapter});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          }
           case "fs.mkdtempChk":
             return finish(
               `(scr_fs_mkdtemp_chk(${arg(0)}, ${arg(1)}, ${arg(2)}), ${isRefCounted(e.type) ? `(${cType(e.type).trim()})NULL` : "0"})`,
@@ -5473,6 +5486,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fsp_unlink(${arg(0)})`);
           case "fsp.chmod":
             return finish(`scr_fsp_chmod(${arg(0)}, ${arg(1)})`);
+          case "fsp.rename":
+            return finish(`scr_fsp_rename(${arg(0)}, ${arg(1)})`);
           case "fsp.readdir":
             return finish(`scr_fsp_readdir(${arg(0)})`);
           case "fsp.rm":
@@ -6615,6 +6630,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fs_chown(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "fs.copyFileSync":
             return finish(`scr_fs_copyfile(${arg(0)}, ${arg(1)})`);
+          case "fs.renameSync":
+            return finish(`scr_fs_rename(${arg(0)}, ${arg(1)})`);
           case "fs.lstatSync":
             return finish(`scr_fs_lstat(${arg(0)})`);
           case "fs.writeFileModeSync":

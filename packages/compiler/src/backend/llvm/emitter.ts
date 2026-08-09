@@ -311,6 +311,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fs.unlinkSync": "scr_fs_unlink",
   "fs.chmodSync": "scr_fs_chmod",
   "fs.copyFileSync": "scr_fs_copyfile",
+  "fs.renameSync": "scr_fs_rename",
   "fs.accessSync": "scr_fs_access",
   // node:assert (scr_assert.c): all args borrowed; failures throw the
   // catchable AssertionError. The never-throwing members ride along.
@@ -498,6 +499,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fsp.mkdirRecursiveMode": "scr_fsp_mkdir_recursive_mode",
   "fsp.unlink": "scr_fsp_unlink",
   "fsp.chmod": "scr_fsp_chmod",
+  "fsp.rename": "scr_fsp_rename",
   "fsp.readdir": "scr_fsp_readdir",
   "fsp.rm": "scr_fsp_rm",
   "fsp.stat": "scr_fsp_stat",
@@ -8428,6 +8430,73 @@ class LlEmitter {
     return sym;
   }
 
+  /** The fs.rename callback adapter: the runtime passes a borrowed Error
+   * or NULL and the thunk constructs the callback's owned, program-shaped
+   * Error | null union (or a dyn error/null in checkJs programs). */
+  private fsRenameThunkFor(cbT: IrType & { kind: "func" }): string {
+    if (cbT.params.length === 0) {
+      this.declare(`declare void @scr_fs_rename_thunk0(ptr, ptr)`);
+      return "scr_fs_rename_thunk0";
+    }
+    const key = `fsren:${typeKey(cbT)}`;
+    let sym = this.resolveThunks.get(key);
+    if (sym) return sym;
+    sym = `sc_fsren_${this.resolveThunks.size}`;
+    this.resolveThunks.set(key, sym);
+    const param = cbT.params[0]!;
+    const d: string[] = [
+      `define internal void @${sym}(ptr %cb, ptr %err) ${FN_ATTRS} { ; fs.rename callback ${typeKey(cbT)}`,
+      `entry:`,
+      `  %slot = alloca ptr`,
+      `  %has = icmp ne ptr %err, null`,
+      `  br i1 %has, label %yes, label %no`,
+      `yes:`,
+    ];
+    if (param.kind === "dyn") {
+      this.declare(`declare ptr @scr_dyn_from_error(ptr)`);
+      this.declare(`declare ptr @scr_dyn_new_null()`);
+      d.push(
+        `  %de = call ptr @scr_dyn_from_error(ptr %err)`,
+        `  store ptr %de, ptr %slot`,
+        `  br label %go`,
+        `no:`,
+        `  %dn = call ptr @scr_dyn_new_null()`,
+        `  store ptr %dn, ptr %slot`,
+      );
+    } else {
+      if (param.kind !== "union") throw new Error("llvm emitter bug: fs.rename error param not a union");
+      const def = this.unionsById.get(param.unionId);
+      const errTag = def ? def.arms.findIndex((a) => a.kind === "object" && a.className === "%Error") : -1;
+      const nullTag = def ? def.arms.findIndex((a) => a.kind === "nullT") : -1;
+      if (errTag < 0 || nullTag < 0) throw new Error("llvm emitter bug: fs.rename error union lacks its arms");
+      this.declare(`declare ptr @scr_error_retain(ptr)`);
+      this.declare(`declare ptr @scr_error_retain_v(ptr)`);
+      this.declare(`declare void @scr_error_release_v(ptr)`);
+      this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
+      d.push(
+        `  %er = call ptr @scr_error_retain(ptr %err)`,
+        `  %eu = call ptr @scr_union_new_ref(i32 ${errTag}, ptr %er, ptr @scr_error_retain_v, ptr @scr_error_release_v, ptr null)`,
+        `  store ptr %eu, ptr %slot`,
+        `  br label %go`,
+        `no:`,
+        `  store ptr ${this.unitInstanceRef(param.unionId, nullTag)}, ptr %slot`,
+      );
+    }
+    d.push(
+      `  br label %go`,
+      `go:`,
+      `  %arg = load ptr, ptr %slot`,
+      `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+      `  %fn = load ptr, ptr %fnp`,
+      `  call void %fn(ptr %cb, ptr %arg)`,
+      `  ret void`,
+      `}`,
+      ``,
+    );
+    this.resolveThunkDefs.push(...d);
+    return sym;
+  }
+
   /** The stream option-callback invoke adapter for one (kind, callback
    * type) — emit-async.ts's streamCbThunkFor: the runtime calls the
    * user's read/write/final/destroy/transform/flush (or the finished/
@@ -10899,6 +10968,20 @@ class LlEmitter {
     const B = this.B;
     // Loop liveness first (one table for generic and special shapes).
     if (USES_TIMERS_LIB_FNS.has(e.fn)) this.usesTimers = true;
+    if (e.fn === "fs.renameCb") {
+      // The callback MOVES into the next-turn operation. Its emitted
+      // adapter materializes the callback's Error | null union (or the
+      // checkJs dyn argument) from the runtime's borrowed ScrError.
+      this.usesTimers = true;
+      const args = e.args.map((a) => this.emitExpr(a));
+      const cbT = e.args[2]!.type;
+      if (cbT.kind !== "func") throw new Error("llvm emitter bug: fs.rename callback not a func");
+      this.moveTemp(args[2]!);
+      const adapter = this.fsRenameThunkFor(cbT);
+      this.declare(`declare void @scr_fs_rename_async(ptr, ptr, ptr, ptr)`);
+      B.line(`call void @scr_fs_rename_async(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${args[2]!.name}, ptr @${adapter})`);
+      return { name: "", type: e.type };
+    }
     if (e.fn === "fetch.responseText" || e.fn === "fetch.responseBytes") {
       if (e.type.kind !== "promise") {
         throw new Error(`llvm emitter bug: ${e.fn} result`);

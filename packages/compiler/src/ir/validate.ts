@@ -311,6 +311,9 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fs.chmodSync": { argTypes: [STRING, F64], result: VOID },
   "fs.chownSync": { argTypes: [STRING, F64, F64], result: VOID },
   "fs.copyFileSync": { argTypes: [STRING, STRING], result: VOID },
+  "fs.renameSync": { argTypes: [STRING, STRING], result: VOID },
+  // Callback type is program-dependent (zero params or Error | null).
+  "fs.renameCb": { argTypes: [STRING, STRING, null], result: VOID },
   "fs.writeFileModeSync": { argTypes: [STRING, STRING, F64], result: VOID },
   "fs.mkdirModeSync": { argTypes: [STRING, F64], result: VOID },
   "fs.mkdirRecursiveModeSync": { argTypes: [STRING, F64], result: VOID },
@@ -755,6 +758,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fsp.mkdirRecursiveMode": { argTypes: [STRING, F64], result: { kind: "promise", inner: VOID } },
   "fsp.unlink": { argTypes: [STRING], result: { kind: "promise", inner: VOID } },
   "fsp.chmod": { argTypes: [STRING, F64], result: { kind: "promise", inner: VOID } },
+  "fsp.rename": { argTypes: [STRING, STRING], result: { kind: "promise", inner: VOID } },
   "fsp.readdir": { argTypes: [STRING], result: { kind: "promise", inner: arrayOf(STRING) } },
   "fsp.rm": { argTypes: [STRING], result: { kind: "promise", inner: VOID } },
   "fsp.stat": { argTypes: [STRING], result: { kind: "promise", inner: STATS_T } },
@@ -3930,6 +3934,32 @@ function validateFunction(
           }
           if (!ok) {
             err(`libCall dns.lookup callback shape (frontend must fence)`, e.loc);
+          }
+          break;
+        }
+        if (e.fn === "fs.renameCb") {
+          // The callback is void and accepts either no parameters, one
+          // checked-dynamic error slot (JS), or Error | null (optionally
+          // including undefined for an explicitly optional parameter).
+          const cbT = e.args[2]?.type;
+          let ok = cbT?.kind === "func" && cbT.ret.kind === "void" && cbT.params.length <= 1;
+          if (ok && cbT?.kind === "func" && cbT.params.length === 1) {
+            const p = cbT.params[0]!;
+            if (p.kind === "dyn") {
+              ok = true;
+            } else {
+              const def = p.kind === "union" ? unions.get(p.unionId) : undefined;
+              ok =
+                def !== undefined &&
+                def.arms.some((a) => a.kind === "nullT") &&
+                def.arms.some((a) => a.kind === "object" && a.className === "%Error") &&
+                def.arms.every((a) =>
+                  a.kind === "nullT" || a.kind === "undefinedT" ||
+                  (a.kind === "object" && a.className === "%Error"));
+            }
+          }
+          if (!ok) {
+            err(`libCall fs.renameCb callback shape (frontend must fence)`, e.loc);
           }
           break;
         }

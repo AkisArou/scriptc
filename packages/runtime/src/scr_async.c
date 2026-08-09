@@ -1486,6 +1486,81 @@ ScrPromise *scr_fsp_stat(ScrStr *path) {
   return scr_promise_settled_ref(st, &scr_stats_retain_v, &scr_stats_release_v, NULL);
 }
 
+ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath) {
+  scr_fs_rename(oldpath, newpath);
+  return scr_promise_settled_void();
+}
+
+/* fs.rename(old, new, cb): the static callback surface. Keep the actual
+ * rename deferred with its callback instead of only deferring delivery;
+ * code after fs.rename therefore observes the pre-rename filesystem, as
+ * it does under Node. The timer closure owns one compact operation record
+ * containing retained paths and the moved user callback. */
+#ifndef SCR_LIB
+typedef struct ScrFsRenameOp {
+  size_t rc;
+  ScrStr *oldpath;
+  ScrStr *newpath;
+  ScrClosure *cb;
+  ScrFsRenameFn fn;
+} ScrFsRenameOp;
+
+static void *scr_fs_rename_op_retain_v(void *p) {
+  ScrFsRenameOp *op = (ScrFsRenameOp *)p;
+  op->rc++;
+  return op;
+}
+
+static void scr_fs_rename_op_release_v(void *p) {
+  ScrFsRenameOp *op = (ScrFsRenameOp *)p;
+  if (--op->rc != 0) return;
+  scr_str_release(op->oldpath);
+  scr_str_release(op->newpath);
+  scr_closure_release(op->cb);
+  free(op);
+}
+
+static void scr_fs_rename_fire(ScrClosure *self) {
+  ScrFsRenameOp *op = (ScrFsRenameOp *)scr_box_get_ref(self->caps[0]);
+  scr_fs_rename(op->oldpath, op->newpath);
+  ScrCaught *caught = scr_exc_pending() ? scr_exc_take() : NULL;
+  ScrError *err = NULL;
+  if (caught && caught->kind == SCR_EXC_OBJ && scr_error_is(caught->payload)) {
+    err = (ScrError *)caught->payload;
+  }
+  op->fn(op->cb, err);
+  scr_caught_release(caught);
+  scr_fs_rename_op_release_v(op);
+}
+#endif
+
+void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
+                         ScrClosure *cb, ScrFsRenameFn fn) {
+#ifdef SCR_LIB
+  (void)oldpath; (void)newpath; (void)fn;
+  scr_closure_release(cb);
+  scr_trap("scriptc: internal error: fs.rename reached in a library build — please report this");
+#else
+  ScrFsRenameOp *op = calloc(1, sizeof *op);
+  if (!op) scr_trap("scriptc: out of memory\n");
+  op->rc = 1;
+  op->oldpath = scr_str_retain(oldpath);
+  op->newpath = scr_str_retain(newpath);
+  op->cb = cb;
+  op->fn = fn;
+  ScrClosure *fire = scr_closure_new((void *)scr_fs_rename_fire, 1);
+  fire->caps[0] = scr_box_new_obj(&scr_fs_rename_op_retain_v,
+                                  &scr_fs_rename_op_release_v, NULL);
+  scr_box_set_ref(fire->caps[0], op);
+  scr_set_timeout(fire, 0);
+#endif
+}
+
+void scr_fs_rename_thunk0(ScrClosure *cb, ScrError *err) {
+  (void)err;
+  ((void (*)(ScrClosure *))cb->fn)(cb);
+}
+
 /* ── node:timers/promises ────────────────────────────────────────────
  * The promisified pair: a PENDING void promise a one-shot heap timer
  * (setTimeout) or the immediate queue (setImmediate) fulfills — the
