@@ -2877,6 +2877,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const http = (opts.http ?? false) || nativeFetch || netIsland;
   const tls = (opts.tls ?? false) || nativeFetch || netIsland;
   const driver = resolveCc();
+  // scr_async.c submits callback-style filesystem work to a native worker.
+  // POSIX drivers need the thread compile/link mode; win32 uses CreateThread.
+  const threadArgs = targetPlatform(driver) === "win32" ? [] : ["-pthread"];
   if (driver.target !== null) {
     // See the resolveCc block: these inputs are built on and for the HOST
     // (vendored archives, system libs). Regex, zlib, and the engine archive
@@ -3022,6 +3025,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   ): string[] => [
     "-std=c11",
     ...driver.targetArgs,
+    ...threadArgs,
     ...(sanitize
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
@@ -3204,6 +3208,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const cflags = [
     "-std=c11",
     ...driver.targetArgs,
+    ...threadArgs,
     ...(sanitize
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
@@ -3324,6 +3329,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   }
   const linkProbeArgs = [
     ...(sanitize ? ["-fsanitize=address"] : []),
+    ...threadArgs,
     ...(targetPlatform(driver) === "win32"
       ? ["-ladvapi32", "-liphlpapi", "-lws2_32"]
       : []),

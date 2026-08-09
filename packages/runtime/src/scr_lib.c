@@ -1917,7 +1917,10 @@ static WCHAR *scr_fs_win_wide(const ScrStr *path) {
     : 0;
   if (path->len > 0 && n == 0) return NULL;
   WCHAR *wide = malloc(((size_t)n + 1) * sizeof *wide);
-  if (!wide) scr_trap("scriptc: out of memory\n");
+  if (!wide) {
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return NULL;
+  }
   if (n > 0) {
     (void)MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                               path->data, (int)path->len, wide, n);
@@ -1974,30 +1977,33 @@ static int scr_fs_win_errno(DWORD error) {
 }
 #endif
 
-void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath) {
+int scr_fs_rename_raw(const ScrStr *oldpath, const ScrStr *newpath) {
 #ifdef _WIN32
   WCHAR *oldwide = scr_fs_win_wide(oldpath);
-  if (!oldwide) {
-    scr_fs_throw2(scr_fs_win_errno(GetLastError()), "rename", oldpath, newpath);
-    return;
-  }
+  if (!oldwide) return scr_fs_win_errno(GetLastError());
   WCHAR *newwide = scr_fs_win_wide(newpath);
   if (!newwide) {
     DWORD error = GetLastError();
     free(oldwide);
-    scr_fs_throw2(scr_fs_win_errno(error), "rename", oldpath, newpath);
-    return;
+    return scr_fs_win_errno(error);
   }
   BOOL ok = MoveFileExW(oldwide, newwide, MOVEFILE_REPLACE_EXISTING);
   DWORD error = ok ? ERROR_SUCCESS : GetLastError();
   free(oldwide);
   free(newwide);
-  if (!ok) scr_fs_throw2(scr_fs_win_errno(error), "rename", oldpath, newpath);
+  return ok ? 0 : scr_fs_win_errno(error);
 #else
-  if (rename(oldpath->data, newpath->data) != 0) {
-    scr_fs_throw2(errno, "rename", oldpath, newpath);
-  }
+  return rename(oldpath->data, newpath->data) == 0 ? 0 : errno;
 #endif
+}
+
+void scr_fs_rename_error(int error, const ScrStr *oldpath, const ScrStr *newpath) {
+  scr_fs_throw2(error, "rename", oldpath, newpath);
+}
+
+void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath) {
+  int error = scr_fs_rename_raw(oldpath, newpath);
+  if (error != 0) scr_fs_rename_error(error, oldpath, newpath);
 }
 
 void scr_fs_rm(ScrStr *path) {

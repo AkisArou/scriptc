@@ -21,6 +21,8 @@ const c = join(dir, "c.txt");
 const d = join(dir, "d.txt");
 const missing = join(dir, "missing.txt");
 const other = join(dir, "other.txt");
+const workerSource = join(dir, "worker-source.txt");
+const workerDest = join(dir, "worker-dest.txt");
 
 writeFileSync(a, "alpha");
 writeFileSync(b, "stale sync destination");
@@ -63,21 +65,44 @@ async function run(): Promise<void> {
     }
   }
 
+  // The OS request starts before callback delivery: blocking the JS/runtime
+  // thread does not prevent libuv/the native worker from moving the file.
+  // The stored callback intentionally returns boolean; TypeScript permits
+  // that in a void callback slot and Node discards the value.
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
   let renameReturned = false;
   writeFileSync(d, "stale callback destination");
-  rename(c, d, (err) => {
-    console.log("callback:", renameReturned, err === null, !existsSync(c), readFileSync(d, "utf8"));
-    rename(missing, other, (missingErr) => {
-      console.log(
-        "callback error:",
-        missingErr?.code,
-        missingErr?.message.includes("rename"),
-        missingErr?.message.includes("missing.txt' -> '"),
-      );
-      rmSync(dir, { recursive: true, force: true });
+  writeFileSync(workerSource, "worker");
+  const onWorkerRename = (workerErr: NodeJS.ErrnoException | null): boolean => {
+    console.log(
+      "worker callback:",
+      renameReturned,
+      workerErr === null,
+      !existsSync(workerSource),
+      readFileSync(workerDest, "utf8"),
+    );
+    rename(c, d, (err) => {
+      console.log("callback:", renameReturned, err === null, !existsSync(c), readFileSync(d, "utf8"));
+      rename(missing, other, (missingErr) => {
+        console.log(
+          "callback error:",
+          missingErr?.code,
+          missingErr?.message.includes("rename"),
+          missingErr?.message.includes("missing.txt' -> '"),
+        );
+        rmSync(dir, { recursive: true, force: true });
+      });
     });
-  });
+    return workerErr === null;
+  };
+  rename(workerSource, workerDest, onWorkerRename);
   renameReturned = true;
+  let waits = 0;
+  while (existsSync(workerSource) && waits < 100) {
+    Atomics.wait(waitBuffer, 0, 0, 10);
+    waits++;
+  }
+  console.log("worker progress:", !existsSync(workerSource), existsSync(workerDest));
 }
 
 void run();

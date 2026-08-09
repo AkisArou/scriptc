@@ -59,7 +59,7 @@ const ERROR_T: IrType = { kind: "object", className: "%Error" };
  * callback rides an interned cast-and-discard adapter (the stream lane's
  * bare-expression-body discard, generalized to closure VALUES): same
  * parameters, void return, the underlying result discarded unread. */
-function voidizedCallback(L: Lowerer, cb: IrExpr, loc: SrcLoc): IrExpr {
+export function voidizedCallback(L: Lowerer, cb: IrExpr, loc: SrcLoc): IrExpr {
   if (cb.type.kind !== "func" || cb.type.ret.kind === "void") return cb;
   const fromT = cb.type;
   const toT = funcOf([...fromT.params], VOID);

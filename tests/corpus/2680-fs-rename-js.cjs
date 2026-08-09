@@ -15,6 +15,7 @@ fs.writeFileSync(from, 'js');
 const onMissing = (missingErr) => {
   console.log('js callback error:', missingErr.code, missingErr.message.includes('rename'));
   fs.rmSync(dir, { recursive: true, force: true });
+  return missingErr !== null; // Node ignores callback results.
 };
 
 fs.rename(from, to, (err) => {
