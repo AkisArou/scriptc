@@ -1395,6 +1395,7 @@ static const char *scr_errno_name(int e, char *fallback, size_t cap) {
   case EXDEV: return "EXDEV";
   case EBADF: return "EBADF";
   case EPIPE: return "EPIPE";
+  case ESPIPE: return "ESPIPE";
   default:
     snprintf(fallback, cap, "E%d", e);
     return fallback;
@@ -1420,6 +1421,7 @@ static const char *scr_errno_text(int e) {
   case EXDEV: return "cross-device link not permitted";
   case EBADF: return "bad file descriptor";
   case EPIPE: return "broken pipe";
+  case ESPIPE: return "invalid seek";
   default: return strerror(e);
   }
 }
@@ -1909,13 +1911,6 @@ double scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length,
   }
 
   scr_num_received(length, recv);
-  if (!(isfinite(length) && trunc(length) == length)) {
-    int len = snprintf(msg, sizeof msg,
-                       "The value of \"length\" is out of range. It must be an integer. Received %s",
-                       recv);
-    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
-    return 0;
-  }
   if (length < 0) {
     int len = snprintf(msg, sizeof msg,
                        "The value of \"length\" is out of range. It must be >= 0. Received %s",
@@ -1928,6 +1923,13 @@ double scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length,
     int len = snprintf(msg, sizeof msg,
                        "The value of \"length\" is out of range. It must be <= %zu. Received %s",
                        bytelen - off, recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return 0;
+  }
+  if (!(isfinite(length) && trunc(length) == length)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"length\" is out of range. It must be an integer. Received %s",
+                       recv);
     scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
     return 0;
   }

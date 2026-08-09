@@ -47,6 +47,19 @@ try {
   const err = e as NodeJS.ErrnoException;
   console.log("length error:", err.name, err.code);
 }
+function logLengthError(label: string, length: number): void {
+  try {
+    fs.writeSync(lengthFd, source, 0, length, 0);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log(label, err.message);
+  }
+}
+// Node checks the caller window before integer-ness: values outside the
+// window report its bound, while an in-range fraction reports integer.
+logLengthError("length above window:", 6.5);
+logLengthError("length infinite:", Infinity);
+logLengthError("length negative fraction:", -0.5);
 fs.closeSync(lengthFd);
 
 const closed = fs.openSync(scratch, "r+");
