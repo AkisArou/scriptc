@@ -2494,6 +2494,13 @@ double scr_fs_open(ScrStr *path, ScrStr *flags);
  * nonnegative positions leave that offset unchanged (pread/ReadFile seam). */
 double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,
                         double position);
+/* writeSync's classic Buffer window and utf8 string forms. position -1 (or
+ * any other non-safe/nonnegative-integer value) writes at and advances the
+ * current descriptor offset; safe nonnegative positions leave it unchanged. */
+double scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length,
+                         double position);
+double scr_fs_write_str_sync(double fd, ScrStr *data, double position,
+                             ScrStr *encoding);
 void scr_fs_close(double fd);
 
 /* ── WHATWG URL (scr_url.c) ──────────────────────────────────────────

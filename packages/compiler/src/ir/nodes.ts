@@ -3892,10 +3892,11 @@ export type IrLibFn =
   | "fs.renameSync"
   | "fs.renameCb"
   | "fs.lstatSync"
-  /** fs.openSync(path, flags) → the raw fd as f64, fs.readSync(fd,
-   * buffer, offset, length, position) → a sequential read when position
-   * is -1 and an offset-preserving positioned read otherwise, and
-   * fs.closeSync(fd) — the fd slice behind spawn/log-processing forms.
+  /** fs.openSync(path, flags) → the raw fd as f64; fs.readSync/fs.writeSync
+   * over Buffer windows perform sequential I/O when position is -1 and
+   * offset-preserving positioned I/O otherwise; fs.writeStrSync is the
+   * utf8 string twin; and fs.closeSync(fd) closes the descriptor. This is
+   * the fd slice behind spawn/log-processing forms.
    * flags is Node's string
    * grammar ("r", "w", "a" and the +/x variants; unknown flags throw
    * Node's ERR_INVALID_ARG_VALUE TypeError text). All throw Node-shaped
@@ -3903,6 +3904,8 @@ export type IrLibFn =
    * closeSync EBADF). */
   | "fs.openSync"
   | "fs.readSync"
+  | "fs.writeSync"
+  | "fs.writeStrSync"
   | "fs.closeSync"
   /** fs.watch(path, listener?) → an FSWatcher handle (scr_watch.c —
    * linked, and scr_watch_install() emitted, only when these appear on
@@ -6982,6 +6985,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.mkdirRecursiveModeSync",
   "fs.openSync",
   "fs.readSync",
+  "fs.writeSync",
+  "fs.writeStrSync",
   "fs.closeSync",
   "fs.watch",
   "fs.watchCb",

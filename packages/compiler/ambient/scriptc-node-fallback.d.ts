@@ -1031,6 +1031,11 @@ declare module "node:fs" {
    * is omitted/null, or from a numeric byte position without advancing the
    * fd. Answers the byte count, 0 at EOF. */
   export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position?: number | null): number;
+  /* Write a caller-buffer window, or a utf8 string, at the fd's current
+   * position when position is omitted/null (advancing it), or at a numeric
+   * byte position without advancing it. Answers the byte count. */
+  export function writeSync(fd: number, buffer: Uint8Array, offset: number, length: number, position?: number | null): number;
+  export function writeSync(fd: number, string: string, position?: number | null, encoding?: "utf8" | "utf-8"): number;
   /* statSync over an open fd — the same Stats snapshot. */
   export function fstatSync(fd: number): Stats;
   /* realpath(3) — resolves symlinks, `.`/`..`, throwing Node's fs error
