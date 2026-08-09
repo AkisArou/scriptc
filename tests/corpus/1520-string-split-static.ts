@@ -32,3 +32,16 @@ console.log(limited("a,b,,c,", ",", 99), limited("a,b,,c,", ",", -1));
 console.log(limited("a,b,,c,", ",", 2.9), limited("a,b,,c,", ",", 4294967298));
 console.log(limited("a,b,,c,", ",", 4294967296), limited("a,b,,c,", ",", NaN));
 console.log(limited("abcd", "", 2), limited("", ",", 1));
+
+// Explicit and forwarded undefined are omission, with effects preserved.
+let limitEffects = 0;
+function undefinedLimit(): undefined {
+  limitEffects++;
+  return undefined;
+}
+function optionalLimit(limit?: number): string {
+  return JSON.stringify("a,b,c".split(",", limit));
+}
+console.log(JSON.stringify("a,b,c".split(",", undefined)));
+console.log(JSON.stringify("a,b,c".split(",", undefinedLimit())), limitEffects);
+console.log(optionalLimit(), optionalLimit(undefined), optionalLimit(2));

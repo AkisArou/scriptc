@@ -81,9 +81,24 @@ function lowerOptionalDefaultArg(
   defaultValue: IrExpr,
 ): IrExpr {
   const undefinedArg = lowerStaticallyUndefinedArg(L, node);
-  return undefinedArg
-    ? defaultAfterUndefined(undefinedArg, defaultValue)
-    : L.lowerExprExpecting(node, expected);
+  if (undefinedArg) return defaultAfterUndefined(undefinedArg, defaultValue);
+  const value = L.lowerExpr(node);
+  if (value.type.kind === "union") {
+    const def = L.unions.get(value.type.unionId);
+    if (
+      def?.arms.length === 2 &&
+      def.arms.some((arm) => arm.kind === "undefinedT") &&
+      def.arms.some((arm) => typeEquals(arm, expected))
+    ) {
+      return { kind: "nullish", left: value, right: defaultValue, type: expected, loc: value.loc };
+    }
+  }
+  return L.coerceInto(node, value, expected);
+}
+
+function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: SrcLoc): IrExpr {
+  const defaultValue: IrExpr = { kind: "numLit", value: 4294967295, type: F64, loc };
+  return node ? lowerOptionalDefaultArg(L, node, F64, defaultValue) : defaultValue;
 }
 
 /** Ambient array method calls. `push`/`unshift`/`pop`/`reverse`/
@@ -4998,12 +5013,12 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       const arg0 = call.arguments[0];
       if (!arg0 || L.mapTypeOf(L.typeOf(arg0))?.kind !== "regex") return null;
       const receiver = lowerReceiver();
-      const args = call.arguments.map((a) => L.lowerExpr(a));
-      // Split's omitted limit is 2^32-1. Complete it here so both IR
-      // backends and the runtime have one required (regex, limit) shape.
-      if (name === "split" && args.length === 1) {
-        args.push({ kind: "numLit", value: 4294967295, type: F64, loc });
-      }
+      // Split's omitted or undefined limit is 2^32-1. Complete it here so
+      // both IR backends and the runtime have one required (regex, limit)
+      // shape; an optional-number value selects the default at runtime.
+      const args = name === "split"
+        ? [L.lowerExpr(arg0), lowerSplitLimitArg(L, call.arguments[1], loc)]
+        : call.arguments.map((a) => L.lowerExpr(a));
       if (name !== "split" && args[1]?.type.kind !== "string") {
         L.unsupported(
           "SC1120",
@@ -5060,7 +5075,9 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       );
     }
     const receiver = dynReceiver ? dynReceiver() : L.lowerExpr(access.expression);
-    const args = call.arguments.map((a) => L.lowerExpr(a));
+    const args = entry.method === "split"
+      ? [L.lowerExpr(call.arguments[0]!), lowerSplitLimitArg(L, call.arguments[1], locOf(call))]
+      : call.arguments.map((a) => L.lowerExpr(a));
     // split's separator must BE a string here (a regex argument was
     // claimed by lowerRegexMethodCall before this path) — the lib's
     // `string | RegExp` union has no lowering as a VALUE.
@@ -5070,11 +5087,6 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
         call.arguments[0]!,
         `'.split()' on a '${L.fmt(args[0]!.type)}' separator (pass a string, or a regex literal)`,
       );
-    }
-    // Split's omitted limit is 2^32-1 (the default after ToUint32).
-    // Complete it just like pad's default fill so the IR has one shape.
-    if (entry.method === "split" && args.length === 1) {
-      args.push({ kind: "numLit", value: 4294967295, type: F64, loc: locOf(call) });
     }
     // padStart/padEnd with the fill omitted: Node pads with " " — the
     // same call with the default made explicit.
