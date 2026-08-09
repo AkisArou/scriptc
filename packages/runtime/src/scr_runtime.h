@@ -2053,6 +2053,11 @@ void scr_fs_chmod(ScrStr *path, double mode);
 void scr_fs_chown(ScrStr *path, double uid, double gid);
 void scr_fs_copyfile(ScrStr *src, ScrStr *dest);
 void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath);
+/* The callback rename worker uses the non-throwing syscall seam off the
+ * runtime thread, then materializes any Node-shaped Error back on the main
+ * thread. raw returns 0 on success or a positive errno value on failure. */
+int scr_fs_rename_raw(const ScrStr *oldpath, const ScrStr *newpath);
+void scr_fs_rename_error(int error, const ScrStr *oldpath, const ScrStr *newpath);
 void scr_fs_write_file_mode(ScrStr *path, ScrStr *data, double mode);
 void scr_fs_mkdir_mode(ScrStr *path, double mode);
 void scr_fs_mkdir_recursive_mode(ScrStr *path, double mode);
@@ -2116,6 +2121,17 @@ ScrPromise *scr_fsp_chmod(ScrStr *path, double mode);
 ScrPromise *scr_fsp_readdir(ScrStr *path);
 ScrPromise *scr_fsp_rm(ScrStr *path);
 ScrPromise *scr_fsp_stat(ScrStr *path);
+ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath);
+
+/* fs.rename: the syscall is submitted to a native worker immediately and
+ * its error-first callback fires on a later event-loop turn through an
+ * emitted, program-shaped adapter. Both paths and the callback are borrowed
+ * at entry; the callback MOVES into the operation. err is borrowed and NULL
+ * on success. */
+typedef void (*ScrFsRenameFn)(ScrClosure *cb, ScrError *err);
+void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
+                         ScrClosure *cb /*moves*/, ScrFsRenameFn fn);
+void scr_fs_rename_thunk0(ScrClosure *cb, ScrError *err);
 
 /* ── node:timers/promises (scr_async.c) ──────────────────────────────
  * The promisified pair: a PENDING void promise a one-shot heap timer /

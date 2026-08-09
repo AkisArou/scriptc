@@ -30,7 +30,7 @@ import { conditionalSpreadOf, lowerDynObjectLiteral } from "./lower-exprs.js";
 import { HTTP2_CONSTANTS } from "./http2-constants.js";
 import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "./crypto-tables.js";
 import { timerStyleCallback } from "./lower-calls.js";
-import { registerHttpClientFnBinding } from "./lower-server.js";
+import { registerHttpClientFnBinding, voidizedCallback } from "./lower-server.js";
 import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
 
@@ -818,6 +818,64 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     }
     if (bi.module === "fs" && bi.member === "watch") {
       return lowerFsWatchCall(L, expr, loc);
+    }
+    // fs.rename(oldPath, newPath, callback): the callback is a
+    // program-shaped closure (zero parameters are valid; the ordinary
+    // form receives NodeJS.ErrnoException | null). Keep it typed here so
+    // the backends can emit the same union-building adapter used by
+    // dns.lookup instead of losing the Error arm through a dyn boundary.
+    if (bi.module === "fs" && bi.member === "rename") {
+      if (expr.arguments.length !== 3 || expr.arguments.some(ts.isSpreadElement)) {
+        L.noLowering(
+          `rename with ${expr.arguments.length} argument${expr.arguments.length === 1 ? "" : "s"}`,
+          expr,
+          "the supported form is rename(oldPath, newPath, callback)",
+        );
+      }
+      const oldPath = L.lowerExprExpecting(expr.arguments[0]!, STRING);
+      const newPath = L.lowerExprExpecting(expr.arguments[1]!, STRING);
+      let callback = L.lowerExpr(expr.arguments[2]!);
+      // JS/checkJs callback values may arrive as checked-dynamic callables.
+      // Adapt them to the one error-first slot; the runtime passes a dyn
+      // Error on failure and null on success through the emitted thunk.
+      if (callback.type.kind === "dyn") {
+        callback = {
+          kind: "dynCheck",
+          value: callback,
+          type: funcOf([DYN], VOID),
+          loc: locOf(expr.arguments[2]!),
+        };
+      }
+      let callbackOk = callback.type.kind === "func" && callback.type.params.length <= 1;
+      if (callbackOk && callback.type.kind === "func" && callback.type.params.length === 1) {
+        const param = callback.type.params[0]!;
+        if (param.kind === "dyn") {
+          callbackOk = true;
+        } else if (param.kind === "union") {
+          const def = L.unions.get(param.unionId);
+          callbackOk = !!def &&
+            def.arms.some((a) => a.kind === "nullT") &&
+            def.arms.some((a) => a.kind === "object" && a.className === "%Error") &&
+            def.arms.every((a) =>
+              a.kind === "nullT" || a.kind === "undefinedT" ||
+              (a.kind === "object" && a.className === "%Error"));
+        } else {
+          callbackOk = false;
+        }
+      }
+      if (!callbackOk) {
+        L.unsupported(
+          "SC1090",
+          expr.arguments[2]!,
+          "fs.rename callbacks must accept at most one Error | null parameter",
+        );
+      }
+      // TypeScript deliberately permits a value-returning function where a
+      // void callback is expected; Node ignores that value. Normalize the
+      // closure to the runtime's void callback ABI after validating its
+      // error-first parameter shape.
+      callback = voidizedCallback(L, callback, locOf(expr.arguments[2]!));
+      return { kind: "libCall", fn: "fs.renameCb", args: [oldPath, newPath, callback], type: VOID, loc };
     }
     // fs.readSync(fd, buffer, offset, length[, position]) — normalize the
     // current-offset forms to Node/libuv's -1 sentinel so the IR and native

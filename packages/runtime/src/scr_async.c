@@ -39,6 +39,7 @@
 #include <windows.h>
 #else
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -1486,6 +1487,248 @@ ScrPromise *scr_fsp_stat(ScrStr *path) {
   return scr_promise_settled_ref(st, &scr_stats_retain_v, &scr_stats_release_v, NULL);
 }
 
+ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath) {
+  scr_fs_rename(oldpath, newpath);
+  return scr_promise_settled_void();
+}
+
+/* fs.rename(old, new, cb): the static callback surface. The OS operation
+ * starts immediately on a native worker, matching libuv's key contract:
+ * while JS/main is synchronously occupied, the filesystem request can still
+ * make progress. Only immutable path bytes cross onto the worker. Error
+ * construction, callback invocation, and every RC mutation stay on the main
+ * runtime thread when a later loop turn observes completion.
+ *
+ * A compact operation queue is also the liveness handle: an outstanding
+ * callback-style request keeps the loop alive. Four persistent workers mirror
+ * libuv's default filesystem concurrency without creating one OS thread per
+ * request. A platform mutex publishes each result and the syscall's filesystem
+ * effects before the loop removes it from the completion queue. */
+#ifndef SCR_LIB
+typedef struct ScrFsRenameOp {
+  ScrStr *oldpath;
+  ScrStr *newpath;
+  ScrClosure *cb;
+  ScrFsRenameFn fn;
+  int error;
+  struct ScrFsRenameOp *next;
+} ScrFsRenameOp;
+
+static ScrFsRenameOp *scr_fs_rename_work = NULL;
+static ScrFsRenameOp **scr_fs_rename_work_tail = &scr_fs_rename_work;
+static ScrFsRenameOp *scr_fs_rename_done = NULL;
+static ScrFsRenameOp **scr_fs_rename_done_tail = &scr_fs_rename_done;
+static size_t scr_fs_rename_pending_count = 0;
+static size_t scr_fs_rename_worker_count = 0;
+static bool scr_fs_rename_stopping = false;
+static bool scr_fs_rename_shutdown_registered = false;
+
+#ifdef _WIN32
+static HANDLE scr_fs_rename_workers[4];
+static SRWLOCK scr_fs_rename_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE scr_fs_rename_cond = CONDITION_VARIABLE_INIT;
+static void scr_fs_rename_lock_enter(void) { AcquireSRWLockExclusive(&scr_fs_rename_lock); }
+static void scr_fs_rename_lock_leave(void) { ReleaseSRWLockExclusive(&scr_fs_rename_lock); }
+static void scr_fs_rename_wait(void) {
+  (void)SleepConditionVariableSRW(&scr_fs_rename_cond, &scr_fs_rename_lock, INFINITE, 0);
+}
+static void scr_fs_rename_signal(void) { WakeConditionVariable(&scr_fs_rename_cond); }
+static void scr_fs_rename_broadcast(void) { WakeAllConditionVariable(&scr_fs_rename_cond); }
+#else
+static pthread_t scr_fs_rename_workers[4];
+static pthread_mutex_t scr_fs_rename_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t scr_fs_rename_cond = PTHREAD_COND_INITIALIZER;
+static void scr_fs_rename_lock_enter(void) { (void)pthread_mutex_lock(&scr_fs_rename_lock); }
+static void scr_fs_rename_lock_leave(void) { (void)pthread_mutex_unlock(&scr_fs_rename_lock); }
+static void scr_fs_rename_wait(void) {
+  (void)pthread_cond_wait(&scr_fs_rename_cond, &scr_fs_rename_lock);
+}
+static void scr_fs_rename_signal(void) { (void)pthread_cond_signal(&scr_fs_rename_cond); }
+static void scr_fs_rename_broadcast(void) { (void)pthread_cond_broadcast(&scr_fs_rename_cond); }
+#endif
+
+static void scr_fs_rename_op_release(ScrFsRenameOp *op) {
+  scr_str_release(op->oldpath);
+  scr_str_release(op->newpath);
+  scr_closure_release(op->cb);
+  free(op);
+}
+
+static void scr_fs_rename_worker_loop(void) {
+  for (;;) {
+    scr_fs_rename_lock_enter();
+    while (scr_fs_rename_work == NULL && !scr_fs_rename_stopping) scr_fs_rename_wait();
+    if (scr_fs_rename_stopping) {
+      scr_fs_rename_lock_leave();
+      return;
+    }
+    ScrFsRenameOp *op = scr_fs_rename_work;
+    scr_fs_rename_work = op->next;
+    if (scr_fs_rename_work == NULL) scr_fs_rename_work_tail = &scr_fs_rename_work;
+    scr_fs_rename_lock_leave();
+
+    op->error = scr_fs_rename_raw(op->oldpath, op->newpath);
+
+    scr_fs_rename_lock_enter();
+    op->next = NULL;
+    *scr_fs_rename_done_tail = op;
+    scr_fs_rename_done_tail = &op->next;
+    scr_fs_rename_lock_leave();
+  }
+}
+
+#ifdef _WIN32
+static DWORD WINAPI scr_fs_rename_worker(LPVOID payload) {
+  (void)payload;
+  scr_fs_rename_worker_loop();
+  return 0;
+}
+#else
+static void *scr_fs_rename_worker(void *payload) {
+  (void)payload;
+  scr_fs_rename_worker_loop();
+  return NULL;
+}
+#endif
+
+/* Runs before the ordinary runtime atexit cleanup/audit (it is registered
+ * lazily by the first rename request, after scr_init/scr_lib_init). Fatal
+ * top-level or callback exceptions can stop the loop with requests still in
+ * flight; join the workers before releasing their retained path/callback
+ * payloads so sanitized builds keep the program's real exit verdict. */
+static void scr_fs_renames_shutdown(void) {
+  scr_fs_rename_lock_enter();
+  scr_fs_rename_stopping = true;
+  scr_fs_rename_broadcast();
+  scr_fs_rename_lock_leave();
+
+  for (size_t i = 0; i < scr_fs_rename_worker_count; i++) {
+#ifdef _WIN32
+    (void)WaitForSingleObject(scr_fs_rename_workers[i], INFINITE);
+    CloseHandle(scr_fs_rename_workers[i]);
+#else
+    (void)pthread_join(scr_fs_rename_workers[i], NULL);
+#endif
+  }
+
+  scr_fs_rename_lock_enter();
+  ScrFsRenameOp *work = scr_fs_rename_work;
+  ScrFsRenameOp *done = scr_fs_rename_done;
+  scr_fs_rename_work = NULL;
+  scr_fs_rename_work_tail = &scr_fs_rename_work;
+  scr_fs_rename_done = NULL;
+  scr_fs_rename_done_tail = &scr_fs_rename_done;
+  scr_fs_rename_pending_count = 0;
+  scr_fs_rename_lock_leave();
+  while (work != NULL) {
+    ScrFsRenameOp *next = work->next;
+    scr_fs_rename_op_release(work);
+    work = next;
+  }
+  while (done != NULL) {
+    ScrFsRenameOp *next = done->next;
+    scr_fs_rename_op_release(done);
+    done = next;
+  }
+}
+
+static bool scr_fs_renames_pending(void) { return scr_fs_rename_pending_count != 0; }
+
+static bool scr_fs_renames_dispatch(void) {
+  scr_fs_rename_lock_enter();
+  ScrFsRenameOp *op = scr_fs_rename_done;
+  if (op != NULL) {
+    scr_fs_rename_done = op->next;
+    if (scr_fs_rename_done == NULL) scr_fs_rename_done_tail = &scr_fs_rename_done;
+  }
+  scr_fs_rename_lock_leave();
+  if (op == NULL) return false;
+  scr_fs_rename_pending_count--;
+  ScrCaught *caught = NULL;
+  ScrError *err = NULL;
+  if (op->error != 0) {
+    scr_fs_rename_error(op->error, op->oldpath, op->newpath);
+    caught = scr_exc_take();
+    if (caught && caught->kind == SCR_EXC_OBJ && scr_error_is(caught->payload)) {
+      err = (ScrError *)caught->payload;
+    }
+  }
+  op->fn(op->cb, err);
+  scr_caught_release(caught);
+  scr_fs_rename_op_release(op);
+  return true;
+}
+#else
+static bool scr_fs_renames_pending(void) { return false; }
+static bool scr_fs_renames_dispatch(void) { return false; }
+#endif
+
+void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
+                         ScrClosure *cb, ScrFsRenameFn fn) {
+#ifdef SCR_LIB
+  (void)oldpath; (void)newpath; (void)fn;
+  scr_closure_release(cb);
+  scr_trap("scriptc: internal error: fs.rename reached in a library build — please report this");
+#else
+  if (!scr_fs_rename_shutdown_registered) {
+    if (atexit(scr_fs_renames_shutdown) != 0) {
+      scr_trap("scriptc: could not register fs.rename worker cleanup\n");
+    }
+    scr_fs_rename_shutdown_registered = true;
+  }
+  ScrFsRenameOp *op = calloc(1, sizeof *op);
+  if (!op) scr_trap("scriptc: out of memory\n");
+  op->oldpath = scr_str_retain(oldpath);
+  op->newpath = scr_str_retain(newpath);
+  op->cb = cb;
+  op->fn = fn;
+  scr_fs_rename_pending_count++;
+  scr_fs_rename_lock_enter();
+  *scr_fs_rename_work_tail = op;
+  scr_fs_rename_work_tail = &op->next;
+  int create_error = 0;
+  if (scr_fs_rename_worker_count < 4) {
+#ifdef _WIN32
+    HANDLE worker = CreateThread(NULL, 0, scr_fs_rename_worker, NULL, 0, NULL);
+    if (worker != NULL) {
+      scr_fs_rename_workers[scr_fs_rename_worker_count] = worker;
+      scr_fs_rename_worker_count++;
+    } else {
+      create_error = EAGAIN;
+    }
+#else
+    pthread_t worker;
+    create_error = pthread_create(&worker, NULL, scr_fs_rename_worker, NULL);
+    if (create_error == 0) {
+      scr_fs_rename_workers[scr_fs_rename_worker_count] = worker;
+      scr_fs_rename_worker_count++;
+    }
+#endif
+  }
+  if (create_error != 0 && scr_fs_rename_worker_count == 0) {
+    /* Submission failure is still callback-asynchronous. No worker exists,
+     * so publish every queued request as the same resource error. */
+    while (scr_fs_rename_work != NULL) {
+      ScrFsRenameOp *failed = scr_fs_rename_work;
+      scr_fs_rename_work = failed->next;
+      failed->error = create_error;
+      failed->next = NULL;
+      *scr_fs_rename_done_tail = failed;
+      scr_fs_rename_done_tail = &failed->next;
+    }
+    scr_fs_rename_work_tail = &scr_fs_rename_work;
+  } else {
+    scr_fs_rename_signal();
+  }
+  scr_fs_rename_lock_leave();
+#endif
+}
+
+void scr_fs_rename_thunk0(ScrClosure *cb, ScrError *err) {
+  (void)err;
+  ((void (*)(ScrClosure *))cb->fn)(cb);
+}
+
 /* ── node:timers/promises ────────────────────────────────────────────
  * The promisified pair: a PENDING void promise a one-shot heap timer
  * (setTimeout) or the immediate queue (setImmediate) fulfills — the
@@ -1807,6 +2050,16 @@ bool scr_loop_run(ScrPromise *top_level) {
      * here would walk the whole live heap every turn, which is precisely
      * what the generations exist to avoid. No-op on an empty buffer. */
     scr_cyc_collect_scheduled();
+    /* Completed callback-style filesystem work is delivered on the main
+     * runtime thread. A worker may have finished while synchronous user code
+     * occupied that thread. Deliver exactly one completion per checkpoint:
+     * Node drains nextTicks and microtasks after each native callback before
+     * invoking the next ready callback. */
+    if (scr_fs_renames_pending()) {
+      bool dispatched = scr_fs_renames_dispatch();
+      if (scr_exc_pending()) return false;
+      if (dispatched) continue;
+    }
     /* Stream tick dispatch (scr_stream.c, when linked): the deferred
      * next-tick emissions ('data' flow kicks, 'readable'/'end'/'finish'/
      * 'drain'/'error'/'close') fire now, FIRST — the nextTick station.
@@ -1874,7 +2127,8 @@ bool scr_loop_run(ScrPromise *top_level) {
           (scr_events_pending_fn != NULL && scr_events_pending_fn()) ||
           (scr_net_pending_fn != NULL && scr_net_pending_fn()) ||
           (scr_dgram_pending_fn != NULL && scr_dgram_pending_fn()) ||
-          (scr_watch_pending_fn != NULL && scr_watch_pending_fn());
+          (scr_watch_pending_fn != NULL && scr_watch_pending_fn()) ||
+          scr_fs_renames_pending();
       if (held) {
         scr_children_poll();
         if (scr_exc_pending()) return false; /* uncaught throw in a listener */
@@ -1893,13 +2147,14 @@ bool scr_loop_run(ScrPromise *top_level) {
     bool net = scr_net_pending_fn != NULL && scr_net_pending_fn();
     bool dgram = scr_dgram_pending_fn != NULL && scr_dgram_pending_fn();
     bool watch = scr_watch_pending_fn != NULL && scr_watch_pending_fn();
+    bool renames = scr_fs_renames_pending();
     /* Timer liveness counts only REF'd timers: an unref'd timer stays in
      * the heap (and fires if the loop runs on for other reasons) but does
      * not by itself keep the process alive — Node's unref semantics.
      * Children follow the same rule: an unref'd child is still REAPED
      * while the loop runs (kids drives the sweeps and sleeps above) but
      * only reffed ones keep the process alive. */
-    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch) break;
+    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch && !renames) break;
     /* Sleep to the earliest deadline, then run every due timer (each may
      * enqueue microtasks, which the next iteration drains first). Who
      * sleeps depends on what is pending:
@@ -1920,6 +2175,10 @@ bool scr_loop_run(ScrPromise *top_level) {
      * - timers only: plain nanosleep to the deadline. */
     double now = scr_now_ms();
     double due = scr_ntimers > 0 ? scr_timers[0].deadline_ms : now + SCR_IO_POLL_MS;
+    /* The rename worker has no platform poll handle yet. Bound the idle
+     * wait exactly like the portable child fallback so completion is noticed
+     * promptly even when another poller owns the sleep. */
+    if (renames && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
     /* An armed island timer (AbortSignal.timeout) caps the sleep: it must
      * fire on time even while the poller waits on socket readiness. */
     if (scr_island_deadline_fn != NULL) {

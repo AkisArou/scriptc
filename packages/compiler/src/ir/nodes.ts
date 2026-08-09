@@ -2876,6 +2876,7 @@ export type IrLibFn =
   | "fsp.mkdirRecursiveMode"
   | "fsp.unlink"
   | "fsp.chmod"
+  | "fsp.rename"
   | "fsp.readdir"
   | "fsp.rm"
   | "fsp.stat"
@@ -3882,6 +3883,11 @@ export type IrLibFn =
   | "fs.chmodSync"
   | "fs.chownSync"
   | "fs.copyFileSync"
+  /** renameSync is the direct two-path syscall wrapper. renameCb defers
+   * the operation to the loop and fires a program-shaped Error | null
+   * callback through a backend-emitted adapter. */
+  | "fs.renameSync"
+  | "fs.renameCb"
   | "fs.lstatSync"
   /** fs.openSync(path, flags) → the raw fd as f64, fs.readSync(fd,
    * buffer, offset, length, position) → a sequential read when position
@@ -6387,6 +6393,7 @@ const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   // its fire rides the timer queue (scr_bytes_io.c), which library links
   // exclude — refuse the surface like the rest of the event-loop family.
   ["fs.existsChk", "the async fs callback surface (fs.exists)"],
+  ["fs.renameCb", "the async fs callback surface (fs.rename)"],
   ["timers.", "the timers surface (setTimeout family)"],
   ["tp.", "the timers/promises surface"],
   ["cp.", "the child_process surface"],
@@ -6960,6 +6967,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.chmodSync",
   "fs.chownSync",
   "fs.copyFileSync",
+  "fs.renameSync",
   "fs.lstatSync",
   "fs.writeFileModeSync",
   "fs.mkdirModeSync",

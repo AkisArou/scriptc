@@ -2,7 +2,7 @@
  * scaffolding, plus the interned resolve/child-exit thunks that adapt typed
  * payloads onto the runtime's promise and child-process machinery. */
 import type { CEmitter } from "./emitter.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFsRenameThunk, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
 import { cDecl, cType, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
@@ -492,6 +492,44 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
         `}`,
       );
     }
+    return sym;
+  }
+
+/** Interned fs.rename callback adapter. The runtime supplies a borrowed
+ * ScrError (or NULL); the adapter builds the callback's program-specific
+ * Error | null union, or a dyn error/null for checkJs callbacks. */
+  export function fsRenameThunkFor(E: CEmitter, cbT: IrType): string {
+    if (cbT.kind !== "func") throw new Error("emitter bug: fs.rename callback not a func");
+    if (cbT.params.length === 0) return "scr_fs_rename_thunk0";
+    const param = cbT.params[0]!;
+    const key = typeKey(cbT);
+    let sym = E.fsRenameThunks.get(key);
+    if (sym) return sym;
+    sym = mangleFsRenameThunk(E.fsRenameThunks.size);
+    E.fsRenameThunks.set(key, sym);
+    E.walkerProtos.push(`static void ${sym}(ScrClosure *sc_cb, ScrError *sc_err);`);
+    if (param.kind === "dyn") {
+      E.walkerDefs.push(
+        `static void ${sym}(ScrClosure *sc_cb, ScrError *sc_err) {`,
+        `  ScrDyn *sc_arg = sc_err ? scr_dyn_from_error(sc_err) : scr_dyn_new_null();`,
+        `  ((void (*)(ScrClosure *, ScrDyn *))sc_cb->fn)(sc_cb, sc_arg);`,
+        `}`,
+      );
+      return sym;
+    }
+    if (param.kind !== "union") throw new Error("emitter bug: fs.rename error param not a union");
+    const def = E.unionsById.get(param.unionId);
+    const errTag = def ? def.arms.findIndex((a) => a.kind === "object" && a.className === "%Error") : -1;
+    const nullTag = def ? def.arms.findIndex((a) => a.kind === "nullT") : -1;
+    if (errTag < 0 || nullTag < 0) throw new Error("emitter bug: fs.rename error union lacks its arms");
+    E.walkerDefs.push(
+      `static void ${sym}(ScrClosure *sc_cb, ScrError *sc_err) {`,
+      `  ScrUnion *sc_u = sc_err`,
+      `      ? scr_union_new_ref(${errTag}, scr_error_retain(sc_err), &scr_error_retain_v, &scr_error_release_v, NULL)`,
+      `      : ${E.unitInstanceRef(param.unionId, nullTag)};`,
+      `  ((void (*)(ScrClosure *, ScrUnion *))sc_cb->fn)(sc_cb, sc_u);`,
+      `}`,
+    );
     return sym;
   }
 

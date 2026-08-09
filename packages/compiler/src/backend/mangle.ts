@@ -204,6 +204,11 @@ export function mangleCloseOverrideWrap(n: number): string {
 export function mangleDnsLookupThunk(n: number): string {
   return `sc_dnslk_${n}`;
 }
+/** Emitted fs.rename callback adapter (the Error | null union's tags are
+ * program data), interned per callback type. */
+export function mangleFsRenameThunk(n: number): string {
+  return `sc_fsren_${n}`;
+}
 /** Emitted SNI answer-closure thunk (the `(err, ctx?) => void` callback a
  * TLS server's SNICallback receives — its unions' tags are program data),
  * interned per cb func-type key. */

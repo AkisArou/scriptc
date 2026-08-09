@@ -1380,10 +1380,18 @@ static const char *scr_errno_name(int e, char *fallback, size_t cap) {
   case ENOENT: return "ENOENT";
   case EEXIST: return "EEXIST";
   case EACCES: return "EACCES";
+  case EBUSY: return "EBUSY";
+  case EINVAL: return "EINVAL";
+  case EIO: return "EIO";
+  case ENAMETOOLONG: return "ENAMETOOLONG";
+  case ENOMEM: return "ENOMEM";
+  case ENOSPC: return "ENOSPC";
   case ENOTDIR: return "ENOTDIR";
   case EISDIR: return "EISDIR";
   case ENOTEMPTY: return "ENOTEMPTY";
   case EPERM: return "EPERM";
+  case EROFS: return "EROFS";
+  case EXDEV: return "EXDEV";
   case EBADF: return "EBADF";
   default:
     snprintf(fallback, cap, "E%d", e);
@@ -1396,10 +1404,18 @@ static const char *scr_errno_text(int e) {
   case ENOENT: return "no such file or directory";
   case EEXIST: return "file already exists";
   case EACCES: return "permission denied";
+  case EBUSY: return "resource busy or locked";
+  case EINVAL: return "invalid argument";
+  case EIO: return "i/o error";
+  case ENAMETOOLONG: return "name too long";
+  case ENOMEM: return "not enough memory";
+  case ENOSPC: return "no space left on device";
   case ENOTDIR: return "not a directory";
   case EISDIR: return "illegal operation on a directory";
   case ENOTEMPTY: return "directory not empty";
   case EPERM: return "operation not permitted";
+  case EROFS: return "read-only file system";
+  case EXDEV: return "cross-device link not permitted";
   case EBADF: return "bad file descriptor";
   default: return strerror(e);
   }
@@ -1884,11 +1900,110 @@ void scr_fs_copyfile(ScrStr *src, ScrStr *dest) {
 }
 
 /* renameSync(old, new): rename(2), Node's two-path error shape ("ENOENT:
- * no such file or directory, rename 'a' -> 'b'"). */
-void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath) {
-  if (rename(oldpath->data, newpath->data) != 0) {
-    scr_fs_throw2(errno, "rename", oldpath, newpath);
+ * no such file or directory, rename 'a' -> 'b'"). Windows must bypass
+ * the CRT's rename(): it refuses an existing destination and cannot move
+ * directories between parents, while Node/libuv uses MoveFileExW with
+ * MOVEFILE_REPLACE_EXISTING. Runtime strings are UTF-8, so feed the wide
+ * Win32 API rather than the active-code-page `A` form. */
+#ifdef _WIN32
+static WCHAR *scr_fs_win_wide(const ScrStr *path) {
+  if (path->len > INT_MAX) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
+    return NULL;
   }
+  int n = path->len > 0
+    ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                          path->data, (int)path->len, NULL, 0)
+    : 0;
+  if (path->len > 0 && n == 0) return NULL;
+  WCHAR *wide = malloc(((size_t)n + 1) * sizeof *wide);
+  if (!wide) {
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return NULL;
+  }
+  if (n > 0) {
+    (void)MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                              path->data, (int)path->len, wide, n);
+  }
+  wide[n] = L'\0';
+  return wide;
+}
+
+/* The reachable fs subset of libuv's uv_translate_sys_error table. */
+static int scr_fs_win_errno(DWORD error) {
+  switch (error) {
+  case ERROR_ALREADY_EXISTS:
+  case ERROR_FILE_EXISTS:
+    return EEXIST;
+  case ERROR_LOCK_VIOLATION:
+  case ERROR_PIPE_BUSY:
+  case ERROR_SHARING_VIOLATION:
+    return EBUSY;
+  case ERROR_INVALID_FUNCTION:
+    return EISDIR;
+  case ERROR_INSUFFICIENT_BUFFER:
+  case ERROR_INVALID_DATA:
+  case ERROR_INVALID_PARAMETER:
+    return EINVAL;
+  case ERROR_BUFFER_OVERFLOW:
+  case ERROR_FILENAME_EXCED_RANGE:
+    return ENAMETOOLONG;
+  case ERROR_NOT_ENOUGH_MEMORY:
+  case ERROR_OUTOFMEMORY:
+    return ENOMEM;
+  case ERROR_CANNOT_MAKE:
+  case ERROR_DISK_FULL:
+  case ERROR_HANDLE_DISK_FULL:
+    return ENOSPC;
+  case ERROR_DIR_NOT_EMPTY:
+    return ENOTEMPTY;
+  case ERROR_ACCESS_DENIED:
+  case ERROR_PRIVILEGE_NOT_HELD:
+    return EPERM;
+  case ERROR_WRITE_PROTECT:
+    return EROFS;
+  case ERROR_NOT_SAME_DEVICE:
+    return EXDEV;
+  case ERROR_BAD_PATHNAME:
+  case ERROR_DIRECTORY:
+  case ERROR_FILE_NOT_FOUND:
+  case ERROR_INVALID_DRIVE:
+  case ERROR_INVALID_NAME:
+  case ERROR_PATH_NOT_FOUND:
+    return ENOENT;
+  default:
+    return EIO;
+  }
+}
+#endif
+
+int scr_fs_rename_raw(const ScrStr *oldpath, const ScrStr *newpath) {
+#ifdef _WIN32
+  WCHAR *oldwide = scr_fs_win_wide(oldpath);
+  if (!oldwide) return scr_fs_win_errno(GetLastError());
+  WCHAR *newwide = scr_fs_win_wide(newpath);
+  if (!newwide) {
+    DWORD error = GetLastError();
+    free(oldwide);
+    return scr_fs_win_errno(error);
+  }
+  BOOL ok = MoveFileExW(oldwide, newwide, MOVEFILE_REPLACE_EXISTING);
+  DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+  free(oldwide);
+  free(newwide);
+  return ok ? 0 : scr_fs_win_errno(error);
+#else
+  return rename(oldpath->data, newpath->data) == 0 ? 0 : errno;
+#endif
+}
+
+void scr_fs_rename_error(int error, const ScrStr *oldpath, const ScrStr *newpath) {
+  scr_fs_throw2(error, "rename", oldpath, newpath);
+}
+
+void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath) {
+  int error = scr_fs_rename_raw(oldpath, newpath);
+  if (error != 0) scr_fs_rename_error(error, oldpath, newpath);
 }
 
 void scr_fs_rm(ScrStr *path) {

@@ -968,6 +968,12 @@
       "status": "static"
     },
     {
+      "id": "node-builtin.fs.promises.rename",
+      "kind": "node-builtin",
+      "name": "fs/promises.rename",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.fs.promises.rm",
       "kind": "node-builtin",
       "name": "fs/promises.rm",
@@ -1013,6 +1019,18 @@
       "id": "node-builtin.fs.realpathSync",
       "kind": "node-builtin",
       "name": "fs.realpathSync",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.fs.rename",
+      "kind": "node-builtin",
+      "name": "fs.rename",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.fs.renameSync",
+      "kind": "node-builtin",
+      "name": "fs.renameSync",
       "status": "static"
     },
     {
