@@ -76,6 +76,7 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <pwd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -1393,6 +1394,7 @@ static const char *scr_errno_name(int e, char *fallback, size_t cap) {
   case EROFS: return "EROFS";
   case EXDEV: return "EXDEV";
   case EBADF: return "EBADF";
+  case EPIPE: return "EPIPE";
   default:
     snprintf(fallback, cap, "E%d", e);
     return fallback;
@@ -1417,6 +1419,7 @@ static const char *scr_errno_text(int e) {
   case EROFS: return "read-only file system";
   case EXDEV: return "cross-device link not permitted";
   case EBADF: return "bad file descriptor";
+  case EPIPE: return "broken pipe";
   default: return strerror(e);
   }
 }
@@ -1809,6 +1812,44 @@ static bool scr_fs_write_fd_valid(double fd) {
   return true;
 }
 
+/* write(2) raises SIGPIPE before returning EPIPE when the pipe/socket peer
+ * has closed. Node blocks that process-killing default so fs.writeSync can
+ * throw a catchable EPIPE instead. Do the same per calling thread rather
+ * than changing the process disposition (which a spawned child would
+ * inherit). If this write generated a fresh pending SIGPIPE, consume exactly
+ * that signal before restoring the caller's mask; preserve one that was
+ * already pending. */
+static ssize_t scr_fs_write_current(int fd, const void *data, size_t length) {
+#if defined(_WIN32) || !defined(SIGPIPE)
+  return write(fd, data, length);
+#else
+  sigset_t pipe_set, old_set, pending;
+  sigemptyset(&pipe_set);
+  sigaddset(&pipe_set, SIGPIPE);
+  if (pthread_sigmask(SIG_BLOCK, &pipe_set, &old_set) != 0) {
+    return write(fd, data, length);
+  }
+
+  bool pending_known = sigpending(&pending) == 0;
+  bool had_pending = pending_known && sigismember(&pending, SIGPIPE) == 1;
+  ssize_t n = write(fd, data, length);
+  int write_errno = errno;
+
+  if (n < 0 && write_errno == EPIPE && pending_known && !had_pending &&
+      sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+    int caught = 0;
+    int wait_err;
+    do {
+      wait_err = sigwait(&pipe_set, &caught);
+    } while (wait_err == EINTR);
+  }
+
+  (void)pthread_sigmask(SIG_SETMASK, &old_set, NULL);
+  errno = write_errno;
+  return n;
+#endif
+}
+
 static double scr_fs_write_bytes(double fd, const void *data, size_t length,
                                  double position) {
   if (!scr_fs_write_fd_valid(fd)) return 0;
@@ -1821,7 +1862,7 @@ static double scr_fs_write_bytes(double fd, const void *data, size_t length,
   do {
     n = positioned
       ? scr_fs_pwrite((int)fd, data, length, position)
-      : write((int)fd, data, length);
+      : scr_fs_write_current((int)fd, data, length);
   } while (n < 0 && errno == EINTR);
   if (n < 0) {
     int e = errno;
@@ -1893,7 +1934,9 @@ double scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length,
   return scr_fs_write_bytes(fd, buf->data + off, (size_t)length, position);
 }
 
-double scr_fs_write_str_sync(double fd, ScrStr *data, double position) {
+double scr_fs_write_str_sync(double fd, ScrStr *data, double position,
+                             ScrStr *encoding) {
+  (void)encoding; /* frontend proves utf8; the argument still evaluates */
   return scr_fs_write_bytes(fd, data->data, data->len, position);
 }
 

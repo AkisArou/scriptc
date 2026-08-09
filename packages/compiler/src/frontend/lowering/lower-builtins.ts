@@ -995,6 +995,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
           );
         }
         const encNode = expr.arguments[3];
+        let enc: IrExpr = { kind: "strLit", value: "utf8", type: STRING, loc };
         if (encNode !== undefined) {
           const encType = L.typeOf(encNode);
           if (!encType.isStringLiteralType() || (encType.value !== "utf8" && encType.value !== "utf-8")) {
@@ -1004,11 +1005,15 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
               supported,
             );
           }
+          // Even though utf8 is the runtime's only encoding, the argument
+          // remains an ordinary JS argument: evaluate it in source order so
+          // a call/getter whose type is the accepted literal cannot vanish.
+          enc = L.lowerExprExpecting(encNode, STRING);
         }
         return {
           kind: "libCall",
           fn: "fs.writeStrSync",
-          args: [fd, L.lowerExprExpecting(dataNode, STRING), position(expr.arguments[2])],
+          args: [fd, L.lowerExprExpecting(dataNode, STRING), position(expr.arguments[2]), enc],
           type: F64,
           loc,
         };

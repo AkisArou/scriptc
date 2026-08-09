@@ -16,6 +16,11 @@ console.log("buffer positioned:", fs.writeSync(fd, Buffer.from("XY"), 0, 2, 8));
 console.log("string current:", fs.writeSync(fd, "é"));
 console.log("string positioned:", fs.writeSync(fd, "Q", 6));
 console.log("string encoded:", fs.writeSync(fd, "!", null, "utf-8"));
+function evaluatedEncoding(): "utf8" {
+  console.log("encoding evaluated");
+  return "utf8";
+}
+console.log("string effectful encoding:", fs.writeSync(fd, "?", null, evaluatedEncoding()));
 console.log("after positioned:", fs.writeSync(fd, Buffer.from("Z"), 0, 1, null));
 
 // Node normalizes invalid numeric WRITE positions to the current offset

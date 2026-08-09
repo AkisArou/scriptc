@@ -3504,7 +3504,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "fs.writeSync":
             return finish(`scr_fs_write_sync(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)})`);
           case "fs.writeStrSync":
-            return finish(`scr_fs_write_str_sync(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+            return finish(`scr_fs_write_str_sync(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`);
           case "fs.closeSync":
             return finish(`scr_fs_close(${arg(0)})`);
           case "fs.watch":
