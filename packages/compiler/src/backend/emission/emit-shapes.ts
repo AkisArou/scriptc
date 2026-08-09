@@ -763,6 +763,7 @@ export interface ClassMeta {
       t.kind === "generator" ||
       t.kind === "regex" || t.kind === "url" || t.kind === "searchParams" ||
       t.kind === "symbol" || t.kind === "stats" ||
+      t.kind === "fileHandle" ||
       t.kind === "spawnRes" || t.kind === "child" || t.kind === "bytes" ||
       t.kind === "netServer" || t.kind === "netSocket" ||
       t.kind === "http2Session" || t.kind === "http2Stream" ||

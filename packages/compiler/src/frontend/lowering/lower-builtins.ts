@@ -31,7 +31,7 @@ import { HTTP2_CONSTANTS } from "./http2-constants.js";
 import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "./crypto-tables.js";
 import { timerStyleCallback } from "./lower-calls.js";
 import { registerHttpClientFnBinding, voidizedCallback } from "./lower-server.js";
-import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FILEHANDLE_T, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
 
 
@@ -818,6 +818,33 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     }
     if (bi.module === "fs" && bi.member === "watch") {
       return lowerFsWatchCall(L, expr, loc);
+    }
+    // fs/promises.open(path[, flags[, mode]]) — string flags and numeric
+    // creation mode, with Node's "r"/0o666 defaults. The runtime wraps
+    // the descriptor in a shared FileHandle and settles/rejects exactly
+    // like the existing fs/promises operations.
+    if (bi.module === "fs/promises" && bi.member === "open") {
+      if (expr.arguments.length < 1 || expr.arguments.length > 3 || expr.arguments.some(ts.isSpreadElement)) {
+        L.noLowering(
+          `fs.promises.open with ${expr.arguments.length} arguments`,
+          expr,
+          "use open(path[, stringFlags[, numericMode]])",
+        );
+      }
+      const path = L.lowerExprExpecting(expr.arguments[0]!, STRING);
+      const flags = expr.arguments[1]
+        ? L.lowerExprExpecting(expr.arguments[1]!, STRING)
+        : { kind: "strLit", value: "r", type: STRING, loc } satisfies IrExpr;
+      const mode = expr.arguments[2]
+        ? L.lowerExprExpecting(expr.arguments[2]!, F64)
+        : { kind: "numLit", value: 0o666, type: F64, loc } satisfies IrExpr;
+      return {
+        kind: "libCall",
+        fn: "fsp.open",
+        args: [path, flags, mode],
+        type: { kind: "promise", inner: FILEHANDLE_T },
+        loc,
+      };
     }
     // fs.rename(oldPath, newPath, callback): the callback is a
     // program-shaped closure (zero parameters are valid; the ordinary
@@ -4275,6 +4302,174 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     };
   }
 
+/** Calls on an fs/promises FileHandle. The promise-returning methods run
+ * through the same synchronous descriptor primitives as fs.readSync /
+ * writeSync, then settle so failures reject at await. read/write retain
+ * the caller's buffer in the Node-shaped result record. */
+  export function lowerFileHandleMethodCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    if (call.questionDotToken || access.questionDotToken) return null;
+    if (L.mapTypeOf(L.typeOf(access.expression))?.kind !== "fileHandle") return null;
+    if (!L.isStdlibMember(access)) return null;
+    const name = access.name.text;
+    const loc = locOf(call);
+    const receiver = (): IrExpr => L.lowerExprExpecting(access.expression, FILEHANDLE_T);
+    const promise = (inner: IrType): IrType => ({ kind: "promise", inner });
+    const absent = (node: ts.Expression | undefined): boolean =>
+      !node || node.kind === ts.SyntaxKind.NullKeyword;
+    const bool = (value: boolean): IrExpr => ({ kind: "boolLit", value, type: BOOL, loc });
+    const num = (node: ts.Expression | undefined, dflt: number): IrExpr => {
+      if (!node || node.kind === ts.SyntaxKind.NullKeyword) {
+        return { kind: "numLit", value: dflt, type: F64, loc };
+      }
+      return L.lowerExprExpecting(node, F64);
+    };
+    const utf8 = (node: ts.Expression | undefined): IrExpr => {
+      if (!node || node.kind === ts.SyntaxKind.NullKeyword) {
+        return { kind: "strLit", value: "utf8", type: STRING, loc };
+      }
+      const t = L.typeOf(node);
+      if (!(t.isStringLiteralType() && (t.value === "utf8" || t.value === "utf-8"))) {
+        L.noLowering(
+          `FileHandle.${name} with a non-utf8 encoding`,
+          node,
+          "only utf8 data is supported",
+        );
+      }
+      return L.lowerExprExpecting(node, STRING);
+    };
+
+    if (name === "close" || name === "stat") {
+      if (call.arguments.length !== 0) L.noLowering(`FileHandle.${name} with arguments`, call);
+      return {
+        kind: "libCall",
+        fn: name === "close" ? "fileHandle.close" : "fileHandle.stat",
+        args: [receiver()],
+        type: promise(name === "close" ? VOID : { kind: "stats" }),
+        loc,
+      };
+    }
+
+    if (name === "readFile") {
+      if (call.arguments.length === 0 || call.arguments[0]?.kind === ts.SyntaxKind.NullKeyword) {
+        return {
+          kind: "libCall", fn: "fileHandle.readFileBytes", args: [receiver()],
+          type: promise(BYTES_U8), loc,
+        };
+      }
+      if (call.arguments.length !== 1) {
+        L.noLowering(`FileHandle.readFile with ${call.arguments.length} arguments`, call);
+      }
+      const encoding = utf8(call.arguments[0]);
+      return {
+        kind: "libCall", fn: "fileHandle.readFile", args: [receiver(), encoding],
+        type: promise(STRING), loc,
+      };
+    }
+
+    if (name === "writeFile" || name === "appendFile") {
+      if (call.arguments.length < 1 || call.arguments.length > 2) {
+        L.noLowering(`FileHandle.${name} with ${call.arguments.length} arguments`, call);
+      }
+      const dataNode = call.arguments[0]!;
+      const dataT = L.mapTypeOf(L.typeOf(dataNode));
+      // Evaluate a supplied utf8 encoding even for Buffer data, matching
+      // Node's argument order; it does not affect the bytes.
+      const encoding = utf8(call.arguments[1]);
+      if (dataT?.kind === "string") {
+        return {
+          kind: "libCall", fn: "fileHandle.writeFile",
+          args: [receiver(), L.lowerExprExpecting(dataNode, STRING), encoding],
+          type: promise(VOID), loc,
+        };
+      }
+      if (dataT?.kind === "bytes" && dataT.elem === "u8") {
+        return {
+          kind: "libCall", fn: "fileHandle.writeFileBytes",
+          args: [receiver(), L.lowerExprExpecting(dataNode, BYTES_U8), encoding],
+          type: promise(VOID), loc,
+        };
+      }
+      L.noLowering(
+        `FileHandle.${name} of '${dataT ? L.fmt(dataT) : L.checker.typeToString(L.typeOf(dataNode))}' data`,
+        dataNode,
+        "string and Uint8Array data are supported",
+      );
+    }
+
+    if (name === "read") {
+      if (call.arguments.length < 1 || call.arguments.length > 4) {
+        L.noLowering(
+          `FileHandle.read with ${call.arguments.length} arguments`,
+          call,
+          "use read(buffer[, offset[, length[, position]]])",
+        );
+      }
+      const buffer = L.lowerExprExpecting(call.arguments[0]!, BYTES_U8);
+      const type = L.mapTypeOf(L.typeOf(call));
+      if (type?.kind !== "promise" || type.inner.kind !== "record") {
+        L.badType(call, L.typeOf(call));
+      }
+      return {
+        kind: "libCall", fn: "fileHandle.read",
+        args: [
+          receiver(), buffer, num(call.arguments[1], 0), num(call.arguments[2], -1),
+          num(call.arguments[3], -1), bool(absent(call.arguments[2])),
+        ],
+        type, loc,
+      };
+    }
+
+    if (name === "write") {
+      if (call.arguments.length < 1 || call.arguments.length > 4) {
+        L.noLowering(`FileHandle.write with ${call.arguments.length} arguments`, call);
+      }
+      const dataNode = call.arguments[0]!;
+      const dataT = L.mapTypeOf(L.typeOf(dataNode));
+      const type = L.mapTypeOf(L.typeOf(call));
+      if (type?.kind !== "promise" || type.inner.kind !== "record") {
+        L.badType(call, L.typeOf(call));
+      }
+      if (dataT?.kind === "bytes" && dataT.elem === "u8") {
+        return {
+          kind: "libCall", fn: "fileHandle.writeBytes",
+          args: [
+            receiver(), L.lowerExprExpecting(dataNode, BYTES_U8),
+            num(call.arguments[1], 0), num(call.arguments[2], -1), num(call.arguments[3], -1),
+            bool(absent(call.arguments[2])),
+          ],
+          type, loc,
+        };
+      }
+      if (dataT?.kind === "string") {
+        if (call.arguments.length > 3) {
+          L.noLowering(
+            `FileHandle.write(string) with ${call.arguments.length} arguments`,
+            call,
+            'use write(string[, position[, "utf8"]])',
+          );
+        }
+        return {
+          kind: "libCall", fn: "fileHandle.writeStr",
+          args: [receiver(), L.lowerExprExpecting(dataNode, STRING), num(call.arguments[1], -1), utf8(call.arguments[2])],
+          type, loc,
+        };
+      }
+      L.noLowering(
+        `FileHandle.write of '${dataT ? L.fmt(dataT) : L.checker.typeToString(L.typeOf(dataNode))}' data`,
+        dataNode,
+        "string and Uint8Array data are supported",
+      );
+    }
+
+    L.noLowering(
+      `FileHandle.${name}`,
+      call,
+      "fd, close(), read(), write(), readFile(), writeFile(), appendFile(), and stat() are the supported FileHandle members",
+      L.checker.getSymbolAtLocation(access.name),
+    );
+  }
+
 /** Method calls on Stats-typed receivers: isFile()/isDirectory()/
    * isSymbolicLink() are pure reads on the stat snapshot (a followed
    * statSync snapshot never answers true to isSymbolicLink — take
@@ -4374,10 +4569,26 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       return { kind: "recordGet", obj: receiver, shapeId: receiver.type.shapeId, field: "%enc", type: STRING, loc: locOf(expr) };
     }
     const kind = L.mapTypeOf(L.typeOf(expr.expression))?.kind;
-    if (kind !== "stats" && kind !== "spawnRes" && kind !== "child") return null;
+    if (kind !== "stats" && kind !== "fileHandle" && kind !== "spawnRes" && kind !== "child") return null;
     if (kind === "child" ? !isChildSurfaceMember(L, expr) : !L.isStdlibMember(expr)) return null;
     const name = expr.name.text;
     const loc = locOf(expr);
+    if (kind === "fileHandle") {
+      if (name === "fd") {
+        const receiver = L.lowerExprExpecting(expr.expression, FILEHANDLE_T);
+        return { kind: "libCall", fn: "fileHandle.fd", args: [receiver], type: F64, loc };
+      }
+      const methods = new Set(["close", "read", "write", "readFile", "writeFile", "appendFile", "stat"]);
+      if (methods.has(name)) {
+        L.unsupported("SC1090", expr, `FileHandle methods as values (call '${name}' directly)`);
+      }
+      L.noLowering(
+        `FileHandle.${name}`,
+        expr,
+        "fd, close(), read(), write(), readFile(), writeFile(), appendFile(), and stat() are the supported FileHandle members",
+        L.checker.getSymbolAtLocation(expr.name),
+      );
+    }
     // child.stdout / child.stderr — the piped-output streams: the
     // checker's `Readable | null` (null exactly when the slot was not
     // piped), constructed type-directedly in the backend over the

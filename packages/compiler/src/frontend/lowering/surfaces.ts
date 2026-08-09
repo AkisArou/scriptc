@@ -7,7 +7,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { UNSUPPORTED } from "../../diagnostics/diagnostic.js";
-import { BOOL, BYTES_U8, CHILD_T, DYN, F64, IrExpr, IrLibFn, IrStrIntrinsicMethod, IrType, RUNTIME_ERROR_CLASSES, SPAWNRES_T, STATS_T, STRING, URL_T, VOID, arrayOf } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, CHILD_T, DYN, F64, FILEHANDLE_T, IrExpr, IrLibFn, IrStrIntrinsicMethod, IrType, RUNTIME_ERROR_CLASSES, SPAWNRES_T, STATS_T, STRING, URL_T, VOID, arrayOf } from "../../ir/nodes.js";
 import { isNodeTypesPath, requireSpecOf } from "../program.js";
 
 /** Statement-level constructs rejected wholesale, keyed by syntax kind. */
@@ -628,6 +628,10 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     unlink: { fn: "fsp.unlink", params: [STRING], result: { kind: "promise", inner: VOID } },
     chmod: { fn: "fsp.chmod", params: [STRING, F64], result: { kind: "promise", inner: VOID } },
     rename: { fn: "fsp.rename", params: [STRING, STRING], result: { kind: "promise", inner: VOID } },
+    // open's optional flags/mode completion is special-cased in
+    // lowerBuiltinModuleCall; this row routes all import spellings and
+    // gives coverage the static member.
+    open: { fn: "fsp.open", params: [STRING, STRING, F64], result: { kind: "promise", inner: FILEHANDLE_T } },
   },
   // The bare module's POSIX-target binding; a win32 target rebinds it to
   // the win32 table (builtinModuleFnsOf — Node on Windows IS path.win32).
