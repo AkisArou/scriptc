@@ -1,7 +1,8 @@
 // Static three-argument fs/promises.writeFile: utf8's string and object
 // spellings, creation mode (which does not re-apply to existing files),
-// and syscall failures delivered as promise rejections.
-import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+// safely ignored option values, and syscall failures delivered as promise
+// rejections.
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +37,20 @@ await writeFile(writePath("path"), writeData("data", "bare effect"), encoding("b
 await writeFile(encoded, "encoding first", { encoding: encoding("encoding"), mode: mode("mode") });
 await writeFile(encoded, "mode first", { mode: mode("mode"), encoding: encoding("encoding") });
 console.log("evaluated:", evaluations.join(","), readFileSync(encoded, "utf8"));
+
+// Undocumented values that cannot have effects stay dropped rather than
+// being lowered themselves. Primitive __proto__ values are also ignored by
+// JavaScript's special object-literal setter, so they do not need the
+// prototype-backed-options fence.
+writeFileSync(encoded, "sync ignored", {
+  ignored: <T>(value: T): T => value,
+  __proto__: 1,
+});
+await writeFile(encoded, "promise ignored", {
+  ignored: <T>(value: T): T => value,
+  __proto__: "primitive",
+});
+console.log("ignored:", readFileSync(encoded, "utf8"));
 
 await writeFile(modeFile, "created", { mode: 0o600, encoding: "utf-8" });
 accessSync(modeFile, constants.W_OK);

@@ -1632,7 +1632,6 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
               L, p, m.name, operation, FS_WRITE_FILE_DOCUMENTED_OPTIONS,
               'the supported options are { mode: <number>, encoding: "utf8" }',
             );
-            optionValues.push({ kind: "effect", value: L.lowerExpr(m.value) });
           }
         }
       }
