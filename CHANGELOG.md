@@ -6,6 +6,22 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.0.24
+
+### Features
+
+- **Everyday filesystem work stays static across more of the file lifecycle.** `fs.rename`, `fs.renameSync`, and `fs/promises.rename` lower with Node's callback, promise, replacement, and platform error behavior; `fs.writeSync` covers the Buffer-window and UTF-8 string overloads with current-offset and positioned writes; and `fs/promises.open` returns a native `FileHandle` with `fd`, `read`, `write`, `readFile`, `writeFile`, `appendFile`, `stat`, and idempotent `close`. The three-argument `fs/promises.writeFile` accepts the supported UTF-8 and creation-mode options, while filesystem stats expose `blocks`, `nlink`, and `atimeMs` through path, promise, file-handle, and dynamic-bridge results.
+- **Native text decoding covers the WHATWG encoding families.** A statically labelled `TextDecoder` recognizes the standard aliases for the legacy single-byte, UTF-16, Chinese, Japanese, and Korean encodings, including BOM handling and malformed-input recovery matching the pinned Node runtime. Runtime-valued `BufferEncoding` arguments also work in `Buffer.toString`, with case-insensitive aliases, optional defaults, range behavior, and Node's unknown-encoding errors.
+- **`util.parseArgs` compiles statically.** Boolean and string options, short and clustered spellings, repeated values, defaults, negative options, positionals, token output, permissive parsing, the live default `process.argv`, and Node's coded validation errors lower through both backends.
+- **Array mutation and bounded string splitting grow their static surface.** `Array.prototype.unshift` and `reverse` preserve mutation, spread, evaluation order, and reference identity, while `String.prototype.split` accepts JavaScript limits for string and literal-RegExp separators with `ToUint32` semantics.
+- **`process.stdout.write` and `process.stderr.write` accept encoding and completion arguments.** String chunks honor supported encoding aliases, byte chunks retain their bytes, and successful completion callbacks join the next-tick queue in Node's order on both backends.
+
+### Performance
+
+- **Canonical typed-array loops use native integer induction.** Both backends recognize semantics-safe byte loops and emit integer counters and direct byte indexes, avoiding repeated floating-point index conversion while preserving the general fallback whenever the loop shape cannot prove the rewrite.
+
+<!-- release:end -->
+
 ## 0.0.23
 
 ### Features
@@ -19,8 +35,6 @@ All notable changes to scriptc will be documented in this file.
 - **Top-level `await` marks an implicit ES module.** TypeScript and JavaScript files without an explicit import or export now follow Node 24's syntax detection, package-type precedence, module scoping, and `require` diagnostics instead of being misclassified as CommonJS.
 - **Cycle collection stays fast on large live heaps.** The runtime now collects cycles generationally, promotes survivors, and schedules bounded mature passes, avoiding repeated whole-heap walks while retaining full sweeps for cross-generation garbage and shutdown auditing.
 - **Typed-array reads, writes, and lengths use specialized native lowering.** Both backends emit operations directly from the IR element kind while preserving numeric coercion, bounds behavior, and receiver lifetime across side-effecting index and value expressions.
-
-<!-- release:end -->
 
 ## 0.0.22
 
