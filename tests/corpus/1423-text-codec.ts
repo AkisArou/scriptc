@@ -134,6 +134,14 @@ const recoverySamples = [
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x1b, 0x24, 0x21])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x1b, 0x24, 0x42, 0x1b, 0x24, 0x42])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x26, 0x40, 0x1b, 0x24, 0x42, 0x46, 0x7c])),
+  // Four-byte designation prefixes stay pending until their final byte;
+  // unknown finals restore the payload while known finals are one error.
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x28, 0x00])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x28, 0x41])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x25, 0x2f, 0x42])),
+  // ICU's JIS-1990 announcer enters lead state even without a following
+  // designation; the next two payload bytes therefore form a JIS pair.
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x26, 0x40, 0x21, 0x5a])),
   // ICU emits line separators in JIS/Katakana states and resumes in ASCII.
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x46, 0x7c, 0x0a, 0x41])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x28, 0x49, 0x21, 0x0d, 0x41])),

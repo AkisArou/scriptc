@@ -1220,16 +1220,42 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
           if (repeated) scr_td_error(&out);
           break;
         }
+        /* Some ICU designation families need one more final byte. A known
+         * final consumes the whole four-byte escape as one error; an unknown
+         * final restores both payload bytes and leaves that final queued. */
+        bool extended_prefix =
+          (lead == 0x24 && (byte == 0x28 || byte == 0x29 || byte == 0x2a || byte == 0x2b)) ||
+          (lead == 0x25 && byte == 0x2f);
+        if (extended_prefix) {
+          if (i == b->len) {
+            output_flag = false; state = output_state; scr_td_error(&out);
+            break;
+          }
+          uint8_t final = b->data[i];
+          bool known_final =
+            (lead == 0x24 && byte == 0x28 &&
+              ((final >= 0x40 && final <= 0x45) || (final >= 0x47 && final <= 0x4d))) ||
+            (lead == 0x24 && byte == 0x29 &&
+              (final == 0x41 || final == 0x43 || final == 0x45 || final == 0x47)) ||
+            (lead == 0x24 && byte == 0x2a && final == 0x48) ||
+            (lead == 0x24 && byte == 0x2b && final >= 0x49 && final <= 0x4d) ||
+            (lead == 0x25 && byte == 0x2f &&
+              ((final >= 0x40 && final <= 0x41) || (final >= 0x43 && final <= 0x46)));
+          if (known_final) {
+            i++;
+            output_flag = false; state = output_state; scr_td_error(&out);
+            break;
+          }
+        }
         /* ICU consumes the complete unsupported designations it recognizes,
          * while other malformed payloads are restored to the input queue. */
         bool consume_error =
-          (lead == 0x24 && (byte == 0x28 || byte == 0x29 || byte == 0x2a ||
-                            byte == 0x2b || byte == 0x41)) ||
+          (lead == 0x24 && byte == 0x41) ||
           (lead == 0x28 && ((byte >= 0x40 && byte <= 0x47) || byte == 0x4b || byte == 0x52)) ||
-          (lead == 0x25 && (byte == 0x2f || byte == 0x42)) ||
+          (lead == 0x25 && byte == 0x42) ||
           (lead == 0x2e && (byte == 0x41 || byte == 0x46));
         if (item >= 0 && lead == 0x26 && byte == 0x40) {
-          state = output_state;
+          state = output_state = SCR_TD_ISO_LEAD;
           bool repeated = output_flag;
           output_flag = !repeated;
           if (repeated) scr_td_error(&out);

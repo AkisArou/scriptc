@@ -26,7 +26,7 @@ import {
   fenceOrDropOptionKey,
   isChildSurfaceMember,
 } from "./surfaces.js";
-import { conditionalSpreadOf, droppableStatic, lowerDynObjectLiteral } from "./lower-exprs.js";
+import { conditionalSpreadOf, lowerDynObjectLiteral } from "./lower-exprs.js";
 import { HTTP2_CONSTANTS } from "./http2-constants.js";
 import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "./crypto-tables.js";
 import { timerStyleCallback } from "./lower-calls.js";
@@ -6571,7 +6571,7 @@ function staticTextDecoderEncoding(label: string): StaticTextDecoderEncoding | n
         ? L.lowerExprExpecting(ctorArgs[0]!, STRING)
         : null;
       const afterLabel = (result: IrExpr): IrExpr =>
-        labelEffect === null || droppableStatic(labelEffect)
+        labelEffect === null || labelEffect.kind === "strLit"
           ? result
           : {
             kind: "seqExpr",
