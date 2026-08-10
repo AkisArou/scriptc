@@ -49,13 +49,13 @@
 #include <ws2tcpip.h> /* inet_ntop, sockaddr_in6 */
 #include <iphlpapi.h> /* GetAdaptersAddresses (os.networkInterfaces) */
 #include <windows.h>
+#include <winioctl.h> /* FSCTL_GET_REPARSE_POINT */
 #include <lmcons.h>  /* UNLEN for GetUserNameA */
 
 
-/* CRT stat has no symlink view — lstat degrades to stat (divergence: a
- * compiled binary never reports isSymbolicLink() true on Windows; Node
- * does for real symlinks/junctions). Mechanical fix: GetFileAttributesW +
- * FILE_ATTRIBUTE_REPARSE_POINT. */
+/* The CRT has no symlink view, so its internal lstat users degrade to stat.
+ * The public Stats path below bypasses this seam and opens the final component
+ * as a reparse point for lstatSync, matching Node's no-follow split. */
 #define lstat stat
 
 /* Windows has no directory mode bits; the CRT mkdir takes one argument. */
@@ -2828,13 +2828,130 @@ static ScrStats *scr_stats_crt_fallback(const ScrStr *path, const char *op) {
 /* Resolve ordinary disk paths once and populate every public field from the
  * resulting handle. Splitting size/type across CRT stat() and a later
  * CreateFile call can mix two entries when another process replaces path. */
-static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op) {
+static bool scr_stats_is_link_tag(DWORD tag) {
+  return tag == IO_REPARSE_TAG_SYMLINK ||
+         tag == IO_REPARSE_TAG_MOUNT_POINT ||
+         tag == IO_REPARSE_TAG_APPEXECLINK ||
+         tag == UINT32_C(0xA000001D); /* IO_REPARSE_TAG_LX_SYMLINK */
+}
+
+static double scr_stats_utf16_len(const WCHAR *text, size_t len) {
+  if (len == 0) return 0;
+  if (len > INT_MAX) return -1;
+  int bytes = WideCharToMultiByte(
+    CP_UTF8, 0, text, (int)len, NULL, 0, NULL, NULL);
+  return bytes > 0 ? (double)bytes : -1;
+}
+
+typedef struct {
+  ULONG tag;
+  USHORT data_len;
+  USHORT reserved;
+  union {
+    struct {
+      USHORT substitute_offset;
+      USHORT substitute_len;
+      USHORT print_offset;
+      USHORT print_len;
+      ULONG flags;
+      WCHAR path[1];
+    } symlink;
+    struct {
+      USHORT substitute_offset;
+      USHORT substitute_len;
+      USHORT print_offset;
+      USHORT print_len;
+      WCHAR path[1];
+    } mount;
+    struct {
+      unsigned char bytes[1];
+    } generic;
+  } body;
+} ScrStatsReparseData;
+
+/* Node/libuv reports a Windows link's target-text length as st_size. The
+ * ordinary handle information does not carry that value, so read the reparse
+ * payload while the no-follow handle is live. */
+static double scr_stats_link_size(HANDLE h, DWORD tag) {
+  union {
+    ScrStatsReparseData align;
+    unsigned char bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+  } storage;
+  DWORD used;
+  if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0,
+                       storage.bytes, sizeof storage.bytes, &used, NULL)) return -1;
+  ScrStatsReparseData *data = (ScrStatsReparseData *)storage.bytes;
+  if (data->tag != tag) return -1;
+
+  const WCHAR *target;
+  size_t len;
+  if (tag == IO_REPARSE_TAG_SYMLINK) {
+    target = data->body.symlink.path +
+      data->body.symlink.substitute_offset / sizeof(WCHAR);
+    len = data->body.symlink.substitute_len / sizeof(WCHAR);
+  } else if (tag == IO_REPARSE_TAG_MOUNT_POINT) {
+    target = data->body.mount.path +
+      data->body.mount.substitute_offset / sizeof(WCHAR);
+    len = data->body.mount.substitute_len / sizeof(WCHAR);
+  } else if (tag == UINT32_C(0xA000001D)) {
+    /* WSL's LX symlink payload is a version word followed by UTF-8 bytes. */
+    return data->data_len >= sizeof(ULONG)
+      ? (double)(data->data_len - sizeof(ULONG)) : -1;
+  } else {
+    /* App execution links carry a counted UTF-16 string list; the third
+     * string is the target path. */
+    if (tag != IO_REPARSE_TAG_APPEXECLINK ||
+        data->data_len < sizeof(ULONG)) return -1;
+    const unsigned char *raw = data->body.generic.bytes;
+    ULONG count;
+    memcpy(&count, raw, sizeof count);
+    if (count < 3) return -1;
+    target = (const WCHAR *)(raw + sizeof count);
+    size_t chars = (data->data_len - sizeof count) / sizeof(WCHAR);
+    for (size_t item = 0; item < 2; item++) {
+      size_t part = 0;
+      while (part < chars && target[part] != L'\0') part++;
+      if (part == chars) return -1;
+      target += part + 1;
+      chars -= part + 1;
+    }
+    len = 0;
+    while (len < chars && target[len] != L'\0') len++;
+    if (len == chars) return -1;
+    return scr_stats_utf16_len(target, len);
+  }
+
+  /* Undo the NT namespace prefix CreateSymbolicLinkW stores for absolute
+   * DOS/UNC targets, matching libuv's readlink normalization. */
+  if (len >= 4 && target[0] == L'\\' && target[1] == L'?' &&
+      target[2] == L'?' && target[3] == L'\\') {
+    if (len >= 6 && target[5] == L':' &&
+        ((target[4] >= L'A' && target[4] <= L'Z') ||
+         (target[4] >= L'a' && target[4] <= L'z'))) {
+      target += 4;
+      len -= 4;
+    } else if (len >= 8 &&
+               (target[4] == L'U' || target[4] == L'u') &&
+               (target[5] == L'N' || target[5] == L'n') &&
+               (target[6] == L'C' || target[6] == L'c') &&
+               target[7] == L'\\') {
+      target += 6;
+      len -= 6;
+    }
+  }
+  return scr_stats_utf16_len(target, len);
+}
+
+static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op,
+                                   bool no_follow) {
   WCHAR *wide = scr_fs_win_wide(path);
   if (!wide) return scr_stats_crt_fallback(path, op);
 
+  DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+  if (no_follow) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
   HANDLE h = CreateFileW(wide, FILE_READ_ATTRIBUTES,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                         NULL, OPEN_EXISTING, flags, NULL);
   free(wide);
   if (h == INVALID_HANDLE_VALUE) return scr_stats_crt_fallback(path, op);
 
@@ -2848,6 +2965,21 @@ static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op) {
     CloseHandle(h);
     return scr_stats_crt_fallback(path, op);
   }
+  bool is_link = false;
+  double link_size = -1;
+  if (no_follow && (basic.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    FILE_ATTRIBUTE_TAG_INFO tagged;
+    if (!GetFileInformationByHandleEx(
+          h, FileAttributeTagInfo, &tagged, sizeof tagged) ||
+        !scr_stats_is_link_tag(tagged.ReparseTag)) {
+      /* Reparse points are a general interception mechanism. Node/libuv
+       * follows non-link tags even for lstat, so reopen the resolved target. */
+      CloseHandle(h);
+      return scr_stats_of_path(path, op, false);
+    }
+    is_link = true;
+    link_size = scr_stats_link_size(h, tagged.ReparseTag);
+  }
   FILE_STANDARD_INFO standard;
   bool have_standard = GetFileInformationByHandleEx(
     h, FileStandardInfo, &standard, sizeof standard);
@@ -2856,10 +2988,10 @@ static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op) {
   bool is_dir = (basic.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
   uint64_t size = ((uint64_t)basic.nFileSizeHigh << 32) | basic.nFileSizeLow;
   ScrStats *s = scr_stats_new();
-  s->is_file = have_standard ? !standard.Directory : !is_dir;
-  s->is_dir = have_standard ? standard.Directory : is_dir;
-  s->is_symlink = false; /* the handle follows the path, like statSync */
-  s->size = s->is_dir ? 0.0
+  s->is_file = !is_link && (have_standard ? !standard.Directory : !is_dir);
+  s->is_dir = !is_link && (have_standard ? standard.Directory : is_dir);
+  s->is_symlink = is_link;
+  s->size = is_link && link_size >= 0 ? link_size : s->is_dir ? 0.0
     : have_standard ? (double)standard.EndOfFile.QuadPart : (double)size;
   s->blocks = have_standard
     ? (double)((uint64_t)standard.AllocationSize.QuadPart >> 9)
@@ -2897,7 +3029,7 @@ static ScrStats *scr_stats_of(const struct stat *st) {
 
 ScrStats *scr_fs_stat(ScrStr *path) {
 #ifdef _WIN32
-  return scr_stats_of_path(path, "stat");
+  return scr_stats_of_path(path, "stat", false);
 #else
   struct stat st;
   if (stat(path->data, &st) != 0) { /* follows symlinks, like Node's statSync */
@@ -2910,8 +3042,7 @@ ScrStats *scr_fs_stat(ScrStr *path) {
 
 ScrStats *scr_fs_lstat(ScrStr *path) {
 #ifdef _WIN32
-  /* Windows lstat still deliberately follows (see the lstat macro above). */
-  return scr_stats_of_path(path, "lstat");
+  return scr_stats_of_path(path, "lstat", true);
 #else
   struct stat st;
   if (lstat(path->data, &st) != 0) { /* no follow; Node reports lstat */
