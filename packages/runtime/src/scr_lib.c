@@ -2752,8 +2752,8 @@ void scr_process_stdin_destroy(void) {
 }
 
 /* ── Stats values ────────────────────────────────────────────────────
- * An immutable snapshot of stat(2) results — the slice the lowered
- * surface exposes (isFile/isDirectory/size). statSync THROWS like the
+ * An immutable snapshot of stat(2) results — the lowered type/mode, size,
+ * allocation/link, and access/write-time slice. statSync THROWS like the
  * other sync fs calls; the promise form rejects (see the fsp section). */
 
 struct ScrStats {
@@ -2790,45 +2790,92 @@ double scr_stats_nlink(ScrStats *s) { return s->nlink; }
 double scr_stats_atime_ms(ScrStats *s) { return s->atime_ms; }
 double scr_stats_mtime_ms(ScrStats *s) { return s->mtime_ms; }
 
-static ScrStats *scr_stats_of(const struct stat *st, const char *path) {
+static ScrStats *scr_stats_new(void) {
   ScrStats *s = malloc(sizeof(ScrStats));
   if (!s) {
     scr_trap("scriptc: out of memory\n");
   }
   s->rc = 1;
+  return s;
+}
+
+#ifdef _WIN32
+/* The CRT fallback is deliberately complete: callers either get every field
+ * from this one stat() result or every field from one Win32 handle below,
+ * never a snapshot spliced across two path resolutions. */
+static ScrStats *scr_stats_of_crt(const struct stat *st) {
+  ScrStats *s = scr_stats_new();
   s->is_file = S_ISREG(st->st_mode);
   s->is_dir = S_ISDIR(st->st_mode);
-#if defined(_WIN32)
-  /* The CRT snapshot supplies safe fallbacks, but its times have only whole
-   * seconds and it has no allocated-block count. Query the same followed
-   * handle Node/libuv uses: FILE_STANDARD_INFO carries the allocation size
-   * and link count; BY_HANDLE_FILE_INFORMATION carries 100ns access/write
-   * times. A metadata-query refusal leaves the CRT values in place rather
-   * than turning a successful stat into a new failure. */
   s->is_symlink = false;
+  s->size = (double)st->st_size;
   s->blocks = st->st_size <= 0 ? 0.0 : (double)(((uint64_t)st->st_size + 511) >> 9);
   s->nlink = (double)st->st_nlink;
   s->atime_ms = (double)st->st_atime * 1000.0;
   s->mtime_ms = (double)st->st_mtime * 1000.0;
-  HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES,
+  return s;
+}
+
+static ScrStats *scr_stats_crt_fallback(const ScrStr *path, const char *op) {
+  struct stat st;
+  if (stat(path->data, &st) != 0) {
+    scr_fs_throw(errno, op, path);
+    return NULL;
+  }
+  return scr_stats_of_crt(&st);
+}
+
+/* Resolve ordinary disk paths once and populate every public field from the
+ * resulting handle. Splitting size/type across CRT stat() and a later
+ * CreateFile call can mix two entries when another process replaces path. */
+static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op) {
+  WCHAR *wide = scr_fs_win_wide(path);
+  if (!wide) return scr_stats_crt_fallback(path, op);
+
+  HANDLE h = CreateFileW(wide, FILE_READ_ATTRIBUTES,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-  if (h != INVALID_HANDLE_VALUE) {
-    BY_HANDLE_FILE_INFORMATION basic;
-    if (GetFileInformationByHandle(h, &basic)) {
-      s->nlink = (double)basic.nNumberOfLinks;
-      s->atime_ms = scr_filetime_unix_ms(basic.ftLastAccessTime);
-      s->mtime_ms = scr_filetime_unix_ms(basic.ftLastWriteTime);
-    }
-    FILE_STANDARD_INFO standard;
-    if (GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof standard)) {
-      s->blocks = (double)((uint64_t)standard.AllocationSize.QuadPart >> 9);
-      s->nlink = (double)standard.NumberOfLinks;
-    }
+  free(wide);
+  if (h == INVALID_HANDLE_VALUE) return scr_stats_crt_fallback(path, op);
+
+  DWORD file_type = GetFileType(h);
+  if (file_type != FILE_TYPE_DISK) {
     CloseHandle(h);
+    return scr_stats_crt_fallback(path, op);
   }
+  BY_HANDLE_FILE_INFORMATION basic;
+  if (!GetFileInformationByHandle(h, &basic)) {
+    CloseHandle(h);
+    return scr_stats_crt_fallback(path, op);
+  }
+  FILE_STANDARD_INFO standard;
+  bool have_standard = GetFileInformationByHandleEx(
+    h, FileStandardInfo, &standard, sizeof standard);
+  CloseHandle(h);
+
+  bool is_dir = (basic.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+  uint64_t size = ((uint64_t)basic.nFileSizeHigh << 32) | basic.nFileSizeLow;
+  ScrStats *s = scr_stats_new();
+  s->is_file = have_standard ? !standard.Directory : !is_dir;
+  s->is_dir = have_standard ? standard.Directory : is_dir;
+  s->is_symlink = false; /* the handle follows the path, like statSync */
+  s->size = s->is_dir ? 0.0
+    : have_standard ? (double)standard.EndOfFile.QuadPart : (double)size;
+  s->blocks = have_standard
+    ? (double)((uint64_t)standard.AllocationSize.QuadPart >> 9)
+    : size == 0 ? 0.0 : (double)((size + 511) >> 9);
+  s->nlink = have_standard
+    ? (double)standard.NumberOfLinks
+    : (double)basic.nNumberOfLinks;
+  s->atime_ms = scr_filetime_unix_ms(basic.ftLastAccessTime);
+  s->mtime_ms = scr_filetime_unix_ms(basic.ftLastWriteTime);
+  return s;
+}
 #else
-  (void)path;
+static ScrStats *scr_stats_of(const struct stat *st) {
+  ScrStats *s = scr_stats_new();
+  s->is_file = S_ISREG(st->st_mode);
+  s->is_dir = S_ISDIR(st->st_mode);
   s->is_symlink = S_ISLNK(st->st_mode);
 #if defined(__APPLE__)
   s->atime_ms = (double)st->st_atimespec.tv_sec * 1000.0 +
@@ -2843,27 +2890,36 @@ static ScrStats *scr_stats_of(const struct stat *st, const char *path) {
 #endif
   s->blocks = (double)st->st_blocks;
   s->nlink = (double)st->st_nlink;
-#endif
   s->size = (double)st->st_size;
   return s;
 }
+#endif
 
 ScrStats *scr_fs_stat(ScrStr *path) {
+#ifdef _WIN32
+  return scr_stats_of_path(path, "stat");
+#else
   struct stat st;
   if (stat(path->data, &st) != 0) { /* follows symlinks, like Node's statSync */
     scr_fs_throw(errno, "stat", path);
     return NULL;
   }
-  return scr_stats_of(&st, path->data);
+  return scr_stats_of(&st);
+#endif
 }
 
 ScrStats *scr_fs_lstat(ScrStr *path) {
+#ifdef _WIN32
+  /* Windows lstat still deliberately follows (see the lstat macro above). */
+  return scr_stats_of_path(path, "lstat");
+#else
   struct stat st;
   if (lstat(path->data, &st) != 0) { /* no follow; Node reports lstat */
     scr_fs_throw(errno, "lstat", path);
     return NULL;
   }
-  return scr_stats_of(&st, path->data);
+  return scr_stats_of(&st);
+#endif
 }
 
 ScrArr *scr_fs_readdir(ScrStr *path) {
