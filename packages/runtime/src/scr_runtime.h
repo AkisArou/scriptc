@@ -2103,6 +2103,7 @@ double scr_process_columns(double fd);
  * stat(2) — follows symlinks, like Node's stat family. scr_fs_stat
  * THROWS like the other sync calls. */
 typedef struct ScrStats ScrStats;
+typedef struct ScrFileHandle ScrFileHandle;
 typedef struct ScrPromise ScrPromise; /* full section further down */
 
 ScrStats *scr_fs_stat(ScrStr *path);  /* +1, or throws */
@@ -2135,6 +2136,13 @@ ScrPromise *scr_fsp_readdir(ScrStr *path);
 ScrPromise *scr_fsp_rm(ScrStr *path);
 ScrPromise *scr_fsp_stat(ScrStr *path);
 ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath);
+ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode);
+ScrPromise *scr_file_handle_close_promise(ScrFileHandle *h);
+ScrPromise *scr_file_handle_read_file_promise(ScrFileHandle *h, ScrStr *encoding);
+ScrPromise *scr_file_handle_read_file_bytes_promise(ScrFileHandle *h, ScrStr *encoding);
+ScrPromise *scr_file_handle_write_file_promise(ScrFileHandle *h, ScrStr *data, ScrStr *encoding);
+ScrPromise *scr_file_handle_write_file_bytes_promise(ScrFileHandle *h, ScrBytes *data, ScrStr *encoding);
+ScrPromise *scr_file_handle_stat_promise(ScrFileHandle *h);
 
 /* fs.rename: the syscall is submitted to a native worker immediately and
  * its error-first callback fires on a later event-loop turn through an
@@ -2494,6 +2502,25 @@ ScrStr *scr_path_win32_to_namespaced_path(ScrStr *path);
  * (failure throws the path-less "EBADF: bad file descriptor, close").
  * The pair behind spawn's fd-stdio form. */
 double scr_fs_open(ScrStr *path, ScrStr *flags);
+ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode);
+ScrFileHandle *scr_file_handle_retain(ScrFileHandle *h);
+void scr_file_handle_release(ScrFileHandle *h);
+void *scr_file_handle_retain_v(void *p);
+void scr_file_handle_release_v(void *p);
+double scr_file_handle_fd(ScrFileHandle *h);
+void scr_file_handle_close(ScrFileHandle *h);
+double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,
+                            double length, double position, bool length_default);
+double scr_file_handle_write_bytes(ScrFileHandle *h, ScrBytes *buf,
+                                   double offset, double length,
+                                   double position, bool length_default);
+double scr_file_handle_write_str(ScrFileHandle *h, ScrStr *data,
+                                 double position, ScrStr *encoding);
+ScrStr *scr_file_handle_read_file(ScrFileHandle *h);
+ScrBytes *scr_file_handle_read_file_bytes(ScrFileHandle *h);
+void scr_file_handle_write_file(ScrFileHandle *h, ScrStr *data);
+void scr_file_handle_write_file_bytes(ScrFileHandle *h, ScrBytes *data);
+ScrStats *scr_file_handle_stat(ScrFileHandle *h);
 /* position == -1 reads from and advances the descriptor's current offset;
  * nonnegative positions leave that offset unchanged (pread/ReadFile seam). */
 double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length,

@@ -16,7 +16,7 @@ import { ffiBindingDiag, ffiSignatureDiag, requiresDynamicDiag } from "../../dia
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
-import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
+import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerFileHandleMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
 import { droppableStatic, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
 import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
@@ -3886,6 +3886,7 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         L.lowerUrlMethodCall(expr, expr.expression) ??
         L.lowerSearchParamsMethodCall(expr, expr.expression) ??
         L.lowerStatsMethodCall(expr, expr.expression) ??
+        lowerFileHandleMethodCall(L, expr, expr.expression) ??
         L.lowerChildMethodCall(expr, expr.expression) ??
         // Piped child-output stream receivers — on/once("data" | "end").
         lowerChildStreamMethodCall(L, expr, expr.expression) ??

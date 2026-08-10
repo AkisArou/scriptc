@@ -191,6 +191,10 @@ export function vAdapters(host: ShapeHost, t: IrType): { retain: string; release
       host.declare(`declare ptr @scr_stats_retain_v(ptr)`);
       host.declare(`declare void @scr_stats_release_v(ptr)`);
       return { retain: "@scr_stats_retain_v", release: "@scr_stats_release_v" };
+    case "fileHandle":
+      host.declare(`declare ptr @scr_file_handle_retain_v(ptr)`);
+      host.declare(`declare void @scr_file_handle_release_v(ptr)`);
+      return { retain: "@scr_file_handle_retain_v", release: "@scr_file_handle_release_v" };
     case "spawnRes":
       host.declare(`declare ptr @scr_spawn_res_retain_v(ptr)`);
       host.declare(`declare void @scr_spawn_res_release_v(ptr)`);
@@ -349,6 +353,9 @@ export function releaseSym(host: ShapeHost, t: IrType): string {
     case "stats":
       host.declare(`declare void @scr_stats_release_v(ptr)`);
       return "@scr_stats_release_v";
+    case "fileHandle":
+      host.declare(`declare void @scr_file_handle_release_v(ptr)`);
+      return "@scr_file_handle_release_v";
     case "spawnRes":
       host.declare(`declare void @scr_spawn_res_release_v(ptr)`);
       return "@scr_spawn_res_release_v";
@@ -542,7 +549,7 @@ export function boxNewCall(host: ShapeHost, t: IrType): string {
     t.kind === "record" || t.kind === "object" || t.kind === "classval" || t.kind === "union" ||
     t.kind === "array" || t.kind === "map" || t.kind === "set" || t.kind === "symbol" || t.kind === "regex" ||
     t.kind === "promise" || t.kind === "bytes" || t.kind === "url" || t.kind === "searchParams" ||
-    t.kind === "stats" || t.kind === "spawnRes" || t.kind === "child" || t.kind === "childStream" ||
+    t.kind === "stats" || t.kind === "fileHandle" || t.kind === "spawnRes" || t.kind === "child" || t.kind === "childStream" ||
     t.kind === "generator" ||
     t.kind === "netServer" || t.kind === "netSocket" || t.kind === "dgramSocket" ||
     t.kind === "httpReq" || t.kind === "httpRes" || t.kind === "httpClientReq" ||
@@ -595,6 +602,7 @@ export function llFieldType(t: IrType): "double" | "i8" | "ptr" {
     case "url":
     case "searchParams":
     case "stats":
+    case "fileHandle":
     case "spawnRes":
     case "child":
     case "childStream":

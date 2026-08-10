@@ -217,6 +217,11 @@ export interface CcOptions {
    * implemented in scr_copying.c (index.ts detects them on the IR).
    * Off keeps that optional TU out of unrelated binaries. */
   copying?: boolean;
+  /** The program uses fs/promises.open or a FileHandle value
+   * (moduleUsesFileHandle on the IR): compiles scr_file_handle.c. Keeping
+   * the descriptor object and promise adapters in their own unit preserves
+   * the base runtime's size class for programs that never open a handle. */
+  fileHandle?: boolean;
   /** The embedded npm graph references fetch (index.ts detects it on the
    * IR): compiles the NATIVE fetch bridge (scr_fetch.c over scr_net +
    * scr_tls + scr_http's client parser + zlib — the socket units join
@@ -3049,6 +3054,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     "-I", rtDir,
     ...RUNTIME_SOURCES.map((f) => rt(join(rtDir, f))),
     ...(opts.copying ? [rt(join(rtDir, "scr_copying.c"))] : []),
+    ...(opts.fileHandle ? [rt(join(rtDir, "scr_file_handle.c"))] : []),
     // win32 targets compile the libc-shim TU (stpcpy, arc4random_buf,
     // gmtime_r, strcasestr — the _WIN32 block in scr_runtime.h declares
     // them) and link advapi32 (the CSPRNG RtlGenRandom/SystemFunction036,

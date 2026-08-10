@@ -506,6 +506,14 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fsp.readdir": "scr_fsp_readdir",
   "fsp.rm": "scr_fsp_rm",
   "fsp.stat": "scr_fsp_stat",
+  "fsp.open": "scr_fsp_open",
+  "fileHandle.fd": "scr_file_handle_fd",
+  "fileHandle.close": "scr_file_handle_close_promise",
+  "fileHandle.readFile": "scr_file_handle_read_file_promise",
+  "fileHandle.readFileBytes": "scr_file_handle_read_file_bytes_promise",
+  "fileHandle.writeFile": "scr_file_handle_write_file_promise",
+  "fileHandle.writeFileBytes": "scr_file_handle_write_file_bytes_promise",
+  "fileHandle.stat": "scr_file_handle_stat_promise",
   "sym.new": "scr_sym_new",
   "sym.for": "scr_sym_for",
   "sym.toString": "scr_sym_to_string",
@@ -1138,6 +1146,7 @@ class LlEmitter {
       case "url":
       case "searchParams":
       case "stats":
+      case "fileHandle":
       case "spawnRes":
       case "child":
       case "childStream":
@@ -2574,6 +2583,7 @@ class LlEmitter {
       case "url":
       case "searchParams":
       case "stats":
+      case "fileHandle":
       case "spawnRes":
       case "child":
       case "childStream":
@@ -2670,6 +2680,7 @@ class LlEmitter {
             case "url":
             case "searchParams":
             case "stats":
+            case "fileHandle":
             case "spawnRes":
             case "child":
             case "childStream":
@@ -11050,6 +11061,39 @@ class LlEmitter {
       this.declare(`declare void @scr_fs_rename_async(ptr, ptr, ptr, ptr)`);
       B.line(`call void @scr_fs_rename_async(ptr ${args[0]!.name}, ptr ${args[1]!.name}, ptr ${args[2]!.name}, ptr @${adapter})`);
       return { name: "", type: e.type };
+    }
+    if (e.fn === "fileHandle.read" || e.fn === "fileHandle.writeBytes" || e.fn === "fileHandle.writeStr") {
+      if (e.type.kind !== "promise" || e.type.inner.kind !== "record") {
+        throw new Error(`llvm emitter bug: ${e.fn} result`);
+      }
+      const args = e.args.map((a) => this.emitExpr(a));
+      const sym = e.fn === "fileHandle.read"
+        ? "scr_file_handle_read"
+        : e.fn === "fileHandle.writeBytes"
+          ? "scr_file_handle_write_bytes"
+          : "scr_file_handle_write_str";
+      const tail = e.fn === "fileHandle.writeStr"
+        ? "ptr, ptr, double, ptr"
+        : "ptr, ptr, double, double, double, i1 zeroext";
+      this.declare(`declare double @${sym}(${tail})`);
+      const count = B.tmp();
+      B.line(
+        `${count} = call double @${sym}(${args.map((a) => `${this.llType(a.type)} ${a.name}`).join(", ")})`,
+      );
+      const inner = e.type.inner;
+      const rec = B.tmp();
+      B.line(`${rec} = call ptr @${mangleRecordNew(inner.shapeId)}()`);
+      const countField = e.fn === "fileHandle.read" ? "bytesRead" : "bytesWritten";
+      this.storeField(this.recordFieldPtr(rec, inner.shapeId, countField).ptr, F64, count);
+      const payload = this.retainValue(args[1]!.name, e.args[1]!.type);
+      B.line(`store ptr ${payload}, ptr ${this.recordFieldPtr(rec, inner.shapeId, "buffer").ptr}`);
+      const rc = vAdapters(this, inner);
+      this.declare(`declare ptr @scr_promise_settled_ref(ptr, ptr, ptr, ptr)`);
+      const result = B.tmp();
+      B.line(
+        `${result} = call ptr @scr_promise_settled_ref(ptr ${rec}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this, inner)})`,
+      );
+      return this.own({ name: result, type: e.type });
     }
     if (e.fn === "fetch.responseText" || e.fn === "fetch.responseBytes") {
       if (e.type.kind !== "promise") {
