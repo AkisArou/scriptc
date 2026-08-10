@@ -15,3 +15,12 @@ text-decoder-label.ts:7:13 - error SC2020: 'new TextDecoder with runtime-valued 
   8 | 
 
   hint: a recognized literal WHATWG label with default options compiles
+
+text-decoder-label.ts:10:13 - error SC2020: 'new TextDecoder with runtime-valued options or an unknown label' is part of the standard library types but has no scriptc lowering yet
+
+   9 | // Vertical tab is not WHATWG ASCII whitespace and must not be trimmed.
+  10 | console.log(new TextDecoder("\vutf-8").decode(bytes));
+     |             ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  11 | 
+
+  hint: a recognized literal WHATWG label with default options compiles

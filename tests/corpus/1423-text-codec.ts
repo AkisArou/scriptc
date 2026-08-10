@@ -122,6 +122,9 @@ const recoverySamples = [
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x41])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x4f])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x28, 0x48, 0x5c, 0x7e])),
+  // ICU emits line separators in JIS/Katakana states and resumes in ASCII.
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x46, 0x7c, 0x0a, 0x41])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x28, 0x49, 0x21, 0x0d, 0x41])),
 ];
 console.log(JSON.stringify(recoverySamples));
 

@@ -1114,6 +1114,17 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
   while (!at_eof) {
     int item = i < b->len ? b->data[i++] : -1;
     uint8_t byte = item < 0 ? 0 : (uint8_t)item;
+    /* ICU treats CR/LF as line boundaries while a non-ASCII designation is
+     * active: emit the separator and resume in ASCII. A pending JIS lead is
+     * different (TRAIL state below) — there the line break completes an
+     * ill-formed pair and remains a replacement, matching Node. */
+    if (item >= 0 && (byte == 0x0a || byte == 0x0d) &&
+        (state == SCR_TD_ISO_KATAKANA || state == SCR_TD_ISO_LEAD)) {
+      output_flag = false;
+      state = output_state = SCR_TD_ISO_ASCII;
+      scr_td_put(&out, byte);
+      continue;
+    }
     switch (state) {
       case SCR_TD_ISO_ASCII:
       case SCR_TD_ISO_ROMAN:

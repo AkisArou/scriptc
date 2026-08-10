@@ -6390,7 +6390,7 @@ type StaticTextDecoderEncoding = { kind: "utf8" } | { kind: "legacy"; id: number
  * fold ASCII case only (Unicode case folding must not manufacture a label). */
 function staticTextDecoderEncoding(label: string): StaticTextDecoderEncoding | null {
   const normalized = label
-    .replace(/^[\u0009-\u000d\u0020]+|[\u0009-\u000d\u0020]+$/g, "")
+    .replace(/^[\u0009\u000a\u000c\u000d\u0020]+|[\u0009\u000a\u000c\u000d\u0020]+$/g, "")
     .replace(/[A-Z]/g, (char) => char.toLowerCase());
   if (TEXT_DECODER_UTF8_LABELS.has(normalized)) return { kind: "utf8" };
   const id = own(TEXT_DECODER_LEGACY_LABELS, normalized);
