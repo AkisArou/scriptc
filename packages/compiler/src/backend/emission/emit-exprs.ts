@@ -554,6 +554,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         // tag-only); one reaching the generic dispatch escaped its wrap.
         throw new Error(`emitter bug: bare unitLit '${e.unit}'`);
       case "varRef": {
+        const integerLoopIndex = E.integerLoopIndex(e);
+        if (integerLoopIndex !== null) return E.newTemp(e.type, `(double)${integerLoopIndex}`);
         const local = E.currentLocals.get(e.localId);
         if (!local && E.globalsById.has(e.localId)) {
           const gname = mangleGlobal(e.localId);
@@ -1590,7 +1592,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const r = directElementAccess
           ? emitBytesReceiver(E, e.receiver, e.args)
           : E.emitExpr(e.receiver);
-        const args = e.args.map((a) => E.emitExpr(a));
+        const integerIndex = method === "get" ? E.integerLoopIndex(e.args[0]!) : null;
+        const args = integerIndex === null ? e.args.map((a) => E.emitExpr(a)) : [];
         switch (method) {
           case "length":
             return E.newTemp(e.type, `(double)${r.name}->len`);
@@ -1609,7 +1612,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             }
             return E.newTemp(
               e.type,
-              `${E.bytesElementHelper("get", e.receiver.type.elem)}(${r.name}, ${args[0]!.name})`,
+              `${E.bytesElementHelper("get", e.receiver.type.elem, integerIndex !== null)}(${r.name}, ${integerIndex ?? args[0]!.name})`,
             );
           case "slice":
             // Omitted relative indices default like string slice: start 0,

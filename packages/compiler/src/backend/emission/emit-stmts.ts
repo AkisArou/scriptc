@@ -9,6 +9,7 @@ import { BOOL, CAUGHT, IrExpr, IrStmt, RUNTIME_ERROR_CLASSES, isRefCounted } fro
 import { boxAccess, cDecl, cStringLiteral, elemAccess, vAdapters } from "./emit-types.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { emitBytesReceiver } from "./emit-exprs.js";
+import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 
 
 
@@ -27,6 +28,7 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
     E.labelCounter = 0;
     E.currentLocals = new Map(fn.locals.map((l) => [l.id, l]));
     E.captureIds = new Set((fn.captures ?? []).map((c) => c.localId));
+    E.integerLoopBindings.clear();
 
     E.line(`${E.signature(fn)} {${E.srcComment(fn.loc)}`);
     E.indent++;
@@ -307,13 +309,24 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
       case "for": {
         // Desugared in place; the init's scope wraps the whole loop, so
         // break/continue must NOT release it (scopeDepth captured after).
+        const integerLoop = matchIntegerBytesForLoop(s, E.currentLocals);
         E.line(`{${E.srcComment(s.loc)}`);
         E.indent++;
         E.scopes.push([]);
-        if (s.init) E.emitStmt(s.init);
+        let integerShadow: string | null = null;
+        if (integerLoop) {
+          integerShadow = `sc_i${E.tempCounter++}`;
+          E.line(`uint64_t ${integerShadow} = 0; /* integer induction ${E.currentLocals.get(integerLoop.localId)!.name} */`);
+          E.integerLoopBindings.set(integerLoop.localId, integerShadow);
+        } else if (s.init) {
+          E.emitStmt(s.init);
+        }
         E.line(`for (;;) {`);
         E.indent++;
-        if (s.cond) {
+        if (integerLoop && integerShadow) {
+          const receiver = emitBytesReceiver(E, integerLoop.limitReceiver, []);
+          E.line(`if (!(${integerShadow} < ${receiver.name}->len)) break;`);
+        } else if (s.cond) {
           const cond = E.emitCondition(s.cond);
           E.line(`if (!(${cond})) break;`);
         }
@@ -341,7 +354,8 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
             // loop exit — which is now the freshest binding. Nothing to fix.
           }
         }
-        if (s.update) E.emitStmt(s.update);
+        if (integerLoop && integerShadow) E.line(`${integerShadow}++;`);
+        else if (s.update) E.emitStmt(s.update);
         E.indent--;
         E.line(`}`);
         // A labeled break lands exactly where C break does: BEFORE the
@@ -349,6 +363,7 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         // as the fall-through path).
         if (loop.usedEnd) E.line(`${loop.endLabel}:;`);
         E.releaseFrame(E.scopes.pop()!);
+        if (integerLoop) E.integerLoopBindings.delete(integerLoop.localId);
         E.indent--;
         E.line(`}`);
         break;
@@ -373,11 +388,12 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         // append. The IR carries the element kind; do not rediscover it in
         // the generic runtime accessor on every loop iteration.
         const arr = emitBytesReceiver(E, s.arr, [s.index, s.value]);
-        const idx = E.emitExpr(s.index);
+        const integerIndex = E.integerLoopIndex(s.index);
+        const idx = integerIndex === null ? E.emitExpr(s.index).name : integerIndex;
         const v = E.emitExpr(s.value);
         if (s.arr.type.kind !== "bytes") throw new Error("emitter bug: bytesSet on non-bytes");
         E.line(
-          `${E.bytesElementHelper("set", s.arr.type.elem)}(${arr.name}, ${idx.name}, ${v.name});${E.srcComment(s.loc)}`,
+          `${E.bytesElementHelper("set", s.arr.type.elem, integerIndex !== null)}(${arr.name}, ${idx}, ${v.name});${E.srcComment(s.loc)}`,
         );
         break;
       }
