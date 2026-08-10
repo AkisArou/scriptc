@@ -835,6 +835,11 @@ static ScrStr *scr_td_utf16(const ScrBytes *b, bool be) {
           scr_td_put(&out, 0x10000 + ((cu - 0xd800) << 10) + (lo - 0xdc00));
           continue;
         }
+      } else if (i < n) {
+        /* ICU treats a lead surrogate plus one final byte as one malformed
+         * UTF-16 subsequence. Consume that byte here so the odd-tail path
+         * below does not emit a second replacement. */
+        i++;
       }
       scr_td_error(&out);
       continue;
@@ -1108,11 +1113,18 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
   enum ScrTdIsoState state = SCR_TD_ISO_ASCII;
   enum ScrTdIsoState output_state = SCR_TD_ISO_ASCII;
   uint8_t lead = 0;
+  int replay = -1;
   bool output_flag = false;
   size_t i = 0;
   bool at_eof = false;
   while (!at_eof) {
-    int item = i < b->len ? b->data[i++] : -1;
+    int item;
+    if (replay >= 0) {
+      item = replay;
+      replay = -1;
+    } else {
+      item = i < b->len ? b->data[i++] : -1;
+    }
     uint8_t byte = item < 0 ? 0 : (uint8_t)item;
     /* ICU treats CR/LF as line boundaries while a non-ASCII designation is
      * active: emit the separator and resume in ASCII. A pending JIS lead is
@@ -1151,6 +1163,17 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
         if (byte >= 0x21 && byte <= 0x7e) {
           output_flag = false; lead = byte; state = SCR_TD_ISO_TRAIL; break;
         }
+        /* ICU's fixed-width JIS converter folds two adjacent non-starter
+         * bytes into one malformed subsequence. A valid lead, ESC, and the
+         * SO/SI controls begin their own item and must remain queued; CR/LF
+         * following an invalid byte is payload here rather than the line
+         * reset handled above. */
+        if (byte != 0x0e && byte != 0x0f && i < b->len) {
+          uint8_t next = b->data[i];
+          bool starts_item = next == 0x0e || next == 0x0f || next == 0x1b ||
+                             (next >= 0x21 && next <= 0x7e);
+          if (!starts_item) i++;
+        }
         output_flag = false; scr_td_error(&out); break;
 
       case SCR_TD_ISO_TRAIL:
@@ -1160,7 +1183,13 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
         if (byte >= 0x21 && byte <= 0x7e) {
           uint32_t cp = scr_td_jis0208[(lead - 0x21) * 94 + byte - 0x21];
           if (cp) scr_td_put(&out, cp); else scr_td_error(&out);
-        } else scr_td_error(&out);
+        } else {
+          scr_td_error(&out);
+          /* SO/SI are standalone illegal items in ICU's JIS state rather
+           * than trails consumed with the pending lead. Replay them so they
+           * each contribute their own replacement. */
+          if (byte == 0x0e || byte == 0x0f) i--;
+        }
         break;
 
       case SCR_TD_ISO_ESCAPE_START:
@@ -1187,7 +1216,7 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
         if ((int)next >= 0) {
           state = output_state = next;
           bool repeated = output_flag;
-          output_flag = true;
+          output_flag = !repeated;
           if (repeated) scr_td_error(&out);
           break;
         }
@@ -1201,6 +1230,9 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
           (lead == 0x2e && (byte == 0x41 || byte == 0x46));
         if (item >= 0 && lead == 0x26 && byte == 0x40) {
           state = output_state;
+          bool repeated = output_flag;
+          output_flag = !repeated;
+          if (repeated) scr_td_error(&out);
           break;
         }
         if (item < 0 || consume_error) {
@@ -1208,20 +1240,12 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
           if (item < 0) at_eof = true;
           break;
         }
-        if (item >= 0) i--;
+        i--;
         /* The first escape payload byte is restored before the current
-         * byte. Process it immediately in the prior output state. */
-        uint8_t restore = lead;
+         * byte. Replay it through the full prior state machine: in JIS
+         * mode it can become the lead paired with the current byte. */
+        replay = lead;
         output_flag = false; state = output_state; scr_td_error(&out);
-        if (restore == 0x1b) { state = SCR_TD_ISO_ESCAPE_START; }
-        else if (state == SCR_TD_ISO_ROMAN && restore == 0x5c) scr_td_put(&out, 0x00a5);
-        else if (state == SCR_TD_ISO_ROMAN && restore == 0x7e) scr_td_put(&out, 0x203e);
-        else if (state == SCR_TD_ISO_KATAKANA && restore >= 0x21 && restore <= 0x5f)
-          scr_td_put(&out, 0xff61 + restore - 0x21);
-        else if (state != SCR_TD_ISO_KATAKANA && restore < 0x80 && restore != 0x0e && restore != 0x0f)
-          scr_td_put(&out, restore);
-        else scr_td_error(&out);
-        if (item < 0) at_eof = true;
         break;
       }
     }

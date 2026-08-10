@@ -89,6 +89,8 @@ console.log(JSON.stringify(new TextDecoder("x-user-defined").decode(new Uint8Arr
 console.log(new TextDecoder("utf-16le").decode(new Uint8Array([0xff, 0xfe, 0x61, 0x00, 0x3d, 0xd8, 0x00, 0xde])));
 console.log(new TextDecoder("unicodefffe").decode(new Uint8Array([0xfe, 0xff, 0x00, 0x61, 0xd8, 0x3d, 0xde, 0x00])));
 console.log(JSON.stringify(new TextDecoder("utf-16le").decode(new Uint8Array([0x00, 0xd8, 0x61, 0x00, 0xff]))));
+console.log(JSON.stringify(new TextDecoder("utf-16le").decode(new Uint8Array([0x00, 0xd8, 0x12]))));
+console.log(JSON.stringify(new TextDecoder("utf-16be").decode(new Uint8Array([0xd8, 0x00, 0x12]))));
 
 // The multibyte families: two- and four-byte GB, traditional Chinese,
 // Japanese stateful/stateless forms, and Korean.
@@ -122,6 +124,16 @@ const recoverySamples = [
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x41])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x4f])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x28, 0x48, 0x5c, 0x7e])),
+  // In JIS mode ICU groups adjacent invalid payload bytes, but SO/SI begin
+  // standalone errors; a grouped CR/LF does not perform the line reset.
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x00, 0x00])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x21, 0x0e])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x00, 0x0a, 0x41])),
+  // Malformed escapes restore their payload in the active JIS state;
+  // consecutive designations toggle ICU's replacement flag.
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x1b, 0x24, 0x21])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x1b, 0x24, 0x42, 0x1b, 0x24, 0x42])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x26, 0x40, 0x1b, 0x24, 0x42, 0x46, 0x7c])),
   // ICU emits line separators in JIS/Katakana states and resumes in ASCII.
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x42, 0x46, 0x7c, 0x0a, 0x41])),
   new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x28, 0x49, 0x21, 0x0d, 0x41])),
