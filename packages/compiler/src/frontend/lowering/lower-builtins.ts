@@ -4635,7 +4635,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     L.noLowering(
       `Stats.${name}`,
       call,
-      "isFile(), isDirectory(), isSymbolicLink(), size, and mtimeMs are the supported Stats members",
+      "isFile(), isDirectory(), isSymbolicLink(), size, blocks, nlink, atimeMs, and mtimeMs are the supported Stats members",
       L.checker.getSymbolAtLocation(access.name),
     );
   }
@@ -4691,12 +4691,11 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
 
 /** The property-read extensions this spoke owns, tried BEFORE the
    * lower-exprs intrinsic-property fallback (the lowerer's wrapper chains
-   * them): Stats.mtimeMs (milliseconds with the nanosecond fraction,
-   * Node's arithmetic) and SpawnSyncReturns.signal (the termination
-   * signal's name as the call site's `Signals | null` union — null for a
-   * normal exit or spawn failure; a timeout kill reports its killSignal,
-   * Node's shape). Null for everything else, so the ordinary chain (and
-   * its fences) keeps going. */
+   * them): the widened numeric Stats snapshot and SpawnSyncReturns.signal
+   * (the termination signal's name as the call site's `Signals | null` union
+   * — null for a normal exit or spawn failure; a timeout kill reports its
+   * killSignal, Node's shape). Null for everything else, so the ordinary
+   * chain (and its fences) keeps going. */
   export function lowerBuiltinExtraProperty(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
     if (expr.questionDotToken && !L.chainHandled.has(expr)) return null;
     // decoder.encoding on a StringDecoder-typed receiver: the record's
@@ -4748,9 +4747,17 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       return L.maybeNarrow(read, expr);
     }
     if (kind === "child") return null; // pid/exitCode/killed live in lowerIntrinsicProperty
-    if (kind === "stats" && name === "mtimeMs") {
+    if (
+      kind === "stats" &&
+      (name === "blocks" || name === "nlink" || name === "atimeMs" || name === "mtimeMs")
+    ) {
       const receiver = L.lowerExpr(expr.expression);
-      return { kind: "libCall", fn: "stats.mtimeMs", args: [receiver], type: F64, loc };
+      const fn = `stats.${name}` as
+        | "stats.blocks"
+        | "stats.nlink"
+        | "stats.atimeMs"
+        | "stats.mtimeMs";
+      return { kind: "libCall", fn, args: [receiver], type: F64, loc };
     }
     if (kind === "spawnRes" && name === "signal") {
       const receiver = L.lowerExpr(expr.expression);

@@ -14,6 +14,7 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -41,8 +42,30 @@ struct ScrStats {
   bool is_dir;
   bool is_symlink;
   double size;
+  double blocks;
+  double nlink;
+  double atime_ms;
   double mtime_ms;
 };
+
+#ifdef _WIN32
+/* Keep the FILETIME conversion byte-for-byte with scr_lib.c's path-stat arm:
+ * libuv splits the 100ns count into Unix seconds and nanoseconds before Node
+ * combines it into the public millisecond value. */
+static double scr_file_handle_filetime_ms(FILETIME ft) {
+  ULARGE_INTEGER raw;
+  raw.LowPart = ft.dwLowDateTime;
+  raw.HighPart = ft.dwHighDateTime;
+  int64_t ticks = (int64_t)raw.QuadPart - INT64_C(116444736000000000);
+  int64_t sec = ticks / INT64_C(10000000);
+  int64_t rem = ticks % INT64_C(10000000);
+  if (rem < 0) {
+    sec--;
+    rem += INT64_C(10000000);
+  }
+  return (double)sec * 1000.0 + (double)rem / 10000.0;
+}
+#endif
 
 typedef struct {
   char *data;
@@ -383,11 +406,37 @@ ScrStats *scr_file_handle_stat(ScrFileHandle *h) {
   out->is_symlink = false; /* fstat follows the open descriptor. */
   out->size = (double)st.st_size;
 #if defined(_WIN32)
+  out->blocks = st.st_size <= 0 ? 0.0 : (double)(((uint64_t)st.st_size + 511) >> 9);
+  out->nlink = (double)st.st_nlink;
+  out->atime_ms = (double)st.st_atime * 1000.0;
   out->mtime_ms = (double)st.st_mtime * 1000.0;
+  HANDLE os_handle = (HANDLE)_get_osfhandle(h->fd);
+  if (os_handle != INVALID_HANDLE_VALUE) {
+    BY_HANDLE_FILE_INFORMATION basic;
+    if (GetFileInformationByHandle(os_handle, &basic)) {
+      out->nlink = (double)basic.nNumberOfLinks;
+      out->atime_ms = scr_file_handle_filetime_ms(basic.ftLastAccessTime);
+      out->mtime_ms = scr_file_handle_filetime_ms(basic.ftLastWriteTime);
+    }
+    FILE_STANDARD_INFO standard;
+    if (GetFileInformationByHandleEx(
+          os_handle, FileStandardInfo, &standard, sizeof standard)) {
+      out->blocks = (double)((uint64_t)standard.AllocationSize.QuadPart >> 9);
+      out->nlink = (double)standard.NumberOfLinks;
+    }
+  }
 #elif defined(__APPLE__)
+  out->blocks = (double)st.st_blocks;
+  out->nlink = (double)st.st_nlink;
+  out->atime_ms = (double)st.st_atimespec.tv_sec * 1000.0 +
+                  (double)st.st_atimespec.tv_nsec / 1e6;
   out->mtime_ms = (double)st.st_mtimespec.tv_sec * 1000.0 +
                   (double)st.st_mtimespec.tv_nsec / 1e6;
 #else
+  out->blocks = (double)st.st_blocks;
+  out->nlink = (double)st.st_nlink;
+  out->atime_ms = (double)st.st_atim.tv_sec * 1000.0 +
+                  (double)st.st_atim.tv_nsec / 1e6;
   out->mtime_ms = (double)st.st_mtim.tv_sec * 1000.0 +
                   (double)st.st_mtim.tv_nsec / 1e6;
 #endif

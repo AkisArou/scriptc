@@ -2978,6 +2978,9 @@ static JSValue isl_host_fs(JSContext *ctx, JSValueConst this_val, int argc,
       JS_SetPropertyUint32(ctx, arr, 2, JS_NewBool(ctx, scr_stats_is_symlink(st)));
       JS_SetPropertyUint32(ctx, arr, 3, JS_NewFloat64(ctx, scr_stats_size(st)));
       JS_SetPropertyUint32(ctx, arr, 4, JS_NewFloat64(ctx, scr_stats_mtime_ms(st)));
+      JS_SetPropertyUint32(ctx, arr, 5, JS_NewFloat64(ctx, scr_stats_blocks(st)));
+      JS_SetPropertyUint32(ctx, arr, 6, JS_NewFloat64(ctx, scr_stats_nlink(st)));
+      JS_SetPropertyUint32(ctx, arr, 7, JS_NewFloat64(ctx, scr_stats_atime_ms(st)));
       scr_stats_release(st);
       ret = arr;
     }
@@ -3996,6 +3999,10 @@ static const char isl_modules_bootstrap[] =
     "      this._l = row[2];\n"
     "      this.size = row[3];\n"
     "      this.mtimeMs = row[4];\n"
+    "      this.blocks = row[5];\n"
+    "      this.nlink = row[6];\n"
+    "      this.atimeMs = row[7];\n"
+    "      this.atime = new Date(row[7]);\n"
     "      this.mtime = new Date(row[4]);\n"
     "      this.mode = (this._f ? constants.S_IFREG : this._d ? constants.S_IFDIR : this._l ? (constants.S_IFLNK || 0) : 0);\n"
     "    }\n"

@@ -1112,6 +1112,23 @@ static double scr_filetime_us(FILETIME ft) {
   v.HighPart = ft.dwHighDateTime;
   return (double)(v.QuadPart / 10);
 }
+
+/* A filesystem FILETIME is 100ns ticks since 1601. Match libuv's split into
+ * Unix seconds + nanoseconds before doing Node's millisecond arithmetic; the
+ * split matters for the last-bit rounding of dates far from the epoch. */
+static double scr_filetime_unix_ms(FILETIME ft) {
+  ULARGE_INTEGER raw;
+  raw.LowPart = ft.dwLowDateTime;
+  raw.HighPart = ft.dwHighDateTime;
+  int64_t ticks = (int64_t)raw.QuadPart - INT64_C(116444736000000000);
+  int64_t sec = ticks / INT64_C(10000000);
+  int64_t rem = ticks % INT64_C(10000000);
+  if (rem < 0) {
+    sec--;
+    rem += INT64_C(10000000);
+  }
+  return (double)sec * 1000.0 + (double)rem / 10000.0;
+}
 double scr_cpu_user(void) {
   FILETIME c, e, k, u;
   if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
@@ -2745,6 +2762,9 @@ struct ScrStats {
   bool is_dir;
   bool is_symlink; /* lstat only — a followed stat never sees one */
   double size;
+  double blocks;   /* allocated size in 512-byte units (Node/libuv) */
+  double nlink;
+  double atime_ms;
   double mtime_ms; /* milliseconds with the nanosecond fraction (Node) */
 };
 
@@ -2765,9 +2785,12 @@ bool scr_stats_is_file(ScrStats *s) { return s->is_file; }
 bool scr_stats_is_dir(ScrStats *s) { return s->is_dir; }
 bool scr_stats_is_symlink(ScrStats *s) { return s->is_symlink; }
 double scr_stats_size(ScrStats *s) { return s->size; }
+double scr_stats_blocks(ScrStats *s) { return s->blocks; }
+double scr_stats_nlink(ScrStats *s) { return s->nlink; }
+double scr_stats_atime_ms(ScrStats *s) { return s->atime_ms; }
 double scr_stats_mtime_ms(ScrStats *s) { return s->mtime_ms; }
 
-static ScrStats *scr_stats_of(const struct stat *st) {
+static ScrStats *scr_stats_of(const struct stat *st, const char *path) {
   ScrStats *s = malloc(sizeof(ScrStats));
   if (!s) {
     scr_trap("scriptc: out of memory\n");
@@ -2776,21 +2799,50 @@ static ScrStats *scr_stats_of(const struct stat *st) {
   s->is_file = S_ISREG(st->st_mode);
   s->is_dir = S_ISDIR(st->st_mode);
 #if defined(_WIN32)
-  /* CRT stat has no symlink view (lstat above degrades to stat) and no
-   * sub-second mtime — whole seconds where Node reads the FILETIME's
-   * 100ns units (divergence: mtimeMs precision; mechanical fix is
-   * GetFileAttributesEx). */
+  /* The CRT snapshot supplies safe fallbacks, but its times have only whole
+   * seconds and it has no allocated-block count. Query the same followed
+   * handle Node/libuv uses: FILE_STANDARD_INFO carries the allocation size
+   * and link count; BY_HANDLE_FILE_INFORMATION carries 100ns access/write
+   * times. A metadata-query refusal leaves the CRT values in place rather
+   * than turning a successful stat into a new failure. */
   s->is_symlink = false;
+  s->blocks = st->st_size <= 0 ? 0.0 : (double)(((uint64_t)st->st_size + 511) >> 9);
+  s->nlink = (double)st->st_nlink;
+  s->atime_ms = (double)st->st_atime * 1000.0;
   s->mtime_ms = (double)st->st_mtime * 1000.0;
+  HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    BY_HANDLE_FILE_INFORMATION basic;
+    if (GetFileInformationByHandle(h, &basic)) {
+      s->nlink = (double)basic.nNumberOfLinks;
+      s->atime_ms = scr_filetime_unix_ms(basic.ftLastAccessTime);
+      s->mtime_ms = scr_filetime_unix_ms(basic.ftLastWriteTime);
+    }
+    FILE_STANDARD_INFO standard;
+    if (GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof standard)) {
+      s->blocks = (double)((uint64_t)standard.AllocationSize.QuadPart >> 9);
+      s->nlink = (double)standard.NumberOfLinks;
+    }
+    CloseHandle(h);
+  }
 #else
+  (void)path;
   s->is_symlink = S_ISLNK(st->st_mode);
 #if defined(__APPLE__)
+  s->atime_ms = (double)st->st_atimespec.tv_sec * 1000.0 +
+                (double)st->st_atimespec.tv_nsec / 1e6;
   s->mtime_ms = (double)st->st_mtimespec.tv_sec * 1000.0 +
                 (double)st->st_mtimespec.tv_nsec / 1e6;
 #else
+  s->atime_ms = (double)st->st_atim.tv_sec * 1000.0 +
+                (double)st->st_atim.tv_nsec / 1e6;
   s->mtime_ms = (double)st->st_mtim.tv_sec * 1000.0 +
                 (double)st->st_mtim.tv_nsec / 1e6;
 #endif
+  s->blocks = (double)st->st_blocks;
+  s->nlink = (double)st->st_nlink;
 #endif
   s->size = (double)st->st_size;
   return s;
@@ -2802,7 +2854,7 @@ ScrStats *scr_fs_stat(ScrStr *path) {
     scr_fs_throw(errno, "stat", path);
     return NULL;
   }
-  return scr_stats_of(&st);
+  return scr_stats_of(&st, path->data);
 }
 
 ScrStats *scr_fs_lstat(ScrStr *path) {
@@ -2811,7 +2863,7 @@ ScrStats *scr_fs_lstat(ScrStr *path) {
     scr_fs_throw(errno, "lstat", path);
     return NULL;
   }
-  return scr_stats_of(&st);
+  return scr_stats_of(&st, path->data);
 }
 
 ScrArr *scr_fs_readdir(ScrStr *path) {

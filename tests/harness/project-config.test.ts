@@ -99,7 +99,7 @@ test("node-types: path and os lower statically under @types/node's shapes", asyn
   expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
   if (!result.ok) return;
   const { stdout } = await execFileAsync(result.binaryPath);
-  expect(stdout).toBe("b/c.txt\n/x/y z .gz\ntrue /\ntrue true\ntrue true\ntrue\n");
+  expect(stdout).toBe("b/c.txt\n/x/y z .gz\ntrue /\ntrue true\ntrue true true true true\ntrue\n");
 });
 
 test("node-types: fetch AbortSignal and readable bodies lower statically", async () => {
