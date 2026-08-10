@@ -94,4 +94,13 @@ describe("async_free detection over the IR", () => {
       ),
     ).toContain("process.stdout.write completion callbacks");
   });
+
+  test("explicitly omitted process output callbacks remain async_free", async () => {
+    expect(
+      await surfaceOf(
+        "stdout-write-undefined",
+        `process.stdout.write("x", undefined);\nprocess.stdout.write("y", "utf8", undefined);\n`,
+      ),
+    ).toBeNull();
+  });
 });

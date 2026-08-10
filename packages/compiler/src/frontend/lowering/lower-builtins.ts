@@ -6046,22 +6046,35 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
             "the supported forms are write(data[, encoding][, callback]) with a static BufferEncoding and completion callback",
           );
         }
-        const secondT = args[1] ? L.mapTypeOf(L.typeOf(args[1])) : undefined;
-        const callbackNode = args.length === 3
-          ? args[2]!
+        const secondNode = args[1];
+        const thirdNode = args[2];
+        const secondUndefined = secondNode
+          ? lowerStaticallyUndefinedBuiltinArg(L, secondNode)
+          : null;
+        const thirdUndefined = thirdNode
+          ? lowerStaticallyUndefinedBuiltinArg(L, thirdNode)
+          : null;
+        const secondT = secondNode && !secondUndefined ? L.mapTypeOf(L.typeOf(secondNode)) : undefined;
+        const callbackNode = args.length === 3 && !thirdUndefined
+          ? thirdNode!
           : args.length === 2 && secondT?.kind === "func"
-            ? args[1]!
+            ? secondNode!
             : undefined;
-        const encodingNode = args.length === 3 || (args.length === 2 && callbackNode === undefined)
-          ? args[1]!
-          : undefined;
+        const encodingNode =
+          (args.length === 3 || (args.length === 2 && callbackNode === undefined)) && !secondUndefined
+            ? secondNode!
+            : undefined;
 
         // Node's BufferEncoding aliases normalize before bytes are made.
         // Preserve an effectful literal-typed expression even when its
         // spelling folds (for example a function returning `"binary"`).
         const encoding: IrExpr = ((): IrExpr => {
+          const defaultEncoding = { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+          if (secondUndefined) {
+            return defaultAfterUndefined(secondUndefined, defaultEncoding);
+          }
           if (!encodingNode) {
-            return { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+            return defaultEncoding;
           }
           const aliases: Record<string, string | undefined> = {
             utf8: "utf8", "utf-8": "utf8", hex: "hex", base64: "base64",
@@ -6144,15 +6157,32 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
           callback = voidizedCallback(L, callback, locOf(callbackNode));
         }
 
-        // Callback-bearing writes use one fixed byte ABI. For strings,
-        // Buffer.from's encoder runs after data/encoding evaluation and
-        // before the callback expression; only its pure allocation moves
+        // Encoding- or callback-bearing writes use one fixed byte ABI. For
+        // strings, Buffer.from's encoder runs after data/encoding evaluation
+        // and before the callback expression; only its pure allocation moves
         // earlier than Node's internal write conversion.
-        if (callback || encodingNode || isBytes) {
+        if (callback || args.length > 1 || isBytes) {
           const bytes = isBytes
             ? data
             : { kind: "libCall", fn: "buffer.fromStr", args: [data, encoding], type: BYTES_U8, loc } satisfies IrExpr;
-          const runtimeEncoding = isBytes ? encoding : { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+          const defaultRuntimeEncoding = { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+          let runtimeEncoding = isBytes ? encoding : defaultRuntimeEncoding;
+          // An explicitly-undefined third argument is still evaluated after
+          // data and encoding, even though it schedules no callback. Strings
+          // already evaluate encoding while producing `bytes`; byte chunks
+          // fold both ignored argument effects into this final ABI slot.
+          if (thirdUndefined && !droppableStatic(thirdUndefined)) {
+            const effects = isBytes
+              ? [encoding, thirdUndefined].filter((effect) => !droppableStatic(effect))
+              : [thirdUndefined];
+            runtimeEncoding = {
+              kind: "seqExpr",
+              stmts: effects.map((effect) => ({ kind: "exprStmt", expr: effect, loc: effect.loc })),
+              result: defaultRuntimeEncoding,
+              type: STRING,
+              loc: thirdUndefined.loc,
+            };
+          }
           if (callback) {
             return {
               kind: "libCall",

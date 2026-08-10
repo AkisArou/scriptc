@@ -20,6 +20,18 @@ function completion(label: string): (error?: Error | null) => number {
   };
 }
 
+function omitted(label: string): undefined {
+  console.log(`omitted-expression:${label}`);
+  return undefined;
+}
+
+process.stdout.write("literal-two-undefined|", undefined);
+process.stdout.write("literal-three-undefined|", "utf8", undefined);
+process.stdout.write("effect-two-undefined|", omitted("encoding"));
+process.stdout.write("effect-three-undefined|", "utf8", omitted("callback"));
+process.stdout.write(Buffer.from("byte-two-undefined|"), omitted("byte-encoding"));
+process.stdout.write(Buffer.from("byte-three-undefined|"), "utf8", omitted("byte-callback"));
+
 const encoded = process.stdout.write(chunk(), encoding(), completion("encoded"));
 console.log("encoded-return", encoded);
 
