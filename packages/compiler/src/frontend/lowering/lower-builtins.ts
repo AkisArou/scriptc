@@ -1558,6 +1558,40 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       const plainFn: IrLibFn = promiseWriteOptions ? "fsp.writeFile" : "fs.writeFileSync";
       const modeFn: IrLibFn = promiseWriteOptions ? "fsp.writeFileMode" : "fs.writeFileModeSync";
       const resultType: IrType = promiseWriteOptions ? { kind: "promise", inner: VOID } : VOID;
+      type WriteOptionValue = { kind: "effect" | "mode"; value: IrExpr };
+      // The runtime needs only `mode`, but every source option value is an
+      // ordinary JS expression. Stage path/data and then evaluate the option
+      // values in object-literal order before issuing the write; otherwise a
+      // call/getter statically typed as the accepted utf8 literal can vanish.
+      const finishWrite = (optionValues: WriteOptionValue[]): IrExpr => {
+        const path = L.lowerExprExpecting(expr.arguments[0]!, STRING);
+        const data = L.lowerExprExpecting(expr.arguments[1]!, STRING);
+        const pathLocal = L.declareHiddenLocal("%writePath", STRING);
+        const dataLocal = L.declareHiddenLocal("%writeData", STRING);
+        const ref = (local: IrLocal): IrExpr => ({ kind: "varRef", localId: local.id, type: local.type, loc });
+        const stmts: IrStmt[] = [
+          { kind: "varDecl", localId: pathLocal.id, init: path, loc: path.loc },
+          { kind: "varDecl", localId: dataLocal.id, init: data, loc: data.loc },
+        ];
+        let mode: IrExpr | null = null;
+        for (const option of optionValues) {
+          if (option.kind === "effect") {
+            stmts.push({ kind: "exprStmt", expr: option.value, loc: option.value.loc });
+            continue;
+          }
+          const modeLocal = L.declareHiddenLocal("%writeMode", F64);
+          stmts.push({ kind: "varDecl", localId: modeLocal.id, init: option.value, loc: option.value.loc });
+          mode = ref(modeLocal);
+        }
+        const result: IrExpr = {
+          kind: "libCall",
+          fn: mode ? modeFn : plainFn,
+          args: mode ? [ref(pathLocal), ref(dataLocal), mode] : [ref(pathLocal), ref(dataLocal)],
+          type: resultType,
+          loc,
+        };
+        return { kind: "seqExpr", stmts, result, type: resultType, loc };
+      };
       // The bare-encoding spelling — writeFileSync(p, data, "utf-8") — is
       // the options record's encoding key alone: utf8 is what the runtime
       // writes anyway, so string data takes the plain write. Any OTHER
@@ -1568,22 +1602,21 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
           t.isStringLiteralType() && (t.value === "utf8" || t.value === "utf-8") &&
           L.mapTypeOf(L.typeOf(expr.arguments[1]!))?.kind === "string"
         ) {
-          const path = L.lowerExprExpecting(expr.arguments[0]!, STRING);
-          const data = L.lowerExprExpecting(expr.arguments[1]!, STRING);
-          return { kind: "libCall", fn: plainFn, args: [path, data], type: resultType, loc };
+          return finishWrite([{ kind: "effect", value: L.lowerExprExpecting(optsNode, STRING) }]);
         }
       }
-      let modeNode: ts.Expression | null = null;
+      const optionValues: WriteOptionValue[] = [];
       let ok = ts.isObjectLiteralExpression(optsNode);
       if (ok) {
         for (const p of (optsNode as ts.ObjectLiteralExpression).properties) {
           const m = optionMember(p);
           if (!m) { ok = false; break; }
           if (m.name === "mode") {
-            modeNode = m.value;
+            optionValues.push({ kind: "mode", value: L.lowerExprExpecting(m.value, F64) });
           } else if (m.name === "encoding") {
             const t = L.typeOf(m.value);
             if (!t.isStringLiteralType() || (t.value !== "utf8" && t.value !== "utf-8")) { ok = false; break; }
+            optionValues.push({ kind: "effect", value: L.lowerExprExpecting(m.value, STRING) });
           } else if (m.name === "flag") {
             // Documented, behavior-changing (open(2)'s disposition — 'a'
             // IS appendFileSync), no lowering: fence by name.
@@ -1599,6 +1632,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
               L, p, m.name, operation, FS_WRITE_FILE_DOCUMENTED_OPTIONS,
               'the supported options are { mode: <number>, encoding: "utf8" }',
             );
+            optionValues.push({ kind: "effect", value: L.lowerExpr(m.value) });
           }
         }
       }
@@ -1609,14 +1643,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
           'the supported options are { mode: <number>, encoding: "utf8" } over string data',
         );
       }
-      const path = L.lowerExprExpecting(expr.arguments[0]!, STRING);
-      const data = L.lowerExprExpecting(expr.arguments[1]!, STRING);
-      if (modeNode === null) {
-        // encoding-only options change nothing: the plain write.
-        return { kind: "libCall", fn: plainFn, args: [path, data], type: resultType, loc };
-      }
-      const mode = L.lowerExprExpecting(modeNode, F64);
-      return { kind: "libCall", fn: modeFn, args: [path, data, mode], type: resultType, loc };
+      return finishWrite(optionValues);
     }
     // zlib takes Buffers; a string argument (the lib admits it) gets the
     // wrap-it-first hint instead of a generic type mismatch.
