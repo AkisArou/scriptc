@@ -6968,6 +6968,9 @@ export class Lowerer {
           ctx.captureBySymbol.set(symbol, entry);
           ctx.captures.push({ localId: entry.id, name: entry.name, type: entry.type });
           ctx.captureSources.push(parentEntry.id);
+          if (this.runtimeOptionalStorageLocals.has(parentEntry.id)) {
+            this.runtimeOptionalStorageLocals.add(entry.id);
+          }
         }
         parentEntry = entry;
       }

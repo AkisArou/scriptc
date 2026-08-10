@@ -729,6 +729,11 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             return runtimeOptionalMemberRead(L, expr, local, loc) ??
               { kind: "varRef", localId: local.id, type: local.type, loc };
           }
+          const symbol = L.resolveValueSymbol(expr);
+          if (symbol && L.runtimeOptionalStorageLocals.has(local.id) && L.ctx.captureBySymbol.get(symbol) === local) {
+            const read = runtimeOptionalMemberRead(L, expr, local, loc);
+            if (read) return read;
+          }
           return L.maybeNarrow({ kind: "varRef", localId: local.id, type: local.type, loc }, expr);
       }
       // `import x = N.y` aliases resolve transparently through globalOf/
