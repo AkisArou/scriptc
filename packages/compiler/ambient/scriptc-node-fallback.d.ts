@@ -1018,12 +1018,16 @@ declare module "node:fs" {
   };
   /* A stat(2) snapshot (statSync follows symlinks, lstatSync does not —
    * Node's split) — immutable; the supported surface is exactly these
-   * members. mtimeMs is milliseconds with the nanosecond fraction. */
+   * members. blocks is the allocated size in 512-byte units; the time
+   * fields are milliseconds with their sub-second fractions. */
   export interface Stats {
     isFile(): boolean;
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
     readonly size: number;
+    readonly blocks: number;
+    readonly nlink: number;
+    readonly atimeMs: number;
     readonly mtimeMs: number;
   }
   export function statSync(path: string): Stats;

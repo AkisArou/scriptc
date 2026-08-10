@@ -3587,6 +3587,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fs_stat(${arg(0)})`);
           case "stats.isSymbolicLink":
             return finish(`scr_stats_is_symlink(${arg(0)})`);
+          case "stats.blocks":
+            return finish(`scr_stats_blocks(${arg(0)})`);
+          case "stats.nlink":
+            return finish(`scr_stats_nlink(${arg(0)})`);
+          case "stats.atimeMs":
+            return finish(`scr_stats_atime_ms(${arg(0)})`);
           case "stats.mtimeMs":
             return finish(`scr_stats_mtime_ms(${arg(0)})`);
           case "stats.isFile":

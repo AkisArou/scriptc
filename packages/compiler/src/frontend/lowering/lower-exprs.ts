@@ -3267,7 +3267,7 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       L.noLowering(
         `Stats.${name}`,
         expr,
-        "isFile(), isDirectory(), and size are the supported Stats members",
+        "isFile(), isDirectory(), isSymbolicLink(), size, blocks, nlink, atimeMs, and mtimeMs are the supported Stats members",
         L.checker.getSymbolAtLocation(expr.name),
       );
     }

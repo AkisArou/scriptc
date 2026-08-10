@@ -49,13 +49,14 @@
 #include <ws2tcpip.h> /* inet_ntop, sockaddr_in6 */
 #include <iphlpapi.h> /* GetAdaptersAddresses (os.networkInterfaces) */
 #include <windows.h>
+#include <winioctl.h> /* FSCTL_GET_REPARSE_POINT */
 #include <lmcons.h>  /* UNLEN for GetUserNameA */
+#include "scr_win_stats.h"
 
 
-/* CRT stat has no symlink view — lstat degrades to stat (divergence: a
- * compiled binary never reports isSymbolicLink() true on Windows; Node
- * does for real symlinks/junctions). Mechanical fix: GetFileAttributesW +
- * FILE_ATTRIBUTE_REPARSE_POINT. */
+/* The CRT has no symlink view, so its internal lstat users degrade to stat.
+ * The public Stats path below bypasses this seam and opens the final component
+ * as a reparse point for lstatSync, matching Node's no-follow split. */
 #define lstat stat
 
 /* Windows has no directory mode bits; the CRT mkdir takes one argument. */
@@ -1111,6 +1112,23 @@ static double scr_filetime_us(FILETIME ft) {
   v.LowPart = ft.dwLowDateTime;
   v.HighPart = ft.dwHighDateTime;
   return (double)(v.QuadPart / 10);
+}
+
+/* A filesystem FILETIME is 100ns ticks since 1601. Match libuv's split into
+ * Unix seconds + nanoseconds before doing Node's millisecond arithmetic; the
+ * split matters for the last-bit rounding of dates far from the epoch. */
+static double scr_filetime_unix_ms(FILETIME ft) {
+  ULARGE_INTEGER raw;
+  raw.LowPart = ft.dwLowDateTime;
+  raw.HighPart = ft.dwHighDateTime;
+  int64_t ticks = (int64_t)raw.QuadPart - INT64_C(116444736000000000);
+  int64_t sec = ticks / INT64_C(10000000);
+  int64_t rem = ticks % INT64_C(10000000);
+  if (rem < 0) {
+    sec--;
+    rem += INT64_C(10000000);
+  }
+  return (double)sec * 1000.0 + (double)rem / 10000.0;
 }
 double scr_cpu_user(void) {
   FILETIME c, e, k, u;
@@ -2751,8 +2769,8 @@ void scr_process_stdin_destroy(void) {
 }
 
 /* ── Stats values ────────────────────────────────────────────────────
- * An immutable snapshot of stat(2) results — the slice the lowered
- * surface exposes (isFile/isDirectory/size). statSync THROWS like the
+ * An immutable snapshot of stat(2) results — the lowered type/mode, size,
+ * allocation/link, and access/write-time slice. statSync THROWS like the
  * other sync fs calls; the promise form rejects (see the fsp section). */
 
 struct ScrStats {
@@ -2761,6 +2779,9 @@ struct ScrStats {
   bool is_dir;
   bool is_symlink; /* lstat only — a followed stat never sees one */
   double size;
+  double blocks;   /* allocated size in 512-byte units (Node/libuv) */
+  double nlink;
+  double atime_ms;
   double mtime_ms; /* milliseconds with the nanosecond fraction (Node) */
 };
 
@@ -2781,53 +2802,310 @@ bool scr_stats_is_file(ScrStats *s) { return s->is_file; }
 bool scr_stats_is_dir(ScrStats *s) { return s->is_dir; }
 bool scr_stats_is_symlink(ScrStats *s) { return s->is_symlink; }
 double scr_stats_size(ScrStats *s) { return s->size; }
+double scr_stats_blocks(ScrStats *s) { return s->blocks; }
+double scr_stats_nlink(ScrStats *s) { return s->nlink; }
+double scr_stats_atime_ms(ScrStats *s) { return s->atime_ms; }
 double scr_stats_mtime_ms(ScrStats *s) { return s->mtime_ms; }
 
-static ScrStats *scr_stats_of(const struct stat *st) {
+static ScrStats *scr_stats_new(void) {
   ScrStats *s = malloc(sizeof(ScrStats));
   if (!s) {
     scr_trap("scriptc: out of memory\n");
   }
   s->rc = 1;
-  s->is_file = S_ISREG(st->st_mode);
-  s->is_dir = S_ISDIR(st->st_mode);
-#if defined(_WIN32)
-  /* CRT stat has no symlink view (lstat above degrades to stat) and no
-   * sub-second mtime — whole seconds where Node reads the FILETIME's
-   * 100ns units (divergence: mtimeMs precision; mechanical fix is
-   * GetFileAttributesEx). */
-  s->is_symlink = false;
-  s->mtime_ms = (double)st->st_mtime * 1000.0;
-#else
-  s->is_symlink = S_ISLNK(st->st_mode);
-#if defined(__APPLE__)
-  s->mtime_ms = (double)st->st_mtimespec.tv_sec * 1000.0 +
-                (double)st->st_mtimespec.tv_nsec / 1e6;
-#else
-  s->mtime_ms = (double)st->st_mtim.tv_sec * 1000.0 +
-                (double)st->st_mtim.tv_nsec / 1e6;
-#endif
-#endif
-  s->size = (double)st->st_size;
   return s;
 }
 
+#ifdef _WIN32
+/* The CRT fallback is deliberately complete: callers either get every field
+ * from this one stat() result or every field from one Win32 handle below,
+ * never a snapshot spliced across two path resolutions. */
+static ScrStats *scr_stats_of_crt(const struct stat *st) {
+  ScrStats *s = scr_stats_new();
+  s->is_file = S_ISREG(st->st_mode);
+  s->is_dir = S_ISDIR(st->st_mode);
+  s->is_symlink = false;
+  s->size = (double)st->st_size;
+  s->blocks = st->st_size <= 0 ? 0.0 : (double)(((uint64_t)st->st_size + 511) >> 9);
+  s->nlink = (double)st->st_nlink;
+  s->atime_ms = (double)st->st_atime * 1000.0;
+  s->mtime_ms = (double)st->st_mtime * 1000.0;
+  return s;
+}
+
+static ScrStats *scr_stats_crt_fallback(const ScrStr *path, const char *op) {
+  struct stat st;
+  if (stat(path->data, &st) != 0) {
+    scr_fs_throw(errno, op, path);
+    return NULL;
+  }
+  return scr_stats_of_crt(&st);
+}
+
+/* Resolve ordinary disk paths once and populate every public field from the
+ * resulting handle. Splitting size/type across CRT stat() and a later
+ * CreateFile call can mix two entries when another process replaces path. */
+static bool scr_stats_is_link_tag(DWORD tag) {
+  return tag == IO_REPARSE_TAG_SYMLINK ||
+         tag == IO_REPARSE_TAG_MOUNT_POINT ||
+         tag == IO_REPARSE_TAG_APPEXECLINK ||
+         tag == UINT32_C(0xA000001D); /* IO_REPARSE_TAG_LX_SYMLINK */
+}
+
+static double scr_stats_utf16_len(const WCHAR *text, size_t len) {
+  if (len == 0) return 0;
+  if (len > INT_MAX) return -1;
+  int bytes = WideCharToMultiByte(
+    CP_UTF8, 0, text, (int)len, NULL, 0, NULL, NULL);
+  return bytes > 0 ? (double)bytes : -1;
+}
+
+typedef struct {
+  ULONG tag;
+  USHORT data_len;
+  USHORT reserved;
+  union {
+    struct {
+      USHORT substitute_offset;
+      USHORT substitute_len;
+      USHORT print_offset;
+      USHORT print_len;
+      ULONG flags;
+      WCHAR path[1];
+    } symlink;
+    struct {
+      USHORT substitute_offset;
+      USHORT substitute_len;
+      USHORT print_offset;
+      USHORT print_len;
+      WCHAR path[1];
+    } mount;
+    struct {
+      unsigned char bytes[1];
+    } generic;
+  } body;
+} ScrStatsReparseData;
+
+/* Node/libuv reports a Windows link's target-text length as st_size. The
+ * ordinary handle information does not carry that value, so read the reparse
+ * payload while the no-follow handle is live. */
+static bool scr_stats_link_size(HANDLE h, DWORD tag, double *size_out) {
+  union {
+    ScrStatsReparseData align;
+    unsigned char bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+  } storage;
+  DWORD used;
+  if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0,
+                       storage.bytes, sizeof storage.bytes, &used, NULL)) return false;
+  ScrStatsReparseData *data = (ScrStatsReparseData *)storage.bytes;
+  const size_t body_offset = offsetof(ScrStatsReparseData, body);
+  if (used < body_offset || data->data_len > used - body_offset ||
+      data->tag != tag) return false;
+
+  const WCHAR *target;
+  size_t len;
+  if (tag == IO_REPARSE_TAG_SYMLINK) {
+    const size_t fixed = offsetof(ScrStatsReparseData, body.symlink.path) -
+      body_offset;
+    size_t offset = data->body.symlink.substitute_offset;
+    size_t bytes = data->body.symlink.substitute_len;
+    if (data->data_len < fixed || ((offset | bytes) & 1) != 0 ||
+        offset > data->data_len - fixed ||
+        bytes > data->data_len - fixed - offset) return false;
+    target = (const WCHAR *)((const unsigned char *)data->body.symlink.path +
+      offset);
+    len = bytes / sizeof(WCHAR);
+  } else if (tag == IO_REPARSE_TAG_MOUNT_POINT) {
+    const size_t fixed = offsetof(ScrStatsReparseData, body.mount.path) -
+      body_offset;
+    size_t offset = data->body.mount.substitute_offset;
+    size_t bytes = data->body.mount.substitute_len;
+    if (data->data_len < fixed || ((offset | bytes) & 1) != 0 ||
+        offset > data->data_len - fixed ||
+        bytes > data->data_len - fixed - offset) return false;
+    target = (const WCHAR *)((const unsigned char *)data->body.mount.path +
+      offset);
+    len = bytes / sizeof(WCHAR);
+    _Static_assert(sizeof(WCHAR) == sizeof(uint16_t),
+                   "Windows reparse payloads use UTF-16 code units");
+    if (!scr_win_stats_mount_target_is_junction(
+          (const uint16_t *)target, len)) return false;
+  } else if (tag == UINT32_C(0xA000001D)) {
+    /* WSL's LX symlink payload is a version word followed by UTF-8 bytes. */
+    if (data->data_len < sizeof(ULONG)) return false;
+    *size_out = (double)(data->data_len - sizeof(ULONG));
+    return true;
+  } else {
+    /* App execution links carry a counted UTF-16 string list; the third
+     * string is the target path. */
+    if (tag != IO_REPARSE_TAG_APPEXECLINK ||
+        data->data_len < sizeof(ULONG)) return false;
+    const unsigned char *raw = data->body.generic.bytes;
+    ULONG count;
+    memcpy(&count, raw, sizeof count);
+    if (count < 3 || ((data->data_len - sizeof count) & 1) != 0) return false;
+    target = (const WCHAR *)(raw + sizeof count);
+    size_t chars = (data->data_len - sizeof count) / sizeof(WCHAR);
+    for (size_t item = 0; item < 2; item++) {
+      size_t part = 0;
+      while (part < chars && target[part] != L'\0') part++;
+      if (part == 0 || part == chars) return false;
+      target += part + 1;
+      chars -= part + 1;
+    }
+    len = 0;
+    while (len < chars && target[len] != L'\0') len++;
+    if (len == 0 || len == chars || len < 3 ||
+        !((target[0] >= L'A' && target[0] <= L'Z') ||
+          (target[0] >= L'a' && target[0] <= L'z')) ||
+        target[1] != L':' || target[2] != L'\\') return false;
+    double size = scr_stats_utf16_len(target, len);
+    if (size < 0) return false;
+    *size_out = size;
+    return true;
+  }
+
+  /* Undo the NT namespace prefix CreateSymbolicLinkW stores for absolute
+   * DOS/UNC targets, matching libuv's readlink normalization. */
+  if (len >= 4 && target[0] == L'\\' && target[1] == L'?' &&
+      target[2] == L'?' && target[3] == L'\\') {
+    if (len >= 6 && target[5] == L':' &&
+        ((target[4] >= L'A' && target[4] <= L'Z') ||
+         (target[4] >= L'a' && target[4] <= L'z')) &&
+        (len == 6 || target[6] == L'\\')) {
+      target += 4;
+      len -= 4;
+    } else if (len >= 8 &&
+               (target[4] == L'U' || target[4] == L'u') &&
+               (target[5] == L'N' || target[5] == L'n') &&
+               (target[6] == L'C' || target[6] == L'c') &&
+               target[7] == L'\\') {
+      target += 6;
+      len -= 6;
+    }
+  }
+  double size = scr_stats_utf16_len(target, len);
+  if (size < 0) return false;
+  *size_out = size;
+  return true;
+}
+
+static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op,
+                                   bool no_follow) {
+  WCHAR *wide = scr_fs_win_wide(path);
+  if (!wide) return scr_stats_crt_fallback(path, op);
+
+  DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+  if (no_follow) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+  HANDLE h = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, flags, NULL);
+  free(wide);
+  if (h == INVALID_HANDLE_VALUE) return scr_stats_crt_fallback(path, op);
+
+  DWORD file_type = GetFileType(h);
+  if (file_type != FILE_TYPE_DISK) {
+    CloseHandle(h);
+    return scr_stats_crt_fallback(path, op);
+  }
+  BY_HANDLE_FILE_INFORMATION basic;
+  if (!GetFileInformationByHandle(h, &basic)) {
+    CloseHandle(h);
+    return scr_stats_crt_fallback(path, op);
+  }
+  bool is_link = false;
+  double link_size = -1;
+  if (no_follow && (basic.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    FILE_ATTRIBUTE_TAG_INFO tagged;
+    if (!GetFileInformationByHandleEx(
+          h, FileAttributeTagInfo, &tagged, sizeof tagged) ||
+        !scr_stats_is_link_tag(tagged.ReparseTag)) {
+      /* Reparse points are a general interception mechanism. Node/libuv
+       * follows non-link tags even for lstat, so reopen the resolved target. */
+      CloseHandle(h);
+      return scr_stats_of_path(path, op, false);
+    }
+    if (!scr_stats_link_size(h, tagged.ReparseTag, &link_size)) {
+      /* A mount-point tag may name a mounted volume rather than a junction.
+       * libuv treats those (and malformed/unsupported link payloads) as
+       * ordinary reparse points and retries with the final component
+       * followed. Do not classify from the tag alone. */
+      CloseHandle(h);
+      return scr_stats_of_path(path, op, false);
+    }
+    is_link = true;
+  }
+  FILE_STANDARD_INFO standard;
+  bool have_standard = GetFileInformationByHandleEx(
+    h, FileStandardInfo, &standard, sizeof standard);
+  CloseHandle(h);
+
+  bool is_dir = (basic.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+  uint64_t size = ((uint64_t)basic.nFileSizeHigh << 32) | basic.nFileSizeLow;
+  ScrStats *s = scr_stats_new();
+  s->is_file = !is_link && (have_standard ? !standard.Directory : !is_dir);
+  s->is_dir = !is_link && (have_standard ? standard.Directory : is_dir);
+  s->is_symlink = is_link;
+  s->size = is_link && link_size >= 0 ? link_size : s->is_dir ? 0.0
+    : have_standard ? (double)standard.EndOfFile.QuadPart : (double)size;
+  s->blocks = have_standard
+    ? (double)((uint64_t)standard.AllocationSize.QuadPart >> 9)
+    : size == 0 ? 0.0 : (double)((size + 511) >> 9);
+  s->nlink = have_standard
+    ? (double)standard.NumberOfLinks
+    : (double)basic.nNumberOfLinks;
+  s->atime_ms = scr_filetime_unix_ms(basic.ftLastAccessTime);
+  s->mtime_ms = scr_filetime_unix_ms(basic.ftLastWriteTime);
+  return s;
+}
+#else
+static ScrStats *scr_stats_of(const struct stat *st) {
+  ScrStats *s = scr_stats_new();
+  s->is_file = S_ISREG(st->st_mode);
+  s->is_dir = S_ISDIR(st->st_mode);
+  s->is_symlink = S_ISLNK(st->st_mode);
+#if defined(__APPLE__)
+  s->atime_ms = (double)st->st_atimespec.tv_sec * 1000.0 +
+                (double)st->st_atimespec.tv_nsec / 1e6;
+  s->mtime_ms = (double)st->st_mtimespec.tv_sec * 1000.0 +
+                (double)st->st_mtimespec.tv_nsec / 1e6;
+#else
+  s->atime_ms = (double)st->st_atim.tv_sec * 1000.0 +
+                (double)st->st_atim.tv_nsec / 1e6;
+  s->mtime_ms = (double)st->st_mtim.tv_sec * 1000.0 +
+                (double)st->st_mtim.tv_nsec / 1e6;
+#endif
+  s->blocks = (double)st->st_blocks;
+  s->nlink = (double)st->st_nlink;
+  s->size = (double)st->st_size;
+  return s;
+}
+#endif
+
 ScrStats *scr_fs_stat(ScrStr *path) {
+#ifdef _WIN32
+  return scr_stats_of_path(path, "stat", false);
+#else
   struct stat st;
   if (stat(path->data, &st) != 0) { /* follows symlinks, like Node's statSync */
     scr_fs_throw(errno, "stat", path);
     return NULL;
   }
   return scr_stats_of(&st);
+#endif
 }
 
 ScrStats *scr_fs_lstat(ScrStr *path) {
+#ifdef _WIN32
+  return scr_stats_of_path(path, "lstat", true);
+#else
   struct stat st;
   if (lstat(path->data, &st) != 0) { /* no follow; Node reports lstat */
     scr_fs_throw(errno, "lstat", path);
     return NULL;
   }
   return scr_stats_of(&st);
+#endif
 }
 
 ScrArr *scr_fs_readdir(ScrStr *path) {

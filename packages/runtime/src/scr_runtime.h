@@ -2116,6 +2116,9 @@ bool scr_stats_is_file(ScrStats *s);
 bool scr_stats_is_dir(ScrStats *s);
 bool scr_stats_is_symlink(ScrStats *s); /* lstat snapshots only */
 double scr_stats_size(ScrStats *s);
+double scr_stats_blocks(ScrStats *s); /* allocated size in 512-byte units */
+double scr_stats_nlink(ScrStats *s);
+double scr_stats_atime_ms(ScrStats *s); /* ms with the sub-second fraction */
 double scr_stats_mtime_ms(ScrStats *s); /* ms with the ns fraction */
 
 /* fs/promises: the SAME sync operations, minting an already-settled

@@ -3922,8 +3922,9 @@ export type IrLibFn =
    * uv_fs_copyfile behavior); its errors carry BOTH paths — Node's
    * "copyfile 'src' -> 'dest'". lstatSync is statSync without following
    * a trailing symlink (Node reports lstat); stats.isSymbolicLink /
-   * stats.mtimeMs are pure reads on the widened snapshot (mtimeMs is
-   * milliseconds with the nanosecond fraction, Node's arithmetic).
+   * stats.blocks / nlink / atimeMs / mtimeMs are pure reads on the widened
+   * snapshot (blocks is allocated 512-byte units; the times are milliseconds
+   * with their sub-second fractions, Node's arithmetic).
    * writeFileModeSync is writeFileSync(path, data, { mode }): the mode
    * applies at CREATION only (open(2) with O_CREAT, umask applying),
    * exactly Node — an existing file keeps its permissions. mkdirModeSync
@@ -3985,6 +3986,9 @@ export type IrLibFn =
   | "crypto.x509ValidTo"
   | "crypto.x509ValidToStr"
   | "stats.isSymbolicLink"
+  | "stats.blocks"
+  | "stats.nlink"
+  | "stats.atimeMs"
   | "stats.mtimeMs"
   | "fs.writeFileModeSync"
   | "fs.mkdirModeSync"
