@@ -87,7 +87,7 @@ export class CEmitter {
   /** Kind-specialized typed-array access helpers actually used by this
    * program. Keeping these in the generated TU means unrelated binaries do
    * not pay even debug/link metadata for byte-loop fast paths. */
-  readonly bytesElementHelpers = new Set<`${"get" | "set"}:${IrBytesElem}`>();
+  readonly bytesElementHelpers = new Set<`${"get" | "set"}:${IrBytesElem}:${"f64" | "u64"}`>();
   /** Interned unit-armed union instances: "unionId:tag" → static symbol.
    * A unit arm (undefined/null) has no payload, so every instance of one
    * (union, tag) pair is identical — ONE immortal (rc == SIZE_MAX) static
@@ -122,6 +122,10 @@ export class CEmitter {
    * borrowed — never declared, never released here). */
   currentLocals = new Map<string, IrLocal>();
   captureIds = new Set<string>();
+  /** Canonical byte-loop induction locals currently represented by an
+   * unsigned integer shadow. Ordinary number reads widen the shadow back to
+   * f64; direct byte indices consume it without a conversion round trip. */
+  integerLoopBindings = new Map<string, string>();
   /** Declared functions referenced as values: each needs an env-signature
    * wrapper + an interned immortal closure (so `f === f` holds). */
   readonly fnValues = new Set<string>();
@@ -1308,23 +1312,40 @@ export class CEmitter {
 
   /* ── plumbing ─────────────────────────────────────────────────────── */
 
-  bytesElementHelper(op: "get" | "set", elem: IrBytesElem): string {
-    this.bytesElementHelpers.add(`${op}:${elem}`);
-    return `sc_bytes_${op}_${elem}`;
+  integerLoopIndex(expr: IrExpr): string | null {
+    return expr.kind === "varRef" ? this.integerLoopBindings.get(expr.localId) ?? null : null;
+  }
+
+  bytesElementHelper(op: "get" | "set", elem: IrBytesElem, integerIndex = false): string {
+    const mode = integerIndex ? "u64" : "f64";
+    this.bytesElementHelpers.add(`${op}:${elem}:${mode}`);
+    return `sc_bytes_${op}_${elem}${integerIndex ? "_u64" : ""}`;
   }
 
   private emitBytesElementHelpers(): string[] {
     if (this.bytesElementHelpers.size === 0) return [];
-    const out = [
-      `/* Typed-array hot paths specialized from the IR element kind. */`,
-      `static inline size_t sc_bytes_index_checked(const ScrBytes *b, double i) {`,
-      `  if (!(i >= 0.0 && i < (double)b->len)) { (void)scr_bytes_get(b, i); return 0; }`,
-      `  size_t idx = (size_t)i;`,
-      `  if ((double)idx != i) { (void)scr_bytes_get(b, i); return 0; }`,
-      `  return idx;`,
-      `}`,
-    ];
-    if ([...this.bytesElementHelpers].some((key) => key.startsWith("set:") && key !== "set:f32")) {
+    const hasF64 = [...this.bytesElementHelpers].some((key) => key.endsWith(":f64"));
+    const hasU64 = [...this.bytesElementHelpers].some((key) => key.endsWith(":u64"));
+    const out = [`/* Typed-array hot paths specialized from the IR element kind. */`];
+    if (hasF64) {
+      out.push(
+        `static inline size_t sc_bytes_index_checked(const ScrBytes *b, double i) {`,
+        `  if (!(i >= 0.0 && i < (double)b->len)) { (void)scr_bytes_get(b, i); return 0; }`,
+        `  size_t idx = (size_t)i;`,
+        `  if ((double)idx != i) { (void)scr_bytes_get(b, i); return 0; }`,
+        `  return idx;`,
+        `}`,
+      );
+    }
+    if (hasU64) {
+      out.push(
+        `static inline size_t sc_bytes_index_u64_checked(const ScrBytes *b, uint64_t i) {`,
+        `  if (i >= b->len) { (void)scr_bytes_get(b, (double)i); return 0; }`,
+        `  return (size_t)i;`,
+        `}`,
+      );
+    }
+    if ([...this.bytesElementHelpers].some((key) => key.startsWith("set:") && key.split(":")[1] !== "f32")) {
       out.push(
         `static inline uint32_t sc_bytes_coerce_u32(double v) {`,
         `  if (v >= -9007199254740992.0 && v <= 9007199254740992.0) return (uint32_t)(int64_t)v;`,
@@ -1336,41 +1357,46 @@ export class CEmitter {
       );
     }
     for (const elem of ["u8", "u32", "i32", "f32"] as const) {
-      if (this.bytesElementHelpers.has(`get:${elem}`)) {
-        if (elem === "u8") {
-          out.push(
-            `static inline double sc_bytes_get_u8(const ScrBytes *b, double i) {`,
-            `  return (double)b->data[sc_bytes_index_checked(b, i)];`,
-            `}`,
-          );
-        } else {
-          const valueType = elem === "f32" ? "float" : elem === "i32" ? "int32_t" : "uint32_t";
-          out.push(
-            `static inline double sc_bytes_get_${elem}(const ScrBytes *b, double i) {`,
-            `  ${valueType} v;`,
-            `  memcpy(&v, b->data + sc_bytes_index_checked(b, i) * 4, 4);`,
-            `  return (double)v;`,
-            `}`,
-          );
+      for (const mode of ["f64", "u64"] as const) {
+        const suffix = mode === "u64" ? "_u64" : "";
+        const indexType = mode === "u64" ? "uint64_t" : "double";
+        const checked = mode === "u64" ? "sc_bytes_index_u64_checked" : "sc_bytes_index_checked";
+        if (this.bytesElementHelpers.has(`get:${elem}:${mode}`)) {
+          if (elem === "u8") {
+            out.push(
+              `static inline double sc_bytes_get_u8${suffix}(const ScrBytes *b, ${indexType} i) {`,
+              `  return (double)b->data[${checked}(b, i)];`,
+              `}`,
+            );
+          } else {
+            const valueType = elem === "f32" ? "float" : elem === "i32" ? "int32_t" : "uint32_t";
+            out.push(
+              `static inline double sc_bytes_get_${elem}${suffix}(const ScrBytes *b, ${indexType} i) {`,
+              `  ${valueType} v;`,
+              `  memcpy(&v, b->data + ${checked}(b, i) * 4, 4);`,
+              `  return (double)v;`,
+              `}`,
+            );
+          }
         }
-      }
-      if (this.bytesElementHelpers.has(`set:${elem}`)) {
-        if (elem === "u8") {
-          out.push(
-            `static inline void sc_bytes_set_u8(ScrBytes *b, double i, double v) {`,
-            `  b->data[sc_bytes_index_checked(b, i)] = (uint8_t)sc_bytes_coerce_u32(v);`,
-            `}`,
-          );
-        } else {
-          const valueType = elem === "f32" ? "float" : "uint32_t";
-          const init = elem === "f32" ? `(float)v` : `sc_bytes_coerce_u32(v)`;
-          out.push(
-            `static inline void sc_bytes_set_${elem}(ScrBytes *b, double i, double v) {`,
-            `  size_t idx = sc_bytes_index_checked(b, i);`,
-            `  ${valueType} stored = ${init};`,
-            `  memcpy(b->data + idx * 4, &stored, 4);`,
-            `}`,
-          );
+        if (this.bytesElementHelpers.has(`set:${elem}:${mode}`)) {
+          if (elem === "u8") {
+            out.push(
+              `static inline void sc_bytes_set_u8${suffix}(ScrBytes *b, ${indexType} i, double v) {`,
+              `  b->data[${checked}(b, i)] = (uint8_t)sc_bytes_coerce_u32(v);`,
+              `}`,
+            );
+          } else {
+            const valueType = elem === "f32" ? "float" : "uint32_t";
+            const init = elem === "f32" ? `(float)v` : `sc_bytes_coerce_u32(v)`;
+            out.push(
+              `static inline void sc_bytes_set_${elem}${suffix}(ScrBytes *b, ${indexType} i, double v) {`,
+              `  size_t idx = ${checked}(b, i);`,
+              `  ${valueType} stored = ${init};`,
+              `  memcpy(b->data + idx * 4, &stored, 4);`,
+              `}`,
+            );
+          }
         }
       }
     }

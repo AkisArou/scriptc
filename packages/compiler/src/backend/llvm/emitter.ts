@@ -75,6 +75,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -1025,6 +1026,8 @@ class LlEmitter {
   }[] = [];
   private currentLocals = new Map<string, IrLocal>();
   private captureIds = new Set<string>();
+  /** Active canonical byte-loop induction bindings: local id → i64 slot. */
+  private integerLoopBindings = new Map<string, string>();
   /** Enclosing try-with-FINALLY regions, innermost last: a `return`
    * inside one runs every crossed finally (innermost first) before the
    * actual ret — the C emitter's pending-return path, with the finally
@@ -3044,6 +3047,7 @@ class LlEmitter {
     this.jumpTargets = [];
     this.currentLocals = new Map(fn.locals.map((l) => [l.id, l]));
     this.captureIds = new Set((fn.captures ?? []).map((c) => c.localId));
+    this.integerLoopBindings.clear();
     this.chainSlots.clear();
     this.finallyStack = [];
     this.tryStack = [];
@@ -3242,10 +3246,11 @@ class LlEmitter {
         // append. IrBytesElem is static, so never rediscover it through the
         // generic runtime switch in a hot loop.
         const arr = this.emitBytesReceiver(s.arr, [s.index, s.value]);
-        const idx = this.emitExpr(s.index);
+        const integerIndex = this.emitIntegerLoopIndex(s.index);
+        const idx = integerIndex ?? this.emitExpr(s.index).name;
         const v = this.emitExpr(s.value);
         if (s.arr.type.kind !== "bytes") throw new Error("llvm emitter bug: bytesSet on non-bytes");
-        this.emitBytesSet(s.arr.type.elem, arr.name, idx.name, v.name);
+        this.emitBytesSet(s.arr.type.elem, arr.name, idx, v.name, integerIndex !== null);
         break;
       }
       case "fieldSet":
@@ -3496,8 +3501,17 @@ class LlEmitter {
       case "for": {
         // The init's scope wraps the whole loop (break/continue must NOT
         // release it — scopeDepth captured after the push, C parity).
+        const integerLoop = matchIntegerBytesForLoop(s, this.currentLocals);
         this.scopes.push([]);
-        if (s.init) this.emitStmt(s.init);
+        let integerSlot: string | null = null;
+        if (integerLoop) {
+          integerSlot = B.slot();
+          B.entryAllocas.push(`${integerSlot} = alloca i64 ; integer induction ${this.currentLocals.get(integerLoop.localId)!.name}`);
+          B.line(`store i64 0, ptr ${integerSlot}`);
+          this.integerLoopBindings.set(integerLoop.localId, integerSlot);
+        } else if (s.init) {
+          this.emitStmt(s.init);
+        }
         const lc = B.newLabel("loop.c");
         const lb = B.newLabel("loop.b");
         const le = B.newLabel("loop.e");
@@ -3511,7 +3525,18 @@ class LlEmitter {
         const lu = s.update || freshens ? B.newLabel("loop.u") : lc;
         B.br(lc);
         B.startBlock(lc);
-        if (s.cond) B.condBr(this.emitCondition(s.cond), lb, le);
+        if (integerLoop && integerSlot) {
+          const receiver = this.emitBytesReceiver(integerLoop.limitReceiver, []);
+          const lenPtr = B.tmp();
+          const len = B.tmp();
+          const index = B.tmp();
+          const inBounds = B.tmp();
+          B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${receiver.name}, i64 0, i32 1`);
+          B.line(`${len} = load i64, ptr ${lenPtr}`);
+          B.line(`${index} = load i64, ptr ${integerSlot}`);
+          B.line(`${inBounds} = icmp ult i64 ${index}, ${len}`);
+          B.condBr(inBounds, lb, le);
+        } else if (s.cond) B.condBr(this.emitCondition(s.cond), lb, le);
         else B.br(lb);
         B.startBlock(lb);
         this.jumpTargets.push({
@@ -3541,11 +3566,18 @@ class LlEmitter {
             // The wrapper scope's entry releases whatever the slot points
             // to at loop exit — now the freshest binding. Nothing to fix.
           }
-          if (s.update) this.emitStmt(s.update);
+          if (integerLoop && integerSlot) {
+            const old = B.tmp();
+            const next = B.tmp();
+            B.line(`${old} = load i64, ptr ${integerSlot}`);
+            B.line(`${next} = add nuw i64 ${old}, 1`);
+            B.line(`store i64 ${next}, ptr ${integerSlot}`);
+          } else if (s.update) this.emitStmt(s.update);
           B.br(lc);
         }
         B.startBlock(le);
         this.releaseScope(this.scopes.pop()!);
+        if (integerLoop) this.integerLoopBindings.delete(integerLoop.localId);
         break;
       }
       case "forOf": {
@@ -4016,6 +4048,14 @@ class LlEmitter {
         // tag-only); one reaching the generic dispatch escaped its wrap.
         throw new Error(`llvm emitter bug: bare unitLit '${e.unit}'`);
       case "varRef": {
+        const integerSlot = this.integerLoopBindings.get(e.localId);
+        if (integerSlot !== undefined) {
+          const integer = B.tmp();
+          const number = B.tmp();
+          B.line(`${integer} = load i64, ptr ${integerSlot}`);
+          B.line(`${number} = uitofp i64 ${integer} to double`);
+          return { name: number, type: e.type };
+        }
         const b = this.binding(e.localId);
         if (b.kind === "boxed") {
           // Reads go through the shared binding; ref kinds come out +1.
@@ -9536,20 +9576,46 @@ class LlEmitter {
     return this.emitExpr(receiver);
   }
 
+  /** Load a canonical integer-loop induction value for a direct index use.
+   * Other expression shapes retain ordinary f64 evaluation. */
+  private emitIntegerLoopIndex(expr: IrExpr): string | null {
+    if (expr.kind !== "varRef") return null;
+    const slot = this.integerLoopBindings.get(expr.localId);
+    if (slot === undefined) return null;
+    const index = this.B.tmp();
+    this.B.line(`${index} = load i64, ptr ${slot}`);
+    return index;
+  }
+
   /** Bounds-check a typed-array element index without an out-of-line call
    * on the valid path. The range test rejects NaN/infinity before fptoui;
    * the integer round trip then rejects fractions. The error block retains
    * the runtime's exact trap text. Leaves the builder in the valid block. */
-  private emitBytesIndex(receiver: string, index: string): string {
+  private emitBytesIndex(receiver: string, index: string, integerIndex = false): string {
     const B = this.B;
     const lenPtr = B.tmp();
     const len = B.tmp();
+    B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 1`);
+    B.line(`${len} = load i64, ptr ${lenPtr}`);
+    if (integerIndex) {
+      const inRange = B.tmp();
+      B.line(`${inRange} = icmp ult i64 ${index}, ${len}`);
+      const invalid = B.newLabel("bytes.index.invalid");
+      const valid = B.newLabel("bytes.index.valid");
+      B.condBr(inRange, valid, invalid);
+      B.startBlock(invalid);
+      const indexF64 = B.tmp();
+      B.line(`${indexF64} = uitofp i64 ${index} to double`);
+      this.declare(`declare double @scr_bytes_get(ptr, double)`);
+      B.line(`call double @scr_bytes_get(ptr ${receiver}, double ${indexF64})`);
+      B.terminate("unreachable");
+      B.startBlock(valid);
+      return index;
+    }
     const lenF64 = B.tmp();
     const nonnegative = B.tmp();
     const belowLen = B.tmp();
     const inRange = B.tmp();
-    B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 1`);
-    B.line(`${len} = load i64, ptr ${lenPtr}`);
     B.line(`${lenF64} = uitofp i64 ${len} to double`);
     B.line(`${nonnegative} = fcmp oge double ${index}, ${f64Lit(0)}`);
     B.line(`${belowLen} = fcmp olt double ${index}, ${lenF64}`);
@@ -9602,9 +9668,9 @@ class LlEmitter {
   }
 
   /** Kind-specialized typed-array load. */
-  private emitBytesGet(elem: IrBytesElem, receiver: string, index: string): LlValue {
+  private emitBytesGet(elem: IrBytesElem, receiver: string, index: string, integerIndex = false): LlValue {
     const B = this.B;
-    const idx = this.emitBytesIndex(receiver, index);
+    const idx = this.emitBytesIndex(receiver, index, integerIndex);
     const data = this.emitBytesData(receiver);
     const p = B.tmp();
     if (elem === "u8") {
@@ -9705,9 +9771,9 @@ class LlEmitter {
   }
 
   /** Kind-specialized typed-array store. */
-  private emitBytesSet(elem: IrBytesElem, receiver: string, index: string, value: string): void {
+  private emitBytesSet(elem: IrBytesElem, receiver: string, index: string, value: string, integerIndex = false): void {
     const B = this.B;
-    const idx = this.emitBytesIndex(receiver, index);
+    const idx = this.emitBytesIndex(receiver, index, integerIndex);
     const stored = elem === "f32" ? null : this.emitBytesU32(value);
     const data = this.emitBytesData(receiver);
     const p = B.tmp();
@@ -9779,7 +9845,8 @@ class LlEmitter {
     const r = directElementAccess
       ? this.emitBytesReceiver(e.receiver, e.args)
       : this.emitExpr(e.receiver);
-    const args = e.args.map((a) => this.emitExpr(a));
+    const integerIndex = method === "get" ? this.emitIntegerLoopIndex(e.args[0]!) : null;
+    const args = integerIndex === null ? e.args.map((a) => this.emitExpr(a)) : [];
     const NAN = f64Lit(NaN);
     switch (method) {
       case "length":
@@ -9797,7 +9864,12 @@ class LlEmitter {
         if (e.receiver.type.kind !== "bytes") {
           throw new Error("llvm emitter bug: bytesIntrinsic get on non-bytes");
         }
-        return this.emitBytesGet(e.receiver.type.elem, r.name, args[0]!.name);
+        return this.emitBytesGet(
+          e.receiver.type.elem,
+          r.name,
+          integerIndex ?? args[0]!.name,
+          integerIndex !== null,
+        );
       case "slice":
         return call(
           "scr_bytes_slice",

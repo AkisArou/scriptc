@@ -168,6 +168,80 @@ function sideEffectFixture(): IrModule {
   return mod;
 }
 
+function integerLoopFixture(mutatesIndex = false): IrModule {
+  const bytes = bytesOf("u8");
+  const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
+  const ref = (localId: string, type = F64): IrExpr => ({ kind: "varRef", localId, type, loc });
+  const bytesRef = (): IrExpr => ref("bytes", bytes);
+  const indexRef = (): IrExpr => ref("index");
+  const get: IrExpr = {
+    kind: "bytesIntrinsic",
+    method: "get",
+    receiver: bytesRef(),
+    args: [indexRef()],
+    type: F64,
+    loc,
+  };
+  const loopBody: IrStmt[] = [];
+  if (mutatesIndex) {
+    loopBody.push({
+      kind: "assign",
+      localId: "index",
+      value: { kind: "bin", op: "+", left: indexRef(), right: num(1), type: F64, loc },
+      loc,
+    });
+  }
+  loopBody.push(
+    {
+      kind: "assign",
+      localId: "sum",
+      value: { kind: "bin", op: "+", left: ref("sum"), right: get, type: F64, loc },
+      loc,
+    },
+    { kind: "bytesSet", arr: bytesRef(), index: indexRef(), value: ref("sum"), loc },
+  );
+  return {
+    irVersion: 3,
+    sourceFile: loc.file,
+    entry: "__main",
+    functions: [{
+      name: "__main",
+      params: [],
+      returnType: VOID,
+      locals: [
+        { id: "bytes", name: "bytes", type: bytes, mutable: false },
+        { id: "sum", name: "sum", type: F64, mutable: true },
+        { id: "index", name: "index", type: F64, mutable: true },
+      ],
+      body: [
+        { kind: "varDecl", localId: "bytes", init: { kind: "bytesNew", source: num(4), type: bytes, loc }, loc },
+        { kind: "varDecl", localId: "sum", init: num(0), loc },
+        {
+          kind: "for",
+          init: { kind: "varDecl", localId: "index", init: num(0), loc },
+          cond: {
+            kind: "bin",
+            op: "<",
+            left: indexRef(),
+            right: { kind: "bytesIntrinsic", method: "length", receiver: bytesRef(), args: [], type: F64, loc },
+            type: BOOL,
+            loc,
+          },
+          update: {
+            kind: "assign",
+            localId: "index",
+            value: { kind: "bin", op: "+", left: indexRef(), right: num(1), type: F64, loc },
+            loc,
+          },
+          body: loopBody,
+          loc,
+        },
+      ],
+      loc,
+    }],
+  };
+}
+
 test("C emission specializes typed-array element access by static element kind", () => {
   const mod = fixture();
   expect(validateModule(mod)).toEqual([]);
@@ -218,4 +292,33 @@ test("receiver assignments nested in numeric operands retain the receiver snapsh
   // Two receiver snapshots plus two retains per yielded bytes assignment
   // (one for the RHS temp and one for the binding's stored reference).
   expect(ll.match(/call ptr @scr_bytes_retain_v/g)).toHaveLength(6);
+});
+
+test("canonical byte loops keep their induction variable and indices integral", () => {
+  const mod = integerLoopFixture();
+  expect(validateModule(mod)).toEqual([]);
+  const c = emitModule(mod);
+  const ll = emitLlvmModule(mod);
+
+  expect(c).toContain("uint64_t sc_i");
+  expect(c).toContain("sc_bytes_get_u8_u64(");
+  expect(c).toContain("sc_bytes_set_u8_u64(");
+  expect(c).not.toContain("sc_bytes_index_checked(");
+
+  expect(ll).toContain("alloca i64 ; integer induction index");
+  expect(ll).toContain("icmp ult i64");
+  expect(ll).not.toContain("bytes.index.range");
+});
+
+test("a body mutation keeps the byte loop on the general f64 path", () => {
+  const mod = integerLoopFixture(true);
+  expect(validateModule(mod)).toEqual([]);
+  const c = emitModule(mod);
+  const ll = emitLlvmModule(mod);
+
+  expect(c).not.toContain("integer induction index");
+  expect(c).not.toContain("_u64(");
+  expect(ll).not.toContain("integer induction index");
+  expect(ll).toContain("bytes.index.range");
+  expect(ll).toContain("fptoui double");
 });
