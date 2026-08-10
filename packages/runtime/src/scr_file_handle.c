@@ -280,6 +280,24 @@ double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,
                             double length, double position,
                             bool length_default) {
   if (!scr_file_handle_require_open(h)) return 0;
+  if (buf->len == 0) {
+    /* FileHandle.read's empty-buffer ladder differs from readSync's generic
+     * window check: validate offset intrinsically first, then a zero request
+     * succeeds without consulting position/the descriptor; every other
+     * request rejects with Node's dedicated invalid-buffer error. Reusing a
+     * zero-length read performs exactly that offset-only validation. */
+    double checked = scr_fs_read_sync((double)h->fd, buf, offset, 0, position);
+    if (scr_exc_pending()) return 0;
+    if ((!length_default && length >= 0 && length < 1) ||
+        (length_default && offset == 0)) {
+      return checked;
+    }
+    static const char msg[] =
+        "The argument 'buffer' is empty and cannot be written. Received <Buffer >";
+    scr_throw_error_msg_code(SCR_ERR_TYPE, msg, sizeof msg - 1,
+                             "ERR_INVALID_ARG_VALUE");
+    return 0;
+  }
   if (length_default && isfinite(offset) && trunc(offset) == offset &&
       offset >= 0 && offset <= (double)buf->len) {
     length = (double)buf->len - offset;
@@ -291,6 +309,9 @@ double scr_file_handle_write_bytes(ScrFileHandle *h, ScrBytes *buf,
                                    double offset, double length,
                                    double position, bool length_default) {
   if (!scr_file_handle_require_open(h)) return 0;
+  /* Node completes an empty Buffer write before validating offset/length/
+   * position or testing whether the descriptor is writable. */
+  if (buf->len == 0) return 0;
   if (length_default && isfinite(offset) && trunc(offset) == offset &&
       offset >= 0 && offset <= (double)buf->len) {
     length = (double)buf->len - offset;

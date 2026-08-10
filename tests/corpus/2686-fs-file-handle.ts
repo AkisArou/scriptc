@@ -115,6 +115,24 @@ async function main(): Promise<void> {
   }
   await writer.close();
 
+  const emptyEdges = await open(scratch, "r");
+  const emptyBuffer = Buffer.alloc(0);
+  const emptyDefaultWrite = await emptyEdges.write(emptyBuffer);
+  const emptyInvalidWindowWrite = await emptyEdges.write(emptyBuffer, -1, 1, 0);
+  console.log(
+    "empty Buffer writes:",
+    emptyDefaultWrite.bytesWritten,
+    emptyDefaultWrite.buffer === emptyBuffer,
+    emptyInvalidWindowWrite.bytesWritten,
+  );
+  try {
+    await emptyEdges.read(emptyBuffer, 0, 1, 0);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log("empty Buffer read:", err.name, err.code, err.message);
+  }
+  await emptyEdges.close();
+
   const writeOnly = await open(scratch, "a");
   try {
     await writeOnly.readFile();
