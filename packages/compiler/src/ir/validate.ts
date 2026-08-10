@@ -751,8 +751,12 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fsp.readFileBytes": { argTypes: [STRING], result: { kind: "promise", inner: BYTES_U8 } },
   "zlib.deflateSync": { argTypes: [BYTES_U8], result: BYTES_U8 },
   "zlib.inflateSync": { argTypes: [BYTES_U8], result: BYTES_U8 },
-  "process.stdoutWriteBytes": { argTypes: [BYTES_U8], result: BOOL },
-  "process.stderrWriteBytes": { argTypes: [BYTES_U8], result: BOOL },
+  "process.stdoutWriteBytes": { argTypes: [BYTES_U8, STRING], result: BOOL },
+  "process.stderrWriteBytes": { argTypes: [BYTES_U8, STRING], result: BOOL },
+  // Completion callback is program-dependent: zero params, checked-dynamic,
+  // or an optional Error | null slot (same success shape as fs.rename).
+  "process.stdoutWriteBytesCb": { argTypes: [BYTES_U8, STRING, null], result: BOOL },
+  "process.stderrWriteBytesCb": { argTypes: [BYTES_U8, STRING, null], result: BOOL },
   "fsp.readFile": { argTypes: [STRING, STRING], result: { kind: "promise", inner: STRING } },
   "fsp.writeFile": { argTypes: [STRING, STRING], result: { kind: "promise", inner: VOID } },
   "fsp.mkdir": { argTypes: [STRING], result: { kind: "promise", inner: VOID } },
@@ -3972,7 +3976,11 @@ function validateFunction(
           }
           break;
         }
-        if (e.fn === "fs.renameCb") {
+        if (
+          e.fn === "fs.renameCb" ||
+          e.fn === "process.stdoutWriteBytesCb" ||
+          e.fn === "process.stderrWriteBytesCb"
+        ) {
           // The callback is void and accepts either no parameters, one
           // checked-dynamic error slot (JS), or Error | null (optionally
           // including undefined for an explicitly optional parameter).
@@ -3994,7 +4002,7 @@ function validateFunction(
             }
           }
           if (!ok) {
-            err(`libCall fs.renameCb callback shape (frontend must fence)`, e.loc);
+            err(`libCall ${e.fn} callback shape (frontend must fence)`, e.loc);
           }
           break;
         }

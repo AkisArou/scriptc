@@ -5910,12 +5910,13 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
   export function lowerProcessMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (call.questionDotToken) return null;
-    // process.stdout.write(s) / process.stderr.write(s): the raw byte
-    // write — no newline, no formatting. stdout shares console.log's
+    // process.stdout.write(s[, encoding][, callback]) and stderr's twin:
+    // raw bytes, no newline or formatting. stdout shares console.log's
     // promptly-submitted stream, preserving source order. Node's boolean
     // is a backpressure signal; this synchronous write is constantly true.
-    // @types/node's wider forms (Buffer data, encoding, callback) typecheck
-    // and fence here.
+    // String encodings are compile-time-known BufferEncoding spellings;
+    // byte chunks evaluate but ignore the encoding like Node. Completion
+    // callbacks ride the next-tick queue and receive the success `null`.
     // process.stdin.destroy(): a deliberate no-op — no stream machinery
     // exists to tear down, and no other stdin surface observes the
     // destroyed state (SEMANTICS.md documents it).
@@ -6037,14 +6038,74 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       const stream = L.stdlibGlobalMember(access.expression, "process");
       if (stream === "stdout" || stream === "stderr") {
         const loc = locOf(call);
-        if (call.arguments.length !== 1) {
+        const args = call.arguments;
+        if (args.length < 1 || args.length > 3 || args.some(ts.isSpreadElement)) {
           L.noLowering(
-            `process.${stream}.write with ${call.arguments.length} arguments`,
+            `process.${stream}.write with ${args.length} arguments`,
             call,
-            "the supported form is write(data) with one string — encodings and callbacks have no lowering",
+            "the supported forms are write(data[, encoding][, callback]) with a static BufferEncoding and completion callback",
           );
         }
-        let data = L.lowerExpr(call.arguments[0]!);
+        const secondNode = args[1];
+        const thirdNode = args[2];
+        const secondUndefined = secondNode
+          ? lowerStaticallyUndefinedBuiltinArg(L, secondNode)
+          : null;
+        const thirdUndefined = thirdNode
+          ? lowerStaticallyUndefinedBuiltinArg(L, thirdNode)
+          : null;
+        const secondT = secondNode && !secondUndefined ? L.mapTypeOf(L.typeOf(secondNode)) : undefined;
+        const callbackNode = args.length === 3 && !thirdUndefined
+          ? thirdNode!
+          : args.length === 2 && secondT?.kind === "func"
+            ? secondNode!
+            : undefined;
+        const encodingNode =
+          (args.length === 3 || (args.length === 2 && callbackNode === undefined)) && !secondUndefined
+            ? secondNode!
+            : undefined;
+
+        // Node's BufferEncoding aliases normalize before bytes are made.
+        // Preserve an effectful literal-typed expression even when its
+        // spelling folds (for example a function returning `"binary"`).
+        const encoding: IrExpr = ((): IrExpr => {
+          const defaultEncoding = { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+          if (secondUndefined) {
+            return defaultAfterUndefined(secondUndefined, defaultEncoding);
+          }
+          if (!encodingNode) {
+            return defaultEncoding;
+          }
+          const aliases: Record<string, string | undefined> = {
+            utf8: "utf8", "utf-8": "utf8", hex: "hex", base64: "base64",
+            base64url: "base64url", latin1: "latin1", binary: "latin1", ascii: "ascii",
+            utf16le: "utf16le", "utf-16le": "utf16le", ucs2: "utf16le", "ucs-2": "utf16le",
+          };
+          const t = L.typeOf(encodingNode);
+          const raw = t.isStringLiteralType() ? t.value : undefined;
+          const canonical = raw !== undefined ? own(aliases, raw) : undefined;
+          if (canonical === undefined) {
+            L.noLowering(
+              `process.${stream}.write with this encoding`,
+              encodingNode,
+              'use a literal "utf8", "hex", "base64", "base64url", "latin1", "binary", "ascii", "utf16le", or "ucs2" encoding',
+            );
+          }
+          const evaluated = L.lowerExprExpecting(encodingNode, STRING);
+          if (canonical === raw) return evaluated;
+          const normalized: IrExpr = { kind: "strLit", value: canonical, type: STRING, loc: locOf(encodingNode) };
+          return droppableStatic(evaluated)
+            ? normalized
+            : {
+              kind: "seqExpr",
+              stmts: [{ kind: "exprStmt", expr: evaluated, loc: evaluated.loc }],
+              result: normalized,
+              type: STRING,
+              loc: evaluated.loc,
+            };
+        })();
+
+        let data = L.lowerExpr(args[0]!);
         // A checked-dynamic argument in a JS file takes the validated
         // string exit (the trust-but-verify boundary: commander's
         // `writeOut: (str) => process.stdout.write(str)` — str untyped):
@@ -6053,23 +6114,91 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         if (data.type.kind === "dyn" && isJsSourceFile(call.getSourceFile())) {
           data = { kind: "dynCheck", value: data, type: STRING, loc };
         }
-        // The Buffer overload writes raw bytes through the same promptly
-        // submitted streams.
-        if (data.type.kind === "bytes" && data.type.elem === "u8") {
+        const isBytes = data.type.kind === "bytes" && data.type.elem === "u8";
+        if (!isBytes && data.type.kind !== "string") {
+          L.noLowering(
+            `process.${stream}.write of non-string data`,
+            args[0]!,
+            "strings and Buffer/Uint8Array values write; narrow unions first",
+          );
+        }
+
+        let callback: IrExpr | undefined;
+        if (callbackNode) {
+          callback = L.lowerExpr(callbackNode);
+          if (callback.type.kind === "dyn" && isJsSourceFile(call.getSourceFile())) {
+            callback = {
+              kind: "dynCheck",
+              value: callback,
+              type: funcOf([DYN], VOID),
+              loc: locOf(callbackNode),
+            };
+          }
+          let callbackOk = callback.type.kind === "func" && callback.type.params.length <= 1;
+          if (callbackOk && callback.type.kind === "func" && callback.type.params.length === 1) {
+            const param = callback.type.params[0]!;
+            if (param.kind !== "dyn") {
+              const def = param.kind === "union" ? L.unions.get(param.unionId) : undefined;
+              callbackOk = !!def &&
+                def.arms.some((a) => a.kind === "nullT") &&
+                def.arms.some((a) => a.kind === "object" && a.className === "%Error") &&
+                def.arms.every((a) =>
+                  a.kind === "nullT" || a.kind === "undefinedT" ||
+                  (a.kind === "object" && a.className === "%Error"));
+            }
+          }
+          if (!callbackOk) {
+            L.unsupported(
+              "SC1090",
+              callbackNode,
+              "process output completion callbacks must accept at most one Error | null parameter",
+            );
+          }
+          callback = voidizedCallback(L, callback, locOf(callbackNode));
+        }
+
+        // Encoding- or callback-bearing writes use one fixed byte ABI. For
+        // strings, Buffer.from's encoder runs after data/encoding evaluation
+        // and before the callback expression; only its pure allocation moves
+        // earlier than Node's internal write conversion.
+        if (callback || args.length > 1 || isBytes) {
+          const bytes = isBytes
+            ? data
+            : { kind: "libCall", fn: "buffer.fromStr", args: [data, encoding], type: BYTES_U8, loc } satisfies IrExpr;
+          const defaultRuntimeEncoding = { kind: "strLit", value: "utf8", type: STRING, loc } satisfies IrExpr;
+          let runtimeEncoding = isBytes ? encoding : defaultRuntimeEncoding;
+          // An explicitly-undefined third argument is still evaluated after
+          // data and encoding, even though it schedules no callback. Strings
+          // already evaluate encoding while producing `bytes`; byte chunks
+          // fold both ignored argument effects into this final ABI slot.
+          if (thirdUndefined && !droppableStatic(thirdUndefined)) {
+            const effects = isBytes
+              ? [encoding, thirdUndefined].filter((effect) => !droppableStatic(effect))
+              : [thirdUndefined];
+            runtimeEncoding = {
+              kind: "seqExpr",
+              stmts: effects.map((effect) => ({ kind: "exprStmt", expr: effect, loc: effect.loc })),
+              result: defaultRuntimeEncoding,
+              type: STRING,
+              loc: thirdUndefined.loc,
+            };
+          }
+          if (callback) {
+            return {
+              kind: "libCall",
+              fn: stream === "stdout" ? "process.stdoutWriteBytesCb" : "process.stderrWriteBytesCb",
+              args: [bytes, runtimeEncoding, callback],
+              type: BOOL,
+              loc,
+            };
+          }
           return {
             kind: "libCall",
             fn: stream === "stdout" ? "process.stdoutWriteBytes" : "process.stderrWriteBytes",
-            args: [data],
+            args: [bytes, runtimeEncoding],
             type: BOOL,
             loc,
           };
-        }
-        if (data.type.kind !== "string") {
-          L.noLowering(
-            `process.${stream}.write of non-string data`,
-            call.arguments[0]!,
-            "strings and Buffer/Uint8Array values write; narrow unions first",
-          );
         }
         return {
           kind: "libCall",

@@ -5417,9 +5417,27 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "zlib.inflateSync":
             return finish(`scr_zlib_inflate(${arg(0)})`);
           case "process.stdoutWriteBytes":
-            return finish(`scr_process_stdout_write_bytes(${arg(0)})`);
+            return finish(`scr_process_stdout_write_bytes(${arg(0)}, ${arg(1)})`);
           case "process.stderrWriteBytes":
-            return finish(`scr_process_stderr_write_bytes(${arg(0)})`);
+            return finish(`scr_process_stderr_write_bytes(${arg(0)}, ${arg(1)})`);
+          case "process.stdoutWriteBytesCb":
+          case "process.stderrWriteBytesCb": {
+            // Submit the bytes only after every call argument evaluated,
+            // then move the completion callback onto the next-tick queue.
+            // The shared error-first adapter materializes success `null`.
+            E.usesTimers = true;
+            const cbT = e.args[2]!.type;
+            if (cbT.kind !== "func") throw new Error("emitter bug: process write callback not a func");
+            const cb = args[2]!;
+            E.moveTemp(cb);
+            const adapter = E.fsRenameThunkFor(cbT);
+            const write = e.fn === "process.stdoutWriteBytesCb"
+              ? "scr_process_stdout_write_bytes"
+              : "scr_process_stderr_write_bytes";
+            const out = E.newTemp(e.type, `${write}(${arg(0)}, ${arg(1)})`);
+            E.line(`scr_process_write_callback(${cb.name}, &${adapter});${E.srcComment(e.loc)}`);
+            return out;
+          }
           case "tp.setTimeout":
             return finish(`scr_tp_set_timeout(${arg(0)})`);
           case "tp.setImmediate":

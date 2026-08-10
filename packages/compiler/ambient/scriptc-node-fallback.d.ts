@@ -205,12 +205,18 @@ declare var process: {
   /* The raw byte writes — no newline, no formatting. stdout shares
    * console.log's stream, each call is submitted promptly, and ordering is
    * preserved. The boolean is Node's backpressure signal — these synchronous
-   * writes always return true. The Uint8Array overload
-   * and isTTY exist so real CLIs TYPECHECK (they are @types/node surface);
-   * only the one-string form has a lowering — everything else fences at
-   * its use site. */
-  stdout: { write(data: string): boolean; write(data: Uint8Array): boolean; readonly isTTY: boolean };
-  stderr: { write(data: string): boolean; write(data: Uint8Array): boolean; readonly isTTY: boolean };
+   * writes always return true. Static BufferEncoding arguments and the
+   * completion callback overloads match Node's WritableStream surface. */
+  stdout: {
+    write(data: string | Uint8Array, callback?: (error?: Error | null) => void): boolean;
+    write(data: string | Uint8Array, encoding: BufferEncoding, callback?: (error?: Error | null) => void): boolean;
+    readonly isTTY: boolean;
+  };
+  stderr: {
+    write(data: string | Uint8Array, callback?: (error?: Error | null) => void): boolean;
+    write(data: string | Uint8Array, encoding: BufferEncoding, callback?: (error?: Error | null) => void): boolean;
+    readonly isTTY: boolean;
+  };
   /* The stdin stream, the piped-input slice: the TTY probe, the
    * data/end/error events (on and once — a 'data' listener keeps the
    * event loop alive until EOF, like Node's flowing stdin), destroy()
