@@ -1543,14 +1543,21 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         return { kind: "libCall", fn: "fs.writeFileSyncBytes", args: [path, data], type: VOID, loc };
       }
     }
-    // writeFileSync(p, data, options): the lowered options are a literal
+    // writeFileSync(p, data, options) / fs.promises.writeFile(p, data,
+    // options): the lowered options are a literal
     // `{ mode?: <number>, encoding?: "utf8" }` — the mode is open(2)'s
     // O_CREAT argument (creation only; an existing file keeps its
     // permissions, exactly Node), and the encoding may only spell the
-    // utf8 the runtime writes anyway. String data only — the Buffer form
-    // never carries options in the supported corpus.
-    if (bi.module === "fs" && bi.member === "writeFileSync" && expr.arguments.length === 3) {
+    // utf8 the runtime writes anyway. String data only — Buffer options
+    // remain outside the static surface.
+    const syncWriteOptions = bi.module === "fs" && bi.member === "writeFileSync";
+    const promiseWriteOptions = bi.module === "fs/promises" && bi.member === "writeFile";
+    if ((syncWriteOptions || promiseWriteOptions) && expr.arguments.length === 3) {
       const optsNode = expr.arguments[2]!;
+      const operation = promiseWriteOptions ? "fs.promises.writeFile" : "writeFileSync";
+      const plainFn: IrLibFn = promiseWriteOptions ? "fsp.writeFile" : "fs.writeFileSync";
+      const modeFn: IrLibFn = promiseWriteOptions ? "fsp.writeFileMode" : "fs.writeFileModeSync";
+      const resultType: IrType = promiseWriteOptions ? { kind: "promise", inner: VOID } : VOID;
       // The bare-encoding spelling — writeFileSync(p, data, "utf-8") — is
       // the options record's encoding key alone: utf8 is what the runtime
       // writes anyway, so string data takes the plain write. Any OTHER
@@ -1563,7 +1570,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         ) {
           const path = L.lowerExprExpecting(expr.arguments[0]!, STRING);
           const data = L.lowerExprExpecting(expr.arguments[1]!, STRING);
-          return { kind: "libCall", fn: "fs.writeFileSync", args: [path, data], type: VOID, loc };
+          return { kind: "libCall", fn: plainFn, args: [path, data], type: resultType, loc };
         }
       }
       let modeNode: ts.Expression | null = null;
@@ -1581,15 +1588,15 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
             // Documented, behavior-changing (open(2)'s disposition — 'a'
             // IS appendFileSync), no lowering: fence by name.
             L.noLowering(
-              "writeFileSync with the flag option",
+              `${operation} with the flag option`,
               p,
-              "the write truncates-or-creates (Node's default 'w') — appendFileSync is the lowered append; other flags have no lowering",
+              "the write truncates-or-creates (Node's default 'w'); other flags have no lowering",
             );
           } else {
             // The options-record stance: documented keys with no lowering
             // fence by name; undocumented keys drop like Node.
             fenceOrDropOptionKey(
-              L, p, m.name, "writeFileSync", FS_WRITE_FILE_DOCUMENTED_OPTIONS,
+              L, p, m.name, operation, FS_WRITE_FILE_DOCUMENTED_OPTIONS,
               'the supported options are { mode: <number>, encoding: "utf8" }',
             );
           }
@@ -1597,7 +1604,7 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
       if (!ok || L.mapTypeOf(L.typeOf(expr.arguments[1]!))?.kind !== "string") {
         L.noLowering(
-          "fs.writeFileSync with 3 arguments",
+          `${operation} with 3 arguments`,
           optsNode,
           'the supported options are { mode: <number>, encoding: "utf8" } over string data',
         );
@@ -1606,10 +1613,10 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       const data = L.lowerExprExpecting(expr.arguments[1]!, STRING);
       if (modeNode === null) {
         // encoding-only options change nothing: the plain write.
-        return { kind: "libCall", fn: "fs.writeFileSync", args: [path, data], type: VOID, loc };
+        return { kind: "libCall", fn: plainFn, args: [path, data], type: resultType, loc };
       }
       const mode = L.lowerExprExpecting(modeNode, F64);
-      return { kind: "libCall", fn: "fs.writeFileModeSync", args: [path, data, mode], type: VOID, loc };
+      return { kind: "libCall", fn: modeFn, args: [path, data, mode], type: resultType, loc };
     }
     // zlib takes Buffers; a string argument (the lib admits it) gets the
     // wrap-it-first hint instead of a generic type mismatch.
