@@ -872,7 +872,8 @@ static ScrStr *scr_td_gb18030_decode(const ScrBytes *b) {
     uint8_t byte = replay_len ? replay[--replay_len] : b->data[i++];
     if (third) {
       uint32_t cp = 0;
-      if (byte >= 0x30 && byte <= 0x39) {
+      bool valid_fourth = byte >= 0x30 && byte <= 0x39;
+      if (valid_fourth) {
         uint32_t pointer = (((uint32_t)(first - 0x81) * 10 + second - 0x30) * 126 +
                             third - 0x81) * 10 + byte - 0x30;
         cp = scr_td_gb_range(pointer);
@@ -883,9 +884,14 @@ static ScrStr *scr_td_gb18030_decode(const ScrBytes *b) {
         scr_td_put(&out, cp);
       } else {
         scr_td_error(&out);
-        replay[replay_len++] = byte;
-        replay[replay_len++] = old_third;
-        replay[replay_len++] = old_second;
+        /* A structurally valid four-byte sequence with an unmapped pointer
+         * is consumed as one error. Only a malformed fourth byte restores
+         * the preceding payload bytes to Node's input queue. */
+        if (!valid_fourth) {
+          replay[replay_len++] = byte;
+          replay[replay_len++] = old_third;
+          replay[replay_len++] = old_second;
+        }
       }
       continue;
     }
@@ -918,7 +924,8 @@ static ScrStr *scr_td_gb18030_decode(const ScrBytes *b) {
       if (cp) scr_td_put(&out, cp);
       else {
         scr_td_error(&out);
-        if (!valid_trail) replay[replay_len++] = byte;
+        /* Non-ASCII invalid trails are consumed; ASCII is restored. */
+        if (!valid_trail && byte < 0x80) replay[replay_len++] = byte;
       }
       continue;
     }
@@ -946,7 +953,8 @@ static ScrStr *scr_td_big5_decode(const ScrBytes *b) {
       if (cp) scr_td_put(&out, cp);
       else {
         scr_td_error(&out);
-        if (byte < 0x80) i--;
+        /* 0xff has a standalone ICU/Node mapping and is restored too. */
+        if (byte < 0x80 || byte == 0xff) i--;
       }
       continue;
     }
@@ -970,6 +978,14 @@ static ScrStr *scr_td_euc_jp_decode(const ScrBytes *b) {
       scr_td_put(&out, 0xff61 + byte - 0xa1);
       continue;
     }
+    /* Node's pinned ICU EUC-JP converter exposes three NEC extensions just
+     * above the half-width katakana trail range. */
+    if (lead == 0x8e && byte >= 0xe0 && byte <= 0xe2) {
+      static const uint16_t extensions[] = { 0x00a2, 0x00a3, 0x00ac };
+      lead = 0;
+      scr_td_put(&out, extensions[byte - 0xe0]);
+      continue;
+    }
     if (lead == 0x8f && byte >= 0xa1 && byte <= 0xfe) {
       jis0212 = true;
       lead = byte;
@@ -979,15 +995,30 @@ static ScrStr *scr_td_euc_jp_decode(const ScrBytes *b) {
       uint8_t old_lead = lead;
       lead = 0;
       uint32_t cp = 0;
-      if (old_lead >= 0xa1 && old_lead <= 0xfe && byte >= 0xa1 && byte <= 0xfe) {
+      bool valid_trail = old_lead >= 0xa1 && old_lead <= 0xfe &&
+                         byte >= 0xa1 && byte <= 0xfe;
+      if (valid_trail) {
         unsigned pointer = (old_lead - 0xa1) * 94 + byte - 0xa1;
         cp = jis0212 ? scr_td_jis0212[pointer] : scr_td_jis0208[pointer];
+      }
+      /* When the third byte of an 0x8f JIS-0212 sequence is malformed,
+       * ICU reports the prefix and restores both following bytes. Model the
+       * saved second byte as the next ordinary EUC-JP lead. */
+      if (jis0212 && !valid_trail) {
+        jis0212 = false;
+        lead = old_lead;
+        scr_td_error(&out);
+        i--;
+        continue;
       }
       jis0212 = false;
       if (cp) scr_td_put(&out, cp);
       else {
         scr_td_error(&out);
-        if (byte < 0xa1 || byte > 0xfe) i--;
+        /* C0/C1 bytes are restored; 0xa0 and 0xff are consumed with the
+         * malformed sequence rather than producing a second error. The
+         * 0x8e extension converter additionally restores 0xe5..0xfe. */
+        if (byte < 0xa0 || (old_lead == 0x8e && byte >= 0xe5 && byte <= 0xfe)) i--;
       }
       continue;
     }
@@ -1050,12 +1081,12 @@ static ScrStr *scr_td_euc_kr_decode(const ScrBytes *b) {
       if (cp) scr_td_put(&out, cp);
       else {
         scr_td_error(&out);
-        if (byte < 0xa1 || byte > 0xfe) i--;
+        if (byte < 0xa0) i--;
       }
       continue;
     }
     if (byte < 0xa0 && byte != 0x8e && byte != 0x8f) scr_td_put(&out, byte);
-    else if (byte == 0x8e || byte == 0x8f || (byte >= 0xa1 && byte <= 0xfe)) lead = byte;
+    else if (byte >= 0xa1 && byte <= 0xfe) lead = byte;
     else scr_td_error(&out);
   }
   if (lead) scr_td_error(&out);
@@ -1122,8 +1153,14 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
         break;
 
       case SCR_TD_ISO_ESCAPE_START:
-        if (item >= 0 && (byte == 0x24 || byte == 0x28)) {
+        if (item >= 0 && (byte == 0x24 || byte == 0x25 || byte == 0x26 ||
+                          byte == 0x28 || byte == 0x2e)) {
           lead = byte; state = SCR_TD_ISO_ESCAPE; break;
+        }
+        /* ICU recognizes ESC O as a complete but unsupported single-shift
+         * escape, consuming the O with the replacement. */
+        if (item >= 0 && byte == 0x4f) {
+          output_flag = false; state = output_state; scr_td_error(&out); break;
         }
         if (item >= 0) i--;
         output_flag = false; state = output_state; scr_td_error(&out);
@@ -1133,7 +1170,7 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
       case SCR_TD_ISO_ESCAPE: {
         enum ScrTdIsoState next = (enum ScrTdIsoState)-1;
         if (item >= 0 && lead == 0x28 && byte == 0x42) next = SCR_TD_ISO_ASCII;
-        else if (item >= 0 && lead == 0x28 && byte == 0x4a) next = SCR_TD_ISO_ROMAN;
+        else if (item >= 0 && lead == 0x28 && (byte == 0x48 || byte == 0x4a)) next = SCR_TD_ISO_ROMAN;
         else if (item >= 0 && lead == 0x28 && byte == 0x49) next = SCR_TD_ISO_KATAKANA;
         else if (item >= 0 && lead == 0x24 && (byte == 0x40 || byte == 0x42)) next = SCR_TD_ISO_LEAD;
         if ((int)next >= 0) {
@@ -1141,6 +1178,23 @@ static ScrStr *scr_td_iso_2022_jp_decode(const ScrBytes *b) {
           bool repeated = output_flag;
           output_flag = true;
           if (repeated) scr_td_error(&out);
+          break;
+        }
+        /* ICU consumes the complete unsupported designations it recognizes,
+         * while other malformed payloads are restored to the input queue. */
+        bool consume_error =
+          (lead == 0x24 && (byte == 0x28 || byte == 0x29 || byte == 0x2a ||
+                            byte == 0x2b || byte == 0x41)) ||
+          (lead == 0x28 && ((byte >= 0x40 && byte <= 0x47) || byte == 0x4b || byte == 0x52)) ||
+          (lead == 0x25 && (byte == 0x2f || byte == 0x42)) ||
+          (lead == 0x2e && (byte == 0x41 || byte == 0x46));
+        if (item >= 0 && lead == 0x26 && byte == 0x40) {
+          state = output_state;
+          break;
+        }
+        if (item < 0 || consume_error) {
+          output_flag = false; state = output_state; scr_td_error(&out);
+          if (item < 0) at_eof = true;
           break;
         }
         if (item >= 0) i--;

@@ -107,6 +107,24 @@ console.log(JSON.stringify(new TextDecoder("euc-jp").decode(new Uint8Array([0xa1
 console.log(JSON.stringify(new TextDecoder("shift_jis").decode(new Uint8Array([0x81, 0x20, 0x81]))));
 console.log(JSON.stringify(new TextDecoder("euc-kr").decode(new Uint8Array([0xa1, 0x20, 0xa1]))));
 
+// Recovery rules vary by converter: some invalid bytes are consumed, some
+// return to the input queue, and ICU recognizes a few historical extensions.
+const recoverySamples = [
+  new TextDecoder("gb18030").decode(new Uint8Array([0x81, 0xff])),
+  new TextDecoder("gb18030").decode(new Uint8Array([0x84, 0x31, 0xa4, 0x37])),
+  new TextDecoder("big5").decode(new Uint8Array([0x81, 0xff])),
+  new TextDecoder("euc-jp").decode(new Uint8Array([0xa1, 0xff])),
+  new TextDecoder("euc-jp").decode(new Uint8Array([0x8e, 0xe0])),
+  new TextDecoder("euc-jp").decode(new Uint8Array([0x8f, 0xea, 0x00])),
+  new TextDecoder("euc-kr").decode(new Uint8Array([0xa1, 0xff])),
+  new TextDecoder("euc-kr").decode(new Uint8Array([0x8e, 0xa1])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x24, 0x41])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x4f])),
+  new TextDecoder("iso-2022-jp").decode(new Uint8Array([0x1b, 0x28, 0x48, 0x5c, 0x7e])),
+];
+console.log(JSON.stringify(recoverySamples));
+
 // A compact deterministic byte sweep exercises malformed-sequence recovery,
 // truncated leads, state resets between decode() calls, and sparse table
 // holes. JSON is the byte-for-byte oracle artifact.
