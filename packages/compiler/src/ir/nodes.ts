@@ -3875,6 +3875,13 @@ export type IrLibFn =
    * lower to buffer.fromStr(s, "utf8") (identical bytes — ScrStr storage
    * is well-formed UTF-8). Borrowed arg; owned (+1) string; never throws. */
   | "text.decode"
+  /** TextDecoder.decode for a compile-time non-UTF-8 WHATWG label. The
+   * second f64 is the frontend-owned encoding id consumed by scr_bytes.c;
+   * label aliases/case/ASCII whitespace are canonicalized before IR. The
+   * mapping tables are generated from the pinned Node 24 oracle, keeping
+   * output portable without an ICU/iconv dependency. Borrowed args; owned
+   * (+1) string; never throws. */
+  | "text.decodeLegacy"
   /** The wider sync fs slice (scr_lib.c), all throwing catchably with
    * Node's errno message shapes and `.code` stamped like the rest of
    * sync fs. unlink/chmod/chown wrap the syscalls 1:1 (Node reports the
@@ -5685,6 +5692,28 @@ export function moduleUsesCopying(mod: IrModule): boolean {
       return;
     }
     for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** True when a non-UTF-8 TextDecoder call survives lowering. This gates the
+ * generated legacy mapping tables inside scr_bytes.c; the default UTF-8
+ * decoder and unrelated Buffer users keep their prior runtime object. */
+export function moduleUsesLegacyTextDecoder(mod: IrModule): boolean {
+  let found = false;
+  const visit = (value: unknown): void => {
+    if (found || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    const node = value as { kind?: unknown; fn?: unknown };
+    if (node.kind === "libCall" && node.fn === "text.decodeLegacy") {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(value)) visit((value as Record<string, unknown>)[key]);
   };
   visit(mod);
   return found;

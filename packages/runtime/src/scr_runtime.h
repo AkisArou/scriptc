@@ -4751,6 +4751,12 @@ ScrStr *scr_bytes_to_str_checked_range(const ScrBytes *b, const ScrStr *enc, dou
  * stripped. Borrows; +1; never throws. */
 ScrStr *scr_text_decode(const ScrBytes *b);
 
+/* TextDecoder with a compile-time WHATWG legacy-encoding id. The frontend
+ * owns label canonicalization and emits only the ids understood by
+ * scr_bytes.c; keeping this separate from scr_text_decode means default
+ * UTF-8 users do not retain the legacy mapping tables. Borrows; +1. */
+ScrStr *scr_text_decode_legacy(const ScrBytes *b, double encoding);
+
 /* Buffer.from(string, enc): "utf8" copies the bytes; "hex" parses pairs
  * and stops at the first invalid/odd tail (Node-lenient); "base64" and
  * "base64url" decode the standard AND url-safe alphabets, skipping

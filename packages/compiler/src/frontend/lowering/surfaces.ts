@@ -1446,8 +1446,8 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         "instances and other members need a runtime object representation";
     } else if (container === "TextDecoder") {
       hint =
-        "the inline new TextDecoder().decode(bytes) form and same-scope const store-then-call " +
-        "(const decoder = new TextDecoder(); decoder.decode(bytes)) compile; captured/imported " +
+        "the inline new TextDecoder(<literal label>).decode(bytes) form and same-scope const store-then-call " +
+        "(const decoder = new TextDecoder(<literal label>); decoder.decode(bytes)) compile; captured/imported " +
         "instances, streaming state, and other members need a runtime object representation";
     } else if (member === "prototype") {
       hint =
