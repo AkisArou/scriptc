@@ -86,7 +86,9 @@ export const NARROW_FIRST =
  *   - undocumented keys DROP exactly as Node drops them, provided the
  *     value expression is side-effect-free (an effectful initializer
  *     fences: Node would have evaluated it, so skipping it would be
- *     observable).
+ *     observable). A bare `__proto__: value` assignment is never a
+ *     droppable key: it changes the record's prototype, and Node may read
+ *     documented options inherited from that value.
  * fenceOrDropOptionKey is that split's tail — option walks call it for
  * every key outside their lowered set. */
 
@@ -137,6 +139,17 @@ export function fenceOrDropOptionKey(
 ): void {
   if (documented.has(key)) {
     L.noLowering(`${api} option '${key}'`, prop, pointedHints?.[key] ?? supportedHint);
+  }
+  if (
+    key === "__proto__" &&
+    ts.isPropertyAssignment(prop) &&
+    !ts.isComputedPropertyName(prop.name)
+  ) {
+    L.noLowering(
+      `${api} option '__proto__'`,
+      prop,
+      "a bare __proto__: value entry changes the options object's prototype, so inherited options cannot be lowered",
+    );
   }
   const value = ts.isPropertyAssignment(prop) ? prop.initializer : null;
   if (value !== null && !sideEffectFreeOptionValue(value)) {
