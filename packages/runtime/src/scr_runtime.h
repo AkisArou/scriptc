@@ -3783,6 +3783,10 @@ bool scr_immediate_has_ref(double handle);
  * teardown (they must never run yet must not leak). cb ownership moves
  * in. */
 void scr_next_tick(ScrClosure *cb);
+/* A successful process.stdout/stderr.write completion on that same queue.
+ * The callback and its program-shaped Error | null adapter both MOVE into
+ * the entry; the adapter is invoked with NULL (Node's success argument). */
+void scr_process_write_callback(ScrClosure *cb, ScrFsRenameFn fn);
 /* A raw C-hook entry on the SAME queue: the stream unit enqueues one
  * marker per deferred stream emission, so stream ticks and user
  * nextTicks run in true FIFO order (in Node they are the same queue).
@@ -4978,10 +4982,12 @@ ScrPromise *scr_fsp_read_file_bytes(ScrStr *path); /* +1 */
  * RangeError catchably (same check as scr_crypto_random_string). */
 ScrBytes *scr_crypto_random_bytes(double n); /* +1 */
 
-/* process.stdout/stderr.write(buf): the raw byte writes' Buffer overloads
- * (same streams and buffering as the string forms). Constantly true. */
-bool scr_process_stdout_write_bytes(const ScrBytes *b);
-bool scr_process_stderr_write_bytes(const ScrBytes *b);
+/* process.stdout/stderr.write(buf[, encoding]): the raw byte writes' Buffer
+ * overloads (same streams and buffering as the string forms). The encoding
+ * is evaluated by the caller and ignored here, as Node does for bytes.
+ * Constantly true. */
+bool scr_process_stdout_write_bytes(const ScrBytes *b, const ScrStr *encoding);
+bool scr_process_stderr_write_bytes(const ScrBytes *b, const ScrStr *encoding);
 
 /* The Node-shaped fs error thrower (scr_lib.c): formats "ENOENT: no such
  * file or directory, open 'x'" and throws it catchably. Shared with

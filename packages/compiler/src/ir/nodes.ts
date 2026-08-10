@@ -2882,9 +2882,13 @@ export type IrLibFn =
   | "zlib.deflateSync"
   | "zlib.inflateSync"
   /** The Buffer overloads of the raw stream writes — same promptly
-   * submitted streams as process.stdoutWrite/stderrWrite, constantly true. */
+   * submitted streams as process.stdoutWrite/stderrWrite, constantly true.
+   * The encoding arg is evaluated but ignored for bytes, like Node. The Cb
+   * forms move their program-shaped completion callback to the tick queue. */
   | "process.stdoutWriteBytes"
   | "process.stderrWriteBytes"
+  | "process.stdoutWriteBytesCb"
+  | "process.stderrWriteBytesCb"
   | "fsp.readFile"
   | "fsp.writeFile"
   | "fsp.mkdir"
@@ -6490,6 +6494,8 @@ const LIB_MODE_REFUSED_PREFIXES: readonly [string, string][] = [
   // exclude — refuse the surface like the rest of the event-loop family.
   ["fs.existsChk", "the async fs callback surface (fs.exists)"],
   ["fs.renameCb", "the async fs callback surface (fs.rename)"],
+  ["process.stdoutWriteBytesCb", "process.stdout.write completion callbacks"],
+  ["process.stderrWriteBytesCb", "process.stderr.write completion callbacks"],
   ["timers.", "the timers surface (setTimeout family)"],
   ["tp.", "the timers/promises surface"],
   ["cp.", "the child_process surface"],

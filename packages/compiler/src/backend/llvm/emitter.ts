@@ -11049,6 +11049,26 @@ class LlEmitter {
     const B = this.B;
     // Loop liveness first (one table for generic and special shapes).
     if (USES_TIMERS_LIB_FNS.has(e.fn)) this.usesTimers = true;
+    if (e.fn === "process.stdoutWriteBytesCb" || e.fn === "process.stderrWriteBytesCb") {
+      // All arguments evaluate before bytes are submitted. The callback
+      // then moves into the next-tick entry and its error-first adapter
+      // constructs Node's success `null` argument when the tick fires.
+      this.usesTimers = true;
+      const args = e.args.map((a) => this.emitExpr(a));
+      const cbT = e.args[2]!.type;
+      if (cbT.kind !== "func") throw new Error("llvm emitter bug: process write callback not a func");
+      this.moveTemp(args[2]!);
+      const adapter = this.fsRenameThunkFor(cbT);
+      const write = e.fn === "process.stdoutWriteBytesCb"
+        ? "scr_process_stdout_write_bytes"
+        : "scr_process_stderr_write_bytes";
+      this.declare(`declare zeroext i1 @${write}(ptr, ptr)`);
+      this.declare(`declare void @scr_process_write_callback(ptr, ptr)`);
+      const out = B.tmp();
+      B.line(`${out} = call i1 @${write}(ptr ${args[0]!.name}, ptr ${args[1]!.name})`);
+      B.line(`call void @scr_process_write_callback(ptr ${args[2]!.name}, ptr @${adapter})`);
+      return { name: out, type: e.type };
+    }
     if (e.fn === "fs.renameCb") {
       // The callback MOVES into the next-turn operation. Its emitted
       // adapter materializes the callback's Error | null union (or the

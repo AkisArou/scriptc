@@ -628,8 +628,9 @@ ScrArr *scr_active_resources(void) {
  * left queued on the uncaught paths) never run — the teardown releases
  * them, like Node dropping the queue at exit. */
 typedef struct ScrNtick {
-  ScrClosure *cb;    /* owned; NULL for a raw C-hook entry */
-  void (*raw)(void); /* the hook when cb == NULL (stream tick markers) */
+  ScrClosure *cb;             /* owned; NULL for a raw C-hook entry */
+  ScrFsRenameFn error_cb;     /* process-write success adapter, or NULL */
+  void (*raw)(void);          /* hook when cb == NULL (stream markers) */
   struct ScrNtick *next;
 } ScrNtick;
 
@@ -645,6 +646,20 @@ void scr_next_tick(ScrClosure *cb /*moves*/) {
   ScrNtick *t = calloc(1, sizeof *t);
   if (!t) scr_oom();
   t->cb = cb;
+  if (scr_nt_tail) scr_nt_tail->next = t;
+  else scr_nt_head = t;
+  scr_nt_tail = t;
+}
+
+/* stdout/stderr write completions are Node nextTicks too, but their
+ * callback receives the success `null` argument. Reuse the error-first
+ * adapter ABI also used by fs.rename: emitted adapters construct the
+ * program's Error | null union, and NULL selects its null arm. */
+void scr_process_write_callback(ScrClosure *cb /*moves*/, ScrFsRenameFn fn) {
+  ScrNtick *t = calloc(1, sizeof *t);
+  if (!t) scr_oom();
+  t->cb = cb;
+  t->error_cb = fn;
   if (scr_nt_tail) scr_nt_tail->next = t;
   else scr_nt_head = t;
   scr_nt_tail = t;
@@ -2006,10 +2021,12 @@ bool scr_loop_run(ScrPromise *top_level) {
         scr_nt_head = t->next;
         if (scr_nt_head == NULL) scr_nt_tail = NULL;
         ScrClosure *cb = t->cb;
+        ScrFsRenameFn error_cb = t->error_cb;
         void (*raw)(void) = t->raw;
         free(t);
         if (cb) {
-          ((void (*)(ScrClosure *))cb->fn)(cb);
+          if (error_cb) error_cb(cb, NULL);
+          else ((void (*)(ScrClosure *))cb->fn)(cb);
           scr_closure_release(cb);
         } else {
           raw(); /* one stream tick, FIFO with the user ticks around it */
