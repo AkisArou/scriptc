@@ -86,7 +86,9 @@ export const NARROW_FIRST =
  *   - undocumented keys DROP exactly as Node drops them, provided the
  *     value expression is side-effect-free (an effectful initializer
  *     fences: Node would have evaluated it, so skipping it would be
- *     observable).
+ *     observable). A bare `__proto__: value` assignment with an
+ *     object-capable value is not droppable: it may change the record's
+ *     prototype, and Node may read documented options inherited from it.
  * fenceOrDropOptionKey is that split's tail — option walks call it for
  * every key outside their lowered set. */
 
@@ -121,6 +123,25 @@ export function sideEffectFreeOptionValue(node: ts.Expression): boolean {
   return false;
 }
 
+/** True when an object-literal `__proto__: value` entry is provably a
+ * no-op. The special prototype setter accepts only objects or null; every
+ * primitive value is ignored. Unknown/object-capable types stay fenced. */
+function primitiveProtoValueIsIgnored(L: Lowerer, node: ts.Expression): boolean {
+  const primitive =
+    ts.TypeFlags.StringLike |
+    ts.TypeFlags.NumberLike |
+    ts.TypeFlags.BooleanLike |
+    ts.TypeFlags.BigIntLike |
+    ts.TypeFlags.ESSymbolLike |
+    ts.TypeFlags.EnumLike |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Void |
+    ts.TypeFlags.Never;
+  const t = L.typeOf(node);
+  const parts = t.isUnionType() ? t.getTypes() : [t];
+  return parts.every((p) => (p.flags & primitive) !== 0);
+}
+
 /** The stance's tail: `key` is outside the walk's lowered set. Documented
  * keys of the API fence by name (pointed per-key hints first, the walk's
  * supported-options hint otherwise); undocumented keys drop like Node
@@ -137,6 +158,18 @@ export function fenceOrDropOptionKey(
 ): void {
   if (documented.has(key)) {
     L.noLowering(`${api} option '${key}'`, prop, pointedHints?.[key] ?? supportedHint);
+  }
+  if (
+    key === "__proto__" &&
+    ts.isPropertyAssignment(prop) &&
+    !ts.isComputedPropertyName(prop.name) &&
+    !primitiveProtoValueIsIgnored(L, prop.initializer)
+  ) {
+    L.noLowering(
+      `${api} option '__proto__'`,
+      prop,
+      "a bare __proto__: value entry changes the options object's prototype, so inherited options cannot be lowered",
+    );
   }
   const value = ts.isPropertyAssignment(prop) ? prop.initializer : null;
   if (value !== null && !sideEffectFreeOptionValue(value)) {
@@ -871,6 +904,8 @@ export const BUILTIN_MODULE_FN_ALIASES: Record<string, Record<string, readonly I
   "fs/promises": {
     // The Buffer form (no encoding).
     readFile: ["fsp.readFileBytes"],
+    // The string-data { mode } options form.
+    writeFile: ["fsp.writeFileMode"],
   },
   crypto: {
     // The composed randomBytes(n).toString(enc) chain keeps its one-libCall

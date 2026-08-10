@@ -1136,7 +1136,12 @@ declare module "fs/promises" {
   export function open(path: string, flags?: string, mode?: number): Promise<FileHandle>;
   export function readFile(path: string, encoding: "utf8" | "utf-8"): Promise<string>;
   export function readFile(path: string): Promise<Buffer>;
-  export function writeFile(path: string, data: string): Promise<void>;
+  export function writeFile(
+    path: string,
+    data: string,
+    options?: { mode?: number; encoding?: "utf8" | "utf-8"; flag?: string; [option: string]: unknown },
+  ): Promise<void>;
+  export function writeFile(path: string, data: string, encoding: "utf8" | "utf-8"): Promise<void>;
   export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<void>;
   export function readdir(path: string): Promise<string[]>;
   export function rm(path: string): Promise<void>;

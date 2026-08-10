@@ -1567,6 +1567,22 @@ void scr_fs_write_file(ScrStr *path, ScrStr *data) {
  * existing file keeps its permissions, exactly Node (which never chmods
  * here). Same error shapes as the plain form. */
 void scr_fs_write_file_mode(ScrStr *path, ScrStr *data, double mode) {
+  char recv[48], msg[176];
+  scr_num_received(mode, recv);
+  if (!(isfinite(mode) && trunc(mode) == mode)) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"mode\" is out of range. It must be an integer. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  if (mode < 0 || mode > 4294967295.0) {
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"mode\" is out of range. It must be >= 0 && <= 4294967295. Received %s",
+                       recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
   /* O_BINARY: zero on POSIX; on Windows it keeps the CRT from translating
    * \n in these byte-exact writes (fopen's "wb" path already does). */
   int fd = open(path->data, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, (mode_t)mode);

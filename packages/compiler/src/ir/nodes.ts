@@ -2891,6 +2891,9 @@ export type IrLibFn =
   | "process.stderrWriteBytesCb"
   | "fsp.readFile"
   | "fsp.writeFile"
+  /** fs.promises.writeFile(path, data, { mode }): the settled-promise
+   * twin of fs.writeFileModeSync. */
+  | "fsp.writeFileMode"
   | "fsp.mkdir"
   /** The fs/promises option/member tail the certs pipeline uses: mkdir's
    * literal { recursive?, mode? } options (the mkdirSync matrix behind
