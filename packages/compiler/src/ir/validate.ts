@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -765,6 +765,19 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fsp.readdir": { argTypes: [STRING], result: { kind: "promise", inner: arrayOf(STRING) } },
   "fsp.rm": { argTypes: [STRING], result: { kind: "promise", inner: VOID } },
   "fsp.stat": { argTypes: [STRING], result: { kind: "promise", inner: STATS_T } },
+  "fsp.open": { argTypes: [STRING, STRING, F64], result: { kind: "promise", inner: FILEHANDLE_T } },
+  "fileHandle.fd": { argTypes: [FILEHANDLE_T], result: F64 },
+  "fileHandle.close": { argTypes: [FILEHANDLE_T], result: { kind: "promise", inner: VOID } },
+  // read/write carry call-site result record shapes; the validator checks
+  // those below, so promise<void> is only a table sentinel.
+  "fileHandle.read": { argTypes: [FILEHANDLE_T, BYTES_U8, F64, F64, F64, BOOL], result: { kind: "promise", inner: VOID } },
+  "fileHandle.writeBytes": { argTypes: [FILEHANDLE_T, BYTES_U8, F64, F64, F64, BOOL], result: { kind: "promise", inner: VOID } },
+  "fileHandle.writeStr": { argTypes: [FILEHANDLE_T, STRING, F64, STRING], result: { kind: "promise", inner: VOID } },
+  "fileHandle.readFile": { argTypes: [FILEHANDLE_T, STRING], result: { kind: "promise", inner: STRING } },
+  "fileHandle.readFileBytes": { argTypes: [FILEHANDLE_T, STRING], result: { kind: "promise", inner: BYTES_U8 } },
+  "fileHandle.writeFile": { argTypes: [FILEHANDLE_T, STRING, STRING], result: { kind: "promise", inner: VOID } },
+  "fileHandle.writeFileBytes": { argTypes: [FILEHANDLE_T, BYTES_U8, STRING], result: { kind: "promise", inner: VOID } },
+  "fileHandle.stat": { argTypes: [FILEHANDLE_T], result: { kind: "promise", inner: STATS_T } },
   "process.argv": { argTypes: [], result: arrayOf(STRING) },
   "process.platform": { argTypes: [], result: STRING },
   // The one libCall whose result type is program-dependent (union ids are
@@ -3519,6 +3532,22 @@ function validateFunction(
           const want = sig.argTypes[i];
           if (want) expectType(a, want, `libCall ${e.fn} arg ${i}`);
         });
+        if (e.fn === "fileHandle.read" || e.fn === "fileHandle.writeBytes" || e.fn === "fileHandle.writeStr") {
+          const inner = e.type.kind === "promise" ? e.type.inner : undefined;
+          const shape = inner?.kind === "record" ? records.get(inner.shapeId) : undefined;
+          const countName = e.fn === "fileHandle.read" ? "bytesRead" : "bytesWritten";
+          const payload = e.args[1]?.type;
+          const count = shape?.fields.find((f) => f.name === countName);
+          const buffer = shape?.fields.find((f) => f.name === "buffer");
+          const ok =
+            shape !== undefined && !shape.tuple && shape.indexValue === undefined && shape.fields.length === 2 &&
+            count?.type.kind === "f64" && payload !== undefined && buffer !== undefined &&
+            typeEquals(buffer.type, payload);
+          if (!ok) {
+            err(`libCall ${e.fn} must return a promise of { ${countName}: number, buffer }`, e.loc);
+          }
+          break;
+        }
         if (e.fn === "fetch.streamFrom") {
           const t = e.args[0]?.type;
           const ok =

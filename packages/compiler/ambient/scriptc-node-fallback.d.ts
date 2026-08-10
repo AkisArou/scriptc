@@ -1097,6 +1097,37 @@ declare module "fs" {
  * interleaves with timers or other fibers — observable only in concurrent
  * code. readFile is utf8-only, like readFileSync. */
 declare module "fs/promises" {
+  export interface FileReadResult<T extends Uint8Array> {
+    bytesRead: number;
+    buffer: T;
+  }
+  export interface FileWriteResult<T> {
+    bytesWritten: number;
+    buffer: T;
+  }
+  export interface FileHandle {
+    readonly fd: number;
+    close(): Promise<void>;
+    read<T extends Uint8Array>(
+      buffer: T,
+      offset?: number | null,
+      length?: number | null,
+      position?: number | null,
+    ): Promise<FileReadResult<T>>;
+    write<T extends Uint8Array>(
+      buffer: T,
+      offset?: number | null,
+      length?: number | null,
+      position?: number | null,
+    ): Promise<FileWriteResult<T>>;
+    write(data: string, position?: number | null, encoding?: "utf8" | "utf-8" | null): Promise<FileWriteResult<string>>;
+    readFile(options?: null): Promise<Buffer>;
+    readFile(encoding: "utf8" | "utf-8"): Promise<string>;
+    writeFile(data: string | Uint8Array, encoding?: "utf8" | "utf-8" | null): Promise<void>;
+    appendFile(data: string | Uint8Array, encoding?: "utf8" | "utf-8" | null): Promise<void>;
+    stat(): Promise<import("node:fs").Stats>;
+  }
+  export function open(path: string, flags?: string, mode?: number): Promise<FileHandle>;
   export function readFile(path: string, encoding: "utf8" | "utf-8"): Promise<string>;
   export function readFile(path: string): Promise<Buffer>;
   export function writeFile(path: string, data: string): Promise<void>;

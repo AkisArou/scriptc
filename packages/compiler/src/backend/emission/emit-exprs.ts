@@ -5539,6 +5539,43 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fsp_rm(${arg(0)})`);
           case "fsp.stat":
             return finish(`scr_fsp_stat(${arg(0)})`);
+          case "fsp.open":
+            return finish(`scr_fsp_open(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "fileHandle.fd":
+            return finish(`scr_file_handle_fd(${arg(0)})`);
+          case "fileHandle.close":
+            return finish(`scr_file_handle_close_promise(${arg(0)})`);
+          case "fileHandle.readFile":
+            return finish(`scr_file_handle_read_file_promise(${arg(0)}, ${arg(1)})`);
+          case "fileHandle.readFileBytes":
+            return finish(`scr_file_handle_read_file_bytes_promise(${arg(0)}, ${arg(1)})`);
+          case "fileHandle.writeFile":
+            return finish(`scr_file_handle_write_file_promise(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "fileHandle.writeFileBytes":
+            return finish(`scr_file_handle_write_file_bytes_promise(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "fileHandle.stat":
+            return finish(`scr_file_handle_stat_promise(${arg(0)})`);
+          case "fileHandle.read":
+          case "fileHandle.writeBytes":
+          case "fileHandle.writeStr": {
+            if (e.type.kind !== "promise" || e.type.inner.kind !== "record") {
+              throw new Error(`emitter bug: ${e.fn} result`);
+            }
+            const inner = e.type.inner;
+            const countFn = e.fn === "fileHandle.read"
+              ? `scr_file_handle_read(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`
+              : e.fn === "fileHandle.writeBytes"
+                ? `scr_file_handle_write_bytes(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)}, ${arg(4)}, ${arg(5)})`
+                : `scr_file_handle_write_str(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`;
+            const count = E.newTemp(F64, countFn);
+            const row = E.newTemp(inner, `${mangleRecordNew(inner.shapeId)}()`);
+            const countField = e.fn === "fileHandle.read" ? "bytesRead" : "bytesWritten";
+            E.line(`${row.name}->${mangleField(countField)} = ${count.name};`);
+            E.line(`${row.name}->${mangleField("buffer")} = ${retainCallC(e.args[1]!.type, arg(1))};`);
+            const rc = vAdapters(inner);
+            E.moveTemp(row); // promise fulfillment owns the result record
+            return finish(`scr_promise_settled_ref(${row.name}, &${rc.retain}, &${rc.release}, ${E.traceArgC(inner)})`);
+          }
           case "process.argv":
             return finish(`scr_process_argv()`);
           case "process.platform":

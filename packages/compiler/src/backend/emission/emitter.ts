@@ -1716,6 +1716,7 @@ export class CEmitter {
       case "searchParams":
       case "symbol":
       case "stats":
+      case "fileHandle":
       case "spawnRes":
       case "child":
       case "netServer":

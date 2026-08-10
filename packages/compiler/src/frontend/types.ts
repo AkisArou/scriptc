@@ -377,6 +377,8 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
       return "symbol";
     case "stats":
       return "Stats";
+    case "fileHandle":
+      return "FileHandle";
     case "spawnRes":
       return "SpawnSyncReturns";
     case "child":
@@ -981,6 +983,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       elem.kind === "url" ||
       elem.kind === "searchParams" ||
       elem.kind === "stats" ||
+      elem.kind === "fileHandle" ||
       elem.kind === "spawnRes" ||
       elem.kind === "netSocket" ||
       elem.kind === "dgramSocket" ||
@@ -1609,6 +1612,20 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   ) {
     return { kind: "stats" };
   }
+  // fs/promises.FileHandle: an owned descriptor object. Module provenance
+  // distinguishes it from user interfaces with the same name; both the
+  // fallback and @types/node declare it in "fs/promises".
+  if (
+    psym?.name === "FileHandle" &&
+    checker.declarationsOf(psym).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        ctx.isStdlibFile(d.getSourceFile()) &&
+        isDeclaredInAmbientModule(d, "fs/promises"),
+    )
+  ) {
+    return { kind: "fileHandle" };
+  }
   // child_process.SpawnSyncReturns: @types/node's generic interface (the
   // Buffer/string split is re-checked at the stdout/stderr READ — status
   // reads work either way) or the fallback declarations' plain interface.
@@ -2051,6 +2068,39 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         false,
         undefined,
         ["address", "family", "port"],
+      ),
+    };
+  }
+  // fs/promises FileReadResult<T> / FileWriteResult<T>: the two-field
+  // null-prototype objects returned by FileHandle.read/write. The native
+  // record does not model the prototype (unobservable through the lowered
+  // surface); it preserves the caller buffer/string by reference.
+  if (
+    (psym?.name === "FileReadResult" || psym?.name === "FileWriteResult") &&
+    checker.declarationsOf(psym).some(
+      (d) =>
+        ts.isInterfaceDeclaration(d) &&
+        ctx.isStdlibFile(d.getSourceFile()) &&
+        isDeclaredInAmbientModule(d, "fs/promises"),
+    )
+  ) {
+    const args = checker.getTypeArguments(widened as ts.TypeReference);
+    if (args.length !== 1) return null;
+    const payload = mapType(args[0]!, ctx);
+    if (!payload || !(payload.kind === "string" || (payload.kind === "bytes" && payload.elem === "u8"))) {
+      return null;
+    }
+    const count = psym.name === "FileReadResult" ? "bytesRead" : "bytesWritten";
+    return {
+      kind: "record",
+      shapeId: ctx.shapes.intern(
+        [
+          { name: "buffer", type: payload },
+          { name: count, type: F64 },
+        ],
+        false,
+        undefined,
+        [count, "buffer"],
       ),
     };
   }

@@ -115,6 +115,12 @@ export type IrType =
    * never part of a cycle, no trace. Same container rules as url: union
    * arms fine, arrays/maps/JSON fenced. */
   | { kind: "stats" }
+  /** A node:fs/promises FileHandle: heap, refcounted, MUTABLE — aliases
+   * share one descriptor slot, so close() is idempotent and every alias
+   * observes fd === -1 after closure. The final release closes a still-
+   * open descriptor, matching Node's ownership safety without its GC
+   * warning. Holds no references and cannot participate in a cycle. */
+  | { kind: "fileHandle" }
   /** A child_process.spawnSync result (scr_child.c): heap, refcounted,
    * IMMUTABLE — the reaped child's status plus its captured utf8 stdout/
    * stderr. Holds only strings — never part of a cycle, no trace. Same
@@ -313,7 +319,7 @@ export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
   // symbol is not a JS object, but every symbol is truthy — the same
   // constant-true answer.
   "symbol",
-  "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "spawnRes", "child",
+  "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "fileHandle", "spawnRes", "child",
   "netServer", "netSocket", "http2Session", "http2Stream", "dgramSocket", "testCtx", "httpReq", "httpRes", "httpClientReq",
   "secureCtx", "fsWatcher", "childStream", "procStream", "bytes", "func", "object", "record", "promise",
   // A generator object is a JS object: always truthy.
@@ -332,6 +338,7 @@ export const URL_T: IrType = { kind: "url" };
 export const SEARCH_PARAMS_T: IrType = { kind: "searchParams" };
 export const SYMBOL_T: IrType = { kind: "symbol" };
 export const STATS_T: IrType = { kind: "stats" };
+export const FILEHANDLE_T: IrType = { kind: "fileHandle" };
 export const SPAWNRES_T: IrType = { kind: "spawnRes" };
 export const CHILD_T: IrType = { kind: "child" };
 export const NETSERVER_T: IrType = { kind: "netServer" };
@@ -514,6 +521,7 @@ export function typeKey(t: IrType): string {
     case "searchParams":
     case "symbol":
     case "stats":
+    case "fileHandle":
     case "spawnRes":
     case "child":
     case "netServer":
@@ -628,6 +636,7 @@ export function isRefCounted(t: IrType): boolean {
     // most two strings.
     t.kind === "symbol" ||
     t.kind === "stats" ||
+    t.kind === "fileHandle" ||
     t.kind === "spawnRes" ||
     t.kind === "child" ||
     // net handles are refcounted like child (listeners drop at settle,
@@ -2892,6 +2901,22 @@ export type IrLibFn =
   | "fsp.readdir"
   | "fsp.rm"
   | "fsp.stat"
+  /** fs/promises.open and the statically represented FileHandle surface.
+   * Every operation returns an already-settled promise; syscall failures
+   * become rejections rather than escaping synchronously. read/write
+   * results are call-site record shapes ({ bytesRead/bytesWritten,
+   * buffer }) assembled by the backends around the fixed runtime ABI. */
+  | "fsp.open"
+  | "fileHandle.fd"
+  | "fileHandle.close"
+  | "fileHandle.read"
+  | "fileHandle.writeBytes"
+  | "fileHandle.writeStr"
+  | "fileHandle.readFile"
+  | "fileHandle.readFileBytes"
+  | "fileHandle.writeFile"
+  | "fileHandle.writeFileBytes"
+  | "fileHandle.stat"
   | "process.argv"
   | "process.platform"
   /** getenv(3): one string key arg → the interned `string | undefined`
@@ -5175,6 +5200,7 @@ function isJsonSafeAt(
     // representable type-directedly; rejected like Maps.
     case "bytes":
     case "stats":
+    case "fileHandle":
     case "spawnRes":
     case "child":
     case "netServer":
@@ -5714,6 +5740,27 @@ export function moduleUsesLegacyTextDecoder(mod: IrModule): boolean {
       return;
     }
     for (const key of Object.keys(value)) visit((value as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** True when a FileHandle type survives in the module. This is the link
+ * switch for scr_file_handle.c; fs/promises.open carries the type inside its
+ * promise result even when no handle method is called. */
+export function moduleUsesFileHandle(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    if ((v as { kind?: unknown }).kind === "fileHandle") {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
   };
   visit(mod);
   return found;
