@@ -44,28 +44,144 @@ struct ScrStats {
   double mtime_ms;
 };
 
+typedef struct {
+  char *data;
+  size_t len;
+  size_t cap;
+} ScrFileHandleBuf;
+
+static void scr_file_handle_buf_grow(ScrFileHandleBuf *b, size_t need) {
+  if (need <= b->cap - b->len) return;
+  if (need > SIZE_MAX - b->len) scr_trap("scriptc: out of memory\n");
+  size_t want = b->len + need;
+  size_t cap = b->cap ? b->cap : 64;
+  while (cap < want) {
+    if (cap > SIZE_MAX / 2) {
+      cap = want;
+      break;
+    }
+    cap *= 2;
+  }
+  char *data = realloc(b->data, cap);
+  if (!data) scr_trap("scriptc: out of memory\n");
+  b->data = data;
+  b->cap = cap;
+}
+
+static void scr_file_handle_buf_bytes(ScrFileHandleBuf *b, const char *data,
+                                      size_t len) {
+  scr_file_handle_buf_grow(b, len);
+  memcpy(b->data + b->len, data, len);
+  b->len += len;
+}
+
+static void scr_file_handle_buf_cstr(ScrFileHandleBuf *b, const char *data) {
+  scr_file_handle_buf_bytes(b, data, strlen(data));
+}
+
+static void scr_file_handle_buf_char(ScrFileHandleBuf *b, char c) {
+  scr_file_handle_buf_bytes(b, &c, 1);
+}
+
+static bool scr_file_handle_has_dollar_brace(const ScrStr *value) {
+  for (size_t i = 0; i + 1 < value->len; i++) {
+    if (value->data[i] == '$' && value->data[i + 1] == '{') return true;
+  }
+  return false;
+}
+
+static char scr_file_handle_inspect_quote(const ScrStr *value) {
+  if (!memchr(value->data, '\'', value->len)) return '\'';
+  if (!memchr(value->data, '"', value->len)) return '"';
+  if (!memchr(value->data, '`', value->len) &&
+      !scr_file_handle_has_dollar_brace(value)) {
+    return '`';
+  }
+  return '\'';
+}
+
+/* Node's ERR_INVALID_ARG_VALUE renderer runs util.inspect on the value and
+ * truncates that rendered text to 128 UTF-16 units before appending "...".
+ * FileHandle flags and paths use the static ScrStr representation, so this
+ * scalar slice is all this translation unit needs from the optional inspect
+ * runtime. */
+static ScrStr *scr_file_handle_inspect(const ScrStr *value) {
+  ScrFileHandleBuf b = {0};
+  char quote = scr_file_handle_inspect_quote(value);
+  scr_file_handle_buf_char(&b, quote);
+  for (size_t i = 0; i < value->len; i++) {
+    unsigned char c = (unsigned char)value->data[i];
+    if (c == '\\' || (c == '\'' && quote == '\'')) {
+      scr_file_handle_buf_char(&b, '\\');
+      scr_file_handle_buf_char(&b, (char)c);
+    } else if (c == '\b') {
+      scr_file_handle_buf_cstr(&b, "\\b");
+    } else if (c == '\t') {
+      scr_file_handle_buf_cstr(&b, "\\t");
+    } else if (c == '\n') {
+      scr_file_handle_buf_cstr(&b, "\\n");
+    } else if (c == '\f') {
+      scr_file_handle_buf_cstr(&b, "\\f");
+    } else if (c == '\r') {
+      scr_file_handle_buf_cstr(&b, "\\r");
+    } else if (c < 0x20 || c == 0x7f) {
+      char escaped[5];
+      int len = snprintf(escaped, sizeof escaped, "\\x%02X", c);
+      scr_file_handle_buf_bytes(&b, escaped, (size_t)len);
+    } else if (c == 0xc2 && i + 1 < value->len &&
+               (unsigned char)value->data[i + 1] >= 0x80 &&
+               (unsigned char)value->data[i + 1] <= 0x9f) {
+      char escaped[5];
+      int len = snprintf(escaped, sizeof escaped, "\\x%02X",
+                         (unsigned char)value->data[++i]);
+      scr_file_handle_buf_bytes(&b, escaped, (size_t)len);
+    } else {
+      scr_file_handle_buf_char(&b, (char)c);
+    }
+  }
+  scr_file_handle_buf_char(&b, quote);
+  ScrStr *full = scr_str_new(b.data ? b.data : "", b.len);
+  free(b.data);
+  if (scr_str_utf16_len(full) <= 128) return full;
+  ScrStr *head = scr_str_slice(full, 0, 128);
+  scr_str_release(full);
+  ScrFileHandleBuf truncated = {0};
+  scr_file_handle_buf_bytes(&truncated, head->data, head->len);
+  scr_file_handle_buf_cstr(&truncated, "...");
+  scr_str_release(head);
+  ScrStr *out = scr_str_new(truncated.data, truncated.len);
+  free(truncated.data);
+  return out;
+}
+
+static void scr_file_handle_arg_value_error(const char *prefix,
+                                            const ScrStr *value) {
+  ScrStr *inspected = scr_file_handle_inspect(value);
+  ScrFileHandleBuf msg = {0};
+  scr_file_handle_buf_cstr(&msg, prefix);
+  scr_file_handle_buf_bytes(&msg, inspected->data, inspected->len);
+  scr_throw_error_msg_code(SCR_ERR_TYPE, msg.data, msg.len,
+                           "ERR_INVALID_ARG_VALUE");
+  free(msg.data);
+  scr_str_release(inspected);
+}
+
 static bool scr_file_handle_flag_eq(const ScrStr *flags, const char *want) {
   size_t len = strlen(want);
   return flags->len == len && memcmp(flags->data, want, len) == 0;
 }
 
 static void scr_file_handle_invalid_flags(const ScrStr *flags) {
-  static const char prefix[] = "The argument 'flags' is invalid. Received '";
-  static const char suffix[] = "'";
-  size_t prefix_len = sizeof prefix - 1;
-  size_t suffix_len = sizeof suffix - 1;
-  if (flags->len > SIZE_MAX - prefix_len - suffix_len - 1) {
-    scr_trap("scriptc: out of memory\n");
-  }
-  size_t len = prefix_len + flags->len + suffix_len;
-  char *msg = malloc(len + 1);
-  if (!msg) scr_trap("scriptc: out of memory\n");
-  memcpy(msg, prefix, prefix_len);
-  memcpy(msg + prefix_len, flags->data, flags->len);
-  memcpy(msg + prefix_len + flags->len, suffix, suffix_len);
-  msg[len] = 0;
-  scr_throw_error_msg_code(SCR_ERR_TYPE, msg, len, "ERR_INVALID_ARG_VALUE");
-  free(msg);
+  scr_file_handle_arg_value_error(
+      "The argument 'flags' is invalid. Received ", flags);
+}
+
+static bool scr_file_handle_path_valid(const ScrStr *path) {
+  if (!memchr(path->data, 0, path->len)) return true;
+  scr_file_handle_arg_value_error(
+      "The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received ",
+      path);
+  return false;
 }
 
 static int scr_file_handle_open_flags(ScrStr *flags) {
@@ -113,6 +229,7 @@ static bool scr_file_handle_mode_valid(double mode) {
 }
 
 ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
+  if (!scr_file_handle_path_valid(path)) return NULL;
   int of = scr_file_handle_open_flags(flags);
   if (of < 0) return NULL;
   if (!scr_file_handle_mode_valid(mode)) return NULL;

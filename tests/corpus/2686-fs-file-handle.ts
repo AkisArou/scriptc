@@ -32,7 +32,24 @@ async function invalidFlags(flags: string): Promise<void> {
     await open(scratch, flags);
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
-    console.log("invalid flags:", flags.length, err.name, err.code);
+    console.log("invalid flags:", flags.length, err.name, err.code, JSON.stringify(err.message));
+  }
+}
+
+async function invalidPath(value: string): Promise<void> {
+  try {
+    const unexpected = await open(value);
+    await unexpected.close();
+    console.log("invalid path: opened");
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log(
+      "invalid path:",
+      err.name,
+      err.code,
+      err.message.includes("without null bytes"),
+      err.message.includes("\\x00suffix"),
+    );
   }
 }
 
@@ -119,8 +136,15 @@ async function main(): Promise<void> {
   await optionalDefaults.close();
 
   await invalidFlags("bad");
+  await invalidFlags("w'bad");
+  await invalidFlags('w"bad');
+  await invalidFlags("w'\"bad");
+  await invalidFlags("w\\bad");
+  await invalidFlags("w\nbad");
+  await invalidFlags("w\u0080bad");
   await invalidFlags("w\0not-a-flag");
   await invalidFlags("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+  await invalidPath(`${scratch}\0suffix`);
   await invalidMode(-1);
   await invalidMode(1.5);
 
