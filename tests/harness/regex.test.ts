@@ -167,10 +167,11 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     // preserving their existing cushion.
     // The canonical Ubuntu 24.04/clang Sandbox measures 387,600 bytes for
     // the plain binary and 540,232 with regex linked. The Linux bounds leave
-    // roughly one ELF page of growth. Mach-O keeps its independently
-    // calibrated bounds; neither cushion can hide an engine-sized jump.
+    // roughly one ELF page of growth. Current Mach-O toolchains measure
+    // 398,024 bytes for the plain binary, whose bound likewise leaves about
+    // one native page; neither cushion can hide an engine-sized jump.
     expect(statSync(plainBuild.binaryPath).size).toBeLessThan(
-      process.platform === "linux" ? 408_000 : 395_000,
+      process.platform === "linux" ? 408_000 : 415_000,
     );
     expect(statSync(regexBuild.binaryPath).size).toBeLessThan(
       process.platform === "linux" ? 561_000 : 545_000,

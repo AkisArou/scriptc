@@ -2544,7 +2544,7 @@ static void scr_fs_throw_nopath(int e, const char *op) {
   const char *text = scr_errno_text(e);
   char msg[256];
   int len = snprintf(msg, sizeof msg, "%s: %s, %s", name, text, op);
-  scr_throw_error_msg(SCR_ERR_ERROR, msg, (size_t)len);
+  scr_throw_error_msg_code(SCR_ERR_ERROR, msg, (size_t)len, name);
 }
 
 /* read(2) loop to EOF from the CURRENT position — Node's

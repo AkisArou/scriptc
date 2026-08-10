@@ -115,6 +115,21 @@ async function main(): Promise<void> {
   }
   await writer.close();
 
+  const writeOnly = await open(scratch, "a");
+  try {
+    await writeOnly.readFile();
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log("readFile bytes rejection:", err.name, err.code, err.message);
+  }
+  try {
+    await writeOnly.readFile("utf8");
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    console.log("readFile string rejection:", err.name, err.code, err.message);
+  }
+  await writeOnly.close();
+
   const defaults = await open(scratch);
   const bytes = await defaults.readFile();
   console.log("defaults:", bytes.toString(), defaults.fd >= 0);
