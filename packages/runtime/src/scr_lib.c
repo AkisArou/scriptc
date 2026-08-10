@@ -51,6 +51,7 @@
 #include <windows.h>
 #include <winioctl.h> /* FSCTL_GET_REPARSE_POINT */
 #include <lmcons.h>  /* UNLEN for GetUserNameA */
+#include "scr_win_stats.h"
 
 
 /* The CRT has no symlink view, so its internal lstat users degrade to stat.
@@ -2872,53 +2873,80 @@ typedef struct {
 /* Node/libuv reports a Windows link's target-text length as st_size. The
  * ordinary handle information does not carry that value, so read the reparse
  * payload while the no-follow handle is live. */
-static double scr_stats_link_size(HANDLE h, DWORD tag) {
+static bool scr_stats_link_size(HANDLE h, DWORD tag, double *size_out) {
   union {
     ScrStatsReparseData align;
     unsigned char bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
   } storage;
   DWORD used;
   if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0,
-                       storage.bytes, sizeof storage.bytes, &used, NULL)) return -1;
+                       storage.bytes, sizeof storage.bytes, &used, NULL)) return false;
   ScrStatsReparseData *data = (ScrStatsReparseData *)storage.bytes;
-  if (data->tag != tag) return -1;
+  const size_t body_offset = offsetof(ScrStatsReparseData, body);
+  if (used < body_offset || data->data_len > used - body_offset ||
+      data->tag != tag) return false;
 
   const WCHAR *target;
   size_t len;
   if (tag == IO_REPARSE_TAG_SYMLINK) {
-    target = data->body.symlink.path +
-      data->body.symlink.substitute_offset / sizeof(WCHAR);
-    len = data->body.symlink.substitute_len / sizeof(WCHAR);
+    const size_t fixed = offsetof(ScrStatsReparseData, body.symlink.path) -
+      body_offset;
+    size_t offset = data->body.symlink.substitute_offset;
+    size_t bytes = data->body.symlink.substitute_len;
+    if (data->data_len < fixed || ((offset | bytes) & 1) != 0 ||
+        offset > data->data_len - fixed ||
+        bytes > data->data_len - fixed - offset) return false;
+    target = (const WCHAR *)((const unsigned char *)data->body.symlink.path +
+      offset);
+    len = bytes / sizeof(WCHAR);
   } else if (tag == IO_REPARSE_TAG_MOUNT_POINT) {
-    target = data->body.mount.path +
-      data->body.mount.substitute_offset / sizeof(WCHAR);
-    len = data->body.mount.substitute_len / sizeof(WCHAR);
+    const size_t fixed = offsetof(ScrStatsReparseData, body.mount.path) -
+      body_offset;
+    size_t offset = data->body.mount.substitute_offset;
+    size_t bytes = data->body.mount.substitute_len;
+    if (data->data_len < fixed || ((offset | bytes) & 1) != 0 ||
+        offset > data->data_len - fixed ||
+        bytes > data->data_len - fixed - offset) return false;
+    target = (const WCHAR *)((const unsigned char *)data->body.mount.path +
+      offset);
+    len = bytes / sizeof(WCHAR);
+    _Static_assert(sizeof(WCHAR) == sizeof(uint16_t),
+                   "Windows reparse payloads use UTF-16 code units");
+    if (!scr_win_stats_mount_target_is_junction(
+          (const uint16_t *)target, len)) return false;
   } else if (tag == UINT32_C(0xA000001D)) {
     /* WSL's LX symlink payload is a version word followed by UTF-8 bytes. */
-    return data->data_len >= sizeof(ULONG)
-      ? (double)(data->data_len - sizeof(ULONG)) : -1;
+    if (data->data_len < sizeof(ULONG)) return false;
+    *size_out = (double)(data->data_len - sizeof(ULONG));
+    return true;
   } else {
     /* App execution links carry a counted UTF-16 string list; the third
      * string is the target path. */
     if (tag != IO_REPARSE_TAG_APPEXECLINK ||
-        data->data_len < sizeof(ULONG)) return -1;
+        data->data_len < sizeof(ULONG)) return false;
     const unsigned char *raw = data->body.generic.bytes;
     ULONG count;
     memcpy(&count, raw, sizeof count);
-    if (count < 3) return -1;
+    if (count < 3 || ((data->data_len - sizeof count) & 1) != 0) return false;
     target = (const WCHAR *)(raw + sizeof count);
     size_t chars = (data->data_len - sizeof count) / sizeof(WCHAR);
     for (size_t item = 0; item < 2; item++) {
       size_t part = 0;
       while (part < chars && target[part] != L'\0') part++;
-      if (part == chars) return -1;
+      if (part == 0 || part == chars) return false;
       target += part + 1;
       chars -= part + 1;
     }
     len = 0;
     while (len < chars && target[len] != L'\0') len++;
-    if (len == chars) return -1;
-    return scr_stats_utf16_len(target, len);
+    if (len == 0 || len == chars || len < 3 ||
+        !((target[0] >= L'A' && target[0] <= L'Z') ||
+          (target[0] >= L'a' && target[0] <= L'z')) ||
+        target[1] != L':' || target[2] != L'\\') return false;
+    double size = scr_stats_utf16_len(target, len);
+    if (size < 0) return false;
+    *size_out = size;
+    return true;
   }
 
   /* Undo the NT namespace prefix CreateSymbolicLinkW stores for absolute
@@ -2927,7 +2955,8 @@ static double scr_stats_link_size(HANDLE h, DWORD tag) {
       target[2] == L'?' && target[3] == L'\\') {
     if (len >= 6 && target[5] == L':' &&
         ((target[4] >= L'A' && target[4] <= L'Z') ||
-         (target[4] >= L'a' && target[4] <= L'z'))) {
+         (target[4] >= L'a' && target[4] <= L'z')) &&
+        (len == 6 || target[6] == L'\\')) {
       target += 4;
       len -= 4;
     } else if (len >= 8 &&
@@ -2939,7 +2968,10 @@ static double scr_stats_link_size(HANDLE h, DWORD tag) {
       len -= 6;
     }
   }
-  return scr_stats_utf16_len(target, len);
+  double size = scr_stats_utf16_len(target, len);
+  if (size < 0) return false;
+  *size_out = size;
+  return true;
 }
 
 static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op,
@@ -2977,8 +3009,15 @@ static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op,
       CloseHandle(h);
       return scr_stats_of_path(path, op, false);
     }
+    if (!scr_stats_link_size(h, tagged.ReparseTag, &link_size)) {
+      /* A mount-point tag may name a mounted volume rather than a junction.
+       * libuv treats those (and malformed/unsupported link payloads) as
+       * ordinary reparse points and retries with the final component
+       * followed. Do not classify from the tag alone. */
+      CloseHandle(h);
+      return scr_stats_of_path(path, op, false);
+    }
     is_link = true;
-    link_size = scr_stats_link_size(h, tagged.ReparseTag);
   }
   FILE_STANDARD_INFO standard;
   bool have_standard = GetFileInformationByHandleEx(

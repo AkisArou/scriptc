@@ -10,6 +10,7 @@
  * exact "Uncaught <ERRNO>: <text>, <syscall> '<path>'" stderr lines.
  */
 #include "scr_runtime.h"
+#include "scr_win_stats.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -53,6 +54,38 @@ int main(int argc, char **argv) {
   char pb[4096];
   ScrStr *p; /* current path operand */
   ScrStr *t;
+
+  /* IO_REPARSE_TAG_MOUNT_POINT is shared by directory junctions and volume
+   * mount points. Pin the libuv-compatible payload distinction without
+   * requiring this portable unit test to provision a Windows volume. */
+  static const uint16_t junction_root[] = {'\\', '?', '?', '\\', 'C', ':'};
+  static const uint16_t junction_path[] = {
+    '\\', '?', '?', '\\', 'd', ':', '\\', 'w', 'o', 'r', 'k'
+  };
+  static const uint16_t volume_mount[] = {
+    '\\', '?', '?', '\\', 'V', 'o', 'l', 'u', 'm', 'e', '{', '1', '}', '\\'
+  };
+  static const uint16_t drive_relative[] = {
+    '\\', '?', '?', '\\', 'C', ':', 'r', 'e', 'l'
+  };
+  static const uint16_t unc_mount[] = {
+    '\\', '?', '?', '\\', 'U', 'N', 'C', '\\', 's', 'h', 'a', 'r', 'e'
+  };
+  check(scr_win_stats_mount_target_is_junction(
+          junction_root, sizeof junction_root / sizeof junction_root[0]),
+        "drive-root mount payload is a junction");
+  check(scr_win_stats_mount_target_is_junction(
+          junction_path, sizeof junction_path / sizeof junction_path[0]),
+        "drive-path mount payload is a junction");
+  check(!scr_win_stats_mount_target_is_junction(
+          volume_mount, sizeof volume_mount / sizeof volume_mount[0]),
+        "volume mount payload is followed");
+  check(!scr_win_stats_mount_target_is_junction(
+          drive_relative, sizeof drive_relative / sizeof drive_relative[0]),
+        "drive-relative mount payload is followed");
+  check(!scr_win_stats_mount_target_is_junction(
+          unc_mount, sizeof unc_mount / sizeof unc_mount[0]),
+        "UNC mount payload is followed");
 
   /* process.argv: one interned array — identity, shape, contents. */
   ScrArr *a1 = scr_process_argv();
