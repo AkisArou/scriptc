@@ -217,6 +217,10 @@ export interface CcOptions {
    * implemented in scr_copying.c (index.ts detects them on the IR).
    * Off keeps that optional TU out of unrelated binaries. */
   copying?: boolean;
+  /** The program uses a statically-labelled non-UTF-8 TextDecoder. Its
+   * generated mapping tables live behind SCR_TEXT_DECODER_LEGACY so the
+   * always-compiled bytes TU stays in the historical size class otherwise. */
+  textDecoderLegacy?: boolean;
   /** The program uses fs/promises.open or a FileHandle value
    * (moduleUsesFileHandle on the IR): compiles scr_file_handle.c. Keeping
    * the descriptor object and promise adapters in their own unit preserves
@@ -1102,6 +1106,7 @@ export interface LibArchiveOptions {
   emitter?: boolean;
   zlib?: boolean;
   copying?: boolean;
+  textDecoderLegacy?: boolean;
 }
 
 export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> {
@@ -1137,6 +1142,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     "-fno-strict-aliasing", // the emitted object model type-puns — see compileC's buildArgs
     "-Wno-deprecated-declarations",
     "-DSCR_LIB",
+    ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-I", rtDir,
     ...(regex ? ["-I", vendorEngineDir()] : []),
     ...(opts.zlib ? ["-I", vendorZlibDir()] : []),
@@ -3037,6 +3043,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(sanitize
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
+    ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-fno-math-errno",
     // The emitted object model is deliberately type-punned C: a hierarchy
     // upcast is a raw pointer cast, so one object's header (rc, vt) and
@@ -3222,6 +3229,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(sanitize
       ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"]
       : ["-O2"]),
+    ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-fno-math-errno",
     "-fno-strict-aliasing", // the emitted object model type-puns — see buildArgs
     "-Wno-deprecated-declarations",

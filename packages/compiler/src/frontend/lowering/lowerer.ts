@@ -2795,7 +2795,7 @@ export class Lowerer {
         TextEncoder:
           "TextEncoder values have no representation — call through a const initialized with new TextEncoder(), or use the composed new TextEncoder().encode(s) form",
         TextDecoder:
-          "TextDecoder values have no representation — call through a const initialized with the default new TextDecoder(), or use the composed new TextDecoder().decode(bytes) form",
+          "TextDecoder values have no representation — call through a const initialized with a recognized literal label, or use the composed new TextDecoder(<literal label>).decode(bytes) form",
       };
       this.pushDiag(
         noLoweringDiag(this.checker.typeToString(type), locOf(node), typeHints[stdlibOwnSym?.name ?? ""]),

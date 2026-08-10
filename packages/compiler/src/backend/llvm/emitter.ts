@@ -389,6 +389,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "stats.size": "scr_stats_size",
   "stats.mtimeMs": "scr_stats_mtime_ms",
   "text.decode": "scr_text_decode",
+  "text.decodeLegacy": "scr_text_decode_legacy",
   "zlib.deflateSync": "scr_zlib_deflate",
   "zlib.inflateSync": "scr_zlib_inflate",
   // The CA-store unit. get/set throw (an unknown type name, a

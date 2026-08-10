@@ -6690,6 +6690,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // WHATWG utf-8 decode with the leading BOM stripped
             // (scr_bytes.c). Borrowed bytes; +1 string; never throws.
             return finish(`scr_text_decode(${arg(0)})`);
+          case "text.decodeLegacy":
+            // Compile-time-labeled WHATWG legacy decode (scr_bytes.c).
+            // Borrowed bytes + numeric encoding id; +1 string.
+            return finish(`scr_text_decode_legacy(${arg(0)}, ${arg(1)})`);
           // The fs option forms (scr_lib.c) — all in the may-throw seed,
           // like the rest of sync fs.
           case "fs.mkdirRecursiveSync":

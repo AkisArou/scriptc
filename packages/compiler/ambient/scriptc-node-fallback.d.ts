@@ -475,8 +475,8 @@ declare var Buffer: BufferConstructor;
 
 /* The WHATWG encoders (Node globals). The COMPOSED forms lower —
  * `new TextEncoder().encode(s)` and `new TextDecoder().decode(bytes)` —
- * as do same-scope const store-then-call forms. The label is typed as the
- * utf-8 spellings (the one supported decoder; other labels and the
+ * as do same-scope const store-then-call forms. Recognized literal WHATWG
+ * labels compile statically; runtime-valued/unknown labels and the
  * fatal/ignoreBOM options fence at the use site). */
 interface TextEncoder {
   encode(input?: string): Uint8Array;
@@ -485,7 +485,7 @@ declare var TextEncoder: { new (): TextEncoder };
 interface TextDecoder {
   decode(input?: ArrayBufferView | ArrayBuffer): string;
 }
-declare var TextDecoder: { new (label?: "utf-8" | "utf8"): TextDecoder };
+declare var TextDecoder: { new (label?: string): TextDecoder };
 
 /* The WHATWG event surface (Node globals since v15): declared so the
  * suite's event-plumbing tests typecheck and fence per SITE with the

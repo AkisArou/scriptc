@@ -3050,8 +3050,8 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // alias plumbing (see stdlibGlobalAliasDecl), no storage, no code.
     if (!isLet && stdlibGlobalAliasDecl(L, decl.name, decl.initializer)) return null;
 
-    // `const encoder = new TextEncoder()` and the default TextDecoder
-    // twin: the codec has no general value representation, but calls
+    // `const encoder = new TextEncoder()` and a statically-labelled
+    // TextDecoder twin: the codec has no general value representation, but calls
     // through this stable binding resolve back to the initializer. The
     // supported constructors are effect-free, so the declaration itself
     // is compile-time alias plumbing with no storage or code.

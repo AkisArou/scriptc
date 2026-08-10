@@ -7642,6 +7642,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/text-decoder-label.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/text-decoder-label.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts": {
    "order": [
     "<repo>/tests/diagnostics/top-level-await-commonjs/main.ts"
