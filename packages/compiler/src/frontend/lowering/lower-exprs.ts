@@ -243,6 +243,8 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     if (ts.isNonNullExpression(expr)) {
       const inner = L.lowerExpr(expr.expression);
       if (inner.type.kind === "union") {
+        const use = runtimeOptionalUseOf(expr);
+        if (runtimeOptionalAssertionErases(L, expr, inner, use)) return inner;
         const target = L.mapTypeOf(L.typeOf(expr));
         if (target && target.kind !== "union" && !typeEquals(target, inner.type)) {
           const helper = L.narrowedArmHelper(inner.type.unionId, target, loc);
@@ -725,14 +727,33 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         const local = L.resolveLocal(expr);
         if (local) {
           if (local.type.kind === "caught") return L.caughtRead(expr, local, loc);
-          if (L.runtimeOptionalLocals.has(local.id)) {
-            return runtimeOptionalMemberRead(L, expr, local, loc) ??
-              { kind: "varRef", localId: local.id, type: local.type, loc };
-          }
           const symbol = L.resolveValueSymbol(expr);
-          if (symbol && L.runtimeOptionalStorageLocals.has(local.id) && L.ctx.captureBySymbol.get(symbol) === local) {
-            const read = runtimeOptionalMemberRead(L, expr, local, loc);
-            if (read) return read;
+          const runtimeOptionalRoot = L.runtimeOptionalRootOf(local);
+          const active = L.runtimeOptionalLocals.has(runtimeOptionalRoot);
+          const captured = !!symbol &&
+            L.runtimeOptionalStorageLocals.has(runtimeOptionalRoot) &&
+            L.ctx.captureBySymbol.get(symbol) === local;
+          if (active || captured) {
+            const use = runtimeOptionalUseOf(expr);
+            if (use?.complex) {
+              L.unsupported("SC1090", expr, "a logical or conditional receiver containing a runtime-optional capture");
+            }
+            if (use?.optional) return { kind: "varRef", localId: local.id, type: local.type, loc };
+            if (use?.kind === "property") return runtimeOptionalReceiverRead(L, expr, local, use.access.name.text, loc);
+            if (use?.kind === "element") {
+              const key = runtimeOptionalElementKey(use.access.argumentExpression);
+              if (key === null) {
+                L.unsupported("SC1090", use.access, "a computed read from a runtime-optional capture (use a literal key)");
+              }
+              return runtimeOptionalReceiverRead(L, expr, local, key, loc);
+            }
+            if (use?.kind === "call") {
+              if (use.comma && !use.optional) {
+                L.unsupported("SC1090", use.access, "a direct call through a comma-wrapped runtime-optional capture");
+              }
+              return runtimeOptionalReceiverRead(L, expr, local, null, loc);
+            }
+            if (active || captured) return { kind: "varRef", localId: local.id, type: local.type, loc };
           }
           return L.maybeNarrow({ kind: "varRef", localId: local.id, type: local.type, loc }, expr);
       }
@@ -2285,26 +2306,29 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
    * force. TypeScript then types a direct member receiver as the plain arm,
    * even though an OOB-safe assignment may have restored undefined. Check
    * that hidden arm and throw the member-read TypeError Node would produce. */
-  function runtimeOptionalMemberRead(
+  function runtimeOptionalReceiverRead(
     L: Lowerer,
     expr: ts.Identifier,
     local: IrLocal,
+    property: string | null,
     loc: SrcLoc,
-  ): IrExpr | null {
-    const access = expr.parent;
-    if (
-      local.type.kind !== "union" ||
-      !ts.isPropertyAccessExpression(access) || access.expression !== expr ||
-      access.questionDotToken !== undefined
-    ) {
-      return null;
-    }
+  ): IrExpr {
+    if (local.type.kind !== "union") throw new Error("runtime-optional local is not union-typed");
     const narrowed = L.mapTypeOf(L.typeOf(expr));
-    if (!narrowed || narrowed.kind === "union" || isUnitType(narrowed)) return null;
+    if (!narrowed || narrowed.kind === "union" || isUnitType(narrowed)) {
+      L.unsupported("SC1090", expr, "a runtime-optional capture whose narrowed value type is not representable");
+    }
     const valueTag = L.armTag(local.type.unionId, narrowed);
     const undefTag = L.armTag(local.type.unionId, UNDEFINED_T);
-    if (valueTag < 0 || undefTag < 0) return null;
+    if (valueTag < 0 || undefTag < 0) throw new Error("runtime-optional local is missing its value or undefined arm");
+    const def = L.unions.get(local.type.unionId);
+    if (!def || def.arms.length !== 2) {
+      L.unsupported("SC1090", expr, "a direct read from a runtime-optional capture with multiple value arms");
+    }
     const ref = (): IrExpr => ({ kind: "varRef", localId: local.id, type: local.type, loc });
+    const message = property === null
+      ? `${expr.text} is not a function`
+      : `Cannot read properties of undefined (reading '${property}')`;
     return {
       kind: "ternary",
       cond: {
@@ -2319,7 +2343,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       then: nodeThrowExpr(
         1,
         "",
-        `Cannot read properties of undefined (reading '${access.name.text}')`,
+        message,
         narrowed,
         loc,
       ),
@@ -2334,6 +2358,78 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       type: narrowed,
       loc,
     };
+  }
+
+  type RuntimeOptionalUse =
+    | { kind: "property"; access: ts.PropertyAccessExpression; optional: boolean; complex: boolean; comma: boolean }
+    | { kind: "element"; access: ts.ElementAccessExpression; optional: boolean; complex: boolean; comma: boolean }
+    | { kind: "call"; access: ts.CallExpression; optional: boolean; complex: boolean; comma: boolean };
+
+  function runtimeOptionalUseOf(expr: ts.Expression): RuntimeOptionalUse | null {
+    let receiver = expr;
+    let complex = false;
+    let comma = false;
+    for (;;) {
+      const parent = receiver.parent;
+      if (
+        (ts.isParenthesizedExpression(parent) || ts.isAssertionExpression(parent) ||
+          ts.isSatisfiesExpression(parent) ||
+          ts.isNonNullExpression(parent)) &&
+        parent.expression === receiver
+      ) {
+        receiver = parent;
+        continue;
+      }
+      if (
+        ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.CommaToken && parent.right === receiver
+      ) {
+        comma = true;
+        receiver = parent;
+        continue;
+      }
+      if (
+        (ts.isBinaryExpression(parent) &&
+          (parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+            parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+            parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) &&
+          (parent.left === receiver || parent.right === receiver)) ||
+        (ts.isConditionalExpression(parent) &&
+          (parent.condition === receiver || parent.whenTrue === receiver || parent.whenFalse === receiver))
+      ) {
+        complex = true;
+        receiver = parent;
+        continue;
+      }
+      break;
+    }
+    const access = receiver.parent;
+    if (ts.isPropertyAccessExpression(access) && access.expression === receiver) {
+      return { kind: "property", access, optional: access.questionDotToken !== undefined, complex, comma };
+    }
+    if (ts.isElementAccessExpression(access) && access.expression === receiver) {
+      return { kind: "element", access, optional: access.questionDotToken !== undefined, complex, comma };
+    }
+    if (ts.isCallExpression(access) && access.expression === receiver) {
+      return { kind: "call", access, optional: access.questionDotToken !== undefined, complex, comma };
+    }
+    return null;
+  }
+
+  function runtimeOptionalElementKey(expr: ts.Expression): string | null {
+    if (ts.isStringLiteral(expr) || ts.isNumericLiteral(expr)) return expr.text;
+    if (ts.isNoSubstitutionTemplateLiteral(expr)) return expr.text;
+    return null;
+  }
+
+  function runtimeOptionalAssertionErases(
+    L: Lowerer,
+    expr: ts.Expression,
+    inner: IrExpr,
+    use: RuntimeOptionalUse | null,
+  ): boolean {
+    if (inner.type.kind !== "union" || !use?.optional || use.complex || L.armTag(inner.type.unionId, UNDEFINED_T) < 0) return false;
+    const target = L.mapTypeOf(L.typeOf(expr));
+    return !!target && target.kind !== "union" && typeEquals(L.stripUndefinedArm(inner.type), target);
   }
 
 /** `v === undefined` / `v !== null` — the narrowing tests for unit-armed
@@ -3102,7 +3198,14 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     if (body.type.kind === "dyn") {
       return { kind: "optChain", id, receiver, body, type: DYN, loc };
     }
-    const type = L.irTypeOf(expr);
+    let type = L.irTypeOf(expr);
+    const hiddenOptionalResult =
+      (type.kind !== "union" || L.armTag(type.unionId, UNDEFINED_T) < 0) &&
+      receiver.type.kind === "union" && L.armTag(receiver.type.unionId, UNDEFINED_T) >= 0 &&
+      body.type.kind !== "generator" && body.type.kind !== "jsval"
+        ? L.withUndefinedArmOf(body.type)
+        : null;
+    if (hiddenOptionalResult) type = hiddenOptionalResult;
     if (type.kind !== "union" || L.armTag(type.unionId, UNDEFINED_T) < 0) {
       L.unsupported(
         "SC1090",
@@ -3132,14 +3235,14 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
         // (true for &&, false for ||) — aliased-typeof narrows the left
         // PROVES under that polarity hold while it lowers (`type ===
         // 'string' && val.length > 0`, the ms entry shape).
-        const runtimeOptionalId = isAnd ? runtimeOptionalLocalId(L, e.left) : null;
+        const runtimeOptionalLocal = isAnd ? runtimeOptionalLocalOf(L, e.left) : null;
         const right = L.narrowingAliases(aliasTypeofNarrows(L, e.left, isAnd), () => {
-          if (runtimeOptionalId === null) return L.lowerCondition(e.right);
-          L.runtimeOptionalLocals.delete(runtimeOptionalId);
+          if (runtimeOptionalLocal === null) return L.lowerCondition(e.right);
+          L.runtimeOptionalLocals.delete(L.runtimeOptionalRootOf(runtimeOptionalLocal));
           try {
             return L.lowerCondition(e.right);
           } finally {
-            L.runtimeOptionalLocals.add(runtimeOptionalId);
+            L.runtimeOptionalLocals.add(L.runtimeOptionalRootOf(runtimeOptionalLocal));
           }
         });
         return {
@@ -3155,15 +3258,15 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     return L.ensureBool(lowerAbsenceProbe(L, expr) ?? L.lowerExpr(expr), expr);
   }
 
-  function runtimeOptionalLocalId(L: Lowerer, node: ts.Expression): string | null {
+  function runtimeOptionalLocalOf(L: Lowerer, node: ts.Expression): IrLocal | null {
     let expr = node;
     while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
     if (!ts.isIdentifier(expr)) return null;
     const local = L.resolveLocal(expr);
-    return local && L.runtimeOptionalLocals.has(local.id) ? local.id : null;
+    return local && L.runtimeOptionalLocals.has(L.runtimeOptionalRootOf(local)) ? local : null;
   }
 
-  export function runtimeOptionalTrueIds(L: Lowerer, node: ts.Expression): string[] {
+  export function runtimeOptionalTrueIds(L: Lowerer, node: ts.Expression): IrLocal[] {
     let expr = node;
     while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
     if (
@@ -3172,17 +3275,17 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     ) {
       return [...runtimeOptionalTrueIds(L, expr.left), ...runtimeOptionalTrueIds(L, expr.right)];
     }
-    const id = runtimeOptionalLocalId(L, expr);
-    return id === null ? [] : [id];
+    const local = runtimeOptionalLocalOf(L, expr);
+    return local === null ? [] : [local];
   }
 
-  export function withRuntimeOptionalNarrowed<T>(L: Lowerer, ids: readonly string[], fn: () => T): T {
-    if (ids.length === 0) return fn();
-    for (const id of ids) L.runtimeOptionalLocals.delete(id);
+  export function withRuntimeOptionalNarrowed<T>(L: Lowerer, locals: readonly IrLocal[], fn: () => T): T {
+    if (locals.length === 0) return fn();
+    for (const local of locals) L.runtimeOptionalLocals.delete(L.runtimeOptionalRootOf(local));
     try {
       return fn();
     } finally {
-      for (const id of ids) L.runtimeOptionalLocals.add(id);
+      for (const local of locals) L.runtimeOptionalLocals.add(L.runtimeOptionalRootOf(local));
     }
   }
 
@@ -7011,6 +7114,8 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
       if (!bridged) L.unsupported("SC1063", expr);
     }
     const inner = L.lowerExpr(expr.expression);
+    const use = runtimeOptionalUseOf(expr);
+    if (inner.type.kind === "union" && runtimeOptionalAssertionErases(L, expr, inner, use)) return inner;
     if (inner.type.kind !== "dyn" && inner.type.kind !== "jsval") {
       // A STATIC value cast `as any` is the explicit island entrance.
       const targetTs0 = L.checker.getTypeFromTypeNode(expr.type);
@@ -7271,7 +7376,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           L.rejectUnresolved(expr.left, `assignment to '${expr.left.text}' (not a writable local or module global)`);
         }
         const value = L.lowerExprExpecting(expr.right, target.type);
-        if (L.runtimeOptionalStorageLocals.has(target.id)) L.runtimeOptionalLocals.add(target.id);
+        const runtimeOptionalRoot = L.runtimeOptionalRootOf(target);
+        if (L.runtimeOptionalStorageLocals.has(runtimeOptionalRoot)) L.runtimeOptionalLocals.add(runtimeOptionalRoot);
         return { kind: "assignExpr", localId: target.id, value, type: target.type, loc };
       }
       // `events.defaultMaxListeners = v` — the module-property write

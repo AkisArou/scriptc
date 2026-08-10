@@ -883,10 +883,17 @@ export class Lowerer {
   /** Locals widened beyond the checker's type because an inferred indexed
    * read can be absent at runtime. Bare reads preserve that union until a
    * surrounding JavaScript guard/default consumes it. */
-  readonly runtimeOptionalLocals = new Set<string>();
+  readonly runtimeOptionalLocals = new Set<IrLocal>();
   /** All storage slots widened for runtime absence, including slots whose
    * current control-flow branch has temporarily narrowed the value. */
-  readonly runtimeOptionalStorageLocals = new Set<string>();
+  readonly runtimeOptionalStorageLocals = new Set<IrLocal>();
+  /** Capture entries and their origin share one mutable box. Normalize each
+   * entry to the origin so writes and flow proofs stay synchronized. */
+  readonly runtimeOptionalRoots = new Map<IrLocal, IrLocal>();
+
+  runtimeOptionalRootOf(local: IrLocal): IrLocal {
+    return this.runtimeOptionalRoots.get(local) ?? local;
+  }
 
   /** Runs `fn` with the given aliased-typeof narrows applied (and restored
    * after) — the branch-scoping primitive. */
@@ -1799,16 +1806,16 @@ export class Lowerer {
 
   /** Assignment-target resolution: a function local (possibly captured) or
    * a module global. tsc has already rejected writes to consts. */
-  resolveWritable(ident: ts.Identifier): { id: string; type: IrType } | null {
+  resolveWritable(ident: ts.Identifier): IrLocal | null {
     const local = this.resolveLocal(ident);
     if (local?.type.kind === "caught") {
       // tsc admits writes (the binding types as `unknown`), but the
       // snapshot is read-only by design — bind a new local instead.
       this.unsupported("SC1090", ident, "assignments to catch bindings");
     }
-    if (local) return { id: local.id, type: local.type };
+    if (local) return local;
     const g = this.globalOf(ident);
-    if (g) return { id: g.id, type: g.type };
+    if (g) return g;
     return null;
   }
 
@@ -6968,8 +6975,9 @@ export class Lowerer {
           ctx.captureBySymbol.set(symbol, entry);
           ctx.captures.push({ localId: entry.id, name: entry.name, type: entry.type });
           ctx.captureSources.push(parentEntry.id);
-          if (this.runtimeOptionalStorageLocals.has(parentEntry.id)) {
-            this.runtimeOptionalStorageLocals.add(entry.id);
+          const runtimeOptionalRoot = this.runtimeOptionalRootOf(parentEntry);
+          if (this.runtimeOptionalStorageLocals.has(runtimeOptionalRoot)) {
+            this.runtimeOptionalRoots.set(entry, runtimeOptionalRoot);
           }
         }
         parentEntry = entry;

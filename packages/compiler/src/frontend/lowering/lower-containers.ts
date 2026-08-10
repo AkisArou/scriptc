@@ -779,9 +779,8 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
    * Package JS is inference-typed, guard-style code (`registeredArguments
    * .slice(-1)[0]`, commander's last-element probe), and the trap would
    * fire on working Node idioms; program files keep the documented trap
-   * (their annotations can prove bounds). Null when the element is
-   * union-typed (the re-tag has no story here) — the caller keeps the
-   * ordinary read. */
+   * (their annotations can prove bounds). Existing element unions retag
+   * into the canonical union with an added undefined arm. */
   export function lowerSafeIndexRead(
     L: Lowerer,
     arr: IrExpr & { type: { kind: "array" } },
@@ -789,12 +788,12 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
     loc: SrcLoc,
   ): IrExpr | null {
     const elem = (arr.type as IrType & { kind: "array" }).elem;
-    if (elem.kind === "union" || elem.kind === "void" || elem.kind === "dyn") return null;
-    const resultT = L.withUndefinedArm(elem);
-    if (resultT.kind !== "union") return null;
+    if (elem.kind === "void" || elem.kind === "dyn") return null;
+    const resultT = elem.kind === "union" ? L.withUndefinedArmOf(elem) : L.withUndefinedArm(elem);
+    if (!resultT || resultT.kind !== "union") return null;
     const undefTag = L.armTag(resultT.unionId, UNDEFINED_T);
-    const foundTag = L.armTag(resultT.unionId, elem);
-    if (undefTag < 0 || foundTag < 0) return null;
+    const foundTag = elem.kind === "union" ? -1 : L.armTag(resultT.unionId, elem);
+    if (undefTag < 0 || (elem.kind !== "union" && foundTag < 0)) return null;
     const arrT = arr.type;
     const key = `idxOr:${typeKey(elem)}`;
     let name = L.arrHofHelpers.get(key);
@@ -832,7 +831,9 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
         { kind: "varDecl", localId: "v.0", init: { kind: "arrayGet", arr: ref("a.0", arrT), index: i, type: elem, loc }, loc },
         {
           kind: "return",
-          value: { kind: "unionWrap", unionId: resultT.unionId, tag: foundTag, value: v, type: resultT, loc },
+          value: elem.kind === "union"
+            ? L.coerceToExpected(v, resultT)
+            : { kind: "unionWrap", unionId: resultT.unionId, tag: foundTag, value: v, type: resultT, loc },
           loc,
         },
       ];

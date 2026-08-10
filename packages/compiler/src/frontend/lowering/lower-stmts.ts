@@ -683,7 +683,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
           )
         : null;
       const narrowedAfter = falsyExitRuntimeOptionalLocal(L, stmt);
-      if (narrowedAfter !== null) L.runtimeOptionalLocals.delete(narrowedAfter);
+      if (narrowedAfter !== null) L.runtimeOptionalLocals.delete(L.runtimeOptionalRootOf(narrowedAfter));
       return { kind: "if", cond, then, else_, loc: locOf(stmt) };
     }
     if (ts.isWhileStatement(stmt)) {
@@ -3435,8 +3435,9 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     init = L.coerceInto(decl.initializer, init, type);
     const local = L.declareLocal(decl.name, decl.name.text, type, isLet);
     if (runtimeOptional) {
-      L.runtimeOptionalLocals.add(local.id);
-      L.runtimeOptionalStorageLocals.add(local.id);
+      const runtimeOptionalRoot = L.runtimeOptionalRootOf(local);
+      L.runtimeOptionalLocals.add(runtimeOptionalRoot);
+      L.runtimeOptionalStorageLocals.add(runtimeOptionalRoot);
     }
     return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
   }
@@ -3459,7 +3460,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     return ts.isIdentifier(operand) && L.resolveValueSymbol(operand) === L.resolveValueSymbol(decl.name);
   }
 
-  function falsyExitRuntimeOptionalLocal(L: Lowerer, stmt: ts.IfStatement): string | null {
+  function falsyExitRuntimeOptionalLocal(L: Lowerer, stmt: ts.IfStatement): IrLocal | null {
     if (stmt.elseStatement) return null;
     let condition = stmt.expression;
     while (ts.isParenthesizedExpression(condition)) condition = condition.expression;
@@ -3468,12 +3469,12 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
     if (!ts.isIdentifier(operand)) return null;
     const local = L.resolveLocal(operand);
-    if (!local || !L.runtimeOptionalLocals.has(local.id)) return null;
+    if (!local || !L.runtimeOptionalLocals.has(L.runtimeOptionalRootOf(local))) return null;
     const exits = ts.isReturnStatement(stmt.thenStatement) || ts.isThrowStatement(stmt.thenStatement) ||
       (ts.isBlock(stmt.thenStatement) && stmt.thenStatement.statements.length > 0 &&
         (ts.isReturnStatement(stmt.thenStatement.statements[stmt.thenStatement.statements.length - 1]!) ||
           ts.isThrowStatement(stmt.thenStatement.statements[stmt.thenStatement.statements.length - 1]!)));
-    return exits ? local.id : null;
+    return exits ? local : null;
   }
 
 /** JS-exact switch (see docs/ir.md): one shared lexical scope for all case
@@ -4542,7 +4543,8 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         const target = L.resolveWritable(expr.left);
         if (!target) L.rejectUnresolved(expr.left, `assignment to '${expr.left.text}' (not a writable local or module global)`);
         const value = L.lowerExprExpecting(expr.right, target.type);
-        if (L.runtimeOptionalStorageLocals.has(target.id)) L.runtimeOptionalLocals.add(target.id);
+        const runtimeOptionalRoot = L.runtimeOptionalRootOf(target);
+        if (L.runtimeOptionalStorageLocals.has(runtimeOptionalRoot)) L.runtimeOptionalLocals.add(runtimeOptionalRoot);
         return { kind: "assign", localId: target.id, value, loc: locOf(expr) };
       }
       if (opKind === ts.SyntaxKind.QuestionQuestionEqualsToken) {
