@@ -112,6 +112,7 @@ export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
+export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
   setProvenanceSources,
   type ProvenancePackageSource,

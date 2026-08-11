@@ -1,5 +1,5 @@
 import { tmpdir } from "node:os";
-import { buildTargetPlatform } from "@scriptc/compiler";
+import { buildTargetPlatform, wasiGuestPath } from "@scriptc/compiler";
 
 /** Default executable filename for the build target. Explicit --out paths
  * stay exact; only scriptc's generated default needs the Windows PE suffix. */
@@ -17,4 +17,36 @@ export function wasiPreopens(
   hostTmp: string = tmpdir(),
 ): Record<string, string> {
   return { "/": cwd, "/tmp": hostTmp };
+}
+
+/** Environment inherited by a WASI module. Host-absolute directory values
+ * must not claim paths outside the guest namespace: `/` is the module's
+ * capability root/home/cwd and `/tmp` is its writable temporary directory. */
+export function wasiEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+  hostTmp: string = tmpdir(),
+): Record<string, string> {
+  const guest = Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+
+  guest["PWD"] = "/";
+  guest["HOME"] = "/";
+  guest["TMPDIR"] = "/tmp";
+  if (guest["USERPROFILE"] !== undefined) guest["USERPROFILE"] = "/";
+  if (guest["TMP"] !== undefined) guest["TMP"] = "/tmp";
+  if (guest["TEMP"] !== undefined) guest["TEMP"] = "/tmp";
+
+  // These optional shell/package-manager paths retain their meaning only
+  // when they fall under a capability the runner actually exposes.
+  for (const key of ["OLDPWD", "INIT_CWD"] as const) {
+    const value = guest[key];
+    if (value === undefined) continue;
+    const mapped = wasiGuestPath(value, cwd, hostTmp);
+    if (mapped === null) delete guest[key];
+    else guest[key] = mapped;
+  }
+
+  return guest;
 }

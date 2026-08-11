@@ -28,7 +28,7 @@ const WASI_RUNNER = [
   'const fs=require("node:fs")',
   'const {WASI}=require("node:wasi")',
   'const p=process.argv[1]',
-  'const wasi=new WASI({version:"preview1",args:[p],env:process.env,preopens:{"/":process.cwd(),"/tmp":"/tmp"},returnOnExit:true})',
+  'const wasi=new WASI({version:"preview1",args:[p],env:{...process.env,PWD:"/",HOME:"/",TMPDIR:"/tmp"},preopens:{"/":process.cwd(),"/tmp":"/tmp"},returnOnExit:true})',
   'const mod=new WebAssembly.Module(fs.readFileSync(p))',
   'const instance=new WebAssembly.Instance(mod,wasi.getImportObject())',
   'process.exitCode=wasi.start(instance)',
@@ -77,6 +77,7 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
 
   test.each([
     "2700-wasi-core.ts",
+    "1612-cjs-module-globals.cjs",
     "992-fs-roundtrip.ts",
     "751-cycle-records-mutual.ts",
     "1000-json-stringify-basics.ts",

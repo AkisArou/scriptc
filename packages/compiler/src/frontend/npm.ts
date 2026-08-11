@@ -246,8 +246,9 @@ export interface NpmRuntimeGraph {
  * identifier resolves locally. With no ambient library, an unresolved read is
  * exactly the engine global; declarations/imports/parameters retain symbols.
  * `globalThis.fetch` and `global.fetch` are recognized explicitly when their
- * receiver is likewise unshadowed. Parsing is recovery-capable, matching the
- * module-specifier sweep's treatment of shipped JavaScript. */
+ * receiver is likewise unshadowed, including const aliases of those global
+ * objects. Parsing is recovery-capable, matching the module-specifier sweep's
+ * treatment of shipped JavaScript. */
 export function embeddedModulesUsingGlobalFetch(
   modules: readonly EmbeddedModule[],
 ): ReadonlySet<string> {
@@ -322,6 +323,17 @@ export function embeddedModulesUsingGlobalFetch(
     );
   };
 
+  const globalObjectExpression = (
+    candidate: ts.Expression,
+    aliases: ReadonlySet<ts.Symbol>,
+  ): boolean => {
+    const node = unwrapParentheses(candidate);
+    if (unboundGlobalObject(node)) return true;
+    if (!ts.isIdentifier(node)) return false;
+    const symbol = checker.getSymbolAtLocation(node);
+    return symbol !== undefined && aliases.has(symbol);
+  };
+
   const staticPropertyName = (name: ts.PropertyName | ts.BindingName): string | null => {
     if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
     if (
@@ -337,7 +349,10 @@ export function embeddedModulesUsingGlobalFetch(
    * checker quite correctly resolves every later `fetch` read to that local.
    * The capability read happens at the binding pattern itself. The same is
    * true for aliases, computed literal keys, and defaulted parameters. */
-  const bindingReadsGlobalFetch = (node: ts.BindingElement): boolean => {
+  const bindingReadsGlobalFetch = (
+    node: ts.BindingElement,
+    aliases: ReadonlySet<ts.Symbol>,
+  ): boolean => {
     const pattern = node.parent;
     if (!ts.isObjectBindingPattern(pattern)) return false;
     const key = node.propertyName ?? (ts.isIdentifier(node.name) ? node.name : null);
@@ -349,17 +364,20 @@ export function embeddedModulesUsingGlobalFetch(
       owner.name === pattern &&
       owner.initializer !== undefined
     ) {
-      return unboundGlobalObject(owner.initializer);
+      return globalObjectExpression(owner.initializer, aliases);
     }
     return false;
   };
 
   /** Assignment destructuring is represented as an object-literal-shaped
    * assignment target rather than an ObjectBindingPattern. */
-  const assignmentReadsGlobalFetch = (node: ts.BinaryExpression): boolean => {
+  const assignmentReadsGlobalFetch = (
+    node: ts.BinaryExpression,
+    aliases: ReadonlySet<ts.Symbol>,
+  ): boolean => {
     if (
       node.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
-      !unboundGlobalObject(node.right)
+      !globalObjectExpression(node.right, aliases)
     ) {
       return false;
     }
@@ -406,12 +424,41 @@ export function embeddedModulesUsingGlobalFetch(
   };
 
   for (const sourceFile of program.getSourceFiles()) {
+    // Package bootstraps commonly snapshot the global object before reading
+    // capabilities (`const root = globalThis; root.fetch`). Resolve const
+    // alias chains by symbol, so a same-named parameter/local in another
+    // scope cannot inherit the classification. Iterate to a fixed point so
+    // declaration order does not matter.
+    const globalObjectAliases = new Set<ts.Symbol>();
+    let addedAlias = true;
+    while (addedAlias) {
+      addedAlias = false;
+      const collectAliases = (node: ts.Node): void => {
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          node.initializer !== undefined &&
+          ts.isVariableDeclarationList(node.parent) &&
+          (node.parent.flags & ts.NodeFlags.Const) !== 0 &&
+          globalObjectExpression(node.initializer, globalObjectAliases)
+        ) {
+          const symbol = checker.getSymbolAtLocation(node.name);
+          if (symbol !== undefined && !globalObjectAliases.has(symbol)) {
+            globalObjectAliases.add(symbol);
+            addedAlias = true;
+          }
+        }
+        ts.forEachChild(node, collectAliases);
+      };
+      collectAliases(sourceFile);
+    }
+
     let usesFetch = false;
     const visit = (node: ts.Node): void => {
       if (usesFetch) return;
       if (
-        (ts.isBindingElement(node) && bindingReadsGlobalFetch(node)) ||
-        (ts.isBinaryExpression(node) && assignmentReadsGlobalFetch(node))
+        (ts.isBindingElement(node) && bindingReadsGlobalFetch(node, globalObjectAliases)) ||
+        (ts.isBinaryExpression(node) && assignmentReadsGlobalFetch(node, globalObjectAliases))
       ) {
         usesFetch = true;
         return;
@@ -419,7 +466,7 @@ export function embeddedModulesUsingGlobalFetch(
       if (
         ts.isPropertyAccessExpression(node) &&
         node.name.text === "fetch" &&
-        unboundGlobalObject(node.expression)
+        globalObjectExpression(node.expression, globalObjectAliases)
       ) {
         usesFetch = true;
         return;
@@ -428,7 +475,7 @@ export function embeddedModulesUsingGlobalFetch(
         ts.isElementAccessExpression(node) &&
         ts.isStringLiteralLike(node.argumentExpression) &&
         node.argumentExpression.text === "fetch" &&
-        unboundGlobalObject(node.expression)
+        globalObjectExpression(node.expression, globalObjectAliases)
       ) {
         usesFetch = true;
         return;

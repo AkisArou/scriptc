@@ -18,6 +18,8 @@ test("embedded fetch capability analysis ignores text and local bindings", () =>
     js("import", "import fetch from 'a-local-package'; export default fetch('local');"),
     js("shadow-global", "module.exports = function (globalThis) { return globalThis.fetch('local'); };"),
     js("object-destructure", "const source = { fetch: 1 }; const { fetch: request } = source; module.exports = request;"),
+    js("local-alias", "const source = { fetch: 1 }; const root = source; module.exports = root.fetch;"),
+    js("shadowed-alias", "const root = globalThis; module.exports = function (root) { return root.fetch; };"),
     js("label", "fetch: for (;;) { break fetch; } module.exports = 1;"),
   ];
 
@@ -34,6 +36,9 @@ test("embedded fetch capability analysis finds global reads", () => {
     js("destructure-alias", "const { fetch: request } = global; module.exports = request;"),
     js("destructure-computed", "const { ['fetch']: request } = globalThis; module.exports = request;"),
     js("destructure-assign", "let request; ({ fetch: request } = globalThis); module.exports = request;"),
+    js("global-alias", "const root = globalThis; module.exports = root.fetch;"),
+    js("global-alias-chain", "const root = global; const platform = root; module.exports = platform['fetch'];"),
+    js("global-alias-destructure", "const root = globalThis; const { fetch: request } = root; module.exports = request;"),
     {
       ...js("windows-path", "module.exports = fetch('https://example.com');"),
       key: "C:\\pkg\\index.js",
@@ -49,6 +54,9 @@ test("embedded fetch capability analysis finds global reads", () => {
     "/destructure-alias.js",
     "/destructure-computed.js",
     "/destructure-assign.js",
+    "/global-alias.js",
+    "/global-alias-chain.js",
+    "/global-alias-destructure.js",
     "C:\\pkg\\index.js",
   ]);
 });
