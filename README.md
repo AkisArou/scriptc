@@ -34,8 +34,8 @@ Or write a standalone executable:
 
 ```console
 $ scriptc build hello.ts -o hello
-$ ./hello Ada
-hello, Ada
+$ ./hello ctate
+hello, ctate
 ```
 
 ## Use Node APIs
