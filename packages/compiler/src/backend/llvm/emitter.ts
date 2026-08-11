@@ -8687,8 +8687,8 @@ class LlEmitter {
    * POINTER-SIZE slots off the emit tuple's va_list (textual LLVM IR
    * cannot va_arg portably) and calls this function behind the wrapper
    * closure's fn. It re-types each slot to the listener's declared
-   * parameter (f64 from its i64 bit pattern, bool from the zero-extended
-   * slot, refcounted values retained — the callee owns +1 per the
+   * parameter (f64/bool scalars load from the emit site's stack slot,
+   * refcounted values retain the direct pointer — the callee owns +1 per the
    * universal convention) and calls the ORIGINAL listener held by the
    * wrapper's one capture box. A non-void result is discarded (refcounted
    * ones released) — Node ignores listener return values. Interned per
@@ -8720,16 +8720,10 @@ class LlEmitter {
     cbT.params.forEach((p, i) => {
       const ty = this.llType(p);
       if (ty === "double") {
-        d.push(
-          `  %x${i} = ptrtoint ptr %a${i} to i64`,
-          `  %d${i} = bitcast i64 %x${i} to double`,
-        );
+        d.push(`  %d${i} = load double, ptr %a${i}`);
         passed.push(`double %d${i}`);
       } else if (ty === "i1") {
-        d.push(
-          `  %x${i} = ptrtoint ptr %a${i} to i64`,
-          `  %b${i} = trunc i64 %x${i} to i1`,
-        );
+        d.push(`  %b${i} = load i1, ptr %a${i}`);
         passed.push(`i1 %b${i}`);
       } else if (isRefCounted(p)) {
         d.push(`  %r${i} = call ptr ${retainSym(this, p)}(ptr %a${i})`);
@@ -12765,22 +12759,19 @@ class LlEmitter {
     }
     if (e.fn === "emitter.emit") {
       // The variadic dispatch: the event's unified tuple rides the C
-      // variadic tail POINTER-CLASSED (f64 as its i64 bit pattern, bool
-      // zero-extended — scr_runtime.h's fixed-shim contract; the emitted
-      // adapters re-type on the way out), every argument borrowed. May
+      // variadic tail POINTER-CLASSED. Scalar values ride pointers to
+      // call-lived stack slots, while reference values ride directly; the
+      // fixed shim can therefore read one pointer-width slot per argument
+      // on both wasm32 and native targets. Every argument is borrowed. May
       // throw (listeners run inside).
       const args = e.args.map((a) => this.emitExpr(a));
       const tuple = args.slice(2).map((a) => {
         const ty = this.llType(a.type);
-        if (ty === "double") {
-          const x = B.tmp();
-          B.line(`${x} = bitcast double ${a.name} to i64`);
-          return `i64 ${x}`;
-        }
-        if (ty === "i1") {
-          const x = B.tmp();
-          B.line(`${x} = zext i1 ${a.name} to i64`);
-          return `i64 ${x}`;
+        if (ty === "double" || ty === "i1") {
+          const slot = B.slot();
+          B.entryAllocas.push(`${slot} = alloca ${ty} ; EventEmitter scalar argument`);
+          B.line(`store ${ty} ${a.name}, ptr ${slot}`);
+          return `ptr ${slot}`;
         }
         return `ptr ${a.name}`;
       });

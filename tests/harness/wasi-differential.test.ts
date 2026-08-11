@@ -105,6 +105,7 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     "1551-dyn-receiver-methods.ts",
     "1558-any-joins-and-dyn-validation.ts",
     "1634-inspect-classes.ts",
+    "1644-ee-basics.ts",
     "1666-dyn-fn-identity.ts",
     "1800-immediate-basics.ts",
     "1805-timer-callback-args.ts",
@@ -150,6 +151,50 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     });
     expect(llvmResult.ok).toBe(true);
     if (llvmResult.ok) expect(llvmResult.backend).toBe("llvm");
+  });
+
+  test("the explicit C backend still emits async-free wasm", async () => {
+    const outDir = await mkdtemp("/tmp/scriptc-wasi-c-");
+    const result = await compile(join(repoRoot, "tests/corpus/001-hello.ts"), {
+      outDir,
+      outPath: join(outDir, "program.wasm"),
+      backend: "c",
+    });
+    if (!result.ok) {
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    }
+    expect(result.backend).toBe("c");
+  });
+
+  test("the explicit C backend diagnoses coroutine-dependent programs", async () => {
+    const outDir = await mkdtemp("/tmp/scriptc-wasi-c-refusal-");
+    const result = await compile(join(repoRoot, "tests/corpus/1020-async-basics.ts"), {
+      outDir,
+      outPath: join(outDir, "program.wasm"),
+      backend: "c",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]?.code).toBe("SC3001");
+      expect(result.diagnostics[0]?.message).toMatch(
+        /c backend does not support an async function .* for wasm32-wasi; use --backend llvm/,
+      );
+    }
+  });
+
+  test("embedded source comments mentioning fetch do not trigger SC3002", async () => {
+    const entry = join(repoRoot, "tests/fixtures/npm/cases/island-web-plumbing/main.ts");
+    const outDir = await mkdtemp("/tmp/scriptc-wasi-fetch-comment-");
+    const result = await compile(entry, {
+      outDir,
+      outPath: join(outDir, "program.wasm"),
+      dynamic: true,
+    });
+    if (!result.ok) {
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    }
+    expect(result.backend).toBe("llvm");
   });
 
   test.each([

@@ -32,7 +32,8 @@ Options:
                      builds — the default lane emits C for it and a one-line
                      stderr note names the construct — while an explicit
                      --backend llvm fails with that construct named
-                     wasm32-wasi is LLVM-only unless --backend c is explicit
+                     wasm32-wasi is LLVM-only unless --backend c is explicit;
+                     its C inspection lane accepts async-free programs only
       --from-c       treat input as a C (or .ll) file (toolchain plumbing/debugging)
       --keep-c       keep the generated program TU next to the executable
                      (default; the .ll — or the .c under --backend=c or

@@ -182,6 +182,22 @@ function llvmRefusalDiag(err: LlvmUnsupportedError, entryPath: string): ScrDiagn
   };
 }
 
+/** A valid IR surface the explicitly-selected code generator cannot host.
+ * SC3001 is backend coverage (as with an LLVM tier refusal), not a target
+ * capability gap: wasm32-wasi's production LLVM lane still accepts it. */
+function backendRefusalDiag(
+  backend: "c" | "llvm",
+  target: string,
+  surface: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC3001",
+    message: `${backend} backend does not support ${surface} for ${target}; use --backend llvm`,
+    loc,
+  };
+}
+
 /** A valid program surface that the selected execution target cannot host.
  * SC3xxx stays the backend/target-coverage family: source semantics are
  * valid, but this target deliberately refuses them instead of emitting a
@@ -864,6 +880,14 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       const unavailable = moduleWasiUnavailableSurface(lowered.module);
       if (unavailable !== null) {
         return fail([targetRefusalDiag("wasm32-wasi", unavailable.surface, unavailable.loc)]);
+      }
+      if (opts.backend === "c") {
+        const asyncSurface = moduleLibAsyncSurface(lowered.module);
+        if (asyncSurface !== null) {
+          return fail([
+            backendRefusalDiag("c", "wasm32-wasi", asyncSurface.surface, asyncSurface.loc),
+          ]);
+        }
       }
     }
     entryText = fe.entryText();

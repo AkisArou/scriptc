@@ -63,7 +63,7 @@ Analyzes the program without producing a binary and reports, statement by statem
   <dd>Bind signature-only TypeScript declarations to native C ABI symbols and link the manifest's archive, object, and system-library inputs. See <a href="/ffi">Native FFI</a>.</dd>
 
   <dt><code>--backend &lt;c|llvm&gt;</code></dt>
-  <dd>Code generator: <code>llvm</code> (default — emits LLVM IR text, compiled by the same clang) or <code>c</code> (the readable debugging backend). Unset, a native build can fall back to C when the program is outside the LLVM tier. The production <code>wasm32-wasi</code> target never falls back: a missing LLVM lowering is <code>SC3001</code>. Use <code>--backend c</code> explicitly only when inspecting generated C.</dd>
+  <dd>Code generator: <code>llvm</code> (default — emits LLVM IR text, compiled by the same clang) or <code>c</code> (the readable debugging backend). Unset, a native build can fall back to C when the program is outside the LLVM tier. The production <code>wasm32-wasi</code> target never falls back: a missing LLVM lowering is <code>SC3001</code>. Use <code>--backend c</code> explicitly only when inspecting generated C; on WASI that inspection lane accepts async-free programs only and reports <code>SC3001</code> for coroutine-dependent surfaces.</dd>
 
   <dt><code>--npm-static &lt;pkg[,pkg…]|auto&gt;</code></dt>
   <dd>EXPERIMENTAL. Compile the named npm packages' shipped JS statically as program modules instead of embedding them for the engine (repeatable; <code>auto</code> opts in every eligible direct import). A package the preflight refuses falls back to the island with a coverage-report note. See <a href="/dependencies">npm Dependencies</a> for maturity notes.</dd>

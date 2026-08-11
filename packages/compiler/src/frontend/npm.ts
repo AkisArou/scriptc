@@ -97,6 +97,11 @@ export interface EmbeddedModule {
   key: string;
   source: string;
   format: EmbeddedFormat;
+  /** The parsed source reaches Node's global fetch binding. This is a
+   * semantic capability fact, unlike the old whole-source word scan: comments,
+   * strings, property names, and locally-bound `fetch` identifiers do not set
+   * it. The IR/link gates consume this bit without reparsing embedded text. */
+  usesFetch?: true;
   /** CommonJS only: the synthesized ESM facade the island's module loader
    * evaluates when an ES module imports this file — default plus the LEXED
    * named exports (cjsEsmFacadeSource). ESM sources compile natively and
@@ -232,6 +237,124 @@ export interface NpmRuntimeGraph {
   /** Unresolvable lazily-reached specifiers embedded as runtime traps. */
   lazyTraps: NpmLazyTrap[];
   errors: NpmGraphError[];
+}
+
+/** Embedded modules whose executable syntax reads Node's global fetch.
+ *
+ * The npm graph already owns every source string, so bind them together in a
+ * no-lib TypeScript program once and ask the checker whether a `fetch`
+ * identifier resolves locally. With no ambient library, an unresolved read is
+ * exactly the engine global; declarations/imports/parameters retain symbols.
+ * `globalThis.fetch` and `global.fetch` are recognized explicitly when their
+ * receiver is likewise unshadowed. Parsing is recovery-capable, matching the
+ * module-specifier sweep's treatment of shipped JavaScript. */
+export function embeddedModulesUsingGlobalFetch(
+  modules: readonly EmbeddedModule[],
+): ReadonlySet<string> {
+  const sourceFiles = new Map<string, ts.SourceFile>();
+  for (const mod of modules) {
+    if (mod.format === "json") continue;
+    sourceFiles.set(
+      mod.key,
+      ts.createSourceFile(mod.key, mod.source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS),
+    );
+  }
+  if (sourceFiles.size === 0) return new Set();
+
+  const options: ts.CompilerOptions = {
+    allowJs: true,
+    checkJs: false,
+    noLib: true,
+    target: ts.ScriptTarget.Latest,
+    module: ts.ModuleKind.ESNext,
+    moduleDetection: ts.ModuleDetectionKind.Force,
+  };
+  const canonical = (fileName: string): string => {
+    const normalized = fileName.replace(/\\/g, "/");
+    return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
+  };
+  const byCanonical = new Map(
+    [...sourceFiles].map(([fileName, sourceFile]) => [canonical(fileName), sourceFile] as const),
+  );
+  const originalKeyByCanonical = new Map(
+    [...sourceFiles.keys()].map((fileName) => [canonical(fileName), fileName] as const),
+  );
+  const host: ts.CompilerHost = {
+    getSourceFile: (fileName) => byCanonical.get(canonical(fileName)),
+    getDefaultLibFileName: () => "",
+    writeFile: () => {},
+    getCurrentDirectory: () => "/",
+    getDirectories: () => [],
+    fileExists: (fileName) => byCanonical.has(canonical(fileName)),
+    readFile: (fileName) => byCanonical.get(canonical(fileName))?.text,
+    getCanonicalFileName: canonical,
+    useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+    getNewLine: () => "\n",
+    directoryExists: () => true,
+    realpath: (fileName) => fileName,
+  };
+  const program = ts.createProgram({ rootNames: [...sourceFiles.keys()], options, host });
+  const checker = program.getTypeChecker();
+  const found = new Set<string>();
+
+  const unboundGlobalObject = (node: ts.Expression): boolean => {
+    if (
+      !ts.isIdentifier(node) ||
+      (node.text !== "globalThis" && node.text !== "global")
+    ) {
+      return false;
+    }
+    const symbol = checker.getSymbolAtLocation(node);
+    // TypeScript synthesizes a declaration-less globalThis symbol even in a
+    // no-lib program. A source shadow (parameter/local/import) always carries
+    // at least one declaration; the Node `global` alias remains unresolved.
+    return (
+      symbol === undefined ||
+      symbol.declarations === undefined ||
+      symbol.declarations.length === 0
+    );
+  };
+
+  for (const sourceFile of program.getSourceFiles()) {
+    let usesFetch = false;
+    const visit = (node: ts.Node): void => {
+      if (usesFetch) return;
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        node.name.text === "fetch" &&
+        unboundGlobalObject(node.expression)
+      ) {
+        usesFetch = true;
+        return;
+      }
+      if (
+        ts.isElementAccessExpression(node) &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        node.argumentExpression.text === "fetch" &&
+        unboundGlobalObject(node.expression)
+      ) {
+        usesFetch = true;
+        return;
+      }
+      if (ts.isIdentifier(node) && node.text === "fetch") {
+        // A property-access name is not a binding read (`obj.fetch`); the
+        // global-object case was handled above. Every real bare read has no
+        // symbol in this no-lib program unless source syntax binds it.
+        if (
+          !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+          checker.getSymbolAtLocation(node) === undefined
+        ) {
+          usesFetch = true;
+          return;
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    const originalKey = originalKeyByCanonical.get(canonical(sourceFile.fileName));
+    if (usesFetch && originalKey !== undefined) found.add(originalKey);
+  }
+  return found;
 }
 
 /** Builtins the island provides shims for (scr_island.c). Both spellings
@@ -958,6 +1081,10 @@ export class NpmGraphBuilder {
 
   finish(): NpmRuntimeGraph {
     this.synthesizeCjsFacades();
+    for (const key of embeddedModulesUsingGlobalFetch([...this.modules.values()])) {
+      const mod = this.modules.get(key);
+      if (mod !== undefined) mod.usesFetch = true;
+    }
     return {
       modules: [...this.modules.values()],
       edges: this.edges,

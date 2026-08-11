@@ -5,6 +5,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { WASI } from "node:wasi";
+import { wasiPreopens } from "./paths.js";
 
 type WasiInstance = Parameters<WASI["start"]>[0];
 declare const WebAssembly: {
@@ -22,8 +23,9 @@ const wasi = new WASI({
   args: [binary],
   env: process.env,
   // A native scriptc executable inherits access to the caller's filesystem.
-  // WASI is capability-based, so expose the caller's working tree as `/`.
-  preopens: { "/": process.cwd(), "/tmp": "/tmp" },
+  // WASI is capability-based, so expose the caller's working tree as `/`
+  // and the platform's actual temporary directory as guest `/tmp`.
+  preopens: wasiPreopens(),
   returnOnExit: true,
 });
 const instantiated = await WebAssembly.instantiate(

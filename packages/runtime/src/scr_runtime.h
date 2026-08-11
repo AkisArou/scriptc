@@ -1427,9 +1427,10 @@ ScrEmitter *scr_emitter_on_via(ScrEmitter *em, ScrStr *name, ScrClosure *orig /*
  * slots off the emit tuple and calls cb->fn behind the fixed signature
  * `void (ScrClosure *, void * ×k)` — the fixed-signature adapter the
  * backend provides. Such backends pass every user tuple argument
- * pointer-classed at the emit site (f64 as its i64 bit pattern, bool
- * zero-extended); the runtime's own emits (data/error/pipe/meta) carry
- * pointers only, so the shims read every tuple either lane produces.
+ * pointer-classed at the emit site: scalar values point at call-lived
+ * typed stack slots and reference values ride directly. The runtime's own
+ * emits (data/error/pipe/meta) carry pointers only, so the shims read every
+ * tuple either lane produces on 32- and 64-bit targets.
  * SCR_EE_FIXED_MAX is the registry's audited arity ceiling — backends
  * refuse listeners past it rather than guess. */
 #define SCR_EE_FIXED_MAX 4

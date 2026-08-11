@@ -1,6 +1,6 @@
 import { buildTargetPlatform } from "@scriptc/compiler";
 import { expect, test } from "vitest";
-import { defaultExecutableName } from "../src/paths.js";
+import { defaultExecutableName, wasiPreopens } from "../src/paths.js";
 
 test("default executable names use the Windows PE suffix", () => {
   expect(defaultExecutableName("main", "win32")).toBe("main.exe");
@@ -16,6 +16,13 @@ test("WASI cross-builds use the WebAssembly suffix", () => {
   });
   expect(platform).toBe("wasi");
   expect(defaultExecutableName("main", platform)).toBe("main.wasm");
+});
+
+test("WASI preopens map guest /tmp to the host platform temp directory", () => {
+  expect(wasiPreopens("C:\\work\\repo", "C:\\Users\\runner\\AppData\\Local\\Temp")).toEqual({
+    "/": "C:\\work\\repo",
+    "/tmp": "C:\\Users\\runner\\AppData\\Local\\Temp",
+  });
 });
 
 test("Windows cross-builds use the PE suffix on a non-Windows host", () => {

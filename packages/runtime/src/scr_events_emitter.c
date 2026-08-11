@@ -390,10 +390,10 @@ ScrEmitter *scr_emitter_on_via(ScrEmitter *em, ScrStr *name, ScrClosure *orig /*
 
 /* ── fixed-arity invoke shims (scr_runtime.h's contract) ──────────────
  * Read k pointer-size slots and call the fixed-signature adapter behind
- * cb->fn. The LLVM lane's emit sites pass every tuple argument pointer-
- * classed (f64 as its i64 bit pattern, bool zero-extended) and the
- * runtime's own emits are pointer-only, so va_arg(ap, void *) reads every
- * tuple a fixed-registered listener can observe. */
+ * cb->fn. The LLVM lane's emit sites pass scalars by pointer to typed stack
+ * slots and references directly; the runtime's own emits are pointer-only,
+ * so va_arg(ap, void *) reads every tuple a fixed-registered listener can
+ * observe on 32- and 64-bit targets. */
 void scr_ee_inv_fixed0(ScrClosure *cb, va_list ap) {
   (void)ap;
   ((void (*)(ScrClosure *))cb->fn)(cb);
