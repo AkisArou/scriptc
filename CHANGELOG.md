@@ -6,17 +6,22 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.0.26
+
 ### Features
 
+- **WebAssembly is a production target.** `SCRIPTC_TARGET=wasm32-wasi` emits a standalone WASI Preview 1 module through the LLVM backend, and `scriptc run` hosts it with inherited stdio and environment plus preopened working and temporary directories. The full portable language tier includes checked dynamic values, async/await, promises, generators, timers, filesystem work, and `--dynamic`; APIs whose capabilities WASI does not provide refuse before linking with a targeted diagnostic instead of producing a broken module.
+- **Cross-compilation targets Alpine Linux directly.** `SCRIPTC_TARGET=x86_64-linux-musl` produces a statically linked executable with Zig, backed by musl-specific runtime shims for randomness, fibers, and child-process working directories. Executables and library archives are validated against Alpine alongside the existing glibc targets.
 - **Native FFI accepts C function-pointer callbacks.** Format 2 describes callback pointers and opaque contexts as independently positioned ABI entries, adapts ordinary capturing TypeScript closures through both backends, and preserves scalar C conversion and catchable callback throws. Raw callbacks without userdata use a binding-specific same-thread trampoline. The initial lifetime policy is explicit and bounded: callbacks are valid only during the native call; retained and foreign-thread callbacks remain rejected by contract.
+- **HTTP and HTTPS servers expose Node's timeout configuration statically.** `timeout`, `keepAliveTimeout`, `keepAliveTimeoutBuffer`, `headersTimeout`, and `requestTimeout` retain Node's defaults and independent per-server storage through typed and dynamic reads and writes. The HTTP and HTTPS constructors also accept and validate `keepAliveTimeoutBuffer`; this surface configures the values, while deadline enforcement remains a separate server behavior.
+
+<!-- release:end -->
 
 ## 0.0.25
 
 ### Fixes
 
 - **Busy sockets no longer starve the native event loop.** Readable wakes now yield after a bounded batch, allowing timers and other descriptors to keep progressing even while upgraded connections are continuously flooded.
-
-<!-- release:end -->
 
 ## 0.0.24
 
