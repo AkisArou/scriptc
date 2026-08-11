@@ -82,11 +82,9 @@ const who = process.argv.length > 2 ? process.argv[2] : "world";
 - **Island microtask interleaving**: static fibers drain first, then the engine's jobs at loop quiescence — a static `await` racing a package promise resolves in a documented, deterministic order that can differ from Node's interleaving.
 - **Top-level `await` in embedded ESM packages** is not supported yet. It does compile in your program's own ESM graph and in npm packages compiled through `--npm-static`; the remaining limit is package code running inside the `--dynamic` island.
 - **`--npm-static` and `--provenance-sources` are experimental** — see [npm Dependencies](/dependencies) for the maturity notes.
-- **Cross-compiled `--dynamic` binaries are not supported yet** — the engine archive is host-native today.
 
 ## Tooling gaps
 
 - `scriptc run` does not forward extra CLI arguments to the program — `build` and invoke the binary directly.
 - Native FFI is a direct, manifest-declared C ABI link surface. Callback parameters are synchronous, call-scoped, and same-thread; retained or foreign-thread callbacks are not supported yet. Variadic calls, structs by value, owned pointer/string/byte returns, runtime dynamic-library loading, and library-mode builds also remain unsupported. See [Native FFI](/ffi).
 - Numbers are JS-exact f64 everywhere. Integer inference and ownership analysis — the systems-language performance ceiling — are roadmap, not shipped.
-- No Windows servers or `child_process` yet — see [Platform Support](/platforms).
