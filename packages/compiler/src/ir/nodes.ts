@@ -2341,6 +2341,7 @@ export type IrLibFn =
    * the property values; timer enforcement remains outside this surface. */
   | "http.serverTimeoutGet"
   | "http.serverTimeoutSet"
+  | "http.serverTimeoutOptionSet"
   /** server.on("listening", cb) — the deferred listen-callback list. */
   | "net.serverOnListening"
   /** The ServerResponse member surface: statusCode/statusMessage reads
@@ -6758,6 +6759,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dc.chanBindStore",
   "dc.chanRunStores",
   "http.resWriteHeadDyn",
+  "http.serverTimeoutOptionSet",
   "net.sockSetEncoding",
   "http.reqSetEncoding",
   "fs.readFileSyncBuf",

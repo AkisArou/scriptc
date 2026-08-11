@@ -5118,6 +5118,9 @@ double scr_net_server_port(ScrNetServer *s); /* address().port */
  * keepAliveTimeoutBuffer. */
 double scr_net_server_timeout_get(ScrNetServer *s, double field);
 void scr_net_server_timeout_set(ScrNetServer *s, double field, double value);
+/* Constructor-option twin: validates a non-negative safe integer before
+ * storing, matching Node's option ladder (plain property writes do not). */
+void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double value);
 ScrStr *scr_net_server_addr_ip(ScrNetServer *s);     /* +1 — address().address */
 ScrStr *scr_net_server_addr_family(ScrNetServer *s); /* +1 — address().family */
 void scr_net_server_close(ScrNetServer *s, ScrClosure *cb /*moves, nullable*/);

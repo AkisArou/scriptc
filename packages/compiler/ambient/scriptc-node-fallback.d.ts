@@ -2138,11 +2138,13 @@ declare module "http" {
   };
   /* The options-record stance (the RequestOptions precedent): every
    * documented key typechecks; the lowering's option walk decides per
-   * key — requireHostHeader: false and joinDuplicateHeaders lower,
+   * key — requireHostHeader: false, joinDuplicateHeaders, and
+   * keepAliveTimeoutBuffer lower,
    * documented-but-unlowered keys fence by name, unknown keys drop. */
   export interface ServerOptions {
     requireHostHeader?: boolean;
     joinDuplicateHeaders?: boolean;
+    keepAliveTimeoutBuffer?: number;
     [option: string]: unknown;
   }
   /* The outgoing-header shape, @types/node's matrix: numbers format via

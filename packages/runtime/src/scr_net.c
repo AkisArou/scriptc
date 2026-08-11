@@ -1400,6 +1400,37 @@ void scr_net_server_timeout_set(ScrNetServer *s, double field, double value) {
   s->http_timeouts[i] = value;
 }
 
+/* Constructor-option validation is intentionally separate from the plain
+ * writable-property setter above. Node validates these option values as
+ * non-negative safe integers, while later property assignments store the
+ * number directly. */
+void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double value) {
+  static const char *const names[] = {
+    "timeout", "keepAliveTimeout", "headersTimeout", "requestTimeout",
+    "keepAliveTimeoutBuffer",
+  };
+  int i = (int)field;
+  if (i < 0 || i >= 5) abort(); /* compiler/runtime ABI violation */
+  char recv[48], msg[224];
+  if (!(isfinite(value) && trunc(value) == value)) {
+    scr_num_received(value, recv);
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"%s\" is out of range. It must be an integer. Received %s",
+                       names[i], recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  if (value < 0 || value > 9007199254740991.0) {
+    scr_num_received(value, recv);
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"%s\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
+                       names[i], recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  s->http_timeouts[i] = value;
+}
+
 /* address()'s other two fields — the bound host ('::'/'0.0.0.0' for the
  * host-less any, the normalized explicit host otherwise) and the family
  * string. Answer the any-form defaults before listen (Node answers null
@@ -3321,13 +3352,25 @@ static ScrDyn *scr_net_dynh_srv_invoke(void *h, ScrDyn *self, const char *method
   return NULL;
 }
 
+static int scr_net_dynh_srv_timeout_field(const char *key) {
+  if (strcmp(key, "timeout") == 0) return 0;
+  if (strcmp(key, "keepAliveTimeout") == 0) return 1;
+  if (strcmp(key, "headersTimeout") == 0) return 2;
+  if (strcmp(key, "requestTimeout") == 0) return 3;
+  if (strcmp(key, "keepAliveTimeoutBuffer") == 0) return 4;
+  return -1;
+}
+
 static ScrDyn *scr_net_dynh_srv_get(void *h, const char *key, size_t key_len) {
   ScrNetServer *s = (ScrNetServer *)h;
   (void)key_len;
   if (strcmp(key, "listening") == 0) return scr_dyn_new_bool(s->listening);
+  int timeout_field = scr_net_dynh_srv_timeout_field(key);
+  if (timeout_field >= 0) {
+    return scr_dyn_new_num(scr_net_server_timeout_get(s, (double)timeout_field));
+  }
   {
-    static const char *const known[] = { "maxConnections", "connections", "maxHeadersCount",
-      "timeout", "keepAliveTimeout", "headersTimeout", "requestTimeout", NULL };
+    static const char *const known[] = { "maxConnections", "connections", "maxHeadersCount", NULL };
     for (size_t i = 0; known[i]; i++) {
       if (strcmp(key, known[i]) == 0) {
         scr_net_dynh_srv_unsupported(key, NULL);
@@ -3339,7 +3382,17 @@ static ScrDyn *scr_net_dynh_srv_get(void *h, const char *key, size_t key_len) {
 }
 
 static bool scr_net_dynh_srv_set(void *h, const char *key, size_t key_len, const ScrDyn *value) {
-  (void)h; (void)key; (void)key_len; (void)value;
+  ScrNetServer *s = (ScrNetServer *)h;
+  (void)key_len;
+  int timeout_field = scr_net_dynh_srv_timeout_field(key);
+  if (timeout_field >= 0) {
+    if (value->kind != SCR_DYN_NUM) {
+      scr_dyn_arg_type_fail(key, "of type number", value);
+      return true; /* handled: the exception is pending */
+    }
+    scr_net_server_timeout_set(s, (double)timeout_field, value->v.num);
+    return true;
+  }
   return false;
 }
 

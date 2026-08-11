@@ -4469,6 +4469,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "http.serverTimeoutSet":
             E.line(`scr_net_server_timeout_set(${arg(0)}, ${arg(1)}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
+          case "http.serverTimeoutOptionSet":
+            return finish(`scr_net_server_timeout_option_set(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "net.serverOnListening": {
             const cb = args[1]!;
             E.moveTemp(cb);
