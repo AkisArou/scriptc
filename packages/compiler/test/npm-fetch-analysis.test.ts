@@ -17,6 +17,8 @@ test("embedded fetch capability analysis ignores text and local bindings", () =>
     js("parameter", "module.exports = function (fetch) { return fetch('local'); };"),
     js("import", "import fetch from 'a-local-package'; export default fetch('local');"),
     js("shadow-global", "module.exports = function (globalThis) { return globalThis.fetch('local'); };"),
+    js("object-destructure", "const source = { fetch: 1 }; const { fetch: request } = source; module.exports = request;"),
+    js("label", "fetch: for (;;) { break fetch; } module.exports = 1;"),
   ];
 
   expect([...embeddedModulesUsingGlobalFetch(modules)]).toEqual([]);
@@ -25,8 +27,13 @@ test("embedded fetch capability analysis ignores text and local bindings", () =>
 test("embedded fetch capability analysis finds global reads", () => {
   const modules = [
     js("bare", "module.exports = fetch('https://example.com');"),
+    js("shorthand-property", "module.exports = { fetch };"),
     js("global-this", "module.exports = globalThis.fetch('https://example.com');"),
     js("global", "module.exports = global['fetch']('https://example.com');"),
+    js("destructure", "const { fetch } = globalThis; module.exports = fetch;"),
+    js("destructure-alias", "const { fetch: request } = global; module.exports = request;"),
+    js("destructure-computed", "const { ['fetch']: request } = globalThis; module.exports = request;"),
+    js("destructure-assign", "let request; ({ fetch: request } = globalThis); module.exports = request;"),
     {
       ...js("windows-path", "module.exports = fetch('https://example.com');"),
       key: "C:\\pkg\\index.js",
@@ -35,8 +42,13 @@ test("embedded fetch capability analysis finds global reads", () => {
 
   expect([...embeddedModulesUsingGlobalFetch(modules)]).toEqual([
     "/bare.js",
+    "/shorthand-property.js",
     "/global-this.js",
     "/global.js",
+    "/destructure.js",
+    "/destructure-alias.js",
+    "/destructure-computed.js",
+    "/destructure-assign.js",
     "C:\\pkg\\index.js",
   ]);
 });

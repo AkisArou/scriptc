@@ -601,6 +601,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/1409-typedarray-integer-loops.ts": {
+   "order": [
+    "<repo>/tests/corpus/1409-typedarray-integer-loops.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/1420-number-statics.ts": {
    "order": [
     "<repo>/tests/corpus/1420-number-statics.ts"
@@ -5562,6 +5568,60 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2685-array-unshift-reverse.ts": {
+   "order": [
+    "<repo>/tests/corpus/2685-array-unshift-reverse.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2685-fs-write-sync.ts": {
+   "order": [
+    "<repo>/tests/corpus/2685-fs-write-sync.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2686-fs-file-handle.ts": {
+   "order": [
+    "<repo>/tests/corpus/2686-fs-file-handle.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2687-fsp-write-file-options.ts": {
+   "order": [
+    "<repo>/tests/corpus/2687-fsp-write-file-options.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2687-process-write-args.ts": {
+   "order": [
+    "<repo>/tests/corpus/2687-process-write-args.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2688-fs-stats-disk-fields.ts": {
+   "order": [
+    "<repo>/tests/corpus/2688-fs-stats-disk-fields.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2689-http-server-timeout-properties.ts": {
+   "order": [
+    "<repo>/tests/corpus/2689-http-server-timeout-properties.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2690-https-server-timeout-option.ts": {
+   "order": [
+    "<repo>/tests/corpus/2690-https-server-timeout-option.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2700-wasi-core.ts": {
+   "order": [
+    "<repo>/tests/corpus/2700-wasi-core.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -7918,6 +7978,12 @@
   "<repo>/tests/fixtures/npm/cases/esm-missing-export/main.ts": {
    "order": [
     "<repo>/tests/fixtures/npm/cases/esm-missing-export/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/fixtures/npm/cases/fetch-destructure/main.ts": {
+   "order": [
+    "<repo>/tests/fixtures/npm/cases/fetch-destructure/main.ts"
    ],
    "diags": []
   },

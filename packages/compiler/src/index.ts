@@ -1451,6 +1451,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   }
   const profile = loadedProfile.profile;
   const entryPath = profile.entry;
+  const buildPlatform = buildTargetPlatform();
 
   // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
   // posture: "lib" runs the same auto-detection and eligibility bar as
@@ -1473,6 +1474,19 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
     });
+    // Library mode emits a host-embedded static archive with native trap and
+    // C-ABI contracts. wasm32-wasi executable modules are supported, but the
+    // archive/reactor contract is not; refuse before emitting a host-width
+    // LLVM TU or asking Zig to compile the native library runtime for WASI.
+    if (buildPlatform === "wasi") {
+      return fail([
+        targetRefusalDiag(
+          "wasm32-wasi",
+          "library-mode archive builds",
+          { file: entryPath, start: 0, end: 0 },
+        ),
+      ]);
+    }
     // The npm verdicts FIRST: whatever the shared frontend would have
     // served from the island — an eligibility miss, an untyped install, a
     // preflight offender inside a package's files, a dropped inferred
@@ -1524,7 +1538,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     try {
       lowered = fe.lower({
         dynamic: false,
-        targetPlatform: buildTargetPlatform(),
+        targetPlatform: buildPlatform,
         // The profile-mapped exports are called from OUTSIDE the graph:
         // they seed reachability beside the entry's top level (an
         // executable build would dead-strip an uncalled export). A helper

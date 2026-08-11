@@ -1,5 +1,13 @@
 # Vendored third-party code
 
+## libucontext (derived source)
+
+- Project: https://github.com/kaniini/libucontext
+- Commit: 49e671dd52ff6791295d8161ad3b6da7dc5f6f9d
+- License: ISC (copyright and permission notice reproduced in `src/scr_musl.c`)
+
+The x86_64 register-save/restore and `makecontext` logic is adapted into `src/scr_musl.c`, rather than carried as a separate library, to supply the legacy `ucontext` functions that musl declares but does not implement. It is compiled only for the explicit `x86_64-linux-musl` target and uses musl's public `ucontext_t` layout. The signal-mask compatibility wrapper is deliberately not included: scriptc fibers perform user-space register swaps and do not change a per-fiber signal mask.
+
 ## ryu/
 
 - Project: https://github.com/ulfjack/ryu

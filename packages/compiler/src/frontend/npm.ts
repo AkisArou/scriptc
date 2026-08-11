@@ -297,7 +297,14 @@ export function embeddedModulesUsingGlobalFetch(
   const checker = program.getTypeChecker();
   const found = new Set<string>();
 
-  const unboundGlobalObject = (node: ts.Expression): boolean => {
+  const unwrapParentheses = (node: ts.Expression): ts.Expression => {
+    let current = node;
+    while (ts.isParenthesizedExpression(current)) current = current.expression;
+    return current;
+  };
+
+  const unboundGlobalObject = (candidate: ts.Expression): boolean => {
+    const node = unwrapParentheses(candidate);
     if (
       !ts.isIdentifier(node) ||
       (node.text !== "globalThis" && node.text !== "global")
@@ -315,10 +322,100 @@ export function embeddedModulesUsingGlobalFetch(
     );
   };
 
+  const staticPropertyName = (name: ts.PropertyName | ts.BindingName): string | null => {
+    if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+    if (
+      ts.isComputedPropertyName(name) &&
+      ts.isStringLiteralLike(name.expression)
+    ) {
+      return name.expression.text;
+    }
+    return null;
+  };
+
+  /** `const { fetch } = globalThis` binds a local identifier, so the
+   * checker quite correctly resolves every later `fetch` read to that local.
+   * The capability read happens at the binding pattern itself. The same is
+   * true for aliases, computed literal keys, and defaulted parameters. */
+  const bindingReadsGlobalFetch = (node: ts.BindingElement): boolean => {
+    const pattern = node.parent;
+    if (!ts.isObjectBindingPattern(pattern)) return false;
+    const key = node.propertyName ?? (ts.isIdentifier(node.name) ? node.name : null);
+    if (key === null || staticPropertyName(key) !== "fetch") return false;
+
+    const owner = pattern.parent;
+    if (
+      (ts.isVariableDeclaration(owner) || ts.isParameter(owner) || ts.isBindingElement(owner)) &&
+      owner.name === pattern &&
+      owner.initializer !== undefined
+    ) {
+      return unboundGlobalObject(owner.initializer);
+    }
+    return false;
+  };
+
+  /** Assignment destructuring is represented as an object-literal-shaped
+   * assignment target rather than an ObjectBindingPattern. */
+  const assignmentReadsGlobalFetch = (node: ts.BinaryExpression): boolean => {
+    if (
+      node.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+      !unboundGlobalObject(node.right)
+    ) {
+      return false;
+    }
+    const target = unwrapParentheses(node.left);
+    if (!ts.isObjectLiteralExpression(target)) return false;
+    return target.properties.some((property) => {
+      if (ts.isShorthandPropertyAssignment(property)) return property.name.text === "fetch";
+      return ts.isPropertyAssignment(property) && staticPropertyName(property.name) === "fetch";
+    });
+  };
+
+  const bareIdentifierRead = (node: ts.Identifier): boolean => {
+    const parent = node.parent;
+    // Binding-element names and aliases are declarations/property keys; the
+    // global-object destructuring case is handled explicitly above.
+    if (ts.isBindingElement(parent)) return false;
+    if (
+      (ts.isLabeledStatement(parent) ||
+        ts.isBreakStatement(parent) ||
+        ts.isContinueStatement(parent)) &&
+      parent.label === node
+    ) {
+      return false;
+    }
+    if (ts.isQualifiedName(parent) && parent.right === node) return false;
+
+    // Named declarations and object/class property names are not reads.
+    // A shorthand property is the exception: `{ fetch }` evaluates the
+    // identifier and therefore needs the global when it is unbound.
+    const namedParent = parent as ts.Node & { name?: ts.Node };
+    if (namedParent.name === node && !ts.isShorthandPropertyAssignment(parent)) return false;
+    return true;
+  };
+
+  const bareIdentifierIsUnbound = (node: ts.Identifier): boolean => {
+    const parent = node.parent;
+    // The binder gives `{ fetch }` a symbol for the PROPERTY it creates;
+    // the value-side symbol is the one that answers whether the shorthand
+    // reads a local binding or Node's global.
+    if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
+      return checker.getShorthandAssignmentValueSymbol(parent) === undefined;
+    }
+    return checker.getSymbolAtLocation(node) === undefined;
+  };
+
   for (const sourceFile of program.getSourceFiles()) {
     let usesFetch = false;
     const visit = (node: ts.Node): void => {
       if (usesFetch) return;
+      if (
+        (ts.isBindingElement(node) && bindingReadsGlobalFetch(node)) ||
+        (ts.isBinaryExpression(node) && assignmentReadsGlobalFetch(node))
+      ) {
+        usesFetch = true;
+        return;
+      }
       if (
         ts.isPropertyAccessExpression(node) &&
         node.name.text === "fetch" &&
@@ -337,13 +434,10 @@ export function embeddedModulesUsingGlobalFetch(
         return;
       }
       if (ts.isIdentifier(node) && node.text === "fetch") {
-        // A property-access name is not a binding read (`obj.fetch`); the
-        // global-object case was handled above. Every real bare read has no
-        // symbol in this no-lib program unless source syntax binds it.
-        if (
-          !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
-          checker.getSymbolAtLocation(node) === undefined
-        ) {
+        // Every real bare read has no symbol in this no-lib program unless
+        // source syntax binds it. Syntactic names without symbols (labels,
+        // destructuring keys) are filtered separately.
+        if (bareIdentifierRead(node) && bareIdentifierIsUnbound(node)) {
           usesFetch = true;
           return;
         }

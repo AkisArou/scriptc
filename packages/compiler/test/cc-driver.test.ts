@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
-import { compileC, resolveCc } from "../src/backend/cc.js";
+import { compileC, resolveCc, runtimeSrcDir } from "../src/backend/cc.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -59,7 +59,7 @@ test("unknown SCRIPTC_CC values are rejected", () => {
   expect(() => resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm64-wasi" })).toThrow(/supported: wasm32-wasi/);
 });
 
-test("zigcc resolves to `zig cc`; linux triples add -target and -D_GNU_SOURCE", () => {
+test("zigcc resolves to `zig cc`; linux triples add their libc target flags", () => {
   const native = resolveCc({ SCRIPTC_CC: "zigcc" }, "darwin");
   expect(native.argv).toEqual(["zig", "cc"]);
   expect(native.targetArgs).toEqual([]);
@@ -73,6 +73,15 @@ test("zigcc resolves to `zig cc`; linux triples add -target and -D_GNU_SOURCE", 
   expect(cross.argv).toEqual(["zig", "cc"]);
   expect(cross.targetArgs).toEqual(["-target", "aarch64-linux-gnu.2.36", "-D_GNU_SOURCE"]);
   expect(cross.linkArgs).toEqual(["-lm"]);
+
+  const musl = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "x86_64-linux-musl" });
+  expect(musl.targetArgs).toEqual([
+    "-target",
+    "x86_64-linux-musl",
+    "-D_GNU_SOURCE",
+    "-DSCR_MUSL",
+  ]);
+  expect(musl.linkArgs).toEqual(["-lm"]);
 
   // Non-linux triples get the -target but not glibc's visibility macro.
   const mac = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "aarch64-macos" });
@@ -147,6 +156,17 @@ test("host-native clang static build links native fetch after zlib inputs", asyn
 }, 600_000);
 
 const HELLO_C = '#include <stdio.h>\nint main(void) { printf("zigcc says hi\\n"); return 0; }\n';
+const MUSL_RUNTIME_C = `
+#include <stddef.h>
+#include <ucontext.h>
+void arc4random_buf(void *, size_t);
+int main(void) {
+  ucontext_t here;
+  unsigned char random_byte;
+  arc4random_buf(&random_byte, sizeof random_byte);
+  return getcontext(&here);
+}
+`;
 
 describe.skipIf(!zigOnPath())("zig cc builds (zig on PATH)", () => {
   test("host-native zigcc build compiles the runtime and runs", async () => {
@@ -167,6 +187,36 @@ describe.skipIf(!zigOnPath())("zig cc builds (zig on PATH)", () => {
     await withCcEnv("zigcc", "aarch64-linux-gnu.2.36", () => compileC({ cPath, outPath }));
     const magic = (await readFile(outPath)).subarray(0, 4);
     expect([...magic]).toEqual([0x7f, 0x45, 0x4c, 0x46]); // \x7fELF
+  });
+
+  test("cross build for x86_64-linux-musl links the libc and ucontext shims", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-musl-"));
+    const cPath = join(dir, "program.c");
+    await writeFile(cPath, MUSL_RUNTIME_C);
+    const outPath = join(dir, "program");
+    await withCcEnv("zigcc", "x86_64-linux-musl", () => compileC({ cPath, outPath }));
+    const elf = await readFile(outPath);
+    expect([...elf.subarray(0, 4)]).toEqual([0x7f, 0x45, 0x4c, 0x46]);
+  });
+
+  test("musl library CSPRNG failures stay on the library trap funnel", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-musl-lib-"));
+    const object = join(dir, "scr_musl.o");
+    const rtDir = runtimeSrcDir();
+    await execFileAsync("zig", [
+      "cc",
+      "-target", "x86_64-linux-musl",
+      "-std=c11",
+      "-D_GNU_SOURCE",
+      "-DSCR_MUSL",
+      "-DSCR_LIB",
+      "-I", rtDir,
+      "-c", join(rtDir, "scr_musl.c"),
+      "-o", object,
+    ]);
+    const undefinedSymbols = execFileSync("nm", ["-u", object], { encoding: "utf8" });
+    expect(undefinedSymbols).toMatch(/\b_?scr_trap\b/);
+    expect(undefinedSymbols).not.toMatch(/\b_?(?:fputs|abort)\b/);
   });
 
   test("linux cross builds accept fetch natively (no libcurl); the curl reference keeps its soname stub", async () => {

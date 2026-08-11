@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { compile } from "@scriptc/compiler";
+import { compile, compileLibrary } from "@scriptc/compiler";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
@@ -153,6 +153,20 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     if (llvmResult.ok) expect(llvmResult.backend).toBe("llvm");
   });
 
+  test("library mode reports a target diagnostic instead of invoking the WASI toolchain", async () => {
+    const outDir = await mkdtemp("/tmp/scriptc-wasi-library-");
+    const result = await compileLibrary({
+      profilePath: join(repoRoot, "tests/library-mode/scalars/profile.json"),
+      outDir,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]?.code).toBe("SC3002");
+      expect(result.diagnostics[0]?.message).toMatch(/does not support library-mode archive builds/);
+    }
+  });
+
   test("the explicit C backend still emits async-free wasm", async () => {
     const outDir = await mkdtemp("/tmp/scriptc-wasi-c-");
     const result = await compile(join(repoRoot, "tests/corpus/001-hello.ts"), {
@@ -195,6 +209,22 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     }
     expect(result.backend).toBe("llvm");
+  });
+
+  test("embedded destructuring of global fetch reports SC3002", async () => {
+    const entry = join(repoRoot, "tests/fixtures/npm/cases/fetch-destructure/main.ts");
+    const outDir = await mkdtemp("/tmp/scriptc-wasi-fetch-destructure-");
+    const result = await compile(entry, {
+      outDir,
+      outPath: join(outDir, "program.wasm"),
+      dynamic: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]?.code).toBe("SC3002");
+      expect(result.diagnostics[0]?.message).toMatch(/network-backed fetch/);
+    }
   });
 
   test.each([
