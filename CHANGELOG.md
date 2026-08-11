@@ -6,6 +6,14 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.0.25
+
+### Fixes
+
+- **Busy sockets no longer starve the native event loop.** Readable wakes now yield after a bounded batch, allowing timers and other descriptors to keep progressing even while upgraded connections are continuously flooded.
+
+<!-- release:end -->
+
 ## 0.0.24
 
 ### Features
@@ -19,8 +27,6 @@ All notable changes to scriptc will be documented in this file.
 ### Performance
 
 - **Canonical typed-array loops use native integer induction.** Both backends recognize semantics-safe byte loops and emit integer counters and direct byte indexes, avoiding repeated floating-point index conversion while preserving the general fallback whenever the loop shape cannot prove the rewrite.
-
-<!-- release:end -->
 
 ## 0.0.23
 
