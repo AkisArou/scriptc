@@ -5,8 +5,7 @@ import { statSync } from "node:fs";
 import path from "node:path";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  // The homepage lives in the site header, not the docs nav, so list it explicitly.
-  const hrefs = ["/", ...allDocsPages.map((page) => page.href)];
+  const hrefs = ["/", "/status", ...allDocsPages.map((page) => page.href)];
   return hrefs.map((href) => ({
     url: `${siteUrl}${href}`,
     lastModified: lastModifiedFor(href),

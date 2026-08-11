@@ -7,13 +7,14 @@ import { Sheet, SheetTrigger, SheetContent, SheetTitle } from "@/components/ui/s
 
 const links = [
   { name: "Home", href: "/" },
+  { name: "Status", href: "/status" },
   { name: "Docs", href: "/introduction" },
 ];
 
 function isCurrent(href: string, pathname: string): boolean {
   if (href === "/") return pathname === "/";
-  // Docs owns every other page.
-  return pathname !== "/";
+  if (href === "/status") return pathname === "/status";
+  return pathname !== "/" && pathname !== "/status";
 }
 
 export function HeaderNav() {
