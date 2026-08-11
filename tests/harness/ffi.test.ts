@@ -1,9 +1,10 @@
 /* Outbound native FFI is an integration lane rather than a corpus case:
  * Node has no equivalent static-link surface to differential-run. The same
  * TypeScript and native archive run through BOTH scriptc backends, and the
- * result bytes must match. The fixture covers every format-1 ABI class,
- * integer coercion, embedded-NUL/UTF-8 string spans, byte spans, and a void
- * call with observable native state. */
+ * result bytes must match. The fixture covers every value ABI class,
+ * integer coercion, embedded-NUL/UTF-8 string spans, byte spans, and format-2
+ * raw/context callbacks (captures, exact context positions, conversion,
+ * mutation, and catchable throws). */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -57,11 +58,17 @@ const expected = [
   "429",
   "6",
   "12.5",
+  "12",
+  "28",
+  "true 255 4000000000 -7 0.5",
+  "4294967295",
+  "6",
+  "caught callback boom",
   "",
 ].join("\n");
 
 describe.each(["c", "llvm"] as const)("outbound native FFI, %s backend", (backend) => {
-  test("calls the manifest-bound archive across every v1 ABI class", async () => {
+  test("calls the manifest-bound archive across every v1 ABI class plus v2 callback ABI classes", async () => {
     const outDir = join(cacheRoot, backend);
     mkdirSync(outDir, { recursive: true });
     const result = await compile(join(fixtureRoot, "main.ts"), {
@@ -118,6 +125,75 @@ test("manifest validation reports a missing native link input", () => {
   if (!result.ok) {
     expect(result.diagnostics[0]?.code).toBe("SC5001");
     expect(result.diagnostics[0]?.message).toContain("cannot be read");
+  }
+});
+
+test.each([
+  {
+    name: "a callback in format 1",
+    profile: {
+      ffi_format: 1,
+      functions: [{
+        name: "visit",
+        symbol: "sf_visit",
+        params: [{ callback: { id: "visit", params: ["f64"], returns: "void", lifetime: "call" } }],
+        returns: "void",
+      }],
+    },
+    message: "must be one of",
+  },
+  {
+    name: "an orphaned context",
+    profile: {
+      ffi_format: 2,
+      functions: [{ name: "visit", symbol: "sf_visit", params: [{ context: "visit" }], returns: "void" }],
+    },
+    message: "has no matching callback",
+  },
+  {
+    name: "a context present on only one side",
+    profile: {
+      ffi_format: 2,
+      functions: [{
+        name: "visit",
+        symbol: "sf_visit",
+        params: [{
+          callback: {
+            id: "visit",
+            params: ["f64", { context: "visit" }],
+            returns: "void",
+            lifetime: "call",
+          },
+        }],
+        returns: "void",
+      }],
+    },
+    message: "exactly once in both",
+  },
+  {
+    name: "a retained callback lifetime",
+    profile: {
+      ffi_format: 2,
+      functions: [{
+        name: "visit",
+        symbol: "sf_visit",
+        params: [{
+          callback: { id: "visit", params: ["f64"], returns: "void", lifetime: "retained" },
+        }],
+        returns: "void",
+      }],
+    },
+    message: "lifetime' must be 'call",
+  },
+])("manifest validation rejects $name", ({ name, profile, message }) => {
+  const path = join(cacheRoot, `invalid-callback-${name.replaceAll(" ", "-")}.json`);
+  mkdirSync(cacheRoot, { recursive: true });
+  writeFileSync(path, JSON.stringify(profile));
+  const result = loadFfiProfile(path);
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.diagnostics[0]?.code).toBe("SC5001");
+    expect(result.diagnostics[0]?.message).toContain(message);
   }
 });
 

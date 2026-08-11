@@ -5,7 +5,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
-import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import { BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import type { IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
@@ -2471,21 +2471,15 @@ export function islandPrimitiveExit(L: Lowerer, call: ts.CallExpression, result:
     return null;
   }
 
-function ffiTypeForClass(
-  cls: IrFfiImport["params"][number] | IrFfiImport["returns"],
-): IrType {
-  switch (cls) {
-    case "bool":
-      return BOOL;
-    case "string":
-      return STRING;
-    case "bytes":
-      return BYTES_U8;
-    case "void":
-      return VOID;
-    default:
-      return F64;
-  }
+function ffiSourceParams(binding: IrFfiImport): Exclude<IrFfiImport["params"][number], { context: string }>[] {
+  return binding.params.filter((param) => !isFfiContextParam(param)) as Exclude<
+    IrFfiImport["params"][number],
+    { context: string }
+  >[];
+}
+
+function ffiParamDisplay(param: ReturnType<typeof ffiSourceParams>[number]): string {
+  return isFfiCallbackParam(param) ? `callback '${param.callback.id}'` : `class '${param}'`;
 }
 
 /** The declaration half of an outbound FFI binding. Kept independent of
@@ -2527,14 +2521,16 @@ function ffiDeclarationDiagnostic(
   }
   const signature = signatures[0]!;
   const params = signature.getParameters();
-  if (params.length !== binding.params.length) {
+  const sourceParams = ffiSourceParams(binding);
+  if (params.length !== sourceParams.length) {
     return ffiSignatureDiag(
       binding.name,
-      `the TypeScript declaration has ${params.length} parameter(s), but the manifest declares ${binding.params.length}`,
+      `the TypeScript declaration has ${params.length} parameter(s), but the manifest declares ${sourceParams.length} source parameter(s) ` +
+        `(${binding.params.length - sourceParams.length} additional native context slot(s) are compiler-supplied)`,
       loc,
     );
   }
-  const expectedParams = binding.params.map(ffiTypeForClass);
+  const expectedParams = ffiSourceParamTypes(binding.params);
   for (let i = 0; i < params.length; i++) {
     const paramType = L.checker.getTypeOfSymbol(params[i]!);
     // `mapType` deliberately gives uninhabited value positions a cheap f64
@@ -2554,7 +2550,7 @@ function ffiDeclarationDiagnostic(
       return ffiSignatureDiag(
         binding.name,
         `parameter ${i + 1} maps to '${mapped === null ? L.checker.typeToString(paramType) : L.fmt(mapped)}', ` +
-          `which does not fit manifest class '${binding.params[i]}'`,
+          `which does not fit manifest ${ffiParamDisplay(sourceParams[i]!)}`,
         loc,
       );
     }
@@ -2571,7 +2567,7 @@ function ffiDeclarationDiagnostic(
     );
   }
   const declaredReturn = L.mapTypeOf(returnType);
-  const expectedReturn = ffiTypeForClass(binding.returns);
+  const expectedReturn = ffiClassType(binding.returns);
   if (declaredReturn === null || !typeEquals(declaredReturn, expectedReturn)) {
     return ffiSignatureDiag(
       binding.name,
@@ -2704,13 +2700,13 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
     if (expr.arguments.some(ts.isSpreadElement)) {
       signatureError("spread arguments do not have a fixed native ABI");
     }
-    if (expr.arguments.length !== binding.params.length) {
+    const expectedParams = ffiSourceParamTypes(binding.params);
+    if (expr.arguments.length !== expectedParams.length) {
       signatureError(
-        `this call passes ${expr.arguments.length} argument(s), but the native ABI requires exactly ${binding.params.length}`,
+        `this call passes ${expr.arguments.length} argument(s), but the native binding requires exactly ${expectedParams.length}`,
       );
     }
-    const expectedParams = binding.params.map(ffiTypeForClass);
-    const expectedReturn = ffiTypeForClass(binding.returns);
+    const expectedReturn = ffiClassType(binding.returns);
     const args = expr.arguments.map((arg, i) =>
       L.lowerExprExpecting(arg, expectedParams[i]!)
     );

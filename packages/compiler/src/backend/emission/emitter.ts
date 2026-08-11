@@ -25,7 +25,11 @@ import type {
   IrGlobal,
   IrRecordShape,
   IrExpr,
+  IrFfiCallbackParamClass,
+  IrFfiCallbackParam,
   IrFfiImport,
+  IrFfiReturnClass,
+  IrFfiValueParamClass,
   IrFunction,
   IrLocal,
   IrModule,
@@ -34,7 +38,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -48,7 +52,7 @@ import {
   mangleVtSlot,
   mangleWrapper,
 } from "../mangle.js";
-import { cType, releaseCallC, cStringLiteral, cDecl } from "./emit-types.js";
+import { cFnPtrCast, cType, releaseCallC, cStringLiteral, cDecl } from "./emit-types.js";
 import { computeMayThrow } from "./may-throw.js";
 import { dynDesc, unionTruthyHelper, unionEqHelper, unionToStrHelper, unionJoinHelper, jsonWriteHelper, jsonIndentHelper, dynMatchHelper, dynCheckHelper, dynFuncBoxHelper, dynToStrHelper, caughtToDynHelper, toDynHelper, recordKeyGetHelper, recordKeySetHelper } from "./emit-walkers.js";
 import { VtSlot, ClassMeta, emitStructDefs, vtEntriesFor, vtSlotParams, emitVtableDecls, emitVtableInstances, emitVtAdapterDefs, emitHierarchyClassHelpers, emitClassObjs, emitCtorThunkDefs, errorVtStampLines, emitterVtStampLines, streamVtStampLines, traceAdapterC, traceArgC, boxNewC, arrNewC } from "./emit-shapes.js";
@@ -76,6 +80,52 @@ export interface Temp {
  * capture box (boxed locals release their BOX; the box frees its contents). */
 export interface ScopeEntry extends Temp {
   boxed?: boolean;
+}
+
+export interface CCallbackAdapter {
+  symbol: string;
+  /** Raw callbacks have no ABI context parameter and borrow this TLS slot. */
+  tls: string | null;
+  callback: IrFfiCallbackParam["callback"];
+}
+
+export function ffiNativeTypeC(
+  cls: IrFfiCallbackParamClass | IrFfiValueParamClass | IrFfiReturnClass,
+): string {
+  switch (cls) {
+    case "f64":
+      return "double";
+    case "bool":
+    case "u8":
+      return "uint8_t";
+    case "u32":
+      return "uint32_t";
+    case "i32":
+      return "int32_t";
+    case "string":
+    case "bytes":
+      throw new Error(`emitter bug: span class '${cls}' has no scalar C type`);
+    case "void":
+      return "void";
+  }
+}
+
+function ffiCallbackNativeParamsC(callback: IrFfiCallbackParam["callback"], named: boolean): string[] {
+  return callback.params.map((param, i) =>
+    isFfiContextParam(param)
+      ? `void *${named ? "sc_ctx" : ""}`.trim()
+      : `${ffiNativeTypeC(param)}${named ? ` sc_a${i}` : ""}`,
+  );
+}
+
+function ffiCallbackPointerTypeC(callback: IrFfiCallbackParam["callback"]): string {
+  const ret = ffiNativeTypeC(callback.returns);
+  const params = ffiCallbackNativeParamsC(callback, false);
+  return `${ret} (*)(${params.length > 0 ? params.join(", ") : "void"})`;
+}
+
+function ffiCallbackDummyC(callback: IrFfiCallbackParam["callback"]): string {
+  return callback.returns === "void" ? "" : "0";
 }
 
 export class CEmitter {
@@ -181,6 +231,10 @@ export class CEmitter {
   readonly fnByName = new Map<string, IrFunction>();
   /** Manifest-bound native imports, used by ffiCall emission. */
   readonly ffiByName = new Map<string, IrFfiImport>();
+  /** One C-ABI trampoline per manifest callback entry. Raw function
+   * pointers additionally get a distinct TLS context slot, so two
+   * callbacks with the same signature never alias each other's closure. */
+  readonly ffiCallbackAdapters = new Map<string, CCallbackAdapter>();
   readonly globalsById = new Map<string, IrGlobal>();
   readonly unionsById = new Map<string, IrUnionDef>();
   /** Active optional-chain bind temps, by chain id (chainRecv reads). */
@@ -349,7 +403,19 @@ export class CEmitter {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
     }
-    for (const entry of mod.ffiImports ?? []) this.ffiByName.set(entry.name, entry);
+    for (const entry of mod.ffiImports ?? []) {
+      this.ffiByName.set(entry.name, entry);
+      for (const param of entry.params) {
+        if (!isFfiCallbackParam(param)) continue;
+        const index = this.ffiCallbackAdapters.size;
+        const hasContext = param.callback.params.some(isFfiContextParam);
+        this.ffiCallbackAdapters.set(`${entry.name}:${param.callback.id}`, {
+          symbol: `sc_ffi_cb_${index}`,
+          tls: hasContext ? null : `sc_ffi_cb_ctx_${index}`,
+          callback: param.callback,
+        });
+      }
+    }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
     this.indirectMayThrow = mt.indirect;
@@ -641,10 +707,13 @@ export class CEmitter {
     }
     if (globals.length > 0) out.push("");
     // Outbound native FFI declarations. string/bytes each expand from one
-    // scriptc value to a borrowed pointer+length pair at the C boundary.
+    // scriptc value to a borrowed pointer+length pair. Format-2 callbacks
+    // and their independently positioned contexts are exact pointer slots.
     for (const entry of this.mod.ffiImports ?? []) {
-      const params = entry.params.flatMap((cls): string[] => {
-        switch (cls) {
+      const params = entry.params.flatMap((param): string[] => {
+        if (isFfiCallbackParam(param)) return [ffiCallbackPointerTypeC(param.callback)];
+        if (isFfiContextParam(param)) return ["void *"];
+        switch (param) {
           case "f64":
             return ["double"];
           case "bool":
@@ -659,16 +728,12 @@ export class CEmitter {
             return ["const uint8_t *", "size_t"];
         }
       });
-      const ret =
-        entry.returns === "f64" ? "double"
-        : entry.returns === "bool" || entry.returns === "u8" ? "uint8_t"
-        : entry.returns === "u32" ? "uint32_t"
-        : entry.returns === "i32" ? "int32_t"
-        : "void";
+      const ret = ffiNativeTypeC(entry.returns);
       out.push(`extern ${ret} ${entry.symbol}(${params.length > 0 ? params.join(", ") : "void"});`);
     }
     if ((this.mod.ffiImports?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
+    this.emitFfiCallbackDefs(out);
     // Class objects (classes as values): construct-thunk prototypes plus
     // the immortal statics that take their addresses — after the function
     // signatures (the thunks call sc_new_*/the constructors), before
@@ -1640,6 +1705,75 @@ export class CEmitter {
   }
 
   /* ── functions ────────────────────────────────────────────────────── */
+
+  ffiCallbackAdapter(binding: string, id: string): CCallbackAdapter {
+    const adapter = this.ffiCallbackAdapters.get(`${binding}:${id}`);
+    if (!adapter) throw new Error(`emitter bug: no callback adapter for ${binding}:${id}`);
+    return adapter;
+  }
+
+  /** C-callable trampolines for format-2 callbacks. The external callback
+   * ABI is scalar C plus an optional exact-position context pointer; the
+   * internal side is scriptc's (ScrClosure *env, params...) convention.
+   * A raw callback borrows its closure through a distinct TLS slot for the
+   * dynamic extent of the outer call. */
+  emitFfiCallbackDefs(out: string[]): void {
+    if (this.ffiCallbackAdapters.size === 0) return;
+    for (const adapter of this.ffiCallbackAdapters.values()) {
+      const cb = adapter.callback;
+      if (adapter.tls !== null) {
+        out.push(`static _Thread_local ScrClosure *${adapter.tls};`);
+      }
+      const nativeParams = ffiCallbackNativeParamsC(cb, true);
+      const ret = ffiNativeTypeC(cb.returns);
+      const contextParam = cb.params.findIndex(isFfiContextParam);
+      out.push(
+        `static ${ret} ${adapter.symbol}(${nativeParams.length > 0 ? nativeParams.join(", ") : "void"}) {`,
+        `  ScrClosure *sc_cb = ${contextParam >= 0 ? `(ScrClosure *)sc_ctx` : adapter.tls};`,
+        `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
+      );
+      const dummy = ffiCallbackDummyC(cb);
+      out.push(`  if (scr_exc_pending()) ${cb.returns === "void" ? "return;" : `return ${dummy};`}`);
+      const ft = ffiCallbackType(cb);
+      const scriptArgs = cb.params.flatMap((param, i): string[] => {
+        if (isFfiContextParam(param)) return [];
+        switch (param) {
+          case "f64":
+            return [`sc_a${i}`];
+          case "bool":
+            return [`(sc_a${i} != 0)`];
+          case "u8":
+          case "u32":
+          case "i32":
+            return [`(double)sc_a${i}`];
+        }
+      });
+      const call = `(${cFnPtrCast(ft)}sc_cb->fn)(sc_cb${scriptArgs.length ? `, ${scriptArgs.join(", ")}` : ""})`;
+      if (cb.returns === "void") {
+        out.push(`  ${call};`, `  return;`, `}`, ``);
+        continue;
+      }
+      out.push(`  ${cDecl(ft.ret, "sc_result")} = ${call};`);
+      switch (cb.returns) {
+        case "f64":
+          out.push(`  return sc_result;`);
+          break;
+        case "bool":
+          out.push(`  return (uint8_t)(sc_result ? 1 : 0);`);
+          break;
+        case "u8":
+          out.push(`  return (uint8_t)(uint32_t)scr_bit_ushr(sc_result, 0.0);`);
+          break;
+        case "u32":
+          out.push(`  return (uint32_t)scr_bit_ushr(sc_result, 0.0);`);
+          break;
+        case "i32":
+          out.push(`  return (int32_t)scr_bit_or(sc_result, 0.0);`);
+          break;
+      }
+      out.push(`}`, ``);
+    }
+  }
 
   signature(fn: IrFunction): string {
     const boxedIds = new Set(fn.locals.filter((l) => l.boxed).map((l) => l.id));

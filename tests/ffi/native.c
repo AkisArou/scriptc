@@ -42,3 +42,31 @@ void sf_note(double value) {
 double sf_last_note(void) {
   return last_note;
 }
+
+typedef double (*sf_apply_cb)(double value, void *context);
+
+double sf_apply(sf_apply_cb callback, double value, void *context) {
+  return callback(value, context);
+}
+
+typedef double (*sf_raw_cb)(double value);
+
+double sf_combine_raw(sf_raw_cb left, sf_raw_cb right, double value) {
+  return left(value) + right(value);
+}
+
+typedef uint32_t (*sf_mix_cb)(uint8_t truth, uint8_t byte, uint32_t wide,
+                              int32_t signed_value, double fraction,
+                              void *context);
+
+uint32_t sf_callback_mix(sf_mix_cb callback, void *context) {
+  return callback(2, 255, 4000000000u, -7, 0.5, context);
+}
+
+typedef void (*sf_each_cb)(double value, void *context);
+
+void sf_each(sf_each_cb callback, void *context) {
+  callback(1, context);
+  callback(2, context);
+  callback(3, context);
+}

@@ -1,5 +1,5 @@
 {
-  "ffi_format": 1,
+  "ffi_format": 2,
   "functions": [
     { "name": "nativeScale", "symbol": "sf_scale", "params": ["f64"], "returns": "f64" },
     { "name": "nativeInvert", "symbol": "sf_invert", "params": ["bool"], "returns": "bool" },
@@ -9,7 +9,80 @@
     { "name": "nativeTextSum", "symbol": "sf_text_sum", "params": ["string"], "returns": "f64" },
     { "name": "nativeBytesSum", "symbol": "sf_bytes_sum", "params": ["bytes"], "returns": "f64" },
     { "name": "nativeNote", "symbol": "sf_note", "params": ["f64"], "returns": "void" },
-    { "name": "nativeLastNote", "symbol": "sf_last_note", "params": [], "returns": "f64" }
+    { "name": "nativeLastNote", "symbol": "sf_last_note", "params": [], "returns": "f64" },
+    {
+      "name": "nativeApply",
+      "symbol": "sf_apply",
+      "params": [
+        {
+          "callback": {
+            "id": "apply",
+            "params": ["f64", { "context": "apply" }],
+            "returns": "f64",
+            "lifetime": "call"
+          }
+        },
+        "f64",
+        { "context": "apply" }
+      ],
+      "returns": "f64"
+    },
+    {
+      "name": "nativeCombineRaw",
+      "symbol": "sf_combine_raw",
+      "params": [
+        {
+          "callback": {
+            "id": "left",
+            "params": ["f64"],
+            "returns": "f64",
+            "lifetime": "call"
+          }
+        },
+        {
+          "callback": {
+            "id": "right",
+            "params": ["f64"],
+            "returns": "f64",
+            "lifetime": "call"
+          }
+        },
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "name": "nativeCallbackMix",
+      "symbol": "sf_callback_mix",
+      "params": [
+        {
+          "callback": {
+            "id": "mix",
+            "params": ["bool", "u8", "u32", "i32", "f64", { "context": "mix" }],
+            "returns": "u32",
+            "lifetime": "call"
+          }
+        },
+        { "context": "mix" }
+      ],
+      "returns": "u32"
+    },
+    {
+      "name": "nativeEach",
+      "symbol": "sf_each",
+      "params": [
+        {
+          "callback": {
+            "id": "each",
+            "params": ["f64", { "context": "each" }],
+            "returns": "void",
+            "lifetime": "call"
+          }
+        },
+        { "context": "each" }
+      ],
+      "returns": "void"
+    }
   ],
   "libraries": [],
   "system_libraries": []
