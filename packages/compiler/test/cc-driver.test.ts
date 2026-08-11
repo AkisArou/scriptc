@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
-import { compileC, resolveCc } from "../src/backend/cc.js";
+import { compileC, resolveCc, runtimeSrcDir } from "../src/backend/cc.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -185,6 +185,26 @@ describe.skipIf(!zigOnPath())("zig cc builds (zig on PATH)", () => {
     await withCcEnv("zigcc", "x86_64-linux-musl", () => compileC({ cPath, outPath }));
     const elf = await readFile(outPath);
     expect([...elf.subarray(0, 4)]).toEqual([0x7f, 0x45, 0x4c, 0x46]);
+  });
+
+  test("musl library CSPRNG failures stay on the library trap funnel", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-musl-lib-"));
+    const object = join(dir, "scr_musl.o");
+    const rtDir = runtimeSrcDir();
+    await execFileAsync("zig", [
+      "cc",
+      "-target", "x86_64-linux-musl",
+      "-std=c11",
+      "-D_GNU_SOURCE",
+      "-DSCR_MUSL",
+      "-DSCR_LIB",
+      "-I", rtDir,
+      "-c", join(rtDir, "scr_musl.c"),
+      "-o", object,
+    ]);
+    const undefinedSymbols = execFileSync("nm", ["-u", object], { encoding: "utf8" });
+    expect(undefinedSymbols).toMatch(/\b_?scr_trap\b/);
+    expect(undefinedSymbols).not.toMatch(/\b_?(?:fputs|abort)\b/);
   });
 
   test("linux cross builds accept fetch natively (no libcurl); the curl reference keeps its soname stub", async () => {

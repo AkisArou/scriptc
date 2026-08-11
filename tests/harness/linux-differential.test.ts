@@ -141,7 +141,6 @@ const ROSETTA_SPAWN_SKIPS = new Set([
   "1361-spawn-events.ts",
   "1363-spawn-unhandled-error.ts",
   "1462-exec-sync.ts",
-  "1466-child-containers.ts",
   "1470-child-lifecycle.ts",
   "1472-errno-code.ts",
   "1473-promisify-execfile.ts",

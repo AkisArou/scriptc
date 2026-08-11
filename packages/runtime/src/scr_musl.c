@@ -20,7 +20,6 @@
 #include "scr_runtime.h"
 
 #include <errno.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <sys/random.h>
 #ifndef SCR_LIB
@@ -34,8 +33,10 @@
 
 /* The scriptc runtime uses arc4random_buf as its infallible CSPRNG contract.
  * Linux getrandom has the same kernel source and needs neither mutable state
- * nor an fd. Retry interrupts and short reads; any other failure aborts rather
- * than returning predictable or partially initialized bytes. */
+ * nor an fd. Retry interrupts and short reads; any other failure enters the
+ * runtime trap funnel rather than returning predictable or partially
+ * initialized bytes. Executables still print and abort there, while library
+ * artifacts deliver the failure to their registered panic sink. */
 void arc4random_buf(void *buf, size_t n) {
   unsigned char *p = buf;
   while (n > 0) {
@@ -46,8 +47,7 @@ void arc4random_buf(void *buf, size_t n) {
       continue;
     }
     if (got < 0 && errno == EINTR) continue;
-    fputs("scriptc: getrandom failed\n", stderr);
-    abort();
+    scr_trap("scriptc: getrandom failed\n");
   }
 }
 
