@@ -354,6 +354,8 @@ export const surfaceReleases: SurfaceRelease[] = [
   }),
 ];
 
+const latestCorpusRelease = surfaceReleases.at(-1)!;
+
 export type CorpusStatus = "match" | "blocked";
 
 export type CorpusCase = {
@@ -529,16 +531,10 @@ export const corpusCases: CorpusCase[] = [
 ];
 
 export const corpusSummary = {
-  release: "0.0.25",
+  release: latestCorpusRelease.version,
   nodeVersion: "26.4.0",
   platform: "macOS arm64",
-  statements: 86,
-  staticStatements: 68,
-  dynamicStatements: 4,
-  blockedStatements: 14,
-  staticPrograms: 7,
-  dynamicPrograms: 10,
-  totalPrograms: 20,
+  ...latestCorpusRelease.corpus,
   silentMismatches: 0,
   generatedAt: "2026-08-11T05:44:49.616Z",
 };
