@@ -56,6 +56,7 @@ test("SCRIPTC_TARGET without zigcc is an error, never a silent clang cross build
 
 test("unknown SCRIPTC_CC values are rejected", () => {
   expect(() => resolveCc({ SCRIPTC_CC: "gcc" })).toThrow(/unknown SCRIPTC_CC/);
+  expect(() => resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm64-wasi" })).toThrow(/supported: wasm32-wasi/);
 });
 
 test("zigcc resolves to `zig cc`; linux triples add -target and -D_GNU_SOURCE", () => {
@@ -82,6 +83,17 @@ test("zigcc resolves to `zig cc`; linux triples add -target and -D_GNU_SOURCE", 
   const win = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "x86_64-windows-gnu" });
   expect(win.targetArgs).toEqual(["-target", "x86_64-windows-gnu"]);
   expect(win.linkArgs).toEqual([]);
+
+  // WASI uses wasi-libc's explicit emulation archives for the small signal
+  // and process-clock surface retained by the portable runtime.
+  const wasi = resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm32-wasi" });
+  expect(wasi.targetArgs).toEqual([
+    "-target", "wasm32-wasi", "-D_GNU_SOURCE",
+    "-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS",
+  ]);
+  expect(wasi.linkArgs).toEqual([
+    "-lwasi-emulated-signal", "-lwasi-emulated-process-clocks",
+  ]);
 });
 
 /** Runs body with SCRIPTC_CC/SCRIPTC_TARGET set, restoring the previous values. */

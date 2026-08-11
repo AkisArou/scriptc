@@ -1,10 +1,10 @@
 # scriptc
 
-scriptc compiles TypeScript and JavaScript to native executables. It uses the TypeScript compiler for parsing and type checking, then emits LLVM IR or C for clang to compile.
+scriptc compiles TypeScript and JavaScript to native executables and WebAssembly modules. It uses the TypeScript compiler for parsing and type checking, then emits LLVM IR for clang to compile. A readable C backend remains available for debugging.
 
 Static builds include a small native runtime, but no Node or JavaScript engine. Code that cannot compile statically is reported as a diagnostic. For npm packages and `any`-typed code, `--dynamic` embeds [quickjs-ng](https://github.com/quickjs-ng/quickjs) explicitly.
 
-scriptc is experimental and targets macOS, Linux, and Windows.
+scriptc is experimental and targets macOS, Linux, Windows, and WebAssembly via WASI Preview 1.
 
 ## Installation
 
@@ -73,6 +73,20 @@ $ scriptc coverage hello.ts
 
   fully static — this program has no dynamic remainder.
 ```
+
+## Build WebAssembly
+
+WASI and other cross-target builds require Zig. Its bundled WASI libc produces a portable WASI Preview 1 module through the production LLVM backend:
+
+```console
+$ SCRIPTC_CC=zigcc SCRIPTC_TARGET=wasm32-wasi scriptc build hello.ts --no-keep-c -o hello.wasm >/dev/null
+$ file hello.wasm
+hello.wasm: WebAssembly (wasm) binary module version 0x1 (MVP)
+$ SCRIPTC_CC=zigcc SCRIPTC_TARGET=wasm32-wasi scriptc run hello.ts
+hello, world
+```
+
+The WASI target supports the same language tiers as the native targets, including async/await, promises, generators, timers, stdin/readline events, callback and promise filesystem APIs, and `--dynamic`. APIs that require capabilities absent from portable WASI Preview 1—network sockets/fetch, child processes, OS signals, and filesystem watching—fail before linking with `SC3002`; sanitizer builds and native FFI are target diagnostics too. See [platform support](https://scriptc.dev/platforms) for the precise boundary.
 
 ## Use npm packages
 

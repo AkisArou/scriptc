@@ -118,7 +118,7 @@ static void *isl_realloc_fn(void *opaque, void *ptr, size_t size) {
   if (!ptr && p) isl_live_allocs++;
   return p;
 }
-static size_t isl_usable_size(const void *ptr) { return isl_malloc_size(ptr); }
+static size_t isl_usable_size(const void *ptr) { return isl_malloc_size((void *)ptr); }
 
 static const JSMallocFunctions isl_mf = {
     isl_calloc, isl_malloc, isl_free, isl_realloc_fn, isl_usable_size,
@@ -3352,7 +3352,7 @@ static JSValue isl_host_ids(JSContext *ctx, JSValueConst this_val, int argc,
   (void)argc;
   (void)argv;
   JSValue arr = JS_NewArray(ctx);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__wasi__)
   JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, -1));
   JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, -1));
 #else
@@ -3370,7 +3370,7 @@ static JSValue isl_host_umask(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__wasi__)
   return JS_NewInt32(ctx, 0);
 #else
   mode_t m = umask(0);
@@ -3495,11 +3495,15 @@ static JSValue isl_host_hostname(JSContext *ctx, JSValueConst this_val, int argc
    * counted like the socket units' own WSAStartup calls (ws2_32 is on
    * every win32 link line). */
   char buf[256];
+#if defined(__wasi__)
+  buf[0] = '\0';
+#else
 #ifdef _WIN32
   WSADATA wsa;
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return JS_NewString(ctx, "");
 #endif
   if (gethostname(buf, sizeof buf) != 0) buf[0] = '\0';
+#endif
   buf[sizeof buf - 1] = '\0';
   return JS_NewString(ctx, buf);
 }

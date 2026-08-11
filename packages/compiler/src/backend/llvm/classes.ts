@@ -270,7 +270,7 @@ export function emitClassShapes(
       : [];
     const members = [...prefix, ...fieldTys];
     typeDefs.push(
-      `%${mangleClassStruct(cls.name)} = type { i64${members.length ? ", " + members.join(", ") : ""} } ` +
+      `%${mangleClassStruct(cls.name)} = type { ${host.sizeType}${members.length ? ", " + members.join(", ") : ""} } ` +
         `; class ${cls.name}${meta.hierarchy ? " (vt at 1)" : ""}${streamRooted(meta) ? " (ScrStream prefix at 2)" : emitterRooted(meta) ? " (ScrEmitter prefix at 2)" : ""} { ${cls.fields.map((f) => f.name).join("; ")} }`,
     );
   }
@@ -299,7 +299,7 @@ export function emitClassShapes(
         ? `ptr null` // outside the declaring subtree / fully-abstract chain
         : `ptr @${mangleFunction(`%${impl.def.name}.${slot.method}`)}`,
     );
-    const head = `%ScrVt { i64 ${meta.pre}, i64 ${meta.post}, ptr @${mangleClassReleaseDirect(cls.name)} }`;
+    const head = `%ScrVt { ${host.sizeType} ${meta.pre}, ${host.sizeType} ${meta.post}, ptr @${mangleClassReleaseDirect(cls.name)} }`;
     defs.push(
       `@${mangleVtInstance(cls.name)} = internal constant %${mangleVtStruct(meta.root.def.name)} ` +
         `{ ${[head, ...entries].join(", ")} } ; class ${cls.name}`,
@@ -317,7 +317,7 @@ export function emitClassShapes(
     const refFields = cls.fields
       .map((f, i) => ({ ...f, index: fieldIndex(i) }))
       .filter((f) => isRefCounted(f.type));
-    const sizeOf = `ptrtoint (ptr getelementptr (%${struct}, ptr null, i32 1) to i64)`;
+    const sizeOf = `ptrtoint (ptr getelementptr (%${struct}, ptr null, i32 1) to ${host.sizeType})`;
     // An embedded prefix slot (the emitter registry at 2, the stream
     // state at 4) handed to one of the runtime's prefix helpers —
     // teardown/trace/collector.
@@ -342,14 +342,14 @@ export function emitClassShapes(
       `  %isnull = icmp eq ptr %o, null`,
       `  br i1 %isnull, label %done, label %check`,
       `check:`,
-      `  %rc = load i64, ptr %o`,
-      `  %imm = icmp eq i64 %rc, -1`,
+      `  %rc = load ${host.sizeType}, ptr %o`,
+      `  %imm = icmp eq ${host.sizeType} %rc, -1`,
       `  br i1 %imm, label %done, label %inc`,
       `inc:`,
-      `  %n = add i64 %rc, 1`,
-      `  store i64 %n, ptr %o`,
+      `  %n = add ${host.sizeType} %rc, 1`,
+      `  store ${host.sizeType} %n, ptr %o`,
       ...(traced
-        ? [`  %colorp = getelementptr i8, ptr %o, i64 -16`, `  store i32 0, ptr %colorp ; mark live`]
+        ? [`  %colorp = getelementptr i8, ptr %o, ${host.sizeType} -${host.cycleColorOffset}`, `  store i32 0, ptr %colorp ; mark live`]
         : []),
       `  br label %done`,
       `done:`,
@@ -395,8 +395,8 @@ export function emitClassShapes(
         `  %isnull = icmp eq ptr %o, null`,
         `  br i1 %isnull, label %done, label %check`,
         `check:`,
-        `  %rc = load i64, ptr %o`,
-        `  %imm = icmp eq i64 %rc, -1`,
+        `  %rc = load ${host.sizeType}, ptr %o`,
+        `  %imm = icmp eq ${host.sizeType} %rc, -1`,
         `  br i1 %imm, label %done, label %disp`,
         `disp:`,
         `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,
@@ -415,10 +415,10 @@ export function emitClassShapes(
       const reld: string[] = [
         `define internal void @${mangleClassReleaseDirect(cls.name)}(ptr %o) ${FN_ATTRS} { ; direct release ${cls.name}`,
         `entry:`,
-        `  %rc = load i64, ptr %o`,
-        `  %n = sub i64 %rc, 1`,
-        `  store i64 %n, ptr %o`,
-        `  %dead = icmp eq i64 %n, 0`,
+        `  %rc = load ${host.sizeType}, ptr %o`,
+        `  %n = sub ${host.sizeType} %rc, 1`,
+        `  store ${host.sizeType} %n, ptr %o`,
+        `  %dead = icmp eq ${host.sizeType} %n, 0`,
         `  br i1 %dead, label %free, label %${traced ? "root" : "done"}`,
         `free:`,
       ];
@@ -441,13 +441,13 @@ export function emitClassShapes(
         `  %isnull = icmp eq ptr %o, null`,
         `  br i1 %isnull, label %done, label %check`,
         `check:`,
-        `  %rc = load i64, ptr %o`,
-        `  %imm = icmp eq i64 %rc, -1`,
+        `  %rc = load ${host.sizeType}, ptr %o`,
+        `  %imm = icmp eq ${host.sizeType} %rc, -1`,
         `  br i1 %imm, label %done, label %dec`,
         `dec:`,
-        `  %n = sub i64 %rc, 1`,
-        `  store i64 %n, ptr %o`,
-        `  %dead = icmp eq i64 %n, 0`,
+        `  %n = sub ${host.sizeType} %rc, 1`,
+        `  store ${host.sizeType} %n, ptr %o`,
+        `  %dead = icmp eq ${host.sizeType} %n, 0`,
         `  br i1 %dead, label %free, label %${traced ? "root" : "done"}`,
         `free:`,
       ];
@@ -474,15 +474,15 @@ export function emitClassShapes(
       `entry:`,
     ];
     if (traced) {
-      host.declare(`declare ptr @scr_cyc_alloc(i64, ptr, ptr)`);
+      host.declare(`declare ptr @scr_cyc_alloc(${host.sizeType}, ptr, ptr)`);
       nw.push(
-        `  %o = call ptr @scr_cyc_alloc(i64 ${sizeOf}, ptr @${mangleClassTrace(cls.name)}, ptr @${mangleClassGcFree(cls.name)})`,
+        `  %o = call ptr @scr_cyc_alloc(${host.sizeType} ${sizeOf}, ptr @${mangleClassTrace(cls.name)}, ptr @${mangleClassGcFree(cls.name)})`,
       );
     } else {
-      host.declare(`declare ptr @calloc(i64, i64)`);
+      host.declare(`declare ptr @calloc(${host.sizeType}, ${host.sizeType})`);
       host.needOom();
       nw.push(
-        `  %o = call ptr @calloc(i64 1, i64 ${sizeOf})`,
+        `  %o = call ptr @calloc(${host.sizeType} 1, ${host.sizeType} ${sizeOf})`,
         `  %isnull = icmp eq ptr %o, null`,
         `  br i1 %isnull, label %oom, label %ok`,
         `oom:`,
@@ -491,7 +491,7 @@ export function emitClassShapes(
         `ok:`,
       );
     }
-    nw.push(`  store i64 1, ptr %o`);
+    nw.push(`  store ${host.sizeType} 1, ptr %o`);
     if (meta.hierarchy) {
       nw.push(
         `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,
@@ -598,7 +598,7 @@ export function emitClassObjDefs(
       `  ret ptr %o`,
       `}`,
       `@${mangleClassObj(className)} = internal global %ScrClassObj ` +
-        `{ i64 -1, i64 ${intervalMeta.pre}, i64 ${intervalMeta.post}, ptr @${mangleCtorThunk(className)}, ptr ${nameSym} } ; class ${className}`,
+        `{ ${host.sizeType} -1, ${host.sizeType} ${intervalMeta.pre}, ${host.sizeType} ${intervalMeta.post}, ptr @${mangleCtorThunk(className)}, ptr ${nameSym} } ; class ${className}`,
       ``,
     );
   }

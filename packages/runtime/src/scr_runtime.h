@@ -241,16 +241,22 @@ typedef struct ScrCycHdr {
   size_t buf_index;  /* position there (O(1) removal when rc hits 0) */
 } ScrCycHdr;
 
-/* This layout is an ABI, not an implementation detail: the LLVM backend
- * inlines scr_cyc_mark_live as a raw `store i32 0` at obj-16 (it is a
- * static inline here, so there is no symbol to call) and reaches the header
- * at obj-32. Three sites emit it — llvm/shapes.ts, llvm/classes.ts,
- * llvm/emitter.ts. Nothing but `color` may share those four bytes: a field
- * placed in them is silently zeroed by every retain, which is invisible to
- * the type system and to the C compiler. Hence the assertions. */
-_Static_assert(sizeof(ScrCycHdr) == 32, "LLVM backend reads the header at obj-32");
+/* This layout is an ABI, not an implementation detail. The LLVM backend
+ * inlines scr_cyc_mark_live as a raw `store i32 0`: color is at obj-16 on
+ * 64-bit targets and obj-12 on wasm32. Three sites emit it —
+ * llvm/shapes.ts, llvm/classes.ts, and llvm/emitter.ts. Nothing but `color`
+ * may share those four bytes: a field placed in them is silently zeroed by
+ * every retain, which is invisible to the type system and to the C
+ * compiler. Hence the target-width assertions. */
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(ScrCycHdr) == 32, "LLVM backend expects a 32-byte cycle header");
 _Static_assert(offsetof(ScrCycHdr, color) == 16,
                "LLVM backend's inlined mark-live stores i32 0 at obj-16");
+#elif UINTPTR_MAX == UINT32_MAX
+_Static_assert(sizeof(ScrCycHdr) == 20, "LLVM backend expects a 20-byte cycle header");
+_Static_assert(offsetof(ScrCycHdr, color) == 8,
+               "LLVM backend's inlined mark-live stores i32 0 at obj-12");
+#endif
 _Static_assert(sizeof(((ScrCycHdr *)0)->color) == 4,
                "mark-live is an i32 store: color must own all four bytes");
 _Static_assert(SCR_CYC_BLACK == 0,
@@ -3548,6 +3554,21 @@ void scr_promise_release_v(void *p);
 typedef struct ScrFiber ScrFiber;
 /* Spawn + run eagerly to the first suspension; returns the promise, +1. */
 ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack);
+
+/* wasm32-wasi lowers async functions and generators through LLVM switched
+ * coroutines instead of the native stack-switching implementations. The
+ * first two adapters are emitted into the program module; the remaining
+ * helpers let scr_async.c register, queue, and finish those coroutine
+ * frames through the same ScrFiber scheduler. These declarations are part
+ * of the LLVM/runtime ABI even though native targets never call them. */
+void scr_wasi_coro_resume(void *handle);
+void scr_wasi_coro_destroy(void *handle);
+void scr_wasi_coro_started(void *handle);
+void scr_wasi_await_prepare(ScrFiber *self, ScrPromise *p);
+void scr_wasi_await_hop_prepare(ScrFiber *self);
+bool scr_wasi_module_await_prepare(ScrFiber *self, ScrPromise *p);
+void scr_wasi_async_finish(ScrFiber *self);
+void scr_wasi_gen_finish(ScrFiber *self);
 
 double scr_await_f64(ScrPromise *p); /* rejected promises re-throw */
 bool scr_await_bool(ScrPromise *p);

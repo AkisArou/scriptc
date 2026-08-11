@@ -56,10 +56,11 @@
  * the dyn expression kinds (dynFrom/dynCall/dynInvoke/dynTest/dynKeyGet/
  * dynCheck/destructuring), the JSON.parse family, dyn record fields and
  * overflow maps, dyn capture boxes, and generator unknown channels.
- * Still refused: the runtime emitter/stream classes (their listener
- * invoke adapters receive a va_list — the C-companion-TU decision) and
- * the island surface (jsval/jsExit — the engine bridge).
+ * The island surface (jsval/jsExit and embedded npm tables) is in the
+ * tier too; the module text and resolution tables use the same compressed,
+ * lazy-inflate representation as the C debugging backend.
  */
+import { deflateRawSync } from "node:zlib";
 import type {
   IrBytesElem,
   IrExpr,
@@ -78,7 +79,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
@@ -182,8 +183,15 @@ interface LlScopeEntry {
   boxed?: boolean;
 }
 
-export function emitLlvmModule(mod: IrModule): string {
-  return new LlEmitter(mod).emit();
+export interface LlvmTargetOptions {
+  /** Pointer width of the target C ABI. Native targets are 64-bit today. */
+  pointerBits?: 32 | 64;
+  /** Select the WASI libc entry-point convention. */
+  wasi?: boolean;
+}
+
+export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
+  return new LlEmitter(mod, options).emit();
 }
 
 /** Exact double literal: LLVM's 16-digit hex form round-trips every f64
@@ -198,8 +206,7 @@ const F64_INF = f64Lit(Infinity);
 
 /** LLVM c"..." payload for a UTF-8 literal, NUL-terminated like the C
  * emitter's flexible-array-member initializer. */
-function llStrBytes(text: string): string {
-  const bytes = Buffer.from(text, "utf8");
+function llBytes(bytes: Uint8Array): string {
   let s = "";
   for (const b of bytes) {
     s +=
@@ -208,6 +215,10 @@ function llStrBytes(text: string): string {
         : `\\${b.toString(16).padStart(2, "0").toUpperCase()}`;
   }
   return `${s}\\00`;
+}
+
+function llStrBytes(text: string): string {
+  return llBytes(Buffer.from(text, "utf8"));
 }
 
 /** The non-throwing libCall slice the tier claims: IrLibFn → runtime
@@ -958,6 +969,9 @@ const DV_SET_KIND: Record<string, number> = {
 };
 
 class LlEmitter {
+  readonly sizeType: "i32" | "i64";
+  readonly cycleColorOffset: number;
+  private readonly wasi: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
    * first-use order, the C emitter's determinism discipline. */
   private readonly literals = new Map<string, { sym: string; len: number }>();
@@ -1075,7 +1089,7 @@ class LlEmitter {
   }[] = [];
   private currentLocals = new Map<string, IrLocal>();
   private captureIds = new Set<string>();
-  /** Active canonical byte-loop induction bindings: local id → i64 slot. */
+  /** Active canonical byte-loop induction bindings: local id → size_t slot. */
   private integerLoopBindings = new Map<string, string>();
   /** Enclosing try-with-FINALLY regions, innermost last: a `return`
    * inside one runs every crossed finally (innermost first) before the
@@ -1096,6 +1110,17 @@ class LlEmitter {
   /** Return type of the function being emitted — the unwind path returns
    * a dummy of this type (never read: callers check the flag first). */
   private currentReturnType: IrType = VOID;
+  /** Active only while emitting a wasm32 async body lowered with LLVM's
+   * switched-coroutine intrinsics. */
+  private currentWasiCoro: {
+    kind: "async" | "generator";
+    id: string;
+    handle: string;
+    self: string;
+    finalLabel: string;
+    cleanupLabel: string;
+    suspendLabel: string;
+  } | null = null;
   /** The generator channels of the function being emitted (null outside
    * generator bodies): yieldExpr emission reads them, and emitTryCatch's
    * catch prologue emits the GENRET sentinel re-unwind exactly here. */
@@ -1104,7 +1129,13 @@ class LlEmitter {
   private readonly chainSlots = new Map<string, LlValue>();
   private logArgSlots = 0;
 
-  constructor(private readonly mod: IrModule) {
+  constructor(private readonly mod: IrModule, options: LlvmTargetOptions) {
+    this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
+    this.wasi = options.wasi === true;
+    // ScrCycHdr is { ptr trace; ptr free; i32 color; i16 buffered;
+    // i16 gen; size_t buf_index }. The object follows it, so color is 12
+    // bytes behind a wasm32 object and 16 bytes behind a 64-bit object.
+    this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) {
@@ -1175,9 +1206,10 @@ class LlEmitter {
         lib: rec.lib,
       });
     }
-    if (mod.embedded !== undefined && mod.embedded.modules.length > 0) {
-      throw new LlvmUnsupportedError("npmEmbedding");
-    }
+  }
+
+  private abiOffset(native64: number, wasm32: number): number {
+    return this.sizeType === "i32" ? wasm32 : native64;
   }
 
   // ── types ───────────────────────────────────────────────────────────────
@@ -1359,6 +1391,22 @@ class LlEmitter {
     const wrappers = this.emitFnValueDefs();
     const asyncDefs = this.emitAsyncScaffolding();
     const ffiCallbacks = this.emitFfiCallbackDefs();
+    const embedded = this.mod.embedded;
+    const usesIsland = embedded !== undefined && embedded.modules.length > 0;
+    const storeNpmText = (text: string): { bytes: Buffer; raw: number } => {
+      const plain = Buffer.from(text, "utf8");
+      if (text.length < NPM_COMPRESS_MIN) return { bytes: plain, raw: 0 };
+      const deflated = deflateRawSync(plain, { level: 9 });
+      return deflated.length < plain.length
+        ? { bytes: deflated, raw: plain.length }
+        : { bytes: plain, raw: 0 };
+    };
+    const npmStored = usesIsland
+      ? embedded.modules.map((m) => ({
+          src: storeNpmText(m.source),
+          esm: m.esm === undefined ? null : storeNpmText(m.esm),
+        }))
+      : [];
 
     // Module globals, FIRST OCCURRENCE per id: a class-expression static
     // instantiated through several mixin applications registers one global
@@ -1423,9 +1471,22 @@ class LlEmitter {
     // any island entry (the engine's lazy boot consults it) — cc.ts
     // compiles scr_fetch.c on the same predicate.
     const usesFetch = moduleUsesFetch(this.mod);
+    const embedsZlib = moduleEmbedsBuiltin(this.mod, "node:zlib");
+    const embedsNet =
+      moduleEmbedsBuiltin(this.mod, "node:http") ||
+      moduleEmbedsBuiltin(this.mod, "node:https") ||
+      moduleEmbedsBuiltin(this.mod, "node:net") ||
+      moduleEmbedsBuiltin(this.mod, "node:tls");
     const snapshotsTlsCa =
-      moduleUsesTls(this.mod) || moduleUsesTlsCa(this.mod);
+      moduleUsesTls(this.mod) || moduleUsesTlsCa(this.mod) ||
+      moduleEmbedsBuiltin(this.mod, "node:https") ||
+      moduleEmbedsBuiltin(this.mod, "node:tls");
     const hasRefGlobals = globals.some((g) => isRefCounted(g.type)) || fnValueProps.length > 0;
+    // The process verdict has the same precedence as the C reference
+    // emitter: node:test owns the final status when present; otherwise an
+    // embedded process.exitCode owns it; ordinary programs return zero.
+    const usesNodeTest = moduleUsesNodeTest(this.mod);
+    const programExitUsesIsland = !usesNodeTest && usesIsland;
     // Declared NOW — the extern block flushes before main assembles.
     if (usesEvents) this.declare(`declare void @scr_events_install()`);
     if (usesFsWatch) this.declare(`declare void @scr_watch_install()`);
@@ -1436,6 +1497,17 @@ class LlEmitter {
     }
     if (usesHttp) this.declare(`declare void @scr_http_dyn_install()`);
     if (usesFetch) this.declare(`declare void @scr_fetch_install()`);
+    if (embedsZlib) this.declare(`declare void @scr_zlib_island_install()`);
+    if (embedsNet) this.declare(`declare void @scr_net_island_install()`);
+    if (usesIsland) {
+      this.declare(`declare void @scr_island_modules(ptr, ${this.sizeType}, ptr, ${this.sizeType})`);
+      this.declare(`declare i32 @scr_island_exit_code()`);
+      if (moduleEmbedsCompressedNpm(this.mod)) {
+        this.declare(`declare void @scr_island_set_inflate(ptr)`);
+        this.declare(`declare zeroext i1 @scr_zlib_inflate_exact(ptr, ${this.sizeType}, ptr, ${this.sizeType})`);
+      }
+    }
+    if (usesNodeTest) this.declare(`declare i32 @scr_test_exit_code()`);
     if (snapshotsTlsCa) {
       this.declare(`declare void @scr_tls_ca_install()`);
     }
@@ -1456,12 +1528,13 @@ class LlEmitter {
     const entryMayThrow = this.mayThrow.has(this.mod.entry);
     // The event loop runs when timers appeared OR any async/generator
     // function exists (the C main's hasAsync || hasGenerators ||
-    // usesTimers gate; the island stays refused). Generator programs run
+    // usesTimers gate). Generator programs run
     // the loop too: its exit accounting notes still-suspended generator
     // fibers as abandoned, so the RC audit downgrades exactly like the
     // async loop-exhaustion story.
     const runsLoop =
       this.usesTimers ||
+      usesIsland ||
       this.mod.functions.some((f) => f.async === true || f.generator !== undefined);
     const uncaughtReleases = entryMayThrow && !asyncEntry ? globalReleaseLines("gu") : [];
     const loopReleasesU = runsLoop ? globalReleaseLines("gl") : [];
@@ -1482,7 +1555,53 @@ class LlEmitter {
       this.declare(`declare i32 @scr_promise_finish_top_level(ptr)`);
       this.declare(`declare void @scr_promise_rethrow_top_level(ptr)`);
       this.declare(`declare void @scr_promise_release(ptr)`);
+      this.declare(`declare void @scr_exit_code_note(i32)`);
+      if (programExitUsesIsland && usesEvents && hasRefGlobals) {
+        this.declare(`declare ${this.sizeType} @scr_island_exit_code_version()`);
+      }
     }
+    const topPendingExitLines = (): string[] => {
+      if (!asyncEntry) return [];
+      const lines: string[] = [];
+      if (usesNodeTest) {
+        lines.push(`  %tla_program_exit = call i32 @scr_test_exit_code()`);
+      } else if (usesIsland) {
+        lines.push(`  %tla_program_exit = call i32 @scr_island_exit_code()`);
+      }
+      if (usesNodeTest || usesIsland) {
+        lines.push(
+          `  %tla_program_exit_zero = icmp eq i32 %tla_program_exit, 0`,
+          `  %tla_exit_status = select i1 %tla_program_exit_zero, i32 %tla_status, i32 %tla_program_exit`,
+        );
+      }
+      const exitStatus = usesNodeTest || usesIsland ? "%tla_exit_status" : "%tla_status";
+      const tracksIslandExit = programExitUsesIsland && usesEvents && hasRefGlobals;
+      if (tracksIslandExit) {
+        lines.push(`  %tla_exit_version = call ${this.sizeType} @scr_island_exit_code_version()`);
+      }
+      // finish_top_level initially notes 13. Replace that hint before exit
+      // listeners run when a higher-priority verdict was already selected.
+      lines.push(`  call void @scr_exit_code_note(i32 ${exitStatus})`);
+      lines.push(...exitListenerLines("xp"));
+      if (tracksIslandExit) {
+        lines.push(
+          `  %tla_exit_version_after = call ${this.sizeType} @scr_island_exit_code_version()`,
+          `  %tla_exit_changed = icmp ne ${this.sizeType} %tla_exit_version_after, %tla_exit_version`,
+          `  br i1 %tla_exit_changed, label %tla_exit_updated, label %tla_exit_unchanged`,
+          `tla_exit_updated:`,
+          `  %tla_listener_exit = call i32 @scr_island_exit_code()`,
+          `  call void @scr_exit_code_note(i32 %tla_listener_exit)`,
+          `  br label %tla_exit_done`,
+          `tla_exit_unchanged:`,
+          `  br label %tla_exit_done`,
+          `tla_exit_done:`,
+          `  %tla_final_exit = phi i32 [ %tla_listener_exit, %tla_exit_updated ], [ ${exitStatus}, %tla_exit_unchanged ]`,
+        );
+      }
+      lines.push(...topPendingReleases);
+      lines.push(`  ret i32 ${tracksIslandExit ? "%tla_final_exit" : exitStatus}`);
+      return lines;
+    };
     // LIBRARY mode: the runtime entry points the generated library
     // symbols delegate to — declared before the extern block flushes.
     if (this.mod.lib !== undefined) {
@@ -1493,10 +1612,10 @@ class LlEmitter {
       this.declare(`declare void @scr_library_arena_reset()`);
       this.declare(`declare void @scr_library_collect()`);
       if (this.mod.lib.exports.some((e) => e.params.includes("string"))) {
-        this.declare(`declare ptr @scr_library_str_in(ptr, i64)`);
+        this.declare(`declare ptr @scr_library_str_in(ptr, ${this.sizeType})`);
       }
       if (this.mod.lib.exports.some((e) => e.params.includes("bytes"))) {
-        this.declare(`declare ptr @scr_library_bytes_in(ptr, i64, ptr)`);
+        this.declare(`declare ptr @scr_library_bytes_in(ptr, ${this.sizeType}, ptr)`);
       }
       if (this.mod.lib.exports.some((e) => e.params.includes("i64"))) {
         this.declare(`declare double @scr_library_i64_in(i64, ptr)`);
@@ -1524,47 +1643,49 @@ class LlEmitter {
       // the C layout (4 bytes padding after the tag). ScrUnion/ScrClosure
       // mirror scr_runtime.h field-for-field (tag reads, slot peeks, the
       // fn pointer, and the caps[] tail all address through them).
-      `%ScrStr = type { i64, i64, i64 }`,
+      `%ScrStr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrLogArg = type { i32, i64 }`,
-      `%ScrVt = type { i64, i64, ptr }`,
-      `%ScrUnion = type { i64, i32, ptr, ptr, ptr, i64 }`,
-      `%ScrClosure = type { i64, ptr, i64, ptr }`,
-      `%ScrRegex = type { i64, ptr, ptr, ptr }`,
+      `%ScrVt = type { ${this.sizeType}, ${this.sizeType}, ptr }`,
+      `%ScrUnion = type { ${this.sizeType}, i32, ptr, ptr, ptr, i64 }`,
+      `%ScrClosure = type { ${this.sizeType}, ptr, ${this.sizeType}, ptr }`,
+      `%ScrRegex = type { ${this.sizeType}, ptr, ptr, ptr }`,
       // ScrArr mirror { rc, len, cap, elem(i32+pad), elem_retain,
       // elem_release, elem_trace, data } — the immortal tagged-template
       // strings objects lay out through it (nothing GEPs into live heap
       // arrays; those stay behind the runtime's own entry points).
-      `%ScrArr = type { i64, i64, i64, i32, ptr, ptr, ptr, ptr }`,
+      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr }`,
       // The runtime error prefix { rc, vt, name, message, code } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
       // builtin errors and classval loads GEP through these.
-      `%ScrError = type { i64, ptr, ptr, ptr, ptr }`,
-      `%ScrClassObj = type { i64, i64, i64, ptr, ptr }`,
+      `%ScrError = type { ${this.sizeType}, ptr, ptr, ptr, ptr }`,
+      `%ScrClassObj = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ptr }`,
       // The runtime emitter prefix { rc, vt, reg, cls } — user subclasses
       // embed it (classes.ts), and bare-emitter GEPs address through it.
-      `%ScrEmitter = type { i64, ptr, ptr, ptr }`,
+      `%ScrEmitter = type { ${this.sizeType}, ptr, ptr, ptr }`,
       // The runtime stream layout { rc, vt, reg, cls, st } — one struct
       // for all five stream classes; stream subclasses embed it.
-      `%ScrStream = type { i64, ptr, ptr, ptr, ptr }`,
+      `%ScrStream = type { ${this.sizeType}, ptr, ptr, ptr, ptr }`,
       // The catch-binding snapshot box { rc, kind, f64, b, payload,
       // retain_fn, release_fn, trace_fn } — caughtTest kind reads and
       // caughtNarrow payload extraction GEP through it (offsets match
       // scr_runtime.h's natural alignment: kind at 8, f64 at 16, b at 24,
       // payload at 32).
-      `%ScrCaught = type { i64, i32, double, i8, ptr, ptr, ptr, ptr }`,
+      `%ScrCaught = type { ${this.sizeType}, i32, double, i8, ptr, ptr, ptr, ptr }`,
       // ScrBytes { rc, len, elem(i32+pad), data, backing }. Indexed
       // typed-array access GEPs through this directly: the IR type already
       // fixes elem, so the hot path needs neither a runtime kind load nor
       // the generic scr_bytes_get/set call.
-      `%ScrBytes = type { i64, i64, i32, ptr, ptr }`,
+      `%ScrBytes = type { ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr }`,
       // The capture box { rc, kind, obj_retain, obj_release, obj_trace,
       // slot } — TDZ reads peek the payload slot (offset 40) directly.
-      `%ScrBox = type { i64, i32, ptr, ptr, ptr, i64 }`,
+      `%ScrBox = type { ${this.sizeType}, i32, ptr, ptr, ptr, i64 }`,
       // The stack buffer of the emitted JSON serializers { data, len, cap }.
-      `%ScrJsonBuf = type { ptr, i64, i64, ptr, i64, i64 }`,
+      `%ScrJsonBuf = type { ptr, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ${this.sizeType} }`,
       // The dynCheck error-path spine { parent, key, index } — the emitted
       // builders stack-allocate one per recursion level (dyn.ts).
-      `%ScrDynPath = type { ptr, ptr, i64 }`,
+      `%ScrDynPath = type { ptr, ptr, ${this.sizeType} }`,
+      `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
+      `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
     ];
     out.push(...shapes.typeDefs);
     out.push(...classShapes.typeDefs);
@@ -1580,8 +1701,8 @@ class LlEmitter {
       // Immortal interned ScrStr: { rc = SIZE_MAX, len, cap = len, bytes\0 } —
       // the C emitter's static table, retain/release skip rc == SIZE_MAX.
       out.push(
-        `@${lit.sym} = internal global { i64, i64, i64, [${lit.len + 1} x i8] } ` +
-          `{ i64 -1, i64 ${lit.len}, i64 ${lit.len}, [${lit.len + 1} x i8] c"${llStrBytes(text)}" }`,
+        `@${lit.sym} = internal global { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, [${lit.len + 1} x i8] } ` +
+          `{ ${this.sizeType} -1, ${this.sizeType} ${lit.len}, ${this.sizeType} ${lit.len}, [${lit.len + 1} x i8] c"${llStrBytes(text)}" }`,
       );
     }
     if (this.literals.size > 0) out.push(``);
@@ -1591,7 +1712,7 @@ class LlEmitter {
       // rc == SIZE_MAX, so these never join the RC audit or a trace walk.
       const [unionId, tag] = key.split(":");
       out.push(
-        `@${sym} = internal global %ScrUnion { i64 -1, i32 ${tag}, ptr null, ptr null, ptr null, i64 0 } ; ${unionId} unit arm`,
+        `@${sym} = internal global %ScrUnion { ${this.sizeType} -1, i32 ${tag}, ptr null, ptr null, ptr null, i64 0 } ; ${unionId} unit arm`,
       );
     }
     if (this.unitInstances.size > 0) out.push(``);
@@ -1600,7 +1721,7 @@ class LlEmitter {
       // the interned source/flags strings. The bc slot starts null (lazy
       // compile, cached by the runtime) — a mutable global, not constant.
       out.push(
-        `@${re.sym} = internal global %ScrRegex { i64 -1, ptr ${re.src}, ptr ${re.fl}, ptr null } ; ${key.replace(/\n/g, "\\n")}`,
+        `@${re.sym} = internal global %ScrRegex { ${this.sizeType} -1, ptr ${re.src}, ptr ${re.fl}, ptr null } ; ${key.replace(/\n/g, "\\n")}`,
       );
     }
     if (this.regexInstances.size > 0) out.push(``);
@@ -1612,7 +1733,7 @@ class LlEmitter {
       const n = inst.slots.length;
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-        `@${inst.sym} = internal global %ScrArr { i64 -1, i64 ${n}, i64 ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data }`,
+        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
@@ -1624,6 +1745,49 @@ class LlEmitter {
       );
     }
     if (this.cstrs.size > 0) out.push(``);
+    if (usesIsland) {
+      const fmt = { esm: 0, cjs: 1, json: 2 } as const;
+      const edgeKind = { any: 0, import: 1, require: 2 } as const;
+      embedded.modules.forEach((m, i) => {
+        const stored = npmStored[i]!;
+        const key = Buffer.from(m.key, "utf8");
+        out.push(
+          `@sc_npm_key_${i} = internal constant [${key.length + 1} x i8] c"${llBytes(key)}"`,
+          `@sc_npm_src_${i} = internal constant [${stored.src.bytes.length + 1} x i8] c"${llBytes(stored.src.bytes)}"`,
+        );
+        if (stored.esm !== null) {
+          out.push(
+            `@sc_npm_esm_${i} = internal constant [${stored.esm.bytes.length + 1} x i8] c"${llBytes(stored.esm.bytes)}"`,
+          );
+        }
+      });
+      const moduleRows = embedded.modules.map((m, i) => {
+        const stored = npmStored[i]!;
+        const esm = stored.esm === null
+          ? `ptr null, ${this.sizeType} 0, ${this.sizeType} 0`
+          : `ptr @sc_npm_esm_${i}, ${this.sizeType} ${stored.esm.bytes.length}, ${this.sizeType} ${stored.esm.raw}`;
+        return `%ScrIslandModule { ptr @sc_npm_key_${i}, ptr @sc_npm_src_${i}, ` +
+          `${this.sizeType} ${stored.src.bytes.length}, ${this.sizeType} ${stored.src.raw}, ` +
+          `i32 ${fmt[m.format]}, ${esm} }`;
+      });
+      out.push(
+        `@sc_npm_modules = internal constant [${moduleRows.length} x %ScrIslandModule] [ ${moduleRows.join(", ")} ]`,
+      );
+      embedded.edges.forEach((edge, i) => {
+        for (const [part, text] of [["from", edge.from], ["spec", edge.specifier], ["to", edge.to]] as const) {
+          const bytes = Buffer.from(text, "utf8");
+          out.push(`@sc_npm_edge_${i}_${part} = internal constant [${bytes.length + 1} x i8] c"${llBytes(bytes)}"`);
+        }
+      });
+      if (embedded.edges.length > 0) {
+        const edgeRows = embedded.edges.map((edge, i) =>
+          `%ScrIslandEdge { ptr @sc_npm_edge_${i}_from, ptr @sc_npm_edge_${i}_spec, ` +
+          `ptr @sc_npm_edge_${i}_to, i32 ${edgeKind[edge.kind]} }`,
+        );
+        out.push(`@sc_npm_edges = internal constant [${edgeRows.length} x %ScrIslandEdge] [ ${edgeRows.join(", ")} ]`);
+      }
+      out.push(``);
+    }
     out.push(...ffiCallbacks.globals);
     if (ffiCallbacks.globals.length > 0) out.push(``);
     for (const g of globals) {
@@ -1653,7 +1817,7 @@ class LlEmitter {
     for (const iv of this.errorIntervals) {
       for (const [field, value] of [[0, iv.pre], [1, iv.post]] as const) {
         stamps.push(
-          `  store i64 ${value}, ptr getelementptr inbounds ([5 x %ScrVt], ptr @scr_error_vts, i64 0, i64 ${iv.kind}, i32 ${field})${field === 1 ? ` ; ${iv.lib}` : ""}`,
+          `  store ${this.sizeType} ${value}, ptr getelementptr inbounds ([5 x %ScrVt], ptr @scr_error_vts, i64 0, i64 ${iv.kind}, i32 ${field})${field === 1 ? ` ; ${iv.lib}` : ""}`,
         );
       }
     }
@@ -1663,8 +1827,8 @@ class LlEmitter {
       // teardown under THIS module's preorder numbering.
       out.push(`@scr_emitter_vt = external global %ScrVt`, ``);
       stamps.push(
-        `  store i64 ${this.emitterInterval.pre}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 0)`,
-        `  store i64 ${this.emitterInterval.post}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 1) ; EventEmitter`,
+        `  store ${this.sizeType} ${this.emitterInterval.pre}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 0)`,
+        `  store ${this.sizeType} ${this.emitterInterval.post}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 1) ; EventEmitter`,
       );
     }
     for (const iv of this.streamIntervals) {
@@ -1673,8 +1837,8 @@ class LlEmitter {
       // them.
       out.push(`@${iv.vt} = external global %ScrVt`);
       stamps.push(
-        `  store i64 ${iv.pre}, ptr getelementptr inbounds (%ScrVt, ptr @${iv.vt}, i64 0, i32 0)`,
-        `  store i64 ${iv.post}, ptr getelementptr inbounds (%ScrVt, ptr @${iv.vt}, i64 0, i32 1) ; ${iv.lib}`,
+        `  store ${this.sizeType} ${iv.pre}, ptr getelementptr inbounds (%ScrVt, ptr @${iv.vt}, i64 0, i32 0)`,
+        `  store ${this.sizeType} ${iv.post}, ptr getelementptr inbounds (%ScrVt, ptr @${iv.vt}, i64 0, i32 1) ; ${iv.lib}`,
       );
     }
     if (this.streamIntervals.length > 0) out.push(``);
@@ -1698,11 +1862,13 @@ class LlEmitter {
       // LIBRARY mode: no @main — the profile-declared external
       // symbols instead, from the same IR facts the C emission consumes.
       out.push(...this.emitLibDefs(globals, globalReleaseLines, stamps));
-      out.push(`attributes #0 = { sanitize_address }`, ``);
+      out.push(`attributes #0 = { sanitize_address }`);
+      if (this.wasi) out.push(`attributes #1 = { sanitize_address presplitcoroutine }`);
+      out.push(``);
       return out.join("\n");
     }
     out.push(
-      `define i32 @main(i32 %argc, ptr %argv) ${FN_ATTRS} {`,
+      `define i32 @${this.wasi ? "__main_argc_argv" : "main"}(i32 %argc, ptr %argv) ${FN_ATTRS} {`,
       `entry:`,
       `  call void @scr_init()`,
       ...stamps,
@@ -1715,10 +1881,21 @@ class LlEmitter {
       ...(usesFsWatch ? [`  call void @scr_watch_install()`] : []),
       ...(snapshotsTlsCa ? [`  call void @scr_tls_ca_install()`] : []),
       ...(usesFetch ? [`  call void @scr_fetch_install()`] : []),
+      ...(embedsZlib ? [`  call void @scr_zlib_island_install()`] : []),
+      ...(embedsNet ? [`  call void @scr_net_island_install()`] : []),
       ...(usesNet ? [`  call void @scr_net_install()`, `  call void @scr_net_dyn_install()`] : []),
       ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),
       ...(usesStream ? [`  call void @scr_stream_install()`] : []),
       `  call void @scr_lib_init(i32 %argc, ptr %argv)`,
+      ...(usesIsland
+        ? [
+            ...(moduleEmbedsCompressedNpm(this.mod)
+              ? [`  call void @scr_island_set_inflate(ptr @scr_zlib_inflate_exact)`]
+              : []),
+            `  call void @scr_island_modules(ptr @sc_npm_modules, ${this.sizeType} ${embedded.modules.length}, ` +
+              `ptr ${embedded.edges.length > 0 ? "@sc_npm_edges" : "null"}, ${this.sizeType} ${embedded.edges.length})`,
+          ]
+        : []),
       ...(asyncEntry
         ? [`  %top = call ptr @${mangleAsyncSpawn(this.mod.entry)}()`]
         : [`  call void @${mangleFunction(this.mod.entry)}()`]),
@@ -1790,9 +1967,7 @@ class LlEmitter {
                   `  %tla_pending = icmp eq i32 %tla_status, 13`,
                   `  br i1 %tla_pending, label %tla_stuck, label %tla_ok`,
                   `tla_stuck:`,
-                  ...exitListenerLines("xp"),
-                  ...topPendingReleases,
-                  `  ret i32 13`,
+                  ...topPendingExitLines(),
                   `tla_ok:`,
                 ]
               : []),
@@ -1800,13 +1975,18 @@ class LlEmitter {
         : []),
       ...exitListenerLines("xn"),
       ...globalReleases,
-      `  ret i32 0`,
+      ...(usesNodeTest
+        ? [`  %test_exit = call i32 @scr_test_exit_code()`, `  ret i32 %test_exit`]
+        : usesIsland
+        ? [`  %island_exit = call i32 @scr_island_exit_code()`, `  ret i32 %island_exit`]
+        : [`  ret i32 0`]),
       `}`,
       ``,
       // sanitize_address is inert under the plain pipeline; the sanitized
       // lane's -fsanitize=address link activates instrumentation over the
       // emitted functions too (the runtime TUs get theirs from clang).
       `attributes #0 = { sanitize_address }`,
+      ...(this.wasi ? [`attributes #1 = { sanitize_address presplitcoroutine }`] : []),
       ``,
     );
     return out.join("\n");
@@ -1864,7 +2044,7 @@ class LlEmitter {
       ovlCells.length === 0
         ? `@scr_library_trap_overlays = constant [1 x ptr] zeroinitializer`
         : `@scr_library_trap_overlays = constant [${ovlCells.length} x ptr] [${ovlCells.join(", ")}]`,
-      `@scr_library_trap_overlays_len = constant i64 ${lib.trapOverlays.length}`,
+      `@scr_library_trap_overlays_len = constant ${this.sizeType} ${lib.trapOverlays.length}`,
       ``,
     );
     // The init entry: full deterministic reset-and-reevaluate. Program
@@ -1998,13 +2178,13 @@ class LlEmitter {
             args.push(`double %c${i}`);
             break;
           case "string":
-            params.push(`ptr %a${i}_ptr`, `i64 %a${i}_len`);
-            body.push(`  %c${i} = call ptr @scr_library_str_in(ptr %a${i}_ptr, i64 %a${i}_len)`);
+            params.push(`ptr %a${i}_ptr`, `${this.sizeType} %a${i}_len`);
+            body.push(`  %c${i} = call ptr @scr_library_str_in(ptr %a${i}_ptr, ${this.sizeType} %a${i}_len)`);
             args.push(`ptr %c${i}`);
             break;
           case "bytes":
-            params.push(`ptr %a${i}_ptr`, `i64 %a${i}_len`);
-            body.push(`  %c${i} = call ptr @scr_library_bytes_in(ptr %a${i}_ptr, i64 %a${i}_len, ptr @sc_lib_bytes_trap_${e.symbol})`);
+            params.push(`ptr %a${i}_ptr`, `${this.sizeType} %a${i}_len`);
+            body.push(`  %c${i} = call ptr @scr_library_bytes_in(ptr %a${i}_ptr, ${this.sizeType} %a${i}_len, ptr @sc_lib_bytes_trap_${e.symbol})`);
             args.push(`ptr %c${i}`);
             break;
         }
@@ -2123,13 +2303,13 @@ class LlEmitter {
       defs.push(
         `define internal ptr @sc_retain_box(ptr %b) ${FN_ATTRS} {`,
         `entry:`,
-        `  %rc = load i64, ptr %b`,
-        `  %imm = icmp eq i64 %rc, -1`,
+        `  %rc = load ${this.sizeType}, ptr %b`,
+        `  %imm = icmp eq ${this.sizeType} %rc, -1`,
         `  br i1 %imm, label %done, label %inc`,
         `inc:`,
-        `  %n = add i64 %rc, 1`,
-        `  store i64 %n, ptr %b`,
-        `  %colorp = getelementptr i8, ptr %b, i64 -16`,
+        `  %n = add ${this.sizeType} %rc, 1`,
+        `  store ${this.sizeType} %n, ptr %b`,
+        `  %colorp = getelementptr i8, ptr %b, ${this.sizeType} -${this.cycleColorOffset}`,
         `  store i32 0, ptr %colorp ; mark live`,
         `  br label %done`,
         `done:`,
@@ -2163,7 +2343,7 @@ class LlEmitter {
         ret === "void" ? `  ${call}` : `  %r = ${call}`,
         ret === "void" ? `  ret void` : `  ret ${ret} %r`,
         `}`,
-        `@${mangleFnClosure(name)} = internal global %ScrClosure { i64 -1, ptr @${mangleWrapper(name)}, i64 0, ptr null }`,
+        `@${mangleFnClosure(name)} = internal global %ScrClosure { ${this.sizeType} -1, ptr @${mangleWrapper(name)}, ${this.sizeType} 0, ptr null }`,
         ``,
       );
     }
@@ -2179,16 +2359,33 @@ class LlEmitter {
    * fiber eagerly to its first suspension and returns the promise). */
   private emitAsyncScaffolding(): string[] {
     const out: string[] = [];
+    if (this.wasi) {
+      this.declare(`declare void @llvm.coro.resume(ptr)`);
+      this.declare(`declare void @llvm.coro.destroy(ptr)`);
+      out.push(
+        `define void @scr_wasi_coro_resume(ptr %handle) ${FN_ATTRS} {`,
+        `entry:`,
+        `  call void @llvm.coro.resume(ptr %handle)`,
+        `  ret void`,
+        `}`,
+        `define void @scr_wasi_coro_destroy(ptr %handle) ${FN_ATTRS} {`,
+        `entry:`,
+        `  call void @llvm.coro.destroy(ptr %handle)`,
+        `  ret void`,
+        `}`,
+        ``,
+      );
+    }
     for (const fn of this.mod.functions) {
       if (fn.async !== true) continue;
       const pack = mangleArgPack(fn.name);
       const lifted = fn.captures !== undefined;
       const fieldTys = [...(lifted ? ["ptr"] : []), ...fn.params.map((p) => this.llType(p.type))];
       out.push(`%${pack} = type { ${fieldTys.join(", ") || "i8"} } ; ${fn.name} args`);
-      const sizeOf = `ptrtoint (ptr getelementptr (%${pack}, ptr null, i32 1) to i64)`;
+      const sizeOf = `ptrtoint (ptr getelementptr (%${pack}, ptr null, i32 1) to ${this.sizeType})`;
 
       this.declare(`declare void @free(ptr)`);
-      this.declare(`declare ptr @malloc(i64)`);
+      this.declare(`declare ptr @malloc(${this.sizeType})`);
       this.declare(`declare zeroext i1 @scr_exc_pending()`);
       this.declare(`declare ptr @scr_fiber_promise(ptr)`);
       this.declare(`declare ptr @scr_async_spawn(ptr, ptr)`);
@@ -2212,48 +2409,55 @@ class LlEmitter {
       const retTy = this.llType(ret);
       const bodyCall = `call ${retTy} @${mangleFunction(fn.name)}(${loads.join(", ")})`;
       tr.push(retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`);
-      if (lifted) {
-        this.declare(`declare void @scr_closure_release(ptr)`);
-        tr.push(`  call void @scr_closure_release(ptr %a0)`);
-      }
-      tr.push(
-        `  %pend = call zeroext i1 @scr_exc_pending()`,
-        `  br i1 %pend, label %thrown, label %clean`,
-        `clean:`,
-        `  %pr = call ptr @scr_fiber_promise(ptr %self)`,
-      );
-      switch (ret.kind) {
-        case "void":
-          this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
-          tr.push(`  call void @scr_promise_fulfill_void(ptr %pr)`);
-          break;
-        case "f64":
-        case "date":
-          this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
-          tr.push(`  call void @scr_promise_fulfill_f64(ptr %pr, double %r)`);
-          break;
-        case "bool":
-          this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
-          tr.push(`  call void @scr_promise_fulfill_bool(ptr %pr, i1 %r)`);
-          break;
-        case "string":
-          this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
-          tr.push(`  call void @scr_promise_fulfill_str(ptr %pr, ptr %r) ; moves in`);
-          break;
-        default: {
-          const v = vAdapters(this, ret);
-          this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
-          tr.push(
-            `  call void @scr_promise_fulfill_ref(ptr %pr, ptr %r, ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(this, ret)})`,
-          );
+      if (this.wasi) {
+        // The coroutine body settles its own promise and owns the retained
+        // lifted environment until final suspension. Its initial call
+        // returns here at the first suspend (or final suspend).
+        tr.push(`  ret void`, `}`, ``);
+      } else {
+        if (lifted) {
+          this.declare(`declare void @scr_closure_release(ptr)`);
+          tr.push(`  call void @scr_closure_release(ptr %a0)`);
         }
+        tr.push(
+          `  %pend = call zeroext i1 @scr_exc_pending()`,
+          `  br i1 %pend, label %thrown, label %clean`,
+          `clean:`,
+          `  %pr = call ptr @scr_fiber_promise(ptr %self)`,
+        );
+        switch (ret.kind) {
+          case "void":
+            this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
+            tr.push(`  call void @scr_promise_fulfill_void(ptr %pr)`);
+            break;
+          case "f64":
+          case "date":
+            this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
+            tr.push(`  call void @scr_promise_fulfill_f64(ptr %pr, double %r)`);
+            break;
+          case "bool":
+            this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
+            tr.push(`  call void @scr_promise_fulfill_bool(ptr %pr, i1 %r)`);
+            break;
+          case "string":
+            this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
+            tr.push(`  call void @scr_promise_fulfill_str(ptr %pr, ptr %r) ; moves in`);
+            break;
+          default: {
+            const v = vAdapters(this, ret);
+            this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+            tr.push(
+              `  call void @scr_promise_fulfill_ref(ptr %pr, ptr %r, ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(this, ret)})`,
+            );
+          }
+        }
+        tr.push(`  ret void`, `thrown:`);
+        if (ret.kind !== "void" && isRefCounted(ret)) {
+          // An escaping throw means %r is the never-read dummy (NULL).
+          tr.push(`  call void ${releaseSym(this, ret)}(ptr %r)`);
+        }
+        tr.push(`  ret void`, `}`, ``);
       }
-      tr.push(`  ret void`, `thrown:`);
-      if (ret.kind !== "void" && isRefCounted(ret)) {
-        // An escaping throw means %r is the never-read dummy (NULL).
-        tr.push(`  call void ${releaseSym(this, ret)}(ptr %r)`);
-      }
-      tr.push(`  ret void`, `}`, ``);
       out.push(...tr);
 
       // Spawn wrapper: pack the args (+1 moves in), spawn the fiber.
@@ -2282,7 +2486,7 @@ class LlEmitter {
               `cache_miss:`,
             ]
           : []),
-        `  %ap = call ptr @malloc(i64 ${sizeOf})`,
+        `  %ap = call ptr @malloc(${this.sizeType} ${sizeOf})`,
         `  %isnull = icmp eq ptr %ap, null`,
         `  br i1 %isnull, label %oom, label %ok`,
         `oom:`,
@@ -2361,10 +2565,10 @@ class LlEmitter {
       const lifted = fn.captures !== undefined;
       const fieldTys = [...(lifted ? ["ptr"] : []), ...fn.params.map((p) => this.llType(p.type))];
       out.push(`%${pack} = type { ${fieldTys.join(", ") || "i8"} } ; ${fn.name} args`);
-      const sizeOf = `ptrtoint (ptr getelementptr (%${pack}, ptr null, i32 1) to i64)`;
+      const sizeOf = `ptrtoint (ptr getelementptr (%${pack}, ptr null, i32 1) to ${this.sizeType})`;
 
       this.declare(`declare void @free(ptr)`);
-      this.declare(`declare ptr @malloc(i64)`);
+      this.declare(`declare ptr @malloc(${this.sizeType})`);
       this.declare(`declare zeroext i1 @scr_exc_pending()`);
       this.declare(`declare zeroext i1 @scr_exc_genret_pending()`);
       this.declare(`declare void @scr_exc_clear()`);
@@ -2390,7 +2594,7 @@ class LlEmitter {
       const retTy = this.llType(ret);
       const bodyCall = `call ${retTy} @${mangleFunction(fn.name)}(${loads.join(", ")})`;
       tr.push(retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`);
-      if (lifted) {
+      if (lifted && !this.wasi) {
         this.declare(`declare void @scr_closure_release(ptr)`);
         tr.push(`  call void @scr_closure_release(ptr %a0)`);
       }
@@ -2398,6 +2602,9 @@ class LlEmitter {
       // with the NONE slot — JS's undefined done-value. A GENRET unwind
       // consumes the sentinel and promotes the parked .return value; a
       // real exception stays pending (the consumer-side resume moves it).
+      if (this.wasi) {
+        tr.push(`  ret void`, `}`, ``);
+      } else {
       tr.push(
         `  %g = call ptr @scr_gen_of_fiber(ptr %self)`,
         `  %pend = call zeroext i1 @scr_exc_pending()`,
@@ -2437,6 +2644,7 @@ class LlEmitter {
         tr.push(`  call void ${releaseSym(this, ret)}(ptr %r) ; unwound: the never-read dummy`);
       }
       tr.push(`  br label %done`, `done:`, `  ret void`, `}`, ``);
+      }
       out.push(...tr);
 
       // The never-started teardown: drop the packed (+1) arguments.
@@ -2468,7 +2676,7 @@ class LlEmitter {
       const sp: string[] = [
         `define internal ptr @${mangleGenSpawn(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; gen spawn ${fn.name}`,
         `entry:`,
-        `  %ap = call ptr @malloc(i64 ${sizeOf})`,
+        `  %ap = call ptr @malloc(${this.sizeType} ${sizeOf})`,
         `  %isnull = icmp eq ptr %ap, null`,
         `  br i1 %isnull, label %oom, label %ok`,
         `oom:`,
@@ -2658,6 +2866,10 @@ class LlEmitter {
       return;
     }
     this.releaseForJump(0, 0);
+    if (this.currentWasiCoro !== null) {
+      this.B.terminate(`br label %${this.currentWasiCoro.finalLabel}`);
+      return;
+    }
     const t = this.currentReturnType;
     if (t.kind === "void") this.B.terminate("ret void");
     else if (t.kind === "f64" || t.kind === "date") this.B.terminate(`ret double ${f64Lit(0)}`);
@@ -2734,8 +2946,8 @@ class LlEmitter {
         const len = B.tmp();
         const t = B.tmp();
         B.line(`${lenp} = getelementptr inbounds %ScrStr, ptr ${v.name}, i64 0, i32 1`);
-        B.line(`${len} = load i64, ptr ${lenp}`);
-        B.line(`${t} = icmp ne i64 ${len}, 0`);
+        B.line(`${len} = load ${this.sizeType}, ptr ${lenp}`);
+        B.line(`${t} = icmp ne ${this.sizeType} ${len}, 0`);
         return t;
       }
       case "date":
@@ -2829,8 +3041,8 @@ class LlEmitter {
               const len = B.tmp();
               const t = B.tmp();
               B.line(`${lenp} = getelementptr inbounds %ScrStr, ptr ${p}, i64 0, i32 1`);
-              B.line(`${len} = load i64, ptr ${lenp}`);
-              B.line(`${t} = icmp ne i64 ${len}, 0`);
+              B.line(`${len} = load ${this.sizeType}, ptr ${lenp}`);
+              B.line(`${t} = icmp ne ${this.sizeType} ${len}, 0`);
               B.line(`store i1 ${t}, ptr ${slot}`);
               break;
             }
@@ -3002,7 +3214,7 @@ class LlEmitter {
     B.line(`${vtp} = getelementptr inbounds %${classStructSym(staticClassName)}, ptr ${objName}, i64 0, i32 1`);
     B.line(`${vt} = load ptr, ptr ${vtp}`);
     B.line(`${prep} = getelementptr inbounds %ScrVt, ptr ${vt}, i64 0, i32 0`);
-    B.line(`${pre} = load i64, ptr ${prep}`);
+    B.line(`${pre} = load ${this.sizeType}, ptr ${prep}`);
     return pre;
   }
 
@@ -3205,6 +3417,96 @@ class LlEmitter {
     return mangleFunction(fnName);
   }
 
+  /** Queue the current wasm coroutine and suspend it. The runtime decides
+   * whether the promise waiter list or the ready FIFO owns the continuation;
+   * LLVM keeps all live locals in the coroutine frame. */
+  private emitWasiSuspend(promise: string | null): void {
+    const coro = this.currentWasiCoro;
+    if (coro === null) throw new Error("llvm emitter bug: wasm suspension outside async body");
+    if (promise === null) {
+      this.declare(`declare void @scr_wasi_await_hop_prepare(ptr)`);
+      this.B.line(`call void @scr_wasi_await_hop_prepare(ptr ${coro.self})`);
+    } else {
+      this.declare(`declare void @scr_wasi_await_prepare(ptr, ptr)`);
+      this.B.line(`call void @scr_wasi_await_prepare(ptr ${coro.self}, ptr ${promise})`);
+    }
+    this.emitWasiSuspendPrepared();
+  }
+
+  /** Suspend after a target-specific runtime helper already queued the
+   * continuation (used by module awaits, which skip the hop when settled). */
+  private emitWasiSuspendPrepared(): void {
+    const coro = this.currentWasiCoro;
+    if (coro === null) throw new Error("llvm emitter bug: wasm suspension outside async body");
+    const save = this.B.tmp();
+    const state = this.B.tmp();
+    const resume = this.B.newLabel("coro.resume");
+    this.B.line(`${save} = call token @llvm.coro.save(ptr ${coro.handle})`);
+    this.B.line(`${state} = call i8 @llvm.coro.suspend(token ${save}, i1 false)`);
+    this.B.terminate(
+      `switch i8 ${state}, label %${coro.suspendLabel} [ i8 0, label %${resume} i8 1, label %${coro.cleanupLabel} ]`,
+    );
+    this.B.startBlock(resume);
+  }
+
+  /** Move a clean async return value into the current fiber's promise. */
+  private emitWasiFulfill(v: LlValue | null): void {
+    const coro = this.currentWasiCoro;
+    if (coro === null) throw new Error("llvm emitter bug: wasm fulfillment outside async body");
+    const ret = this.currentReturnType;
+    if (coro.kind === "generator") {
+      this.declare(`declare ptr @scr_gen_of_fiber(ptr)`);
+      const gen = this.B.tmp();
+      this.B.line(`${gen} = call ptr @scr_gen_of_fiber(ptr ${coro.self})`);
+      switch (ret.kind) {
+        case "void":
+          return;
+        case "f64":
+        case "date":
+          this.declare(`declare void @scr_gen_out_f64(ptr, double)`);
+          this.B.line(`call void @scr_gen_out_f64(ptr ${gen}, double ${v!.name})`);
+          return;
+        case "bool":
+          this.declare(`declare void @scr_gen_out_bool(ptr, i1 zeroext)`);
+          this.B.line(`call void @scr_gen_out_bool(ptr ${gen}, i1 ${v!.name})`);
+          return;
+        default:
+          this.declare(`declare void @scr_gen_out_ref(ptr, ptr, ptr)`);
+          this.B.line(`call void @scr_gen_out_ref(ptr ${gen}, ptr ${v!.name}, ptr ${vAdapters(this, ret).release})`);
+          return;
+      }
+    }
+    this.declare(`declare ptr @scr_fiber_promise(ptr)`);
+    const pr = this.B.tmp();
+    this.B.line(`${pr} = call ptr @scr_fiber_promise(ptr ${coro.self})`);
+    switch (ret.kind) {
+      case "void":
+        this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
+        this.B.line(`call void @scr_promise_fulfill_void(ptr ${pr})`);
+        break;
+      case "f64":
+      case "date":
+        this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
+        this.B.line(`call void @scr_promise_fulfill_f64(ptr ${pr}, double ${v!.name})`);
+        break;
+      case "bool":
+        this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
+        this.B.line(`call void @scr_promise_fulfill_bool(ptr ${pr}, i1 ${v!.name})`);
+        break;
+      case "string":
+        this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
+        this.B.line(`call void @scr_promise_fulfill_str(ptr ${pr}, ptr ${v!.name}) ; moves in`);
+        break;
+      default: {
+        const rc = vAdapters(this, ret);
+        this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+        this.B.line(
+          `call void @scr_promise_fulfill_ref(ptr ${pr}, ptr ${v!.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this, ret)})`,
+        );
+      }
+    }
+  }
+
   private emitFunction(fn: IrFunction): string {
     const B = new BlockBuilder();
     this.B = B;
@@ -3219,7 +3521,42 @@ class LlEmitter {
     this.tryStack = [];
     this.currentReturnType = fn.returnType;
     this.currentGenerator = fn.generator ?? null;
+    this.currentWasiCoro = null;
     this.logArgSlots = 0;
+
+    if (this.wasi && (fn.async === true || fn.generator !== undefined)) {
+      this.declare(`declare token @llvm.coro.id(i32, ptr, ptr, ptr)`);
+      this.declare(`declare ${this.sizeType} @llvm.coro.size.${this.sizeType}()`);
+      this.declare(`declare ptr @llvm.coro.begin(token, ptr)`);
+      this.declare(`declare token @llvm.coro.save(ptr)`);
+      this.declare(`declare i8 @llvm.coro.suspend(token, i1)`);
+      this.declare(`declare ptr @llvm.coro.free(token, ptr)`);
+      this.declare(`declare i1 @llvm.coro.end(ptr, i1, token)`);
+      this.declare(`declare ptr @malloc(${this.sizeType})`);
+      this.declare(`declare void @free(ptr)`);
+      this.declare(`declare void @scr_wasi_coro_started(ptr)`);
+      this.declare(`declare ptr @scr_fiber_self()`);
+      const id = B.tmp();
+      const size = B.tmp();
+      const mem = B.tmp();
+      const handle = B.tmp();
+      const self = B.tmp();
+      B.line(`${id} = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)`);
+      B.line(`${size} = call ${this.sizeType} @llvm.coro.size.${this.sizeType}()`);
+      B.line(`${mem} = call ptr @malloc(${this.sizeType} ${size})`);
+      B.line(`${handle} = call ptr @llvm.coro.begin(token ${id}, ptr ${mem})`);
+      B.line(`call void @scr_wasi_coro_started(ptr ${handle})`);
+      B.line(`${self} = call ptr @scr_fiber_self()`);
+      this.currentWasiCoro = {
+        kind: fn.async === true ? "async" : "generator",
+        id,
+        handle,
+        self,
+        finalLabel: B.newLabel("coro.final"),
+        cleanupLabel: B.newLabel("coro.cleanup"),
+        suspendLabel: B.newLabel("coro.suspend"),
+      };
+    }
 
     const paramIds = new Set(fn.params.map((p) => p.localId));
     for (const local of fn.locals) {
@@ -3242,9 +3579,11 @@ class LlEmitter {
     // Captured bindings come in through the environment — borrowed for the
     // whole call (the closure owns them): bound here, never released here.
     (fn.captures ?? []).forEach((c, i) => {
+      const caps = B.tmp();
       const p = B.tmp();
       const box = B.tmp();
-      B.line(`${p} = getelementptr inbounds i8, ptr %sc_env, i64 ${32 + 8 * i} ; caps[${i}]`);
+      B.line(`${caps} = getelementptr inbounds %ScrClosure, ptr %sc_env, i64 1 ; caps`);
+      B.line(`${p} = getelementptr inbounds ptr, ptr ${caps}, ${this.sizeType} ${i} ; caps[${i}]`);
       B.line(`${box} = load ptr, ptr ${p}`);
       B.line(`store ptr ${box}, ptr %${mangleLocal(c.localId)} ; captured ${c.name}`);
     });
@@ -3273,9 +3612,48 @@ class LlEmitter {
     // whose unwind released everything down to depth 0).
     if (fn.returnType.kind === "void" && !B.isTerminated()) {
       this.releaseScope(this.scopes[0]!);
-      B.terminate("ret void");
+      if (this.currentWasiCoro !== null) {
+        this.emitWasiFulfill(null);
+        B.terminate(`br label %${this.currentWasiCoro.finalLabel}`);
+      } else {
+        B.terminate("ret void");
+      }
     }
     this.scopes.pop();
+
+    const coro = this.currentWasiCoro;
+    if (coro !== null) {
+      B.startBlock(coro.finalLabel);
+      if (fn.captures !== undefined) {
+        this.declare(`declare void @scr_closure_release(ptr)`);
+        B.line(`call void @scr_closure_release(ptr %sc_env)`);
+      }
+      if (coro.kind === "generator") {
+        this.declare(`declare void @scr_wasi_gen_finish(ptr)`);
+        B.line(`call void @scr_wasi_gen_finish(ptr ${coro.self})`);
+      } else {
+        this.declare(`declare void @scr_wasi_async_finish(ptr)`);
+        B.line(`call void @scr_wasi_async_finish(ptr ${coro.self})`);
+      }
+      const finalState = B.tmp();
+      B.line(`${finalState} = call i8 @llvm.coro.suspend(token none, i1 true)`);
+      B.terminate(
+        `switch i8 ${finalState}, label %${coro.suspendLabel} [ i8 1, label %${coro.cleanupLabel} ]`,
+      );
+      B.startBlock(coro.cleanupLabel);
+      const frame = B.tmp();
+      B.line(`${frame} = call ptr @llvm.coro.free(token ${coro.id}, ptr ${coro.handle})`);
+      B.line(`call void @free(ptr ${frame})`);
+      B.br(coro.suspendLabel);
+      B.startBlock(coro.suspendLabel);
+      const ended = B.tmp();
+      B.line(`${ended} = call i1 @llvm.coro.end(ptr ${coro.handle}, i1 false, token none)`);
+      const ret = this.llType(fn.returnType);
+      if (ret === "void") B.terminate(`ret void`);
+      else if (ret === "double") B.terminate(`ret double ${f64Lit(0)}`);
+      else if (ret === "i1") B.terminate(`ret i1 false`);
+      else B.terminate(`ret ptr null`);
+    }
 
     if (this.logArgSlots > 0) {
       B.entryAllocas.push(`%logargs = alloca [${this.logArgSlots} x %ScrLogArg]`);
@@ -3284,7 +3662,8 @@ class LlEmitter {
     // Lifted functions receive their closure first (the callValue ABI).
     if (fn.captures !== undefined) params.unshift("ptr %sc_env");
     const ret = this.llType(fn.returnType);
-    return `define internal ${ret} @${mangleFunction(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; ${fn.name}\n${B.render()}\n}`;
+    const attrs = coro !== null ? "#1" : FN_ATTRS;
+    return `define internal ${ret} @${mangleFunction(fn.name)}(${params.join(", ")}) ${attrs} { ; ${fn.name}\n${B.render()}\n}`;
   }
 
   // ── statements ──────────────────────────────────────────────────────────
@@ -3507,7 +3886,7 @@ class LlEmitter {
             B.line(`${kp} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 1`);
             B.line(`store ptr ${this.cstr(f.name)}, ptr ${kp}`);
             B.line(`${ip} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 2`);
-            B.line(`store i64 0, ptr ${ip}`);
+            B.line(`store ${this.sizeType} 0, ptr ${ip}`);
             const helper = this.dyn.dynCheckHelper(f.type);
             const fty = this.llType(f.type);
             const nv = B.tmp();
@@ -3672,8 +4051,8 @@ class LlEmitter {
         let integerSlot: string | null = null;
         if (integerLoop) {
           integerSlot = B.slot();
-          B.entryAllocas.push(`${integerSlot} = alloca i64 ; integer induction ${this.currentLocals.get(integerLoop.localId)!.name}`);
-          B.line(`store i64 0, ptr ${integerSlot}`);
+          B.entryAllocas.push(`${integerSlot} = alloca ${this.sizeType} ; integer induction ${this.currentLocals.get(integerLoop.localId)!.name}`);
+          B.line(`store ${this.sizeType} 0, ptr ${integerSlot}`);
           this.integerLoopBindings.set(integerLoop.localId, integerSlot);
         } else if (s.init) {
           this.emitStmt(s.init);
@@ -3698,9 +4077,9 @@ class LlEmitter {
           const index = B.tmp();
           const inBounds = B.tmp();
           B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${receiver.name}, i64 0, i32 1`);
-          B.line(`${len} = load i64, ptr ${lenPtr}`);
-          B.line(`${index} = load i64, ptr ${integerSlot}`);
-          B.line(`${inBounds} = icmp ult i64 ${index}, ${len}`);
+          B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
+          B.line(`${index} = load ${this.sizeType}, ptr ${integerSlot}`);
+          B.line(`${inBounds} = icmp ult ${this.sizeType} ${index}, ${len}`);
           B.condBr(inBounds, lb, le);
         } else if (s.cond) B.condBr(this.emitCondition(s.cond), lb, le);
         else B.br(lb);
@@ -3735,9 +4114,9 @@ class LlEmitter {
           if (integerLoop && integerSlot) {
             const old = B.tmp();
             const next = B.tmp();
-            B.line(`${old} = load i64, ptr ${integerSlot}`);
-            B.line(`${next} = add nuw i64 ${old}, 1`);
-            B.line(`store i64 ${next}, ptr ${integerSlot}`);
+            B.line(`${old} = load ${this.sizeType}, ptr ${integerSlot}`);
+            B.line(`${next} = add nuw ${this.sizeType} ${old}, 1`);
+            B.line(`store ${this.sizeType} ${next}, ptr ${integerSlot}`);
           } else if (s.update) this.emitStmt(s.update);
           B.br(lc);
         }
@@ -3904,8 +4283,13 @@ class LlEmitter {
         } else {
           this.releaseForJump(0, 0);
         }
-        if (v === null) B.terminate("ret void");
-        else B.terminate(`ret ${this.llType(s.value!.type)} ${v.name}`);
+        if (!B.isTerminated()) {
+          if (this.currentWasiCoro !== null) {
+            this.emitWasiFulfill(v);
+            B.terminate(`br label %${this.currentWasiCoro.finalLabel}`);
+          } else if (v === null) B.terminate("ret void");
+          else B.terminate(`ret ${this.llType(s.value!.type)} ${v.name}`);
+        }
         break;
       }
       case "throw": {
@@ -3933,9 +4317,9 @@ class LlEmitter {
         // the construct (message) with the SC code stamped on `code`,
         // then unwind exactly like `throw`. SCR_ERR_ERROR = 0.
         const bytes = Buffer.byteLength(s.message, "utf8");
-        this.declare(`declare void @scr_throw_error_msg_code(i32, ptr, i64, ptr)`);
+        this.declare(`declare void @scr_throw_error_msg_code(i32, ptr, ${this.sizeType}, ptr)`);
         B.line(
-          `call void @scr_throw_error_msg_code(i32 0, ptr ${this.cstr(s.message)}, i64 ${bytes}, ptr ${this.cstr(s.code)})`,
+          `call void @scr_throw_error_msg_code(i32 0, ptr ${this.cstr(s.message)}, ${this.sizeType} ${bytes}, ptr ${this.cstr(s.code)})`,
         );
         this.emitUnwind();
         break;
@@ -4218,8 +4602,8 @@ class LlEmitter {
         if (integerSlot !== undefined) {
           const integer = B.tmp();
           const number = B.tmp();
-          B.line(`${integer} = load i64, ptr ${integerSlot}`);
-          B.line(`${number} = uitofp i64 ${integer} to double`);
+          B.line(`${integer} = load ${this.sizeType}, ptr ${integerSlot}`);
+          B.line(`${number} = uitofp ${this.sizeType} ${integer} to double`);
           return { name: number, type: e.type };
         }
         const b = this.binding(e.localId);
@@ -5309,15 +5693,17 @@ class LlEmitter {
         }
         // Lifted async lambdas enter through their spawn wrapper (which
         // takes sc_env first, like every lifted function).
-        this.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+        this.declare(`declare ptr @scr_closure_new(ptr, ${this.sizeType})`);
         const c = B.tmp();
-        B.line(`${c} = call ptr @scr_closure_new(ptr @${this.callTarget(e.fnName)}, i64 ${e.captures.length})`);
+        B.line(`${c} = call ptr @scr_closure_new(ptr @${this.callTarget(e.fnName)}, ${this.sizeType} ${e.captures.length})`);
         const out = this.own({ name: c, type: e.type });
         e.captures.forEach((localId, i) => {
           const box = this.loadBox(`%${mangleLocal(localId)}`);
           const retained = this.retainBox(box);
+          const caps = B.tmp();
           const capp = B.tmp();
-          B.line(`${capp} = getelementptr inbounds i8, ptr ${c}, i64 ${32 + 8 * i} ; caps[${i}]`);
+          B.line(`${caps} = getelementptr inbounds %ScrClosure, ptr ${c}, i64 1 ; caps`);
+          B.line(`${capp} = getelementptr inbounds ptr, ptr ${caps}, ${this.sizeType} ${i} ; caps[${i}]`);
           B.line(`store ptr ${retained}, ptr ${capp}`);
         });
         return out;
@@ -5639,8 +6025,8 @@ class LlEmitter {
         const ge = B.tmp();
         const le = B.tmp();
         const t = B.tmp();
-        B.line(`${ge} = icmp sge i64 ${pre}, ${target.pre}`);
-        B.line(`${le} = icmp sle i64 ${pre}, ${target.post}`);
+        B.line(`${ge} = icmp sge ${this.sizeType} ${pre}, ${target.pre}`);
+        B.line(`${le} = icmp sle ${this.sizeType} ${pre}, ${target.post}`);
         B.line(`${t} = and i1 ${ge}, ${le} ; instanceof ${e.className}`);
         return { name: t, type: e.type };
       }
@@ -5657,14 +6043,14 @@ class LlEmitter {
         const tpostp = B.tmp();
         const tpost = B.tmp();
         B.line(`${tprep} = getelementptr inbounds %ScrClassObj, ptr ${target.name}, i64 0, i32 1`);
-        B.line(`${tpre} = load i64, ptr ${tprep}`);
+        B.line(`${tpre} = load ${this.sizeType}, ptr ${tprep}`);
         B.line(`${tpostp} = getelementptr inbounds %ScrClassObj, ptr ${target.name}, i64 0, i32 2`);
-        B.line(`${tpost} = load i64, ptr ${tpostp}`);
+        B.line(`${tpost} = load ${this.sizeType}, ptr ${tpostp}`);
         const ge = B.tmp();
         const le = B.tmp();
         const t = B.tmp();
-        B.line(`${ge} = icmp sge i64 ${pre}, ${tpre}`);
-        B.line(`${le} = icmp sle i64 ${pre}, ${tpost}`);
+        B.line(`${ge} = icmp sge ${this.sizeType} ${pre}, ${tpre}`);
+        B.line(`${le} = icmp sle ${this.sizeType} ${pre}, ${tpost}`);
         B.line(`${t} = and i1 ${ge}, ${le}`);
         return { name: t, type: e.type };
       }
@@ -5676,9 +6062,9 @@ class LlEmitter {
         const c = this.emitExpr(e.value);
         if (e.test === "instanceof") {
           const target = this.classMetaOf(e.className!);
-          this.declare(`declare zeroext i1 @scr_caught_instanceof(ptr, i64, i64)`);
+          this.declare(`declare zeroext i1 @scr_caught_instanceof(ptr, ${this.sizeType}, ${this.sizeType})`);
           const t = B.tmp();
-          B.line(`${t} = call zeroext i1 @scr_caught_instanceof(ptr ${c.name}, i64 ${target.pre}, i64 ${target.post})`);
+          B.line(`${t} = call zeroext i1 @scr_caught_instanceof(ptr ${c.name}, ${this.sizeType} ${target.pre}, ${this.sizeType} ${target.post})`);
           if (e.negated !== true) return { name: t, type: e.type };
           const n = B.tmp();
           B.line(`${n} = xor i1 ${t}, true`);
@@ -5742,10 +6128,10 @@ class LlEmitter {
         const c = this.emitExpr(e.value);
         const target = this.classMetaOf(e.className);
         const display = e.className.startsWith("%") ? e.className.slice(1) : e.className;
-        this.declare(`declare ptr @scr_caught_check_obj(ptr, i64, i64, ptr)`);
+        this.declare(`declare ptr @scr_caught_check_obj(ptr, ${this.sizeType}, ${this.sizeType}, ptr)`);
         const t = B.tmp();
         B.line(
-          `${t} = call ptr @scr_caught_check_obj(ptr ${c.name}, i64 ${target.pre}, i64 ${target.post}, ptr ${this.cstr(display)})`,
+          `${t} = call ptr @scr_caught_check_obj(ptr ${c.name}, ${this.sizeType} ${target.pre}, ${this.sizeType} ${target.post}, ptr ${this.cstr(display)})`,
         );
         const out = this.own({ name: t, type: e.type });
         this.emitPendingCheck();
@@ -5849,7 +6235,7 @@ class LlEmitter {
         const rewriter = this.walkers.jsonIndentHelper();
         const t2 = B.tmp();
         B.line(
-          `${t2} = call ptr @${rewriter}(ptr ${compact.name}, ptr ${this.cstr(indent)}, i64 ${Buffer.byteLength(indent, "utf8")})`,
+          `${t2} = call ptr @${rewriter}(ptr ${compact.name}, ptr ${this.cstr(indent)}, ${this.sizeType} ${Buffer.byteLength(indent, "utf8")})`,
         );
         return this.own({ name: t2, type: e.type });
       }
@@ -5902,16 +6288,44 @@ class LlEmitter {
         const v = this.emitExpr(e.value);
         const yt = e.value.type;
         if (yt.kind === "f64" || yt.kind === "date") {
-          this.declare(`declare void @scr_gen_yield_f64(double)`);
-          B.line(`call void @scr_gen_yield_f64(double ${v.name})`);
+          if (this.wasi) {
+            const coro = this.currentWasiCoro!;
+            this.declare(`declare ptr @scr_gen_of_fiber(ptr)`);
+            this.declare(`declare void @scr_gen_out_f64(ptr, double)`);
+            const g = B.tmp();
+            B.line(`${g} = call ptr @scr_gen_of_fiber(ptr ${coro.self})`);
+            B.line(`call void @scr_gen_out_f64(ptr ${g}, double ${v.name})`);
+          } else {
+            this.declare(`declare void @scr_gen_yield_f64(double)`);
+            B.line(`call void @scr_gen_yield_f64(double ${v.name})`);
+          }
         } else if (yt.kind === "bool") {
-          this.declare(`declare void @scr_gen_yield_bool(i1 zeroext)`);
-          B.line(`call void @scr_gen_yield_bool(i1 ${v.name})`);
+          if (this.wasi) {
+            const coro = this.currentWasiCoro!;
+            this.declare(`declare ptr @scr_gen_of_fiber(ptr)`);
+            this.declare(`declare void @scr_gen_out_bool(ptr, i1 zeroext)`);
+            const g = B.tmp();
+            B.line(`${g} = call ptr @scr_gen_of_fiber(ptr ${coro.self})`);
+            B.line(`call void @scr_gen_out_bool(ptr ${g}, i1 ${v.name})`);
+          } else {
+            this.declare(`declare void @scr_gen_yield_bool(i1 zeroext)`);
+            B.line(`call void @scr_gen_yield_bool(i1 ${v.name})`);
+          }
         } else {
           this.moveTemp(v); // the OUT slot takes ownership
-          this.declare(`declare void @scr_gen_yield_ref(ptr, ptr)`);
-          B.line(`call void @scr_gen_yield_ref(ptr ${v.name}, ptr ${vAdapters(this, yt).release})`);
+          if (this.wasi) {
+            const coro = this.currentWasiCoro!;
+            this.declare(`declare ptr @scr_gen_of_fiber(ptr)`);
+            this.declare(`declare void @scr_gen_out_ref(ptr, ptr, ptr)`);
+            const g = B.tmp();
+            B.line(`${g} = call ptr @scr_gen_of_fiber(ptr ${coro.self})`);
+            B.line(`call void @scr_gen_out_ref(ptr ${g}, ptr ${v.name}, ptr ${vAdapters(this, yt).release})`);
+          } else {
+            this.declare(`declare void @scr_gen_yield_ref(ptr, ptr)`);
+            B.line(`call void @scr_gen_yield_ref(ptr ${v.name}, ptr ${vAdapters(this, yt).release})`);
+          }
         }
+        if (this.wasi) this.emitWasiSuspendPrepared();
         this.emitPendingCheck();
         if (e.type.kind === "void") {
           // An undefined next-channel: nothing to read (the frontend
@@ -6029,6 +6443,7 @@ class LlEmitter {
         // refcounted results arrive +1 and join the frame pre-check so an
         // unwind releases the dummy (NULL) harmlessly.
         const pr = this.emitExpr(e.value);
+        if (this.wasi) this.emitWasiSuspend(pr.name);
         if (e.type.kind === "void") {
           this.declare(`declare void @scr_await_void(ptr)`);
           B.line(`call void @scr_await_void(ptr ${pr.name})`);
@@ -6079,10 +6494,15 @@ class LlEmitter {
           B.condBr(isP, lp, lh);
           B.startBlock(lp);
           this.declare(`declare void @scr_await_void(ptr)`);
-          B.line(`call void @scr_await_void(ptr ${this.unionPeek(u.name)})`);
+          {
+            const promise = this.unionPeek(u.name);
+            if (this.wasi) this.emitWasiSuspend(promise);
+            B.line(`call void @scr_await_void(ptr ${promise})`);
+          }
           B.br(lj);
           B.startBlock(lh);
-          B.line(`call void @scr_await_hop()`);
+          if (this.wasi) this.emitWasiSuspend(null);
+          else B.line(`call void @scr_await_hop()`);
           B.br(lj);
           B.startBlock(lj);
           this.emitPendingCheck();
@@ -6109,6 +6529,7 @@ class LlEmitter {
         B.condBr(isP, lp, lh);
         B.startBlock(lp);
         const peek = this.unionPeek(u.name);
+        if (this.wasi) this.emitWasiSuspend(peek);
         let awaited: LlValue;
         if (inner.kind === "f64" || inner.kind === "date") {
           this.declare(`declare double @scr_await_f64(ptr)`);
@@ -6134,7 +6555,8 @@ class LlEmitter {
         B.line(`store ptr ${this.unionNewOwned(innerTag, awaited)}, ptr ${slot}`);
         B.br(lj);
         B.startBlock(lh);
-        B.line(`call void @scr_await_hop()`);
+        if (this.wasi) this.emitWasiSuspend(null);
+        else B.line(`call void @scr_await_hop()`);
         const unitTags = def.arms.flatMap((a, i) => (isUnitType(a) ? [i] : []));
         if (unitTags.length === 1) {
           B.line(`store ptr ${this.unitInstanceRef(resUnionId, resTagOf(def.arms[unitTags[0]!]!))}, ptr ${slot}`);
@@ -6257,8 +6679,25 @@ class LlEmitter {
           // Internal ESM dependency wait: pending promises park the module
           // fiber, while settled ones continue synchronously.
           const p = this.emitExpr(e.args[0]!);
-          this.declare(`declare void @scr_module_await(ptr)`);
-          B.line(`call void @scr_module_await(ptr ${p.name})`);
+          if (this.wasi) {
+            const coro = this.currentWasiCoro;
+            if (coro === null) throw new Error("llvm emitter bug: module await outside wasm coroutine");
+            this.declare(`declare zeroext i1 @scr_wasi_module_await_prepare(ptr, ptr)`);
+            const needsSuspend = B.tmp();
+            const suspend = B.newLabel("ma.suspend");
+            const ready = B.newLabel("ma.ready");
+            B.line(`${needsSuspend} = call zeroext i1 @scr_wasi_module_await_prepare(ptr ${coro.self}, ptr ${p.name})`);
+            B.condBr(needsSuspend, suspend, ready);
+            B.startBlock(suspend);
+            this.emitWasiSuspendPrepared();
+            B.br(ready);
+            B.startBlock(ready);
+            this.declare(`declare void @scr_module_await(ptr)`);
+            B.line(`call void @scr_module_await(ptr ${p.name})`);
+          } else {
+            this.declare(`declare void @scr_module_await(ptr)`);
+            B.line(`call void @scr_module_await(ptr ${p.name})`);
+          }
           this.emitPendingCheck();
           return { name: "", type: e.type };
         }
@@ -6291,7 +6730,7 @@ class LlEmitter {
           const len = B.tmp();
           const cap = B.tmp();
           B.line(`${len} = call double @scr_arr_len(ptr ${ps.name})`);
-          B.line(`${cap} = fptoui double ${len} to i64`);
+          B.line(`${cap} = fptoui double ${len} to ${this.sizeType}`);
           const vals = B.tmp();
           B.line(`${vals} = ${arrNewCall(this, elem, cap)}`);
           this.own({ name: vals, type: e.type.inner });
@@ -6405,8 +6844,8 @@ class LlEmitter {
           }
         });
         const fn = e.name === "console.error" ? "scr_console_error" : "scr_console_log";
-        this.declare(`declare void @${fn}(i64, ptr)`);
-        B.line(`call void @${fn}(i64 ${args.length}, ptr %logargs)`);
+        this.declare(`declare void @${fn}(${this.sizeType}, ptr)`);
+        B.line(`call void @${fn}(${this.sizeType} ${args.length}, ptr %logargs)`);
         return { name: "", type: e.type };
       }
       case "dynFrom": {
@@ -6452,11 +6891,11 @@ class LlEmitter {
           }
           const rc = vAdapters(this, v.type);
           this.declare(
-            `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+            `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, ${this.sizeType}, ptr, ptr)`,
           );
           const boxed = B.tmp();
           B.line(
-            `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
+            `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, ${this.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
           );
           return this.own({ name: boxed, type: e.type });
         }
@@ -6558,14 +6997,14 @@ class LlEmitter {
           B.entryAllocas.push(`${arr} = alloca [${args.length} x ptr]`);
           args.forEach((a, i) => {
             const p = B.tmp();
-            B.line(`${p} = getelementptr inbounds [${args.length} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+            B.line(`${p} = getelementptr inbounds [${args.length} x ptr], ptr ${arr}, i64 0, ${this.sizeType} ${i}`);
             B.line(`store ptr ${a.name}, ptr ${p}`);
           });
           argsPtr = arr;
         }
-        this.declare(`declare ptr @scr_dyn_call(ptr, ptr, i64, ptr)`);
+        this.declare(`declare ptr @scr_dyn_call(ptr, ptr, ${this.sizeType}, ptr)`);
         const t = B.tmp();
-        B.line(`${t} = call ptr @scr_dyn_call(ptr ${callee.name}, ptr ${argsPtr}, i64 ${args.length}, ptr ${this.cstr(e.calleeName)})`);
+        B.line(`${t} = call ptr @scr_dyn_call(ptr ${callee.name}, ptr ${argsPtr}, ${this.sizeType} ${args.length}, ptr ${this.cstr(e.calleeName)})`);
         const out = this.own({ name: t, type: e.type });
         this.emitPendingCheck();
         return out;
@@ -6582,15 +7021,15 @@ class LlEmitter {
           B.entryAllocas.push(`${arr} = alloca [${args.length} x ptr]`);
           args.forEach((a, i) => {
             const p = B.tmp();
-            B.line(`${p} = getelementptr inbounds [${args.length} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+            B.line(`${p} = getelementptr inbounds [${args.length} x ptr], ptr ${arr}, i64 0, ${this.sizeType} ${i}`);
             B.line(`store ptr ${a.name}, ptr ${p}`);
           });
           argsPtr = arr;
         }
-        this.declare(`declare ptr @scr_dyn_invoke(ptr, ptr, ptr, i64, ptr)`);
+        this.declare(`declare ptr @scr_dyn_invoke(ptr, ptr, ptr, ${this.sizeType}, ptr)`);
         const t = B.tmp();
         B.line(
-          `${t} = call ptr @scr_dyn_invoke(ptr ${recv.name}, ptr ${this.cstr(e.method)}, ptr ${argsPtr}, i64 ${args.length}, ptr ${this.cstr(e.calleeName)})`,
+          `${t} = call ptr @scr_dyn_invoke(ptr ${recv.name}, ptr ${this.cstr(e.method)}, ptr ${argsPtr}, ${this.sizeType} ${args.length}, ptr ${this.cstr(e.calleeName)})`,
         );
         const out = this.own({ name: t, type: e.type });
         this.emitPendingCheck();
@@ -6658,11 +7097,11 @@ class LlEmitter {
         B.line(`${isObj} = icmp eq i32 ${kd}, ${DK.OBJ}`);
         B.condBr(isObj, lObj, lNotObj);
         B.startBlock(lObj);
-        this.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, i64)`);
+        this.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, ${this.sizeType})`);
         const keyBytes = Buffer.byteLength(e.key, "utf8");
         const m = B.tmp();
         const has = B.tmp();
-        B.line(`${m} = call ptr @scr_dyn_obj_get(ptr ${d.name}, ptr ${this.cstr(e.key)}, i64 ${keyBytes})`);
+        B.line(`${m} = call ptr @scr_dyn_obj_get(ptr ${d.name}, ptr ${this.cstr(e.key)}, ${this.sizeType} ${keyBytes})`);
         B.line(`${has} = icmp ne ptr ${m}, null`);
         B.line(`store i1 ${has}, ptr ${slot}`);
         B.br(lj);
@@ -6679,8 +7118,8 @@ class LlEmitter {
           const len = B.tmp();
           const inR = B.tmp();
           B.line(`${lenp} = getelementptr inbounds i8, ptr ${d.name}, i64 16 ; ->v.arr.len`);
-          B.line(`${len} = load i64, ptr ${lenp}`);
-          B.line(`${inR} = icmp ugt i64 ${len}, ${e.key}`);
+          B.line(`${len} = load ${this.sizeType}, ptr ${lenp}`);
+          B.line(`${inR} = icmp ugt ${this.sizeType} ${len}, ${e.key}`);
           B.line(`store i1 ${inR}, ptr ${slot}`);
         }
         B.br(lj);
@@ -6787,10 +7226,10 @@ class LlEmitter {
           const lj = B.newLabel("dts.j");
           B.condBr(isObj, lObj, lj);
           B.startBlock(lObj);
-          this.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, i64)`);
+          this.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, ${this.sizeType})`);
           const m = B.tmp();
           const has = B.tmp();
-          B.line(`${m} = call ptr @scr_dyn_obj_get(ptr ${d.name}, ptr ${this.cstr("%error")}, i64 6)`);
+          B.line(`${m} = call ptr @scr_dyn_obj_get(ptr ${d.name}, ptr ${this.cstr("%error")}, ${this.sizeType} 6)`);
           B.line(`${has} = icmp ne ptr ${m}, null`);
           B.line(`store i1 ${has}, ptr ${slot}`);
           B.br(lj);
@@ -6891,7 +7330,7 @@ class LlEmitter {
         }
         const helper = this.dyn.dynIterNHelper();
         const t = B.tmp();
-        B.line(`${t} = call ptr @${helper}(ptr ${v.name}, i64 ${e.count})`);
+        B.line(`${t} = call ptr @${helper}(ptr ${v.name}, ${this.sizeType} ${e.count})`);
         const out = this.own({ name: t, type: e.type });
         this.emitPendingCheck();
         return out;
@@ -7758,13 +8197,13 @@ class LlEmitter {
     return sym;
   }
 
-  /** Loads a dyn node's kind tag (i32 at +8) — the dyn expression tests'
+  /** Loads a dyn node's kind tag after its size_t RC word — the dyn expression tests'
    * shared read. */
   private dynKind(d: string): string {
     const B = this.B;
     const p = B.tmp();
     const k = B.tmp();
-    B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 8 ; ->kind`);
+    B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 ${this.sizeType === "i32" ? 4 : 8} ; ->kind`);
     B.line(`${k} = load i32, ptr ${p}`);
     return k;
   }
@@ -8169,8 +8608,8 @@ class LlEmitter {
     }
     this.declare(`declare ptr @scr_union_new_f64(i32, double)`);
     this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
-    this.declare(`declare ptr @scr_str_new(ptr, i64)`);
-    this.declare(`declare i64 @strlen(ptr)`);
+    this.declare(`declare ptr @scr_str_new(ptr, ${this.sizeType})`);
+    this.declare(`declare ${this.sizeType} @strlen(ptr)`);
     this.declare(`declare ptr @scr_str_retain_v(ptr)`);
     this.declare(`declare void @scr_str_release_v(ptr)`);
     this.resolveThunkDefs.push(
@@ -8190,8 +8629,8 @@ class LlEmitter {
       `  %hassig = icmp ne ptr %sig, null`,
       `  br i1 %hassig, label %sigs, label %signull`,
       `sigs:`,
-      `  %len = call i64 @strlen(ptr %sig)`,
-      `  %ss = call ptr @scr_str_new(ptr %sig, i64 %len)`,
+      `  %len = call ${this.sizeType} @strlen(ptr %sig)`,
+      `  %ss = call ptr @scr_str_new(ptr %sig, ${this.sizeType} %len)`,
       `  %su = call ptr @scr_union_new_ref(i32 ${strTag}, ptr %ss, ptr @scr_str_retain_v, ptr @scr_str_release_v, ptr null)`,
       `  store ptr %su, ptr %sslot`,
       `  br label %go`,
@@ -8323,11 +8762,11 @@ class LlEmitter {
    * registration call it feeds always moves it into the registry. */
   private wrapEmitterListener(target: string, adapterFn: string): string {
     const B = this.B;
-    this.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+    this.declare(`declare ptr @scr_closure_new(ptr, ${this.sizeType})`);
     this.declare(`declare ptr @scr_box_new(i32)`);
     this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
     const ad = B.tmp();
-    B.line(`${ad} = call ptr @scr_closure_new(ptr @${adapterFn}, i64 1)`);
+    B.line(`${ad} = call ptr @scr_closure_new(ptr @${adapterFn}, ${this.sizeType} 1)`);
     const bx = B.tmp();
     B.line(`${bx} = call ptr @scr_box_new(i32 4) ; SCR_BOX_FUNC`);
     const capsp = B.tmp();
@@ -8413,7 +8852,7 @@ class LlEmitter {
         `}`,
         ``,
       );
-      this.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+      this.declare(`declare ptr @scr_closure_new(ptr, ${this.sizeType})`);
       this.declare(`declare ptr @scr_box_new(i32)`);
       this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
     }
@@ -8436,7 +8875,7 @@ class LlEmitter {
     ];
     if (oneParam) {
       d.push(
-        `  %reg = call ptr @scr_closure_new(ptr @${trampoline}, i64 1)`,
+        `  %reg = call ptr @scr_closure_new(ptr @${trampoline}, ${this.sizeType} 1)`,
         `  %rbx = call ptr @scr_box_new(i32 4) ; SCR_BOX_FUNC`,
         `  %rcp = getelementptr inbounds %ScrClosure, ptr %reg, i64 1`,
         `  store ptr %rbx, ptr %rcp`,
@@ -8557,12 +8996,12 @@ class LlEmitter {
         ? "a 'data' listener declaring a Buffer chunk received a string (the stream has an encoding set)"
         : "a 'data' listener declaring a string chunk received a Buffer (call setEncoding, or declare the chunk as a Buffer)";
       const slot = p.kind === "bytes" ? "%a0" : "%a1";
-      this.declare(`declare void @scr_throw_error_msg(i32, ptr, i64)`);
+      this.declare(`declare void @scr_throw_error_msg(i32, ptr, ${this.sizeType})`);
       d.push(
         `  %miss = icmp eq ptr ${slot}, null`,
         `  br i1 %miss, label %bad, label %ok`,
         `bad:`,
-        `  call void @scr_throw_error_msg(i32 1, ptr ${this.cstr(msg)}, i64 ${Buffer.byteLength(msg, "utf8")})`,
+        `  call void @scr_throw_error_msg(i32 1, ptr ${this.cstr(msg)}, ${this.sizeType} ${Buffer.byteLength(msg, "utf8")})`,
         `  call void @scr_closure_release(ptr %orig)`,
         `  ret void`,
         `ok:`,
@@ -8810,14 +9249,14 @@ class LlEmitter {
     // The stream-owning completion closure (a 1-cap closure boxing the
     // retained stream) — shared by the typed and dyn done shapes.
     const doneClosure = (fnRef: string, tag: string): string => {
-      this.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+      this.declare(`declare ptr @scr_closure_new(ptr, ${this.sizeType})`);
       this.declare(`declare ptr @scr_box_new_obj(ptr, ptr, ptr)`);
       this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
       this.declare(`declare ptr @scr_stream_retain_v(ptr)`);
       this.declare(`declare void @scr_stream_release_v(ptr)`);
       this.declare(`declare void @scr_stream_trace(ptr, ptr, ptr)`);
       d.push(
-        `  %${tag}clo = call ptr @scr_closure_new(ptr ${fnRef}, i64 1)`,
+        `  %${tag}clo = call ptr @scr_closure_new(ptr ${fnRef}, ${this.sizeType} 1)`,
         `  %${tag}bx = call ptr @scr_box_new_obj(ptr @scr_stream_retain_v, ptr @scr_stream_release_v, ptr @scr_stream_trace)`,
         `  %${tag}cp = getelementptr inbounds %ScrClosure, ptr %${tag}clo, i64 1`,
         `  store ptr %${tag}bx, ptr %${tag}cp`,
@@ -8851,11 +9290,11 @@ class LlEmitter {
           d.push(`  %dc${i} = call ptr @scr_dyn_new_buffer_copy(ptr %chunk)`);
           passed.push(`ptr %dc${i}`);
         } else if (isEncPos) {
-          this.declare(`declare ptr @scr_str_new(ptr, i64)`);
+          this.declare(`declare ptr @scr_str_new(ptr, ${this.sizeType})`);
           this.declare(`declare ptr @scr_dyn_new_str(ptr)`);
           this.declare(`declare void @scr_str_release(ptr)`);
           d.push(
-            `  %es${i} = call ptr @scr_str_new(ptr ${this.cstr("buffer")}, i64 6)`,
+            `  %es${i} = call ptr @scr_str_new(ptr ${this.cstr("buffer")}, ${this.sizeType} 6)`,
             `  %ed${i} = call ptr @scr_dyn_new_str(ptr %es${i})`,
             `  call void @scr_str_release(ptr %es${i})`,
           );
@@ -8897,7 +9336,7 @@ class LlEmitter {
           passed.push(`ptr %edv${i}`);
         } else if (isDonePos) {
           const glue = `scr_stream_done_dyn_${kind}`;
-          this.declare(`declare ptr @${glue}(ptr, ptr, i64)`);
+          this.declare(`declare ptr @${glue}(ptr, ptr, ${this.sizeType})`);
           this.declare(`declare ptr @scr_dyn_new_func(ptr, ptr, i32, ptr, ptr)`);
           const clo = doneClosure(`@${glue}`, `dd${i}`);
           const arity = kind === "t" || kind === "l" ? 2 : 1;
@@ -8917,8 +9356,8 @@ class LlEmitter {
         passed.push(`ptr %rc${i}`);
       } else if (isEncPos) {
         // Node's encoding for decoded (Buffer) chunks is 'buffer'.
-        this.declare(`declare ptr @scr_str_new(ptr, i64)`);
-        d.push(`  %en${i} = call ptr @scr_str_new(ptr ${this.cstr("buffer")}, i64 6)`);
+        this.declare(`declare ptr @scr_str_new(ptr, ${this.sizeType})`);
+        d.push(`  %en${i} = call ptr @scr_str_new(ptr ${this.cstr("buffer")}, ${this.sizeType} 6)`);
         passed.push(`ptr %en${i}`);
       } else if (isErrPos) {
         // destroy's error argument: `Error | null` — wrap type-directedly.
@@ -9797,7 +10236,7 @@ class LlEmitter {
     const slot = this.integerLoopBindings.get(expr.localId);
     if (slot === undefined) return null;
     const index = this.B.tmp();
-    this.B.line(`${index} = load i64, ptr ${slot}`);
+    this.B.line(`${index} = load ${this.sizeType}, ptr ${slot}`);
     return index;
   }
 
@@ -9810,16 +10249,16 @@ class LlEmitter {
     const lenPtr = B.tmp();
     const len = B.tmp();
     B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 1`);
-    B.line(`${len} = load i64, ptr ${lenPtr}`);
+    B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
     if (integerIndex) {
       const inRange = B.tmp();
-      B.line(`${inRange} = icmp ult i64 ${index}, ${len}`);
+      B.line(`${inRange} = icmp ult ${this.sizeType} ${index}, ${len}`);
       const invalid = B.newLabel("bytes.index.invalid");
       const valid = B.newLabel("bytes.index.valid");
       B.condBr(inRange, valid, invalid);
       B.startBlock(invalid);
       const indexF64 = B.tmp();
-      B.line(`${indexF64} = uitofp i64 ${index} to double`);
+      B.line(`${indexF64} = uitofp ${this.sizeType} ${index} to double`);
       this.declare(`declare double @scr_bytes_get(ptr, double)`);
       B.line(`call double @scr_bytes_get(ptr ${receiver}, double ${indexF64})`);
       B.terminate("unreachable");
@@ -9830,7 +10269,7 @@ class LlEmitter {
     const nonnegative = B.tmp();
     const belowLen = B.tmp();
     const inRange = B.tmp();
-    B.line(`${lenF64} = uitofp i64 ${len} to double`);
+    B.line(`${lenF64} = uitofp ${this.sizeType} ${len} to double`);
     B.line(`${nonnegative} = fcmp oge double ${index}, ${f64Lit(0)}`);
     B.line(`${belowLen} = fcmp olt double ${index}, ${lenF64}`);
     B.line(`${inRange} = and i1 ${nonnegative}, ${belowLen}`);
@@ -9844,8 +10283,8 @@ class LlEmitter {
     const idx = B.tmp();
     const roundTrip = B.tmp();
     const integral = B.tmp();
-    B.line(`${idx} = fptoui double ${index} to i64`);
-    B.line(`${roundTrip} = uitofp i64 ${idx} to double`);
+    B.line(`${idx} = fptoui double ${index} to ${this.sizeType}`);
+    B.line(`${roundTrip} = uitofp ${this.sizeType} ${idx} to double`);
     B.line(`${integral} = fcmp oeq double ${roundTrip}, ${index}`);
     B.condBr(integral, valid, invalid);
 
@@ -9873,11 +10312,11 @@ class LlEmitter {
     const p = B.tmp();
     const len = B.tmp();
     B.line(`${p} = getelementptr inbounds %ScrBytes, ptr ${receiver}, i64 0, i32 1`);
-    B.line(`${len} = load i64, ptr ${p}`);
+    B.line(`${len} = load ${this.sizeType}, ptr ${p}`);
     const count = bytes && elem !== "u8" ? B.tmp() : len;
-    if (count !== len) B.line(`${count} = shl i64 ${len}, 2`);
+    if (count !== len) B.line(`${count} = shl ${this.sizeType} ${len}, 2`);
     const out = B.tmp();
-    B.line(`${out} = uitofp i64 ${count} to double`);
+    B.line(`${out} = uitofp ${this.sizeType} ${count} to double`);
     return { name: out, type: F64 };
   }
 
@@ -9891,7 +10330,7 @@ class LlEmitter {
       const raw = B.tmp();
       const wide = B.tmp();
       const out = B.tmp();
-      B.line(`${p} = getelementptr inbounds i8, ptr ${data}, i64 ${idx}`);
+      B.line(`${p} = getelementptr inbounds i8, ptr ${data}, ${this.sizeType} ${idx}`);
       B.line(`${raw} = load i8, ptr ${p}, align 1`);
       B.line(`${wide} = zext i8 ${raw} to i32`);
       B.line(`${out} = uitofp i32 ${wide} to double`);
@@ -9900,14 +10339,14 @@ class LlEmitter {
     if (elem === "f32") {
       const raw = B.tmp();
       const out = B.tmp();
-      B.line(`${p} = getelementptr inbounds float, ptr ${data}, i64 ${idx}`);
+      B.line(`${p} = getelementptr inbounds float, ptr ${data}, ${this.sizeType} ${idx}`);
       B.line(`${raw} = load float, ptr ${p}, align 1`);
       B.line(`${out} = fpext float ${raw} to double`);
       return { name: out, type: F64 };
     }
     const raw = B.tmp();
     const out = B.tmp();
-    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, i64 ${idx}`);
+    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, ${this.sizeType} ${idx}`);
     B.line(`${raw} = load i32, ptr ${p}, align 1`);
     B.line(`${out} = ${elem === "i32" ? "sitofp" : "uitofp"} i32 ${raw} to double`);
     return { name: out, type: F64 };
@@ -9994,18 +10433,18 @@ class LlEmitter {
     if (elem === "u8") {
       const byte = B.tmp();
       B.line(`${byte} = trunc i32 ${stored!} to i8`);
-      B.line(`${p} = getelementptr inbounds i8, ptr ${data}, i64 ${idx}`);
+      B.line(`${p} = getelementptr inbounds i8, ptr ${data}, ${this.sizeType} ${idx}`);
       B.line(`store i8 ${byte}, ptr ${p}, align 1`);
       return;
     }
     if (elem === "f32") {
       const narrowed = B.tmp();
       B.line(`${narrowed} = fptrunc double ${value} to float`);
-      B.line(`${p} = getelementptr inbounds float, ptr ${data}, i64 ${idx}`);
+      B.line(`${p} = getelementptr inbounds float, ptr ${data}, ${this.sizeType} ${idx}`);
       B.line(`store float ${narrowed}, ptr ${p}, align 1`);
       return;
     }
-    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, i64 ${idx}`);
+    B.line(`${p} = getelementptr inbounds i32, ptr ${data}, ${this.sizeType} ${idx}`);
     B.line(`store i32 ${stored!}, ptr ${p}, align 1`);
   }
 
@@ -10812,16 +11251,16 @@ class LlEmitter {
         `swap:`,
         `  %target_len_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 1`,
         `  %next_len_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 1`,
-        `  %target_len = load i64, ptr %target_len_ptr`,
-        `  %next_len = load i64, ptr %next_len_ptr`,
-        `  store i64 %next_len, ptr %target_len_ptr`,
-        `  store i64 %target_len, ptr %next_len_ptr`,
+        `  %target_len = load ${this.sizeType}, ptr %target_len_ptr`,
+        `  %next_len = load ${this.sizeType}, ptr %next_len_ptr`,
+        `  store ${this.sizeType} %next_len, ptr %target_len_ptr`,
+        `  store ${this.sizeType} %target_len, ptr %next_len_ptr`,
         `  %target_cap_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 2`,
         `  %next_cap_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 2`,
-        `  %target_cap = load i64, ptr %target_cap_ptr`,
-        `  %next_cap = load i64, ptr %next_cap_ptr`,
-        `  store i64 %next_cap, ptr %target_cap_ptr`,
-        `  store i64 %target_cap, ptr %next_cap_ptr`,
+        `  %target_cap = load ${this.sizeType}, ptr %target_cap_ptr`,
+        `  %next_cap = load ${this.sizeType}, ptr %next_cap_ptr`,
+        `  store ${this.sizeType} %next_cap, ptr %target_cap_ptr`,
+        `  store ${this.sizeType} %target_cap, ptr %next_cap_ptr`,
         `  %target_data_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 7`,
         `  %next_data_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 7`,
         `  %target_data = load ptr, ptr %target_data_ptr`,
@@ -10915,7 +11354,7 @@ class LlEmitter {
     const sym = `sc_ldu_${this.liveDynUnionRefAdapters.size}`;
     this.liveDynUnionRefAdapters.set(key, sym);
     this.declare(
-      `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+      `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, ${this.sizeType}, ptr, ptr)`,
     );
     const adapters = new Map<number, LlStreamTypedRefAdapter>();
     for (const { arm, tag } of mutableArms) {
@@ -10955,7 +11394,7 @@ class LlEmitter {
       );
       B.line(`${payload} = load ptr, ptr ${payloadPtr}`);
       B.line(
-        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, i64 ${Buffer.byteLength(armKey, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
+        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, ${this.sizeType} ${Buffer.byteLength(armKey, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
       );
       B.terminate(`ret ptr ${boxed}`);
     });
@@ -10998,10 +11437,10 @@ class LlEmitter {
     const rc = vAdapters(this, t);
     const key = typeKey(t);
     this.declare(
-      `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+      `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, ${this.sizeType}, ptr, ptr)`,
     );
     B.line(
-      `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${nested.snapshot}, ptr ${nested.commit})`,
+      `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(key)}, ${this.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${nested.snapshot}, ptr ${nested.commit})`,
     );
     return boxed;
   }
@@ -11071,7 +11510,7 @@ class LlEmitter {
         B.terminate(`ret ptr ${out}`);
       } else {
         this.declare(`declare ptr @scr_dyn_new_obj()`);
-        this.declare(`declare void @scr_dyn_obj_set(ptr, ptr, i64, ptr)`);
+        this.declare(`declare void @scr_dyn_obj_set(ptr, ptr, ${this.sizeType}, ptr)`);
         const out = B.tmp();
         B.line(`${out} = call ptr @scr_dyn_new_obj()`);
         const byName = new Map(shape.fields.map((field) => [field.name, field]));
@@ -11098,7 +11537,7 @@ class LlEmitter {
             fieldValue,
             ctx,
           );
-          B.line(`call void @scr_dyn_obj_set(ptr ${out}, ptr ${this.cstr(field.name)}, i64 ${Buffer.byteLength(field.name, "utf8")}, ptr ${boxed})`);
+          B.line(`call void @scr_dyn_obj_set(ptr ${out}, ptr ${this.cstr(field.name)}, ${this.sizeType} ${Buffer.byteLength(field.name, "utf8")}, ptr ${boxed})`);
         }
         B.terminate(`ret ptr ${out}`);
       }
@@ -11221,7 +11660,7 @@ class LlEmitter {
         );
       } else {
         this.declare(
-          `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+          `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, ${this.sizeType}, ptr, ptr)`,
         );
         const boxedSlot = B.slot();
         B.entryAllocas.push(`${boxedSlot} = alloca ptr`);
@@ -11254,7 +11693,7 @@ class LlEmitter {
           );
           B.line(`${payload} = load ptr, ptr ${payloadPtr}`);
           B.line(
-            `${armBoxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, i64 ${Buffer.byteLength(armKey, "utf8")}, ptr @${armSnapshot}, ptr ${armCommit})`,
+            `${armBoxed} = call ptr @scr_dyn_new_typed_ref(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.cstr(armKey)}, ${this.sizeType} ${Buffer.byteLength(armKey, "utf8")}, ptr @${armSnapshot}, ptr ${armCommit})`,
           );
           B.line(`store ptr ${armBoxed}, ptr ${boxedSlot}`);
           B.br(join);
@@ -11301,10 +11740,10 @@ class LlEmitter {
         );
       }
       this.declare(
-        `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, i64, ptr, ptr)`,
+        `declare ptr @scr_dyn_new_typed_ref(ptr, ptr, ptr, ptr, ${this.sizeType}, ptr, ptr)`,
       );
       B.line(
-        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, i64 ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot}, ptr ${commit})`,
+        `${boxed} = call ptr @scr_dyn_new_typed_ref(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, ${this.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot}, ptr ${commit})`,
       );
     } else {
       boxed = B.tmp();
@@ -12037,16 +12476,16 @@ class LlEmitter {
       );
       const tag4 = 1 - tag6;
       this.declare(`declare ptr @scr_os_ifaddrs()`);
-      this.declare(`declare i64 @scr_os_ifaddrs_count(ptr)`);
-      this.declare(`declare ptr @scr_os_ifaddrs_name(ptr, i64)`);
-      this.declare(`declare ptr @scr_os_ifaddrs_address(ptr, i64)`);
-      this.declare(`declare ptr @scr_os_ifaddrs_netmask(ptr, i64)`);
-      this.declare(`declare ptr @scr_os_ifaddrs_family(ptr, i64)`);
-      this.declare(`declare ptr @scr_os_ifaddrs_mac(ptr, i64)`);
-      this.declare(`declare zeroext i1 @scr_os_ifaddrs_internal(ptr, i64)`);
-      this.declare(`declare zeroext i1 @scr_os_ifaddrs_ipv6(ptr, i64)`);
-      this.declare(`declare ptr @scr_os_ifaddrs_cidr(ptr, i64)`);
-      this.declare(`declare double @scr_os_ifaddrs_scopeid(ptr, i64)`);
+      this.declare(`declare ${this.sizeType} @scr_os_ifaddrs_count(ptr)`);
+      this.declare(`declare ptr @scr_os_ifaddrs_name(ptr, ${this.sizeType})`);
+      this.declare(`declare ptr @scr_os_ifaddrs_address(ptr, ${this.sizeType})`);
+      this.declare(`declare ptr @scr_os_ifaddrs_netmask(ptr, ${this.sizeType})`);
+      this.declare(`declare ptr @scr_os_ifaddrs_family(ptr, ${this.sizeType})`);
+      this.declare(`declare ptr @scr_os_ifaddrs_mac(ptr, ${this.sizeType})`);
+      this.declare(`declare zeroext i1 @scr_os_ifaddrs_internal(ptr, ${this.sizeType})`);
+      this.declare(`declare zeroext i1 @scr_os_ifaddrs_ipv6(ptr, ${this.sizeType})`);
+      this.declare(`declare ptr @scr_os_ifaddrs_cidr(ptr, ${this.sizeType})`);
+      this.declare(`declare double @scr_os_ifaddrs_scopeid(ptr, ${this.sizeType})`);
       this.declare(`declare void @scr_os_ifaddrs_free(ptr)`);
       this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
       this.declare(`declare ptr @scr_union_retain_v(ptr)`);
@@ -12065,11 +12504,11 @@ class LlEmitter {
       const snap = B.tmp();
       const cnt = B.tmp();
       B.line(`${snap} = call ptr @scr_os_ifaddrs()`);
-      B.line(`${cnt} = call i64 @scr_os_ifaddrs_count(ptr ${snap})`);
+      B.line(`${cnt} = call ${this.sizeType} @scr_os_ifaddrs_count(ptr ${snap})`);
       const iSlot = B.slot();
       const rowSlot = B.slot();
-      B.entryAllocas.push(`${iSlot} = alloca i64`, `${rowSlot} = alloca ptr`);
-      B.line(`store i64 0, ptr ${iSlot}`);
+      B.entryAllocas.push(`${iSlot} = alloca ${this.sizeType}`, `${rowSlot} = alloca ptr`);
+      B.line(`store ${this.sizeType} 0, ptr ${iSlot}`);
       const lc = B.newLabel("ni.c");
       const lb = B.newLabel("ni.b");
       const le = B.newLabel("ni.e");
@@ -12077,12 +12516,12 @@ class LlEmitter {
       B.startBlock(lc);
       const i = B.tmp();
       const cont = B.tmp();
-      B.line(`${i} = load i64, ptr ${iSlot}`);
-      B.line(`${cont} = icmp ult i64 ${i}, ${cnt}`);
+      B.line(`${i} = load ${this.sizeType}, ptr ${iSlot}`);
+      B.line(`${cont} = icmp ult ${this.sizeType} ${i}, ${cnt}`);
       B.condBr(cont, lb, le);
       B.startBlock(lb);
       const isV6 = B.tmp();
-      B.line(`${isV6} = call zeroext i1 @scr_os_ifaddrs_ipv6(ptr ${snap}, i64 ${i})`);
+      B.line(`${isV6} = call zeroext i1 @scr_os_ifaddrs_ipv6(ptr ${snap}, ${this.sizeType} ${i})`);
       const l6 = B.newLabel("ni.v6");
       const l4 = B.newLabel("ni.v4");
       const lRow = B.newLabel("ni.r");
@@ -12106,14 +12545,14 @@ class LlEmitter {
           ["mac", "scr_os_ifaddrs_mac"],
         ] as const) {
           const v = B.tmp();
-          B.line(`${v} = call ptr @${sym}(ptr ${snap}, i64 ${i}) ; +1`);
+          B.line(`${v} = call ptr @${sym}(ptr ${snap}, ${this.sizeType} ${i}) ; +1`);
           B.line(`store ptr ${v}, ptr ${this.recordFieldPtr(r, t.shapeId, field).ptr}`);
         }
         const internal = B.tmp();
-        B.line(`${internal} = call zeroext i1 @scr_os_ifaddrs_internal(ptr ${snap}, i64 ${i})`);
+        B.line(`${internal} = call zeroext i1 @scr_os_ifaddrs_internal(ptr ${snap}, ${this.sizeType} ${i})`);
         this.storeField(this.recordFieldPtr(r, t.shapeId, "internal").ptr, { kind: "bool" }, internal);
         const cs = B.tmp();
-        B.line(`${cs} = call ptr @scr_os_ifaddrs_cidr(ptr ${snap}, i64 ${i}) ; +1 or null`);
+        B.line(`${cs} = call ptr @scr_os_ifaddrs_cidr(ptr ${snap}, ${this.sizeType} ${i}) ; +1 or null`);
         const hasCidr = B.tmp();
         B.line(`${hasCidr} = icmp ne ptr ${cs}, null`);
         const lcs = B.newLabel("ni.cs");
@@ -12138,7 +12577,7 @@ class LlEmitter {
         B.line(`store ptr ${cv}, ptr ${this.recordFieldPtr(r, t.shapeId, "cidr").ptr}`);
         if (v6) {
           const sc = B.tmp();
-          B.line(`${sc} = call double @scr_os_ifaddrs_scopeid(ptr ${snap}, i64 ${i})`);
+          B.line(`${sc} = call double @scr_os_ifaddrs_scopeid(ptr ${snap}, ${this.sizeType} ${i})`);
           this.storeField(this.recordFieldPtr(r, t.shapeId, "scopeid").ptr, F64, sc);
         } else {
           const st = shape.fields.find((f) => f.name === "scopeid")?.type;
@@ -12162,7 +12601,7 @@ class LlEmitter {
       const row = B.tmp();
       B.line(`${row} = load ptr, ptr ${rowSlot}`);
       const nm = B.tmp();
-      B.line(`${nm} = call ptr @scr_os_ifaddrs_name(ptr ${snap}, i64 ${i}) ; +1`);
+      B.line(`${nm} = call ptr @scr_os_ifaddrs_name(ptr ${snap}, ${this.sizeType} ${i}) ; +1`);
       const cell = B.tmp();
       B.line(`${cell} = call ptr @scr_map_get_str_ref(ptr ${ovf}, ptr ${nm})`);
       const hasCell = B.tmp();
@@ -12198,8 +12637,8 @@ class LlEmitter {
       B.line(`call void @scr_arr_release(ptr ${rows})`);
       B.line(`call void @scr_str_release(ptr ${nm})`);
       const i2 = B.tmp();
-      B.line(`${i2} = add i64 ${i}, 1`);
-      B.line(`store i64 ${i2}, ptr ${iSlot}`);
+      B.line(`${i2} = add ${this.sizeType} ${i}, 1`);
+      B.line(`store ${this.sizeType} ${i2}, ptr ${iSlot}`);
       B.br(lc);
       B.startBlock(le);
       B.line(`call void @scr_os_ifaddrs_free(ptr ${snap})`);
@@ -12216,21 +12655,21 @@ class LlEmitter {
       const recT = e.type.elem;
       const path = this.emitExpr(e.args[0]!);
       this.declare(`declare ptr @scr_fs_scandir(ptr)`);
-      this.declare(`declare i64 @scr_fs_scandir_count(ptr)`);
-      this.declare(`declare ptr @scr_fs_scandir_name(ptr, i64)`);
-      this.declare(`declare double @scr_fs_scandir_type(ptr, i64)`);
+      this.declare(`declare ${this.sizeType} @scr_fs_scandir_count(ptr)`);
+      this.declare(`declare ptr @scr_fs_scandir_name(ptr, ${this.sizeType})`);
+      this.declare(`declare double @scr_fs_scandir_type(ptr, ${this.sizeType})`);
       this.declare(`declare void @scr_fs_scandir_free(ptr)`);
       const snap = B.tmp();
       B.line(`${snap} = call ptr @scr_fs_scandir(ptr ${path.name})`);
       this.emitPendingCheck();
       const cnt = B.tmp();
-      B.line(`${cnt} = call i64 @scr_fs_scandir_count(ptr ${snap})`);
+      B.line(`${cnt} = call ${this.sizeType} @scr_fs_scandir_count(ptr ${snap})`);
       const arr = B.tmp();
       B.line(`${arr} = ${arrNewCall(this, recT, cnt)}`);
       const out = this.own({ name: arr, type: e.type });
       const iSlot = B.slot();
-      B.entryAllocas.push(`${iSlot} = alloca i64`);
-      B.line(`store i64 0, ptr ${iSlot}`);
+      B.entryAllocas.push(`${iSlot} = alloca ${this.sizeType}`);
+      B.line(`store ${this.sizeType} 0, ptr ${iSlot}`);
       const lc = B.newLabel("sd.c");
       const lb = B.newLabel("sd.b");
       const le = B.newLabel("sd.e");
@@ -12238,23 +12677,23 @@ class LlEmitter {
       B.startBlock(lc);
       const i = B.tmp();
       const cont = B.tmp();
-      B.line(`${i} = load i64, ptr ${iSlot}`);
-      B.line(`${cont} = icmp ult i64 ${i}, ${cnt}`);
+      B.line(`${i} = load ${this.sizeType}, ptr ${iSlot}`);
+      B.line(`${cont} = icmp ult ${this.sizeType} ${i}, ${cnt}`);
       B.condBr(cont, lb, le);
       B.startBlock(lb);
       const row = B.tmp();
       B.line(`${row} = call ptr @${mangleRecordNew(recT.shapeId)}()`);
       const dt = B.tmp();
-      B.line(`${dt} = call double @scr_fs_scandir_type(ptr ${snap}, i64 ${i})`);
+      B.line(`${dt} = call double @scr_fs_scandir_type(ptr ${snap}, ${this.sizeType} ${i})`);
       this.storeField(this.recordFieldPtr(row, recT.shapeId, "%dtype").ptr, F64, dt);
       const nm = B.tmp();
-      B.line(`${nm} = call ptr @scr_fs_scandir_name(ptr ${snap}, i64 ${i}) ; +1`);
+      B.line(`${nm} = call ptr @scr_fs_scandir_name(ptr ${snap}, ${this.sizeType} ${i}) ; +1`);
       B.line(`store ptr ${nm}, ptr ${this.recordFieldPtr(row, recT.shapeId, "name").ptr}`);
       B.line(`store ptr ${this.retainValue(path.name, STRING)}, ptr ${this.recordFieldPtr(row, recT.shapeId, "parentPath").ptr}`);
       this.arrPush(arr, "ref", row); // push takes ownership of the row
       const i2 = B.tmp();
-      B.line(`${i2} = add i64 ${i}, 1`);
-      B.line(`store i64 ${i2}, ptr ${iSlot}`);
+      B.line(`${i2} = add ${this.sizeType} ${i}, 1`);
+      B.line(`store ${this.sizeType} ${i2}, ptr ${iSlot}`);
       B.br(lc);
       B.startBlock(le);
       B.line(`call void @scr_fs_scandir_free(ptr ${snap})`);
@@ -12906,13 +13345,13 @@ class LlEmitter {
       if (e.type.kind !== "func") throw new Error("llvm emitter bug: net.serverCloseBind result not a func");
       const args = e.args.map((a) => this.emitExpr(a));
       const fnSym = this.closeBindThunkFor(e.type.params[0]!, e.type.ret.kind === "netServer");
-      this.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+      this.declare(`declare ptr @scr_closure_new(ptr, ${this.sizeType})`);
       this.declare(`declare ptr @scr_box_new_obj(ptr, ptr, ptr)`);
       this.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
       this.declare(`declare ptr @scr_net_server_retain_v(ptr)`);
       this.declare(`declare void @scr_net_server_release_v(ptr)`);
       const bound = B.tmp();
-      B.line(`${bound} = call ptr @scr_closure_new(ptr @${fnSym}, i64 1)`);
+      B.line(`${bound} = call ptr @scr_closure_new(ptr @${fnSym}, ${this.sizeType} 1)`);
       const bx = B.tmp();
       B.line(`${bx} = call ptr @scr_box_new_obj(ptr @scr_net_server_retain_v, ptr @scr_net_server_release_v, ptr null)`);
       const capp = B.tmp();
@@ -13203,20 +13642,20 @@ class LlEmitter {
         if (ca.type.kind === "string") {
           caData = B.tmp();
           B.line(`${caLenPtr} = getelementptr inbounds %ScrStr, ptr ${ca.name}, i64 0, i32 1`);
-          B.line(`${caLen} = load i64, ptr ${caLenPtr}`);
-          B.line(`${caData} = getelementptr inbounds i8, ptr ${ca.name}, i64 24`);
+          B.line(`${caLen} = load ${this.sizeType}, ptr ${caLenPtr}`);
+          B.line(`${caData} = getelementptr inbounds i8, ptr ${ca.name}, i64 ${this.abiOffset(24, 12)}`);
         } else if (ca.type.kind === "bytes" && ca.type.elem === "u8") {
           const caDataPtr = B.tmp();
           caData = B.tmp();
-          B.line(`${caLenPtr} = getelementptr inbounds i8, ptr ${ca.name}, i64 8`);
-          B.line(`${caLen} = load i64, ptr ${caLenPtr}`);
-          B.line(`${caDataPtr} = getelementptr inbounds i8, ptr ${ca.name}, i64 24`);
+          B.line(`${caLenPtr} = getelementptr inbounds i8, ptr ${ca.name}, i64 ${this.abiOffset(8, 4)}`);
+          B.line(`${caLen} = load ${this.sizeType}, ptr ${caLenPtr}`);
+          B.line(`${caDataPtr} = getelementptr inbounds i8, ptr ${ca.name}, i64 ${this.abiOffset(24, 12)}`);
           B.line(`${caData} = load ptr, ptr ${caDataPtr}`);
         } else {
           throw new Error(`llvm emitter bug: ${e.fn} CA is not a string or Buffer`);
         }
-        callArgs = [...callArgs.slice(0, 8), `ptr ${caData}`, `i64 ${caLen}`];
-        this.declare(`declare ptr @scr_https_request(ptr, double, ptr, ptr, double, ptr, i1 zeroext, i1 zeroext, ptr, i64, ptr, ptr)`);
+        callArgs = [...callArgs.slice(0, 8), `ptr ${caData}`, `${this.sizeType} ${caLen}`];
+        this.declare(`declare ptr @scr_https_request(ptr, double, ptr, ptr, double, ptr, i1 zeroext, i1 zeroext, ptr, ${this.sizeType}, ptr, ptr)`);
       } else {
         const decls = head.map((a) => (this.llType(a.type) === "i1" ? "i1 zeroext" : this.llType(a.type)));
         this.declare(`declare ptr @${entry}(${[...decls, "ptr", "ptr"].join(", ")})`);

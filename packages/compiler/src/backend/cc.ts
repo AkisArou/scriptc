@@ -462,12 +462,24 @@ export function resolveCc(
     throw new Error(`unknown SCRIPTC_CC '${cc}' (supported: clang, zigcc)`);
   }
   if (target === "") return { argv: ["zig", "cc"], target: null, ...hostArgs };
+  if (target.includes("wasi") && target !== "wasm32-wasi") {
+    throw new Error(`unsupported WASI target '${target}' (supported: wasm32-wasi)`);
+  }
   const linux = target.includes("linux");
+  const wasi = target.includes("wasi");
   return {
     argv: ["zig", "cc"],
     target,
-    targetArgs: ["-target", target, ...(linux ? ["-D_GNU_SOURCE"] : [])],
-    linkArgs: linux ? ["-lm"] : [],
+    targetArgs: [
+      "-target", target,
+      ...(linux || wasi ? ["-D_GNU_SOURCE"] : []),
+      ...(wasi ? ["-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS"] : []),
+    ],
+    linkArgs: linux
+      ? ["-lm"]
+      : wasi
+        ? ["-lwasi-emulated-signal", "-lwasi-emulated-process-clocks"]
+        : [],
   };
 }
 
@@ -479,6 +491,7 @@ export function resolveCc(
  * Node-on-Windows semantics, path.win32 backing the bare module). */
 export function targetPlatform(driver: CcDriver): string {
   if (driver.target === null) return process.platform;
+  if (driver.target.includes("wasi")) return "wasi";
   if (driver.target.includes("linux")) return "linux";
   if (driver.target.includes("windows")) return "win32";
   return driver.target.includes("macos") || driver.target.includes("darwin") ? "darwin" : "other";
@@ -2891,9 +2904,14 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const http = (opts.http ?? false) || nativeFetch || netIsland;
   const tls = (opts.tls ?? false) || nativeFetch || netIsland;
   const driver = resolveCc();
+  const runtimeSources = targetPlatform(driver) === "wasi"
+    ? RUNTIME_SOURCES.filter((source) => source !== "scr_child.c")
+    : RUNTIME_SOURCES;
   // scr_async.c submits callback-style filesystem work to a native worker.
   // POSIX drivers need the thread compile/link mode; win32 uses CreateThread.
-  const threadArgs = targetPlatform(driver) === "win32" ? [] : ["-pthread"];
+  const threadArgs = targetPlatform(driver) === "win32" || targetPlatform(driver) === "wasi"
+    ? []
+    : ["-pthread"];
   if (driver.target !== null) {
     // See the resolveCc block: these inputs are built on and for the HOST
     // (vendored archives, system libs). Regex, zlib, and the engine archive
@@ -3059,7 +3077,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     "-fno-strict-aliasing",
     "-Wno-deprecated-declarations", // ucontext fibers (scr_async.c)
     "-I", rtDir,
-    ...RUNTIME_SOURCES.map((f) => rt(join(rtDir, f))),
+    ...runtimeSources.map((f) => rt(join(rtDir, f))),
     ...(opts.copying ? [rt(join(rtDir, "scr_copying.c"))] : []),
     ...(opts.fileHandle ? [rt(join(rtDir, "scr_file_handle.c"))] : []),
     // win32 targets compile the libc-shim TU (stpcpy, arc4random_buf,

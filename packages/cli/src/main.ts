@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { analyze, compile, compileC, compileLibrary, isExactExternalTypeSpecifier, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
+import { analyze, buildTargetPlatform, compile, compileC, compileLibrary, isExactExternalTypeSpecifier, renderAll, renderCoverage, resolveProvenanceSources, setProvenanceSources } from "@scriptc/compiler";
 import { defaultExecutableName } from "./paths.js";
 
-const USAGE = `scriptc — TypeScript/JavaScript to native executables (experimental)
+const USAGE = `scriptc — TypeScript/JavaScript to native and WebAssembly executables (experimental)
 
 Usage:
-  scriptc build <file.ts|.js> [options]     compile to a native executable
+  scriptc build <file.ts|.js> [options]     compile to an executable target artifact
   scriptc run <file.ts|.js> [options]       compile and run
   scriptc coverage <file.ts|.js>            how much compiles statically, and why not
   scriptc coverage <file.ts|.js> --dynamic  what a --dynamic build compiles, and what still blocks it
@@ -24,14 +24,15 @@ Usage:
                                             contract sidecar JSON beside the archive
 
 Options:
-  -o, --out <path>   output executable path (default: .scriptc/<name>)
+  -o, --out <path>   output path (default: .scriptc/<name>[.exe|.wasm])
       --backend <b>  code generator. llvm is the default and the output that
                      ships; c emits readable C for inspecting what the
                      compiler produced, and program behavior is identical
-                     either way. A program outside the LLVM tier still
+                     either way. On native targets, a program outside the LLVM tier still
                      builds — the default lane emits C for it and a one-line
                      stderr note names the construct — while an explicit
                      --backend llvm fails with that construct named
+                     wasm32-wasi is LLVM-only unless --backend c is explicit
       --from-c       treat input as a C (or .ll) file (toolchain plumbing/debugging)
       --keep-c       keep the generated program TU next to the executable
                      (default; the .ll — or the .c under --backend=c or
@@ -308,7 +309,20 @@ async function main(): Promise<number> {
 
   if (command === "run") {
     return new Promise<number>((resolveExit) => {
-      const child = spawn(binary, [], { stdio: "inherit" });
+      let child;
+      if (buildTargetPlatform() === "wasi") {
+        const builtRunner = fileURLToPath(new URL("./wasi-runner.js", import.meta.url));
+        const runner = existsSync(builtRunner)
+          ? builtRunner
+          : fileURLToPath(new URL("./wasi-runner.ts", import.meta.url));
+        child = spawn(
+          process.execPath,
+          [...process.execArgv, "--no-warnings", runner, binary],
+          { stdio: "inherit" },
+        );
+      } else {
+        child = spawn(binary, [], { stdio: "inherit" });
+      }
       child.on("exit", (code, signal) => {
         if (signal) {
           process.stderr.write(`scriptc: program killed by ${signal}\n`);

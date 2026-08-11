@@ -35,10 +35,18 @@ fib.exe: PE32+ executable (console) x86-64, for MS Windows
 
 The language, stdlib, `fs`, and async surfaces pass a differential lane against Windows Node. **Not ported yet:** the socket/server stack (`net`/`http`/`https`/`tls`/`dgram`) and `child_process`.
 
+### WebAssembly (WASI Preview 1)
+
+Set <code>SCRIPTC_CC=zigcc</code> and <code>SCRIPTC_TARGET=wasm32-wasi</code> to produce a standalone <code>.wasm</code> module. Without <code>-o</code>, <code>scriptc build hello.ts</code> writes <code>.scriptc/hello.wasm</code>. <code>scriptc run</code> hosts the module with Node's WASI implementation, inherits stdio and environment, preopens the current working directory as <code>/</code>, and maps the host's <code>/tmp</code> to the guest's <code>/tmp</code>. A built module can run in another WASI Preview 1 host instead.
+
+WASI is a production LLVM target with the same language tiers as the native targets. Its 32-bit LLVM ABI supports collections, closures, exceptions, classes, checked dynamic values, async/await, promises, synchronous and asynchronous generators, timers, stdin/readline events, process-exit listeners, filesystem callbacks and promises, and the <code>--dynamic</code> QuickJS island. The debugging C backend remains available only through an explicit <code>--backend c</code>; WASI never silently falls back to it.
+
+The remaining boundary is host capability, not language coverage. WASI Preview 1 has no portable socket, process-spawn, OS-signal, network-interface, or filesystem-notification APIs. Networking/fetch, child processes, signal APIs, <code>os.networkInterfaces()</code>, and <code>fs.watch</code> therefore fail before linking with diagnostic <code>SC3002</code>. <code>--sanitize</code> and native FFI are unavailable too. Filesystem behavior is bounded by the host's preopens, and process/OS introspection follows WASI's reduced model.
+
 ## What doesn't cross-compile yet
 
-- **`--dynamic` binaries are host-native only.** The embedded engine archive is built per target; cross-compiling a `--dynamic` build is not supported today. Static programs cross-compile fully.
 - `--sanitize` is a host-build lane.
+- WASI cannot host APIs for capabilities missing from Preview 1, as described above.
 
 ## Summary
 
@@ -65,6 +73,11 @@ The language, stdlib, `fs`, and async surfaces pass a differential lane against 
       <td>Windows x86_64</td>
       <td><code>SCRIPTC_CC=zigcc SCRIPTC_TARGET=x86_64-windows-gnu</code></td>
       <td>Language, stdlib, fs, async; no servers or child_process yet</td>
+    </tr>
+    <tr>
+      <td>WebAssembly / WASI Preview 1</td>
+      <td><code>SCRIPTC_CC=zigcc SCRIPTC_TARGET=wasm32-wasi</code></td>
+      <td>Production LLVM target; full language and dynamic tiers, bounded by WASI P1 host capabilities</td>
     </tr>
   </tbody>
 </table>
