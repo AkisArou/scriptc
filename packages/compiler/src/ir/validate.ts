@@ -425,6 +425,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "http.createServer": { argTypes: [null], result: NETSERVER_T },
   "http.createServerEmpty": { argTypes: [], result: NETSERVER_T },
   "http.serverJoinDupHeaders": { argTypes: [NETSERVER_T], result: VOID },
+  "http.serverTimeoutGet": { argTypes: [NETSERVER_T, F64], result: F64 },
+  "http.serverTimeoutSet": { argTypes: [NETSERVER_T, F64, F64], result: VOID },
   "net.serverOnListening": { argTypes: [NETSERVER_T, { kind: "func", params: [], ret: VOID }, BOOL], result: VOID },
   "http.resStatusGet": { argTypes: [HTTPRES_T], result: F64 },
   "http.resStatusSet": { argTypes: [HTTPRES_T, F64], result: VOID },

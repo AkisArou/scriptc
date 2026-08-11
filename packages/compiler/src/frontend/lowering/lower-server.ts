@@ -39,6 +39,19 @@ export const NET_MODULE_FNS: ReadonlySet<string> = new Set([
 const NARROW_DATA_HINT =
   'write/end take one string or one Uint8Array/Buffer value (narrow unions first)';
 
+/** The writable numeric http.Server timeout fields. The selector is an
+ * internal runtime ABI shared by the get/set libCalls (kept here beside
+ * the only two construction/lowering paths that can mint the accesses). */
+function httpServerTimeoutField(name: string): number | null {
+  switch (name) {
+    case "timeout": return 0;
+    case "keepAliveTimeout": return 1;
+    case "headersTimeout": return 2;
+    case "requestTimeout": return 3;
+    default: return null;
+  }
+}
+
 /** VOID-result server/socket calls are usable as statements and as concise
  * arrow bodies (`socket.on("error", () => socket.destroy())` — the shape
  * portless is made of); anything that would CONSUME the result (Node
@@ -923,6 +936,27 @@ export function lowerHttpResPropertyAssignment(L: Lowerer, left: ts.Expression,
   return {
     kind: "exprStmt",
     expr: { kind: "libCall", fn, args: [receiver, value], type: VOID, loc },
+    loc,
+  };
+}
+
+/** `server.timeout = n` and the three HTTP parser/keep-alive timeout
+ * siblings. These are ordinary writable number properties in Node: the
+ * runtime stores their exact value per server; active timeout behavior is
+ * a separate protocol concern. */
+export function lowerHttpServerTimeoutAssignment(L: Lowerer, left: ts.Expression,
+  right: ts.Expression, loc: SrcLoc,): IrStmt | null {
+  if (!ts.isPropertyAccessExpression(left) || left.questionDotToken) return null;
+  const field = httpServerTimeoutField(left.name.text);
+  if (field === null) return null;
+  if (L.mapTypeOf(L.typeOf(left.expression))?.kind !== "netServer") return null;
+  if (!L.isStdlibMember(left)) return null;
+  const receiver = handleReceiver(L, left.expression, NETSERVER_T);
+  const selector: IrExpr = { kind: "numLit", value: field, type: F64, loc };
+  const value = L.lowerExprExpecting(right, F64);
+  return {
+    kind: "exprStmt",
+    expr: { kind: "libCall", fn: "http.serverTimeoutSet", args: [receiver, selector, value], type: VOID, loc },
     loc,
   };
 }
@@ -1971,6 +2005,14 @@ export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpressio
   // req.url / req.method — always-present strings on server requests;
   // req.headers.NAME — the `string | undefined` union (envGet's type).
   const recvKind = L.mapTypeOf(L.typeOf(expr.expression))?.kind;
+  if (recvKind === "netServer" && L.isStdlibMember(expr)) {
+    const field = httpServerTimeoutField(expr.name.text);
+    if (field !== null) {
+      const receiver = handleReceiver(L, expr.expression, NETSERVER_T);
+      const selector: IrExpr = { kind: "numLit", value: field, type: F64, loc };
+      return { kind: "libCall", fn: "http.serverTimeoutGet", args: [receiver, selector], type: F64, loc };
+    }
+  }
   if (recvKind === "httpReq" && L.isStdlibMember(expr)) {
     const name = expr.name.text;
     if (name === "url" || name === "method") {
