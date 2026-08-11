@@ -393,7 +393,7 @@ struct ScrNetServer {
    * server handle because http/https servers retain that handle identity;
    * plain net servers never expose these fields through the static type
    * surface. Indices match lower-server.ts's selector ABI. */
-  double http_timeouts[4];
+  double http_timeouts[5];
   bool defer_conn; /* TLS: 'connection' fires post-handshake, not at accept */
   bool bound_v6;       /* the bound family (address()'s 'IPv6'/'IPv4' split) */
   ScrStr *bound_host;  /* the explicit bind host (NULL = the host-less any:
@@ -1209,6 +1209,7 @@ static ScrNetServer *scr_net_server_new(void) {
   s->http_timeouts[1] = 5000;   /* keepAliveTimeout */
   s->http_timeouts[2] = 60000;  /* headersTimeout */
   s->http_timeouts[3] = 300000; /* requestTimeout */
+  s->http_timeouts[4] = 1000;   /* keepAliveTimeoutBuffer */
 #ifdef SCR_RC_AUDIT
   scr_net_live++;
 #endif
@@ -1389,13 +1390,13 @@ double scr_net_server_port(ScrNetServer *s) { return (double)s->port; }
 
 double scr_net_server_timeout_get(ScrNetServer *s, double field) {
   int i = (int)field;
-  if (i < 0 || i >= 4) abort(); /* compiler/runtime ABI violation */
+  if (i < 0 || i >= 5) abort(); /* compiler/runtime ABI violation */
   return s->http_timeouts[i];
 }
 
 void scr_net_server_timeout_set(ScrNetServer *s, double field, double value) {
   int i = (int)field;
-  if (i < 0 || i >= 4) abort(); /* compiler/runtime ABI violation */
+  if (i < 0 || i >= 5) abort(); /* compiler/runtime ABI violation */
   s->http_timeouts[i] = value;
 }
 

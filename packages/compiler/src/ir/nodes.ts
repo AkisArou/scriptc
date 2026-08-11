@@ -2335,10 +2335,10 @@ export type IrLibFn =
    * joinDuplicateHeaders joins repeated request-header reads ", "). */
   | "http.createServerEmpty"
   | "http.serverJoinDupHeaders"
-  /** The four writable numeric http.Server timeout fields use one
+  /** The five writable numeric http.Server timeout fields use one
    * selector ABI: 0 timeout, 1 keepAliveTimeout, 2 headersTimeout,
-   * 3 requestTimeout. These calls store/read the property values; timer
-   * enforcement remains outside this surface. */
+   * 3 requestTimeout, 4 keepAliveTimeoutBuffer. These calls store/read
+   * the property values; timer enforcement remains outside this surface. */
   | "http.serverTimeoutGet"
   | "http.serverTimeoutSet"
   /** server.on("listening", cb) — the deferred listen-callback list. */

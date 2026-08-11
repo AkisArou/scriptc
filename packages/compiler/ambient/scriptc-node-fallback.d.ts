@@ -2121,6 +2121,7 @@ declare module "http" {
   export interface Server extends NetServer {
     timeout: number;
     keepAliveTimeout: number;
+    keepAliveTimeoutBuffer: number;
     headersTimeout: number;
     requestTimeout: number;
   }

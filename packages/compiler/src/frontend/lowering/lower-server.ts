@@ -48,6 +48,7 @@ function httpServerTimeoutField(name: string): number | null {
     case "keepAliveTimeout": return 1;
     case "headersTimeout": return 2;
     case "requestTimeout": return 3;
+    case "keepAliveTimeoutBuffer": return 4;
     default: return null;
   }
 }
@@ -940,7 +941,7 @@ export function lowerHttpResPropertyAssignment(L: Lowerer, left: ts.Expression,
   };
 }
 
-/** `server.timeout = n` and the three HTTP parser/keep-alive timeout
+/** `server.timeout = n` and the four HTTP parser/keep-alive timeout
  * siblings. These are ordinary writable number properties in Node: the
  * runtime stores their exact value per server; active timeout behavior is
  * a separate protocol concern. */

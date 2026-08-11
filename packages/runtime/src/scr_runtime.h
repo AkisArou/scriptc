@@ -5114,7 +5114,8 @@ void scr_net_listen_opts(ScrNetServer *s, double port, ScrStr *host /*borrowed*/
                           bool ipv6_only, ScrClosure *cb /*moves, nullable*/);
 double scr_net_server_port(ScrNetServer *s); /* address().port */
 /* Writable http.Server timeout property storage. `field` is the compiler
- * ABI selector: timeout, keepAliveTimeout, headersTimeout, requestTimeout. */
+ * ABI selector: timeout, keepAliveTimeout, headersTimeout, requestTimeout,
+ * keepAliveTimeoutBuffer. */
 double scr_net_server_timeout_get(ScrNetServer *s, double field);
 void scr_net_server_timeout_set(ScrNetServer *s, double field, double value);
 ScrStr *scr_net_server_addr_ip(ScrNetServer *s);     /* +1 — address().address */
