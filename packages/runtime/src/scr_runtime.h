@@ -5113,6 +5113,20 @@ void scr_net_listen(ScrNetServer *s, double port, ScrClosure *cb /*moves, nullab
 void scr_net_listen_opts(ScrNetServer *s, double port, ScrStr *host /*borrowed*/,
                           bool ipv6_only, ScrClosure *cb /*moves, nullable*/);
 double scr_net_server_port(ScrNetServer *s); /* address().port */
+/* Writable http.Server timeout property storage. `field` is the compiler
+ * ABI selector: timeout, keepAliveTimeout, headersTimeout, requestTimeout,
+ * keepAliveTimeoutBuffer. Typed reads validate that no dynamic write left
+ * a non-number in the ordinary JS property slot. */
+double scr_net_server_timeout_get(ScrNetServer *s, double field);
+void scr_net_server_timeout_set(ScrNetServer *s, double field, double value);
+/* Marks the shared net-server handle as an HTTP/1 or HTTPS server. The
+ * dynamic handle uses this to keep HTTP-only fields off net/TLS/H2. */
+void scr_net_server_enable_http_timeout_surface(ScrNetServer *s);
+/* Constructor-option twin: undefined is absent; otherwise validates type
+ * and a non-negative safe integer before storing, matching Node's option
+ * ladder (plain property writes do not validate). */
+bool scr_net_server_timeout_option_check(double field, double value);
+void scr_net_server_timeout_option_set(ScrNetServer *s, double field, const struct ScrDyn *value);
 ScrStr *scr_net_server_addr_ip(ScrNetServer *s);     /* +1 — address().address */
 ScrStr *scr_net_server_addr_family(ScrNetServer *s); /* +1 — address().family */
 void scr_net_server_close(ScrNetServer *s, ScrClosure *cb /*moves, nullable*/);

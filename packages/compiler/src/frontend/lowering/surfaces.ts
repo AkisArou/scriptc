@@ -195,12 +195,13 @@ export const HTTP_CLIENT_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
 
 /** http.createServer / http.Server's documented option keys (Node v24 —
  * http.createServer options + the net.Server knobs it forwards). The
- * lowered pair is requireHostHeader/joinDuplicateHeaders; the rest fence
- * by name here, and unknown keys drop like Node drops them. */
+ * lowered set is requireHostHeader/joinDuplicateHeaders plus
+ * keepAliveTimeoutBuffer storage; the rest fence by name here, and
+ * unknown keys drop like Node drops them. */
 export const HTTP_SERVER_DOCUMENTED_OPTIONS: ReadonlySet<string> = new Set([
   "IncomingMessage", "ServerResponse", "allowHalfOpen", "connectionsCheckingInterval",
   "headersTimeout", "highWaterMark", "insecureHTTPParser", "joinDuplicateHeaders",
-  "keepAlive", "keepAliveInitialDelay", "keepAliveTimeout", "maxHeaderSize",
+  "keepAlive", "keepAliveInitialDelay", "keepAliveTimeout", "keepAliveTimeoutBuffer", "maxHeaderSize",
   "noDelay", "pauseOnConnect", "rejectNonStandardBodyWrites", "requestTimeout",
   "requireHostHeader", "uniqueHeaders",
 ]);

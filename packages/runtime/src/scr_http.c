@@ -2009,6 +2009,7 @@ void scr_http2_stream_undef_call(ScrStr *member) {
 ScrNetServer *scr_http_create_server(ScrClosure *handler /*moves, nullable*/, ScrHttpReqFn fn) {
   scr_http_install();
   ScrNetServer *s = scr_net_create_server(NULL, NULL);
+  scr_net_server_enable_http_timeout_surface(s);
   ScrHttpSrvCtx *ctx = calloc(1, sizeof *ctx);
   if (!ctx) scr_http_oom();
   ctx->proto = SCR_NET_PROTO_HTTP1;
