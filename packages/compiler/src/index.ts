@@ -112,6 +112,7 @@ export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
+export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
   setProvenanceSources,
   type ProvenancePackageSource,
@@ -133,14 +134,16 @@ export interface CompileOptions {
   /** Code generator for the program TU. Unset (the release default): the
    * LLVM backend emits LLVM IR text (.ll) that rides the SAME clang
    * command line in the program-TU seat, and a program outside the LLVM
-   * tier falls back to the reference C backend transparently — the IR is
+   * tier falls back to the debugging C backend transparently — the IR is
    * backend-agnostic, so only the emit retries; CompileResult records the
    * lane (`backend`, plus `llvmRefusal` when the fallback engaged). ONLY a
    * tier refusal (LlvmUnsupportedError) falls back — every real diagnostic
    * and every ICE fails the build on either lane. Explicit `llvm` is the
    * debugging/CI pin and keeps the fail-loudly contract: an out-of-tier
    * program is diagnostic SC3001 naming the first unsupported construct,
-   * never a silent lane change. Explicit `c` pins the C backend. */
+   * never a silent lane change. Explicit `c` pins the debugging C backend.
+   * wasm32-wasi is a production LLVM target and never takes the automatic
+   * C fallback; a missing LLVM lowering there is SC3001. */
   backend?: "c" | "llvm";
   /** --npm-static: package names whose shipped, unminified JS compiles
    * STATICALLY as program modules (inference types the bodies; statements
@@ -164,7 +167,7 @@ export type CompileResult =
    * seat, same lifecycle — --keep-c in the CLI governs both). `backend` is
    * the code generator that ACTUALLY emitted the TU; `llvmRefusal` is
    * present iff the default lane fell back to C, carrying the tier
-   * refusal's machine-readable kind tag ("npmEmbedding", "stmt:...", ...). */
+   * refusal's machine-readable kind tag ("stmt:...", "libCall:...", ...). */
   | { ok: true; binaryPath: string; cPath: string; irPath?: string; backend: "c" | "llvm"; llvmRefusal?: string }
   | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
 
@@ -178,6 +181,123 @@ function llvmRefusalDiag(err: LlvmUnsupportedError, entryPath: string): ScrDiagn
     message: err.message,
     loc: err.loc ?? { file: entryPath, start: 0, end: 0 },
   };
+}
+
+/** A valid IR surface the explicitly-selected code generator cannot host.
+ * SC3001 is backend coverage (as with an LLVM tier refusal), not a target
+ * capability gap: wasm32-wasi's production LLVM lane still accepts it. */
+function backendRefusalDiag(
+  backend: "c" | "llvm",
+  target: string,
+  surface: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC3001",
+    message: `${backend} backend does not support ${surface} for ${target}; use --backend llvm`,
+    loc,
+  };
+}
+
+/** A valid program surface that the selected execution target cannot host.
+ * SC3xxx stays the backend/target-coverage family: source semantics are
+ * valid, but this target deliberately refuses them instead of emitting a
+ * binary that traps later. */
+function targetRefusalDiag(target: string, surface: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC3002",
+    message: `${target} target does not support ${surface}`,
+    loc,
+  };
+}
+
+/** APIs that require host capabilities absent from portable WASI Preview 1.
+ * These are target diagnostics, not backend-tier gaps: the same language IR
+ * (including async, generators, and the dynamic island) is otherwise valid.
+ * Keep the fine-grained walk first so diagnostics point at the API use; the
+ * embedded-module checks are the entry-anchored safety net for island code. */
+function moduleWasiUnavailableSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
+  const entryLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
+  const prefixes: readonly (readonly [string, string])[] = [
+    ["cp.", "child processes (WASI Preview 1 has no process-spawning API)"],
+    ["child.", "child processes (WASI Preview 1 has no process-spawning API)"],
+    ["spawnRes.", "child processes (WASI Preview 1 has no process-spawning API)"],
+    ["net.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["http.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["https.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["http2.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["h2.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["dgram.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["dns.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["tls.", "network sockets (WASI Preview 1 has no socket API)"],
+    ["fetch.", "network-backed fetch (WASI Preview 1 has no socket API)"],
+    ["fs.watch", "filesystem watching (WASI Preview 1 has no notification API)"],
+    ["watcher.", "filesystem watching (WASI Preview 1 has no notification API)"],
+  ];
+  const kinds: ReadonlyMap<string, string> = new Map([
+    ["child", "child processes (WASI Preview 1 has no process-spawning API)"],
+    ["spawnRes", "child processes (WASI Preview 1 has no process-spawning API)"],
+    ["childStream", "child processes (WASI Preview 1 has no process-spawning API)"],
+    ["netServer", "network sockets (WASI Preview 1 has no socket API)"],
+    ["netSocket", "network sockets (WASI Preview 1 has no socket API)"],
+    ["http2Session", "network sockets (WASI Preview 1 has no socket API)"],
+    ["http2Stream", "network sockets (WASI Preview 1 has no socket API)"],
+    ["dgramSocket", "network sockets (WASI Preview 1 has no socket API)"],
+    ["fsWatcher", "filesystem watching (WASI Preview 1 has no notification API)"],
+    ["httpReq", "network sockets (WASI Preview 1 has no socket API)"],
+    ["httpRes", "network sockets (WASI Preview 1 has no socket API)"],
+    ["httpClientReq", "network sockets (WASI Preview 1 has no socket API)"],
+    ["secureCtx", "network sockets (WASI Preview 1 has no socket API)"],
+  ]);
+  let found: { surface: string; loc: SrcLoc } | null = null;
+  const visit = (value: unknown, inheritedLoc: SrcLoc): void => {
+    if (found !== null || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, inheritedLoc);
+      return;
+    }
+    const node = value as { kind?: unknown; fn?: unknown; loc?: SrcLoc };
+    const loc = node.loc ?? inheritedLoc;
+    if (typeof node.kind === "string") {
+      const kindSurface = kinds.get(node.kind);
+      if (kindSurface !== undefined) {
+        found = { surface: kindSurface, loc };
+        return;
+      }
+      if (node.kind === "libCall" && typeof node.fn === "string") {
+        if (node.fn === "process.kill" || node.fn === "process.killNum" ||
+            node.fn === "process.onSignal" || node.fn === "process.offSignal") {
+          found = { surface: "OS signals (WASI Preview 1 has no signal API)", loc };
+          return;
+        }
+        if (node.fn === "os.networkInterfaces") {
+          found = { surface: "network-interface enumeration (WASI Preview 1 has no interface API)", loc };
+          return;
+        }
+        for (const [prefix, surface] of prefixes) {
+          if (node.fn.startsWith(prefix)) {
+            found = { surface, loc };
+            return;
+          }
+        }
+      }
+    }
+    for (const key of Object.keys(value)) {
+      visit((value as Record<string, unknown>)[key], loc);
+    }
+  };
+  visit(mod, entryLoc);
+  if (found !== null) return found;
+
+  if (moduleUsesFetch(mod)) {
+    return { surface: "network-backed fetch (WASI Preview 1 has no socket API)", loc: entryLoc };
+  }
+  for (const builtin of ["node:http", "node:https", "node:net", "node:tls"] as const) {
+    if (moduleEmbedsBuiltin(mod, builtin)) {
+      return { surface: `${builtin} networking (WASI Preview 1 has no socket API)`, loc: entryLoc };
+    }
+  }
+  return null;
 }
 
 /** Clang may print every warning from the generated/runtime translation
@@ -713,6 +833,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
     ffi = loaded.profile;
   }
+  const buildPlatform = buildTargetPlatform();
   const fe = runFrontend(entryPath, opts.npmStatic);
   let lowered: LowerResult;
   let entryText: string;
@@ -731,7 +852,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     try {
       lowered = fe.lower({
         dynamic: opts.dynamic ?? false,
-        targetPlatform: buildTargetPlatform(),
+        targetPlatform: buildPlatform,
         ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
       });
     } catch (e) {
@@ -748,6 +869,27 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     const validation = validateModule(lowered.module);
     if (validation.length > 0) {
       return fail(validation.map((v) => iceDiag(v.message, v.loc)));
+    }
+    if (buildPlatform === "wasi") {
+      const entryLoc: SrcLoc = { file: entryPath, start: 0, end: 0 };
+      if (opts.sanitize) {
+        return fail([targetRefusalDiag("wasm32-wasi", "--sanitize", entryLoc)]);
+      }
+      if (ffi !== null) {
+        return fail([targetRefusalDiag("wasm32-wasi", "native FFI manifests", entryLoc)]);
+      }
+      const unavailable = moduleWasiUnavailableSurface(lowered.module);
+      if (unavailable !== null) {
+        return fail([targetRefusalDiag("wasm32-wasi", unavailable.surface, unavailable.loc)]);
+      }
+      if (opts.backend === "c") {
+        const asyncSurface = moduleLibAsyncSurface(lowered.module);
+        if (asyncSurface !== null) {
+          return fail([
+            backendRefusalDiag("c", "wasm32-wasi", asyncSurface.surface, asyncSurface.loc),
+          ]);
+        }
+      }
     }
     entryText = fe.entryText();
     sourceTexts = fe.sourceTexts();
@@ -767,7 +909,10 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   let llvmRefusal: string | undefined;
   if (opts.backend !== "c") {
     try {
-      const ll = emitLlvmModule(lowered.module!);
+      const ll = emitLlvmModule(lowered.module!, {
+        pointerBits: buildPlatform === "wasi" ? 32 : 64,
+        wasi: buildPlatform === "wasi",
+      });
       cPath = join(opts.outDir, `${stem}.ll`);
       await writeFile(cPath, ll);
       backend = "llvm";
@@ -775,7 +920,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       if (!(err instanceof LlvmUnsupportedError)) throw err;
       // Explicit backend "llvm" keeps the fail-loudly contract (the
       // debugging/CI pin): SC3001, never a silent lane change.
-      if (opts.backend === "llvm") {
+      if (opts.backend === "llvm" || buildPlatform === "wasi") {
         return { ok: false, diagnostics: [llvmRefusalDiag(err, entryPath)], sourceTexts };
       }
       llvmRefusal = err.kind;
@@ -1307,6 +1452,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   }
   const profile = loadedProfile.profile;
   const entryPath = profile.entry;
+  const buildPlatform = buildTargetPlatform();
 
   // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
   // posture: "lib" runs the same auto-detection and eligibility bar as
@@ -1329,6 +1475,19 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
     });
+    // Library mode emits a host-embedded static archive with native trap and
+    // C-ABI contracts. wasm32-wasi executable modules are supported, but the
+    // archive/reactor contract is not; refuse before emitting a host-width
+    // LLVM TU or asking Zig to compile the native library runtime for WASI.
+    if (buildPlatform === "wasi") {
+      return fail([
+        targetRefusalDiag(
+          "wasm32-wasi",
+          "library-mode archive builds",
+          { file: entryPath, start: 0, end: 0 },
+        ),
+      ]);
+    }
     // The npm verdicts FIRST: whatever the shared frontend would have
     // served from the island — an eligibility miss, an untyped install, a
     // preflight offender inside a package's files, a dropped inferred
@@ -1380,7 +1539,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     try {
       lowered = fe.lower({
         dynamic: false,
-        targetPlatform: buildTargetPlatform(),
+        targetPlatform: buildPlatform,
         // The profile-mapped exports are called from OUTSIDE the graph:
         // they seed reachability beside the entry's top level (an
         // executable build would dead-strip an uncalled export). A helper

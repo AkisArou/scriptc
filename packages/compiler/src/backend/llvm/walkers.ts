@@ -54,6 +54,11 @@ export class LlWalkers {
 
   constructor(private readonly host: WalkerHost) {}
 
+  private get S(): "i32" | "i64" { return this.host.sizeType; }
+  private abiOffset(native64: number, wasm32: number): number {
+    return this.S === "i32" ? wasm32 : native64;
+  }
+
   /** The value-parameter LLVM type of a writer for `t`. */
   private valTy(t: IrType): string {
     return t.kind === "f64" ? "double" : t.kind === "bool" ? "i1" : "ptr";
@@ -77,11 +82,11 @@ export class LlWalkers {
     const len = B.tmp();
     const data = B.tmp();
     B.line(`${lenp} = getelementptr inbounds %ScrStr, ptr ${s}, i64 0, i32 1`);
-    B.line(`${len} = load i64, ptr ${lenp}`);
-    B.line(`${data} = getelementptr inbounds i8, ptr ${s}, i64 24 ; ->data`);
+    B.line(`${len} = load ${this.S}, ptr ${lenp}`);
+    B.line(`${data} = getelementptr inbounds i8, ptr ${s}, i64 ${this.abiOffset(24, 12)} ; ->data`);
     const jSlot = B.slot();
-    B.entryAllocas.push(`${jSlot} = alloca i64`);
-    B.line(`store i64 0, ptr ${jSlot}`);
+    B.entryAllocas.push(`${jSlot} = alloca ${this.S}`);
+    B.line(`store ${this.S} 0, ptr ${jSlot}`);
     const lc = B.newLabel("ps.c");
     const lb = B.newLabel("ps.b");
     const le = B.newLabel("ps.e");
@@ -89,18 +94,18 @@ export class LlWalkers {
     B.startBlock(lc);
     const j = B.tmp();
     const cont = B.tmp();
-    B.line(`${j} = load i64, ptr ${jSlot}`);
-    B.line(`${cont} = icmp ult i64 ${j}, ${len}`);
+    B.line(`${j} = load ${this.S}, ptr ${jSlot}`);
+    B.line(`${cont} = icmp ult ${this.S} ${j}, ${len}`);
     B.condBr(cont, lb, le);
     B.startBlock(lb);
     const cp = B.tmp();
     const c = B.tmp();
-    B.line(`${cp} = getelementptr inbounds i8, ptr ${data}, i64 ${j}`);
+    B.line(`${cp} = getelementptr inbounds i8, ptr ${data}, ${this.S} ${j}`);
     B.line(`${c} = load i8, ptr ${cp}`);
     this.putc(B, buf, c);
     const j2 = B.tmp();
-    B.line(`${j2} = add i64 ${j}, 1`);
-    B.line(`store i64 ${j2}, ptr ${jSlot}`);
+    B.line(`${j2} = add ${this.S} ${j}, 1`);
+    B.line(`store ${this.S} ${j2}, ptr ${jSlot}`);
     B.br(lc);
     B.startBlock(le);
   }
@@ -151,8 +156,8 @@ export class LlWalkers {
   }
 
   private jbEdgeIdx(B: BlockBuilder, idx: string): void {
-    this.host.declare(`declare void @scr_jb_edge_idx(ptr, i64)`);
-    B.line(`call void @scr_jb_edge_idx(ptr %b, i64 ${idx})`);
+    this.host.declare(`declare void @scr_jb_edge_idx(ptr, ${this.S})`);
+    B.line(`call void @scr_jb_edge_idx(ptr %b, ${this.S} ${idx})`);
   }
 
   /* ── type-directed JSON serializers (jsonWriteHelper, ported) ─────────── */
@@ -372,7 +377,7 @@ export class LlWalkers {
       B.line(`${val} = call ptr @scr_map_get_str_ref(ptr ${ovf}, ptr ${k}) ; value (+1)`);
     }
     // Undefined-valued entries drop, exactly the optional-field rule: a
-    // dyn value whose dyn kind is SCR_DYN_UNDEF (i32 at offset 8, enum
+    // dyn value whose dyn kind follows its size_t RC word (enum
     // member 6 — scr_runtime.h's ScrDynKind), or a union holding its
     // undefined arm.
     let skipUndef: string | null = null;
@@ -380,7 +385,7 @@ export class LlWalkers {
       const kp = B.tmp();
       const kd = B.tmp();
       const isu = B.tmp();
-      B.line(`${kp} = getelementptr inbounds i8, ptr ${val}, i64 8 ; ->kind`);
+      B.line(`${kp} = getelementptr inbounds i8, ptr ${val}, i64 ${this.abiOffset(8, 4)} ; ->kind`);
       B.line(`${kd} = load i32, ptr ${kp}`);
       B.line(`${isu} = icmp eq i32 ${kd}, 6 ; SCR_DYN_UNDEF (NULL is 0 — null members DO serialize)`);
       skipUndef = isu;
@@ -469,7 +474,7 @@ export class LlWalkers {
     B.startBlock(lj);
     if (cyclic) {
       const idx = B.tmp();
-      B.line(`${idx} = fptoui double ${i} to i64`);
+      B.line(`${idx} = fptoui double ${i} to ${this.S}`);
       this.jbEdgeIdx(B, idx);
     }
     if (elem.kind === "f64" || elem.kind === "bool") {
@@ -562,28 +567,28 @@ export class LlWalkers {
 
     // The newline + depth * indent writer, shared by the three break sites.
     this.defs.push(
-      `define internal void @sc_ji_ind(ptr %b, i64 %depth, ptr %ind, i64 %ilen) ${FN_ATTRS} { ; stringify gap indent`,
+      `define internal void @sc_ji_ind(ptr %b, ${this.S} %depth, ptr %ind, ${this.S} %ilen) ${FN_ATTRS} { ; stringify gap indent`,
       `entry:`,
       `  call void @scr_jb_putc(ptr %b, i8 10)`,
       `  br label %oc`,
       `oc:`,
-      `  %d = phi i64 [ 0, %entry ], [ %d2, %ie ]`,
-      `  %ocont = icmp ult i64 %d, %depth`,
+      `  %d = phi ${this.S} [ 0, %entry ], [ %d2, %ie ]`,
+      `  %ocont = icmp ult ${this.S} %d, %depth`,
       `  br i1 %ocont, label %ic0, label %done`,
       `ic0:`,
       `  br label %ic`,
       `ic:`,
-      `  %k = phi i64 [ 0, %ic0 ], [ %k2, %ib ]`,
-      `  %icont = icmp ult i64 %k, %ilen`,
+      `  %k = phi ${this.S} [ 0, %ic0 ], [ %k2, %ib ]`,
+      `  %icont = icmp ult ${this.S} %k, %ilen`,
       `  br i1 %icont, label %ib, label %ie`,
       `ib:`,
-      `  %cp = getelementptr inbounds i8, ptr %ind, i64 %k`,
+      `  %cp = getelementptr inbounds i8, ptr %ind, ${this.S} %k`,
       `  %c = load i8, ptr %cp`,
       `  call void @scr_jb_putc(ptr %b, i8 %c)`,
-      `  %k2 = add i64 %k, 1`,
+      `  %k2 = add ${this.S} %k, 1`,
       `  br label %ic`,
       `ie:`,
-      `  %d2 = add i64 %d, 1`,
+      `  %d2 = add ${this.S} %d, 1`,
       `  br label %oc`,
       `done:`,
       `  ret void`,
@@ -597,17 +602,17 @@ export class LlWalkers {
     const depth = "%depth";
     const instr = "%instr";
     const iSlot = "%i";
-    B.entryAllocas.push(`${depth} = alloca i64`, `${instr} = alloca i1`, `${iSlot} = alloca i64`);
+    B.entryAllocas.push(`${depth} = alloca ${this.S}`, `${instr} = alloca i1`, `${iSlot} = alloca ${this.S}`);
     B.line(`call void @scr_jb_init(ptr ${buf})`);
-    B.line(`store i64 0, ptr ${depth}`);
+    B.line(`store ${this.S} 0, ptr ${depth}`);
     B.line(`store i1 false, ptr ${instr}`);
-    B.line(`store i64 0, ptr ${iSlot}`);
+    B.line(`store ${this.S} 0, ptr ${iSlot}`);
     const np = B.tmp();
     const n = B.tmp();
     const data = B.tmp();
     B.line(`${np} = getelementptr inbounds %ScrStr, ptr %compact, i64 0, i32 1`);
-    B.line(`${n} = load i64, ptr ${np}`);
-    B.line(`${data} = getelementptr inbounds i8, ptr %compact, i64 24 ; ->data`);
+    B.line(`${n} = load ${this.S}, ptr ${np}`);
+    B.line(`${data} = getelementptr inbounds i8, ptr %compact, i64 ${this.abiOffset(24, 12)} ; ->data`);
 
     const loop = B.newLabel("ji.c");
     const body = B.newLabel("ji.b");
@@ -617,13 +622,13 @@ export class LlWalkers {
     B.startBlock(loop);
     const i = B.tmp();
     const cont = B.tmp();
-    B.line(`${i} = load i64, ptr ${iSlot}`);
-    B.line(`${cont} = icmp ult i64 ${i}, ${n}`);
+    B.line(`${i} = load ${this.S}, ptr ${iSlot}`);
+    B.line(`${cont} = icmp ult ${this.S} ${i}, ${n}`);
     B.condBr(cont, body, end);
     B.startBlock(body);
     const cp = B.tmp();
     const c = B.tmp();
-    B.line(`${cp} = getelementptr inbounds i8, ptr ${data}, i64 ${i}`);
+    B.line(`${cp} = getelementptr inbounds i8, ptr ${data}, ${this.S} ${i}`);
     B.line(`${c} = load i8, ptr ${cp}`);
     const ins = B.tmp();
     B.line(`${ins} = load i1, ptr ${instr}`);
@@ -639,8 +644,8 @@ export class LlWalkers {
     const hasNext = B.tmp();
     const escTake = B.tmp();
     B.line(`${isbs} = icmp eq i8 ${c}, 92 ; backslash`);
-    B.line(`${i1p} = add i64 ${i}, 1`);
-    B.line(`${hasNext} = icmp ult i64 ${i1p}, ${n}`);
+    B.line(`${i1p} = add ${this.S} ${i}, 1`);
+    B.line(`${hasNext} = icmp ult ${this.S} ${i1p}, ${n}`);
     B.line(`${escTake} = and i1 ${isbs}, ${hasNext}`);
     const esc = B.newLabel("ji.se");
     const noesc = B.newLabel("ji.sq");
@@ -648,10 +653,10 @@ export class LlWalkers {
     B.startBlock(esc);
     const ecp = B.tmp();
     const ec = B.tmp();
-    B.line(`${ecp} = getelementptr inbounds i8, ptr ${data}, i64 ${i1p}`);
+    B.line(`${ecp} = getelementptr inbounds i8, ptr ${data}, ${this.S} ${i1p}`);
     B.line(`${ec} = load i8, ptr ${ecp}`);
     this.putc(B, buf, ec);
-    B.line(`store i64 ${i1p}, ptr ${iSlot} ; consumed the escaped char`);
+    B.line(`store ${this.S} ${i1p}, ptr ${iSlot} ; consumed the escaped char`);
     B.br(inc);
     B.startBlock(noesc);
     const isq = B.tmp();
@@ -686,8 +691,8 @@ export class LlWalkers {
       this.putc(B, buf, c);
       const i1b = B.tmp();
       const hasNextB = B.tmp();
-      B.line(`${i1b} = add i64 ${i}, 1`);
-      B.line(`${hasNextB} = icmp ult i64 ${i1b}, ${n}`);
+      B.line(`${i1b} = add ${this.S} ${i}, 1`);
+      B.line(`${hasNextB} = icmp ult ${this.S} ${i1b}, ${n}`);
       const chk = B.newLabel("ji.opc");
       const deep = B.newLabel("ji.opd");
       const inline = B.newLabel("ji.opi");
@@ -696,25 +701,25 @@ export class LlWalkers {
       const ncp = B.tmp();
       const nc = B.tmp();
       const isClose = B.tmp();
-      B.line(`${ncp} = getelementptr inbounds i8, ptr ${data}, i64 ${i1b}`);
+      B.line(`${ncp} = getelementptr inbounds i8, ptr ${data}, ${this.S} ${i1b}`);
       B.line(`${nc} = load i8, ptr ${ncp}`);
       B.line(`${isClose} = icmp eq i8 ${nc}, ${closer}`);
       B.condBr(isClose, inline, deep);
       B.startBlock(inline);
       const nc2p = B.tmp();
       const nc2 = B.tmp();
-      B.line(`${nc2p} = getelementptr inbounds i8, ptr ${data}, i64 ${i1b}`);
+      B.line(`${nc2p} = getelementptr inbounds i8, ptr ${data}, ${this.S} ${i1b}`);
       B.line(`${nc2} = load i8, ptr ${nc2p}`);
       this.putc(B, buf, nc2);
-      B.line(`store i64 ${i1b}, ptr ${iSlot} ; empty {} / [] stay inline, like Node`);
+      B.line(`store ${this.S} ${i1b}, ptr ${iSlot} ; empty {} / [] stay inline, like Node`);
       B.br(inc);
       B.startBlock(deep);
       const d0 = B.tmp();
       const d1 = B.tmp();
-      B.line(`${d0} = load i64, ptr ${depth}`);
-      B.line(`${d1} = add i64 ${d0}, 1`);
-      B.line(`store i64 ${d1}, ptr ${depth}`);
-      B.line(`call void @sc_ji_ind(ptr ${buf}, i64 ${d1}, ptr %ind, i64 %ilen)`);
+      B.line(`${d0} = load ${this.S}, ptr ${depth}`);
+      B.line(`${d1} = add ${this.S} ${d0}, 1`);
+      B.line(`store ${this.S} ${d1}, ptr ${depth}`);
+      B.line(`call void @sc_ji_ind(ptr ${buf}, ${this.S} ${d1}, ptr %ind, ${this.S} %ilen)`);
       B.br(inc);
     };
     openBody(lOpenB, 125); // '{' closes with '}'
@@ -723,18 +728,18 @@ export class LlWalkers {
     B.startBlock(lClose);
     const dc0 = B.tmp();
     const dc1 = B.tmp();
-    B.line(`${dc0} = load i64, ptr ${depth}`);
-    B.line(`${dc1} = sub i64 ${dc0}, 1`);
-    B.line(`store i64 ${dc1}, ptr ${depth}`);
-    B.line(`call void @sc_ji_ind(ptr ${buf}, i64 ${dc1}, ptr %ind, i64 %ilen)`);
+    B.line(`${dc0} = load ${this.S}, ptr ${depth}`);
+    B.line(`${dc1} = sub ${this.S} ${dc0}, 1`);
+    B.line(`store ${this.S} ${dc1}, ptr ${depth}`);
+    B.line(`call void @sc_ji_ind(ptr ${buf}, ${this.S} ${dc1}, ptr %ind, ${this.S} %ilen)`);
     this.putc(B, buf, c);
     B.br(inc);
 
     B.startBlock(lComma);
     this.putc(B, buf, "44");
     const dm = B.tmp();
-    B.line(`${dm} = load i64, ptr ${depth}`);
-    B.line(`call void @sc_ji_ind(ptr ${buf}, i64 ${dm}, ptr %ind, i64 %ilen)`);
+    B.line(`${dm} = load ${this.S}, ptr ${depth}`);
+    B.line(`call void @sc_ji_ind(ptr ${buf}, ${this.S} ${dm}, ptr %ind, ${this.S} %ilen)`);
     B.br(inc);
 
     B.startBlock(lColon);
@@ -749,9 +754,9 @@ export class LlWalkers {
     B.startBlock(inc);
     const iN = B.tmp();
     const iN2 = B.tmp();
-    B.line(`${iN} = load i64, ptr ${iSlot}`);
-    B.line(`${iN2} = add i64 ${iN}, 1`);
-    B.line(`store i64 ${iN2}, ptr ${iSlot}`);
+    B.line(`${iN} = load ${this.S}, ptr ${iSlot}`);
+    B.line(`${iN2} = add ${this.S} ${iN}, 1`);
+    B.line(`store ${this.S} ${iN2}, ptr ${iSlot}`);
     B.br(loop);
     B.startBlock(end);
     const r = B.tmp();
@@ -759,7 +764,7 @@ export class LlWalkers {
     B.terminate(`ret ptr ${r}`);
 
     this.defs.push(
-      `define internal ptr @${name}(ptr %compact, ptr %ind, i64 %ilen) ${FN_ATTRS} { ; stringify space re-indent (Node's gap algorithm)`,
+      `define internal ptr @${name}(ptr %compact, ptr %ind, ${this.S} %ilen) ${FN_ATTRS} { ; stringify space re-indent (Node's gap algorithm)`,
       B.render(),
       `}`,
       ``,

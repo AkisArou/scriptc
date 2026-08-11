@@ -11,7 +11,8 @@
  *
  * dyn layout facts this file compiles against (scr_runtime.h):
  *   ScrDyn   { size_t rc; ScrDynKind kind; bool buffer; union v; }
- *            kind at +8 (i32), buffer at +12 (i8), v at +16.
+ *            v is naturally 8-byte aligned; size-bearing offsets below
+ *            are selected from the target C ABI.
  *            v.num double | v.b i8 | v.str/v.bytes ptr at +16;
  *            v.arr { len +16, cap +24, items +32 };
  *            v.obj { len +16, cap +24, entries +32 };
@@ -69,10 +70,6 @@ function f64Lit(n: number): string {
 
 const FN_ATTRS = "#0";
 
-/** i64 spelling of (SIZE_MAX - 9) / 10 — the canonical-index overflow
- * guard the C helpers compare against. */
-const IDX_MAX_DIV10 = "1844674407370955160";
-
 export class LlDyn {
   private readonly dynMatchers = new Map<string, string>();
   private readonly dynBuilders = new Map<string, string>();
@@ -88,6 +85,14 @@ export class LlDyn {
 
   constructor(private readonly host: DynHost) {}
 
+  private get S(): "i32" | "i64" { return this.host.sizeType; }
+  private abiOffset(native64: number, wasm32: number): number {
+    return this.S === "i32" ? wasm32 : native64;
+  }
+  private get indexMaxDiv10(): string {
+    return this.S === "i32" ? "429496728" : "1844674407370955160";
+  }
+
   /** The value LLVM type of a dynCheck result / toDyn operand for `t`. */
   private valTy(t: IrType): string {
     return t.kind === "f64" ? "double" : t.kind === "bool" ? "i1" : "ptr";
@@ -95,11 +100,11 @@ export class LlDyn {
 
   /* ── dyn node plumbing ─────────────────────────────────────────────── */
 
-  /** Loads a dyn node's kind tag (i32 at +8). */
+  /** Loads a dyn node's kind tag (after the size_t rc word). */
   private kindOf(B: BlockBuilder, d: string): string {
     const p = B.tmp();
     const k = B.tmp();
-    B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 8 ; ->kind`);
+    B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 ${this.abiOffset(8, 4)} ; ->kind`);
     B.line(`${k} = load i32, ptr ${p}`);
     return k;
   }
@@ -124,20 +129,20 @@ export class LlDyn {
     return b;
   }
 
-  /** Loads v.arr/v.obj length (i64 at +16). */
+  /** Loads v.arr/v.obj length (size_t at +16). */
   private lenOf(B: BlockBuilder, d: string): string {
     const p = B.tmp();
     const n = B.tmp();
     B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 16 ; ->v.arr.len`);
-    B.line(`${n} = load i64, ptr ${p}`);
+    B.line(`${n} = load ${this.S}, ptr ${p}`);
     return n;
   }
 
-  /** Loads v.arr.items / v.obj.entries (ptr at +32). */
+  /** Loads v.arr.items / v.obj.entries after two size_t fields. */
   private itemsOf(B: BlockBuilder, d: string): string {
     const p = B.tmp();
     const it = B.tmp();
-    B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 32 ; ->v.arr.items`);
+    B.line(`${p} = getelementptr inbounds i8, ptr ${d}, i64 ${this.abiOffset(32, 24)} ; ->v.arr.items`);
     B.line(`${it} = load ptr, ptr ${p}`);
     return it;
   }
@@ -146,7 +151,7 @@ export class LlDyn {
   private itemAt(B: BlockBuilder, items: string, i: string): string {
     const p = B.tmp();
     const e = B.tmp();
-    B.line(`${p} = getelementptr inbounds ptr, ptr ${items}, i64 ${i}`);
+    B.line(`${p} = getelementptr inbounds ptr, ptr ${items}, ${this.S} ${i}`);
     B.line(`${e} = load ptr, ptr ${p}`);
     return e;
   }
@@ -156,17 +161,17 @@ export class LlDyn {
   private entryAt(B: BlockBuilder, entries: string, i: string): { key: string; keyLen: string; value: string } {
     const off = B.tmp();
     const base = B.tmp();
-    B.line(`${off} = mul i64 ${i}, 24 ; sizeof(ScrDynEntry)`);
-    B.line(`${base} = getelementptr inbounds i8, ptr ${entries}, i64 ${off}`);
+    B.line(`${off} = mul ${this.S} ${i}, ${this.abiOffset(24, 12)} ; sizeof(ScrDynEntry)`);
+    B.line(`${base} = getelementptr inbounds i8, ptr ${entries}, ${this.S} ${off}`);
     const key = B.tmp();
     B.line(`${key} = load ptr, ptr ${base}`);
     const klp = B.tmp();
     const keyLen = B.tmp();
-    B.line(`${klp} = getelementptr inbounds i8, ptr ${base}, i64 8`);
-    B.line(`${keyLen} = load i64, ptr ${klp}`);
+    B.line(`${klp} = getelementptr inbounds i8, ptr ${base}, i64 ${this.abiOffset(8, 4)}`);
+    B.line(`${keyLen} = load ${this.S}, ptr ${klp}`);
     const vp = B.tmp();
     const value = B.tmp();
-    B.line(`${vp} = getelementptr inbounds i8, ptr ${base}, i64 16`);
+    B.line(`${vp} = getelementptr inbounds i8, ptr ${base}, i64 ${this.abiOffset(16, 8)}`);
     B.line(`${value} = load ptr, ptr ${vp}`);
     return { key, keyLen, value };
   }
@@ -178,8 +183,8 @@ export class LlDyn {
     const len = B.tmp();
     const data = B.tmp();
     B.line(`${lp} = getelementptr inbounds %ScrStr, ptr ${s}, i64 0, i32 1`);
-    B.line(`${len} = load i64, ptr ${lp}`);
-    B.line(`${data} = getelementptr inbounds i8, ptr ${s}, i64 24 ; ->data`);
+    B.line(`${len} = load ${this.S}, ptr ${lp}`);
+    B.line(`${data} = getelementptr inbounds i8, ptr ${s}, i64 ${this.abiOffset(24, 12)} ; ->data`);
     return { len, data };
   }
 
@@ -201,10 +206,10 @@ export class LlDyn {
 
   /** scr_dyn_obj_get with a compile-time key: borrowed member or null. */
   private objGetLit(B: BlockBuilder, d: string, key: string): string {
-    this.host.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, i64)`);
+    this.host.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, ${this.S})`);
     const t = B.tmp();
     const len = Buffer.byteLength(key, "utf8");
-    B.line(`${t} = call ptr @scr_dyn_obj_get(ptr ${d}, ptr ${this.host.cstr(key)}, i64 ${len}) ; .${key}`);
+    B.line(`${t} = call ptr @scr_dyn_obj_get(ptr ${d}, ptr ${this.host.cstr(key)}, ${this.S} ${len}) ; .${key}`);
     return t;
   }
 
@@ -213,8 +218,8 @@ export class LlDyn {
     this.host.declare(`declare void @scr_jb_putc(ptr, i8)`);
     const { len, data } = this.strParts(B, s);
     const jSlot = B.slot();
-    B.entryAllocas.push(`${jSlot} = alloca i64`);
-    B.line(`store i64 0, ptr ${jSlot}`);
+    B.entryAllocas.push(`${jSlot} = alloca ${this.S}`);
+    B.line(`store ${this.S} 0, ptr ${jSlot}`);
     const lc = B.newLabel("dps.c");
     const lb = B.newLabel("dps.b");
     const le = B.newLabel("dps.e");
@@ -222,18 +227,18 @@ export class LlDyn {
     B.startBlock(lc);
     const j = B.tmp();
     const cont = B.tmp();
-    B.line(`${j} = load i64, ptr ${jSlot}`);
-    B.line(`${cont} = icmp ult i64 ${j}, ${len}`);
+    B.line(`${j} = load ${this.S}, ptr ${jSlot}`);
+    B.line(`${cont} = icmp ult ${this.S} ${j}, ${len}`);
     B.condBr(cont, lb, le);
     B.startBlock(lb);
     const cp = B.tmp();
     const c = B.tmp();
-    B.line(`${cp} = getelementptr inbounds i8, ptr ${data}, i64 ${j}`);
+    B.line(`${cp} = getelementptr inbounds i8, ptr ${data}, ${this.S} ${j}`);
     B.line(`${c} = load i8, ptr ${cp}`);
     B.line(`call void @scr_jb_putc(ptr ${buf}, i8 ${c})`);
     const j2 = B.tmp();
-    B.line(`${j2} = add i64 ${j}, 1`);
-    B.line(`store i64 ${j2}, ptr ${jSlot}`);
+    B.line(`${j2} = add ${this.S} ${j}, 1`);
+    B.line(`store ${this.S} ${j2}, ptr ${jSlot}`);
     B.br(lc);
     B.startBlock(le);
   }
@@ -243,12 +248,12 @@ export class LlDyn {
     B.line(`call void @scr_jb_puts(ptr ${buf}, ptr ${this.host.cstr(text)}) ; ${JSON.stringify(text)}`);
   }
 
-  /** An i64 counting loop: emits header/body, calls `body(i)`, closes.
+  /** A size_t counting loop: emits header/body, calls `body(i)`, closes.
    * The body must not terminate its final block. */
   private i64Loop(B: BlockBuilder, hint: string, limit: string, body: (i: string, brNext: () => void, next: string) => void): void {
     const iSlot = B.slot();
-    B.entryAllocas.push(`${iSlot} = alloca i64`);
-    B.line(`store i64 0, ptr ${iSlot}`);
+    B.entryAllocas.push(`${iSlot} = alloca ${this.S}`);
+    B.line(`store ${this.S} 0, ptr ${iSlot}`);
     const lc = B.newLabel(`${hint}.c`);
     const lb = B.newLabel(`${hint}.b`);
     const ln = B.newLabel(`${hint}.n`);
@@ -257,16 +262,16 @@ export class LlDyn {
     B.startBlock(lc);
     const i = B.tmp();
     const cont = B.tmp();
-    B.line(`${i} = load i64, ptr ${iSlot}`);
-    B.line(`${cont} = icmp ult i64 ${i}, ${limit}`);
+    B.line(`${i} = load ${this.S}, ptr ${iSlot}`);
+    B.line(`${cont} = icmp ult ${this.S} ${i}, ${limit}`);
     B.condBr(cont, lb, le);
     B.startBlock(lb);
     body(i, () => B.br(ln), ln);
     B.br(ln);
     B.startBlock(ln);
     const i2 = B.tmp();
-    B.line(`${i2} = add i64 ${i}, 1`);
-    B.line(`store i64 ${i2}, ptr ${iSlot}`);
+    B.line(`${i2} = add ${this.S} ${i}, 1`);
+    B.line(`store ${this.S} ${i2}, ptr ${iSlot}`);
     B.br(lc);
     B.startBlock(le);
   }
@@ -337,10 +342,10 @@ export class LlDyn {
     this.dynMatchers.set(key, name);
     const B = new BlockBuilder();
     if (isRefCounted(t) && t.kind !== "dyn") {
-      this.host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, i64)`);
+      this.host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, ${this.S})`);
       const matched = B.tmp();
       B.line(
-        `${matched} = call zeroext i1 @scr_dyn_typed_ref_is(ptr %d, ptr ${this.host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`,
+        `${matched} = call zeroext i1 @scr_dyn_typed_ref_is(ptr %d, ptr ${this.host.cstr(key)}, ${this.S} ${Buffer.byteLength(key, "utf8")})`,
       );
       const lRef = B.newLabel("dm.tr");
       const lNext = B.newLabel("dm.nt");
@@ -412,7 +417,7 @@ export class LlDyn {
           B.startBlock(l1);
           const len = this.lenOf(B, "%d");
           const lenOk = B.tmp();
-          B.line(`${lenOk} = icmp eq i64 ${len}, ${byIndex.length}`);
+          B.line(`${lenOk} = icmp eq ${this.S} ${len}, ${byIndex.length}`);
           const l2 = B.newLabel("dm.l");
           B.condBr(lenOk, l2, fail);
           B.startBlock(l2);
@@ -459,7 +464,7 @@ export class LlDyn {
         // Index-signature shapes: UNDECLARED keys must fit the overflow
         // value type. A dyn value type accepts anything.
         if (shape.indexValue && shape.indexValue.kind !== "dyn") {
-          this.host.declare(`declare i32 @memcmp(ptr, ptr, i64)`);
+          this.host.declare(`declare i32 @memcmp(ptr, ptr, ${this.S})`);
           const n = this.lenOf(B, "%d");
           const entries = this.itemsOf(B, "%d");
           this.i64Loop(B, "dm.ov", n, (i, brNext) => {
@@ -468,14 +473,14 @@ export class LlDyn {
             for (const f of shape.fields) {
               const klen = Buffer.byteLength(f.name, "utf8");
               const lenEq = B.tmp();
-              B.line(`${lenEq} = icmp eq i64 ${ent.keyLen}, ${klen}`);
+              B.line(`${lenEq} = icmp eq ${this.S} ${ent.keyLen}, ${klen}`);
               const lCmp = B.newLabel("dm.kc");
               const lNo = B.newLabel("dm.kn");
               B.condBr(lenEq, lCmp, lNo);
               B.startBlock(lCmp);
               const c = B.tmp();
               const same = B.tmp();
-              B.line(`${c} = call i32 @memcmp(ptr ${ent.key}, ptr ${this.host.cstr(f.name)}, i64 ${klen}) ; ${f.name}`);
+              B.line(`${c} = call i32 @memcmp(ptr ${ent.key}, ptr ${this.host.cstr(f.name)}, ${this.S} ${klen}) ; ${f.name}`);
               B.line(`${same} = icmp eq i32 ${c}, 0`);
               const lNo2 = B.newLabel("dm.kn");
               const skip = B.newLabel("dm.ks");
@@ -569,11 +574,11 @@ export class LlDyn {
     const want = host.cstr(this.dynDesc(t));
     const B = new BlockBuilder();
     if (isRefCounted(t) && t.kind !== "dyn") {
-      host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, i64)`);
+      host.declare(`declare zeroext i1 @scr_dyn_typed_ref_is(ptr, ptr, ${host.sizeType})`);
       host.declare(`declare ptr @scr_dyn_typed_ref_unbox(ptr)`);
       const matched = B.tmp();
       B.line(
-        `${matched} = call zeroext i1 @scr_dyn_typed_ref_is(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`,
+        `${matched} = call zeroext i1 @scr_dyn_typed_ref_is(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")})`,
       );
       const lRef = B.newLabel("dc.tr");
       const lNext = B.newLabel("dc.nt");
@@ -585,8 +590,8 @@ export class LlDyn {
       B.startBlock(lNext);
       if (t.kind !== "union") {
         host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
-        host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, i64)`);
-        host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, i64, ptr, ptr, ptr)`);
+        host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, ${host.sizeType})`);
+        host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, ${host.sizeType}, ptr, ptr, ptr)`);
         host.declare(`declare void @scr_dyn_release_v(ptr)`);
         const rc = vAdapters(host, t);
         const kind = this.kindOf(B, "%d");
@@ -597,7 +602,7 @@ export class LlDyn {
         B.condBr(capsule, lCapsule, lPlain);
         B.startBlock(lCapsule);
         const cached = B.tmp();
-        B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
+        B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")})`);
         const hasCached = B.tmp();
         B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
         if (t.kind !== "record" && t.kind !== "array") {
@@ -657,8 +662,8 @@ export class LlDyn {
                   : []),
               ]
             : [
-                { index: 1, type: "i64" as const, name: "length" },
-                { index: 2, type: "i64" as const, name: "capacity" },
+                { index: 1, type: host.sizeType, name: "length" },
+                { index: 2, type: host.sizeType, name: "capacity" },
                 { index: 7, type: "ptr" as const, name: "data" },
               ];
           members.forEach((member) => {
@@ -679,14 +684,14 @@ export class LlDyn {
           B.line(`call void ${releaseSym(host, t)}(ptr ${checked})`);
           B.terminate(`ret ptr ${cached}`);
           B.startBlock(lCache);
-          B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+          B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
           B.terminate(`ret ptr ${checked}`);
         } else {
           const lCache = B.newLabel("dc.tr.put");
           const lReturn = B.newLabel("dc.tr.ret");
           B.condBr(ok, lCache, lReturn);
           B.startBlock(lCache);
-          B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+          B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
           B.br(lReturn);
           B.startBlock(lReturn);
           B.terminate(`ret ptr ${checked}`);
@@ -802,7 +807,7 @@ export class LlDyn {
           B.line(`${kp} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 1`);
           B.line(`store ptr ${keyText === null ? "null" : host.cstr(keyText)}, ptr ${kp}`);
           B.line(`${ip} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 2`);
-          B.line(`store i64 ${index}, ptr ${ip}`);
+          B.line(`store ${host.sizeType} ${index}, ptr ${ip}`);
         };
         const setPathKeyPtr = (keyPtr: string): void => {
           const pp = B.tmp();
@@ -813,7 +818,7 @@ export class LlDyn {
           B.line(`${kp} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 1`);
           B.line(`store ptr ${keyPtr}, ptr ${kp}`);
           B.line(`${ip} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 2`);
-          B.line(`store i64 0, ptr ${ip}`);
+          B.line(`store ${host.sizeType} 0, ptr ${ip}`);
         };
         const storeInto = (fieldName: string, ft: IrType, value: string): void => {
           const idx = fieldIndex.get(fieldName)!;
@@ -834,7 +839,7 @@ export class LlDyn {
           requireKind(DK.ARR, "dct");
           const len = this.lenOf(B, "%d");
           const lenOk = B.tmp();
-          B.line(`${lenOk} = icmp eq i64 ${len}, ${byIndex.length}`);
+          B.line(`${lenOk} = icmp eq ${host.sizeType} ${len}, ${byIndex.length}`);
           const lGo = B.newLabel("dct.g");
           const lAr = B.newLabel("dct.a");
           B.condBr(lenOk, lGo, lAr);
@@ -916,8 +921,8 @@ export class LlDyn {
         // overflow map.
         if (shape.indexValue) {
           const iv = shape.indexValue;
-          host.declare(`declare i32 @memcmp(ptr, ptr, i64)`);
-          host.declare(`declare ptr @scr_str_new(ptr, i64)`);
+          host.declare(`declare i32 @memcmp(ptr, ptr, ${host.sizeType})`);
+          host.declare(`declare ptr @scr_str_new(ptr, ${host.sizeType})`);
           host.declare(`declare void @scr_str_release(ptr)`);
           const ovfp = B.tmp();
           const ovf = B.tmp();
@@ -930,14 +935,14 @@ export class LlDyn {
             for (const f of shape.fields) {
               const klen = Buffer.byteLength(f.name, "utf8");
               const lenEq = B.tmp();
-              B.line(`${lenEq} = icmp eq i64 ${ent.keyLen}, ${klen}`);
+              B.line(`${lenEq} = icmp eq ${host.sizeType} ${ent.keyLen}, ${klen}`);
               const lCmp = B.newLabel("dcv.kc");
               const lNo = B.newLabel("dcv.kn");
               B.condBr(lenEq, lCmp, lNo);
               B.startBlock(lCmp);
               const c = B.tmp();
               const same = B.tmp();
-              B.line(`${c} = call i32 @memcmp(ptr ${ent.key}, ptr ${host.cstr(f.name)}, i64 ${klen}) ; ${f.name}`);
+              B.line(`${c} = call i32 @memcmp(ptr ${ent.key}, ptr ${host.cstr(f.name)}, ${host.sizeType} ${klen}) ; ${f.name}`);
               B.line(`${same} = icmp eq i32 ${c}, 0`);
               const skip = B.newLabel("dcv.ks");
               const lNo2 = B.newLabel("dcv.kn");
@@ -958,7 +963,7 @@ export class LlDyn {
               this.pendingBail(B, "dcv", releaseR, "ptr null");
             }
             const ek = B.tmp();
-            B.line(`${ek} = call ptr @scr_str_new(ptr ${ent.key}, i64 ${ent.keyLen})`);
+            B.line(`${ek} = call ptr @scr_str_new(ptr ${ent.key}, ${host.sizeType} ${ent.keyLen})`);
             if (iv.kind === "f64") {
               host.declare(`declare void @scr_map_set_str_f64(ptr, ptr, double)`);
               B.line(`call void @scr_map_set_str_f64(ptr ${ovf}, ptr ${ek}, double ${ev})`);
@@ -999,7 +1004,7 @@ export class LlDyn {
           B.line(`${kp} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 1`);
           B.line(`store ptr null, ptr ${kp}`);
           B.line(`${ip} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 2`);
-          B.line(`store i64 ${i}, ptr ${ip}`);
+          B.line(`store ${host.sizeType} ${i}, ptr ${ip}`);
           const e = this.itemAt(B, items, i);
           const v = B.tmp();
           B.line(`${v} = call ${this.valTy(elem)} @${c}(ptr ${e}, ptr ${pathSlot})`);
@@ -1062,8 +1067,8 @@ export class LlDyn {
         // snapshot (the compiler's width-coercion stance, rather than a
         // live narrowed alias).
         host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
-        host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, i64)`);
-        host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, i64, ptr, ptr, ptr)`);
+        host.declare(`declare ptr @scr_dyn_typed_ref_cached_cast(ptr, ptr, ${host.sizeType})`);
+        host.declare(`declare void @scr_dyn_typed_ref_cache_cast(ptr, ptr, ${host.sizeType}, ptr, ptr, ptr)`);
         host.declare(`declare void @scr_dyn_release_v(ptr)`);
         host.declare(`declare void @scr_union_release(ptr)`);
         const rc = vAdapters(host, t);
@@ -1075,7 +1080,7 @@ export class LlDyn {
         B.condBr(capsule, lCapsule, lFail);
         B.startBlock(lCapsule);
         const cached = B.tmp();
-        B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")})`);
+        B.line(`${cached} = call ptr @scr_dyn_typed_ref_cached_cast(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")})`);
         const hasCached = B.tmp();
         B.line(`${hasCached} = icmp ne ptr ${cached}, null`);
         const materialized = B.tmp();
@@ -1123,7 +1128,7 @@ export class LlDyn {
         B.line(`call void @scr_union_release(ptr ${checked})`);
         B.terminate(`ret ptr ${cached}`);
         B.startBlock(lCache);
-        B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, i64 ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
+        B.line(`call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release})`);
         B.terminate(`ret ptr ${checked}`);
         B.startBlock(lFail);
         B.line(`call void @scr_dyn_check_fail(ptr %path, ptr ${want}, ptr %d)`);
@@ -1141,7 +1146,7 @@ export class LlDyn {
         host.declare(`declare i32 @strcmp(ptr, ptr)`);
         const sigp = B.tmp();
         const sig = B.tmp();
-        B.line(`${sigp} = getelementptr inbounds i8, ptr %d, i64 32 ; ->v.fn.sig`);
+        B.line(`${sigp} = getelementptr inbounds i8, ptr %d, i64 ${this.abiOffset(32, 24)} ; ->v.fn.sig`);
         B.line(`${sig} = load ptr, ptr ${sigp}`);
         const cmp = B.tmp();
         const same = B.tmp();
@@ -1160,17 +1165,17 @@ export class LlDyn {
         B.line(`${r} = call ptr @scr_closure_retain_v(ptr ${clo})`);
         B.terminate(`ret ptr ${r}`);
         B.startBlock(lWrap);
-        host.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+        host.declare(`declare ptr @scr_closure_new(ptr, ${host.sizeType})`);
         host.declare(`declare ptr @scr_box_new_obj(ptr, ptr, ptr)`);
         host.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
         host.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
         host.declare(`declare void @scr_dyn_release_v(ptr)`);
         const a = B.tmp();
-        B.line(`${a} = call ptr @scr_closure_new(ptr @${adapter}, i64 1)`);
+        B.line(`${a} = call ptr @scr_closure_new(ptr @${adapter}, ${host.sizeType} 1)`);
         const box = B.tmp();
         B.line(`${box} = call ptr @scr_box_new_obj(ptr @scr_dyn_retain_v, ptr @scr_dyn_release_v, ptr null)`);
         const capp = B.tmp();
-        B.line(`${capp} = getelementptr inbounds i8, ptr ${a}, i64 32 ; caps[0]`);
+        B.line(`${capp} = getelementptr inbounds %ScrClosure, ptr ${a}, i64 1 ; caps[0]`);
         B.line(`store ptr ${box}, ptr ${capp}`);
         const rd = this.retainDyn(B, "%d");
         B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${rd})`);
@@ -1284,7 +1289,7 @@ export class LlDyn {
           B.line(`${b} = trunc i8 ${raw} to i1`);
           return b;
         };
-        host.declare(`declare void @scr_dyn_obj_set(ptr, ptr, i64, ptr)`);
+        host.declare(`declare void @scr_dyn_obj_set(ptr, ptr, ${host.sizeType}, ptr)`);
         // CYCLE-CAPABLE shapes guard the deep copy: enter TRAPS on a value
         // already being converted (a cyclic value has no finite dyn copy —
         // SEMANTICS.md; the C emitter's contract exactly).
@@ -1343,7 +1348,7 @@ export class LlDyn {
           const fv = loadFieldOf(f.name, f.type);
           const conv = B.tmp();
           B.line(`${conv} = call ptr @${this.toDynHelper(f.type)}(${this.valTy(f.type)} ${fv})`);
-          B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${host.cstr(f.name)}, i64 ${klen}, ptr ${conv}) ; ${f.name}`);
+          B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${host.cstr(f.name)}, ${host.sizeType} ${klen}, ptr ${conv}) ; ${f.name}`);
         }
         if (shape.indexValue) {
           const iv = shape.indexValue;
@@ -1400,20 +1405,20 @@ export class LlDyn {
               host.declare(`declare ptr @scr_dyn_new_bool(i1 zeroext)`);
               B.line(`${boxed} = call ptr @scr_dyn_new_bool(i1 ${val})`);
             }
-            B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${kdata}, i64 ${klen}, ptr ${boxed})`);
+            B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${kdata}, ${host.sizeType} ${klen}, ptr ${boxed})`);
           } else if (iv.kind === "dyn") {
             // get_str_ref returns +1 — exactly the ownership obj_set takes.
             host.declare(`declare ptr @scr_map_get_str_ref(ptr, ptr)`);
             const hit = B.tmp();
             B.line(`${hit} = call ptr @scr_map_get_str_ref(ptr ${ovf}, ptr ${k})`);
-            B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${kdata}, i64 ${klen}, ptr ${hit})`);
+            B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${kdata}, ${host.sizeType} ${klen}, ptr ${hit})`);
           } else {
             host.declare(`declare ptr @scr_map_get_str_ref(ptr, ptr)`);
             const hit = B.tmp();
             B.line(`${hit} = call ptr @scr_map_get_str_ref(ptr ${ovf}, ptr ${k})`);
             const conv = B.tmp();
             B.line(`${conv} = call ptr @${this.toDynHelper(iv)}(ptr ${hit})`);
-            B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${kdata}, i64 ${klen}, ptr ${conv})`);
+            B.line(`call void @scr_dyn_obj_set(ptr ${d}, ptr ${kdata}, ${host.sizeType} ${klen}, ptr ${conv})`);
             B.line(`call void ${releaseSym(host, iv)}(ptr ${hit})`);
           }
           B.line(`call void @scr_str_release(ptr ${k})`);
@@ -1791,7 +1796,7 @@ export class LlDyn {
         const items = this.itemsOf(B, "%d");
         this.i64Loop(B, "ds.ar", n, (i, brNext) => {
           const nz = B.tmp();
-          B.line(`${nz} = icmp ugt i64 ${i}, 0`);
+          B.line(`${nz} = icmp ugt ${this.S} ${i}, 0`);
           const lcm = B.newLabel("ds.cm");
           const lel = B.newLabel("ds.el");
           B.condBr(nz, lcm, lel);
@@ -1886,7 +1891,7 @@ export class LlDyn {
             B.startBlock(lt);
             const { len } = this.strParts(B, s);
             const nz = B.tmp();
-            B.line(`${nz} = icmp ne i64 ${len}, 0`);
+            B.line(`${nz} = icmp ne ${this.S} ${len}, 0`);
             B.line(`store i1 ${nz}, ptr ${slot}`);
             B.br(lj);
             B.startBlock(lj);
@@ -1916,7 +1921,7 @@ export class LlDyn {
         const bufp = B.tmp();
         const bufRaw = B.tmp();
         const isBuf = B.tmp();
-        B.line(`${bufp} = getelementptr inbounds i8, ptr %d, i64 12 ; ->buffer`);
+        B.line(`${bufp} = getelementptr inbounds i8, ptr %d, i64 ${this.abiOffset(12, 8)} ; ->buffer`);
         B.line(`${bufRaw} = load i8, ptr ${bufp}`);
         B.line(`${isBuf} = icmp ne i8 ${bufRaw}, 0`);
         const lBuf = B.newLabel("ds.bu");
@@ -1937,13 +1942,13 @@ export class LlDyn {
         const blen = B.tmp();
         const bdatap = B.tmp();
         const bdata = B.tmp();
-        B.line(`${blenp} = getelementptr inbounds i8, ptr ${bts}, i64 8 ; ->len`);
-        B.line(`${blen} = load i64, ptr ${blenp}`);
-        B.line(`${bdatap} = getelementptr inbounds i8, ptr ${bts}, i64 24 ; ->data`);
+        B.line(`${blenp} = getelementptr inbounds i8, ptr ${bts}, i64 ${this.abiOffset(8, 4)} ; ->len`);
+        B.line(`${blen} = load ${this.S}, ptr ${blenp}`);
+        B.line(`${bdatap} = getelementptr inbounds i8, ptr ${bts}, i64 ${this.abiOffset(24, 12)} ; ->data`);
         B.line(`${bdata} = load ptr, ptr ${bdatap}`);
         this.i64Loop(B, "ds.by", blen, (i) => {
           const nz = B.tmp();
-          B.line(`${nz} = icmp ugt i64 ${i}, 0`);
+          B.line(`${nz} = icmp ugt ${this.S} ${i}, 0`);
           const lcm = B.newLabel("ds.bc");
           const lv = B.newLabel("ds.bv");
           B.condBr(nz, lcm, lv);
@@ -1954,7 +1959,7 @@ export class LlDyn {
           const cp = B.tmp();
           const c = B.tmp();
           const cd = B.tmp();
-          B.line(`${cp} = getelementptr inbounds i8, ptr ${bdata}, i64 ${i}`);
+          B.line(`${cp} = getelementptr inbounds i8, ptr ${bdata}, ${this.S} ${i}`);
           B.line(`${c} = load i8, ptr ${cp}`);
           B.line(`${cd} = uitofp i8 ${c} to double`);
           const s = B.tmp();
@@ -1970,7 +1975,7 @@ export class LlDyn {
         this.puts(B, "%b", "function ");
         const namep = B.tmp();
         const nm = B.tmp();
-        B.line(`${namep} = getelementptr inbounds i8, ptr %d, i64 40 ; ->v.fn.name`);
+        B.line(`${namep} = getelementptr inbounds i8, ptr %d, i64 ${this.abiOffset(40, 28)} ; ->v.fn.name`);
         B.line(`${nm} = load ptr, ptr ${namep}`);
         const nn = B.tmp();
         B.line(`${nn} = icmp ne ptr ${nm}, null`);
@@ -2188,7 +2193,7 @@ export class LlDyn {
       B.startBlock(lOpt);
       retainUndef();
       B.startBlock(lThrow);
-      host.declare(`declare ptr @scr_str_new(ptr, i64)`);
+      host.declare(`declare ptr @scr_str_new(ptr, ${host.sizeType})`);
       host.declare(`declare ptr @scr_str_concat(ptr, ptr)`);
       host.declare(`declare void @scr_str_release(ptr)`);
       host.declare(`declare void @scr_throw_error(i32, ptr)`);
@@ -2197,14 +2202,14 @@ export class LlDyn {
       const base = B.tmp();
       B.line(`${base} = select i1 ${isU}, ptr ${host.cstr(baseU)}, ptr ${host.cstr(baseN)}`);
       const baseLen = B.tmp();
-      B.line(`${baseLen} = select i1 ${isU}, i64 ${Buffer.byteLength(baseU)}, i64 ${Buffer.byteLength(baseN)}`);
+      B.line(`${baseLen} = select i1 ${isU}, ${host.sizeType} ${Buffer.byteLength(baseU)}, ${host.sizeType} ${Buffer.byteLength(baseN)}`);
       const head = B.tmp();
-      B.line(`${head} = call ptr @scr_str_new(ptr ${base}, i64 ${baseLen})`);
+      B.line(`${head} = call ptr @scr_str_new(ptr ${base}, ${host.sizeType} ${baseLen})`);
       const withKey = B.tmp();
       B.line(`${withKey} = call ptr @scr_str_concat(ptr ${head}, ptr %k)`);
       B.line(`call void @scr_str_release(ptr ${head})`);
       const tail = B.tmp();
-      B.line(`${tail} = call ptr @scr_str_new(ptr ${host.cstr("')")}, i64 2)`);
+      B.line(`${tail} = call ptr @scr_str_new(ptr ${host.cstr("')")}, ${host.sizeType} 2)`);
       const msg = B.tmp();
       B.line(`${msg} = call ptr @scr_str_concat(ptr ${withKey}, ptr ${tail})`);
       B.line(`call void @scr_str_release(ptr ${withKey})`);
@@ -2256,9 +2261,9 @@ export class LlDyn {
       const lNext = B.newLabel("kg.n");
       B.condBr(isObj, lObj, lNext);
       B.startBlock(lObj);
-      host.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, i64)`);
+      host.declare(`declare ptr @scr_dyn_obj_get(ptr, ptr, ${host.sizeType})`);
       const m = B.tmp();
-      B.line(`${m} = call ptr @scr_dyn_obj_get(ptr %d, ptr ${kParts.data}, i64 ${kParts.len})`);
+      B.line(`${m} = call ptr @scr_dyn_obj_get(ptr %d, ptr ${kParts.data}, ${host.sizeType} ${kParts.len})`);
       const has = B.tmp();
       B.line(`${has} = icmp ne ptr ${m}, null`);
       const u = this.undef(B);
@@ -2287,18 +2292,18 @@ export class LlDyn {
     const parseIndex = (): { digits: string; idx: string } => {
       const digitsSlot = B.slot();
       const idxSlot = B.slot();
-      B.entryAllocas.push(`${digitsSlot} = alloca i1`, `${idxSlot} = alloca i64`);
+      B.entryAllocas.push(`${digitsSlot} = alloca i1`, `${idxSlot} = alloca ${host.sizeType}`);
       B.line(`store i1 false, ptr ${digitsSlot}`);
-      B.line(`store i64 0, ptr ${idxSlot}`);
+      B.line(`store ${host.sizeType} 0, ptr ${idxSlot}`);
       // k->len > 0 && !(k->len > 1 && k->data[0] == '0')
       const nz = B.tmp();
-      B.line(`${nz} = icmp ugt i64 ${kParts.len}, 0`);
+      B.line(`${nz} = icmp ugt ${host.sizeType} ${kParts.len}, 0`);
       const lGo = B.newLabel("kg.ix");
       const lOut = B.newLabel("kg.io");
       B.condBr(nz, lGo, lOut);
       B.startBlock(lGo);
       const multi = B.tmp();
-      B.line(`${multi} = icmp ugt i64 ${kParts.len}, 1`);
+      B.line(`${multi} = icmp ugt ${host.sizeType} ${kParts.len}, 1`);
       const c0 = B.tmp();
       B.line(`${c0} = load i8, ptr ${kParts.data}`);
       const isZero = B.tmp();
@@ -2312,16 +2317,16 @@ export class LlDyn {
       this.i64Loop(B, "kg.id", kParts.len, (i) => {
         const cp = B.tmp();
         const c = B.tmp();
-        B.line(`${cp} = getelementptr inbounds i8, ptr ${kParts.data}, i64 ${i}`);
+        B.line(`${cp} = getelementptr inbounds i8, ptr ${kParts.data}, ${host.sizeType} ${i}`);
         B.line(`${c} = load i8, ptr ${cp}`);
         const lt0 = B.tmp();
         const gt9 = B.tmp();
         B.line(`${lt0} = icmp ult i8 ${c}, 48`);
         B.line(`${gt9} = icmp ugt i8 ${c}, 57`);
         const cur = B.tmp();
-        B.line(`${cur} = load i64, ptr ${idxSlot}`);
+        B.line(`${cur} = load ${host.sizeType}, ptr ${idxSlot}`);
         const over = B.tmp();
-        B.line(`${over} = icmp ugt i64 ${cur}, ${IDX_MAX_DIV10}`);
+        B.line(`${over} = icmp ugt ${host.sizeType} ${cur}, ${this.indexMaxDiv10}`);
         const bad0 = B.tmp();
         const bad = B.tmp();
         B.line(`${bad0} = or i1 ${lt0}, ${gt9}`);
@@ -2335,36 +2340,36 @@ export class LlDyn {
         B.startBlock(lStep);
         const ten = B.tmp();
         const digit = B.tmp();
-        const digit64 = B.tmp();
+        const digitSize = B.tmp();
         const nx = B.tmp();
-        B.line(`${ten} = mul i64 ${cur}, 10`);
+        B.line(`${ten} = mul ${host.sizeType} ${cur}, 10`);
         B.line(`${digit} = sub i8 ${c}, 48`);
-        B.line(`${digit64} = zext i8 ${digit} to i64`);
-        B.line(`${nx} = add i64 ${ten}, ${digit64}`);
-        B.line(`store i64 ${nx}, ptr ${idxSlot}`);
+        B.line(`${digitSize} = zext i8 ${digit} to ${host.sizeType}`);
+        B.line(`${nx} = add ${host.sizeType} ${ten}, ${digitSize}`);
+        B.line(`store ${host.sizeType} ${nx}, ptr ${idxSlot}`);
       });
       B.br(lOut);
       B.startBlock(lOut);
       const digits = B.tmp();
       const idx = B.tmp();
       B.line(`${digits} = load i1, ptr ${digitsSlot}`);
-      B.line(`${idx} = load i64, ptr ${idxSlot}`);
+      B.line(`${idx} = load ${host.sizeType}, ptr ${idxSlot}`);
       return { digits, idx };
     };
     const isLength = (): string => {
-      host.declare(`declare i32 @memcmp(ptr, ptr, i64)`);
+      host.declare(`declare i32 @memcmp(ptr, ptr, ${host.sizeType})`);
       const slot = B.slot();
       B.entryAllocas.push(`${slot} = alloca i1`);
       B.line(`store i1 false, ptr ${slot}`);
       const len6 = B.tmp();
-      B.line(`${len6} = icmp eq i64 ${kParts.len}, 6`);
+      B.line(`${len6} = icmp eq ${host.sizeType} ${kParts.len}, 6`);
       const lCmp = B.newLabel("kg.l6");
       const lj = B.newLabel("kg.lj");
       B.condBr(len6, lCmp, lj);
       B.startBlock(lCmp);
       const c = B.tmp();
       const same = B.tmp();
-      B.line(`${c} = call i32 @memcmp(ptr ${kParts.data}, ptr ${host.cstr("length")}, i64 6)`);
+      B.line(`${c} = call i32 @memcmp(ptr ${kParts.data}, ptr ${host.cstr("length")}, ${host.sizeType} 6)`);
       B.line(`${same} = icmp eq i32 ${c}, 0`);
       B.line(`store i1 ${same}, ptr ${slot}`);
       B.br(lj);
@@ -2389,21 +2394,21 @@ export class LlDyn {
       const bts = this.payloadOf(B, "%d", "ptr");
       const blenp = B.tmp();
       const blen = B.tmp();
-      B.line(`${blenp} = getelementptr inbounds i8, ptr ${bts}, i64 8 ; ->len`);
-      B.line(`${blen} = load i64, ptr ${blenp}`);
+      B.line(`${blenp} = getelementptr inbounds i8, ptr ${bts}, i64 ${this.abiOffset(8, 4)} ; ->len`);
+      B.line(`${blen} = load ${host.sizeType}, ptr ${blenp}`);
       const lLen = B.newLabel("kg.bl");
       const lIdx = B.newLabel("kg.bi");
       B.condBr(lenHit, lLen, lIdx);
       B.startBlock(lLen);
       const lenD = B.tmp();
       const r0 = B.tmp();
-      B.line(`${lenD} = uitofp i64 ${blen} to double`);
+      B.line(`${lenD} = uitofp ${host.sizeType} ${blen} to double`);
       B.line(`${r0} = call ptr @scr_dyn_new_num(double ${lenD})`);
       B.terminate(`ret ptr ${r0}`);
       B.startBlock(lIdx);
       const inRange = B.tmp();
       const hit = B.tmp();
-      B.line(`${inRange} = icmp ult i64 ${idx}, ${blen}`);
+      B.line(`${inRange} = icmp ult ${host.sizeType} ${idx}, ${blen}`);
       B.line(`${hit} = and i1 ${digits}, ${inRange}`);
       const lHit = B.newLabel("kg.bh");
       const lMiss = B.newLabel("kg.bm");
@@ -2411,13 +2416,13 @@ export class LlDyn {
       B.startBlock(lHit);
       const bdatap = B.tmp();
       const bdata = B.tmp();
-      B.line(`${bdatap} = getelementptr inbounds i8, ptr ${bts}, i64 24 ; ->data`);
+      B.line(`${bdatap} = getelementptr inbounds i8, ptr ${bts}, i64 ${this.abiOffset(24, 12)} ; ->data`);
       B.line(`${bdata} = load ptr, ptr ${bdatap}`);
       const bp = B.tmp();
       const bv = B.tmp();
       const bd = B.tmp();
       const r1 = B.tmp();
-      B.line(`${bp} = getelementptr inbounds i8, ptr ${bdata}, i64 ${idx}`);
+      B.line(`${bp} = getelementptr inbounds i8, ptr ${bdata}, ${host.sizeType} ${idx}`);
       B.line(`${bv} = load i8, ptr ${bp}`);
       B.line(`${bd} = uitofp i8 ${bv} to double`);
       B.line(`${r1} = call ptr @scr_dyn_new_num(double ${bd})`);
@@ -2434,9 +2439,9 @@ export class LlDyn {
       const lNext = B.newLabel("kg.n");
       B.condBr(isF, lF, lNext);
       B.startBlock(lF);
-      host.declare(`declare ptr @scr_dyn_fn_get(ptr, ptr, i64)`);
+      host.declare(`declare ptr @scr_dyn_fn_get(ptr, ptr, ${host.sizeType})`);
       const m = B.tmp();
-      B.line(`${m} = call ptr @scr_dyn_fn_get(ptr %d, ptr ${kParts.data}, i64 ${kParts.len})`);
+      B.line(`${m} = call ptr @scr_dyn_fn_get(ptr %d, ptr ${kParts.data}, ${host.sizeType} ${kParts.len})`);
       const has = B.tmp();
       B.line(`${has} = icmp ne ptr ${m}, null`);
       const lHit = B.newLabel("kg.fh");
@@ -2474,7 +2479,7 @@ export class LlDyn {
         const n = this.lenOf(B, "%d");
         const nd = B.tmp();
         const r = B.tmp();
-        B.line(`${nd} = uitofp i64 ${n} to double`);
+        B.line(`${nd} = uitofp ${host.sizeType} ${n} to double`);
         B.line(`${r} = call ptr @scr_dyn_new_num(double ${nd})`);
         B.terminate(`ret ptr ${r}`);
         B.startBlock(lStr);
@@ -2497,7 +2502,7 @@ export class LlDyn {
         B.startBlock(lArr);
         const n = this.lenOf(B, "%d");
         const inR = B.tmp();
-        B.line(`${inR} = icmp ult i64 ${idx}, ${n}`);
+        B.line(`${inR} = icmp ult ${host.sizeType} ${idx}, ${n}`);
         const lHit = B.newLabel("kg.ah");
         B.condBr(inR, lHit, lMiss);
         B.startBlock(lHit);
@@ -2513,7 +2518,7 @@ export class LlDyn {
         const n2 = B.tmp();
         B.line(`${n2} = call double @scr_str_utf16_len(ptr ${s})`);
         const idxD = B.tmp();
-        B.line(`${idxD} = uitofp i64 ${idx} to double`);
+        B.line(`${idxD} = uitofp ${host.sizeType} ${idx} to double`);
         const inR2 = B.tmp();
         B.line(`${inR2} = fcmp olt double ${idxD}, ${n2}`);
         const lHit2 = B.newLabel("kg.ash");
@@ -2638,7 +2643,7 @@ export class LlDyn {
       const materialized = B.tmp();
       const out = B.tmp();
       B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
-      B.line(`${out} = call ptr @${name}(ptr ${materialized}, i64 %n)`);
+      B.line(`${out} = call ptr @${name}(ptr ${materialized}, ${host.sizeType} %n)`);
       B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
       B.terminate(`ret ptr ${out}`);
       B.startBlock(lNext);
@@ -2742,7 +2747,7 @@ export class LlDyn {
       {
         const n = this.lenOf(B, "%d");
         const inR = B.tmp();
-        B.line(`${inR} = icmp ult i64 ${i}, ${n}`);
+        B.line(`${inR} = icmp ult ${host.sizeType} ${i}, ${n}`);
         const lHit = B.newLabel("din.ah");
         const lMiss = B.newLabel("din.am");
         B.condBr(inR, lHit, lMiss);
@@ -2764,23 +2769,23 @@ export class LlDyn {
         const bts = this.payloadOf(B, "%d", "ptr");
         const blenp = B.tmp();
         const blen = B.tmp();
-        B.line(`${blenp} = getelementptr inbounds i8, ptr ${bts}, i64 8 ; ->len`);
-        B.line(`${blen} = load i64, ptr ${blenp}`);
+        B.line(`${blenp} = getelementptr inbounds i8, ptr ${bts}, i64 ${this.abiOffset(8, 4)} ; ->len`);
+        B.line(`${blen} = load ${host.sizeType}, ptr ${blenp}`);
         const inR = B.tmp();
-        B.line(`${inR} = icmp ult i64 ${i}, ${blen}`);
+        B.line(`${inR} = icmp ult ${host.sizeType} ${i}, ${blen}`);
         const lHit = B.newLabel("din.bh");
         const lMiss = B.newLabel("din.bm");
         B.condBr(inR, lHit, lMiss);
         B.startBlock(lHit);
         const bdatap = B.tmp();
         const bdata = B.tmp();
-        B.line(`${bdatap} = getelementptr inbounds i8, ptr ${bts}, i64 24 ; ->data`);
+        B.line(`${bdatap} = getelementptr inbounds i8, ptr ${bts}, i64 ${this.abiOffset(24, 12)} ; ->data`);
         B.line(`${bdata} = load ptr, ptr ${bdatap}`);
         const bp = B.tmp();
         const bv = B.tmp();
         const bd = B.tmp();
         const r = B.tmp();
-        B.line(`${bp} = getelementptr inbounds i8, ptr ${bdata}, i64 ${i}`);
+        B.line(`${bp} = getelementptr inbounds i8, ptr ${bdata}, ${host.sizeType} ${i}`);
         B.line(`${bv} = load i8, ptr ${bp}`);
         B.line(`${bd} = uitofp i8 ${bv} to double`);
         B.line(`${r} = call ptr @scr_dyn_new_num(double ${bd})`);
@@ -2803,9 +2808,9 @@ export class LlDyn {
         B.line(`${len} = call double @scr_str_utf16_len(ptr ${s})`);
         const atSlot = B.slot();
         const stepSlot = B.slot();
-        B.entryAllocas.push(`${atSlot} = alloca double`, `${stepSlot} = alloca i64`);
+        B.entryAllocas.push(`${atSlot} = alloca double`, `${stepSlot} = alloca ${host.sizeType}`);
         B.line(`store double ${f64Lit(0)}, ptr ${atSlot}`);
-        B.line(`store i64 0, ptr ${stepSlot}`);
+        B.line(`store ${host.sizeType} 0, ptr ${stepSlot}`);
         const lc = B.newLabel("din.sc");
         const lb = B.newLabel("din.sb");
         const le = B.newLabel("din.se");
@@ -2816,9 +2821,9 @@ export class LlDyn {
         const c1 = B.tmp();
         const c2 = B.tmp();
         const cont = B.tmp();
-        B.line(`${st} = load i64, ptr ${stepSlot}`);
+        B.line(`${st} = load ${host.sizeType}, ptr ${stepSlot}`);
         B.line(`${at} = load double, ptr ${atSlot}`);
-        B.line(`${c1} = icmp ult i64 ${st}, ${i}`);
+        B.line(`${c1} = icmp ult ${host.sizeType} ${st}, ${i}`);
         B.line(`${c2} = fcmp olt double ${at}, ${len}`);
         B.line(`${cont} = and i1 ${c1}, ${c2}`);
         B.condBr(cont, lb, le);
@@ -2832,8 +2837,8 @@ export class LlDyn {
         B.line(`store double ${at2}, ptr ${atSlot}`);
         B.line(`call void @scr_str_release(ptr ${cp})`);
         const st2 = B.tmp();
-        B.line(`${st2} = add i64 ${st}, 1`);
-        B.line(`store i64 ${st2}, ptr ${stepSlot}`);
+        B.line(`${st2} = add ${host.sizeType} ${st}, 1`);
+        B.line(`store ${host.sizeType} ${st2}, ptr ${stepSlot}`);
         B.br(lc);
         B.startBlock(le);
         const atF = B.tmp();
@@ -2864,7 +2869,7 @@ export class LlDyn {
     });
     B.terminate(`ret ptr ${out}`);
     this.defs.push(
-      `define internal ptr @${name}(ptr %d, i64 %n) ${FN_ATTRS} { ; destructuring GetIterator + N steps`,
+      `define internal ptr @${name}(ptr %d, ${host.sizeType} %n) ${FN_ATTRS} { ; destructuring GetIterator + N steps`,
       B.render(),
       `}`,
       ``,
@@ -2915,7 +2920,7 @@ export class LlDyn {
       const adSlot = B.slot();
       B.entryAllocas.push(`${adSlot} = alloca ptr`);
       const has = B.tmp();
-      B.line(`${has} = icmp ult i64 ${i}, %argc`);
+      B.line(`${has} = icmp ult ${host.sizeType} ${i}, %argc`);
       const lHas = B.newLabel("dfk.h");
       const lMiss = B.newLabel("dfk.m");
       const lj = B.newLabel("dfk.j");
@@ -2923,7 +2928,7 @@ export class LlDyn {
       B.startBlock(lHas);
       const ap = B.tmp();
       const av = B.tmp();
-      B.line(`${ap} = getelementptr inbounds ptr, ptr %args, i64 ${i}`);
+      B.line(`${ap} = getelementptr inbounds ptr, ptr %args, ${host.sizeType} ${i}`);
       B.line(`${av} = load ptr, ptr ${ap}`);
       B.line(`store ptr ${av}, ptr ${adSlot}`);
       B.br(lj);
@@ -2967,7 +2972,7 @@ export class LlDyn {
         B.line(`${kp2} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 1`);
         B.line(`store ptr null, ptr ${kp2}`);
         B.line(`${ip} = getelementptr inbounds %ScrDynPath, ptr ${pathSlot}, i64 0, i32 2`);
-        B.line(`store i64 ${i}, ptr ${ip}`);
+        B.line(`store ${host.sizeType} ${i}, ptr ${ip}`);
         const a = B.tmp();
         B.line(`${a} = call ${this.valTy(p)} @${this.dynCheckHelper(p)}(ptr ${ad}, ptr ${pathSlot})`);
         this.pendingBail(B, "dfk", () => {
@@ -2987,8 +2992,8 @@ export class LlDyn {
       rest = B.tmp();
       B.line(`${rest} = call ptr @scr_dyn_new_arr()`);
       const riSlot = B.slot();
-      B.entryAllocas.push(`${riSlot} = alloca i64`);
-      B.line(`store i64 ${t.params.length}, ptr ${riSlot}`);
+      B.entryAllocas.push(`${riSlot} = alloca ${host.sizeType}`);
+      B.line(`store ${host.sizeType} ${t.params.length}, ptr ${riSlot}`);
       const lc = B.newLabel("dfk.rc");
       const lb = B.newLabel("dfk.rb");
       const le = B.newLabel("dfk.re");
@@ -2996,19 +3001,19 @@ export class LlDyn {
       B.startBlock(lc);
       const ri = B.tmp();
       const cont = B.tmp();
-      B.line(`${ri} = load i64, ptr ${riSlot}`);
-      B.line(`${cont} = icmp ult i64 ${ri}, %argc`);
+      B.line(`${ri} = load ${host.sizeType}, ptr ${riSlot}`);
+      B.line(`${cont} = icmp ult ${host.sizeType} ${ri}, %argc`);
       B.condBr(cont, lb, le);
       B.startBlock(lb);
       const ap = B.tmp();
       const av = B.tmp();
-      B.line(`${ap} = getelementptr inbounds ptr, ptr %args, i64 ${ri}`);
+      B.line(`${ap} = getelementptr inbounds ptr, ptr %args, ${host.sizeType} ${ri}`);
       B.line(`${av} = load ptr, ptr ${ap}`);
       const rv = this.retainDyn(B, av);
       B.line(`call void @scr_dyn_arr_push(ptr ${rest}, ptr ${rv})`);
       const ri2 = B.tmp();
-      B.line(`${ri2} = add i64 ${ri}, 1`);
-      B.line(`store i64 ${ri2}, ptr ${riSlot}`);
+      B.line(`${ri2} = add ${host.sizeType} ${ri}, 1`);
+      B.line(`store ${host.sizeType} ${ri2}, ptr ${riSlot}`);
       B.br(lc);
       B.startBlock(le);
     }
@@ -3043,7 +3048,7 @@ export class LlDyn {
       B.terminate(`ret ptr ${out}`);
     }
     this.defs.push(
-      `define internal ptr @${name}(ptr %c, ptr %args, i64 %argc) ${FN_ATTRS} { ; dyn call thunk for ${key}`,
+      `define internal ptr @${name}(ptr %c, ptr %args, ${host.sizeType} %argc) ${FN_ATTRS} { ; dyn call thunk for ${key}`,
       B.render(),
       `}`,
       ``,
@@ -3086,14 +3091,14 @@ export class LlDyn {
     const host = this.host;
     const B = new BlockBuilder();
     host.declare(`declare ptr @scr_box_get_ref(ptr)`);
-    host.declare(`declare ptr @scr_dyn_call(ptr, ptr, i64, ptr)`);
+    host.declare(`declare ptr @scr_dyn_call(ptr, ptr, ${host.sizeType}, ptr)`);
     host.declare(`declare void @scr_dyn_release(ptr)`);
     const retTy = t.ret.kind === "void" ? "void" : this.valTy(t.ret);
     const dummy =
       t.ret.kind === "void" ? "void" : retTy === "double" ? `double ${f64Lit(0)}` : retTy === "i1" ? "i1 false" : "ptr null";
     const capp = B.tmp();
     const box = B.tmp();
-    B.line(`${capp} = getelementptr inbounds i8, ptr %sc_env, i64 32 ; caps[0]`);
+    B.line(`${capp} = getelementptr inbounds %ScrClosure, ptr %sc_env, i64 1 ; caps[0]`);
     B.line(`${box} = load ptr, ptr ${capp}`);
     const fnv = B.tmp();
     B.line(`${fnv} = call ptr @scr_box_get_ref(ptr ${box}) ; +1`);
@@ -3108,7 +3113,7 @@ export class LlDyn {
         const v = this.toDynExpr(B, p, `%a${i}`);
         argVals.push(v);
         const slotp = B.tmp();
-        B.line(`${slotp} = getelementptr inbounds [${t.params.length} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+        B.line(`${slotp} = getelementptr inbounds [${t.params.length} x ptr], ptr ${arr}, i64 0, ${host.sizeType} ${i}`);
         B.line(`store ptr ${v}, ptr ${slotp}`);
         if (isRefCounted(p)) B.line(`call void ${releaseSym(host, p)}(ptr %a${i})`);
       });
@@ -3117,7 +3122,7 @@ export class LlDyn {
     // The kind is FUNC by construction; `what` is unreachable — spelled
     // anyway (the C's "value").
     const r = B.tmp();
-    B.line(`${r} = call ptr @scr_dyn_call(ptr ${fnv}, ptr ${argsPtr}, i64 ${t.params.length}, ptr ${host.cstr("value")})`);
+    B.line(`${r} = call ptr @scr_dyn_call(ptr ${fnv}, ptr ${argsPtr}, ${host.sizeType} ${t.params.length}, ptr ${host.cstr("value")})`);
     B.line(`call void @scr_dyn_release(ptr ${fnv})`);
     for (const v of argVals) B.line(`call void @scr_dyn_release(ptr ${v})`);
     this.pendingBail(B, "dfa", () => {}, dummy === "void" ? "void" : dummy);

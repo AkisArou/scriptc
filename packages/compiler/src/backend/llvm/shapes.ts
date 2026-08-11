@@ -31,6 +31,10 @@ export interface ShapeHost {
   declare(decl: string): void;
   /** Request the shared OOM abort helper (@sc_oom) — emitted once. */
   needOom(): void;
+  /** The target C ABI's `size_t` / refcount integer type. */
+  readonly sizeType: "i32" | "i64";
+  /** Byte offset from an object pointer back to ScrCycHdr.color. */
+  readonly cycleColorOffset: number;
   readonly tracedShapes: Set<string>;
   readonly tracedUnions: Set<string>;
   readonly recordsById: Map<string, IrRecordShape>;
@@ -520,12 +524,12 @@ export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): stri
     elem.kind === "regex" || // RegExp values: scr_regex_* adapters, no trace (no refs inside)
     (elem.kind === "array" && traceAdapter(host, elem) !== null);
   if (!useRef) {
-    host.declare(`declare ptr @scr_arr_new(i32, i64)`);
-    return `call ptr @scr_arr_new(i32 ${elemKindNum(elem)}, i64 ${capText})`;
+    host.declare(`declare ptr @scr_arr_new(i32, ${host.sizeType})`);
+    return `call ptr @scr_arr_new(i32 ${elemKindNum(elem)}, ${host.sizeType} ${capText})`;
   }
   const v = vAdapters(host, elem);
-  host.declare(`declare ptr @scr_arr_new_ref(ptr, ptr, ptr, i64)`);
-  return `call ptr @scr_arr_new_ref(ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(host, elem)}, i64 ${capText})`;
+  host.declare(`declare ptr @scr_arr_new_ref(ptr, ptr, ptr, ${host.sizeType})`);
+  return `call ptr @scr_arr_new_ref(ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(host, elem)}, ${host.sizeType} ${capText})`;
 }
 
 /* ── capture boxes ────────────────────────────────────────────────────── */
@@ -659,24 +663,26 @@ function rcMembers(shape: IrRecordShape): { index: number; type: IrType; name: s
 }
 
 /** The immortal-skip + mark-live retain body shared by every shape. The
- * cycle header sits 32 bytes before the object; `color` is at header+16,
+ * cycle header sits before the object; `color` is at obj-16 on 64-bit
+ * targets and obj-12 on wasm32,
  * so mark-live is one i32 store at obj-16 (scr_cyc_mark_live inlined —
  * the runtime's is a static inline with no external symbol). */
-function retainBody(fnName: string, traced: boolean): string[] {
+function retainBody(host: ShapeHost, fnName: string, traced: boolean): string[] {
+  const S = host.sizeType;
   return [
     `define internal ptr @${fnName}(ptr %o) ${FN_ATTRS} {`,
     `entry:`,
     `  %isnull = icmp eq ptr %o, null`,
     `  br i1 %isnull, label %done, label %check`,
     `check:`,
-    `  %rc = load i64, ptr %o`,
-    `  %imm = icmp eq i64 %rc, -1`,
+    `  %rc = load ${S}, ptr %o`,
+    `  %imm = icmp eq ${S} %rc, -1`,
     `  br i1 %imm, label %done, label %inc`,
     `inc:`,
-    `  %n = add i64 %rc, 1`,
-    `  store i64 %n, ptr %o`,
+    `  %n = add ${S} %rc, 1`,
+    `  store ${S} %n, ptr %o`,
     ...(traced
-      ? [`  %colorp = getelementptr i8, ptr %o, i64 -16`, `  store i32 0, ptr %colorp ; mark live`]
+      ? [`  %colorp = getelementptr i8, ptr %o, ${S} -${host.cycleColorOffset}`, `  store i32 0, ptr %colorp ; mark live`]
       : []),
     `  br label %done`,
     `done:`,
@@ -704,7 +710,7 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
     const fieldTys = shape.fields.map((f) => llFieldType(f.type));
     if (shape.indexValue) fieldTys.push("ptr"); // the overflow ScrMap *
     typeDefs.push(
-      `%${struct} = type { i64${fieldTys.length ? ", " + fieldTys.join(", ") : ""} } ` +
+      `%${struct} = type { ${host.sizeType}${fieldTys.length ? ", " + fieldTys.join(", ") : ""} } ` +
         `; record ${shape.id} { ${shape.fields.map((f) => f.name).join("; ")}${shape.indexValue ? "; [key: string]" : ""} }`,
     );
   }
@@ -714,9 +720,9 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
     const traced = host.tracedShapes.has(`record:${shape.id}`);
     const members = rcMembers(shape);
     const refMembers = members.filter((m) => isRefCounted(m.type));
-    const sizeOf = `ptrtoint (ptr getelementptr (%${struct}, ptr null, i32 1) to i64)`;
+    const sizeOf = `ptrtoint (ptr getelementptr (%${struct}, ptr null, i32 1) to ${host.sizeType})`;
 
-    defs.push(...retainBody(mangleRecordRetain(shape.id), traced), ``);
+    defs.push(...retainBody(host, mangleRecordRetain(shape.id), traced), ``);
 
     // release: NULL-tolerant, immortal-skip; at rc == 0 release every
     // refcounted member (runtime releases are NULL-tolerant) and free —
@@ -728,13 +734,13 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
       `  %isnull = icmp eq ptr %o, null`,
       `  br i1 %isnull, label %done, label %check`,
       `check:`,
-      `  %rc = load i64, ptr %o`,
-      `  %imm = icmp eq i64 %rc, -1`,
+      `  %rc = load ${host.sizeType}, ptr %o`,
+      `  %imm = icmp eq ${host.sizeType} %rc, -1`,
       `  br i1 %imm, label %done, label %dec`,
       `dec:`,
-      `  %n = sub i64 %rc, 1`,
-      `  store i64 %n, ptr %o`,
-      `  %dead = icmp eq i64 %n, 0`,
+      `  %n = sub ${host.sizeType} %rc, 1`,
+      `  store ${host.sizeType} %n, ptr %o`,
+      `  %dead = icmp eq ${host.sizeType} %n, 0`,
       `  br i1 %dead, label %free, label %${traced ? "root" : "done"}`,
       `free:`,
     ];
@@ -777,15 +783,15 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
       `entry:`,
     ];
     if (traced) {
-      host.declare(`declare ptr @scr_cyc_alloc(i64, ptr, ptr)`);
+      host.declare(`declare ptr @scr_cyc_alloc(${host.sizeType}, ptr, ptr)`);
       nw.push(
-        `  %o = call ptr @scr_cyc_alloc(i64 ${sizeOf}, ptr @${mangleRecordTrace(shape.id)}, ptr @${mangleRecordGcFree(shape.id)})`,
+        `  %o = call ptr @scr_cyc_alloc(${host.sizeType} ${sizeOf}, ptr @${mangleRecordTrace(shape.id)}, ptr @${mangleRecordGcFree(shape.id)})`,
       );
     } else {
-      host.declare(`declare ptr @calloc(i64, i64)`);
+      host.declare(`declare ptr @calloc(${host.sizeType}, ${host.sizeType})`);
       host.needOom();
       nw.push(
-        `  %o = call ptr @calloc(i64 1, i64 ${sizeOf})`,
+        `  %o = call ptr @calloc(${host.sizeType} 1, ${host.sizeType} ${sizeOf})`,
         `  %isnull = icmp eq ptr %o, null`,
         `  br i1 %isnull, label %oom, label %ok`,
         `oom:`,
@@ -794,7 +800,7 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
         `ok:`,
       );
     }
-    nw.push(`  store i64 1, ptr %o`);
+    nw.push(`  store ${host.sizeType} 1, ptr %o`);
     if (shape.indexValue) {
       // The overflow map (string-keyed): value handling is type-directed
       // exactly like emit-shapes.ts's overflowNewC.

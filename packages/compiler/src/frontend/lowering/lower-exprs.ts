@@ -5,8 +5,9 @@
  * ToBoolean/ToString coercion helpers, and field/element reads and writes
  * (FieldTarget). */
 import * as ts from "../ts7/adapter.js";
-import { dirname } from "node:path";
+import { dirname, posix } from "node:path";
 import type { Lowerer } from "./lowerer.js";
+import { wasiGuestPath } from "../../wasi-paths.js";
 import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
@@ -750,11 +751,11 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         return { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc };
       }
       // `__dirname` / `__filename` — the CommonJS module globals: per-
-      // MODULE compile-time constants, the containing file's REAL
-      // location (Node's exact values when the same tree runs in place;
-      // locals shadowing the names resolved above). In a file with ESM
-      // syntax Node never defines them (ReferenceError) — fence rather
-      // than invent a value there.
+      // MODULE compile-time constants, the containing file's location
+      // (Node's exact values when the same tree runs in place; WASI uses
+      // the equivalent guest-visible path; locals shadowing the names
+      // resolved above). In a file with ESM syntax Node never defines them
+      // (ReferenceError) — fence rather than invent a value there.
       if (
         (expr.text === "__dirname" || expr.text === "__filename") &&
         L.isStdlibGlobal(expr, expr.text)
@@ -767,7 +768,16 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             `'${expr.text}' in an ES module (Node defines the CJS module globals only in CommonJS modules)`,
           );
         }
-        const value = expr.text === "__dirname" ? dirname(sf.fileName) : sf.fileName;
+        // The WASI runner mounts the host cwd at guest `/` and the host temp
+        // directory at `/tmp`. Bake the matching GUEST spelling so resource
+        // lookups relative to these CommonJS globals stay inside the exposed
+        // capability instead of naming an unreachable host-absolute path.
+        const fileName = L.targetPlatform === "wasi"
+          ? wasiGuestPath(sf.fileName) ?? sf.fileName.replace(/\\/g, "/")
+          : sf.fileName;
+        const value = expr.text === "__dirname"
+          ? (L.targetPlatform === "wasi" ? posix.dirname(fileName) : dirname(fileName))
+          : fileName;
         return { kind: "strLit", value, type: STRING, loc };
       }
       const sig = L.fnSigOf(expr);

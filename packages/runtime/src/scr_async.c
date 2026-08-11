@@ -37,12 +37,31 @@
  * served by a capped nanosleep — dispatch at the next turn's top, the
  * cap bounding signal/stdin latency instead of a pollable wake fd. */
 #include <windows.h>
+#elif defined(__wasi__)
+#include <poll.h>
 #else
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
+#endif
+
+#ifdef __wasi__
+/* WASI Preview 1 has no process-spawn capability. The child unit is not
+ * linked for this target, but the generic loop keeps its quiescence hooks;
+ * their empty implementation makes the absence explicit at link time
+ * without weakening async/timer support. */
+bool scr_children_pending(void) { return false; }
+bool scr_children_reffed_pending(void) { return false; }
+bool scr_children_failed_pending(void) { return false; }
+void scr_children_poll(void) {}
+int scr_children_wake_fd(void) { return -1; }
+bool scr_children_wait(double max_wait_ms) {
+  (void)max_wait_ms;
+  return false;
+}
+void scr_children_teardown(void) {}
 #endif
 
 #if defined(__has_feature)
@@ -274,12 +293,18 @@ void scr_promise_trace_v(void *p, ScrTraceVisit visit, void *ctx) {
  * so the slot only needs to name the destination; `from` is unused. */
 #ifdef _WIN32
 typedef void *ScrCtx;
+#elif defined(__wasi__)
+typedef unsigned char ScrCtx;
 #else
 typedef ucontext_t ScrCtx;
 #endif
 
 struct ScrFiber {
   ScrCtx ctx;
+  /* wasm32 uses LLVM's stackless switched-coroutine frame instead of a
+   * native saved stack. The compiler emits these two generic wrappers in
+   * every WASI module. */
+  void *coro;
   ScrCtx *return_to; /* whoever resumed us last (spawner or the loop) */
   char *stack;       /* POSIX only; Windows fibers own their stack (NULL) */
   ScrPromise *promise; /* the promise this fiber settles (owned +1); NULL
@@ -349,6 +374,19 @@ long scr_abandoned_fiber_count(void) { return scr_fibers_abandoned; }
  * the main stack is the process's megabytes (scr_island.c isl_entry). */
 bool scr_on_fiber(void) { return scr_current != NULL; }
 void *scr_fiber_self(void) { return scr_current; }
+
+#ifdef __wasi__
+extern void scr_wasi_coro_resume(void *handle);
+extern void scr_wasi_coro_destroy(void *handle);
+
+void scr_wasi_coro_started(void *handle) {
+  if (scr_current == NULL) {
+    fputs("scriptc: internal error: coroutine started outside a fiber\n", stderr);
+    abort();
+  }
+  scr_current->coro = handle;
+}
+#endif
 
 /* Microtask queue: ready fibers, FIFO. */
 static ScrFiber **scr_ready = NULL;
@@ -867,6 +905,10 @@ static void scr_switch(ScrCtx *from, ScrCtx *to, ScrFiber *to_fiber) {
    * fiber object — `from` has nothing to record. */
   (void)from;
   SwitchToFiber(*to);
+#elif defined(__wasi__)
+  (void)from;
+  (void)to;
+  scr_trap("scriptc: internal error: native stack switch reached on WASI\n");
 #elif defined(SCR_ASAN_FIBERS)
   void **save = from_fiber ? &from_fiber->fake_stack : &scr_main_fake_stack;
   const void *bottom = to_fiber ? to_fiber->stack : NULL;
@@ -1154,6 +1196,8 @@ static void scr_trampoline(void) {
 static void scr_fiber_destroy(ScrFiber *f) {
 #ifdef _WIN32
   DeleteFiber(f->ctx);
+#elif defined(__wasi__)
+  if (f->coro != NULL) scr_wasi_coro_destroy(f->coro);
 #endif
   scr_als_ctx_release(f->als);
   free(f->stack);
@@ -1179,6 +1223,22 @@ ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack) {
   ScrCtx here = scr_win_self();
   f->ctx = CreateFiber(SCR_FIBER_STACK, scr_trampoline, NULL);
   if (f->ctx == NULL) scr_oom();
+#elif defined(__wasi__)
+  ScrFiber *spawner = scr_current;
+  scr_current = f;
+  scr_exc_swap_cell(&f->exc);
+  scr_als_active = &f->als;
+  entry(f, argpack); /* eager prefix; returns at suspend/final suspend */
+  scr_current = spawner;
+  scr_exc_swap_cell(spawner ? &spawner->exc : NULL);
+  scr_als_active = spawner ? &spawner->als : &scr_als_main_slot;
+  ScrPromise *result = scr_promise_retain(f->promise);
+  if (f->done) {
+    scr_promise_release(f->promise);
+    scr_fiber_destroy(f);
+    scr_fibers_live--;
+  }
+  return result;
 #else
   f->stack = malloc(SCR_FIBER_STACK);
   if (!f->stack) scr_oom();
@@ -1190,6 +1250,7 @@ ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack) {
 
   ucontext_t here;
 #endif
+#ifndef __wasi__
   f->return_to = &here;
   ScrFiber *spawner = scr_current;
   scr_switch(&here, &f->ctx, f);
@@ -1209,6 +1270,42 @@ ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack) {
     scr_fibers_live--;
   }
   return result;
+#endif
+}
+
+/* A runtime-authored C continuation whose first operation awaits one known
+ * dependency. Native fibers can park normally. wasm32 has no resumable C
+ * stack, so queue the fiber only after the dependency settles; the entry's
+ * await then extracts the result without attempting a stack switch. The
+ * READY queue supplies the settled-await microtask hop in both cases. */
+ScrPromise *scr_async_spawn_after(ScrPromise *dependency,
+                                  void (*entry)(ScrFiber *, void *),
+                                  void *argpack) {
+#ifndef __wasi__
+  (void)dependency;
+  return scr_async_spawn(entry, argpack);
+#else
+  ScrFiber *f = calloc(1, sizeof *f);
+  if (!f) scr_oom();
+  f->promise = scr_promise_new();
+  f->entry = entry;
+  f->argpack = argpack;
+  f->als = scr_als_ctx_retain(*scr_als_active);
+  scr_fibers_live++;
+
+  if (dependency->state == SCR_PROM_PENDING) {
+    if (dependency->nwaiters == dependency->waiters_cap) {
+      dependency->waiters_cap = dependency->waiters_cap ? dependency->waiters_cap * 2 : 4;
+      dependency->waiters = realloc(
+          dependency->waiters, dependency->waiters_cap * sizeof *dependency->waiters);
+      if (!dependency->waiters) scr_oom();
+    }
+    dependency->waiters[dependency->nwaiters++] = f;
+  } else {
+    scr_ready_push(f);
+  }
+  return scr_promise_retain(f->promise);
+#endif
 }
 
 /* Parks the current fiber on `p` until it settles. Only fibers await. */
@@ -1227,6 +1324,42 @@ static void scr_await_park(ScrPromise *p) {
   scr_switch(&self->ctx, self->return_to, NULL);
   /* Resumed by the loop: return_to must now point at the loop's context. */
 }
+
+#ifdef __wasi__
+/* The emitted coroutine suspends immediately after these preparation
+ * calls. Settled promises still queue one ready turn; pending promises own
+ * the continuation through their waiter list. */
+void scr_wasi_await_prepare(ScrFiber *self, ScrPromise *p) {
+  if (p->state == SCR_PROM_PENDING) {
+    if (p->nwaiters == p->waiters_cap) {
+      p->waiters_cap = p->waiters_cap ? p->waiters_cap * 2 : 4;
+      p->waiters = realloc(p->waiters, p->waiters_cap * sizeof *p->waiters);
+      if (!p->waiters) scr_oom();
+    }
+    p->waiters[p->nwaiters++] = self;
+  } else {
+    scr_ready_push(self);
+  }
+}
+
+void scr_wasi_await_hop_prepare(ScrFiber *self) { scr_ready_push(self); }
+
+bool scr_wasi_module_await_prepare(ScrFiber *self, ScrPromise *p) {
+  if (p->state != SCR_PROM_PENDING) return false;
+  scr_wasi_await_prepare(self, p);
+  return true;
+}
+
+void scr_wasi_async_finish(ScrFiber *self) { scr_fiber_finish(self); }
+
+void scr_wasi_gen_finish(ScrFiber *self) {
+  if (scr_exc_genret_pending()) {
+    scr_exc_clear();
+    scr_gen_ret_to_out(self->gen);
+  }
+  scr_fiber_finish(self);
+}
+#endif
 
 /* One microtask hop: park the current fiber on the READY queue itself and
  * yield. JS's `await` ALWAYS suspends — even on an already-settled promise
@@ -1268,8 +1401,15 @@ static void scr_promise_rethrow(ScrPromise *p) {
 
 /* Await result extraction. Rejection re-throws into the awaiter. */
 static bool scr_await_settled(ScrPromise *p) {
+#ifdef __wasi__
+  if (p->state == SCR_PROM_PENDING) {
+    fputs("scriptc: internal error: resumed before awaited promise settled\n", stderr);
+    abort();
+  }
+#else
   if (p->state != SCR_PROM_PENDING) scr_await_yield();
   while (p->state == SCR_PROM_PENDING) scr_await_park(p);
+#endif
   scr_prom_observe(p);
   if (p->state == SCR_PROM_REJECTED) {
     scr_promise_rethrow(p);
@@ -1295,7 +1435,9 @@ void scr_await_void(ScrPromise *p) { scr_await_settled(p); }
  * dependency still parks this module fiber, and rejection propagates into
  * it exactly like an ordinary await. */
 void scr_module_await(ScrPromise *p) {
+#ifndef __wasi__
   while (p->state == SCR_PROM_PENDING) scr_await_park(p);
+#endif
   scr_prom_observe(p);
   if (p->state == SCR_PROM_REJECTED) scr_promise_rethrow(p);
 }
@@ -1524,7 +1666,7 @@ ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath) {
  * libuv's default filesystem concurrency without creating one OS thread per
  * request. A platform mutex publishes each result and the syscall's filesystem
  * effects before the loop removes it from the completion queue. */
-#ifndef SCR_LIB
+#if !defined(SCR_LIB) && !defined(__wasi__)
 typedef struct ScrFsRenameOp {
   ScrStr *oldpath;
   ScrStr *newpath;
@@ -1678,6 +1820,49 @@ static bool scr_fs_renames_dispatch(void) {
   scr_fs_rename_op_release(op);
   return true;
 }
+#elif defined(__wasi__)
+/* WASI Preview 1 has no threads, but rename itself is available. Queue the
+ * request and perform it on the next loop turn so callback timing remains
+ * asynchronous and the request remains a liveness handle. */
+typedef struct ScrFsRenameOp {
+  ScrStr *oldpath;
+  ScrStr *newpath;
+  ScrClosure *cb;
+  ScrFsRenameFn fn;
+  struct ScrFsRenameOp *next;
+} ScrFsRenameOp;
+
+static ScrFsRenameOp *scr_fs_rename_done = NULL;
+static ScrFsRenameOp **scr_fs_rename_done_tail = &scr_fs_rename_done;
+static size_t scr_fs_rename_pending_count = 0;
+
+static bool scr_fs_renames_pending(void) { return scr_fs_rename_pending_count != 0; }
+
+static bool scr_fs_renames_dispatch(void) {
+  ScrFsRenameOp *op = scr_fs_rename_done;
+  if (op == NULL) return false;
+  scr_fs_rename_done = op->next;
+  if (scr_fs_rename_done == NULL) scr_fs_rename_done_tail = &scr_fs_rename_done;
+  scr_fs_rename_pending_count--;
+
+  int error = scr_fs_rename_raw(op->oldpath, op->newpath);
+  ScrCaught *caught = NULL;
+  ScrError *err = NULL;
+  if (error != 0) {
+    scr_fs_rename_error(error, op->oldpath, op->newpath);
+    caught = scr_exc_take();
+    if (caught && caught->kind == SCR_EXC_OBJ && scr_error_is(caught->payload)) {
+      err = (ScrError *)caught->payload;
+    }
+  }
+  op->fn(op->cb, err);
+  scr_caught_release(caught);
+  scr_str_release(op->oldpath);
+  scr_str_release(op->newpath);
+  scr_closure_release(op->cb);
+  free(op);
+  return true;
+}
 #else
 static bool scr_fs_renames_pending(void) { return false; }
 static bool scr_fs_renames_dispatch(void) { return false; }
@@ -1685,10 +1870,20 @@ static bool scr_fs_renames_dispatch(void) { return false; }
 
 void scr_fs_rename_async(ScrStr *oldpath, ScrStr *newpath,
                          ScrClosure *cb, ScrFsRenameFn fn) {
-#ifdef SCR_LIB
+#if defined(SCR_LIB)
   (void)oldpath; (void)newpath; (void)fn;
   scr_closure_release(cb);
-  scr_trap("scriptc: internal error: fs.rename reached in a library build — please report this");
+  scr_trap("scriptc: callback-style fs.rename is not supported by this target\n");
+#elif defined(__wasi__)
+  ScrFsRenameOp *op = calloc(1, sizeof *op);
+  if (!op) scr_trap("scriptc: out of memory\n");
+  op->oldpath = scr_str_retain(oldpath);
+  op->newpath = scr_str_retain(newpath);
+  op->cb = cb;
+  op->fn = fn;
+  *scr_fs_rename_done_tail = op;
+  scr_fs_rename_done_tail = &op->next;
+  scr_fs_rename_pending_count++;
 #else
   if (!scr_fs_rename_shutdown_registered) {
     if (atexit(scr_fs_renames_shutdown) != 0) {
@@ -1893,7 +2088,25 @@ static void scr_resume_fiber(ScrFiber *f) {
   (void)scr_win_self();
 #endif
   f->return_to = &scr_loop_ctx;
+#ifdef __wasi__
+  scr_current = f;
+  scr_exc_swap_cell(&f->exc);
+  scr_als_active = &f->als;
+  if (f->coro != NULL) {
+    scr_wasi_coro_resume(f->coro);
+  } else {
+    /* scr_async_spawn_after's runtime C continuation. Its dependency is
+     * settled, so the entry can extract through scr_await_* without a
+     * stack switch and then completes in this turn. */
+    f->entry(f, f->argpack);
+    scr_fiber_finish(f);
+  }
+  scr_current = NULL;
+  scr_exc_swap_cell(NULL);
+  scr_als_active = &scr_als_main_slot;
+#else
   scr_switch(&scr_loop_ctx, &f->ctx, f);
+#endif
   if (f->done) {
     scr_promise_release(f->promise);
     scr_fiber_destroy(f);
@@ -2222,8 +2435,9 @@ bool scr_loop_run(ScrPromise *top_level) {
       now = scr_now_ms();
       if (scr_ready_len > 0) continue; /* io callbacks woke fibers */
     } else if (evw || net || dgram || watch) {
-#ifdef _WIN32
-      /* The win32 arm: no poll(2), so the sleep is a capped nanosleep and
+#if defined(_WIN32) || defined(__wasi__)
+      /* The win32 arm, and WASI hosts whose poll_oneoff adapters do not
+       * reliably wake for a closed inherited stdin pipe: the sleep is a capped nanosleep and
        * the next turn's dispatch does the work — signal flags (set by the
        * CRT handler on msvcrt's console-ctrl thread) and the stdin probe
        * at SCR_SIGNAL_POLL_MS granularity (scr_events.c), socket/dgram
@@ -2315,7 +2529,7 @@ bool scr_loop_run(ScrPromise *top_level) {
        * WNOHANG sweep at the next turn's top stays the reaper. */
       if (kids) (void)scr_children_wait(0);
       now = scr_now_ms();
-#endif /* !_WIN32 */
+#endif /* !_WIN32 && !__wasi__ */
     } else if (kids && scr_children_wait(due > now ? due - now : 0)) {
       now = scr_now_ms(); /* woke early on an exit, or hit the deadline */
     } else {
@@ -2727,6 +2941,8 @@ ScrGen *scr_gen_new(void (*entry)(ScrFiber *, void *), void *argpack,
 #ifdef _WIN32
   f->ctx = CreateFiber(SCR_FIBER_STACK, scr_trampoline, NULL);
   if (f->ctx == NULL) scr_oom();
+#elif defined(__wasi__)
+  f->ctx = 0;
 #else
   f->stack = malloc(SCR_FIBER_STACK);
   if (!f->stack) scr_oom();
@@ -2898,16 +3114,29 @@ static void scr_gen_switch_in(ScrGen *g) {
   g->state = SCR_GEN_RUNNING;
 #ifdef _WIN32
   ScrCtx here = scr_win_self();
+#elif defined(__wasi__)
+  ScrCtx here = 0;
 #else
   ucontext_t here;
 #endif
   f->return_to = &here;
   ScrFiber *me = scr_current;
+#ifdef __wasi__
+  scr_current = f;
+  scr_exc_swap_cell(&f->exc);
+  scr_als_active = &f->als;
+  if (f->coro == NULL) f->entry(f, f->argpack);
+  else scr_wasi_coro_resume(f->coro);
+  scr_current = me;
+  scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
+  scr_als_active = me != NULL ? &me->als : &scr_als_main_slot;
+#else
   scr_switch(&here, &f->ctx, f);
   /* Back on the consumer: restore identity + the consumer's cell (the
    * yield/finish switch targeted NULL — main's cell). */
   scr_current = me;
   scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
+#endif
   if (f->done) {
     g->state = SCR_GEN_DONE;
     if (f->exc.kind != SCR_EXC_NONE) {

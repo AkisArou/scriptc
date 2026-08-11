@@ -1,6 +1,6 @@
 # scriptc
 
-Compile ordinary TypeScript and JavaScript to small, fast native executables — no Node, no V8, no JavaScript engine in the binary. What compiles behaves byte-for-byte like Node.
+Compile ordinary TypeScript and JavaScript to small, fast native executables or WASI WebAssembly modules — no Node, no V8, no JavaScript engine in the artifact. What compiles behaves byte-for-byte like Node.
 
 ```console
 $ cat fib.ts
@@ -28,7 +28,7 @@ Builds use a bounded persistent cache by default. Unchanged executables and libr
 
 ## Commands
 
-- `scriptc build <file.ts>` — compile to a native executable
+- `scriptc build <file.ts>` — compile to a native executable or selected target artifact
 - `scriptc run <file.ts>` — compile and run
 - `scriptc coverage <file.ts>` — what compiles statically, and why the rest doesn't
 
@@ -39,6 +39,8 @@ types unblock application measurement, while runtime module uses remain
 reported as blockers.
 
 No annotations, no dialect, no special stdlib: the same TypeScript you run on Node, type-checked by the real TypeScript compiler. Programs outside the static tier can opt into `--dynamic`, which embeds a small JavaScript engine (~620KB) for the parts that can't be static; everything else fails the build with a specific error code and usually a rewrite hint.
+
+WebAssembly is available as a production LLVM target: `SCRIPTC_CC=zigcc SCRIPTC_TARGET=wasm32-wasi scriptc build app.ts`. It emits a WASI Preview 1 `.wasm` module, and `scriptc run` supplies a WASI host. The complete executable language tier—including async, generators, timers, and `--dynamic`—is supported. APIs needing capabilities WASI P1 does not expose (network sockets/fetch, child processes, OS signals, and filesystem watching), sanitizer builds, native FFI, and library-mode archive builds are rejected with `SC3002`.
 
 Native code can be called through an explicit, link-time C ABI manifest: declare the function signature in TypeScript, bind it to a C symbol, and build with `--ffi <manifest.json>`. See the [Native FFI guide](https://scriptc.dev/ffi).
 

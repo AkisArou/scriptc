@@ -175,6 +175,8 @@ ScrStr *scr_process_platform(void) {
     scr_platform_str = scr_str_new("darwin", 6);
 #elif defined(__linux__)
     scr_platform_str = scr_str_new("linux", 5);
+#elif defined(__wasi__)
+    scr_platform_str = scr_str_new("wasi", 4);
 #elif defined(_WIN32)
     scr_platform_str = scr_str_new("win32", 5);
 #else
@@ -188,7 +190,11 @@ ScrStr *scr_process_platform(void) {
  * Node spells its own build's arch. Interned like process.platform. */
 ScrStr *scr_process_arch(void) {
   if (!scr_arch_str) {
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__wasm32__)
+    scr_arch_str = scr_str_new("wasm32", 6);
+#elif defined(__wasm64__)
+    scr_arch_str = scr_str_new("wasm64", 6);
+#elif defined(__aarch64__) || defined(_M_ARM64)
     scr_arch_str = scr_str_new("arm64", 5);
 #elif defined(__x86_64__) || defined(_M_X64)
     scr_arch_str = scr_str_new("x64", 3);
@@ -350,11 +356,11 @@ ScrArr *scr_env_pairs(void) {
 
 double scr_process_pid(void) { return (double)getpid(); }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__wasi__)
 /* No uids/gids exist on Windows: Node's process object simply has no
  * getuid/getgid members there, so a call is the property-access TypeError
  * below — thrown catchably, exactly what `process.getuid()` does under
- * Windows Node. */
+ * Windows Node. WASI has no uid/gid process model either. */
 double scr_process_getuid(void) {
   scr_throw_error_msg(SCR_ERR_TYPE, "process.getuid is not a function", 32);
   return 0;
@@ -532,6 +538,14 @@ static int scr_win_kill(int pid, int sig) {
   return 0;
 }
 #define scr_sys_kill(pid, sig) scr_win_kill((int)(pid), (sig))
+#elif defined(__wasi__)
+static int scr_wasi_kill(int pid, int sig) {
+  (void)pid;
+  (void)sig;
+  errno = ENOSYS;
+  return -1;
+}
+#define scr_sys_kill(pid, sig) scr_wasi_kill((int)(pid), (sig))
 #else
 #define scr_sys_kill(pid, sig) kill((pid_t)(pid), (sig))
 #endif
@@ -689,6 +703,27 @@ ScrStr *scr_os_tmpdir(void) {
   if (len > 1 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) len--;
   return scr_str_new(buf, len);
 }
+#elif defined(__wasi__)
+/* WASI has an inherited environment but no passwd database, uname, or
+ * physical-memory query. Keep the useful environment-backed answers and
+ * spell the platform explicitly for the rest. */
+ScrStr *scr_os_homedir(void) {
+  const char *home = getenv("HOME");
+  return scr_str_new(home ? home : "", home ? strlen(home) : 0);
+}
+ScrStr *scr_os_user_name(void) {
+  const char *user = getenv("USER");
+  return scr_str_new(user ? user : "", user ? strlen(user) : 0);
+}
+ScrStr *scr_os_user_shell(void) { return scr_str_new("", 0); }
+ScrStr *scr_os_user_homedir(void) { return scr_os_homedir(); }
+ScrStr *scr_os_release(void) { return scr_str_new("", 0); }
+ScrStr *scr_os_type(void) { return scr_str_new("WASI", 4); }
+double scr_os_totalmem(void) { return 0; }
+/* The guest temp namespace is stable across hosts. `scriptc run` preopens
+ * the host's /tmp at this path; other WASI hosts can provide the same
+ * capability without leaking a host-specific TMPDIR into the module. */
+ScrStr *scr_os_tmpdir(void) { return scr_str_new("/tmp", 4); }
 #else
 ScrStr *scr_os_homedir(void) {
   /* uv_os_homedir: $HOME when set (even empty is "set" only if non-NULL;
@@ -1226,7 +1261,7 @@ double scr_thread_cpu_system_diff(double prev) { return scr_thread_cpu_system() 
  * Darwin's bytes by 1024; the rest are getrusage's own counters, zero
  * where the platform never fills them). */
 double scr_process_rusage(double idx) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__wasi__)
   /* uv fills only the CPU times and page-fault/maxRSS slice on Windows;
    * everything else answers 0 — Node's own shape there. */
   switch ((int)idx) {
@@ -1335,6 +1370,11 @@ double scr_process_umask(double mask) {
   } else {
     _umask_s((int)mask, &prev);
   }
+  return (double)prev;
+#elif defined(__wasi__)
+  static mode_t current = 022;
+  mode_t prev = current;
+  if (mask >= 0) current = (mode_t)mask;
   return (double)prev;
 #else
   mode_t prev;
@@ -1653,9 +1693,10 @@ void scr_fs_chmod(ScrStr *path, double mode) {
 }
 
 void scr_fs_chown(ScrStr *path, double uid, double gid) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__wasi__)
   /* libuv's uv_fs_chown on Windows is an unconditional no-op success —
-   * Node's chownSync "works" and changes nothing there; same here. */
+   * Node's chownSync "works" and changes nothing there; WASI likewise has
+   * no ownership model. */
   (void)path; (void)uid; (void)gid;
 #else
   /* Node passes the ids straight to chown(2); -1 is the POSIX "leave
@@ -1863,7 +1904,7 @@ static bool scr_fs_write_fd_valid(double fd) {
  * call, preserving any signal that was already pending. */
 static ssize_t scr_fs_write_once(int fd, const void *data, size_t length,
                                  bool positioned, double position) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__wasi__)
   return positioned
     ? scr_fs_pwrite(fd, data, length, position)
     : write(fd, data, length);
@@ -2520,23 +2561,23 @@ void scr_fs_rm_opts_retry(ScrStr *path, bool recursive, bool force, double max_r
   scr_str_release(f.path);
 }
 
-#ifdef _WIN32
-/* No mkdtemp in the CRT: libuv's own fallback shape — six random
+#if defined(_WIN32) || defined(__wasi__)
+/* No mkdtemp in the Windows CRT or WASI libc: libuv's own fallback shape — six random
  * [a-z0-9] name characters from the CSPRNG, retried on EEXIST. */
-static char *scr_win_mkdtemp(char *tmpl) {
+static char *scr_portable_mkdtemp(char *tmpl) {
   static const char cs[] = "abcdefghijklmnopqrstuvwxyz0123456789";
   size_t len = strlen(tmpl);
   for (int tries = 0; tries < 32; tries++) {
     unsigned char r[6];
     arc4random_buf(r, sizeof r);
     for (size_t i = 0; i < 6; i++) tmpl[len - 6 + i] = cs[r[i] % 36];
-    if (mkdir(tmpl) == 0) return tmpl;
+    if (scr_sys_mkdir(tmpl, 0777) == 0) return tmpl;
     if (errno != EEXIST) break;
   }
   memcpy(tmpl + len - 6, "XXXXXX", 6); /* the error message shows the template */
   return NULL;
 }
-#define mkdtemp scr_win_mkdtemp
+#define mkdtemp scr_portable_mkdtemp
 #endif
 
 ScrStr *scr_fs_mkdtemp(ScrStr *prefix) {
@@ -2688,6 +2729,8 @@ double scr_process_columns(double fd) {
   CONSOLE_SCREEN_BUFFER_INFO info;
   if (h == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(h, &info)) return -1;
   return (double)(info.srWindow.Right - info.srWindow.Left + 1);
+#elif defined(__wasi__)
+  return -1;
 #else
   struct winsize ws;
   if (ioctl((int)fd, TIOCGWINSZ, &ws) != 0) return -1;
@@ -2727,6 +2770,12 @@ void scr_process_stdin_set_raw_mode(bool raw) {
   } else if (scr_stdin_cooked_saved) {
     (void)SetConsoleMode(h, scr_stdin_cooked);
   }
+}
+#elif defined(__wasi__)
+void scr_process_stdin_set_raw_mode(bool raw) {
+  (void)raw;
+  const char msg[] = "process.stdin.setRawMode is not a function";
+  scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
 }
 #else
 static struct termios scr_stdin_cooked;

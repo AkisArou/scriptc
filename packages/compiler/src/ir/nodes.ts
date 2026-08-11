@@ -720,7 +720,14 @@ export interface IrModule {
      * island loader evaluates when an ES module imports the CJS file:
      * default plus the named exports LEXED from the source at build time
      * (cjs-lexer.ts — the compiler's port of Node's vendored CJS lexer). */
-    modules: { key: string; source: string; format: "esm" | "cjs" | "json"; esm?: string }[];
+    modules: {
+      key: string;
+      source: string;
+      format: "esm" | "cjs" | "json";
+      esm?: string;
+      /** Parsed/bound embedded source reaches the engine's global fetch. */
+      usesFetch?: true;
+    }[];
     /** `kind` picks Node's "exports" condition set per CALL FORM: one
      * (from, specifier) can name a dual package's ESM entry behind an
      * "import" edge AND its CJS entry behind a "require" edge; "any"
@@ -5856,16 +5863,15 @@ export function moduleUsesFileHandle(mod: IrModule): boolean {
 }
 
 /** True when user code lowers static fetch or the embedded npm graph
- * references dynamic fetch — the link switch that pulls scr_fetch.c +
+ * reaches the engine's global fetch — the link switch that pulls scr_fetch.c +
  * its socket/tls/zlib dependencies into the binary (cc.ts) and has the
- * emitted main call scr_fetch_install. For embedded sources, use a
- * word-boundary scan and err toward linking: a false positive costs one
- * dylib reference; a false negative would leave embedded code without
- * the global at runtime. Fetch-free graphs keep their exact historical
- * link lines. */
+ * emitted main call scr_fetch_install. The npm graph records the embedded
+ * source fact with a parser + binder, so comments, strings, property names,
+ * and local `fetch` bindings do not change the link or target capability.
+ * Fetch-free graphs keep their exact historical link lines. */
 export function moduleUsesFetch(mod: IrModule): boolean {
   const embedded = mod.embedded;
-  if (embedded && embedded.modules.some((m) => /\bfetch\b/.test(m.source))) return true;
+  if (embedded && embedded.modules.some((m) => m.usesFetch === true)) return true;
   // User-code fetch is either the engine global or the static libCall pair.
   let found = false;
   const visit = (v: unknown): void => {

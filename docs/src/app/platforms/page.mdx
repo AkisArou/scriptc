@@ -35,9 +35,19 @@ fib.exe: PE32+ executable (console) x86-64, for MS Windows
 
 The full corpus runs in a differential lane against Windows Node, including `--dynamic` programs and `child_process`. The Windows fixture lanes also exercise real loopback traffic through `net`, `http`, `https`, `tls`, `http2`, `dgram`, and `dns`, plus the native `fetch` implementation (including redirects, streaming bodies, compression, cancellation, and proxy handling).
 
+### WebAssembly (WASI Preview 1)
+
+Set <code>SCRIPTC_CC=zigcc</code> and <code>SCRIPTC_TARGET=wasm32-wasi</code> to produce a standalone <code>.wasm</code> module. Without <code>-o</code>, <code>scriptc build hello.ts</code> writes <code>.scriptc/hello.wasm</code>. <code>scriptc run</code> hosts the module with Node's WASI implementation, inherits stdio and environment, preopens the current working directory as <code>/</code>, and maps the host platform's temporary directory to the guest's <code>/tmp</code>. A built module can run in another WASI Preview 1 host instead.
+
+WASI is a production LLVM target with the same language tiers as the native targets. Its 32-bit LLVM ABI supports collections, closures, exceptions, classes, checked dynamic values, async/await, promises, synchronous and asynchronous generators, timers, stdin/readline events, process-exit listeners, filesystem callbacks and promises, and the <code>--dynamic</code> QuickJS island. The debugging C backend remains available for async-free inspection only through an explicit <code>--backend c</code>; coroutine-dependent programs report <code>SC3001</code>, and WASI never silently falls back to C.
+
+The remaining executable boundary is host capability, not language coverage. WASI Preview 1 has no portable socket, process-spawn, OS-signal, network-interface, or filesystem-notification APIs. Networking/fetch, child processes, signal APIs, <code>os.networkInterfaces()</code>, and <code>fs.watch</code> therefore fail before linking with diagnostic <code>SC3002</code>. <code>--sanitize</code>, native FFI, and library-mode archive builds are unavailable too. Filesystem behavior is bounded by the host's preopens, and process/OS introspection follows WASI's reduced model.
+
 ## Cross-target limits
 
 - `--sanitize` is a host-build lane.
+- Library-mode static archives are native embedder artifacts; <code>wasm32-wasi</code> rejects <code>scriptc build --lib</code> with <code>SC3002</code>.
+- WASI cannot host APIs for capabilities missing from Preview 1, as described above.
 
 ## Summary
 
@@ -64,6 +74,11 @@ The full corpus runs in a differential lane against Windows Node, including `--d
       <td>Windows x86_64</td>
       <td><code>SCRIPTC_CC=zigcc SCRIPTC_TARGET=x86_64-windows-gnu</code></td>
       <td>Static and dynamic surfaces incl. servers, TLS, fetch, and child_process; verified against Windows Node</td>
+    </tr>
+    <tr>
+      <td>WebAssembly / WASI Preview 1</td>
+      <td><code>SCRIPTC_CC=zigcc SCRIPTC_TARGET=wasm32-wasi</code></td>
+      <td>Production LLVM target; full language and dynamic tiers, bounded by WASI P1 host capabilities</td>
     </tr>
   </tbody>
 </table>

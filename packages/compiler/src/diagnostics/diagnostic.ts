@@ -10,10 +10,10 @@
  *            surfaced as source-anchored diagnostics (SC0004)
  *   SC1xxx  supported-TypeScript-not-yet: valid TS outside the current subset
  *   SC2xxx  scriptc type rules (types we cannot compile yet)
- *   SC3xxx  backend coverage: the program is compilable (the C backend
- *            builds it) but the selected alternate backend's tier does not
- *            include some IR construct yet (SC3001 — the LLVM backend's
- *            refusal, minted in index.ts from LlvmUnsupportedError)
+ *   SC3xxx  backend/target coverage: the program is valid, but the selected
+ *            alternate backend or execution target does not include it
+ *            (SC3001 — LLVM IR tier refusal; SC3002 — target refusal, both
+ *            minted in index.ts)
  *   SC4xxx  library-mode/profile refusals (the library-emission mode): profile
  *            malformed (SC4001), export unresolved (SC4002), unmappable
  *            signature (SC4003), async/generator export (SC4004), the
@@ -281,7 +281,7 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
  * SC2010/SC2011/SC2012/SC2013); "unsupported" codes mark constructs with
  * no lowering on either tier. Process-level codes are deliberately absent:
  * preflight gates (SC0001–SC0004), comptime evaluation failures (SC1110),
- * the alternate-backend tier refusal (SC3001), and internal errors
+ * backend/target refusals (SC3001/SC3002), and internal errors
  * (SC9001/SC9002) report problems or engine tiers, not language/stdlib
  * surface. */
 export const FENCE_CODES: Record<string, { name: string; status: "unsupported" | "dynamic-only" }> = {

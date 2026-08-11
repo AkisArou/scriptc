@@ -16,7 +16,7 @@ export class LlvmUnsupportedError extends Error {
   ) {
     super(
       `the LLVM backend does not support this construct yet (${kind}); ` +
-        `build with the reference C backend (--backend c, or the default's transparent fallback)`,
+        `build with the debugging C backend (--backend c, or the native default's transparent fallback)`,
     );
     this.name = "LlvmUnsupportedError";
   }
