@@ -2118,25 +2118,33 @@ declare module "node:net" {
  * connection per call (no agent pooling) with Node's exact wire head. */
 declare module "http" {
   import { Server as NetServer, Socket } from "net";
-  export type Server = NetServer;
+  export interface Server extends NetServer {
+    timeout: number;
+    keepAliveTimeout: number;
+    keepAliveTimeoutBuffer: number;
+    headersTimeout: number;
+    requestTimeout: number;
+  }
   export type RequestListener =
     (req: IncomingMessage, res: ServerResponse) => void;
   /* The Server VALUE — Node's constructor works with and without `new`
    * (test/parallel's http.Server(fn) spelling); both route to the
    * createServer lowering. */
   export const Server: {
-    new (requestListener?: (req: IncomingMessage, res: ServerResponse) => void): NetServer;
-    new (options: ServerOptions, requestListener?: (req: IncomingMessage, res: ServerResponse) => void): NetServer;
-    (requestListener?: (req: IncomingMessage, res: ServerResponse) => void): NetServer;
-    (options: ServerOptions, requestListener?: (req: IncomingMessage, res: ServerResponse) => void): NetServer;
+    new (requestListener?: (req: IncomingMessage, res: ServerResponse) => void): Server;
+    new (options: ServerOptions, requestListener?: (req: IncomingMessage, res: ServerResponse) => void): Server;
+    (requestListener?: (req: IncomingMessage, res: ServerResponse) => void): Server;
+    (options: ServerOptions, requestListener?: (req: IncomingMessage, res: ServerResponse) => void): Server;
   };
   /* The options-record stance (the RequestOptions precedent): every
    * documented key typechecks; the lowering's option walk decides per
-   * key — requireHostHeader: false and joinDuplicateHeaders lower,
+   * key — requireHostHeader: false, joinDuplicateHeaders, and
+   * keepAliveTimeoutBuffer lower,
    * documented-but-unlowered keys fence by name, unknown keys drop. */
   export interface ServerOptions {
     requireHostHeader?: boolean;
     joinDuplicateHeaders?: boolean;
+    keepAliveTimeoutBuffer?: number;
     [option: string]: unknown;
   }
   /* The outgoing-header shape, @types/node's matrix: numbers format via
@@ -2392,7 +2400,7 @@ declare module "node:tls" {
  * self-signed probe shape). With neither, /etc/ssl/cert.pem stands in
  * for Node's bundled roots. */
 declare module "https" {
-  import { Server } from "net";
+  import { Server } from "http";
   import { Agent, ClientRequest, IncomingMessage, ServerResponse } from "http";
   export { Agent, Server };
   export interface ServerOptions {

@@ -39,6 +39,20 @@ export const NET_MODULE_FNS: ReadonlySet<string> = new Set([
 const NARROW_DATA_HINT =
   'write/end take one string or one Uint8Array/Buffer value (narrow unions first)';
 
+/** The writable numeric http.Server timeout fields. The selector is an
+ * internal runtime ABI shared by the get/set libCalls (kept here beside
+ * the only two construction/lowering paths that can mint the accesses). */
+function httpServerTimeoutField(name: string): number | null {
+  switch (name) {
+    case "timeout": return 0;
+    case "keepAliveTimeout": return 1;
+    case "headersTimeout": return 2;
+    case "requestTimeout": return 3;
+    case "keepAliveTimeoutBuffer": return 4;
+    default: return null;
+  }
+}
+
 /** VOID-result server/socket calls are usable as statements and as concise
  * arrow bodies (`socket.on("error", () => socket.destroy())` — the shape
  * portless is made of); anything that would CONSUME the result (Node
@@ -923,6 +937,27 @@ export function lowerHttpResPropertyAssignment(L: Lowerer, left: ts.Expression,
   return {
     kind: "exprStmt",
     expr: { kind: "libCall", fn, args: [receiver, value], type: VOID, loc },
+    loc,
+  };
+}
+
+/** `server.timeout = n` and the four HTTP parser/keep-alive timeout
+ * siblings. These are ordinary writable number properties in Node: the
+ * runtime stores their exact value per server; active timeout behavior is
+ * a separate protocol concern. */
+export function lowerHttpServerTimeoutAssignment(L: Lowerer, left: ts.Expression,
+  right: ts.Expression, loc: SrcLoc,): IrStmt | null {
+  if (!ts.isPropertyAccessExpression(left) || left.questionDotToken) return null;
+  const field = httpServerTimeoutField(left.name.text);
+  if (field === null) return null;
+  if (L.mapTypeOf(L.typeOf(left.expression))?.kind !== "netServer") return null;
+  if (!L.isStdlibMember(left)) return null;
+  const receiver = handleReceiver(L, left.expression, NETSERVER_T);
+  const selector: IrExpr = { kind: "numLit", value: field, type: F64, loc };
+  const value = L.lowerExprExpecting(right, F64);
+  return {
+    kind: "exprStmt",
+    expr: { kind: "libCall", fn: "http.serverTimeoutSet", args: [receiver, selector, value], type: VOID, loc },
     loc,
   };
 }
@@ -1966,11 +2001,19 @@ function lowerH2StreamMethodCall(L: Lowerer, call: ts.CallExpression,
  * the two reads never materializes; the runtime answers the bound port
  * directly. Null for every other property shape. */
 export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
-  if (expr.questionDotToken) return null;
+  if (expr.questionDotToken && !L.chainHandled.has(expr)) return null;
   const loc = locOf(expr);
   // req.url / req.method — always-present strings on server requests;
   // req.headers.NAME — the `string | undefined` union (envGet's type).
   const recvKind = L.mapTypeOf(L.typeOf(expr.expression))?.kind;
+  if (recvKind === "netServer" && L.isStdlibMember(expr)) {
+    const field = httpServerTimeoutField(expr.name.text);
+    if (field !== null) {
+      const receiver = handleReceiver(L, expr.expression, NETSERVER_T);
+      const selector: IrExpr = { kind: "numLit", value: field, type: F64, loc };
+      return { kind: "libCall", fn: "http.serverTimeoutGet", args: [receiver, selector], type: F64, loc };
+    }
+  }
   if (recvKind === "httpReq" && L.isStdlibMember(expr)) {
     const name = expr.name.text;
     if (name === "url" || name === "method") {
@@ -2234,13 +2277,15 @@ function lowerRequestHandlerArg(L: Lowerer, node: ts.Expression): IrExpr {
 }
 
 /** The http.createServer / http.Server options object — { requireHostHeader?,
- * joinDuplicateHeaders?, ... }: the two lowered keys are exactly the
- * parser behaviors this runtime has (requireHostHeader: false IS the
- * parser's stance — it never answers 400 for a missing Host;
- * joinDuplicateHeaders: true joins repeated request-header reads with
- * ", "). Other documented keys fence by name; unknown keys drop like
- * Node drops them. Answers whether joinDuplicateHeaders was requested. */
-function lowerHttpServerOptions(L: Lowerer, node: ts.Expression, what: string): { joinDup: boolean } {
+ * joinDuplicateHeaders?, keepAliveTimeoutBuffer?, ... }. The first two
+ * select parser behavior; keepAliveTimeoutBuffer initializes the matching
+ * writable server field after Node's non-negative-safe-integer validation.
+ * Other documented keys fence by name; unknown keys drop like Node drops
+ * them. */
+function lowerHttpServerOptions(L: Lowerer, node: ts.Expression, what: string): {
+  joinDup: boolean;
+  keepAliveTimeoutBuffer: IrExpr | null;
+} {
   if (!ts.isObjectLiteralExpression(node)) {
     L.noLowering(
       `${what} with a non-literal options argument`,
@@ -2249,6 +2294,7 @@ function lowerHttpServerOptions(L: Lowerer, node: ts.Expression, what: string): 
     );
   }
   let joinDup = false;
+  let keepAliveTimeoutBuffer: IrExpr | null = null;
   for (const prop of node.properties) {
     let initializer: ts.Expression | null;
     if (ts.isPropertyAssignment(prop) &&
@@ -2294,20 +2340,47 @@ function lowerHttpServerOptions(L: Lowerer, node: ts.Expression, what: string): 
         "the lowered forms are the literals joinDuplicateHeaders: true (repeats join \", \") and false (the keep-first default)",
       );
     }
+    if (key === "keepAliveTimeoutBuffer") {
+      if (keepAliveTimeoutBuffer !== null) {
+        L.noLowering(
+          `${what} with duplicate keepAliveTimeoutBuffer options`,
+          prop,
+          "write keepAliveTimeoutBuffer once in the options literal",
+        );
+      }
+      const raw = initializer !== null
+        ? L.lowerExpr(initializer)
+        : L.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
+      const value = L.coerceToExpected(raw, DYN);
+      if (value.type.kind !== "dyn") {
+        L.noLowering(
+          `${what} with a keepAliveTimeoutBuffer value that cannot cross the runtime option boundary`,
+          prop,
+          "keepAliveTimeoutBuffer is a number or undefined",
+        );
+      }
+      // Preserve the optional field's undefined arm until runtime: Node
+      // treats it as absent, while numbers take the constructor-only
+      // integer/range ladder and dynamic non-numbers get its named type
+      // error. Coercing eagerly to F64 would reject the valid explicit-
+      // undefined spelling before the option helper sees it.
+      keepAliveTimeoutBuffer = value;
+      continue;
+    }
     fenceOrDropOptionKey(
       L, prop, key, what, HTTP_SERVER_DOCUMENTED_OPTIONS,
-      "requireHostHeader: false and joinDuplicateHeaders are the supported options",
+      "requireHostHeader: false, joinDuplicateHeaders, and keepAliveTimeoutBuffer are the supported options",
     );
     // An undocumented key, dropped like Node drops it.
   }
-  return { joinDup };
+  return { joinDup, keepAliveTimeoutBuffer };
 }
 
 /** The shared createServer([options][, handler]) shapes behind
  * http.createServer, http.Server, and `new http.Server`: no arguments
  * (the on("request") route), a lone handler, a lone options object, and
- * (options, handler). joinDuplicateHeaders wraps the construction in the
- * flag-setting helper. */
+ * (options, handler). Modeled option values wrap the construction in an
+ * interned option-setting helper. */
 function lowerHttpCreateServerForms(L: Lowerer, expr: ts.CallExpression | ts.NewExpression,
   what: string, loc: SrcLoc,): IrExpr {
   const args = expr.arguments ?? ([] as unknown as ts.NodeArray<ts.Expression>);
@@ -2327,36 +2400,62 @@ function lowerHttpCreateServerForms(L: Lowerer, expr: ts.CallExpression | ts.New
     if (ts.isObjectLiteralExpression(args[0]!)) optsNode = args[0]!;
     else handlerNode = args[0]!;
   }
-  const joinDup = optsNode !== null && lowerHttpServerOptions(L, optsNode, what).joinDup;
+  const opts = optsNode !== null
+    ? lowerHttpServerOptions(L, optsNode, what)
+    : { joinDup: false, keepAliveTimeoutBuffer: null };
   const server: IrExpr = handlerNode !== null
     ? { kind: "libCall", fn: "http.createServer", args: [lowerRequestHandlerArg(L, handlerNode)], type: NETSERVER_T, loc }
     : { kind: "libCall", fn: "http.createServerEmpty", args: [], type: NETSERVER_T, loc };
-  if (!joinDup) return server;
-  // The flag-setting composition: an interned helper takes the fresh
-  // server, sets the parser flag, and answers it — one expression.
-  const key = `server.joindup`;
+  if (!opts.joinDup && opts.keepAliveTimeoutBuffer === null) return server;
+  // The option-setting composition: an interned helper takes the option
+  // values first (preserving Node's options-before-handler evaluation
+  // order), then the fresh server, applies the modeled fields, and answers
+  // the server as the constructor/factory result.
+  const hasBuffer = opts.keepAliveTimeoutBuffer !== null;
+  const key = `server.opts:${opts.joinDup ? 1 : 0}:${hasBuffer ? 1 : 0}`;
   const existing = L.arrHofHelpers.get(key);
-  const name = existing ?? `%server.joindup.${L.arrHofHelpers.size}`;
+  const name = existing ?? `%server.opts.${L.arrHofHelpers.size}`;
   if (!existing) {
     L.arrHofHelpers.set(key, name);
+    const params = [
+      ...(hasBuffer ? [{ localId: "b.0", name: "buffer", type: DYN }] : []),
+      { localId: "s.0", name: "s", type: NETSERVER_T },
+    ];
     const ref: IrExpr = { kind: "varRef", localId: "s.0", type: NETSERVER_T, loc };
+    const body: IrStmt[] = [];
+    if (hasBuffer) {
+      const selector: IrExpr = { kind: "numLit", value: 4, type: F64, loc };
+      const value: IrExpr = { kind: "varRef", localId: "b.0", type: DYN, loc };
+      body.push({
+        kind: "exprStmt",
+        expr: { kind: "libCall", fn: "http.serverTimeoutOptionSet", args: [ref, selector, value], type: VOID, loc },
+        loc,
+      });
+    }
+    if (opts.joinDup) {
+      body.push({
+        kind: "exprStmt",
+        expr: { kind: "libCall", fn: "http.serverJoinDupHeaders", args: [ref], type: VOID, loc },
+        loc,
+      });
+    }
+    body.push({ kind: "return", value: ref, loc });
     L.liftedFns.push({
       name,
-      params: [{ localId: "s.0", name: "s", type: NETSERVER_T }],
+      params,
       returnType: NETSERVER_T,
-      locals: [{ id: "s.0", name: "s", type: NETSERVER_T, mutable: false }],
-      body: [
-        {
-          kind: "exprStmt",
-          expr: { kind: "libCall", fn: "http.serverJoinDupHeaders", args: [ref], type: VOID, loc },
-          loc,
-        },
-        { kind: "return", value: ref, loc },
-      ],
+      locals: params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+      body,
       loc,
     });
   }
-  return { kind: "call", callee: name, args: [server], type: NETSERVER_T, loc };
+  return {
+    kind: "call",
+    callee: name,
+    args: [...(opts.keepAliveTimeoutBuffer !== null ? [opts.keepAliveTimeoutBuffer] : []), server],
+    type: NETSERVER_T,
+    loc,
+  };
 }
 
 /** `new http.Server([options][, handler])` — the constructor spelling of
@@ -2633,21 +2732,26 @@ const TLS_VALIDATED_OPTIONS: ReadonlySet<string> = new Set([
   "sessionTimeout", "ticketKeys",
 ]);
 
-/** True when a literal options bag carries a runtime-validated key (and
- * the source is JS — TypeScript keeps its compile fences). */
-function tlsLiteralNeedsRuntimeWalk(node: ts.ObjectLiteralExpression): boolean {
-  if (!isJsSourceFile(node.getSourceFile())) return false;
+/** True when a literal options bag must ride the runtime walker: JS uses
+ * it for the typed TLS validation ladders, and HTTPS uses it for
+ * keepAliveTimeoutBuffer so the HTTP option is consumed without losing
+ * the literal's evaluation order. */
+function tlsLiteralNeedsRuntimeWalk(node: ts.ObjectLiteralExpression,
+  includeHttpTimeoutOptions = false,): boolean {
+  const jsSource = isJsSourceFile(node.getSourceFile());
   return node.properties.some((p) =>
     (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
     (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
-    TLS_VALIDATED_OPTIONS.has(p.name.text),
+    ((includeHttpTimeoutOptions && p.name.text === "keepAliveTimeoutBuffer") ||
+      (jsSource && TLS_VALIDATED_OPTIONS.has(p.name.text))),
   );
 }
 
 function lowerTlsServerOptionsOrDyn(
-  L: Lowerer, node: ts.Expression, what: string,
+  L: Lowerer, node: ts.Expression, what: string, includeHttpTimeoutOptions = false,
 ): { cert: IrExpr; key: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
-  if (ts.isObjectLiteralExpression(node) && !tlsLiteralNeedsRuntimeWalk(node)) {
+  if (ts.isObjectLiteralExpression(node) &&
+      !tlsLiteralNeedsRuntimeWalk(node, includeHttpTimeoutOptions)) {
     return lowerTlsServerOptions(L, node, what);
   }
   const v = L.lowerExpr(node);
@@ -3042,7 +3146,7 @@ function lowerHttpsModuleCall(L: Lowerer, expr: ts.CallExpression,
         "the supported form is createServer({ cert, key }, (req, res) => ...)",
       );
     }
-    const opts = lowerTlsServerOptionsOrDyn(L, args[0]!, "https.createServer");
+    const opts = lowerTlsServerOptionsOrDyn(L, args[0]!, "https.createServer", true);
     if (args.length === 1) {
       // The handler-less form: 'request' listeners arrive later via
       // server.on("request", ...) — the createSecureServer emission's

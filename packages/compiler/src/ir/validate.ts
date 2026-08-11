@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -425,6 +425,9 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "http.createServer": { argTypes: [null], result: NETSERVER_T },
   "http.createServerEmpty": { argTypes: [], result: NETSERVER_T },
   "http.serverJoinDupHeaders": { argTypes: [NETSERVER_T], result: VOID },
+  "http.serverTimeoutGet": { argTypes: [NETSERVER_T, F64], result: F64 },
+  "http.serverTimeoutSet": { argTypes: [NETSERVER_T, F64, F64], result: VOID },
+  "http.serverTimeoutOptionSet": { argTypes: [NETSERVER_T, F64, DYN], result: VOID },
   "net.serverOnListening": { argTypes: [NETSERVER_T, { kind: "func", params: [], ret: VOID }, BOOL], result: VOID },
   "http.resStatusGet": { argTypes: [HTTPRES_T], result: F64 },
   "http.resStatusSet": { argTypes: [HTTPRES_T, F64], result: VOID },
@@ -1149,23 +1152,6 @@ function callSiteReturnType(fn: IrFunction): IrType {
     return { kind: "generator", yieldT: fn.generator.yieldT, retT: fn.returnType, nextT: fn.generator.nextT };
   }
   return fn.returnType;
-}
-
-/** IR type carried by one native FFI marshalling class. Integer classes
- * are represented as f64 inside scriptc and narrow only at the C edge. */
-function ffiClassType(cls: string): IrType {
-  switch (cls) {
-    case "bool":
-      return BOOL;
-    case "string":
-      return STRING;
-    case "bytes":
-      return BYTES_U8;
-    case "void":
-      return VOID;
-    default:
-      return F64;
-  }
 }
 
 export function validateModule(mod: IrModule): IrValidationError[] {
@@ -2636,16 +2622,17 @@ function validateFunction(
           err(`FFI call to undeclared import "${e.import}"`, e.loc);
           break;
         }
-        if (entry.params.length !== e.args.length) {
+        const sourceParamTypes = ffiSourceParamTypes(entry.params);
+        if (sourceParamTypes.length !== e.args.length) {
           err(
-            `FFI call ${e.import}: ${e.args.length} args, expected ${entry.params.length}`,
+            `FFI call ${e.import}: ${e.args.length} args, expected ${sourceParamTypes.length}`,
             e.loc,
           );
         }
         e.args.forEach((arg, i) => {
-          const cls = entry.params[i];
-          if (cls !== undefined) {
-            expectType(arg, ffiClassType(cls), `FFI call ${e.import} arg ${i}`);
+          const expectedParam = sourceParamTypes[i];
+          if (expectedParam !== undefined) {
+            expectType(arg, expectedParam, `FFI call ${e.import} arg ${i}`);
           }
         });
         const expected = ffiClassType(entry.returns);

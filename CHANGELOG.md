@@ -6,6 +6,10 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+### Features
+
+- **Native FFI accepts C function-pointer callbacks.** Format 2 describes callback pointers and opaque contexts as independently positioned ABI entries, adapts ordinary capturing TypeScript closures through both backends, and preserves scalar C conversion and catchable callback throws. Raw callbacks without userdata use a binding-specific same-thread trampoline. The initial lifetime policy is explicit and bounded: callbacks are valid only during the native call; retained and foreign-thread callbacks remain rejected by contract.
+
 ## 0.0.25
 
 ### Fixes

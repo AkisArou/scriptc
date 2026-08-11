@@ -1,7 +1,7 @@
 /* Cheap whole-module may-throw analysis (see computeMayThrow). Pure function
  * of the IR module; the emitter consults the result to place unwind checks. */
 import type { IrArrIntrinsicMethod, IrBytesIntrinsicMethod, IrLibFn, IrModule } from "../../ir/nodes.js";
-import { MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS } from "../../ir/nodes.js";
+import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS } from "../../ir/nodes.js";
 
 /** Cheap may-throw analysis (cost discipline: functions that transitively
  * CANNOT throw pay for no pending-exception checks). A function may throw
@@ -29,6 +29,11 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
   // allocates the suspended fiber (nothing runs, nothing can throw) — a
   // body throw surfaces at genResume, which seeds unconditionally below.
   const genFns = new Set(mod.functions.filter((fn) => fn.generator).map((fn) => fn.name));
+  const callbackFfiImports = new Set(
+    (mod.ffiImports ?? [])
+      .filter((entry) => entry.params.some(isFfiCallbackParam))
+      .map((entry) => entry.name),
+  );
   // Method name → every class's implementation of it (virtualCall callees).
   const methodImpls = new Map<string, string[]>();
   for (const cls of mod.classes ?? []) {
@@ -162,6 +167,12 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           // The may-throw seed hook: throwing library calls (fs.*,
           // json.parse) count exactly like a `throw` statement.
           if (MAY_THROW_LIB_FNS.has(rec["fn"] as IrLibFn)) f.throws = true;
+          break;
+        case "ffiCall":
+          // A call-scoped native callback may run arbitrary scriptc code.
+          // Its exception stays pending until the outer native call
+          // returns, where the emitter checks and unwinds normally.
+          if (callbackFfiImports.has(rec["import"] as string)) f.throws = true;
           break;
         case "bytesNew": {
           // The size form (`new Uint8Array(n)`) throws Node's "Invalid

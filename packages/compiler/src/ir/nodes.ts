@@ -755,18 +755,87 @@ export interface IrModule {
   lib?: IrLibSection;
 }
 
-/** One outbound native FFI declaration, copied from the validated format-1
- * manifest onto the IR so both backends emit the same C ABI. `string` and
- * `bytes` parameters each expand to `(const uint8_t *, size_t)`; their
- * storage is borrowed only until the native call returns. Integer inputs
- * use JavaScript's ToUint32/ToInt32 coercions before narrowing. */
+export type IrFfiValueParamClass = "f64" | "bool" | "u8" | "u32" | "i32" | "string" | "bytes";
+export type IrFfiCallbackParamClass = "f64" | "bool" | "u8" | "u32" | "i32";
+export type IrFfiReturnClass = "f64" | "bool" | "u8" | "u32" | "i32" | "void";
+
+export interface IrFfiContextParam {
+  /** Manifest-local id of the callback whose ScrClosure* occupies this ABI slot. */
+  context: string;
+}
+
+export interface IrFfiCallbackParam {
+  callback: {
+    id: string;
+    /** Exact callback ABI order; context entries consume no TS argument. */
+    params: (IrFfiCallbackParamClass | IrFfiContextParam)[];
+    returns: IrFfiReturnClass;
+    lifetime: "call";
+  };
+}
+
+export type IrFfiParam = IrFfiValueParamClass | IrFfiCallbackParam | IrFfiContextParam;
+
+export function isFfiCallbackParam(param: IrFfiParam): param is IrFfiCallbackParam {
+  return typeof param === "object" && "callback" in param;
+}
+
+export function isFfiContextParam(
+  param: IrFfiParam | IrFfiCallbackParam["callback"]["params"][number],
+): param is IrFfiContextParam {
+  return typeof param === "object" && "context" in param;
+}
+
+/** Script-side type represented by one scalar/span FFI class. */
+export function ffiClassType(cls: IrFfiValueParamClass | IrFfiReturnClass): IrType {
+  switch (cls) {
+    case "bool":
+      return BOOL;
+    case "string":
+      return STRING;
+    case "bytes":
+      return BYTES_U8;
+    case "void":
+      return VOID;
+    default:
+      return F64;
+  }
+}
+
+/** The ordinary TypeScript function type a native callback descriptor consumes. */
+export function ffiCallbackType(
+  callback: IrFfiCallbackParam["callback"],
+): IrType & { kind: "func" } {
+  return {
+    kind: "func",
+    params: callback.params
+      .filter((param): param is IrFfiCallbackParamClass => !isFfiContextParam(param))
+      .map(ffiClassType),
+    ret: ffiClassType(callback.returns),
+  };
+}
+
+/** Source parameters consume values; synthetic context ABI entries do not. */
+export function ffiSourceParamTypes(params: readonly IrFfiParam[]): IrType[] {
+  return params.flatMap((param): IrType[] => {
+    if (isFfiContextParam(param)) return [];
+    if (isFfiCallbackParam(param)) return [ffiCallbackType(param.callback)];
+    return [ffiClassType(param)];
+  });
+}
+
+/** One outbound native FFI declaration. Format 1 contains only value
+ * classes. Format 2 additionally carries exact-position callback/context
+ * entries. String/bytes still expand to pointer+length pairs; callbacks
+ * and contexts are each one native pointer slot. Callback lifetimes are
+ * call-scoped and their closure/context storage is borrowed. */
 export interface IrFfiImport {
   /** The signature-only ambient TypeScript binding name. */
   name: string;
   /** The external C symbol. */
   symbol: string;
-  params: ("f64" | "bool" | "u8" | "u32" | "i32" | "string" | "bytes")[];
-  returns: "f64" | "bool" | "u8" | "u32" | "i32" | "void";
+  params: IrFfiParam[];
+  returns: IrFfiReturnClass;
 }
 
 /** One export-map entry, resolved: the external ccc symbol, the IR
@@ -2335,6 +2404,15 @@ export type IrLibFn =
    * joinDuplicateHeaders joins repeated request-header reads ", "). */
   | "http.createServerEmpty"
   | "http.serverJoinDupHeaders"
+  /** The five writable numeric http.Server timeout fields use one
+   * selector ABI: 0 timeout, 1 keepAliveTimeout, 2 headersTimeout,
+   * 3 requestTimeout, 4 keepAliveTimeoutBuffer. These calls store/read
+   * the property values; timer enforcement remains outside this surface.
+   * The constructor-option setter takes dyn so explicit undefined remains
+   * distinguishable from a numeric value until its Node validation ladder. */
+  | "http.serverTimeoutGet"
+  | "http.serverTimeoutSet"
+  | "http.serverTimeoutOptionSet"
   /** server.on("listening", cb) — the deferred listen-callback list. */
   | "net.serverOnListening"
   /** The ServerResponse member surface: statusCode/statusMessage reads
@@ -6752,6 +6830,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dc.chanBindStore",
   "dc.chanRunStores",
   "http.resWriteHeadDyn",
+  "http.serverTimeoutGet",
+  "http.serverTimeoutOptionSet",
   "net.sockSetEncoding",
   "http.reqSetEncoding",
   "fs.readFileSyncBuf",
