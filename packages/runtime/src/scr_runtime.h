@@ -15,22 +15,18 @@
 #include <string.h>    /* memcpy in the inline slot accessors */
 #include <sys/types.h> /* ssize_t in the transport ops table */
 
-/* ── win32 libc shims (scr_win.c; see the windows portability inventory) ──
- * The POSIX/BSD functions the runtime calls that mingw-w64's CRT does not
- * provide: stpcpy (POSIX.1-2008; scr_number.c's digit writer), the
- * arc4random_buf CSPRNG (Math.random and node:crypto; RtlGenRandom
- * underneath), gmtime_r (scr_http.c's Date header; the CRT's gmtime is
- * already per-thread), and strcasestr (scr_http.c's token scan).
- * scr_win.c — compiled into win32-target builds only (cc.ts) —
- * implements all of them. Declared here so every TU that calls them
- * through scr_runtime.h compiles unchanged; POSIX hosts never see
- * these. */
+/* ── libc shims ─────────────────────────────────────────────────────────
+ * Win32's missing POSIX/BSD functions live in scr_win.c. Zig's musl sysroot
+ * additionally lacks arc4random_buf; scr_musl.c supplies it from Linux's
+ * getrandom syscall. Both files are selected by cc.ts only for their target. */
 #ifdef _WIN32
 #include <time.h> /* time_t / struct tm for the gmtime_r shim */
 char *stpcpy(char *dst, const char *src);
 void arc4random_buf(void *buf, size_t n);
 struct tm *gmtime_r(const time_t *t, struct tm *out);
 char *strcasestr(const char *hay, const char *needle);
+#elif defined(SCR_MUSL)
+void arc4random_buf(void *buf, size_t n);
 #endif
 
 /* ── process ──────────────────────────────────────────────────────────── */

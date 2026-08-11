@@ -395,12 +395,14 @@ export function runtimeSrcDir(): string {
  * link inputs. Other hosts keep the historical bare-clang command line.
  *
  * SCRIPTC_TARGET=<triple> (zigcc only — plain clang has no cross sysroots here)
- * adds `-target <triple>` to every compile. Linux-gnu triples also add
+ * adds `-target <triple>` to every compile. Linux triples also add
  * -D_GNU_SOURCE: glibc hides POSIX/GNU declarations (kill, realpath, stpcpy,
  * arc4random_buf, posix_spawn_file_actions_addchdir_np, ...) under plain
- * -std=c11, where macOS exposes everything by default. Pin the glibc minor
- * in the triple (e.g. aarch64-linux-gnu.2.36) so the binary runs on the
- * differential container's distro (see docs/linux-port.md).
+ * -std=c11, where macOS exposes everything by default. Musl triples additionally
+ * carry SCR_MUSL because musl deliberately exposes no libc-identification macro;
+ * the runtime uses it only for the narrow libc shim in scr_musl.c. Pin the glibc
+ * minor in GNU triples (e.g. aarch64-linux-gnu.2.36) so the binary runs on the
+ * differential container's distro (see tests/harness/linux-differential.test.ts).
  *
  * Fetch is NATIVE everywhere (scr_fetch.c over the socket units — no
  * libcurl), so it cross-compiles wherever net/http/tls do, win32
@@ -463,12 +465,24 @@ export function resolveCc(
   }
   if (target === "") return { argv: ["zig", "cc"], target: null, ...hostArgs };
   const linux = target.includes("linux");
+  const musl = target.includes("linux-musl");
   return {
     argv: ["zig", "cc"],
     target,
-    targetArgs: ["-target", target, ...(linux ? ["-D_GNU_SOURCE"] : [])],
+    targetArgs: [
+      "-target",
+      target,
+      ...(linux ? ["-D_GNU_SOURCE"] : []),
+      ...(musl ? ["-DSCR_MUSL"] : []),
+    ],
     linkArgs: linux ? ["-lm"] : [],
   };
+}
+
+/** Musl intentionally has no predefined libc macro. The explicit Zig target
+ * is therefore the source of truth for selecting its small runtime shim. */
+export function isMuslTarget(driver: Pick<CcDriver, "target">): boolean {
+  return driver.target?.includes("linux-musl") ?? false;
 }
 
 /** The OS the produced binary runs on: the triple's OS under SCRIPTC_TARGET,
@@ -1125,6 +1139,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     // carries no -l flags. Never present off win32, so host archives
     // cannot change by a byte.
     ...(targetPlatform(driver) === "win32" ? ["scr_win.c"] : []),
+    // Zig's musl sysroot does not provide arc4random_buf. Keep the fallback
+    // inside the archive so library embedders need no extra system library.
+    ...(isMuslTarget(driver) ? ["scr_musl.c"] : []),
     ...(regex ? ["scr_regex.c"] : []),
     ...(opts.assert || regex || opts.symbol ? ["scr_assert.c"] : []),
     ...(opts.inspect ? ["scr_inspect.c"] : []),
@@ -3072,6 +3089,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(targetPlatform(driver) === "win32"
       ? [rt(join(rtDir, "scr_win.c")), "-ladvapi32", "-liphlpapi", "-lws2_32"]
       : []),
+    // musl deliberately has no libc-identification predefine; resolveCc's
+    // SCR_MUSL flag and this target-selected TU travel together.
+    ...(isMuslTarget(driver) ? [rt(join(rtDir, "scr_musl.c"))] : []),
     ...(regex
       ? ["-I", vendorEngineDir(), rt(join(rtDir, "scr_regex.c")), ...lreObjects]
       : []),
