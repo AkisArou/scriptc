@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -2057,10 +2057,45 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const entry = E.ffiByName.get(e.import);
         if (!entry) throw new Error(`emitter bug: unknown FFI import ${e.import}`);
         const args = e.args.map((arg) => E.emitExpr(arg));
+        const sourceArgs = new Map<number, Temp>();
+        const callbackArgs = new Map<string, Temp>();
+        let sourceIndex = 0;
+        entry.params.forEach((param, abiIndex) => {
+          if (isFfiContextParam(param)) return;
+          const arg = args[sourceIndex++]!;
+          sourceArgs.set(abiIndex, arg);
+          if (isFfiCallbackParam(param)) callbackArgs.set(param.callback.id, arg);
+        });
+
+        // Raw C callback pointers carry no userdata. For the documented
+        // call-scoped/same-thread policy, lend each one a distinct TLS
+        // slot for the dynamic extent of this native call. Save/restore
+        // makes nested and reentrant calls stack correctly.
+        const rawContexts: { tls: string; previous: Temp }[] = [];
+        for (const param of entry.params) {
+          if (!isFfiCallbackParam(param)) continue;
+          const adapter = E.ffiCallbackAdapter(entry.name, param.callback.id);
+          if (adapter.tls === null) continue;
+          const callback = callbackArgs.get(param.callback.id)!;
+          const previous = E.newBorrowedTemp(callback.type, adapter.tls);
+          E.line(`${adapter.tls} = ${callback.name};`);
+          rawContexts.push({ tls: adapter.tls, previous });
+        }
         const nativeArgs: string[] = [];
-        entry.params.forEach((cls, i) => {
-          const arg = args[i]!;
-          switch (cls) {
+        entry.params.forEach((param, i) => {
+          if (isFfiCallbackParam(param)) {
+            const adapter = E.ffiCallbackAdapter(entry.name, param.callback.id);
+            nativeArgs.push(`&${adapter.symbol}`);
+            return;
+          }
+          if (isFfiContextParam(param)) {
+            const callback = callbackArgs.get(param.context);
+            if (!callback) throw new Error(`emitter bug: FFI context '${param.context}' has no callback arg`);
+            nativeArgs.push(`(void *)${callback.name}`);
+            return;
+          }
+          const arg = sourceArgs.get(i)!;
+          switch (param) {
             case "f64":
               nativeArgs.push(arg.name);
               break;
@@ -2085,18 +2120,39 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
         });
         const call = `${entry.symbol}(${nativeArgs.join(", ")})`;
+        const restoreRawContexts = (): void => {
+          for (let i = rawContexts.length - 1; i >= 0; i--) {
+            const saved = rawContexts[i]!;
+            E.line(`${saved.tls} = ${saved.previous.name};`);
+          }
+        };
+        const callbacksMayThrow = callbackArgs.size > 0;
         switch (entry.returns) {
           case "void":
             E.line(`${call};${E.srcComment(e.loc)}`);
+            restoreRawContexts();
+            if (callbacksMayThrow) E.emitPendingCheck();
             return { name: "", type: e.type };
-          case "f64":
-            return E.newTemp(e.type, call);
-          case "bool":
-            return E.newTemp(e.type, `(${call} != 0)`);
+          case "f64": {
+            const result = E.newTemp(e.type, call);
+            restoreRawContexts();
+            if (callbacksMayThrow) E.emitPendingCheck();
+            return result;
+          }
+          case "bool": {
+            const result = E.newTemp(e.type, `(${call} != 0)`);
+            restoreRawContexts();
+            if (callbacksMayThrow) E.emitPendingCheck();
+            return result;
+          }
           case "u8":
           case "u32":
-          case "i32":
-            return E.newTemp(e.type, `(double)${call}`);
+          case "i32": {
+            const result = E.newTemp(e.type, `(double)${call}`);
+            restoreRawContexts();
+            if (callbacksMayThrow) E.emitPendingCheck();
+            return result;
+          }
         }
       }
       case "closure": {

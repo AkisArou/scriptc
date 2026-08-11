@@ -63,7 +63,11 @@
 import type {
   IrBytesElem,
   IrExpr,
+  IrFfiCallbackParam,
+  IrFfiCallbackParamClass,
   IrFfiImport,
+  IrFfiReturnClass,
+  IrFfiValueParamClass,
   IrFunction,
   IrGlobal,
   IrLocal,
@@ -74,8 +78,9 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
+import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -99,6 +104,41 @@ interface LlStreamTypedRefAdapter {
 interface LlStreamTypedRefContext {
   prefix: string;
   adapters: Map<string, LlStreamTypedRefAdapter>;
+}
+
+function ffiNativeTypeLl(
+  cls: IrFfiCallbackParamClass | IrFfiValueParamClass | IrFfiReturnClass,
+): string {
+  switch (cls) {
+    case "f64":
+      return "double";
+    case "bool":
+    case "u8":
+      return "i8";
+    case "u32":
+    case "i32":
+      return "i32";
+    case "string":
+    case "bytes":
+      throw new Error(`llvm emitter bug: span class '${cls}' has no scalar LLVM type`);
+    case "void":
+      return "void";
+  }
+}
+
+function ffiCallbackDummyLl(callback: IrFfiCallbackParam["callback"]): string {
+  switch (callback.returns) {
+    case "void":
+      return "void";
+    case "f64":
+      return "double 0.0";
+    case "bool":
+    case "u8":
+      return "i8 0";
+    case "u32":
+    case "i32":
+      return "i32 0";
+  }
 }
 import {
   arrNewCall,
@@ -956,6 +996,9 @@ class LlEmitter {
   private readonly fnByName = new Map<string, IrFunction>();
   /** Manifest-bound native imports, used by ffiCall emission. */
   private readonly ffiByName = new Map<string, IrFfiImport>();
+  /** C-ABI callback trampolines and (for raw/no-userdata callbacks) their
+   * distinct call-scoped TLS closure slots. */
+  private readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
   private readonly globalTypes = new Map<string, IrType>();
   /** May-throw analysis (the C emitter's computeMayThrow, shared): pending
    * checks are emitted only after calls that can actually raise. */
@@ -1059,8 +1102,11 @@ class LlEmitter {
   private logArgSlots = 0;
 
   constructor(private readonly mod: IrModule) {
+    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
-    for (const entry of mod.ffiImports ?? []) this.ffiByName.set(entry.name, entry);
+    for (const entry of mod.ffiImports ?? []) {
+      this.ffiByName.set(entry.name, entry);
+    }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
     this.indirectMayThrow = mt.indirect;
@@ -1189,6 +1235,116 @@ class LlEmitter {
 
   // ── module assembly ─────────────────────────────────────────────────────
 
+  private ffiCallbackAdapter(binding: string, id: string): FfiCallbackAdapter {
+    const adapter = this.ffiCallbackAdapters.get(`${binding}:${id}`);
+    if (!adapter) throw new Error(`llvm emitter bug: no callback adapter for ${binding}:${id}`);
+    return adapter;
+  }
+
+  /** C-callable scalar callback trampolines. A callback with an explicit
+   * context entry receives the closure at that exact ABI position. A raw
+   * callback loads it from a call-scoped TLS slot installed around the
+   * outer native call. */
+  private emitFfiCallbackDefs(): { globals: string[]; defs: string[] } {
+    const globals: string[] = [];
+    const defs: string[] = [];
+    if (this.ffiCallbackAdapters.size === 0) return { globals, defs };
+    this.declare(`declare zeroext i1 @scr_exc_pending()`);
+    this.declare(`declare void @scr_trap(ptr)`);
+    const expired = this.cstr("scriptc: native callback invoked outside its call-scoped lifetime\n");
+    for (const adapter of this.ffiCallbackAdapters.values()) {
+      const cb = adapter.callback;
+      if (adapter.tls !== null) globals.push(`@${adapter.tls} = internal thread_local global ptr null`);
+      const params = cb.params.map((param, i) =>
+        isFfiContextParam(param) ? `ptr %ctx` : `${ffiNativeTypeLl(param)} %a${i}`,
+      );
+      const ret = ffiNativeTypeLl(cb.returns);
+      defs.push(
+        `define internal ${ret} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
+        `entry:`,
+        adapter.tls === null ? `  %cb = getelementptr inbounds i8, ptr %ctx, i64 0` : `  %cb = load ptr, ptr @${adapter.tls}`,
+        `  %missing = icmp eq ptr %cb, null`,
+        `  br i1 %missing, label %expired, label %ready`,
+        `expired:`,
+        `  call void @scr_trap(ptr ${expired})`,
+        `  unreachable`,
+        `ready:`,
+        `  %pending = call zeroext i1 @scr_exc_pending()`,
+        `  br i1 %pending, label %skip, label %invoke`,
+        `skip:`,
+        `  ret ${ffiCallbackDummyLl(cb)}`,
+        `invoke:`,
+        `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+        `  %fn = load ptr, ptr %fnp`,
+      );
+      const scriptArgs: string[] = [];
+      for (let i = 0; i < cb.params.length; i++) {
+        const param = cb.params[i]!;
+        if (isFfiContextParam(param)) continue;
+        switch (param) {
+          case "f64":
+            scriptArgs.push(`double %a${i}`);
+            break;
+          case "bool":
+            defs.push(`  %s${i} = icmp ne i8 %a${i}, 0`);
+            scriptArgs.push(`i1 %s${i}`);
+            break;
+          case "u8":
+            defs.push(`  %s${i} = uitofp i8 %a${i} to double`);
+            scriptArgs.push(`double %s${i}`);
+            break;
+          case "u32":
+            defs.push(`  %s${i} = uitofp i32 %a${i} to double`);
+            scriptArgs.push(`double %s${i}`);
+            break;
+          case "i32":
+            defs.push(`  %s${i} = sitofp i32 %a${i} to double`);
+            scriptArgs.push(`double %s${i}`);
+            break;
+        }
+      }
+      const ft = ffiCallbackType(cb);
+      const internalRet = this.llType(ft.ret);
+      const callArgs = [`ptr %cb`, ...scriptArgs].join(", ");
+      if (cb.returns === "void") {
+        defs.push(`  call void %fn(${callArgs})`, `  ret void`, `}`, ``);
+        continue;
+      }
+      defs.push(`  %result = call ${internalRet} %fn(${callArgs})`);
+      switch (cb.returns) {
+        case "f64":
+          defs.push(`  ret double %result`);
+          break;
+        case "bool":
+          defs.push(`  %out = zext i1 %result to i8`, `  ret i8 %out`);
+          break;
+        case "u8":
+        case "u32":
+          this.declare(`declare double @scr_bit_ushr(double, double)`);
+          defs.push(
+            `  %coerced = call double @scr_bit_ushr(double %result, double ${f64Lit(0)})`,
+            `  %wide = fptoui double %coerced to i32`,
+          );
+          if (cb.returns === "u8") {
+            defs.push(`  %out = trunc i32 %wide to i8`, `  ret i8 %out`);
+          } else {
+            defs.push(`  ret i32 %wide`);
+          }
+          break;
+        case "i32":
+          this.declare(`declare double @scr_bit_or(double, double)`);
+          defs.push(
+            `  %coerced = call double @scr_bit_or(double %result, double ${f64Lit(0)})`,
+            `  %out = fptosi double %coerced to i32`,
+            `  ret i32 %out`,
+          );
+          break;
+      }
+      defs.push(`}`, ``);
+    }
+    return { globals, defs };
+  }
+
   emit(): string {
     // Function bodies first (the literal/unit/fn-value tables fill as they
     // emit), then the file assembles around them — the C emitter's order.
@@ -1199,6 +1355,7 @@ class LlEmitter {
     const classObjDefs = emitClassObjDefs(this, this.classMeta, this.classObjs, this.fnByName, (t) => this.llType(t));
     const wrappers = this.emitFnValueDefs();
     const asyncDefs = this.emitAsyncScaffolding();
+    const ffiCallbacks = this.emitFfiCallbackDefs();
 
     // Module globals, FIRST OCCURRENCE per id: a class-expression static
     // instantiated through several mixin applications registers one global
@@ -1464,6 +1621,8 @@ class LlEmitter {
       );
     }
     if (this.cstrs.size > 0) out.push(``);
+    out.push(...ffiCallbacks.globals);
+    if (ffiCallbacks.globals.length > 0) out.push(``);
     for (const g of globals) {
       const ty = this.llType(g.type);
       const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
@@ -1471,6 +1630,7 @@ class LlEmitter {
     }
     if (globals.length > 0) out.push(``);
     out.push(...helpers);
+    out.push(...ffiCallbacks.defs);
     out.push(...shapes.defs);
     out.push(...classShapes.defs);
     out.push(...classObjDefs);
@@ -5222,11 +5382,45 @@ class LlEmitter {
         const entry = this.ffiByName.get(e.import);
         if (!entry) throw new Error(`llvm emitter bug: unknown FFI import ${e.import}`);
         const args = e.args.map((arg) => this.emitExpr(arg));
+        const sourceArgs = new Map<number, LlValue>();
+        const callbackArgs = new Map<string, LlValue>();
+        let sourceIndex = 0;
+        entry.params.forEach((param, abiIndex) => {
+          if (isFfiContextParam(param)) return;
+          const arg = args[sourceIndex++]!;
+          sourceArgs.set(abiIndex, arg);
+          if (isFfiCallbackParam(param)) callbackArgs.set(param.callback.id, arg);
+        });
+
+        const rawContexts: { tls: string; previous: string }[] = [];
+        for (const param of entry.params) {
+          if (!isFfiCallbackParam(param)) continue;
+          const adapter = this.ffiCallbackAdapter(entry.name, param.callback.id);
+          if (adapter.tls === null) continue;
+          const callback = callbackArgs.get(param.callback.id)!;
+          const previous = B.tmp();
+          B.line(`${previous} = load ptr, ptr @${adapter.tls}`);
+          B.line(`store ptr ${callback.name}, ptr @${adapter.tls}`);
+          rawContexts.push({ tls: adapter.tls, previous });
+        }
         const nativeArgs: string[] = [];
         const nativeParamTypes: string[] = [];
-        entry.params.forEach((cls, i) => {
-          const arg = args[i]!;
-          switch (cls) {
+        entry.params.forEach((param, i) => {
+          if (isFfiCallbackParam(param)) {
+            const adapter = this.ffiCallbackAdapter(entry.name, param.callback.id);
+            nativeParamTypes.push("ptr");
+            nativeArgs.push(`ptr @${adapter.symbol}`);
+            return;
+          }
+          if (isFfiContextParam(param)) {
+            const callback = callbackArgs.get(param.context);
+            if (!callback) throw new Error(`llvm emitter bug: FFI context '${param.context}' has no callback arg`);
+            nativeParamTypes.push("ptr");
+            nativeArgs.push(`ptr ${callback.name}`);
+            return;
+          }
+          const arg = sourceArgs.get(i)!;
+          switch (param) {
             case "f64":
               nativeParamTypes.push("double");
               nativeArgs.push(`double ${arg.name}`);
@@ -5245,7 +5439,7 @@ class LlEmitter {
               const asU32 = B.tmp();
               B.line(`${asDouble} = call double @scr_bit_ushr(double ${arg.name}, double ${f64Lit(0)})`);
               B.line(`${asU32} = fptoui double ${asDouble} to i32`);
-              if (cls === "u8") {
+              if (param === "u8") {
                 const asU8 = B.tmp();
                 B.line(`${asU8} = trunc i32 ${asU32} to i8`);
                 nativeParamTypes.push("i8");
@@ -5292,31 +5486,45 @@ class LlEmitter {
             }
           }
         });
-        const retTy =
-          entry.returns === "f64" ? "double"
-          : entry.returns === "bool" || entry.returns === "u8" ? "i8"
-          : entry.returns === "u32" || entry.returns === "i32" ? "i32"
-          : "void";
+        const retTy = ffiNativeTypeLl(entry.returns);
         this.declare(
           `declare ${retTy} @${entry.symbol}(${nativeParamTypes.join(", ")})`,
         );
         const call = `call ${retTy} @${entry.symbol}(${nativeArgs.join(", ")})`;
+        const restoreRawContexts = (): void => {
+          for (let i = rawContexts.length - 1; i >= 0; i--) {
+            const saved = rawContexts[i]!;
+            B.line(`store ptr ${saved.previous}, ptr @${saved.tls}`);
+          }
+        };
+        const callbacksMayThrow = callbackArgs.size > 0;
         if (entry.returns === "void") {
           B.line(call);
+          restoreRawContexts();
+          if (callbacksMayThrow) this.emitPendingCheck();
           return { name: "", type: e.type };
         }
         const raw = B.tmp();
         B.line(`${raw} = ${call}`);
-        if (entry.returns === "f64") return { name: raw, type: e.type };
+        restoreRawContexts();
+        if (entry.returns === "f64") {
+          const result = { name: raw, type: e.type };
+          if (callbacksMayThrow) this.emitPendingCheck();
+          return result;
+        }
         if (entry.returns === "bool") {
           const value = B.tmp();
           B.line(`${value} = icmp ne i8 ${raw}, 0`);
-          return { name: value, type: e.type };
+          const result = { name: value, type: e.type };
+          if (callbacksMayThrow) this.emitPendingCheck();
+          return result;
         }
         const value = B.tmp();
         const op = entry.returns === "i32" ? "sitofp" : "uitofp";
         B.line(`${value} = ${op} ${retTy} ${raw} to double`);
-        return { name: value, type: e.type };
+        const result = { name: value, type: e.type };
+        if (callbacksMayThrow) this.emitPendingCheck();
+        return result;
       }
       case "new": {
         // Allocate (fields zeroed, vt stamped), then run the ctor. The

@@ -124,18 +124,80 @@ The manifest is the native ABI authority. TypeScript has only `number`, so its d
   </tbody>
 </table>
 
-String and byte pointers are borrowed only for the duration of the call. Native code must not mutate, free, or retain them. Strings may contain embedded NUL bytes, so always use the supplied length; an empty span may have a null pointer. Format 1 deliberately has no pointer, string, or byte return because those need an explicit ownership and allocator contract.
+String and byte pointers are borrowed only for the duration of the call. Native code must not mutate, free, or retain them. Strings may contain embedded NUL bytes, so always use the supplied length; an empty span may have a null pointer. The current formats deliberately have no pointer, string, or byte return because those need an explicit ownership and allocator contract.
 
 For C++, export the symbol with `extern "C"` so it keeps the manifest's unmangled C name.
+
+## Callbacks and context pointers
+
+Format 2 adds call-scoped C function-pointer parameters. It describes the function pointer and opaque context as independent ABI entries, in their actual positions—matching the model used by C, Rust's `extern "C" fn` plus `*mut c_void`, and Zig's `*const fn (...) callconv(.c)` plus `*anyopaque`.
+
+For example, this C function takes a callback first, a value second, and its context last. The callback itself receives the context last:
+
+```c:native.c
+typedef double (*map_callback)(double value, void *context);
+
+double native_map(map_callback callback, double value, void *context) {
+  return callback(value, context);
+}
+```
+
+The TypeScript declaration contains only source values. Context entries are supplied by the compiler, so there is no context parameter in TypeScript:
+
+```ts:main.ts
+declare function nativeMap(
+  callback: (value: number) => number,
+  value: number,
+): number;
+
+const offset = 7;
+console.log(nativeMap((value) => value + offset, 5));
+```
+
+The callback id connects the two independently positioned context entries. Both positions are explicit; no adjacency or conventional argument order is assumed.
+
+```json:ffi.json
+{
+  "ffi_format": 2,
+  "functions": [
+    {
+      "name": "nativeMap",
+      "symbol": "native_map",
+      "params": [
+        {
+          "callback": {
+            "id": "map",
+            "params": ["f64", { "context": "map" }],
+            "returns": "f64",
+            "lifetime": "call"
+          }
+        },
+        "f64",
+        { "context": "map" }
+      ],
+      "returns": "f64"
+    }
+  ],
+  "libraries": ["./libnative.a"]
+}
+```
+
+A callback descriptor consumes one TypeScript function parameter and one native function-pointer slot. A context entry consumes no TypeScript parameter and one native `void *` slot. Callback parameter lists currently accept `f64`, `bool`, `u8`, `u32`, and `i32`, plus at most one context entry; callback returns accept those scalar classes or `void`.
+
+For a raw C callback type with no userdata, omit the context entry from both parameter lists. scriptc installs that closure in a binding-specific thread-local slot around the native call, so captures and nested calls still work. This remains call-scoped: the native function must invoke it synchronously on the thread that entered the native call.
+
+`lifetime` must currently be `"call"`. Native code must not retain a callback or context, invoke it after the outer function returns, or invoke it from another thread. As with a bad native pointer or mismatched signature, violating that contract is outside scriptc's memory-safety guarantees. Retained callbacks will require an explicit registration/unregistration ownership model; foreign-thread callbacks will additionally require runtime scheduling and synchronization.
+
+If a callback throws, the adapter returns zero (or `void`) to native code and suppresses further script callback execution while the exception is pending. When the outer native function returns, the original exception resumes through scriptc's ordinary catchable unwind path. Native work performed between the callback's return and the outer function's return is not rolled back.
 
 ## Manifest fields
 
 <dl>
   <dt><code>ffi_format</code></dt>
-  <dd>Required. Must be <code>1</code>.</dd>
+  <dd>Required. Format <code>1</code> supports value parameters; format <code>2</code> preserves them and adds callback/context entries.</dd>
 
   <dt><code>functions</code></dt>
-  <dd>Required array. Every entry has exactly <code>name</code>, <code>symbol</code>, <code>params</code>, and <code>returns</code>. Binding names and symbols must be unique.</dd>
+  <dd>Required array. Every entry has exactly <code>name</code>, <code>symbol</code>, <code>params</code>, and <code>returns</code>. Binding names and symbols must be unique. In format 2, callback ids must be unique within a function and every context must match exactly one callback.</dd>
 
   <dt><code>libraries</code></dt>
   <dd>Optional array of archive or object paths. Relative paths are resolved from the manifest directory and appended after the generated program at link time.</dd>
@@ -150,6 +212,7 @@ Unknown fields, invalid ABI classes, duplicate names, and signature mismatches f
 
 - Native calls are synchronous and must return normally. Do not unwind C++ exceptions or `longjmp` across the boundary.
 - Native code is outside scriptc's exception, reference-counting, and sanitizer contracts. A bad pointer or mismatched C signature can still corrupt the process.
-- There are no callbacks, variadic calls, struct-by-value arguments, owned pointer returns, or runtime `dlopen`/`dlsym` handles yet.
+- Callbacks are synchronous, call-scoped, and same-thread only. Retained callbacks and foreign-thread invocation are not supported yet.
+- There are no variadic calls, struct-by-value arguments, owned pointer returns, or runtime `dlopen`/`dlsym` handles yet.
 - The archive or object must match the build target. Cross-compilation does not translate native inputs.
 - Outbound FFI is currently available for executable builds, not `scriptc build --lib`.

@@ -100,7 +100,8 @@ export function ffiSignatureDiag(name: string, detail: string, loc: SrcLoc): Scr
     loc,
     hint:
       "FFI parameter classes: f64/u8/u32/i32 (TypeScript number), bool, string, and bytes " +
-      "(Uint8Array/Buffer); return classes: f64/u8/u32/i32, bool, and void",
+      "(Uint8Array/Buffer); format 2 also accepts call-scoped callback descriptors with explicit context slots; " +
+      "return classes: f64/u8/u32/i32, bool, and void",
   };
 }
 

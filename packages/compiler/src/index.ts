@@ -76,12 +76,17 @@ export {
 } from "./library/profile.js";
 export {
   loadFfiProfile,
+  FFI_CALLBACK_PARAM_CLASSES,
   FFI_PARAM_CLASSES,
   FFI_RETURN_CLASSES,
+  type FfiCallbackParam,
+  type FfiCallbackParamClass,
+  type FfiContextParam,
   type FfiFunction,
   type FfiParamClass,
   type FfiProfile,
   type FfiReturnClass,
+  type FfiValueParamClass,
 } from "./ffi/profile.js";
 export {
   assembleTrapTeaching,
