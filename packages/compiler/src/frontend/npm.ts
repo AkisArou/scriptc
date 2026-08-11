@@ -329,9 +329,38 @@ export function embeddedModulesUsingGlobalFetch(
   ): boolean => {
     const node = unwrapParentheses(candidate);
     if (unboundGlobalObject(node)) return true;
-    if (!ts.isIdentifier(node)) return false;
-    const symbol = checker.getSymbolAtLocation(node);
-    return symbol !== undefined && aliases.has(symbol);
+    if (ts.isIdentifier(node)) {
+      const symbol = checker.getSymbolAtLocation(node);
+      if (symbol === undefined) return false;
+      if (aliases.has(symbol)) return true;
+      return (
+        (symbol.flags & ts.SymbolFlags.Alias) !== 0 &&
+        aliases.has(checker.getAliasedSymbol(symbol))
+      );
+    }
+    if (ts.isConditionalExpression(node)) {
+      return (
+        globalObjectExpression(node.whenTrue, aliases) ||
+        globalObjectExpression(node.whenFalse, aliases)
+      );
+    }
+    if (ts.isBinaryExpression(node)) {
+      switch (node.operatorToken.kind) {
+        case ts.SyntaxKind.BarBarToken:
+        case ts.SyntaxKind.QuestionQuestionToken:
+        case ts.SyntaxKind.AmpersandAmpersandToken:
+          // A platform selector can yield either operand. Treat either
+          // global-object arm as capability provenance; over-linking a
+          // dead arm is safer than silently omitting fetch at runtime.
+          return (
+            globalObjectExpression(node.left, aliases) ||
+            globalObjectExpression(node.right, aliases)
+          );
+        case ts.SyntaxKind.CommaToken:
+          return globalObjectExpression(node.right, aliases);
+      }
+    }
+    return false;
   };
 
   const staticPropertyName = (name: ts.PropertyName | ts.BindingName): string | null => {
@@ -403,6 +432,11 @@ export function embeddedModulesUsingGlobalFetch(
       return false;
     }
     if (ts.isQualifiedName(parent) && parent.right === node) return false;
+    // Imported/exported names are module member names or declarations,
+    // never reads of Node's global binding. This matters when the custom
+    // no-lib program cannot resolve the referenced package and therefore
+    // has no checker symbol for an ImportSpecifier.propertyName.
+    if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) return false;
 
     // Named declarations and object/class property names are not reads.
     // A shorthand property is the exception: `{ fetch }` evaluates the
@@ -424,11 +458,13 @@ export function embeddedModulesUsingGlobalFetch(
   };
 
   for (const sourceFile of program.getSourceFiles()) {
-    // Package bootstraps commonly snapshot the global object before reading
-    // capabilities (`const root = globalThis; root.fetch`). Resolve const
-    // alias chains by symbol, so a same-named parameter/local in another
-    // scope cannot inherit the classification. Iterate to a fixed point so
-    // declaration order does not matter.
+    // Package bootstraps commonly snapshot or select the global object before
+    // reading capabilities (`const root = globalThis || global; root.fetch`).
+    // Resolve alias chains by symbol, so a same-named parameter/local in
+    // another scope cannot inherit the classification. Mutable declarations
+    // are conservative: a global initializer means some executable path can
+    // retain that value. Iterate to a fixed point so declaration order does
+    // not matter.
     const globalObjectAliases = new Set<ts.Symbol>();
     let addedAlias = true;
     while (addedAlias) {
@@ -438,8 +474,6 @@ export function embeddedModulesUsingGlobalFetch(
           ts.isVariableDeclaration(node) &&
           ts.isIdentifier(node.name) &&
           node.initializer !== undefined &&
-          ts.isVariableDeclarationList(node.parent) &&
-          (node.parent.flags & ts.NodeFlags.Const) !== 0 &&
           globalObjectExpression(node.initializer, globalObjectAliases)
         ) {
           const symbol = checker.getSymbolAtLocation(node.name);

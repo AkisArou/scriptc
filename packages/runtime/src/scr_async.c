@@ -1273,6 +1273,41 @@ ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack) {
 #endif
 }
 
+/* A runtime-authored C continuation whose first operation awaits one known
+ * dependency. Native fibers can park normally. wasm32 has no resumable C
+ * stack, so queue the fiber only after the dependency settles; the entry's
+ * await then extracts the result without attempting a stack switch. The
+ * READY queue supplies the settled-await microtask hop in both cases. */
+ScrPromise *scr_async_spawn_after(ScrPromise *dependency,
+                                  void (*entry)(ScrFiber *, void *),
+                                  void *argpack) {
+#ifndef __wasi__
+  (void)dependency;
+  return scr_async_spawn(entry, argpack);
+#else
+  ScrFiber *f = calloc(1, sizeof *f);
+  if (!f) scr_oom();
+  f->promise = scr_promise_new();
+  f->entry = entry;
+  f->argpack = argpack;
+  f->als = scr_als_ctx_retain(*scr_als_active);
+  scr_fibers_live++;
+
+  if (dependency->state == SCR_PROM_PENDING) {
+    if (dependency->nwaiters == dependency->waiters_cap) {
+      dependency->waiters_cap = dependency->waiters_cap ? dependency->waiters_cap * 2 : 4;
+      dependency->waiters = realloc(
+          dependency->waiters, dependency->waiters_cap * sizeof *dependency->waiters);
+      if (!dependency->waiters) scr_oom();
+    }
+    dependency->waiters[dependency->nwaiters++] = f;
+  } else {
+    scr_ready_push(f);
+  }
+  return scr_promise_retain(f->promise);
+#endif
+}
+
 /* Parks the current fiber on `p` until it settles. Only fibers await. */
 static void scr_await_park(ScrPromise *p) {
   ScrFiber *self = scr_current;
@@ -2057,7 +2092,15 @@ static void scr_resume_fiber(ScrFiber *f) {
   scr_current = f;
   scr_exc_swap_cell(&f->exc);
   scr_als_active = &f->als;
-  scr_wasi_coro_resume(f->coro);
+  if (f->coro != NULL) {
+    scr_wasi_coro_resume(f->coro);
+  } else {
+    /* scr_async_spawn_after's runtime C continuation. Its dependency is
+     * settled, so the entry can extract through scr_await_* without a
+     * stack switch and then completes in this turn. */
+    f->entry(f, f->argpack);
+    scr_fiber_finish(f);
+  }
   scr_current = NULL;
   scr_exc_swap_cell(NULL);
   scr_als_active = &scr_als_main_slot;

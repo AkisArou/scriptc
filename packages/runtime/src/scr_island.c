@@ -2107,7 +2107,7 @@ ScrJsval *scr_jsval_from_promise(ScrPromise *p, int payload) {
   w->payload = payload;
   w->next = isl_prom_wraps;
   isl_prom_wraps = w;
-  ScrPromise *waiter = scr_async_spawn(isl_prom_wrap_entry, w);
+  ScrPromise *waiter = scr_async_spawn_after(w->p, isl_prom_wrap_entry, w);
   scr_promise_release(waiter); /* the waiter never rejects; nobody awaits it */
   return isl_cell_new(prom);
 }

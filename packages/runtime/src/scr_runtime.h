@@ -3551,6 +3551,13 @@ void scr_promise_release_v(void *p);
 typedef struct ScrFiber ScrFiber;
 /* Spawn + run eagerly to the first suspension; returns the promise, +1. */
 ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack);
+/* Runtime-authored C waiters cannot themselves become LLVM switched
+ * coroutines on wasm32. Spawn after `dependency` settles so their first
+ * (and only) await is extraction from an already-settled promise, while
+ * retaining the ordinary promise-job hop on every target. +1. */
+ScrPromise *scr_async_spawn_after(ScrPromise *dependency,
+                                  void (*entry)(ScrFiber *, void *),
+                                  void *argpack);
 
 /* wasm32-wasi lowers async functions and generators through LLVM switched
  * coroutines instead of the native stack-switching implementations. The

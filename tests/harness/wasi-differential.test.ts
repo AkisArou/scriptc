@@ -263,6 +263,22 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     expect(wasm).toEqual(node);
   });
 
+  test("pending static promises cross into the dynamic island", async () => {
+    const entry = join(repoRoot, "tests/corpus/2633-island-promise-crossing.js");
+    const outDir = await mkdtemp("/tmp/scriptc-wasi-dynamic-promise-");
+    const outPath = join(outDir, "program.wasm");
+    const result = await compile(entry, { outDir, outPath, dynamic: true });
+    if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+    expect(result.backend).toBe("llvm");
+
+    const node = await run(process.execPath, ["--import", islandShim, entry]);
+    const wasm = await run(
+      process.execPath,
+      ["--no-warnings", "--experimental-wasi-unstable-preview1", "-e", WASI_RUNNER, outPath],
+    );
+    expect(wasm).toEqual(node);
+  });
+
   test("the LLVM target embeds npm packages for the dynamic island", async () => {
     const entry = join(repoRoot, "tests/fixtures/npm/cases/namespace/main.ts");
     const outDir = await mkdtemp("/tmp/scriptc-wasi-npm-");
