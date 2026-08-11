@@ -12,9 +12,10 @@ function publish(name: string): void {
   // Two same-instant children's exit ORDER is kernel-scheduling-dependent
   // on both sides, so the observation is collected and printed sorted at
   // the barrier (the bounded-margin rule's order-independent sibling).
-  // /bin/true is present in both Debian and Alpine; Alpine deliberately has
-  // no /usr/bin/true, so the success-path fixture must use the portable path.
-  const child = spawn("/bin/true", [], { stdio: "ignore" });
+  // /bin/sh is present on macOS, Debian, and Alpine; the true binary itself
+  // lives under different prefixes, so run the shell builtin for this
+  // success-path fixture.
+  const child = spawn("/bin/sh", ["-c", "true"], { stdio: "ignore" });
   registry.set(name, child);
   running.push(child);
   child.on("exit", () => {
