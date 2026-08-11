@@ -13,6 +13,8 @@ declare function nativeCombineRaw(
   right: (value: number) => number,
   value: number,
 ): number;
+declare function nativeCallbackSymbolCollision(callback: (value: number) => number): number;
+declare function nativeCallbackTlsCollision(value: number): number;
 declare function nativeCallbackMix(
   callback: (
     truth: boolean,
@@ -38,6 +40,8 @@ console.log(nativeApply((value) => value + offset, 5));
 const leftOffset = 3;
 const rightFactor = 4;
 console.log(nativeCombineRaw((value) => value + leftOffset, (value) => value * rightFactor, 5));
+console.log(nativeCallbackSymbolCollision((value) => value + 1));
+console.log(nativeCallbackTlsCollision(41));
 
 console.log(nativeCallbackMix((truth, byte, wide, signedValue, fraction) => {
   console.log(truth, byte, wide, signedValue, fraction);

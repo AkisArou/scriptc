@@ -80,6 +80,7 @@ import type {
 } from "../../ir/nodes.js";
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
+import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -103,12 +104,6 @@ interface LlStreamTypedRefAdapter {
 interface LlStreamTypedRefContext {
   prefix: string;
   adapters: Map<string, LlStreamTypedRefAdapter>;
-}
-
-interface LlFfiCallbackAdapter {
-  symbol: string;
-  tls: string | null;
-  callback: IrFfiCallbackParam["callback"];
 }
 
 function ffiNativeTypeLl(
@@ -1003,7 +998,7 @@ class LlEmitter {
   private readonly ffiByName = new Map<string, IrFfiImport>();
   /** C-ABI callback trampolines and (for raw/no-userdata callbacks) their
    * distinct call-scoped TLS closure slots. */
-  private readonly ffiCallbackAdapters = new Map<string, LlFfiCallbackAdapter>();
+  private readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
   private readonly globalTypes = new Map<string, IrType>();
   /** May-throw analysis (the C emitter's computeMayThrow, shared): pending
    * checks are emitted only after calls that can actually raise. */
@@ -1107,19 +1102,10 @@ class LlEmitter {
   private logArgSlots = 0;
 
   constructor(private readonly mod: IrModule) {
+    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
-      for (const param of entry.params) {
-        if (!isFfiCallbackParam(param)) continue;
-        const index = this.ffiCallbackAdapters.size;
-        const hasContext = param.callback.params.some(isFfiContextParam);
-        this.ffiCallbackAdapters.set(`${entry.name}:${param.callback.id}`, {
-          symbol: `sc_ffi_cb_${index}`,
-          tls: hasContext ? null : `sc_ffi_cb_ctx_${index}`,
-          callback: param.callback,
-        });
-      }
     }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
@@ -1249,7 +1235,7 @@ class LlEmitter {
 
   // ── module assembly ─────────────────────────────────────────────────────
 
-  private ffiCallbackAdapter(binding: string, id: string): LlFfiCallbackAdapter {
+  private ffiCallbackAdapter(binding: string, id: string): FfiCallbackAdapter {
     const adapter = this.ffiCallbackAdapters.get(`${binding}:${id}`);
     if (!adapter) throw new Error(`llvm emitter bug: no callback adapter for ${binding}:${id}`);
     return adapter;

@@ -52,6 +52,27 @@
       "returns": "f64"
     },
     {
+      "name": "nativeCallbackSymbolCollision",
+      "symbol": "sc_ffi_cb_0",
+      "params": [
+        {
+          "callback": {
+            "id": "collision",
+            "params": ["f64"],
+            "returns": "f64",
+            "lifetime": "call"
+          }
+        }
+      ],
+      "returns": "f64"
+    },
+    {
+      "name": "nativeCallbackTlsCollision",
+      "symbol": "sc_ffi_cb_ctx_2",
+      "params": ["f64"],
+      "returns": "f64"
+    },
+    {
       "name": "nativeCallbackMix",
       "symbol": "sf_callback_mix",
       "params": [

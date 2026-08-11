@@ -60,6 +60,8 @@ const expected = [
   "12.5",
   "12",
   "28",
+  "9",
+  "42",
   "true 255 4000000000 -7 0.5",
   "4294967295",
   "6",
@@ -294,6 +296,69 @@ test.each([
     expect(result.diagnostics[0]?.message).toContain(message);
   }
 });
+
+test.each([
+  { id: "number-literal", type: "0", nativeClass: "f64", domain: "number", prefix: null },
+  {
+    id: "numeric-enum",
+    type: "NativeValue",
+    nativeClass: "f64",
+    domain: "number",
+    prefix: "enum NativeValue { Zero }",
+  },
+  { id: "never", type: "never", nativeClass: "f64", domain: "number", prefix: null },
+  { id: "boolean-literal", type: "true", nativeClass: "bool", domain: "boolean", prefix: null },
+])(
+  "rejects a narrowed $id native-to-script callback parameter",
+  async ({ id, type, nativeClass, domain, prefix }) => {
+    const outDir = join(cacheRoot, `reject-callback-${id}`);
+    mkdirSync(outDir, { recursive: true });
+    const entry = join(outDir, "main.ts");
+    const profilePath = join(outDir, "profile.json");
+    writeFileSync(
+      entry,
+      [
+        ...(prefix === null ? [] : [prefix]),
+        `declare function nativeVisit(callback: (value: ${type}) => void): void;`,
+        "console.log('ok');",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      profilePath,
+      JSON.stringify({
+        ffi_format: 2,
+        functions: [{
+          name: "nativeVisit",
+          symbol: "sf_visit",
+          params: [{
+            callback: {
+              id: "visit",
+              params: [nativeClass],
+              returns: "void",
+              lifetime: "call",
+            },
+          }],
+          returns: "void",
+        }],
+      }),
+    );
+
+    const result = await compile(entry, {
+      outDir,
+      outPath: join(outDir, "program"),
+      ffiProfilePath: profilePath,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics[0]?.code).toBe("SC5003");
+      expect(result.diagnostics[0]?.message).toContain(
+        `callback 'visit' parameter 1 is '${type}'`,
+      );
+      expect(result.diagnostics[0]?.message).toContain(`declare it as '${domain}'`);
+    }
+  },
+);
 
 describe.each(["c", "llvm"] as const)("FFI binding identity, %s backend", (backend) => {
   test("a local same-named function remains ordinary TypeScript with Node-byte parity", async () => {

@@ -55,6 +55,16 @@ double sf_combine_raw(sf_raw_cb left, sf_raw_cb right, double value) {
   return left(value) + right(value);
 }
 
+/* These valid external names deliberately overlap the emitter's preferred
+ * callback-trampoline and raw-callback TLS names. */
+double sc_ffi_cb_0(sf_raw_cb callback) {
+  return callback(8);
+}
+
+double sc_ffi_cb_ctx_2(double value) {
+  return value + 1;
+}
+
 typedef uint32_t (*sf_mix_cb)(uint8_t truth, uint8_t byte, uint32_t wide,
                               int32_t signed_value, double fraction,
                               void *context);

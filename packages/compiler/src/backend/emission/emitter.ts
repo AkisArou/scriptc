@@ -39,6 +39,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -80,13 +81,6 @@ export interface Temp {
  * capture box (boxed locals release their BOX; the box frees its contents). */
 export interface ScopeEntry extends Temp {
   boxed?: boolean;
-}
-
-export interface CCallbackAdapter {
-  symbol: string;
-  /** Raw callbacks have no ABI context parameter and borrow this TLS slot. */
-  tls: string | null;
-  callback: IrFfiCallbackParam["callback"];
 }
 
 export function ffiNativeTypeC(
@@ -234,7 +228,7 @@ export class CEmitter {
   /** One C-ABI trampoline per manifest callback entry. Raw function
    * pointers additionally get a distinct TLS context slot, so two
    * callbacks with the same signature never alias each other's closure. */
-  readonly ffiCallbackAdapters = new Map<string, CCallbackAdapter>();
+  readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
   readonly globalsById = new Map<string, IrGlobal>();
   readonly unionsById = new Map<string, IrUnionDef>();
   /** Active optional-chain bind temps, by chain id (chainRecv reads). */
@@ -399,22 +393,13 @@ export class CEmitter {
     readonly mod: IrModule,
     sourceText?: string,
   ) {
+    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
     }
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
-      for (const param of entry.params) {
-        if (!isFfiCallbackParam(param)) continue;
-        const index = this.ffiCallbackAdapters.size;
-        const hasContext = param.callback.params.some(isFfiContextParam);
-        this.ffiCallbackAdapters.set(`${entry.name}:${param.callback.id}`, {
-          symbol: `sc_ffi_cb_${index}`,
-          tls: hasContext ? null : `sc_ffi_cb_ctx_${index}`,
-          callback: param.callback,
-        });
-      }
     }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
@@ -1706,7 +1691,7 @@ export class CEmitter {
 
   /* ── functions ────────────────────────────────────────────────────── */
 
-  ffiCallbackAdapter(binding: string, id: string): CCallbackAdapter {
+  ffiCallbackAdapter(binding: string, id: string): FfiCallbackAdapter {
     const adapter = this.ffiCallbackAdapters.get(`${binding}:${id}`);
     if (!adapter) throw new Error(`emitter bug: no callback adapter for ${binding}:${id}`);
     return adapter;

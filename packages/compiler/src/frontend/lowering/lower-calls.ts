@@ -6,7 +6,7 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
 import { BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
-import type { IrFfiImport } from "../../ir/nodes.js";
+import type { IrFfiCallbackParam, IrFfiCallbackParamClass, IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
@@ -2482,6 +2482,54 @@ function ffiParamDisplay(param: ReturnType<typeof ffiSourceParams>[number]): str
   return isFfiCallbackParam(param) ? `callback '${param.callback.id}'` : `class '${param}'`;
 }
 
+/** Callback arguments flow from native code into TypeScript. Their source
+ * declarations therefore need to cover the whole scalar domain represented
+ * by the manifest class: IR widening alone cannot distinguish `0`, a numeric
+ * enum, or `never` from an unrestricted `number`. */
+function ffiCallbackInputDiagnostic(
+  L: Lowerer,
+  descriptor: IrFfiCallbackParam,
+  callbackType: ts.Type,
+): string | null {
+  const signatures = L.checker.getCallSignatures(callbackType);
+  if (signatures.length !== 1) return null;
+
+  const nativeParams = descriptor.callback.params.filter(
+    (param): param is IrFfiCallbackParamClass => !isFfiContextParam(param),
+  );
+  let nativeIndex = 0;
+  const params = signatures[0]!.getParameters();
+  for (let i = 0; i < params.length; i++) {
+    const paramType = L.checker.getTypeOfSymbol(params[i]!);
+    const mapped = L.mapTypeOf(paramType);
+    // Function mapping drops a `void` parameter because it consumes no
+    // argument. Mirror that alignment before comparing manifest slots.
+    if (mapped?.kind === "void") continue;
+
+    const nativeClass = nativeParams[nativeIndex++];
+    if (
+      nativeClass === undefined ||
+      mapped === null ||
+      !typeEquals(mapped, ffiClassType(nativeClass))
+    ) {
+      continue;
+    }
+
+    const domain = nativeClass === "bool" ? "boolean" : "number";
+    const coversDomain = nativeClass === "bool"
+      ? (paramType.flags & ts.TypeFlags.Boolean) !== 0
+      : (paramType.flags & ts.TypeFlags.Number) !== 0;
+    if (!coversDomain) {
+      return (
+        `callback '${descriptor.callback.id}' parameter ${i + 1} is '${L.checker.typeToString(paramType)}', ` +
+        `but native class '${nativeClass}' may supply any ${domain}; declare it as '${domain}'`
+      );
+    }
+  }
+
+  return null;
+}
+
 /** The declaration half of an outbound FFI binding. Kept independent of
  * call-site argument checks so the whole manifest can be validated even
  * when a configured function is never called. */
@@ -2533,6 +2581,7 @@ function ffiDeclarationDiagnostic(
   const expectedParams = ffiSourceParamTypes(binding.params);
   for (let i = 0; i < params.length; i++) {
     const paramType = L.checker.getTypeOfSymbol(params[i]!);
+    const sourceParam = sourceParams[i]!;
     // `mapType` deliberately gives uninhabited value positions a cheap f64
     // slot because no TypeScript value can ever reach them. An FFI
     // declaration is different: it is a callable external contract, so a
@@ -2544,13 +2593,19 @@ function ffiDeclarationDiagnostic(
         loc,
       );
     }
+    if (isFfiCallbackParam(sourceParam)) {
+      const callbackDiagnostic = ffiCallbackInputDiagnostic(L, sourceParam, paramType);
+      if (callbackDiagnostic !== null) {
+        return ffiSignatureDiag(binding.name, callbackDiagnostic, loc);
+      }
+    }
     const mapped = L.mapTypeOf(paramType);
     const expected = expectedParams[i]!;
     if (mapped === null || !typeEquals(mapped, expected)) {
       return ffiSignatureDiag(
         binding.name,
         `parameter ${i + 1} maps to '${mapped === null ? L.checker.typeToString(paramType) : L.fmt(mapped)}', ` +
-          `which does not fit manifest ${ffiParamDisplay(sourceParams[i]!)}`,
+          `which does not fit manifest ${ffiParamDisplay(sourceParam)}`,
         loc,
       );
     }
