@@ -2338,7 +2338,9 @@ export type IrLibFn =
   /** The five writable numeric http.Server timeout fields use one
    * selector ABI: 0 timeout, 1 keepAliveTimeout, 2 headersTimeout,
    * 3 requestTimeout, 4 keepAliveTimeoutBuffer. These calls store/read
-   * the property values; timer enforcement remains outside this surface. */
+   * the property values; timer enforcement remains outside this surface.
+   * The constructor-option setter takes dyn so explicit undefined remains
+   * distinguishable from a numeric value until its Node validation ladder. */
   | "http.serverTimeoutGet"
   | "http.serverTimeoutSet"
   | "http.serverTimeoutOptionSet"
@@ -6759,6 +6761,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dc.chanBindStore",
   "dc.chanRunStores",
   "http.resWriteHeadDyn",
+  "http.serverTimeoutGet",
   "http.serverTimeoutOptionSet",
   "net.sockSetEncoding",
   "http.reqSetEncoding",

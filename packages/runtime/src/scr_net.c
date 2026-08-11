@@ -394,6 +394,10 @@ struct ScrNetServer {
    * plain net servers never expose these fields through the static type
    * surface. Indices match lower-server.ts's selector ABI. */
   double http_timeouts[5];
+  /* A dynamic write may store any JS value on these ordinary writable
+   * properties. Numeric writes stay in http_timeouts; every other value
+   * is retained here so dynamic reads preserve kind and identity. */
+  ScrDyn *http_timeout_dyn[5];
   bool http_timeout_surface; /* true only for HTTP/1 and HTTPS servers */
   bool defer_conn; /* TLS: 'connection' fires post-handshake, not at accept */
   bool bound_v6;       /* the bound family (address()'s 'IPv6'/'IPv4' split) */
@@ -562,6 +566,7 @@ void scr_net_server_release(ScrNetServer *s) {
     scr_net_ls_drop(&s->close_ls);
     scr_net_ls_drop(&s->listening_cbs);
     scr_closure_release(s->close_override);
+    for (size_t i = 0; i < 5; i++) scr_dyn_release(s->http_timeout_dyn[i]);
     scr_str_release(s->bound_host);
     scr_str_release(s->pending_err);
     if (s->fd >= 0) scr_net_close_fd_raw(s->fd);
@@ -1390,14 +1395,24 @@ void scr_net_listen_opts(ScrNetServer *s, double port, ScrStr *host /*borrowed*/
 double scr_net_server_port(ScrNetServer *s) { return (double)s->port; }
 
 double scr_net_server_timeout_get(ScrNetServer *s, double field) {
+  static const char *const names[] = {
+    "timeout", "keepAliveTimeout", "headersTimeout", "requestTimeout",
+    "keepAliveTimeoutBuffer",
+  };
   int i = (int)field;
   if (i < 0 || i >= 5) abort(); /* compiler/runtime ABI violation */
+  if (s->http_timeout_dyn[i] != NULL) {
+    scr_dyn_arg_type_fail(names[i], "of type number", s->http_timeout_dyn[i]);
+    return 0; /* pending exception; typed reads validate an any-written value */
+  }
   return s->http_timeouts[i];
 }
 
 void scr_net_server_timeout_set(ScrNetServer *s, double field, double value) {
   int i = (int)field;
   if (i < 0 || i >= 5) abort(); /* compiler/runtime ABI violation */
+  scr_dyn_release(s->http_timeout_dyn[i]);
+  s->http_timeout_dyn[i] = NULL;
   s->http_timeouts[i] = value;
 }
 
@@ -1436,10 +1451,20 @@ bool scr_net_server_timeout_option_check(double field, double value) {
   return true;
 }
 
-void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double value) {
-  if (!scr_net_server_timeout_option_check(field, value)) return;
+void scr_net_server_timeout_option_set(ScrNetServer *s, double field, const ScrDyn *value) {
   int i = (int)field;
-  s->http_timeouts[i] = value;
+  if (i < 0 || i >= 5) abort(); /* compiler/runtime ABI violation */
+  if (value->kind == SCR_DYN_UNDEF) return; /* optional field is absent */
+  if (value->kind != SCR_DYN_NUM) {
+    static const char *const names[] = {
+      "timeout", "keepAliveTimeout", "headersTimeout", "requestTimeout",
+      "keepAliveTimeoutBuffer",
+    };
+    scr_dyn_arg_type_fail(names[i], "of type number", value);
+    return;
+  }
+  if (!scr_net_server_timeout_option_check(field, value->v.num)) return;
+  scr_net_server_timeout_set(s, field, value->v.num);
 }
 
 /* address()'s other two fields — the bound host ('::'/'0.0.0.0' for the
@@ -3378,6 +3403,9 @@ static ScrDyn *scr_net_dynh_srv_get(void *h, const char *key, size_t key_len) {
   if (strcmp(key, "listening") == 0) return scr_dyn_new_bool(s->listening);
   int timeout_field = scr_net_dynh_srv_timeout_field(key);
   if (timeout_field >= 0 && s->http_timeout_surface) {
+    if (s->http_timeout_dyn[timeout_field] != NULL) {
+      return scr_dyn_retain(s->http_timeout_dyn[timeout_field]);
+    }
     return scr_dyn_new_num(scr_net_server_timeout_get(s, (double)timeout_field));
   }
   {
@@ -3397,11 +3425,12 @@ static bool scr_net_dynh_srv_set(void *h, const char *key, size_t key_len, const
   (void)key_len;
   int timeout_field = scr_net_dynh_srv_timeout_field(key);
   if (timeout_field >= 0 && s->http_timeout_surface) {
-    if (value->kind != SCR_DYN_NUM) {
-      scr_dyn_arg_type_fail(key, "of type number", value);
-      return true; /* handled: the exception is pending */
+    if (value->kind == SCR_DYN_NUM) {
+      scr_net_server_timeout_set(s, (double)timeout_field, value->v.num);
+    } else {
+      scr_dyn_release(s->http_timeout_dyn[timeout_field]);
+      s->http_timeout_dyn[timeout_field] = scr_dyn_retain((ScrDyn *)value);
     }
-    scr_net_server_timeout_set(s, (double)timeout_field, value->v.num);
     return true;
   }
   return false;

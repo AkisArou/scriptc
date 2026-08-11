@@ -16,6 +16,13 @@ function configure(server: Server): void {
 const configured = createServer();
 const untouched = new Server();
 const fromOption = createServer({ keepAliveTimeoutBuffer: 4321 });
+const fromUndefined = createServer({ keepAliveTimeoutBuffer: undefined });
+
+function serverFromMaybeBuffer(value: number | undefined): Server {
+  return createServer({ keepAliveTimeoutBuffer: value });
+}
+const fromMaybeUndefined = serverFromMaybeBuffer(undefined);
+const fromMaybeNumber = serverFromMaybeBuffer(2468);
 
 console.log(
   configured.timeout,
@@ -42,6 +49,12 @@ console.log(
 );
 
 console.log("option", fromOption.keepAliveTimeoutBuffer);
+console.log(
+  "optional-options",
+  fromUndefined.keepAliveTimeoutBuffer,
+  fromMaybeUndefined.keepAliveTimeoutBuffer,
+  fromMaybeNumber.keepAliveTimeoutBuffer,
+);
 
 function logOptional(server: Server | undefined): void {
   console.log("optional", server?.keepAliveTimeoutBuffer);
@@ -53,6 +66,12 @@ const dynamic: any = fromOption;
 console.log("dynamic", dynamic.keepAliveTimeoutBuffer);
 dynamic.keepAliveTimeoutBuffer = 8765;
 console.log("dynamic-set", dynamic.keepAliveTimeoutBuffer, fromOption.keepAliveTimeoutBuffer);
+dynamic.timeout = "disabled";
+console.log("dynamic-string", typeof dynamic.timeout, dynamic.timeout);
+dynamic.timeout = undefined;
+console.log("dynamic-undefined", typeof dynamic.timeout, dynamic.timeout);
+dynamic.timeout = 2468;
+console.log("dynamic-number", dynamic.timeout, fromOption.timeout);
 
 const plainNetDynamic: any = createNetServer();
 console.log("plain-net-dynamic", plainNetDynamic.timeout, plainNetDynamic.keepAliveTimeoutBuffer);

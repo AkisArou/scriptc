@@ -2348,10 +2348,23 @@ function lowerHttpServerOptions(L: Lowerer, node: ts.Expression, what: string): 
           "write keepAliveTimeoutBuffer once in the options literal",
         );
       }
-      const value = initializer !== null
+      const raw = initializer !== null
         ? L.lowerExpr(initializer)
         : L.lowerShorthandValue(prop as ts.ShorthandPropertyAssignment);
-      keepAliveTimeoutBuffer = L.coerceToExpected(value, F64);
+      const value = L.coerceToExpected(raw, DYN);
+      if (value.type.kind !== "dyn") {
+        L.noLowering(
+          `${what} with a keepAliveTimeoutBuffer value that cannot cross the runtime option boundary`,
+          prop,
+          "keepAliveTimeoutBuffer is a number or undefined",
+        );
+      }
+      // Preserve the optional field's undefined arm until runtime: Node
+      // treats it as absent, while numbers take the constructor-only
+      // integer/range ladder and dynamic non-numbers get its named type
+      // error. Coercing eagerly to F64 would reject the valid explicit-
+      // undefined spelling before the option helper sees it.
+      keepAliveTimeoutBuffer = value;
       continue;
     }
     fenceOrDropOptionKey(
@@ -2405,14 +2418,14 @@ function lowerHttpCreateServerForms(L: Lowerer, expr: ts.CallExpression | ts.New
   if (!existing) {
     L.arrHofHelpers.set(key, name);
     const params = [
-      ...(hasBuffer ? [{ localId: "b.0", name: "buffer", type: F64 }] : []),
+      ...(hasBuffer ? [{ localId: "b.0", name: "buffer", type: DYN }] : []),
       { localId: "s.0", name: "s", type: NETSERVER_T },
     ];
     const ref: IrExpr = { kind: "varRef", localId: "s.0", type: NETSERVER_T, loc };
     const body: IrStmt[] = [];
     if (hasBuffer) {
       const selector: IrExpr = { kind: "numLit", value: 4, type: F64, loc };
-      const value: IrExpr = { kind: "varRef", localId: "b.0", type: F64, loc };
+      const value: IrExpr = { kind: "varRef", localId: "b.0", type: DYN, loc };
       body.push({
         kind: "exprStmt",
         expr: { kind: "libCall", fn: "http.serverTimeoutOptionSet", args: [ref, selector, value], type: VOID, loc },
