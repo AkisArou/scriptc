@@ -394,6 +394,7 @@ struct ScrNetServer {
    * plain net servers never expose these fields through the static type
    * surface. Indices match lower-server.ts's selector ABI. */
   double http_timeouts[5];
+  bool http_timeout_surface; /* true only for HTTP/1 and HTTPS servers */
   bool defer_conn; /* TLS: 'connection' fires post-handshake, not at accept */
   bool bound_v6;       /* the bound family (address()'s 'IPv6'/'IPv4' split) */
   ScrStr *bound_host;  /* the explicit bind host (NULL = the host-less any:
@@ -1400,11 +1401,15 @@ void scr_net_server_timeout_set(ScrNetServer *s, double field, double value) {
   s->http_timeouts[i] = value;
 }
 
+void scr_net_server_enable_http_timeout_surface(ScrNetServer *s) {
+  s->http_timeout_surface = true;
+}
+
 /* Constructor-option validation is intentionally separate from the plain
  * writable-property setter above. Node validates these option values as
  * non-negative safe integers, while later property assignments store the
  * number directly. */
-void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double value) {
+bool scr_net_server_timeout_option_check(double field, double value) {
   static const char *const names[] = {
     "timeout", "keepAliveTimeout", "headersTimeout", "requestTimeout",
     "keepAliveTimeoutBuffer",
@@ -1418,7 +1423,7 @@ void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double val
                        "The value of \"%s\" is out of range. It must be an integer. Received %s",
                        names[i], recv);
     scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
-    return;
+    return false;
   }
   if (value < 0 || value > 9007199254740991.0) {
     scr_num_received(value, recv);
@@ -1426,8 +1431,14 @@ void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double val
                        "The value of \"%s\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
                        names[i], recv);
     scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
-    return;
+    return false;
   }
+  return true;
+}
+
+void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double value) {
+  if (!scr_net_server_timeout_option_check(field, value)) return;
+  int i = (int)field;
   s->http_timeouts[i] = value;
 }
 
@@ -3366,7 +3377,7 @@ static ScrDyn *scr_net_dynh_srv_get(void *h, const char *key, size_t key_len) {
   (void)key_len;
   if (strcmp(key, "listening") == 0) return scr_dyn_new_bool(s->listening);
   int timeout_field = scr_net_dynh_srv_timeout_field(key);
-  if (timeout_field >= 0) {
+  if (timeout_field >= 0 && s->http_timeout_surface) {
     return scr_dyn_new_num(scr_net_server_timeout_get(s, (double)timeout_field));
   }
   {
@@ -3385,7 +3396,7 @@ static bool scr_net_dynh_srv_set(void *h, const char *key, size_t key_len, const
   ScrNetServer *s = (ScrNetServer *)h;
   (void)key_len;
   int timeout_field = scr_net_dynh_srv_timeout_field(key);
-  if (timeout_field >= 0) {
+  if (timeout_field >= 0 && s->http_timeout_surface) {
     if (value->kind != SCR_DYN_NUM) {
       scr_dyn_arg_type_fail(key, "of type number", value);
       return true; /* handled: the exception is pending */

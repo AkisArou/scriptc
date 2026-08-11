@@ -2719,21 +2719,26 @@ const TLS_VALIDATED_OPTIONS: ReadonlySet<string> = new Set([
   "sessionTimeout", "ticketKeys",
 ]);
 
-/** True when a literal options bag carries a runtime-validated key (and
- * the source is JS — TypeScript keeps its compile fences). */
-function tlsLiteralNeedsRuntimeWalk(node: ts.ObjectLiteralExpression): boolean {
-  if (!isJsSourceFile(node.getSourceFile())) return false;
+/** True when a literal options bag must ride the runtime walker: JS uses
+ * it for the typed TLS validation ladders, and HTTPS uses it for
+ * keepAliveTimeoutBuffer so the HTTP option is consumed without losing
+ * the literal's evaluation order. */
+function tlsLiteralNeedsRuntimeWalk(node: ts.ObjectLiteralExpression,
+  includeHttpTimeoutOptions = false,): boolean {
+  const jsSource = isJsSourceFile(node.getSourceFile());
   return node.properties.some((p) =>
     (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
     (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
-    TLS_VALIDATED_OPTIONS.has(p.name.text),
+    ((includeHttpTimeoutOptions && p.name.text === "keepAliveTimeoutBuffer") ||
+      (jsSource && TLS_VALIDATED_OPTIONS.has(p.name.text))),
   );
 }
 
 function lowerTlsServerOptionsOrDyn(
-  L: Lowerer, node: ts.Expression, what: string,
+  L: Lowerer, node: ts.Expression, what: string, includeHttpTimeoutOptions = false,
 ): { cert: IrExpr; key: IrExpr; dyn?: undefined } | { dyn: IrExpr } {
-  if (ts.isObjectLiteralExpression(node) && !tlsLiteralNeedsRuntimeWalk(node)) {
+  if (ts.isObjectLiteralExpression(node) &&
+      !tlsLiteralNeedsRuntimeWalk(node, includeHttpTimeoutOptions)) {
     return lowerTlsServerOptions(L, node, what);
   }
   const v = L.lowerExpr(node);
@@ -3128,7 +3133,7 @@ function lowerHttpsModuleCall(L: Lowerer, expr: ts.CallExpression,
         "the supported form is createServer({ cert, key }, (req, res) => ...)",
       );
     }
-    const opts = lowerTlsServerOptionsOrDyn(L, args[0]!, "https.createServer");
+    const opts = lowerTlsServerOptionsOrDyn(L, args[0]!, "https.createServer", true);
     if (args.length === 1) {
       // The handler-less form: 'request' listeners arrive later via
       // server.on("request", ...) — the createSecureServer emission's

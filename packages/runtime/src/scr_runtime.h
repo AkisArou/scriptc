@@ -5118,8 +5118,12 @@ double scr_net_server_port(ScrNetServer *s); /* address().port */
  * keepAliveTimeoutBuffer. */
 double scr_net_server_timeout_get(ScrNetServer *s, double field);
 void scr_net_server_timeout_set(ScrNetServer *s, double field, double value);
+/* Marks the shared net-server handle as an HTTP/1 or HTTPS server. The
+ * dynamic handle uses this to keep HTTP-only fields off net/TLS/H2. */
+void scr_net_server_enable_http_timeout_surface(ScrNetServer *s);
 /* Constructor-option twin: validates a non-negative safe integer before
  * storing, matching Node's option ladder (plain property writes do not). */
+bool scr_net_server_timeout_option_check(double field, double value);
 void scr_net_server_timeout_option_set(ScrNetServer *s, double field, double value);
 ScrStr *scr_net_server_addr_ip(ScrNetServer *s);     /* +1 — address().address */
 ScrStr *scr_net_server_addr_family(ScrNetServer *s); /* +1 — address().family */

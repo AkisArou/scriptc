@@ -3,6 +3,7 @@
 // dynamic access, and static reads/writes through a typed helper. Timer
 // enforcement is a separate server behavior surface.
 import { createServer, Server } from "node:http";
+import { createServer as createNetServer } from "node:net";
 
 function configure(server: Server): void {
   server.timeout = 125;
@@ -52,6 +53,9 @@ const dynamic: any = fromOption;
 console.log("dynamic", dynamic.keepAliveTimeoutBuffer);
 dynamic.keepAliveTimeoutBuffer = 8765;
 console.log("dynamic-set", dynamic.keepAliveTimeoutBuffer, fromOption.keepAliveTimeoutBuffer);
+
+const plainNetDynamic: any = createNetServer();
+console.log("plain-net-dynamic", plainNetDynamic.timeout, plainNetDynamic.keepAliveTimeoutBuffer);
 
 try {
   createServer({ keepAliveTimeoutBuffer: -1 });
