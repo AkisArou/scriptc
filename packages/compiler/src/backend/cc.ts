@@ -1573,9 +1573,14 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *            private externs out as non-external symbols. Apple ASan's
  *            image-registration COMMON remains shared so the final Mach-O
  *            image registers its globals once.
- *   linux  — ld -r merges, then binutils objcopy --keep-global-symbols
- *            localizes every other DEFINED global (objcopy leaves
- *            undefined symbols global by its own rule).
+ *   linux  — ld -r merges with --force-group-allocation (ASan's
+ *            instrumented globals ride ELF section groups whose signatures
+ *            repeat across archives sharing runtime objects; resolving the
+ *            groups into the combined member keeps a later multi-archive
+ *            link from discarding one archive's copies), then binutils
+ *            objcopy --keep-global-symbols localizes every other DEFINED
+ *            global (objcopy leaves undefined symbols global by its own
+ *            rule).
  *
  * Host-native only: compileLibrary refuses localization for cross targets
  * before emission (this step runs the host's ld/objcopy over host-format
@@ -1610,7 +1615,7 @@ async function localizeLibraryObjects(
     await run(["ld", "-r", programObject, staging, "-o", combined, "-exported_symbols_list", keepFile]);
   } else if (platform === "linux") {
     await writeFile(keepFile, keepSymbols.map((s) => `${s}\n`).join(""));
-    await run(["ld", "-r", programObject, staging, "-o", combined]);
+    await run(["ld", "-r", "--force-group-allocation", programObject, staging, "-o", combined]);
     await run(["objcopy", `--keep-global-symbols=${keepFile}`, combined]);
   } else {
     throw new Error(

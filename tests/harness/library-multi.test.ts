@@ -9,7 +9,7 @@
  *
  *   M1 symbols-exact     nm over a localized archive: the external defined
  *                        set equals the profile-declared set EXACTLY (plus
- *                        Darwin ASan's one image-registration common in a
+ *                        ASan's one image-registration common in a
  *                        sanitized build), and undefineds stay libc/libm-
  *                        shaped apart from sanitizer ABI references
  *   M2 two-instance run  the acceptance probe: two archives (ma_/mb_), two
@@ -44,7 +44,7 @@
  *                        coexists with a second different-prefix localized
  *                        archive in one process (both mechanisms at once);
  *                        the localized link surface stays exactly the
- *                        declared set, with M1's one Darwin ASan
+ *                        declared set, with M1's one ASan
  *                        image-registration common in a sanitized build
  *   M8 sanitized rerun   M6 re-run explicitly under ASan (the K10
  *                        precedent: the plain flavor carries an
@@ -147,14 +147,14 @@ describe.each(EMISSIONS)("localized archive symbols, %s emission", (emission) =>
       const { defined, undef } = nmSymbols(archive);
       // The WHOLE defined set — a classic archive additionally defines
       // every runtime internal; a localized one defines nothing else.
-      // Darwin ASan's image-wide registration guard is the sole sanitized
-      // exception: keeping its COMMON shared makes the final Mach-O image
+      // ASan's image-wide registration guard is the sole sanitized
+      // exception: keeping its COMMON shared makes the final image
       // register its ASan globals exactly once when N archives contribute
-      // module constructors.
-      const toolchainDefinitions =
-        sanitize && process.platform === "darwin"
-          ? ["___asan_globals_registered"]
-          : [];
+      // module constructors — Mach-O and ELF spell the same discipline
+      // with one underscore of decoration between them.
+      const toolchainDefinitions = sanitize
+        ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
+        : [];
       expect([...defined].sort()).toEqual([...declared, ...toolchainDefinitions].sort());
       // Undefineds: no runtime-internal or prefix-carrying reference
       // escapes; libc/libm (and sanitizer ABI) references keep their global
@@ -474,10 +474,9 @@ localizationTest("M7: thread-instanced and runtime-localized archives compose in
   // TLS access machinery undefineds are the platform runtime's, never
   // scriptc's.
   const { defined, undef } = nmSymbols(archiveT);
-  const toolchainDefinitions =
-    sanitize && process.platform === "darwin"
-      ? ["___asan_globals_registered"]
-      : [];
+  const toolchainDefinitions = sanitize
+    ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
+    : [];
   expect([...defined].sort()).toEqual(
     [
       "mt_boom", "mt_bump", "mt_calls_seen", "mt_collect", "mt_init", "mt_set_panic_sink", "mt_sum_to",
@@ -501,7 +500,14 @@ other sinks: t1=0 b=0
 localizationTest("M8: M6 under ASan", async () => {
   const archive = await buildThreaded("llvm", { sanitize: true });
   const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], "t-asan", { sanitize: true });
-  const run = spawnSync(probe, { encoding: "utf8", timeout: 120_000 });
+  // An instance's lifetime is its thread's, with no teardown at thread
+  // exit (the documented contract) — once the worker threads end, their
+  // thread-local roots are gone and Linux LSan's unreachable-at-exit
+  // accounting would flag contractually-held state. Point it away exactly
+  // as the sanitized suite lanes do; Apple ASan carries no leak checker.
+  const env =
+    process.platform === "linux" ? { ...process.env, ASAN_OPTIONS: "detect_leaks=0" } : process.env;
+  const run = spawnSync(probe, { encoding: "utf8", timeout: 120_000, env });
   expect(run.signal).toBeNull();
   expect(run.status).toBe(0);
   expect(run.stdout).toBe(THREADED_EXPECTED);
