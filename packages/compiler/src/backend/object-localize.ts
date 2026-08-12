@@ -29,10 +29,11 @@
  *                          symbol.
  *
  * Shared demotion rule (GNU objcopy --keep-global-symbols semantics):
- * undefined references keep their global binding (libc/libm and sanitizer
- * ABI are the embedder's by design), and COMMON symbols stay global —
- * sanitizer image-registration guards are COMMONs whose merging across
- * archives is the documented single-registration discipline. */
+ * undefined references keep their global binding (the target C/math runtime,
+ * system APIs, and sanitizer ABI are the embedder's by design), and COMMON
+ * symbols stay global — sanitizer image-registration guards are COMMONs whose
+ * merging across archives is the documented single-registration discipline.
+ * Windows embedders additionally link advapi32, iphlpapi, and ws2_32. */
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();

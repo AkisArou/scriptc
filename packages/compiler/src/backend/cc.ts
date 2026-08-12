@@ -1101,9 +1101,12 @@ async function ensureTlsArchive(
  * units a library may reach are the pure-data ones (regex + the vendored matcher, assert,
  * inspect, symbol, searchParams, emitter+dyn_handle, zlib); every
  * loop-hooked or ambient unit was refused at SC4005 before emission.
- * External-symbol contract: undefined references only to libc/libm — which
- * is why zlib rides the VENDORED per-flavor objects here even on hosts
- * (the executable lane's system `-lz` cannot ride inside an archive). */
+ * External-symbol contract: undefined references only to the target's C/math
+ * runtime and system APIs. Windows embedders additionally link advapi32,
+ * iphlpapi, and ws2_32; the platform driver supplies its ordinary CRT and
+ * kernel imports. Zlib rides the VENDORED per-flavor objects here even on
+ * hosts because the executable lane's system `-lz` cannot ride inside an
+ * archive. */
 
 /** The library base: the executable lane's unconditional sources minus the
  * fiber/loop and child-process units, plus the library-mode TU. */
@@ -1129,11 +1132,12 @@ export interface LibArchiveOptions {
    * symbol. Toolchain sanitizer ABI remains external as required,
    * so N archives built under pairwise-distinct prefixes link into one
    * process with no symbol collisions and no shared mutable runtime state.
-   * Undefined references (libc/libm, plus sanitizer ABI in instrumented
-   * builds) keep their global binding. Omitted = the classic archive,
-   * byte-for-byte. Admitted for darwin/linux/win32 native hosts, linux and
-   * windows cross triples from any host, and macos cross triples from a
-   * darwin host (compileLibrary owns the refusal fence). */
+   * Undefined references (the target C/math runtime and system APIs, plus
+   * sanitizer ABI in instrumented builds) keep their global binding. Windows
+   * embedders additionally link advapi32, iphlpapi, and ws2_32. Omitted = the
+   * classic archive, byte-for-byte. Admitted for darwin/linux/win32 native
+   * hosts, linux and windows cross triples from any host, and macos cross
+   * triples from a darwin host (compileLibrary owns the refusal fence). */
   localizeSymbols?: readonly string[];
   /** Thread-instanced state (the profile's abi.instance_per_thread): every
    * TU of the archive compiles with -DSCR_THREAD_INSTANCES, moving the
@@ -1559,9 +1563,11 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * renamed apart — they stop being visible to the embedder's linker at all,
  * so a second archive built under a different prefix brings its own private
  * copy of the whole runtime (allocator, collector, arena, panic sink) into
- * the same process. Undefined references (libc/libm, plus sanitizer ABI in
- * instrumented builds) keep their global binding: the C library and
- * sanitizer are the embedder's, shared by design.
+ * the same process. Undefined references (the target C/math runtime and
+ * system APIs, plus sanitizer ABI in instrumented builds) keep their global
+ * binding: those platform services and the sanitizer are the embedder's,
+ * shared by design. Windows embedders additionally link advapi32, iphlpapi,
+ * and ws2_32.
  *
  * Member selection matters: a classic archive's unused members (and their
  * undefined references to units library mode excludes, like the

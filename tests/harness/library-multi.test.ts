@@ -10,8 +10,9 @@
  *   M1 symbols-exact     nm over a localized archive: the external defined
  *                        set equals the profile-declared set EXACTLY (plus
  *                        ASan's one image-registration common in a
- *                        sanitized build), and undefineds stay libc/libm-
- *                        shaped apart from sanitizer ABI references
+ *                        sanitized build), and undefineds stay target-
+ *                        runtime/system-API-shaped apart from sanitizer ABI
+ *                        references
  *   M2 two-instance run  the acceptance probe: two archives (ma_/mb_), two
  *                        embedder threads (one per instance — the
  *                        documented contract), independent init and
@@ -207,8 +208,8 @@ describe.each(EMISSIONS)("localized archive symbols, %s emission", (emission) =>
         : [];
       expect([...defined].sort()).toEqual([...declared, ...toolchainDefinitions].sort());
       // Undefineds: no runtime-internal or prefix-carrying reference
-      // escapes; libc/libm (and sanitizer ABI) references keep their global
-      // binding.
+      // escapes; target-runtime/system-API (and sanitizer ABI) references
+      // keep their global binding.
       expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
       // The ambient audit holds through the combine step: no
       // process-disposition or threading surface, no atexit teardown.
