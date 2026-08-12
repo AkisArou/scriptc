@@ -342,6 +342,41 @@ test("M4: a macos cross target refuses runtime localization off a darwin host wi
   }
 });
 
+test.each([
+  ["aarch64-windows-gnu", "COFF localization currently requires x86_64"],
+  ["x86-linux-gnu", "cross-ELF localization currently requires x86_64 or aarch64"],
+] as const)(
+  "M4: unsupported localization object class %s refuses before emission with SC3002",
+  async (target, reason) => {
+    const outDir = join(cacheDir, `object-class-refusal-${target}`);
+    mkdirSync(outDir, { recursive: true });
+    const profile = JSON.parse(readFileSync(join(fixtureDir, "profile_a.json"), "utf8")) as {
+      entry: string;
+    };
+    profile.entry = join(fixtureDir, profile.entry);
+    const profilePath = join(outDir, "profile.json");
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+    const prevCc = process.env["SCRIPTC_CC"];
+    const prevTarget = process.env["SCRIPTC_TARGET"];
+    process.env["SCRIPTC_CC"] = "zigcc";
+    process.env["SCRIPTC_TARGET"] = target;
+    try {
+      const result = await compileLibrary({ profilePath, outDir });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.diagnostics[0]!.code).toBe("SC3002");
+        expect(result.diagnostics[0]!.message).toContain(target);
+        expect(result.diagnostics[0]!.message).toContain(reason);
+      }
+    } finally {
+      if (prevCc === undefined) delete process.env["SCRIPTC_CC"];
+      else process.env["SCRIPTC_CC"] = prevCc;
+      if (prevTarget === undefined) delete process.env["SCRIPTC_TARGET"];
+      else process.env["SCRIPTC_TARGET"] = prevTarget;
+    }
+  },
+);
+
 test("M4: an unsupported native host refuses runtime localization with SC3002", async () => {
   const outDir = join(cacheDir, "native-refusal");
   mkdirSync(outDir, { recursive: true });

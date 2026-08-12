@@ -438,6 +438,46 @@ describe("mergeAndLocalizeCoffObjects", () => {
     expect(merged.sections[0]!.relocs[0]!.sym).toBe(byName.get("helper")!.index);
   });
 
+  test("does not pull an alternate definition when a selected object already satisfies the reference", () => {
+    // program defines foo and needs bar; the first support member defines
+    // bar and calls back into foo. A real archive link stops there. The
+    // later alternate foo member must remain unselected rather than causing
+    // a false duplicate definition during the merge.
+    const program = buildCoff(
+      [text([{ va: 0, sym: 3, type: 4 }])],
+      [
+        { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+        { name: "foo", section: 1 },
+        { name: "bar", section: 0 },
+      ],
+    );
+    const needed = buildCoff(
+      [text([{ va: 0, sym: 3, type: 4 }])],
+      [
+        { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+        { name: "bar", section: 1 },
+        { name: "foo", section: 0 },
+      ],
+    );
+    const alternate = buildCoff(
+      [text()],
+      [
+        { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+        { name: "foo", section: 1 },
+        { name: "alternate_only", section: 1 },
+      ],
+    );
+
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects(program, [needed, alternate], new Set()),
+    );
+    const byName = new Map(merged.symbols.map((s) => [s.name, s]));
+    expect(byName.has("alternate_only")).toBe(false);
+    expect(merged.sections.filter((s) => s.name === ".text")).toHaveLength(2);
+    expect(merged.sections[0]!.relocs[0]!.sym).toBe(byName.get("bar")!.index);
+    expect(merged.sections[1]!.relocs[0]!.sym).toBe(byName.get("foo")!.index);
+  });
+
   test("COMDAT duplicates deduplicate inside the merge and the flag clears in the output", () => {
     // Both objects carry a .refptr.shared COMDAT ANY stub (the mingw
     // pattern: one per referencing TU); the program pulls the support

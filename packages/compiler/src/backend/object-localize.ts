@@ -563,14 +563,30 @@ export function mergeAndLocalizeCoffObjects(
     }
   });
   const included: boolean[] = objects.map((_, i) => i === 0);
+  // Archive extraction consults the linker's CURRENT symbol state: an
+  // undefined in a newly pulled member is already satisfied when the
+  // program object (or an earlier member) defines it. Record every
+  // selected definition as soon as its member joins, before that member's
+  // own undefineds are considered. Without this set, a support member can
+  // spuriously pull an alternate definition that a real archive link would
+  // leave untouched, and the merge later reports a false duplicate.
+  const selectedDefinitions = new Set<string>();
+  const addDefinitions = (object: CoffObject): void => {
+    for (const sym of object.symbols) {
+      if (coffDefines(sym)) selectedDefinitions.add(sym.name);
+    }
+  };
+  addDefinitions(objects[0]!);
   const queue = [0];
   while (queue.length > 0) {
     const object = objects[queue.shift()!]!;
     for (const sym of object.symbols) {
       if (!coffIsUndefined(sym)) continue;
+      if (selectedDefinitions.has(sym.name)) continue;
       for (const candidate of definers.get(sym.name) ?? []) {
         if (included[candidate] !== true) {
           included[candidate] = true;
+          addDefinitions(objects[candidate]!);
           queue.push(candidate);
         }
         break;
