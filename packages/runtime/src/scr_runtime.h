@@ -29,6 +29,24 @@ char *strcasestr(const char *hay, const char *needle);
 void arc4random_buf(void *buf, size_t n);
 #endif
 
+/* ── thread-instanced library state ─────────────────────────────────────
+ * Archives built under the profile's abi.instance_per_thread compile every
+ * TU with -DSCR_THREAD_INSTANCES, and SCR_TL moves each unit's mutable
+ * state — and the emitted program's globals — into thread-local storage.
+ * A thread that calls the profile's init entry then owns a complete,
+ * independent instance: its own collector, result arena, panic-sink
+ * registration, poison flag, and program state. The instance's lifetime is
+ * the thread's; the one-thread-per-instance contract (an instance is never
+ * entered from two threads) is unchanged — this mode adds instances, not
+ * thread awareness. Expands to nothing everywhere else, so executable
+ * builds and classic library builds carry the exact bytes they always
+ * carried. Truly immutable tables (static const data) stay shared. */
+#if defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)
+#define SCR_TL _Thread_local
+#else
+#define SCR_TL
+#endif
+
 /* ── process ──────────────────────────────────────────────────────────── */
 
 /* Called once at the top of main: private stdout formatter buffer,
@@ -445,7 +463,7 @@ enum {
   SCR_ERR_DOMEX = 4, /* DOMException — ScrDomException, the wider layout */
 };
 
-extern ScrVt scr_error_vts[5]; /* indexed by SCR_ERR_*; main() stamps pre/post */
+extern SCR_TL ScrVt scr_error_vts[5]; /* indexed by SCR_ERR_*; main() stamps pre/post */
 
 struct ScrDyn; /* full declaration below (the checked-dynamic tree section) */
 
@@ -1373,8 +1391,8 @@ typedef struct ScrEmitter {
   const char *cls; /* display name for the leak warning ("EventEmitter") */
 } ScrEmitter;
 
-extern ScrVt scr_emitter_vt; /* main() stamps pre/post */
-extern double scr_emitter_default_max;
+extern SCR_TL ScrVt scr_emitter_vt; /* main() stamps pre/post */
+extern SCR_TL double scr_emitter_default_max;
 
 ScrEmitter *scr_emitter_new(void); /* +1, collector-headered */
 void scr_emitter_init(void *obj);  /* super() into the prefix (no-op today) */
@@ -1976,7 +1994,7 @@ bool scr_process_kill_named(double pid, const ScrStr *signal);
 void scr_process_exit(double code);
 /* process._exiting: true once the exit sequence began (process.exit or
  * the exit-listener runner set the flag). Never throws. */
-extern bool scr_process_in_exit;
+extern SCR_TL bool scr_process_in_exit;
 bool scr_process_exiting(void);
 /* umask(2): mask < 0 reads without setting; otherwise sets and answers
  * the previous mask. Never throws. */

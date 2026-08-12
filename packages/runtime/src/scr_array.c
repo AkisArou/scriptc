@@ -8,7 +8,7 @@
 /* Live heap-array count for the RC audit lane (-DSCR_RC_AUDIT); same
  * contract as scr_str_live_count in scr_string.c. */
 #ifdef SCR_RC_AUDIT
-static long scr_live_arrays = 0;
+static SCR_TL long scr_live_arrays = 0;
 long scr_arr_live_count(void) { return scr_live_arrays; }
 #endif
 

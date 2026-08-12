@@ -1132,6 +1132,14 @@ export interface LibArchiveOptions {
    * builds) keep their global binding. Omitted = the classic archive,
    * byte-for-byte. Host-native builds only. */
   localizeSymbols?: readonly string[];
+  /** Thread-instanced state (the profile's abi.instance_per_thread): every
+   * TU of the archive compiles with -DSCR_THREAD_INSTANCES, moving the
+   * runtime units' mutable statics into thread-local storage (SCR_TL in
+   * scr_runtime.h) to match the program TU's thread-local globals — one
+   * complete instance per embedder thread. The define rides cflags, so
+   * every cache tier keys it automatically; omitted = the classic
+   * archive, byte-for-byte. */
+  threadInstances?: boolean;
   /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
   regex?: boolean;
   assert?: boolean;
@@ -1180,6 +1188,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     "-fno-strict-aliasing", // the emitted object model type-puns — see compileC's buildArgs
     "-Wno-deprecated-declarations",
     "-DSCR_LIB",
+    ...(opts.threadInstances ? ["-DSCR_THREAD_INSTANCES"] : []),
     ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-I", rtDir,
     ...(regex ? ["-I", vendorEngineDir()] : []),
@@ -1564,9 +1573,14 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *            private externs out as non-external symbols. Apple ASan's
  *            image-registration COMMON remains shared so the final Mach-O
  *            image registers its globals once.
- *   linux  — ld -r merges, then binutils objcopy --keep-global-symbols
- *            localizes every other DEFINED global (objcopy leaves
- *            undefined symbols global by its own rule).
+ *   linux  — ld -r merges with --force-group-allocation (ASan's
+ *            instrumented globals ride ELF section groups whose signatures
+ *            repeat across archives sharing runtime objects; resolving the
+ *            groups into the combined member keeps a later multi-archive
+ *            link from discarding one archive's copies), then binutils
+ *            objcopy --keep-global-symbols localizes every other DEFINED
+ *            global (objcopy leaves undefined symbols global by its own
+ *            rule).
  *
  * Host-native only: compileLibrary refuses localization for cross targets
  * before emission (this step runs the host's ld/objcopy over host-format
@@ -1601,7 +1615,7 @@ async function localizeLibraryObjects(
     await run(["ld", "-r", programObject, staging, "-o", combined, "-exported_symbols_list", keepFile]);
   } else if (platform === "linux") {
     await writeFile(keepFile, keepSymbols.map((s) => `${s}\n`).join(""));
-    await run(["ld", "-r", programObject, staging, "-o", combined]);
+    await run(["ld", "-r", "--force-group-allocation", programObject, staging, "-o", combined]);
     await run(["objcopy", `--keep-global-symbols=${keepFile}`, combined]);
   } else {
     throw new Error(

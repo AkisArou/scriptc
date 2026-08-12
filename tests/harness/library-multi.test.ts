@@ -9,7 +9,7 @@
  *
  *   M1 symbols-exact     nm over a localized archive: the external defined
  *                        set equals the profile-declared set EXACTLY (plus
- *                        Darwin ASan's one image-registration common in a
+ *                        ASan's one image-registration common in a
  *                        sanitized build), and undefineds stay libc/libm-
  *                        shaped apart from sanitizer ABI references
  *   M2 two-instance run  the acceptance probe: two archives (ma_/mb_), two
@@ -24,6 +24,35 @@
  *   M3 profile shape     abi.localize_runtime is strictly boolean (SC4001)
  *   M4 target posture    localization is host-native: a cross-target build
  *                        refuses SC3002 before emission
+ *
+ * Thread-instanced state (the profile's abi.instance_per_thread): every
+ * mutable static in the archive — runtime internals, module globals,
+ * run-once guards, regex literal caches — compiles as thread-local
+ * storage, so ONE linked archive serves one independent instance per
+ * embedder thread through the unchanged entry family (the calling thread
+ * is the instance selector).
+ *
+ *   M6 four threads      one archive, four embedder threads with distinct
+ *                        workloads: concurrent instance-local inits,
+ *                        independent state and collects, a deliberate trap
+ *                        on thread 0 delivered to ITS sink exactly once
+ *                        (SC4014, mt_boom, its ctx) poisoning only its
+ *                        instance while the other three keep answering
+ *                        through and after the trap window; sanitized in
+ *                        the SCRIPTC_SAN=1 flavor like M1/M2
+ *   M6 inspect TLS       deterministic two-thread runtime seam proving
+ *                        circular-target pointers cannot cross instances
+ *   M7 composition       a thread-instanced AND runtime-localized archive
+ *                        coexists with a second different-prefix localized
+ *                        archive in one process (both mechanisms at once);
+ *                        the localized link surface stays exactly the
+ *                        declared set, with M1's one ASan
+ *                        image-registration common in a sanitized build
+ *   M8 sanitized rerun   M6 re-run explicitly under ASan (the K10
+ *                        precedent: the plain flavor carries an
+ *                        instrumented pairing too)
+ *   M9 profile shape     abi.instance_per_thread is strictly boolean
+ *                        (SC4001)
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -120,14 +149,14 @@ describe.each(EMISSIONS)("localized archive symbols, %s emission", (emission) =>
       const { defined, undef } = nmSymbols(archive);
       // The WHOLE defined set — a classic archive additionally defines
       // every runtime internal; a localized one defines nothing else.
-      // Darwin ASan's image-wide registration guard is the sole sanitized
-      // exception: keeping its COMMON shared makes the final Mach-O image
+      // ASan's image-wide registration guard is the sole sanitized
+      // exception: keeping its COMMON shared makes the final image
       // register its ASan globals exactly once when N archives contribute
-      // module constructors.
-      const toolchainDefinitions =
-        sanitize && process.platform === "darwin"
-          ? ["___asan_globals_registered"]
-          : [];
+      // module constructors — Mach-O and ELF spell the same discipline
+      // with one underscore of decoration between them.
+      const toolchainDefinitions = sanitize
+        ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
+        : [];
       expect([...defined].sort()).toEqual([...declared, ...toolchainDefinitions].sort());
       // Undefineds: no runtime-internal or prefix-carrying reference
       // escapes; libc/libm (and sanitizer ABI) references keep their global
@@ -354,3 +383,206 @@ exec "$SCRIPTC_TEST_REAL_AR" "$@"
     }
   },
 );
+
+/* ── M6/M7/M8: thread-instanced state (abi.instance_per_thread) ──────────── */
+
+const threadFixtureDir = join(repoRoot, "tests/library-mode/thread-instances");
+
+/** Build the thread-instances fixture's archive for one emission: same
+ * patch-and-compile shape as buildInstance, plus abi overrides (M7 turns
+ * localize_runtime on) and an explicit sanitize override (M8's ASan
+ * pairing inside the plain flavor). Memoized like buildInstance. */
+function buildThreaded(
+  emission: Emission,
+  opts: { localize?: boolean; sanitize?: boolean } = {},
+): Promise<string> {
+  const sanitized = opts.sanitize ?? sanitize;
+  const key = `t-${emission}${opts.localize === true ? "-loc" : ""}${sanitized ? "-san" : ""}`;
+  let archive = built.get(key);
+  if (archive === undefined) {
+    archive = (async () => {
+      const outDir = join(cacheDir, key);
+      mkdirSync(outDir, { recursive: true });
+      const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+        entry: string;
+        emission: string;
+        abi: Record<string, unknown>;
+      };
+      profile.emission = emission;
+      profile.entry = join(threadFixtureDir, profile.entry);
+      if (opts.localize === true) profile.abi["localize_runtime"] = true;
+      const profilePath = join(outDir, "profile.json");
+      writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+      const result = await compileLibrary({ profilePath, outDir, sanitize: sanitized });
+      if (!result.ok) {
+        throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+      }
+      expect(result.backend).toBe(emission);
+      return result.archivePath;
+    })();
+    built.set(key, archive);
+  }
+  return archive;
+}
+
+function buildThreadProbe(
+  source: string,
+  archives: string[],
+  tag: string,
+  opts: { sanitize?: boolean } = {},
+): string {
+  const outDir = join(cacheDir, "probes");
+  const bin = join(outDir, `probe-${tag}`);
+  mkdirSync(outDir, { recursive: true });
+  execFileSync("clang", [
+    "-std=c11",
+    "-pthread",
+    ...((opts.sanitize ?? sanitize) ? ["-fsanitize=address"] : []),
+    source,
+    ...archives,
+    "-lm",
+    "-o", bin,
+  ]);
+  return bin;
+}
+
+const THREADED_EXPECTED = `t0: bump x100 -> 101, calls_seen 100, sums_ok=1, clocks_ok=1, trap fell through 0
+t0 sink: calls=1 ctx_ok=1 fields=3 code=[SC4014] symbol=[mt_boom] addr_nonzero=1
+t1: bump x150 -> 151, calls_seen 150, sums_ok=1, clocks_ok=1, post_ok=1
+t2: bump x200 -> 201, calls_seen 200, sums_ok=1, clocks_ok=1, post_ok=1
+t3: bump x250 -> 251, calls_seen 250, sums_ok=1, clocks_ok=1, post_ok=1
+survivor sinks: 0 0 0
+`;
+
+describe.each(EMISSIONS)("thread-instanced archive, %s emission", (emission) => {
+  localizationTest("M6: four threads, one archive: independent instances; a trap reaches only its own thread's sink, once", async () => {
+    const archive = await buildThreaded(emission);
+    const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], `t-${emission}`);
+    const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(THREADED_EXPECTED);
+  });
+});
+
+localizationTest("M6: util.inspect circular-reference state is thread-local", () => {
+  const outDir = join(cacheDir, "inspect-tls-probe");
+  const bin = join(outDir, "probe");
+  mkdirSync(outDir, { recursive: true });
+  execFileSync("clang", [
+    "-std=c11",
+    "-pthread",
+    "-DSCR_LIB",
+    "-DSCR_THREAD_INSTANCES",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wno-comment",
+    ...(sanitize ? ["-fsanitize=address"] : []),
+    "-I", join(repoRoot, "packages/runtime/src"),
+    join(threadFixtureDir, "probe_inspect.c"),
+    join(repoRoot, "packages/runtime/src/scr_inspect.c"),
+    process.platform === "darwin" ? "-Wl,-dead_strip" : "-Wl,--gc-sections",
+    "-o", bin,
+  ]);
+  const env =
+    sanitize && process.platform === "linux"
+      ? { ...process.env, ASAN_OPTIONS: "detect_leaks=0" }
+      : process.env;
+  const run = spawnSync(bin, { encoding: "utf8", timeout: 60_000, env });
+  expect(run.signal).toBeNull();
+  expect(run.status).toBe(0);
+  expect(run.stdout).toBe("1 1 1\n");
+});
+
+localizationTest("M7: thread-instanced and runtime-localized archives compose in one process", async () => {
+  const [archiveT, archiveB] = await Promise.all([
+    buildThreaded("llvm", { localize: true }),
+    buildInstance("b", "c"),
+  ]);
+  // The composed archive's link surface stays exactly the declared set:
+  // thread-local storage adds no external definitions (M1's one Darwin
+  // ASan image-registration common included in a sanitized build), and the
+  // TLS access machinery undefineds are the platform runtime's, never
+  // scriptc's.
+  const { defined, undef } = nmSymbols(archiveT);
+  const toolchainDefinitions = sanitize
+    ? [process.platform === "darwin" ? "___asan_globals_registered" : "__asan_globals_registered"]
+    : [];
+  expect([...defined].sort()).toEqual(
+    [
+      "mt_boom", "mt_bump", "mt_calls_seen", "mt_collect", "mt_init", "mt_perf_now", "mt_set_panic_sink", "mt_sum_to", "mt_uptime",
+      ...toolchainDefinitions,
+    ].sort(),
+  );
+  expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("mt_") || s.startsWith("mb_"))).toEqual([]);
+  const probe = buildThreadProbe(join(threadFixtureDir, "probe_pair.c"), [archiveT, archiveB], "t-pair");
+  const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
+  expect(run.signal).toBeNull();
+  expect(run.status).toBe(0);
+  expect(run.stdout).toBe(`multi-b ready
+t0: bump x100 -> 101, calls_seen 100, sums_ok=1, trap fell through 0
+t0 sink: calls=1 ctx_ok=1 code=[SC4014] symbol=[mt_boom]
+t1: bump x200 -> 201, calls_seen 200, sums_ok=1, post_ok=1
+b: sums_ok=1 adds_ok=1 post_ok=1
+other sinks: t1=0 b=0
+`);
+});
+
+localizationTest("M8: M6 under ASan", async () => {
+  const archive = await buildThreaded("llvm", { sanitize: true });
+  const probe = buildThreadProbe(join(threadFixtureDir, "probe.c"), [archive], "t-asan", { sanitize: true });
+  // An instance's lifetime is its thread's, with no teardown at thread
+  // exit (the documented contract) — once the worker threads end, their
+  // thread-local roots are gone and Linux LSan's unreachable-at-exit
+  // accounting would flag contractually-held state. Point it away exactly
+  // as the sanitized suite lanes do; Apple ASan carries no leak checker.
+  const env =
+    process.platform === "linux" ? { ...process.env, ASAN_OPTIONS: "detect_leaks=0" } : process.env;
+  const run = spawnSync(probe, { encoding: "utf8", timeout: 120_000, env });
+  expect(run.signal).toBeNull();
+  expect(run.status).toBe(0);
+  expect(run.stdout).toBe(THREADED_EXPECTED);
+});
+
+/* ── M9: profile shape ───────────────────────────────────────────────────── */
+
+test("M9: abi.instance_per_thread is strictly boolean", () => {
+  const dir = join(cacheDir, "profile-shape-thread");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "profile.json");
+  const base = {
+    profile_format: 1,
+    name: "shape",
+    entry: "lib.ts",
+    emission: "llvm",
+    abi: {
+      prefix: "sp_",
+      init_symbol: "sp_init",
+      sink_register_symbol: "sp_set_panic_sink",
+      collect_symbol: null,
+      result_reset_symbol: null,
+    },
+    exports: [],
+  };
+  for (const invalid of [1, "yes", null] as const) {
+    writeFileSync(path, JSON.stringify({
+      ...base,
+      abi: { ...base.abi, instance_per_thread: invalid },
+    }));
+    const refused = loadLibraryProfile(path);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.diagnostics[0]!.code).toBe("SC4001");
+      expect(refused.diagnostics[0]!.message).toContain("abi.instance_per_thread");
+    }
+  }
+  // The boolean forms load, and absence means false.
+  for (const [value, expected] of [[true, true], [false, false], [undefined, false]] as const) {
+    const abi: Record<string, unknown> = { ...base.abi };
+    if (value !== undefined) abi["instance_per_thread"] = value;
+    writeFileSync(path, JSON.stringify({ ...base, abi }));
+    const loaded = loadLibraryProfile(path);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) expect(loaded.profile.instancePerThread).toBe(expected);
+  }
+});

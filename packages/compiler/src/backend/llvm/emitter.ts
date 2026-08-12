@@ -1689,9 +1689,17 @@ class LlEmitter {
     ];
     out.push(...shapes.typeDefs);
     out.push(...classShapes.typeDefs);
+    // Thread-instanced library state (abi.instance_per_thread): the
+    // program TU's mutable globals — module globals, run-once guards, the
+    // lazily-compiled regex literal caches — and the runtime globals its
+    // init stamps live in thread-local storage, matching the runtime
+    // objects compiled with -DSCR_THREAD_INSTANCES. Immutable interned
+    // data (string literals, unit arms, template arrays, vtables) stays
+    // shared.
+    const tl = this.mod.lib?.threadInstances === true ? "thread_local " : "";
     out.push(
       ``,
-      `@scr_error_vts = external global [5 x %ScrVt]`,
+      `@scr_error_vts = external ${tl}global [5 x %ScrVt]`,
       `declare void @scr_init()`,
       `declare void @scr_lib_init(i32, ptr)`,
     );
@@ -1721,7 +1729,7 @@ class LlEmitter {
       // the interned source/flags strings. The bc slot starts null (lazy
       // compile, cached by the runtime) — a mutable global, not constant.
       out.push(
-        `@${re.sym} = internal global %ScrRegex { ${this.sizeType} -1, ptr ${re.src}, ptr ${re.fl}, ptr null } ; ${key.replace(/\n/g, "\\n")}`,
+        `@${re.sym} = internal ${tl}global %ScrRegex { ${this.sizeType} -1, ptr ${re.src}, ptr ${re.fl}, ptr null } ; ${key.replace(/\n/g, "\\n")}`,
       );
     }
     if (this.regexInstances.size > 0) out.push(``);
@@ -1793,7 +1801,7 @@ class LlEmitter {
     for (const g of globals) {
       const ty = this.llType(g.type);
       const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
-      out.push(`@${mangleGlobal(g.id)} = internal global ${ty} ${zero} ; ${g.name}`);
+      out.push(`@${mangleGlobal(g.id)} = internal ${tl}global ${ty} ${zero} ; ${g.name}`);
     }
     if (globals.length > 0) out.push(``);
     out.push(...helpers);
@@ -1825,7 +1833,7 @@ class LlEmitter {
       // The runtime emitter vtable's interval (emitterVtStampLines): bare
       // EventEmitter instances answer instanceof and dispatch dynamic
       // teardown under THIS module's preorder numbering.
-      out.push(`@scr_emitter_vt = external global %ScrVt`, ``);
+      out.push(`@scr_emitter_vt = external ${tl}global %ScrVt`, ``);
       stamps.push(
         `  store ${this.sizeType} ${this.emitterInterval.pre}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 0)`,
         `  store ${this.sizeType} ${this.emitterInterval.post}, ptr getelementptr inbounds (%ScrVt, ptr @scr_emitter_vt, i64 0, i32 1) ; EventEmitter`,

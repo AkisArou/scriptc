@@ -10,7 +10,7 @@
  * leaks nothing and frees nothing twice (double-free shows up as ASan
  * use-after-free on the rc field or a negative count here). */
 #ifdef SCR_RC_AUDIT
-static long scr_live_strings = 0;
+static SCR_TL long scr_live_strings = 0;
 long scr_str_live_count(void) { return scr_live_strings; }
 #endif
 
@@ -41,8 +41,8 @@ typedef struct {
   size_t u16len;   /* SCR_U16_UNKNOWN until computed */
   size_t cu, cb;   /* cursor: byte offset cb starts the char at unit cu */
 } ScrSidx;
-static ScrSidx scr_sidx_tab[SCR_SIDX_N];
-static unsigned scr_sidx_clock;
+static SCR_TL ScrSidx scr_sidx_tab[SCR_SIDX_N];
+static SCR_TL unsigned scr_sidx_clock;
 
 static void scr_sidx_purge(const ScrStr *s) {
   for (int i = 0; i < SCR_SIDX_N; i++) {
@@ -90,7 +90,7 @@ ScrStr *scr_str_new(const char *bytes, size_t len) {
  * blocks instead of paging in fresh zero-filled memory 40k times. Disabled
  * in the audit lane so ASan sees every logical free as a real free. */
 #ifndef SCR_RC_AUDIT
-static ScrStr *scr_str_spare;
+static SCR_TL ScrStr *scr_str_spare;
 #endif
 
 /* A spare-block reuse must not waste grossly (cap <= 4x the need) and only

@@ -11,7 +11,7 @@
 /* Set by scr_async.c at loop exhaustion; lives here (unconditionally) so
  * binaries that link the console without the async runtime still link, and
  * plain builds satisfy scr_async's reference. */
-static long scr_abandoned_fibers = 0;
+static SCR_TL long scr_abandoned_fibers = 0;
 void scr_note_abandoned_fibers(long n) { scr_abandoned_fibers = n; }
 
 #ifndef SCR_LIB
