@@ -90,12 +90,15 @@
  * runtime internals — allocator, cycle collector, result arena, panic-sink
  * registration, every other piece of runtime state — are demoted to LOCAL
  * symbols behind the profile's prefix, so an ordinary archive's only
- * external definitions are the profile-declared symbols and its only
- * external references are libc/libm. Sanitized artifacts additionally carry
- * their sanitizer ABI; Darwin ASan's image-registration COMMON deliberately
- * remains shared so the final Mach-O image registers its globals exactly
- * once. N such archives, built under pairwise-distinct prefixes, then link
- * into ONE process with no scriptc-runtime symbol collisions or shared
+ * external definitions are the profile-declared symbols. External references
+ * are the target's C/math runtime and system APIs: Windows embedders
+ * additionally link advapi32, iphlpapi, and ws2_32, while the platform driver
+ * supplies its ordinary CRT and kernel imports. Sanitized artifacts also
+ * carry their sanitizer ABI; Darwin ASan's image-registration COMMON
+ * deliberately remains shared so the final Mach-O image registers its
+ * globals exactly once. N such archives, built under pairwise-distinct
+ * prefixes, then link into ONE process with no scriptc-runtime symbol
+ * collisions or shared
  * mutable state: each instance owns a private copy of the whole runtime,
  * panic sinks register per instance, and a trap poisons only the instance it
  * fired in. The embedder contract that makes this sound:
@@ -109,8 +112,10 @@
  *     only through the embedder's own byte/record marshalling.
  *
  * Off by default: an absent or false `localize_runtime` produces the
- * classic artifact, byte-for-byte. Localization is host-native (darwin and
- * linux); cross-target archive builds refuse it with SC3002.
+ * classic artifact, byte-for-byte. Localization follows the archive's
+ * object format: ELF and COFF archives localize on any supported host
+ * (native or cross); Mach-O localization runs the macOS host linker, so
+ * macos targets build on darwin hosts and refuse elsewhere with SC3002.
  *
  * Thread-instanced state (`abi.instance_per_thread: true`): every mutable
  * piece of the archive's state — the runtime units' internals AND the

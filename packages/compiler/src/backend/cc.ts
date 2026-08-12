@@ -6,6 +6,7 @@ import { access, chmod, copyFile, link, mkdir, mkdtemp, readdir, readFile, realp
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { localizeElfObject, mergeAndLocalizeCoffObjects } from "./object-localize.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1100,9 +1101,12 @@ async function ensureTlsArchive(
  * units a library may reach are the pure-data ones (regex + the vendored matcher, assert,
  * inspect, symbol, searchParams, emitter+dyn_handle, zlib); every
  * loop-hooked or ambient unit was refused at SC4005 before emission.
- * External-symbol contract: undefined references only to libc/libm — which
- * is why zlib rides the VENDORED per-flavor objects here even on hosts
- * (the executable lane's system `-lz` cannot ride inside an archive). */
+ * External-symbol contract: undefined references only to the target's C/math
+ * runtime and system APIs. Windows embedders additionally link advapi32,
+ * iphlpapi, and ws2_32; the platform driver supplies its ordinary CRT and
+ * kernel imports. Zlib rides the VENDORED per-flavor objects here even on
+ * hosts because the executable lane's system `-lz` cannot ride inside an
+ * archive. */
 
 /** The library base: the executable lane's unconditional sources minus the
  * fiber/loop and child-process units, plus the library-mode TU. */
@@ -1128,9 +1132,12 @@ export interface LibArchiveOptions {
    * symbol. Toolchain sanitizer ABI remains external as required,
    * so N archives built under pairwise-distinct prefixes link into one
    * process with no symbol collisions and no shared mutable runtime state.
-   * Undefined references (libc/libm, plus sanitizer ABI in instrumented
-   * builds) keep their global binding. Omitted = the classic archive,
-   * byte-for-byte. Host-native builds only. */
+   * Undefined references (the target C/math runtime and system APIs, plus
+   * sanitizer ABI in instrumented builds) keep their global binding. Windows
+   * embedders additionally link advapi32, iphlpapi, and ws2_32. Omitted = the
+   * classic archive, byte-for-byte. Admitted for darwin/linux/win32 native
+   * hosts, linux and windows cross triples from any host, and macos cross
+   * triples from a darwin host (compileLibrary owns the refusal fence). */
   localizeSymbols?: readonly string[];
   /** Thread-instanced state (the profile's abi.instance_per_thread): every
    * TU of the archive compiles with -DSCR_THREAD_INSTANCES, moving the
@@ -1262,9 +1269,10 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     `${toolchainEnv}\0${implicitToolchain ?? "<uncached>"}`,
   );
   // Runtime-localized archives skip the completed-archive tier: their bytes
-  // additionally depend on the host's ld/objcopy identities, which the
-  // archive key does not fingerprint. The runtime-object tier still serves
-  // them (localization consumes the same per-flavor objects).
+  // additionally depend on the localization toolchain's identity (host ld/
+  // objcopy or the cross driver's lld), which the archive key does not
+  // fingerprint. The runtime-object tier still serves them (localization
+  // consumes the same per-flavor objects).
   const cacheCompleteArchive =
     opts.localizeSymbols === undefined &&
     root !== null && await archiverSupportsPersistentCache(arArgv, driver);
@@ -1555,9 +1563,11 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * renamed apart — they stop being visible to the embedder's linker at all,
  * so a second archive built under a different prefix brings its own private
  * copy of the whole runtime (allocator, collector, arena, panic sink) into
- * the same process. Undefined references (libc/libm, plus sanitizer ABI in
- * instrumented builds) keep their global binding: the C library and
- * sanitizer are the embedder's, shared by design.
+ * the same process. Undefined references (the target C/math runtime and
+ * system APIs, plus sanitizer ABI in instrumented builds) keep their global
+ * binding: those platform services and the sanitizer are the embedder's,
+ * shared by design. Windows embedders additionally link advapi32, iphlpapi,
+ * and ws2_32.
  *
  * Member selection matters: a classic archive's unused members (and their
  * undefined references to units library mode excludes, like the
@@ -1565,26 +1575,37 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * blind merge of every object would carry those references into the one
  * combined member. Staging the support objects into an intermediate
  * archive keeps the linker's own member semantics: `ld -r` pulls only the
- * members the program object transitively needs.
+ * members the program object transitively needs (the COFF arm implements
+ * the same member semantics in process).
  *
- *   darwin — one ld64 invocation: -r merges program + needed members,
+ *   Mach-O — one host-ld64 invocation: -r merges program + needed members,
  *            -exported_symbols_list demotes every unlisted global to
  *            private extern, and -r without -keep_private_externs writes
  *            private externs out as non-external symbols. Apple ASan's
  *            image-registration COMMON remains shared so the final Mach-O
- *            image registers its globals once.
- *   linux  — ld -r merges with --force-group-allocation (ASan's
- *            instrumented globals ride ELF section groups whose signatures
- *            repeat across archives sharing runtime objects; resolving the
- *            groups into the combined member keeps a later multi-archive
- *            link from discarding one archive's copies), then binutils
- *            objcopy --keep-global-symbols localizes every other DEFINED
- *            global (objcopy leaves undefined symbols global by its own
- *            rule).
- *
- * Host-native only: compileLibrary refuses localization for cross targets
- * before emission (this step runs the host's ld/objcopy over host-format
- * objects). */
+ *            image registers its globals once. ld64 reads every macOS
+ *            architecture, so darwin-host macos cross triples ride the
+ *            same arm; compileLibrary refuses macos targets elsewhere.
+ *   ELF, native linux host — ld -r merges with --force-group-allocation
+ *            (ASan's instrumented globals ride ELF section groups whose
+ *            signatures repeat across archives sharing runtime objects;
+ *            resolving the groups into the combined member keeps a later
+ *            multi-archive link from discarding one archive's copies),
+ *            then binutils objcopy --keep-global-symbols localizes every
+ *            other DEFINED global (objcopy leaves undefined symbols
+ *            global by its own rule). The exact historical recipe.
+ *   ELF, cross triples from any host — `zig cc -target <triple> -r`
+ *            merges (zig is already the cross driver's hard requirement),
+ *            then localizeElfObject demotes in process and resolves
+ *            section groups the way --force-group-allocation does, with
+ *            no host binutils/llvm-objcopy dependency.
+ *   COFF, native win32 hosts and windows cross triples from any host —
+ *            mergeAndLocalizeCoffObjects performs member selection, the
+ *            merge, cross-object symbol resolution, and demotion in
+ *            process: no linker offers a COFF relocatable mode (lld-link
+ *            mirrors MSVC link.exe; zig's COFF driver refuses multi-object
+ *            merges) and llvm-objcopy rejects symbol-scope flags for
+ *            COFF, so no tool pairing exists to shell out to. */
 async function localizeLibraryObjects(
   driver: CcDriver,
   arArgv: readonly string[],
@@ -1605,21 +1626,62 @@ async function localizeLibraryObjects(
       const stderr = (err as { stderr?: string }).stderr ?? String(err);
       throw new Error(
         `${argv[0]} failed while localizing the library archive's runtime symbols (abi.localize_runtime).\n` +
-          `Runtime symbol localization needs the host toolchain's ${platform === "darwin" ? "ld" : "ld and objcopy"} beside the C compiler.\n\n${stderr}`,
+          `Runtime symbol localization needs the ${platform === "darwin" ? "host toolchain's ld" : driver.target === null ? "host toolchain's ld and objcopy" : "cross driver's relocatable link"} beside the C compiler.\n\n${stderr}`,
       );
     }
   };
+  if (platform === "win32") {
+    // COFF has no relocatable-link tool to stage through; the member
+    // selection and combine+demote happen in process over the object bytes.
+    const [program, ...support] = await Promise.all(
+      [programObject, ...supportObjects].map((path) => readFile(path)),
+    );
+    try {
+      await writeFile(
+        combined,
+        mergeAndLocalizeCoffObjects(program!, support, new Set(keepSymbols), {
+          program: basename(programObject),
+          support: supportObjects.map((path) => basename(path)),
+        }),
+      );
+    } catch (err) {
+      throw new Error(
+        `COFF symbol localization failed while localizing the library archive's runtime symbols (abi.localize_runtime).\n\n${(err as Error).message}`,
+      );
+    }
+    return combined;
+  }
   await run([arArgv[0] ?? "ar", ...arArgv.slice(1), "rcs", staging, ...supportObjects]);
   if (platform === "darwin") {
     await writeFile(keepFile, keepSymbols.map((s) => `_${s}\n`).join(""));
     await run(["ld", "-r", programObject, staging, "-o", combined, "-exported_symbols_list", keepFile]);
-  } else if (platform === "linux") {
+  } else if (platform === "linux" && driver.target === null) {
     await writeFile(keepFile, keepSymbols.map((s) => `${s}\n`).join(""));
     await run(["ld", "-r", "--force-group-allocation", programObject, staging, "-o", combined]);
     await run(["objcopy", `--keep-global-symbols=${keepFile}`, combined]);
+  } else if (platform === "linux") {
+    // Cross ELF: the cross driver's own lld performs the relocatable merge
+    // (with the staging archive's member semantics); demotion and section-
+    // group resolution happen in process. -nostdlib keeps zig from feeding
+    // libc/compiler-rt inputs into the merge.
+    await run([
+      driver.argv[0] ?? "zig",
+      ...driver.argv.slice(1),
+      "-target", driver.target!,
+      "-nostdlib",
+      "-r", programObject, staging,
+      "-o", combined,
+    ]);
+    try {
+      await writeFile(combined, localizeElfObject(await readFile(combined), new Set(keepSymbols)));
+    } catch (err) {
+      throw new Error(
+        `ELF symbol localization failed while localizing the library archive's runtime symbols (abi.localize_runtime).\n\n${(err as Error).message}`,
+      );
+    }
   } else {
     throw new Error(
-      `runtime symbol localization (abi.localize_runtime) supports darwin and linux host builds; this build targets ${platform}`,
+      `runtime symbol localization (abi.localize_runtime) has no ${platform} arm; compileLibrary admits darwin, linux, and win32 builds only`,
     );
   }
   return combined;
