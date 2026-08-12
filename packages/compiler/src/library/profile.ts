@@ -19,7 +19,11 @@
  *       "init_symbol": "<prefix>_init",
  *       "sink_register_symbol": "<prefix>_set_panic_sink",
  *       "collect_symbol": "<prefix>_collect" | null,   // session ruling 2
- *       "result_reset_symbol": "<prefix>_reset" | null // §4.3 two postures
+ *       "result_reset_symbol": "<prefix>_reset" | null, // §4.3 two postures
+ *       "localize_runtime": false                // multi-instance library
+ *                                                // mode (see below); absent
+ *                                                // = false, the classic
+ *                                                // single-archive artifact
  *     },
  *     "exports": [ { "export": "update", "symbol": "<prefix>_update",
  *                    "params": ["f64", "string"], "returns": "bytes" } ],
@@ -77,6 +81,32 @@
  * canonical module paths are root-relative POSIX paths. The identity
  * getters are pure data returns exempt from the poisoned guard and every
  * runtime touch (ratified): callable before init and after a trap.
+ *
+ * Multi-instance library mode (`abi.localize_runtime: true`): the archive's
+ * runtime internals — allocator, cycle collector, result arena, panic-sink
+ * registration, every other piece of runtime state — are demoted to LOCAL
+ * symbols behind the profile's prefix, so an ordinary archive's only
+ * external definitions are the profile-declared symbols and its only
+ * external references are libc/libm. Sanitized artifacts additionally carry
+ * their sanitizer ABI; Darwin ASan's image-registration COMMON deliberately
+ * remains shared so the final Mach-O image registers its globals exactly
+ * once. N such archives, built under pairwise-distinct prefixes, then link
+ * into ONE process with no scriptc-runtime symbol collisions or shared
+ * mutable state: each instance owns a private copy of the whole runtime,
+ * panic sinks register per instance, and a trap poisons only the instance it
+ * fired in. The embedder contract that makes this sound:
+ *
+ *   - Each instance keeps the single-threaded execution model. The embedder
+ *     confines each instance to one thread and never enters one instance
+ *     from two threads; different instances may run on different threads
+ *     concurrently.
+ *   - No value crosses instances directly: results are instance-owned
+ *     memory with instance-tied lifetimes, so data moves between instances
+ *     only through the embedder's own byte/record marshalling.
+ *
+ * Off by default: an absent or false `localize_runtime` produces the
+ * classic artifact, byte-for-byte. Localization is host-native (darwin and
+ * linux); cross-target archive builds refuse it with SC3002.
  *
  * Marshalling classes (design §4.2 + session ruling 3 + ask 4): f64, bool,
  * string, bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing
@@ -196,6 +226,11 @@ export interface LibraryProfile {
   /** §4.3: declared → results accumulate until the host calls it; null →
    * every entry prologue resets the result arena. */
   resultResetSymbol: string | null;
+  /** Multi-instance library mode: true localizes every runtime-internal
+   * symbol so N archives with distinct prefixes link into one process (see
+   * the header contract). False (the default) produces the classic
+   * single-archive artifact unchanged. */
+  localizeRuntime: boolean;
   exports: LibraryExportEntry[];
   /** The ask-2 contract-sidecar section; null = the profile declares no
    * sidecar and the invocation emits none. */
@@ -312,7 +347,7 @@ export function loadLibraryProfile(
     if (abi === null || typeof abi !== "object" || Array.isArray(abi)) {
       throw new ProfileError("'abi' must be an object");
     }
-    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol"]);
+    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime"]);
     const a = abi as Record<string, unknown>;
     const prefix = req<string>(a["prefix"], "abi.prefix", "string");
     if (!C_IDENT.test(prefix)) {
@@ -322,6 +357,13 @@ export function loadLibraryProfile(
     const sinkRegisterSymbol = symbolField(a["sink_register_symbol"], "abi.sink_register_symbol", prefix, false)!;
     const collectSymbol = symbolField(a["collect_symbol"], "abi.collect_symbol", prefix, true);
     const resultResetSymbol = symbolField(a["result_reset_symbol"], "abi.result_reset_symbol", prefix, true);
+    // Multi-instance library mode: strictly boolean when present (the field
+    // gates the artifact's whole link surface, so a truthy non-boolean is a
+    // refusal, never a coercion).
+    const localizeRuntime =
+      a["localize_runtime"] === undefined
+        ? false
+        : req<boolean>(a["localize_runtime"], "abi.localize_runtime", "boolean");
 
     const exportsRaw = p["exports"];
     if (!Array.isArray(exportsRaw)) throw new ProfileError("'exports' must be an array");
@@ -578,6 +620,7 @@ export function loadLibraryProfile(
         sinkRegisterSymbol,
         collectSymbol,
         resultResetSymbol,
+        localizeRuntime,
         exports: entries,
         sidecar,
         profileBytes: bytes,

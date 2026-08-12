@@ -114,6 +114,7 @@ const remoteWorkspaceReset = workspaceResetCommand("/workspace");
 const hostLaneContractFiles = [
   "tests/harness/ffi.test.ts",
   "tests/harness/island.test.ts",
+  "tests/harness/library-multi.test.ts",
   "tests/harness/differential.test.ts",
   "tests/harness/server.test.ts",
   "tests/harness/dgram.test.ts",
@@ -123,6 +124,8 @@ const hostLaneContractPattern = [
   "calls the manifest-bound archive across every v1 ABI class",
   "a missing FFI symbol is an SC5004 diagnostic",
   "deep island recursion on a fiber is a catchable RangeError",
+  "M1: external definitions equal the declared set exactly",
+  "M2: independent state and collects",
   "net-echo",
   "udp-loopback-pair",
   "1564-fs-watch.ts",

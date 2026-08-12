@@ -10,6 +10,15 @@
  * profile-agnostic and the program TU carries every profile-named symbol —
  * one place for the conformance symbol audit to look.
  *
+ * Multi-instance processes (the profile's abi.localize_runtime): the
+ * archive build demotes this file's externals — and every other runtime
+ * internal — to LOCAL symbols, so each linked archive carries its own
+ * private copy of all the state here: its own sink registration, poison
+ * flag, arena, and entry-symbol slot. Sinks therefore register per
+ * instance, and a trap poisons only the instance it fired in. Nothing in
+ * this file is thread-aware; the embedder contract is one thread per
+ * instance (an instance is never entered from two threads).
+ *
  * State after a sink call: none is legal. The trap fired mid-operation with
  * no unwinding — heap, arena, and collector state are unspecified; the library
  * is POISONED. Every runtime-touching entry prologue aborts on the flag
@@ -62,9 +71,11 @@ void scr_library_set_sink(ScrLibSinkFn fn, void *ctx) {
 
 /* The current-entry slot: every generated entry's prologue records its
  * external symbol before dispatching into core code. A single static slot
- * is sound — exactly one core is live per process (the one-live-core rule),
- * entries never nest, and a trap can only fire while an entry is on the
- * stack. NULL (never entered) renders as the empty symbol field. */
+ * is sound — exactly one core is live per copy of this state (the sole
+ * core in a classic process; each archive's own instance under
+ * abi.localize_runtime, where this slot is a per-instance local), entries
+ * never nest, and a trap can only fire while an entry is on the stack.
+ * NULL (never entered) renders as the empty symbol field. */
 static const char *scr_library_entry_symbol = NULL;
 
 /* Detected-trap classification: the runtime's trap sites self-classify
