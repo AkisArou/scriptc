@@ -301,7 +301,7 @@ static SCR_TL InspSeenEnt *g_seen;
 static SCR_TL size_t g_nseen;
 static SCR_TL size_t g_seen_cap;
 /* Detection-numbered circular targets (persist across the call). */
-static const void *g_circ[64];
+static SCR_TL const void *g_circ[64];
 static SCR_TL int g_ncirc;
 
 static void insp_circ_reset(void) {

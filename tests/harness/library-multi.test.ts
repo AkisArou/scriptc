@@ -40,6 +40,8 @@
  *                        instance while the other three keep answering
  *                        through and after the trap window; sanitized in
  *                        the SCRIPTC_SAN=1 flavor like M1/M2
+ *   M6 inspect TLS       deterministic two-thread runtime seam proving
+ *                        circular-target pointers cannot cross instances
  *   M7 composition       a thread-instanced AND runtime-localized archive
  *                        coexists with a second different-prefix localized
  *                        archive in one process (both mechanisms at once);
@@ -461,6 +463,35 @@ describe.each(EMISSIONS)("thread-instanced archive, %s emission", (emission) => 
     expect(run.status).toBe(0);
     expect(run.stdout).toBe(THREADED_EXPECTED);
   });
+});
+
+localizationTest("M6: util.inspect circular-reference state is thread-local", () => {
+  const outDir = join(cacheDir, "inspect-tls-probe");
+  const bin = join(outDir, "probe");
+  mkdirSync(outDir, { recursive: true });
+  execFileSync("clang", [
+    "-std=c11",
+    "-pthread",
+    "-DSCR_LIB",
+    "-DSCR_THREAD_INSTANCES",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wno-comment",
+    ...(sanitize ? ["-fsanitize=address"] : []),
+    "-I", join(repoRoot, "packages/runtime/src"),
+    join(threadFixtureDir, "probe_inspect.c"),
+    join(repoRoot, "packages/runtime/src/scr_inspect.c"),
+    process.platform === "darwin" ? "-Wl,-dead_strip" : "-Wl,--gc-sections",
+    "-o", bin,
+  ]);
+  const env =
+    sanitize && process.platform === "linux"
+      ? { ...process.env, ASAN_OPTIONS: "detect_leaks=0" }
+      : process.env;
+  const run = spawnSync(bin, { encoding: "utf8", timeout: 60_000, env });
+  expect(run.signal).toBeNull();
+  expect(run.status).toBe(0);
+  expect(run.stdout).toBe("1 1 1\n");
 });
 
 localizationTest("M7: thread-instanced and runtime-localized archives compose in one process", async () => {
