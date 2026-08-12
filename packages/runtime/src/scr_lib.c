@@ -104,14 +104,14 @@ extern char **environ; /* env snapshot (scr_env_pairs) */
 
 /* ── process ─────────────────────────────────────────────────────────── */
 
-static int scr_lib_argc = 0;
-static char **scr_lib_argv = NULL;
-static ScrArr *scr_argv_arr = NULL;    /* interned process.argv */
-static ScrStr *scr_platform_str = NULL; /* interned process.platform */
-static ScrStr *scr_exec_path_str = NULL; /* interned process.execPath */
-static ScrStr *scr_arch_str = NULL;      /* interned process.arch */
-static ScrStr *scr_versions_node_str = NULL; /* interned process.versions.node */
-static ScrStr *scr_versions_openssl_str = NULL; /* interned process.versions.openssl */
+static SCR_TL int scr_lib_argc = 0;
+static SCR_TL char **scr_lib_argv = NULL;
+static SCR_TL ScrArr *scr_argv_arr = NULL;    /* interned process.argv */
+static SCR_TL ScrStr *scr_platform_str = NULL; /* interned process.platform */
+static SCR_TL ScrStr *scr_exec_path_str = NULL; /* interned process.execPath */
+static SCR_TL ScrStr *scr_arch_str = NULL;      /* interned process.arch */
+static SCR_TL ScrStr *scr_versions_node_str = NULL; /* interned process.versions.node */
+static SCR_TL ScrStr *scr_versions_openssl_str = NULL; /* interned process.versions.openssl */
 
 static void scr_lib_cleanup(void) {
   scr_arr_release(scr_argv_arr);
@@ -1103,7 +1103,7 @@ void scr_process_exit(double code) {
  * attribute monotonic stamp — the binary's own start, which is what
  * "the current Node.js process" means for a compiled program). */
 #ifdef _WIN32
-static double scr_uptime_t0_ms;
+static SCR_TL double scr_uptime_t0_ms;
 static void scr_uptime_anchor_init(void) { scr_uptime_t0_ms = (double)GetTickCount64(); }
 static double scr_uptime_now_ms(void) { return (double)GetTickCount64(); }
 #else
@@ -1112,7 +1112,7 @@ static double scr_uptime_now_ms(void) { return (double)GetTickCount64(); }
 #ifdef __APPLE__
 #include <mach/mach.h>
 #endif
-static double scr_uptime_t0_ms;
+static SCR_TL double scr_uptime_t0_ms;
 static double scr_uptime_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1353,7 +1353,7 @@ double scr_available_memory(void) {
 /* process._exiting — true once the exit sequence began (set above and by
  * scr_run_exit_listeners in scr_events.c; the flag lives HERE so reading
  * it never forces the events unit into the link). */
-bool scr_process_in_exit = false;
+SCR_TL bool scr_process_in_exit = false;
 
 bool scr_process_exiting(void) { return scr_process_in_exit; }
 
@@ -1372,7 +1372,7 @@ double scr_process_umask(double mask) {
   }
   return (double)prev;
 #elif defined(__wasi__)
-  static mode_t current = 022;
+  static SCR_TL mode_t current = 022;
   mode_t prev = current;
   if (mask >= 0) current = (mode_t)mask;
   return (double)prev;
@@ -1399,7 +1399,7 @@ void scr_process_chdir(ScrStr *dir) {
 /* net's process-wide happy-eyeballs attempt budget (Node's
  * getDefaultAutoSelectFamilyAttemptTimeout pair, default 250ms). Lives in
  * the core unit so the knob never forces scr_net.c into the link. */
-static double scr_net_autosel_timeout_ms = 250;
+static SCR_TL double scr_net_autosel_timeout_ms = 250;
 
 double scr_net_get_autosel_timeout(void) { return scr_net_autosel_timeout_ms; }
 
@@ -2745,8 +2745,8 @@ double scr_process_columns(double fd) {
  * NON-TTY stdin: Node's process.stdin is a Socket with no setRawMode
  * member at all, so the call throws Node's exact catchable TypeError. */
 #ifdef _WIN32
-static DWORD scr_stdin_cooked;
-static bool scr_stdin_cooked_saved = false;
+static SCR_TL DWORD scr_stdin_cooked;
+static SCR_TL bool scr_stdin_cooked_saved = false;
 
 void scr_process_stdin_set_raw_mode(bool raw) {
   if (!isatty(0)) {
@@ -2778,8 +2778,8 @@ void scr_process_stdin_set_raw_mode(bool raw) {
   scr_throw_error_msg(SCR_ERR_TYPE, msg, sizeof msg - 1);
 }
 #else
-static struct termios scr_stdin_cooked;
-static bool scr_stdin_cooked_saved = false;
+static SCR_TL struct termios scr_stdin_cooked;
+static SCR_TL bool scr_stdin_cooked_saved = false;
 
 void scr_process_stdin_set_raw_mode(bool raw) {
   if (!isatty(0)) {

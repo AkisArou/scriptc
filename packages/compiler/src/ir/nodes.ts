@@ -898,6 +898,12 @@ export interface IrLibSection {
   /** The declared result-arena reset entry; null selects the auto-reset
    * posture (every entry prologue resets the arena). */
   resultResetSymbol: string | null;
+  /** Thread-instanced state (the profile's abi.instance_per_thread): both
+   * backends emit the program TU's mutable statics — module globals,
+   * run-once guards, and the lazily-compiled regex literal caches — as
+   * thread-local storage, matching the runtime objects compiled with
+   * -DSCR_THREAD_INSTANCES: one full instance per embedder thread. */
+  threadInstances: boolean;
   exports: IrLibExport[];
   /** Profile-declared teaching/remediation overlays for the runtime
    * detected-trap code family (SC4013–SC4019, diagnostics registry): both

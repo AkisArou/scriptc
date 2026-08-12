@@ -158,9 +158,9 @@ void scr_assert_ok(bool pass, ScrStr *message) {
  * PAIR already being compared answers equal (the coinductive step —
  * Node's memo behavior exactly). The stack is global (comparisons never
  * interleave; the emitted walks cannot throw mid-compare). */
-static struct { const void *a, *b; } *g_deq_stack;
-static size_t g_deq_len;
-static size_t g_deq_cap;
+static SCR_TL struct { const void *a, *b; } *g_deq_stack;
+static SCR_TL size_t g_deq_len;
+static SCR_TL size_t g_deq_cap;
 
 bool scr_assert_deq_enter(const void *a, const void *b) {
   for (size_t i = 0; i < g_deq_len; i++) {
@@ -1228,7 +1228,7 @@ typedef struct {
   ScrStr *val; /* owned: the string value, or the regex's /source/flags */
 } ScrShapeSlot;
 
-static struct {
+static SCR_TL struct {
   ScrError *err; /* borrowed — alive across the straight-line sequence */
   ScrShapeSlot slots[3];
 } scr_shape;

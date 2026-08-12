@@ -31,7 +31,7 @@
 /* Live dyn-node count for the RC audit lane (-DSCR_RC_AUDIT); same contract
  * as scr_str_live_count in scr_string.c. */
 #ifdef SCR_RC_AUDIT
-static long scr_live_dyns = 0;
+static SCR_TL long scr_live_dyns = 0;
 long scr_dyn_live_count(void) { return scr_live_dyns; }
 #endif
 
@@ -49,7 +49,7 @@ static void scr_json_oom(void) {
 /* The ScrStr block behind a non-empty buffer. */
 #define SCR_JB_STR(b) ((ScrStr *)((char *)(b)->data - offsetof(ScrStr, data)))
 
-static size_t scr_jb_hint = 64;
+static SCR_TL size_t scr_jb_hint = 64;
 
 void scr_jb_init(ScrJsonBuf *b) {
   b->data = NULL;
@@ -280,9 +280,9 @@ void scr_jb_edge_idx(ScrJsonBuf *b, size_t i) {
  * (SEMANTICS.md documents the divergence). The emitted converters over
  * cycle-capable containers bracket their walks with enter/leave; the
  * stack is global (conversions never interleave). */
-static const void **g_td_seen;
-static size_t g_td_nseen;
-static size_t g_td_cap;
+static SCR_TL const void **g_td_seen;
+static SCR_TL size_t g_td_nseen;
+static SCR_TL size_t g_td_cap;
 
 void scr_dyn_from_enter(const void *v) {
   for (size_t i = 0; i < g_td_nseen; i++) {
@@ -315,8 +315,8 @@ void scr_dyn_from_leave(void) {
  * strict alloc/free balance.
  */
 #ifndef SCR_RC_AUDIT
-static ScrDyn *scr_dyn_free_arr, *scr_dyn_free_obj, *scr_dyn_free_misc;
-static size_t scr_dyn_free_count;
+static SCR_TL ScrDyn *scr_dyn_free_arr, *scr_dyn_free_obj, *scr_dyn_free_misc;
+static SCR_TL size_t scr_dyn_free_count;
 #define SCR_DYN_FREE_MAX 8192
 #endif
 
@@ -818,7 +818,7 @@ ScrBytes *scr_dyn_bytes_copy_out(const ScrDyn *d) {
  * Per-chunk utf8 decode: a multibyte character split across chunks does
  * not re-join (Node's StringDecoder holds the partial byte); ASCII-clean
  * bodies — the overwhelming test shape — are exact. */
-static bool scr_dyn_chunk_utf8;
+static SCR_TL bool scr_dyn_chunk_utf8;
 void scr_dyn_chunk_enc(bool utf8) { scr_dyn_chunk_utf8 = utf8; }
 
 /* One 'data' payload as the dyn value the current window dictates:
@@ -1122,7 +1122,7 @@ ScrDyn *scr_dyn_alloc_promise(void (*release_fn)(ScrPromise *p)) {
  * this allocator view and installs the engine-routing ops — the
  * scr_dyn_alloc_promise story: a dynamic-free link never references
  * engine symbols, and JSVAL nodes exist only after an install. */
-static const ScrDynJsvalOps *scr_dynjs_ops = NULL;
+static SCR_TL const ScrDynJsvalOps *scr_dynjs_ops = NULL;
 
 ScrDyn *scr_dyn_alloc_jsval(ScrJsval *cell, const ScrDynJsvalOps *ops) {
   scr_dynjs_ops = ops;
@@ -1256,8 +1256,8 @@ typedef struct {
   ScrDyn *dv;           /* dyn entry (+1); NULL for handle/undefined entries */
 } ScrDynThisEnt;
 
-static ScrDynThisEnt *scr_dyn_this_stack;
-static size_t scr_dyn_this_n, scr_dyn_this_cap;
+static SCR_TL ScrDynThisEnt *scr_dyn_this_stack;
+static SCR_TL size_t scr_dyn_this_n, scr_dyn_this_cap;
 
 static ScrDynThisEnt *scr_dyn_this_grow(void) {
   if (scr_dyn_this_n == scr_dyn_this_cap) {
@@ -1526,9 +1526,9 @@ typedef struct {
   ScrDyn *dyn;   /* retained */
 } ScrErrDynEnt;
 
-static ScrErrDynEnt *scr_errdyn_cache = NULL;
-static size_t scr_errdyn_n = 0, scr_errdyn_cap = 0;
-static bool scr_errdyn_teardown_registered = false;
+static SCR_TL ScrErrDynEnt *scr_errdyn_cache = NULL;
+static SCR_TL size_t scr_errdyn_n = 0, scr_errdyn_cap = 0;
+static SCR_TL bool scr_errdyn_teardown_registered = false;
 
 static void scr_errdyn_teardown(void) {
   for (size_t i = 0; i < scr_errdyn_n; i++) {

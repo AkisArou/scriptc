@@ -82,8 +82,8 @@ void *lre_realloc(void *opaque, void *ptr, size_t size) {
  * allocation audit sees the bytecode gone).
  */
 
-static ScrRegex **scr_compiled = NULL;
-static size_t scr_compiled_len = 0, scr_compiled_cap = 0;
+static SCR_TL ScrRegex **scr_compiled = NULL;
+static SCR_TL size_t scr_compiled_len = 0, scr_compiled_cap = 0;
 
 static void scr_regex_free_bytecodes(void) {
   for (size_t i = 0; i < scr_compiled_len; i++) {

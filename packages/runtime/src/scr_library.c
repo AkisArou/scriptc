@@ -19,6 +19,15 @@
  * this file is thread-aware; the embedder contract is one thread per
  * instance (an instance is never entered from two threads).
  *
+ * Thread-instanced archives (the profile's abi.instance_per_thread) take
+ * the same story one level down: SCR_TL moves this file's state — and
+ * every other mutable static in the archive — into thread-local storage,
+ * so ONE linked archive serves one independent instance per embedder
+ * thread. A thread registers its own sink and calls the init entry before
+ * serving; its trap poisons only its own instance while sibling threads'
+ * instances keep answering. The one-thread-per-instance contract is
+ * unchanged — the calling thread IS the instance selector.
+ *
  * State after a sink call: none is legal. The trap fired mid-operation with
  * no unwinding — heap, arena, and collector state are unspecified; the library
  * is POISONED. Every runtime-touching entry prologue aborts on the flag
@@ -32,9 +41,9 @@
 
 /* ── sink registration + poison ───────────────────────────────────────── */
 
-static ScrLibSinkFn scr_library_sink = NULL;
-static void *scr_library_sink_ctx = NULL;
-static bool scr_library_poisoned = false;
+static SCR_TL ScrLibSinkFn scr_library_sink = NULL;
+static SCR_TL void *scr_library_sink_ctx = NULL;
+static SCR_TL bool scr_library_poisoned = false;
 
 void scr_library_set_sink(ScrLibSinkFn fn, void *ctx) {
   /* Latest registration wins; re-registration is permitted before a trap.
@@ -76,7 +85,7 @@ void scr_library_set_sink(ScrLibSinkFn fn, void *ctx) {
  * abi.localize_runtime, where this slot is a per-instance local), entries
  * never nest, and a trap can only fire while an entry is on the stack.
  * NULL (never entered) renders as the empty symbol field. */
-static const char *scr_library_entry_symbol = NULL;
+static SCR_TL const char *scr_library_entry_symbol = NULL;
 
 /* Detected-trap classification: the runtime's trap sites self-classify
  * through their message conventions (the exact bytes the executable lane
@@ -114,7 +123,7 @@ static _Noreturn void scr_library_trap_deliver(const char *msg, size_t len, uint
      * no malloc on the failure path; text truncates before structure ever
      * would (codes and symbols are short; an oversized remediation drops
      * whole, never split). */
-    static char buf[2048];
+    static SCR_TL char buf[2048];
     const char *code = scr_library_trap_code(msg, len);
     const char *text = msg;
     size_t text_len = len;
@@ -179,7 +188,7 @@ __attribute__((noinline)) _Noreturn void scr_trap_len(const char *msg, size_t le
 }
 
 __attribute__((noinline)) _Noreturn void scr_trap_fmt(const char *fmt, ...) {
-  static char buf[512]; /* no malloc on the invariant-failure path */
+  static SCR_TL char buf[512]; /* no malloc on the invariant-failure path */
   va_list ap;
   va_start(ap, fmt);
   int n = vsnprintf(buf, sizeof buf, fmt, ap);
@@ -213,8 +222,8 @@ typedef struct {
   bool is_str; /* ScrStr vs ScrBytes — picks the release */
 } ScrCoreArenaEnt;
 
-static ScrCoreArenaEnt *scr_library_arena = NULL;
-static size_t scr_library_arena_n = 0, scr_library_arena_cap = 0;
+static SCR_TL ScrCoreArenaEnt *scr_library_arena = NULL;
+static SCR_TL size_t scr_library_arena_n = 0, scr_library_arena_cap = 0;
 
 static void scr_library_arena_keep(void *v, bool is_str) {
   if (scr_library_arena_n == scr_library_arena_cap) {
@@ -296,8 +305,8 @@ void scr_library_bytes_out(ScrBytes *b, const uint8_t **out, size_t *out_len) {
  * satisfied because the entry persists. */
 
 #define SCR_LIB_MAX_RESETS 32
-static void (*scr_library_resets[SCR_LIB_MAX_RESETS])(void);
-static size_t scr_library_nresets = 0;
+static SCR_TL void (*scr_library_resets[SCR_LIB_MAX_RESETS])(void);
+static SCR_TL size_t scr_library_nresets = 0;
 
 void scr_library_register_reset(void (*fn)(void)) {
   for (size_t i = 0; i < scr_library_nresets; i++) {

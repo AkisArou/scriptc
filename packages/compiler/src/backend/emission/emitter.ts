@@ -662,7 +662,7 @@ export class CEmitter {
       // "*/" inside the pattern would close the trailing comment.
       const safe = `/${pattern}/${flags}`.split("*/").join("* /");
       out.push(
-        `static ScrRegex ${sym} = { .rc = SIZE_MAX, .source = (ScrStr *)&${src}, ` +
+        `static ${this.mod.lib?.threadInstances === true ? "_Thread_local " : ""}ScrRegex ${sym} = { .rc = SIZE_MAX, .source = (ScrStr *)&${src}, ` +
           `.flags = (ScrStr *)&${fl}, .bc = NULL }; /* ${safe} */`,
       );
     }
@@ -685,10 +685,17 @@ export class CEmitter {
     const embedded = this.mod.embedded;
     emitNpmEmbedding(this, out);
     const globals = this.mod.globals ?? [];
+    // Thread-instanced library state (abi.instance_per_thread): module
+    // globals, run-once guards, and the regex literal caches below live in
+    // thread-local storage — one full instance per embedder thread,
+    // matching the runtime objects compiled with -DSCR_THREAD_INSTANCES.
+    // Immutable interned data (string literals, unit arms, template
+    // arrays, vtables) stays shared.
+    const tl = this.mod.lib?.threadInstances === true ? "_Thread_local " : "";
     for (const g of globals) {
       // File-scope statics: zero/NULL-initialized, assigned by %init
       // functions, released (refcounted ones) before the RC audit runs.
-      out.push(`static ${cDecl(g.type, mangleGlobal(g.id))}; /* ${g.name} */`);
+      out.push(`static ${tl}${cDecl(g.type, mangleGlobal(g.id))}; /* ${g.name} */`);
     }
     if (globals.length > 0) out.push("");
     // Outbound native FFI declarations. string/bytes each expand from one

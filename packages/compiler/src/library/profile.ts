@@ -20,10 +20,14 @@
  *       "sink_register_symbol": "<prefix>_set_panic_sink",
  *       "collect_symbol": "<prefix>_collect" | null,   // session ruling 2
  *       "result_reset_symbol": "<prefix>_reset" | null, // §4.3 two postures
- *       "localize_runtime": false                // multi-instance library
+ *       "localize_runtime": false,               // multi-instance library
  *                                                // mode (see below); absent
  *                                                // = false, the classic
  *                                                // single-archive artifact
+ *       "instance_per_thread": false             // thread-instanced state
+ *                                                // (see below); absent =
+ *                                                // false, one instance per
+ *                                                // linked archive
  *     },
  *     "exports": [ { "export": "update", "symbol": "<prefix>_update",
  *                    "params": ["f64", "string"], "returns": "bytes" } ],
@@ -107,6 +111,31 @@
  * Off by default: an absent or false `localize_runtime` produces the
  * classic artifact, byte-for-byte. Localization is host-native (darwin and
  * linux); cross-target archive builds refuse it with SC3002.
+ *
+ * Thread-instanced state (`abi.instance_per_thread: true`): every mutable
+ * piece of the archive's state — the runtime units' internals AND the
+ * program's globals, run-once guards, and lazily-compiled regex literal
+ * caches — compiles as thread-local storage, so ONE linked archive serves
+ * N instances: a thread that calls the init entry owns a complete,
+ * independent instance through the unchanged entry family (no handle
+ * parameter exists; the calling thread IS the instance selector). Sinks,
+ * the poison flag, the result arena, and the collector are all
+ * per instance, so a trap poisons only the instance it fired in. The
+ * contract extends the multi-instance one:
+ *
+ *   - One instance per thread, selected implicitly by the calling thread;
+ *     each thread that will serve requests calls the init entry first.
+ *   - An instance's lifetime is its thread's lifetime; entering it from
+ *     any other thread is undefined (unchanged rule). Ending a thread ends
+ *     its instance without teardown — memory owned by the instance is
+ *     reclaimed at process exit, so long-lived pools should reuse threads
+ *     rather than cycle them.
+ *   - No value crosses instances (the marshalling rule above, unchanged).
+ *
+ * Independent of `localize_runtime`, and composable with it: a thread-
+ * instanced archive that must coexist with OTHER archives in one process
+ * declares both. Off by default; non-opted builds are byte-for-byte
+ * unchanged.
  *
  * Marshalling classes (design §4.2 + session ruling 3 + ask 4): f64, bool,
  * string, bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing
@@ -231,6 +260,12 @@ export interface LibraryProfile {
    * the header contract). False (the default) produces the classic
    * single-archive artifact unchanged. */
   localizeRuntime: boolean;
+  /** Thread-instanced state: true compiles every mutable static — runtime
+   * internals and program globals — as thread-local storage, so one linked
+   * archive serves one independent instance per embedder thread through
+   * the unchanged entry family (see the header contract). False (the
+   * default) keeps one instance per linked archive. */
+  instancePerThread: boolean;
   exports: LibraryExportEntry[];
   /** The ask-2 contract-sidecar section; null = the profile declares no
    * sidecar and the invocation emits none. */
@@ -347,7 +382,7 @@ export function loadLibraryProfile(
     if (abi === null || typeof abi !== "object" || Array.isArray(abi)) {
       throw new ProfileError("'abi' must be an object");
     }
-    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime"]);
+    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime", "instance_per_thread"]);
     const a = abi as Record<string, unknown>;
     const prefix = req<string>(a["prefix"], "abi.prefix", "string");
     if (!C_IDENT.test(prefix)) {
@@ -364,6 +399,12 @@ export function loadLibraryProfile(
       a["localize_runtime"] === undefined
         ? false
         : req<boolean>(a["localize_runtime"], "abi.localize_runtime", "boolean");
+    // Thread-instanced state: same strict-boolean rule — the field gates
+    // where every mutable static of the artifact lives.
+    const instancePerThread =
+      a["instance_per_thread"] === undefined
+        ? false
+        : req<boolean>(a["instance_per_thread"], "abi.instance_per_thread", "boolean");
 
     const exportsRaw = p["exports"];
     if (!Array.isArray(exportsRaw)) throw new ProfileError("'exports' must be an array");
@@ -621,6 +662,7 @@ export function loadLibraryProfile(
         collectSymbol,
         resultResetSymbol,
         localizeRuntime,
+        instancePerThread,
         exports: entries,
         sidecar,
         profileBytes: bytes,

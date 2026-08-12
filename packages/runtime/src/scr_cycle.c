@@ -95,7 +95,7 @@ static void scr_cyc_oom(void) {
 }
 
 /* Live cycle-headered objects — what the full-pass trigger watches. */
-static size_t scr_cyc_live = 0;
+static SCR_TL size_t scr_cyc_live = 0;
 
 void *scr_cyc_alloc(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn) {
   ScrCycHdr *h = calloc(1, sizeof(ScrCycHdr) + size);
@@ -137,25 +137,25 @@ static void scr_cyc_push(ScrVec *vec, void *obj) {
 
 /* ── the candidate-root buffers (one per generation) ──────────────────── */
 
-static ScrVec scr_roots[SCR_CYC_NGENS];
-static bool scr_collecting = false;
+static SCR_TL ScrVec scr_roots[SCR_CYC_NGENS];
+static SCR_TL bool scr_collecting = false;
 
 /* The candidates of the pass in flight, gathered across the generations it
  * collects so the phases can walk them without re-filtering the buffers. */
-static ScrVec scr_cands;
+static SCR_TL ScrVec scr_cands;
 
 /* Nursery survivors awaiting promotion (see scr_scan_black). */
-static ScrVec scr_promote;
+static SCR_TL ScrVec scr_promote;
 
 /* The gathered white set (freed after the walk completes). */
-static ScrVec scr_white;
+static SCR_TL ScrVec scr_white;
 
 /* Cross-generation targets pinned by the white set (see scr_xg_pin_visit),
  * one entry per skipped edge. Drained after the teardowns. */
-static ScrVec scr_xgen;
+static SCR_TL ScrVec scr_xgen;
 
 /* Objects above this generation are invisible to the pass in flight. */
-static unsigned scr_gen_limit = SCR_CYC_MATURE;
+static SCR_TL unsigned scr_gen_limit = SCR_CYC_MATURE;
 
 static size_t scr_cyc_pass(unsigned gen_limit);
 
@@ -166,10 +166,10 @@ static size_t scr_cyc_pass(unsigned gen_limit);
 #define SCR_CYC_FULL_FLOOR 4096        /* ...but not below this many objects */
 
 /* Live count as of the end of the last full pass. */
-static size_t scr_cyc_live_after_full = 0;
+static SCR_TL size_t scr_cyc_live_after_full = 0;
 
 static size_t scr_cyc_nursery_threshold(void) {
-  static size_t cached = 0;
+  static SCR_TL size_t cached = 0;
   if (cached == 0) {
     const char *env = getenv("SCR_CYCLE_THRESHOLD");
     long v = env ? strtol(env, NULL, 10) : 0;
@@ -186,12 +186,12 @@ static size_t scr_cyc_nursery_threshold(void) {
  * hysteresis a large mature buffer — which a nursery pass cannot drain —
  * would re-arm on every single release. Both start at zero, so the first
  * release runs one trivial pass that arms them properly. */
-static size_t scr_cyc_nbuffered = 0;
-static size_t scr_cyc_trigger = 0;
+static SCR_TL size_t scr_cyc_nbuffered = 0;
+static SCR_TL size_t scr_cyc_trigger = 0;
 
 /* Scheduled nursery passes for which at least one mature root was waiting.
  * A full pass resets the age; with no mature backlog there is nothing to age. */
-static size_t scr_cyc_scheduled_mature_age = 0;
+static SCR_TL size_t scr_cyc_scheduled_mature_age = 0;
 
 static size_t scr_cyc_buffered(void) {
   return scr_roots[SCR_CYC_NURSERY].n + scr_roots[SCR_CYC_MATURE].n;
@@ -404,7 +404,7 @@ static void scr_xg_pin_visit(void *child, void *ctx) {
 }
 
 /* Freed by the cross-generation drain, for the caller's fixpoint. */
-static size_t scr_xg_freed = 0;
+static SCR_TL size_t scr_xg_freed = 0;
 
 static void scr_xg_release(void *obj);
 static void scr_xg_child_visit(void *child, void *ctx) {

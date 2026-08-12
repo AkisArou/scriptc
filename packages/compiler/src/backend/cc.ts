@@ -1132,6 +1132,14 @@ export interface LibArchiveOptions {
    * builds) keep their global binding. Omitted = the classic archive,
    * byte-for-byte. Host-native builds only. */
   localizeSymbols?: readonly string[];
+  /** Thread-instanced state (the profile's abi.instance_per_thread): every
+   * TU of the archive compiles with -DSCR_THREAD_INSTANCES, moving the
+   * runtime units' mutable statics into thread-local storage (SCR_TL in
+   * scr_runtime.h) to match the program TU's thread-local globals — one
+   * complete instance per embedder thread. The define rides cflags, so
+   * every cache tier keys it automatically; omitted = the classic
+   * archive, byte-for-byte. */
+  threadInstances?: boolean;
   /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
   regex?: boolean;
   assert?: boolean;
@@ -1180,6 +1188,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     "-fno-strict-aliasing", // the emitted object model type-puns — see compileC's buildArgs
     "-Wno-deprecated-declarations",
     "-DSCR_LIB",
+    ...(opts.threadInstances ? ["-DSCR_THREAD_INSTANCES"] : []),
     ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-I", rtDir,
     ...(regex ? ["-I", vendorEngineDir()] : []),

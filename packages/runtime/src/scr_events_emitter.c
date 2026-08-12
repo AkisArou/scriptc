@@ -97,11 +97,11 @@ struct ScrEeReg {
  * stamps pre/post from the program's preorder numbering (the
  * scr_error_vts precedent). release is the direct teardown below. */
 static void scr_emitter_release_direct(void *obj);
-ScrVt scr_emitter_vt = {0, 0, &scr_emitter_release_direct};
+SCR_TL ScrVt scr_emitter_vt = {0, 0, &scr_emitter_release_direct};
 
-double scr_emitter_default_max = 10; /* EventEmitter.defaultMaxListeners */
+SCR_TL double scr_emitter_default_max = 10; /* EventEmitter.defaultMaxListeners */
 
-static bool scr_ee_trace_hint_shown = false;
+static SCR_TL bool scr_ee_trace_hint_shown = false;
 
 /* Post-registration hook (scr_runtime.h): the stream unit's flow kick.
  * NULL in stream-free builds — behavior byte-identical. */

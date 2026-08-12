@@ -17,7 +17,7 @@
 #include <string.h>
 
 #ifdef SCR_RC_AUDIT
-static long scr_live_bytes = 0;
+static SCR_TL long scr_live_bytes = 0;
 long scr_bytes_live_count(void) { return scr_live_bytes; }
 #endif
 
