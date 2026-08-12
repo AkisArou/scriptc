@@ -1454,6 +1454,29 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const entryPath = profile.entry;
   const buildPlatform = buildTargetPlatform();
 
+  // Multi-instance library mode (abi.localize_runtime) is native on the
+  // two hosts whose localization toolchains are implemented. Cross-target
+  // builds and unsupported native hosts refuse before frontend/backend work
+  // rather than reaching the ld/objcopy step and throwing an unstructured
+  // toolchain error. WASI retains the general library-mode refusal below.
+  if (profile.localizeRuntime && buildPlatform !== "wasi") {
+    const driver = resolveCc();
+    const platform = targetPlatform(driver);
+    if (driver.target !== null || (platform !== "darwin" && platform !== "linux")) {
+      return {
+        ok: false,
+        diagnostics: decorateLibraryRefusals([
+          targetRefusalDiag(
+            driver.target ?? platform,
+            "runtime-localized (multi-instance) library archives",
+            { file: entryPath, start: 0, end: 0 },
+          ),
+        ], profile),
+        sourceTexts: new Map(),
+      };
+    }
+  }
+
   // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
   // posture: "lib" runs the same auto-detection and eligibility bar as
   // the executable lane's --npm-static (own .d.ts, unminified shipped JS,
@@ -1484,20 +1507,6 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         targetRefusalDiag(
           "wasm32-wasi",
           "library-mode archive builds",
-          { file: entryPath, start: 0, end: 0 },
-        ),
-      ]);
-    }
-    // Multi-instance library mode (abi.localize_runtime) is host-native:
-    // the localization step runs the host toolchain's ld/objcopy over
-    // host-format objects, so a cross-compiled archive refuses before
-    // emission rather than producing an artifact whose runtime internals
-    // collide at the embedder's link.
-    if (profile.localizeRuntime && resolveCc().target !== null) {
-      return fail([
-        targetRefusalDiag(
-          resolveCc().target!,
-          "runtime-localized (multi-instance) library archives",
           { file: entryPath, start: 0, end: 0 },
         ),
       ]);

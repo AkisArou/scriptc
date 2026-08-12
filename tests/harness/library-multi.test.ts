@@ -189,12 +189,17 @@ test("M3: abi.localize_runtime is strictly boolean", () => {
     },
     exports: [],
   };
-  writeFileSync(path, JSON.stringify(base));
-  const refused = loadLibraryProfile(path);
-  expect(refused.ok).toBe(false);
-  if (!refused.ok) {
-    expect(refused.diagnostics[0]!.code).toBe("SC4001");
-    expect(refused.diagnostics[0]!.message).toContain("abi.localize_runtime");
+  for (const invalid of ["yes", null] as const) {
+    writeFileSync(path, JSON.stringify({
+      ...base,
+      abi: { ...base.abi, localize_runtime: invalid },
+    }));
+    const refused = loadLibraryProfile(path);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.diagnostics[0]!.code).toBe("SC4001");
+      expect(refused.diagnostics[0]!.message).toContain("abi.localize_runtime");
+    }
   }
   // The boolean forms load, and absence means false.
   for (const [value, expected] of [[true, true], [false, false], [undefined, false]] as const) {
@@ -234,6 +239,38 @@ test("M4: a cross-target build refuses runtime localization with SC3002", async 
       expect(result.diagnostics[0]!.message).toContain("runtime-localized");
     }
   } finally {
+    if (prevCc === undefined) delete process.env["SCRIPTC_CC"];
+    else process.env["SCRIPTC_CC"] = prevCc;
+    if (prevTarget === undefined) delete process.env["SCRIPTC_TARGET"];
+    else process.env["SCRIPTC_TARGET"] = prevTarget;
+  }
+});
+
+test("M4: an unsupported native host refuses runtime localization with SC3002", async () => {
+  const outDir = join(cacheDir, "native-refusal");
+  mkdirSync(outDir, { recursive: true });
+  const profile = JSON.parse(readFileSync(join(fixtureDir, "profile_a.json"), "utf8")) as {
+    entry: string;
+  };
+  profile.entry = join(fixtureDir, profile.entry);
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const prevCc = process.env["SCRIPTC_CC"];
+  const prevTarget = process.env["SCRIPTC_TARGET"];
+  delete process.env["SCRIPTC_CC"];
+  delete process.env["SCRIPTC_TARGET"];
+  Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+  try {
+    const result = await compileLibrary({ profilePath, outDir });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics[0]!.code).toBe("SC3002");
+      expect(result.diagnostics[0]!.message).toContain("win32");
+      expect(result.diagnostics[0]!.message).toContain("runtime-localized");
+    }
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
     if (prevCc === undefined) delete process.env["SCRIPTC_CC"];
     else process.env["SCRIPTC_CC"] = prevCc;
     if (prevTarget === undefined) delete process.env["SCRIPTC_TARGET"];

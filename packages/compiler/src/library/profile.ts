@@ -358,7 +358,7 @@ export function loadLibraryProfile(
     // gates the artifact's whole link surface, so a truthy non-boolean is a
     // refusal, never a coercion).
     const localizeRuntime =
-      a["localize_runtime"] === undefined || a["localize_runtime"] === null
+      a["localize_runtime"] === undefined
         ? false
         : req<boolean>(a["localize_runtime"], "abi.localize_runtime", "boolean");
 
