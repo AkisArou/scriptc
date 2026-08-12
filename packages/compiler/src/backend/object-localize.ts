@@ -338,6 +338,12 @@ const IMAGE_SYM_CLASS_EXTERNAL = 2;
 const IMAGE_SYM_CLASS_STATIC = 3;
 const IMAGE_SYM_CLASS_SECTION = 104;
 const IMAGE_SYM_CLASS_WEAK_EXTERNAL = 105;
+const IMAGE_COMDAT_SELECT_NODUPLICATES = 1;
+const IMAGE_COMDAT_SELECT_ANY = 2;
+const IMAGE_COMDAT_SELECT_SAME_SIZE = 3;
+const IMAGE_COMDAT_SELECT_EXACT_MATCH = 4;
+const IMAGE_COMDAT_SELECT_ASSOCIATIVE = 5;
+const IMAGE_COMDAT_SELECT_LARGEST = 6;
 
 interface CoffReloc {
   virtualAddress: number;
@@ -527,6 +533,16 @@ function coffIsUndefined(sym: CoffSymbol): boolean {
   );
 }
 
+function coffSectionContentsEqual(a: CoffSection, b: CoffSection): boolean {
+  if (a.rawSize !== b.rawSize) return false;
+  if (a.data === null || b.data === null) return a.data === b.data;
+  if (a.data.length !== b.data.length) return false;
+  for (let i = 0; i < a.data.length; i++) {
+    if (a.data[i] !== b.data[i]) return false;
+  }
+  return true;
+}
+
 /** Combine a program object with the support objects it (transitively)
  * needs into ONE COFF object, then demote every defined external outside
  * `keep` to a static symbol. Support objects join on undefined-symbol
@@ -596,13 +612,12 @@ export function mergeAndLocalizeCoffObjects(
   const selected = objects.filter((_, i) => included[i] === true);
 
   // COMDAT resolution, the ELF arm's --force-group-allocation analog:
-  // deduplicate by COMDAT-symbol name inside THIS merge (mingw emits one
-  // .refptr.<name> pointer stub per referencing TU, selection ANY), then
-  // clear the COMDAT flag on the survivors at emission — a section whose
-  // deduplication name repeats across archives sharing runtime objects
-  // must not be deduplicated against another archive's copy at the
-  // embedder's link, where its relocations bind that archive's private
-  // (demoted) definitions.
+  // resolve duplicate names inside THIS merge according to their selection
+  // contract (mingw's .refptr.<name> stubs use ANY), then clear the COMDAT
+  // flag on the survivors at emission. A section whose deduplication name
+  // repeats across archives sharing runtime objects must not be deduplicated
+  // against another archive's copy at the embedder's link, where its
+  // relocations bind that archive's private (demoted) definitions.
   const sectionDropped = new Map<CoffObject, boolean[]>();
   const comdatKept = new Map<string, { object: CoffObject; index: number }>();
   for (const object of selected) {
@@ -617,39 +632,100 @@ export function mergeAndLocalizeCoffObjects(
       // carries its DWARF untouched but a stripped one loses it.
       if (section.name === ".llvm_addrsig" || section.name.startsWith(".debug$")) {
         dropped[i] = true;
-        return;
       }
-      if ((section.characteristics & IMAGE_SCN_LNK_COMDAT) === 0) return;
-      if (section.comdatSelection === 5) return; // associative: fate follows below
+    });
+  }
+  for (const object of selected) {
+    const dropped = sectionDropped.get(object)!;
+    object.sections.forEach((section, i) => {
+      if (dropped[i] === true || (section.characteristics & IMAGE_SCN_LNK_COMDAT) === 0) return;
+      if (section.comdatSelection === IMAGE_COMDAT_SELECT_ASSOCIATIVE) return;
+      if (
+        section.comdatSelection !== IMAGE_COMDAT_SELECT_NODUPLICATES &&
+        section.comdatSelection !== IMAGE_COMDAT_SELECT_ANY &&
+        section.comdatSelection !== IMAGE_COMDAT_SELECT_SAME_SIZE &&
+        section.comdatSelection !== IMAGE_COMDAT_SELECT_EXACT_MATCH &&
+        section.comdatSelection !== IMAGE_COMDAT_SELECT_LARGEST
+      ) {
+        fail(`${object.label}: COMDAT section ${section.name} has unsupported selection ${section.comdatSelection}`);
+      }
       const leader = section.comdatLeader >= 0 ? object.symbols[section.comdatLeader] : undefined;
-      if (leader === undefined || leader.storageClass !== IMAGE_SYM_CLASS_EXTERNAL) return;
+      if (leader === undefined || leader.storageClass !== IMAGE_SYM_CLASS_EXTERNAL) {
+        fail(`${object.label}: COMDAT section ${section.name} has no external leader symbol`);
+      }
       const existing = comdatKept.get(leader.name);
       if (existing === undefined) {
         comdatKept.set(leader.name, { object, index: i });
         return;
       }
-      if (section.comdatSelection === 1) {
+      const existingSection = existing.object.sections[existing.index]!;
+      if (section.comdatSelection !== existingSection.comdatSelection) {
+        fail(
+          `conflicting COMDAT selections for ${leader.name} ` +
+            `(${existing.object.label}: ${existingSection.comdatSelection}, ${object.label}: ${section.comdatSelection})`,
+        );
+      }
+      if (section.comdatSelection === IMAGE_COMDAT_SELECT_NODUPLICATES) {
         fail(`duplicate IMAGE_COMDAT_SELECT_NODUPLICATES section ${section.name} (${existing.object.label} and ${object.label})`);
       }
-      dropped[i] = true;
+      if (
+        section.comdatSelection === IMAGE_COMDAT_SELECT_SAME_SIZE &&
+        section.rawSize !== existingSection.rawSize
+      ) {
+        fail(
+          `IMAGE_COMDAT_SELECT_SAME_SIZE mismatch for ${leader.name} ` +
+            `(${existing.object.label}: ${existingSection.rawSize} bytes, ${object.label}: ${section.rawSize} bytes)`,
+        );
+      }
+      if (
+        section.comdatSelection === IMAGE_COMDAT_SELECT_EXACT_MATCH &&
+        !coffSectionContentsEqual(existingSection, section)
+      ) {
+        fail(
+          `IMAGE_COMDAT_SELECT_EXACT_MATCH mismatch for ${leader.name} ` +
+            `(${existing.object.label} and ${object.label})`,
+        );
+      }
+      if (
+        section.comdatSelection === IMAGE_COMDAT_SELECT_LARGEST &&
+        section.rawSize > existingSection.rawSize
+      ) {
+        sectionDropped.get(existing.object)![existing.index] = true;
+        comdatKept.set(leader.name, { object, index: i });
+      } else {
+        dropped[i] = true;
+      }
     });
-    // Associative sections follow their target's fate (chase chains, with a
-    // bound so a malformed cycle cannot loop).
-    for (let pass = 0; pass < object.sections.length; pass++) {
-      let changed = false;
-      object.sections.forEach((section, i) => {
-        if (dropped[i] === true || section.comdatSelection !== 5) return;
-        const target = section.comdatAssoc - 1;
+  }
+  // Associative sections follow their target's final fate. Resolve these
+  // only after every non-associative winner is known: LARGEST can replace a
+  // section seen in an earlier object, whose associates must then leave too.
+  for (const object of selected) {
+    const dropped = sectionDropped.get(object)!;
+    object.sections.forEach((section, i) => {
+      if (dropped[i] === true || section.comdatSelection !== IMAGE_COMDAT_SELECT_ASSOCIATIVE) return;
+      const seen = new Set<number>([i]);
+      let target = section.comdatAssoc - 1;
+      while (true) {
         if (target < 0 || target >= object.sections.length) {
           fail(`${object.label}: associative COMDAT ${section.name} names an invalid section`);
         }
+        if (seen.has(target)) {
+          fail(`${object.label}: associative COMDAT ${section.name} contains an association cycle`);
+        }
+        seen.add(target);
+        const targetSection = object.sections[target]!;
+        if ((targetSection.characteristics & IMAGE_SCN_LNK_COMDAT) === 0) {
+          fail(`${object.label}: associative COMDAT ${section.name} targets a non-COMDAT section`);
+        }
         if (dropped[target] === true) {
           dropped[i] = true;
-          changed = true;
+          break;
         }
-      });
-      if (!changed) break;
-    }
+        if (targetSection.comdatSelection !== IMAGE_COMDAT_SELECT_ASSOCIATIVE) break;
+        target = targetSection.comdatAssoc - 1;
+      }
+    });
   }
 
   // Global resolution: one canonical entry per external name. Definitions

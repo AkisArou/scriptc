@@ -260,6 +260,7 @@ interface CoffSectionSpec {
   characteristics?: number;
   relocs?: { va: number; sym: number; type: number }[];
   comdatSelection?: number;
+  comdatAssoc?: number;
 }
 
 interface CoffSymbolSpec {
@@ -329,7 +330,7 @@ function buildCoff(sections: CoffSectionSpec[], symbols: CoffSymbolSpec[]): Uint
       const spec = sections[s.section - 1]!;
       view.setUint32(auxAt, spec.data.length, true);
       view.setUint16(auxAt + 4, (spec.relocs ?? []).length, true);
-      view.setUint16(auxAt + 12, s.section, true);
+      view.setUint16(auxAt + 12, spec.comdatAssoc ?? s.section, true);
       view.setUint8(auxAt + 14, spec.comdatSelection ?? 0);
       raw += 1;
     }
@@ -341,7 +342,7 @@ function buildCoff(sections: CoffSectionSpec[], symbols: CoffSymbolSpec[]): Uint
 }
 
 interface ReadCoff {
-  sections: { name: string; characteristics: number; relocs: { sym: number }[] }[];
+  sections: { name: string; characteristics: number; data: Uint8Array; relocs: { sym: number }[] }[];
   symbols: { name: string; section: number; storageClass: number; index: number }[];
 }
 
@@ -361,11 +362,18 @@ function readCoff(bytes: Uint8Array): ReadCoff {
     const h = 20 + i * 40;
     let name = new TextDecoder().decode(bytes.subarray(h, h + 8)).replace(/\0+$/, "");
     if (name.startsWith("/")) name = cstr(strtabAt + Number.parseInt(name.slice(1), 10));
+    const rawSize = view.getUint32(h + 16, true);
+    const rawAt = view.getUint32(h + 20, true);
     const relocAt = view.getUint32(h + 24, true);
     const relocCount = view.getUint16(h + 32, true);
     const relocs = [] as { sym: number }[];
     for (let r = 0; r < relocCount; r++) relocs.push({ sym: view.getUint32(relocAt + r * 10 + 4, true) });
-    sections.push({ name, characteristics: view.getUint32(h + 36, true), relocs });
+    sections.push({
+      name,
+      characteristics: view.getUint32(h + 36, true),
+      data: bytes.subarray(rawAt, rawAt + rawSize),
+      relocs,
+    });
   }
   const symbols = [] as ReadCoff["symbols"];
   for (let i = 0; i < symbolCount; ) {
@@ -531,6 +539,122 @@ describe("mergeAndLocalizeCoffObjects", () => {
     const stubs = merged.symbols.filter((s) => s.name === ".refptr.shared");
     expect(stubs.length).toBe(1);
     expect(stubs[0]!.storageClass).toBe(IMAGE_SYM_CLASS_STATIC);
+  });
+
+  const comdatPair = (
+    selection: number,
+    firstData: Uint8Array,
+    secondData: Uint8Array,
+  ): { program: Uint8Array; support: Uint8Array[] } => {
+    const program = buildCoff(
+      [text([{ va: 0, sym: 3, type: 4 }, { va: 4, sym: 4, type: 4 }])],
+      [
+        { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+        { name: "entry", section: 1 },
+        { name: "need_one", section: 0 },
+        { name: "need_two", section: 0 },
+      ],
+    );
+    const member = (needed: string, data: Uint8Array): Uint8Array =>
+      buildCoff(
+        [
+          text(),
+          {
+            name: ".rdata",
+            data,
+            characteristics: 0x40000040 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: selection,
+          },
+        ],
+        [
+          { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: ".rdata", section: 2, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: needed, section: 1 },
+          { name: "shared", section: 2 },
+        ],
+      );
+    return { program, support: [member("need_one", firstData), member("need_two", secondData)] };
+  };
+
+  test("COMDAT LARGEST retains the largest selected definition", () => {
+    const pair = comdatPair(6, new Uint8Array([1, 2, 3, 4]), new Uint8Array([5, 6, 7, 8, 9]));
+    const merged = readCoff(mergeAndLocalizeCoffObjects(pair.program, pair.support, new Set(["entry"])));
+    const rdata = merged.sections.filter((section) => section.name === ".rdata");
+    expect(rdata).toHaveLength(1);
+    expect([...rdata[0]!.data]).toEqual([5, 6, 7, 8, 9]);
+  });
+
+  test("associative COMDATs follow a LARGEST winner chosen from a later object", () => {
+    const pair = comdatPair(6, new Uint8Array(4), new Uint8Array(8));
+    const withAssociate = (marker: number): Uint8Array => {
+      // Rebuild the support member so its third section associates with the
+      // LARGEST parent in section 2. Both selected members use the same
+      // leader names; only the later/larger pair should survive.
+      const needed = marker === 1 ? "need_one" : "need_two";
+      return buildCoff(
+        [
+          text(),
+          {
+            name: ".rdata",
+            data: marker === 1 ? new Uint8Array(4) : new Uint8Array(8),
+            characteristics: 0x40000040 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: 6,
+          },
+          {
+            name: ".assoc",
+            data: new Uint8Array([marker]),
+            characteristics: 0x40000040 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: 5,
+            comdatAssoc: 2,
+          },
+        ],
+        [
+          { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: ".rdata", section: 2, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: "shared", section: 2 },
+          { name: ".assoc", section: 3, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: "assoc_shared", section: 3 },
+          { name: needed, section: 1 },
+        ],
+      );
+    };
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects(
+        pair.program,
+        [withAssociate(1), withAssociate(2)],
+        new Set(["entry"]),
+      ),
+    );
+    const associates = merged.sections.filter((section) => section.name === ".assoc");
+    expect(associates).toHaveLength(1);
+    expect([...associates[0]!.data]).toEqual([2]);
+  });
+
+  test("COMDAT SAME_SIZE refuses definitions with different sizes", () => {
+    const pair = comdatPair(3, new Uint8Array(4), new Uint8Array(8));
+    expect(() =>
+      mergeAndLocalizeCoffObjects(pair.program, pair.support, new Set(), {
+        program: "program.o",
+        support: ["one.o", "two.o"],
+      }),
+    ).toThrow(/SAME_SIZE mismatch.*one\.o.*two\.o/);
+  });
+
+  test("COMDAT EXACT_MATCH refuses equal-size definitions with different contents", () => {
+    const pair = comdatPair(4, new Uint8Array([1, 2, 3, 4]), new Uint8Array([1, 2, 3, 5]));
+    expect(() =>
+      mergeAndLocalizeCoffObjects(pair.program, pair.support, new Set(), {
+        program: "program.o",
+        support: ["one.o", "two.o"],
+      }),
+    ).toThrow(/EXACT_MATCH mismatch.*one\.o.*two\.o/);
+  });
+
+  test("COMDAT duplicates refuse conflicting selection kinds", () => {
+    const one = comdatPair(2, new Uint8Array(4), new Uint8Array(4));
+    const two = comdatPair(3, new Uint8Array(4), new Uint8Array(4));
+    expect(() => mergeAndLocalizeCoffObjects(one.program, [one.support[0]!, two.support[1]!], new Set()))
+      .toThrow(/conflicting COMDAT selections/);
   });
 
   test("duplicate strong definitions refuse with both members named", () => {
