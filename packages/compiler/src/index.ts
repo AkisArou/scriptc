@@ -1455,21 +1455,30 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const entryPath = profile.entry;
   const buildPlatform = buildTargetPlatform();
 
-  // Multi-instance library mode (abi.localize_runtime) is native on the
-  // two hosts whose localization toolchains are implemented. Cross-target
-  // builds and unsupported native hosts refuse before frontend/backend work
-  // rather than reaching the ld/objcopy step and throwing an unstructured
-  // toolchain error. WASI retains the general library-mode refusal below.
+  // Multi-instance library mode (abi.localize_runtime) localizes per
+  // OBJECT FORMAT: ELF and COFF archives localize from any host (cross
+  // ELF merges through the cross driver's own lld; COFF merges and
+  // demotes in process — see cc.ts's localizeLibraryObjects), and Mach-O
+  // localization runs the macOS host linker, so macos targets admit
+  // darwin hosts only. Everything else refuses before frontend/backend
+  // work, naming the pairing. WASI retains the general library-mode
+  // refusal below.
   if (profile.localizeRuntime && buildPlatform !== "wasi") {
     const driver = resolveCc();
     const platform = targetPlatform(driver);
-    if (driver.target !== null || (platform !== "darwin" && platform !== "linux")) {
+    const supported =
+      platform === "linux" ||
+      platform === "win32" ||
+      (platform === "darwin" && process.platform === "darwin");
+    if (!supported) {
       return {
         ok: false,
         diagnostics: decorateLibraryRefusals([
           targetRefusalDiag(
             driver.target ?? platform,
-            "runtime-localized (multi-instance) library archives",
+            platform === "darwin"
+              ? `runtime-localized (multi-instance) library archives on ${process.platform} hosts (Mach-O localization runs the macOS host linker)`
+              : "runtime-localized (multi-instance) library archives",
             { file: entryPath, start: 0, end: 0 },
           ),
         ], profile),

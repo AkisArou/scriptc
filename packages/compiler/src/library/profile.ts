@@ -109,8 +109,10 @@
  *     only through the embedder's own byte/record marshalling.
  *
  * Off by default: an absent or false `localize_runtime` produces the
- * classic artifact, byte-for-byte. Localization is host-native (darwin and
- * linux); cross-target archive builds refuse it with SC3002.
+ * classic artifact, byte-for-byte. Localization follows the archive's
+ * object format: ELF and COFF archives localize on any supported host
+ * (native or cross); Mach-O localization runs the macOS host linker, so
+ * macos targets build on darwin hosts and refuse elsewhere with SC3002.
  *
  * Thread-instanced state (`abi.instance_per_thread: true`): every mutable
  * piece of the archive's state — the runtime units' internals AND the
