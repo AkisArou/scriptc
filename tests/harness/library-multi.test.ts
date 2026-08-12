@@ -8,10 +8,10 @@
  * (allocator, collector, result arena, panic sink, poison flag).
  *
  *   M1 symbols-exact     nm over a localized archive: the external defined
- *                        set equals the profile-declared set EXACTLY (not
- *                        just prefix-filtered — the runtime's internals are
- *                        gone from the link surface), and undefineds stay
- *                        libc/libm-shaped with the ambient audit intact
+ *                        set equals the profile-declared set EXACTLY (plus
+ *                        Darwin ASan's one image-registration common in a
+ *                        sanitized build), and undefineds stay libc/libm-
+ *                        shaped apart from sanitizer ABI references
  *   M2 two-instance run  the acceptance probe: two archives (ma_/mb_), two
  *                        embedder threads (one per instance — the
  *                        documented contract), independent init and
@@ -26,18 +26,19 @@
  *                        refuses SC3002 before emission
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary, loadLibraryProfile } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureDir = join(repoRoot, "tests/library-mode/multi");
-const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : test;
+const localizationTest = process.platform === "darwin" || process.platform === "linux" ? test : test.skip;
 /* Suite-flavor segment (the library suites' convention): the plain and
  * SCRIPTC_SAN=1 suites may run concurrently and must never share build
  * dirs. */
-const flavor = process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain";
+const sanitize = process.env["SCRIPTC_SAN"] === "1";
+const flavor = sanitize ? "san" : "plain";
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-multi", flavor);
 
 type Emission = "llvm" | "c";
@@ -63,7 +64,7 @@ function buildInstance(instance: "a" | "b", emission: Emission): Promise<string>
       profile.entry = join(fixtureDir, profile.entry);
       const profilePath = join(outDir, "profile.json");
       writeFileSync(profilePath, JSON.stringify(profile, null, 2));
-      const result = await compileLibrary({ profilePath, outDir });
+      const result = await compileLibrary({ profilePath, outDir, sanitize });
       if (!result.ok) {
         throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
       }
@@ -107,7 +108,7 @@ b sink: calls=0
 /* ── M1: the localized archive's exact link surface ─────────────────────── */
 
 describe.each(EMISSIONS)("localized archive symbols, %s emission", (emission) => {
-  platformTest("M1: external definitions equal the declared set exactly", async () => {
+  localizationTest("M1: external definitions equal the declared set exactly", async () => {
     const [archiveA, archiveB] = await Promise.all([
       buildInstance("a", emission),
       buildInstance("b", emission),
@@ -119,9 +120,18 @@ describe.each(EMISSIONS)("localized archive symbols, %s emission", (emission) =>
       const { defined, undef } = nmSymbols(archive);
       // The WHOLE defined set — a classic archive additionally defines
       // every runtime internal; a localized one defines nothing else.
-      expect([...defined].sort()).toEqual(declared);
+      // Darwin ASan's image-wide registration guard is the sole sanitized
+      // exception: keeping its COMMON shared makes the final Mach-O image
+      // register its ASan globals exactly once when N archives contribute
+      // module constructors.
+      const toolchainDefinitions =
+        sanitize && process.platform === "darwin"
+          ? ["___asan_globals_registered"]
+          : [];
+      expect([...defined].sort()).toEqual([...declared, ...toolchainDefinitions].sort());
       // Undefineds: no runtime-internal or prefix-carrying reference
-      // escapes; libc/libm references keep their global binding.
+      // escapes; libc/libm (and sanitizer ABI) references keep their global
+      // binding.
       expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
       // The ambient audit holds through the combine step: no
       // process-disposition or threading surface, no atexit teardown.
@@ -140,6 +150,7 @@ function buildProbe(archiveA: string, archiveB: string, outDir: string, tag: str
   execFileSync("clang", [
     "-std=c11",
     "-pthread",
+    ...(sanitize ? ["-fsanitize=address"] : []),
     join(fixtureDir, "probe.c"),
     archiveA,
     archiveB,
@@ -158,7 +169,7 @@ const PAIRINGS: { tag: string; a: Emission; b: Emission }[] = [
 ];
 
 describe.each(PAIRINGS)("two instances, one process ($tag)", ({ tag, a, b }) => {
-  platformTest("M2: independent state and collects; a trap reaches only its own sink, once", async () => {
+  localizationTest("M2: independent state and collects; a trap reaches only its own sink, once", async () => {
     const [archiveA, archiveB] = await Promise.all([buildInstance("a", a), buildInstance("b", b)]);
     const probe = buildProbe(archiveA, archiveB, join(cacheDir, "probes"), tag);
     const run = spawnSync(probe, { encoding: "utf8", timeout: 60_000 });
@@ -277,3 +288,69 @@ test("M4: an unsupported native host refuses runtime localization with SC3002", 
     else process.env["SCRIPTC_TARGET"] = prevTarget;
   }
 });
+
+/* ── M5: caller-visible archive publication ─────────────────────────────── */
+
+test.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+  "M5: localization archives privately before atomically installing the caller-visible output",
+  async () => {
+    const outDir = join(cacheDir, "atomic-publication");
+    const binDir = join(outDir, "bin");
+    const outPath = join(outDir, "localized.lib.a");
+    mkdirSync(binDir, { recursive: true });
+    const profile = JSON.parse(readFileSync(join(fixtureDir, "profile_a.json"), "utf8")) as {
+      entry: string;
+    };
+    profile.entry = join(fixtureDir, profile.entry);
+    const profilePath = join(outDir, "profile.json");
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const oldPath = process.env["PATH"];
+    const oldCc = process.env["SCRIPTC_CC"];
+    const oldTarget = process.env["SCRIPTC_TARGET"];
+    const oldRealAr = process.env["SCRIPTC_TEST_REAL_AR"];
+    const oldForbiddenOutput = process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"];
+    const originalAr = (oldPath ?? "")
+      .split(delimiter)
+      .map((entry) => join(entry === "" ? process.cwd() : entry, "ar"))
+      .find((candidate) => existsSync(candidate));
+    expect(originalAr).toBeDefined();
+
+    const wrapper = join(binDir, "ar");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "$SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT" ]; then
+    echo "archiver received caller-visible output" >&2
+    exit 97
+  fi
+done
+exec "$SCRIPTC_TEST_REAL_AR" "$@"
+`,
+    );
+    chmodSync(wrapper, 0o755);
+
+    process.env["PATH"] = `${binDir}${delimiter}${oldPath ?? ""}`;
+    process.env["SCRIPTC_TEST_REAL_AR"] = originalAr!;
+    process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"] = outPath;
+    delete process.env["SCRIPTC_CC"];
+    delete process.env["SCRIPTC_TARGET"];
+    try {
+      const result = await compileLibrary({ profilePath, outDir, outPath, sanitize });
+      expect(result.ok, result.ok ? undefined : result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+      expect(existsSync(outPath)).toBe(true);
+    } finally {
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
+      if (oldCc === undefined) delete process.env["SCRIPTC_CC"];
+      else process.env["SCRIPTC_CC"] = oldCc;
+      if (oldTarget === undefined) delete process.env["SCRIPTC_TARGET"];
+      else process.env["SCRIPTC_TARGET"] = oldTarget;
+      if (oldRealAr === undefined) delete process.env["SCRIPTC_TEST_REAL_AR"];
+      else process.env["SCRIPTC_TEST_REAL_AR"] = oldRealAr;
+      if (oldForbiddenOutput === undefined) delete process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"];
+      else process.env["SCRIPTC_TEST_FORBIDDEN_ARCHIVE_OUTPUT"] = oldForbiddenOutput;
+    }
+  },
+);

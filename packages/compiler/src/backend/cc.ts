@@ -1122,13 +1122,15 @@ export interface LibArchiveOptions {
   cacheIdentity?: string;
   sanitize?: boolean;
   /** Multi-instance library mode (the profile's abi.localize_runtime): the
-   * external symbols to KEEP global — every other external definition in
-   * the archive (the runtime's internals, the program TU's mangled
-   * functions and globals, vendor objects) is demoted to a local symbol,
+   * external symbols to KEEP global — every other scriptc external
+   * definition in the archive (the runtime's internals, the program TU's
+   * mangled functions and globals, vendor objects) is demoted to a local
+   * symbol. Toolchain sanitizer ABI remains external as required,
    * so N archives built under pairwise-distinct prefixes link into one
    * process with no symbol collisions and no shared mutable runtime state.
-   * Undefined references (libc/libm) keep their global binding. Omitted =
-   * the classic archive, byte-for-byte. Host-native builds only. */
+   * Undefined references (libc/libm, plus sanitizer ABI in instrumented
+   * builds) keep their global binding. Omitted = the classic archive,
+   * byte-for-byte. Host-native builds only. */
   localizeSymbols?: readonly string[];
   /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
   regex?: boolean;
@@ -1459,11 +1461,15 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
                 stem,
               ),
             ];
-      // A cacheable build owns a private archive from `ar` through publication.
-      // The caller-visible output can be shared by another invocation without
-      // letting that invocation's bytes poison this key.
+      // A cacheable or runtime-localized build owns a private archive from
+      // `ar` through publication. Localized archives deliberately bypass the
+      // completed-artifact cache, but still need atomic installation so two
+      // invocations sharing a caller-visible output cannot race `rm`/`ar` on
+      // that path.
       const archiveOutput =
-        cachedArchive === null ? opts.outPath : join(buildDir, "artifact.lib.a");
+        cachedArchive === null && opts.localizeSymbols === undefined
+          ? opts.outPath
+          : join(buildDir, "artifact.lib.a");
       await rm(archiveOutput, { force: true }); // `ar r` would append into a stale archive
       await mkdir(dirname(archiveOutput), { recursive: true });
       await execFileAsync(arArgv[0] ?? "ar", [
@@ -1535,13 +1541,14 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
 
 /* Multi-instance library mode's localization step: combine the program
  * object with exactly the runtime/vendor members it reaches into ONE
- * relocatable object, then demote every external definition except the
- * profile-declared symbols to a local symbol. The internals are not
+ * relocatable object, then demote every scriptc external definition except
+ * the profile-declared symbols to a local symbol. The internals are not
  * renamed apart — they stop being visible to the embedder's linker at all,
- * so a second archive built under a different prefix brings its own
- * private copy of the whole runtime (allocator, collector, arena, panic
- * sink) into the same process. Undefined references (libc/libm) keep
- * their global binding: the C library is the embedder's, shared by design.
+ * so a second archive built under a different prefix brings its own private
+ * copy of the whole runtime (allocator, collector, arena, panic sink) into
+ * the same process. Undefined references (libc/libm, plus sanitizer ABI in
+ * instrumented builds) keep their global binding: the C library and
+ * sanitizer are the embedder's, shared by design.
  *
  * Member selection matters: a classic archive's unused members (and their
  * undefined references to units library mode excludes, like the
@@ -1554,7 +1561,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *   darwin — one ld64 invocation: -r merges program + needed members,
  *            -exported_symbols_list demotes every unlisted global to
  *            private extern, and -r without -keep_private_externs writes
- *            private externs out as non-external symbols.
+ *            private externs out as non-external symbols. Apple ASan's
+ *            image-registration COMMON remains shared so the final Mach-O
+ *            image registers its globals once.
  *   linux  — ld -r merges, then binutils objcopy --keep-global-symbols
  *            localizes every other DEFINED global (objcopy leaves
  *            undefined symbols global by its own rule).
