@@ -1488,6 +1488,20 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         ),
       ]);
     }
+    // Multi-instance library mode (abi.localize_runtime) is host-native:
+    // the localization step runs the host toolchain's ld/objcopy over
+    // host-format objects, so a cross-compiled archive refuses before
+    // emission rather than producing an artifact whose runtime internals
+    // collide at the embedder's link.
+    if (profile.localizeRuntime && resolveCc().target !== null) {
+      return fail([
+        targetRefusalDiag(
+          resolveCc().target!,
+          "runtime-localized (multi-instance) library archives",
+          { file: entryPath, start: 0, end: 0 },
+        ),
+      ]);
+    }
     // The npm verdicts FIRST: whatever the shared frontend would have
     // served from the island — an eligibility miss, an untyped install, a
     // preflight offender inside a package's files, a dropped inferred
@@ -1682,11 +1696,27 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   }
 
   const archivePath = opts.outPath ?? join(opts.outDir, `${stem}.lib.a`);
+  // Multi-instance library mode: the profile-declared external surface —
+  // the mode-provided entries, the identity getters, and the export map —
+  // is exactly the set the localization step keeps global.
+  const localizeSymbols = profile.localizeRuntime
+    ? [
+        profile.initSymbol,
+        profile.sinkRegisterSymbol,
+        ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
+        ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
+        ...(profile.sidecar !== null
+          ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
+          : []),
+        ...profile.exports.map((e) => e.symbol),
+      ]
+    : undefined;
   await compileLibArchive({
     cPath,
     outPath: archivePath,
     cacheIdentity: "scriptc-generated-library-v1",
     sanitize: opts.sanitize ?? false,
+    ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
     regex: moduleUsesRegex(mod),
     assert: moduleUsesAssert(mod),
     inspect: moduleUsesInspect(mod),

@@ -1121,6 +1121,15 @@ export interface LibArchiveOptions {
    * matching compileC's arbitrary-input safety boundary. */
   cacheIdentity?: string;
   sanitize?: boolean;
+  /** Multi-instance library mode (the profile's abi.localize_runtime): the
+   * external symbols to KEEP global — every other external definition in
+   * the archive (the runtime's internals, the program TU's mangled
+   * functions and globals, vendor objects) is demoted to a local symbol,
+   * so N archives built under pairwise-distinct prefixes link into one
+   * process with no symbol collisions and no shared mutable runtime state.
+   * Undefined references (libc/libm) keep their global binding. Omitted =
+   * the classic archive, byte-for-byte. Host-native builds only. */
+  localizeSymbols?: readonly string[];
   /** IR-detected link gates (the compileC precedent, refusal-narrowed). */
   regex?: boolean;
   assert?: boolean;
@@ -1241,7 +1250,12 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     driver,
     `${toolchainEnv}\0${implicitToolchain ?? "<uncached>"}`,
   );
+  // Runtime-localized archives skip the completed-archive tier: their bytes
+  // additionally depend on the host's ld/objcopy identities, which the
+  // archive key does not fingerprint. The runtime-object tier still serves
+  // them (localization consumes the same per-flavor objects).
   const cacheCompleteArchive =
+    opts.localizeSymbols === undefined &&
     root !== null && await archiverSupportsPersistentCache(arArgv, driver);
   let cachedArchive: string | null = null;
   let compilerVersion = "";
@@ -1428,6 +1442,23 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         }
       }
       const objects = [programObject, ...runtimeObjects, ...lreObjects, ...zlibObjects];
+      // Multi-instance library mode: the archive's one member becomes the
+      // combined, symbol-localized object (cached vendor/runtime objects
+      // are read-only inputs here — the combine step never mutates them).
+      const archiveMembers =
+        opts.localizeSymbols === undefined
+          ? objects
+          : [
+              await localizeLibraryObjects(
+                driver,
+                arArgv,
+                buildDir,
+                programObject,
+                [...runtimeObjects, ...lreObjects, ...zlibObjects],
+                opts.localizeSymbols,
+                stem,
+              ),
+            ];
       // A cacheable build owns a private archive from `ar` through publication.
       // The caller-visible output can be shared by another invocation without
       // letting that invocation's bytes poison this key.
@@ -1439,7 +1470,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         ...arArgv.slice(1),
         "rcs",
         archiveOutput,
-        ...objects,
+        ...archiveMembers,
       ]);
       if (archiveOutput !== opts.outPath) await installArtifact(archiveOutput, opts.outPath);
       let runtimeStillMatchesKey = false;
@@ -1500,6 +1531,75 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     }
   }
   if (root !== null) await pruneCache(root).catch(() => undefined);
+}
+
+/* Multi-instance library mode's localization step: combine the program
+ * object with exactly the runtime/vendor members it reaches into ONE
+ * relocatable object, then demote every external definition except the
+ * profile-declared symbols to a local symbol. The internals are not
+ * renamed apart — they stop being visible to the embedder's linker at all,
+ * so a second archive built under a different prefix brings its own
+ * private copy of the whole runtime (allocator, collector, arena, panic
+ * sink) into the same process. Undefined references (libc/libm) keep
+ * their global binding: the C library is the embedder's, shared by design.
+ *
+ * Member selection matters: a classic archive's unused members (and their
+ * undefined references to units library mode excludes, like the
+ * fs-promises unit's fiber symbols) never reach an embedder's link. A
+ * blind merge of every object would carry those references into the one
+ * combined member. Staging the support objects into an intermediate
+ * archive keeps the linker's own member semantics: `ld -r` pulls only the
+ * members the program object transitively needs.
+ *
+ *   darwin — one ld64 invocation: -r merges program + needed members,
+ *            -exported_symbols_list demotes every unlisted global to
+ *            private extern, and -r without -keep_private_externs writes
+ *            private externs out as non-external symbols.
+ *   linux  — ld -r merges, then binutils objcopy --keep-global-symbols
+ *            localizes every other DEFINED global (objcopy leaves
+ *            undefined symbols global by its own rule).
+ *
+ * Host-native only: compileLibrary refuses localization for cross targets
+ * before emission (this step runs the host's ld/objcopy over host-format
+ * objects). */
+async function localizeLibraryObjects(
+  driver: CcDriver,
+  arArgv: readonly string[],
+  buildDir: string,
+  programObject: string,
+  supportObjects: readonly string[],
+  keepSymbols: readonly string[],
+  stem: string,
+): Promise<string> {
+  const platform = targetPlatform(driver);
+  const combined = join(buildDir, `${stem}.localized.o`);
+  const staging = join(buildDir, `${stem}.localize-staging.a`);
+  const keepFile = join(buildDir, "localize-keep.syms");
+  const run = async (argv: readonly string[]): Promise<void> => {
+    try {
+      await execFileAsync(argv[0]!, [...argv.slice(1)]);
+    } catch (err) {
+      const stderr = (err as { stderr?: string }).stderr ?? String(err);
+      throw new Error(
+        `${argv[0]} failed while localizing the library archive's runtime symbols (abi.localize_runtime).\n` +
+          `Runtime symbol localization needs the host toolchain's ${platform === "darwin" ? "ld" : "ld and objcopy"} beside the C compiler.\n\n${stderr}`,
+      );
+    }
+  };
+  await run([arArgv[0] ?? "ar", ...arArgv.slice(1), "rcs", staging, ...supportObjects]);
+  if (platform === "darwin") {
+    await writeFile(keepFile, keepSymbols.map((s) => `_${s}\n`).join(""));
+    await run(["ld", "-r", programObject, staging, "-o", combined, "-exported_symbols_list", keepFile]);
+  } else if (platform === "linux") {
+    await writeFile(keepFile, keepSymbols.map((s) => `${s}\n`).join(""));
+    await run(["ld", "-r", programObject, staging, "-o", combined]);
+    await run(["objcopy", `--keep-global-symbols=${keepFile}`, combined]);
+  } else {
+    throw new Error(
+      `runtime symbol localization (abi.localize_runtime) supports darwin and linux host builds; this build targets ${platform}`,
+    );
+  }
+  return combined;
 }
 
 /* -------------------------- persistent build cache ---------------------------

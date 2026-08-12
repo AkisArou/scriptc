@@ -132,6 +132,7 @@ const hostLaneContractPattern = [
 const hostInvariantContractFiles = [
   "tests/harness/island.test.ts",
   "tests/harness/library-mode.test.ts",
+  "tests/harness/library-multi.test.ts",
   "tests/harness/regex.test.ts",
 ];
 const hostInvariantContractPattern = [
@@ -141,6 +142,8 @@ const hostInvariantContractPattern = [
   "K5: a trap delivers to the sink exactly once, host survives",
   "K10: K4 under ASan \\+ RC audit",
   "K10: K5/K7 under ASan",
+  "M1: external definitions equal the declared set exactly",
+  "M2: independent state and collects",
   "regex-free programs never reference the regex runtime",
 ].join("|");
 
