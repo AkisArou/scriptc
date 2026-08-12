@@ -446,11 +446,11 @@ function buildThreadProbe(
   return bin;
 }
 
-const THREADED_EXPECTED = `t0: bump x100 -> 101, calls_seen 100, sums_ok=1, trap fell through 0
+const THREADED_EXPECTED = `t0: bump x100 -> 101, calls_seen 100, sums_ok=1, clocks_ok=1, trap fell through 0
 t0 sink: calls=1 ctx_ok=1 fields=3 code=[SC4014] symbol=[mt_boom] addr_nonzero=1
-t1: bump x150 -> 151, calls_seen 150, sums_ok=1, post_ok=1
-t2: bump x200 -> 201, calls_seen 200, sums_ok=1, post_ok=1
-t3: bump x250 -> 251, calls_seen 250, sums_ok=1, post_ok=1
+t1: bump x150 -> 151, calls_seen 150, sums_ok=1, clocks_ok=1, post_ok=1
+t2: bump x200 -> 201, calls_seen 200, sums_ok=1, clocks_ok=1, post_ok=1
+t3: bump x250 -> 251, calls_seen 250, sums_ok=1, clocks_ok=1, post_ok=1
 survivor sinks: 0 0 0
 `;
 
@@ -510,7 +510,7 @@ localizationTest("M7: thread-instanced and runtime-localized archives compose in
     : [];
   expect([...defined].sort()).toEqual(
     [
-      "mt_boom", "mt_bump", "mt_calls_seen", "mt_collect", "mt_init", "mt_set_panic_sink", "mt_sum_to",
+      "mt_boom", "mt_bump", "mt_calls_seen", "mt_collect", "mt_init", "mt_perf_now", "mt_set_panic_sink", "mt_sum_to", "mt_uptime",
       ...toolchainDefinitions,
     ].sort(),
   );

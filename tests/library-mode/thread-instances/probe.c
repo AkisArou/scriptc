@@ -23,6 +23,8 @@ extern double mt_bump(double x);
 extern double mt_calls_seen(void);
 extern double mt_sum_to(double n);
 extern double mt_boom(double i);
+extern double mt_uptime(void);
+extern double mt_perf_now(void);
 
 #define NTHREADS 4
 
@@ -80,6 +82,7 @@ typedef struct {
   double last_bump;
   double calls_seen;
   int sums_ok;
+  int clocks_ok;
   int trap_fell_through; /* thread 0 only */
   int post_ok;           /* threads 1..3 only */
 } Worker;
@@ -121,6 +124,9 @@ static void *worker(void *arg) {
   Worker *w = arg;
   mt_set_panic_sink(sink, &w->sink);
   mt_init(); /* concurrent across all four threads: each init is instance-local */
+  double uptime = mt_uptime();
+  double perf_now = mt_perf_now();
+  w->clocks_ok = uptime >= 0 && uptime < 60 && perf_now >= 0 && perf_now < 60000;
   w->sums_ok = 1;
   double last = 0;
   for (int i = 0; i < w->iters; i++) {
@@ -163,7 +169,7 @@ int main(void) {
   for (int i = 0; i < NTHREADS; i++) pthread_join(threads[i], NULL);
   for (int i = 0; i < NTHREADS; i++) {
     Worker *w = &workers[i];
-    printf("t%d: bump x%d -> %.0f, calls_seen %.0f, sums_ok=%d", i, w->iters, w->last_bump, w->calls_seen, w->sums_ok);
+    printf("t%d: bump x%d -> %.0f, calls_seen %.0f, sums_ok=%d, clocks_ok=%d", i, w->iters, w->last_bump, w->calls_seen, w->sums_ok, w->clocks_ok);
     if (i == 0) {
       printf(", trap fell through %d\n", w->trap_fell_through);
       printf("t0 sink: calls=%d ctx_ok=%d fields=%d code=[%s] symbol=[%s] addr_nonzero=%d\n",

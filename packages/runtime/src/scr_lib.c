@@ -1103,8 +1103,27 @@ void scr_process_exit(double code) {
  * attribute monotonic stamp — the binary's own start, which is what
  * "the current Node.js process" means for a compiled program). */
 #ifdef _WIN32
+#if defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)
+/* The uptime anchor belongs to the host PROCESS, not to a library
+ * instance. InitOnce keeps the lazy Windows spelling race-free when
+ * several thread instances ask for the clock concurrently. */
+static INIT_ONCE scr_uptime_once = INIT_ONCE_STATIC_INIT;
+static double scr_uptime_t0_ms;
+static BOOL CALLBACK scr_uptime_anchor_once(PINIT_ONCE once, PVOID param,
+                                             PVOID *ctx) {
+  (void)once;
+  (void)param;
+  (void)ctx;
+  scr_uptime_t0_ms = (double)GetTickCount64();
+  return TRUE;
+}
+static void scr_uptime_anchor_init(void) {
+  InitOnceExecuteOnce(&scr_uptime_once, scr_uptime_anchor_once, NULL, NULL);
+}
+#else
 static SCR_TL double scr_uptime_t0_ms;
 static void scr_uptime_anchor_init(void) { scr_uptime_t0_ms = (double)GetTickCount64(); }
+#endif
 static double scr_uptime_now_ms(void) { return (double)GetTickCount64(); }
 #else
 #include <sys/resource.h>
@@ -1112,7 +1131,11 @@ static double scr_uptime_now_ms(void) { return (double)GetTickCount64(); }
 #ifdef __APPLE__
 #include <mach/mach.h>
 #endif
-static SCR_TL double scr_uptime_t0_ms;
+/* A load-time, process-wide anchor: the constructor runs on only the
+ * initial thread, while thread-instanced archives are entered from worker
+ * threads whose TLS slots would otherwise stay zero. It is immutable once
+ * main starts, so sharing it adds no cross-instance mutable state. */
+static double scr_uptime_t0_ms;
 static double scr_uptime_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1124,7 +1147,9 @@ __attribute__((constructor)) static void scr_uptime_anchor_init(void) {
 #endif
 
 double scr_process_uptime(void) {
-#ifdef _WIN32
+#if defined(_WIN32) && defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)
+  scr_uptime_anchor_init();
+#elif defined(_WIN32)
   if (scr_uptime_t0_ms == 0) scr_uptime_anchor_init();
 #endif
   return (scr_uptime_now_ms() - scr_uptime_t0_ms) / 1000.0;
@@ -1134,7 +1159,9 @@ double scr_process_uptime(void) {
  * start (Node's timeOrigin anchor), fractional — the same monotonic
  * clock and anchor as uptime, in Node's performance.now units. */
 double scr_perf_now(void) {
-#ifdef _WIN32
+#if defined(_WIN32) && defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)
+  scr_uptime_anchor_init();
+#elif defined(_WIN32)
   if (scr_uptime_t0_ms == 0) scr_uptime_anchor_init();
 #endif
   return scr_uptime_now_ms() - scr_uptime_t0_ms;

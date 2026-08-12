@@ -4,6 +4,8 @@
 // (array index OOB — the runtime's own range trap) that must reach only the
 // calling thread's sink. No top-level output: four instances init
 // concurrently in the probe.
+import { performance } from "node:perf_hooks";
+
 let calls = 0;
 
 export function bump(x: number): number {
@@ -26,4 +28,12 @@ export function sumTo(n: number): number {
 export function boom(i: number): number {
   const xs = [1, 2, 3];
   return xs[i]!;
+}
+
+export function uptime(): number {
+  return process.uptime();
+}
+
+export function perfNow(): number {
+  return performance.now();
 }
