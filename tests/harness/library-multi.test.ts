@@ -790,10 +790,8 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
   describe.each(CROSS_TARGETS)("target %s", (target) => {
     describe.each(EMISSIONS)("%s emission", (emission) => {
       test("M10: localized archives cross-build; symbols exact, ambient audit holds, probe links", async () => {
-        const [archiveA, archiveB] = await Promise.all([
-          buildInstanceCross("a", emission, target),
-          buildInstanceCross("b", emission, target),
-        ]);
+        const archiveA = await buildInstanceCross("a", emission, target);
+        const archiveB = await buildInstanceCross("b", emission, target);
         for (const [archive, declared] of [
           [archiveA, A_SYMBOLS],
           [archiveB, B_SYMBOLS],
@@ -826,10 +824,8 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
     ] as const)(
       "M11: the two-instance probe runs in the container (%s, %s emission)",
       async ([target, emission]) => {
-        const [archiveA, archiveB] = await Promise.all([
-          buildInstanceCross("a", emission, target),
-          buildInstanceCross("b", emission, target),
-        ]);
+        const archiveA = await buildInstanceCross("a", emission, target);
+        const archiveB = await buildInstanceCross("b", emission, target);
         const probe = buildCrossProbe(
           [archiveA, archiveB],
           join(fixtureDir, "probe.c"),
@@ -858,10 +854,8 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
       async (emission) => {
         const host = process.env["SCRIPTC_WIN_HOST"] ?? "windows-dev";
         const dirWin = "C:\\Users\\rdp\\work\\scriptc-mloc-lane";
-        const [archiveA, archiveB] = await Promise.all([
-          buildInstanceCross("a", emission, "x86_64-windows-gnu"),
-          buildInstanceCross("b", emission, "x86_64-windows-gnu"),
-        ]);
+        const archiveA = await buildInstanceCross("a", emission, "x86_64-windows-gnu");
+        const archiveB = await buildInstanceCross("b", emission, "x86_64-windows-gnu");
         const probe = buildCrossProbe(
           [archiveA, archiveB],
           join(fixtureDir, "probe.c"),
