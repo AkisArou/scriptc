@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { CcCompileError, compileC, compileLibArchive, resolveCc, targetPlatform } from "./backend/cc.js";
+import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
@@ -36,6 +36,7 @@ import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
 export const VERSION = "0.0.1";
 
 export { compileC, runtimeSrcDir, type CcOptions } from "./backend/cc.js";
+export { ANDROID_MIN_API, IPHONEOS_MIN_VERSION, isAndroidTarget, isIosTarget, isMobileTarget, mobileLibraryTarget, mobileTargetRefusal } from "./backend/cc.js";
 export { emitModule } from "./backend/emission/emitter.js";
 export type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
 export { renderAll, renderDiagnostic } from "./diagnostics/render.js";
@@ -834,6 +835,36 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     ffi = loaded.profile;
   }
   const buildPlatform = buildTargetPlatform();
+  // Mobile triples are library-mode targets: the archive an embedding app
+  // links is the artifact, and only the library-admissible runtime surface
+  // is verified on those device classes. The executable lane refuses before
+  // any frontend work — a pure env check, so the refusal needs no toolchain.
+  {
+    const entryLoc: SrcLoc = { file: entryPath, start: 0, end: 0 };
+    const mobileTarget = mobileLibraryTarget();
+    if (mobileTarget !== null) {
+      return {
+        ok: false,
+        diagnostics: [
+          targetRefusalDiag(
+            mobileTarget,
+            "standalone executable builds — mobile targets produce library-mode static archives (scriptc build --lib <profile>) for an embedding app to link",
+            entryLoc,
+          ),
+        ],
+        sourceTexts: new Map(),
+      };
+    }
+    const rawTarget = process.env["SCRIPTC_TARGET"] ?? "";
+    const mobileRefusal = mobileTargetRefusal(rawTarget);
+    if (mobileRefusal !== null) {
+      return {
+        ok: false,
+        diagnostics: [{ code: "SC3002", message: mobileRefusal, loc: entryLoc }],
+        sourceTexts: new Map(),
+      };
+    }
+  }
   const fe = runFrontend(entryPath, opts.npmStatic);
   let lowered: LowerResult;
   let entryText: string;
@@ -1455,14 +1486,35 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const entryPath = profile.entry;
   const buildPlatform = buildTargetPlatform();
 
+  // Mobile-target admission first — a pure env/host check, so a refused
+  // pairing never reaches toolchain discovery. iOS targets (device and
+  // simulator) build on darwin hosts only: the Apple SDK sysroot and the
+  // Mach-O localization linker live there. Android builds from any host
+  // with an NDK; a near-miss mobile spelling refuses with the supported
+  // set named.
+  {
+    const mobileRefusal = mobileTargetRefusal(process.env["SCRIPTC_TARGET"] ?? "");
+    if (mobileRefusal !== null) {
+      return {
+        ok: false,
+        diagnostics: decorateLibraryRefusals(
+          [{ code: "SC3002", message: mobileRefusal, loc: { file: entryPath, start: 0, end: 0 } }],
+          profile,
+        ),
+        sourceTexts: new Map(),
+      };
+    }
+  }
+
   // Multi-instance library mode (abi.localize_runtime) localizes per
   // OBJECT FORMAT: ELF and COFF archives localize from any host (cross
   // ELF merges through the cross driver's own lld; COFF merges and
   // demotes in process — see cc.ts's localizeLibraryObjects), and Mach-O
-  // localization runs the macOS host linker, so macos targets admit
-  // darwin hosts only. Everything else refuses before frontend/backend
-  // work, naming the pairing. WASI retains the general library-mode
-  // refusal below.
+  // localization runs the macOS host linker, so macos and ios targets
+  // admit darwin hosts only (the mobile admission above already refused
+  // an ios triple off darwin). Everything else refuses before frontend/
+  // backend work, naming the pairing. WASI retains the general
+  // library-mode refusal below.
   if (profile.localizeRuntime && buildPlatform !== "wasi") {
     const driver = resolveCc();
     const platform = targetPlatform(driver);

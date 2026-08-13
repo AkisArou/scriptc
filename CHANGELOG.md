@@ -4,6 +4,10 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+### Features
+
+- **Library archives build for iOS and Android.** `SCRIPTC_TARGET=aarch64-apple-ios`, `aarch64-apple-ios-simulator`, and `aarch64-linux-android` produce library-mode static archives for an embedding app to link — Xcode projects on the Apple side, Gradle/NDK builds on the Android side. iOS archives compile against the selected Xcode SDK with an iOS 15.0 minimum (stamped into every object's `LC_BUILD_VERSION`) and localize with the macOS host linker; Android archives compile against the NDK's bionic headers at API level 26 and use the same in-process ELF localization as the Linux cross targets. Multi-instance (`abi.localize_runtime`) and thread-instanced (`abi.instance_per_thread`) profiles carry over unchanged, verified by simulator- and emulator-executed probes; standalone executable builds refuse these targets with a pointer to `--lib`.
+
 <!-- release:start -->
 
 ## 0.0.28

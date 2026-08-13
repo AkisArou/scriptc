@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { access, chmod, copyFile, link, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism, homedir, tmpdir } from "node:os";
@@ -426,16 +426,207 @@ export function runtimeSrcDir(): string {
  * _WIN32 block in scr_runtime.h), linking -ladvapi32 for its CSPRNG
  * (RtlGenRandom) and GetUserNameA. Native zigcc builds (no SCRIPTC_TARGET)
  * support everything: same platform, same archives, just a different
- * driver binary. */
+ * driver binary.
+ * Mobile triples (aarch64-apple-ios, aarch64-apple-ios-simulator,
+ * aarch64-linux-android — see the mobile-targets block below) are
+ * LIBRARY-MODE targets: compileLibArchive accepts them, compile()/compileC
+ * refuse the executable lane with the pointer to --lib. */
 export interface CcDriver {
   /** The compiler argv prefix: ["clang"] (default) or ["zig", "cc"]. */
   argv: string[];
   /** The SCRIPTC_TARGET triple, or null for a host-native build. */
   target: string | null;
+  /** The spelling handed to `zig cc -target` (and the relocatable-merge
+   * link). Identical to `target` except for the mobile triples, whose
+   * canonical LLVM spellings map to zig's own (`aarch64-apple-ios` →
+   * `aarch64-ios.15.0`), pinning the minimum OS version in the same
+   * breath. Null for a host-native build. */
+  zigTarget: string | null;
   /** Extra compile args the produced platform demands. */
   targetArgs: string[];
   /** Platform libraries appended after every object/archive input. */
   linkArgs: string[];
+}
+
+/* ── mobile targets (library mode) ─────────────────────────────────────────
+ * Three mobile triples are admitted, and only for LIBRARY-MODE archive
+ * builds — the consuming pattern is an embedding app linking the archive,
+ * never a standalone executable (compile()/compileC refuse the executable
+ * lane with the pointer to --lib):
+ *
+ *   aarch64-apple-ios            device archives; zig `aarch64-ios.15.0`
+ *   aarch64-apple-ios-simulator  simulator archives; zig
+ *                                `aarch64-ios.15.0-simulator`
+ *   aarch64-linux-android        zig `aarch64-linux-android.26`
+ *
+ * The minimum-version floors are part of the target contract: iOS archives
+ * build for iOS 15.0 (IPHONEOS_MIN_VERSION), Android archives for API level
+ * 26 (ANDROID_MIN_API) — LC_BUILD_VERSION minos and the bionic stub level
+ * both come from the pinned zig spelling above, so an embedder's deployment
+ * target at or above the floor links cleanly.
+ *
+ * Zig bundles no Apple or bionic libc, so both families compile against an
+ * explicit sysroot discovered here and spelled into targetArgs (where every
+ * cache tier already keys it):
+ *
+ *   iOS      darwin hosts only — `xcrun --show-sdk-path` selects the
+ *            iPhoneOS/iPhoneSimulator SDK; compiles add `-isysroot <sdk>`
+ *            plus `-isystem <sdk>/usr/include` (zig's driver manages libc
+ *            header search itself and would otherwise find no headers).
+ *   Android  any host with an NDK — ANDROID_NDK_ROOT/ANDROID_NDK_HOME, or
+ *            the newest ndk/<version> under ANDROID_HOME/ANDROID_SDK_ROOT
+ *            or the platform-default SDK location; compiles add the NDK
+ *            sysroot's generic and per-triple include directories.
+ *
+ * Library archives never link, so the sysroot's LIBRARIES are the
+ * embedder's side of the contract: Xcode links iOS archives against the
+ * selected SDK, and Gradle/NDK builds link Android archives against the
+ * API-26+ bionic stubs. */
+export const IPHONEOS_MIN_VERSION = "15.0";
+export const ANDROID_MIN_API = 26;
+
+const MOBILE_LIBRARY_TARGETS = [
+  "aarch64-apple-ios",
+  "aarch64-apple-ios-simulator",
+  "aarch64-linux-android",
+] as const;
+
+export function isIosTarget(target: string | null): boolean {
+  return target === "aarch64-apple-ios" || target === "aarch64-apple-ios-simulator";
+}
+
+export function isAndroidTarget(target: string | null): boolean {
+  return target === "aarch64-linux-android";
+}
+
+export function isMobileTarget(target: string | null): boolean {
+  return isIosTarget(target) || isAndroidTarget(target);
+}
+
+/** The canonical mobile triple SCRIPTC_TARGET selects, or null when the
+ * environment names none. Pure string inspection — safe to consult before
+ * any toolchain discovery runs. */
+export function mobileLibraryTarget(env: NodeJS.ProcessEnv = process.env): string | null {
+  const target = env["SCRIPTC_TARGET"] ?? "";
+  return isMobileTarget(target) ? target : null;
+}
+
+/** The admission verdict for a mobile-family triple: null when the spelling
+ * and host pairing are supported, otherwise the refusal text (the same text
+ * resolveCc throws and compileLibrary reports as SC3002). Pure string/host
+ * inspection — no discovery, no subprocess. */
+export function mobileTargetRefusal(
+  target: string,
+  hostPlatform: NodeJS.Platform = process.platform,
+): string | null {
+  if (isIosTarget(target)) {
+    return hostPlatform === "darwin"
+      ? null
+      : `${target} library archives build on macOS hosts only (the Apple iOS SDK sysroot and Mach-O symbol localization live there); this host is ${hostPlatform}`;
+  }
+  if (isAndroidTarget(target)) return null;
+  // A near-miss mobile spelling must refuse with the supported set named,
+  // never reach zig with no sysroot wired (the compile would fail on the
+  // first libc header) or produce an artifact for an unverified device
+  // class.
+  if (/(?:^|-)(?:ios|tvos|watchos|visionos|android)/.test(target)) {
+    return `unsupported mobile target '${target}' (supported: ${MOBILE_LIBRARY_TARGETS.join(", ")})`;
+  }
+  return null;
+}
+
+/** The Apple SDK root for one mobile platform, discovered through xcrun the
+ * way Xcode's own build system selects it. Memoized per SDK name and
+ * selection environment: production rediscovers per process, and the two
+ * selection variables (DEVELOPER_DIR/SDKROOT) are already mutable-input
+ * keys that disable persistent caching. */
+const appleSdkMemos = new Map<string, string>();
+function appleSdkRoot(sdk: "iphoneos" | "iphonesimulator", env: NodeJS.ProcessEnv): string {
+  const key = `${sdk}\0${env["DEVELOPER_DIR"] ?? ""}`;
+  const memo = appleSdkMemos.get(key);
+  if (memo !== undefined) return memo;
+  const probe = spawnSync("xcrun", ["--sdk", sdk, "--show-sdk-path"], { encoding: "utf8" });
+  const path = probe.status === 0 ? (probe.stdout ?? "").trim() : "";
+  if (path === "" || !existsSync(join(path, "usr", "include"))) {
+    throw new Error(
+      `the ${sdk} SDK was not found (xcrun --sdk ${sdk} --show-sdk-path failed) — ` +
+        `iOS targets need Xcode with the ${sdk === "iphoneos" ? "iPhoneOS" : "iPhoneSimulator"} SDK installed`,
+    );
+  }
+  appleSdkMemos.set(key, path);
+  return path;
+}
+
+/** Compare dotted-numeric NDK version directory names, newest first. */
+function compareNdkVersionsDesc(a: string, b: string): number {
+  const as = a.split(".").map((s) => Number.parseInt(s, 10));
+  const bs = b.split(".").map((s) => Number.parseInt(s, 10));
+  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+    const d = (bs[i] ?? 0) - (as[i] ?? 0);
+    if (d !== 0 && Number.isFinite(d)) return d;
+  }
+  return a < b ? 1 : a > b ? -1 : 0;
+}
+
+/** The Android NDK sysroot for the selected environment: an explicit
+ * ANDROID_NDK_ROOT/ANDROID_NDK_HOME wins; otherwise the newest ndk/<version>
+ * under ANDROID_HOME, ANDROID_SDK_ROOT, or the platform-default SDK
+ * location. The prebuilt host directory is discovered rather than guessed —
+ * the NDK ships exactly one per host OS. Memoized per selection
+ * environment. */
+const ndkSysrootMemos = new Map<string, string>();
+function androidNdkSysroot(env: NodeJS.ProcessEnv): string {
+  const key = ["ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT"]
+    .map((name) => env[name] ?? "")
+    .join("\0");
+  const memo = ndkSysrootMemos.get(key);
+  if (memo !== undefined) return memo;
+  const ndkRoots: string[] = [];
+  const explicit = env["ANDROID_NDK_ROOT"] ?? env["ANDROID_NDK_HOME"];
+  if (explicit !== undefined && explicit !== "") {
+    ndkRoots.push(explicit);
+  } else {
+    const sdkRoots = [
+      env["ANDROID_HOME"],
+      env["ANDROID_SDK_ROOT"],
+      process.platform === "darwin"
+        ? join(homedir(), "Library", "Android", "sdk")
+        : process.platform === "win32"
+          ? join(env["LOCALAPPDATA"] ?? join(homedir(), "AppData", "Local"), "Android", "Sdk")
+          : join(homedir(), "Android", "Sdk"),
+    ].filter((root): root is string => root !== undefined && root !== "");
+    for (const root of sdkRoots) {
+      let versions: string[] = [];
+      try {
+        versions = readdirSync(join(root, "ndk")).filter((name) => /^\d/.test(name));
+      } catch {
+        continue;
+      }
+      versions.sort(compareNdkVersionsDesc);
+      ndkRoots.push(...versions.map((version) => join(root, "ndk", version)));
+    }
+  }
+  for (const ndk of ndkRoots) {
+    const prebuilt = join(ndk, "toolchains", "llvm", "prebuilt");
+    let hosts: string[] = [];
+    try {
+      hosts = readdirSync(prebuilt).sort();
+    } catch {
+      continue;
+    }
+    for (const host of hosts) {
+      const sysroot = join(prebuilt, host, "sysroot");
+      if (existsSync(join(sysroot, "usr", "include", "aarch64-linux-android"))) {
+        ndkSysrootMemos.set(key, sysroot);
+        return sysroot;
+      }
+    }
+  }
+  throw new Error(
+    "no Android NDK sysroot was found — install an NDK (sdkmanager 'ndk;<version>') and/or set " +
+      "ANDROID_NDK_ROOT to it (ANDROID_HOME with an ndk/ directory also works). " +
+      "aarch64-linux-android compiles against the NDK's bionic headers.",
+  );
 }
 
 /** Resolve native platform flags independently of the machine running tests,
@@ -459,14 +650,60 @@ export function resolveCc(
         `SCRIPTC_TARGET=${target} requires SCRIPTC_CC=zigcc — the default clang path has no cross-target sysroots.`,
       );
     }
-    return { argv: ["clang"], target: null, ...hostArgs };
+    return { argv: ["clang"], target: null, zigTarget: null, ...hostArgs };
   }
   if (cc !== "zigcc") {
     throw new Error(`unknown SCRIPTC_CC '${cc}' (supported: clang, zigcc)`);
   }
-  if (target === "") return { argv: ["zig", "cc"], target: null, ...hostArgs };
+  if (target === "") return { argv: ["zig", "cc"], target: null, zigTarget: null, ...hostArgs };
   if (target.includes("wasi") && target !== "wasm32-wasi") {
     throw new Error(`unsupported WASI target '${target}' (supported: wasm32-wasi)`);
+  }
+  const mobileRefusal = mobileTargetRefusal(target, hostPlatform);
+  if (mobileRefusal !== null) throw new Error(mobileRefusal);
+  if (isIosTarget(target)) {
+    // Library-mode-only target (compile()/compileC own the executable-lane
+    // refusal). Zig bundles no Apple libc: the compile rides the selected
+    // SDK sysroot, with the libc header directory spelled explicitly
+    // because zig's driver manages libc search itself and consults no
+    // -isysroot for it. The zig spelling pins the iOS 15.0 floor into
+    // every object's LC_BUILD_VERSION minos.
+    const simulator = target === "aarch64-apple-ios-simulator";
+    const sdk = appleSdkRoot(simulator ? "iphonesimulator" : "iphoneos", env);
+    const zigTarget = `aarch64-ios.${IPHONEOS_MIN_VERSION}${simulator ? "-simulator" : ""}`;
+    return {
+      argv: ["zig", "cc"],
+      target,
+      zigTarget,
+      targetArgs: ["-target", zigTarget, "-isysroot", sdk, "-isystem", join(sdk, "usr", "include")],
+      linkArgs: [],
+    };
+  }
+  if (isAndroidTarget(target)) {
+    // Library-mode-only target. Zig bundles no bionic: compiles ride the
+    // NDK sysroot's generic and per-triple include directories. Bionic
+    // supports _GNU_SOURCE like glibc (and hides some POSIX declarations
+    // without it); the zig spelling pins the API 26 floor, which the NDK's
+    // versioned stub libraries enforce at the embedder's link. API 26
+    // bionic carries everything the library-lane units call (arc4random_buf
+    // included), so no shim TU joins the archive.
+    const sysroot = androidNdkSysroot(env);
+    const zigTarget = `aarch64-linux-android.${ANDROID_MIN_API}`;
+    return {
+      argv: ["zig", "cc"],
+      target,
+      zigTarget,
+      targetArgs: [
+        "-target",
+        zigTarget,
+        "-D_GNU_SOURCE",
+        "-isystem",
+        join(sysroot, "usr", "include"),
+        "-isystem",
+        join(sysroot, "usr", "include", "aarch64-linux-android"),
+      ],
+      linkArgs: ["-lm"],
+    };
   }
   const linux = target.includes("linux");
   const wasi = target.includes("wasi");
@@ -474,6 +711,7 @@ export function resolveCc(
   return {
     argv: ["zig", "cc"],
     target,
+    zigTarget: target,
     targetArgs: [
       "-target",
       target,
@@ -504,6 +742,10 @@ export function isMuslTarget(driver: Pick<CcDriver, "target">): boolean {
 export function targetPlatform(driver: CcDriver): string {
   if (driver.target === null) return process.platform;
   if (driver.target.includes("wasi")) return "wasi";
+  // iOS is a darwin-family target: Mach-O objects, ld64 localization,
+  // POSIX path/EOL semantics. Android falls to the linux arm below —
+  // bionic is a linux libc and its archives are ordinary ELF.
+  if (isIosTarget(driver.target)) return "darwin";
   if (driver.target.includes("linux")) return "linux";
   if (driver.target.includes("windows")) return "win32";
   return driver.target.includes("macos") || driver.target.includes("darwin") ? "darwin" : "other";
@@ -1136,8 +1378,9 @@ export interface LibArchiveOptions {
    * sanitizer ABI in instrumented builds) keep their global binding. Windows
    * embedders additionally link advapi32, iphlpapi, and ws2_32. Omitted = the
    * classic archive, byte-for-byte. Admitted for darwin/linux/win32 native
-   * hosts, linux and windows cross triples from any host, and macos cross
-   * triples from a darwin host (compileLibrary owns the refusal fence). */
+   * hosts, linux/android/windows cross triples from any host, and macos/ios
+   * cross triples from a darwin host (compileLibrary owns the refusal
+   * fence). */
   localizeSymbols?: readonly string[];
   /** Thread-instanced state (the profile's abi.instance_per_thread): every
    * TU of the archive compiles with -DSCR_THREAD_INSTANCES, moving the
@@ -1583,9 +1826,12 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  *            private extern, and -r without -keep_private_externs writes
  *            private externs out as non-external symbols. Apple ASan's
  *            image-registration COMMON remains shared so the final Mach-O
- *            image registers its globals once. ld64 reads every macOS
- *            architecture, so darwin-host macos cross triples ride the
- *            same arm; compileLibrary refuses macos targets elsewhere.
+ *            image registers its globals once. ld64 reads every Apple
+ *            platform's objects — macOS architectures and the iOS/
+ *            iOS-simulator triples alike (LC_BUILD_VERSION platform and
+ *            minos survive the merge) — so darwin-host macos AND ios
+ *            targets ride the same arm; compileLibrary refuses those
+ *            targets elsewhere.
  *   ELF, native linux host — ld -r merges with --force-group-allocation
  *            (ASan's instrumented globals ride ELF section groups whose
  *            signatures repeat across archives sharing runtime objects;
@@ -1663,11 +1909,13 @@ async function localizeLibraryObjects(
     // Cross ELF: the cross driver's own lld performs the relocatable merge
     // (with the staging archive's member semantics); demotion and section-
     // group resolution happen in process. -nostdlib keeps zig from feeding
-    // libc/compiler-rt inputs into the merge.
+    // libc/compiler-rt inputs into the merge. Android rides this arm
+    // unchanged: bionic archives are ordinary aarch64 ELF64, and the merge
+    // uses the driver's zig spelling (which pins the API floor).
     await run([
       driver.argv[0] ?? "zig",
       ...driver.argv.slice(1),
-      "-target", driver.target!,
+      "-target", driver.zigTarget ?? driver.target!,
       "-nostdlib",
       "-r", programObject, staging,
       "-o", combined,
@@ -3103,6 +3351,16 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const http = (opts.http ?? false) || nativeFetch || netIsland;
   const tls = (opts.tls ?? false) || nativeFetch || netIsland;
   const driver = resolveCc();
+  // Mobile triples produce library archives, never standalone executables:
+  // the executable-lane runtime (event loop, sockets, child processes) is
+  // not verified on those device classes. compile() reports the SC3002
+  // diagnostic first; this is the backstop for direct compileC callers.
+  if (isMobileTarget(driver.target)) {
+    throw new Error(
+      `SCRIPTC_TARGET=${driver.target} builds library-mode static archives only — ` +
+        `compile with a library profile (scriptc build --lib <profile>) and link the archive from the app project.`,
+    );
+  }
   const runtimeSources = targetPlatform(driver) === "wasi"
     ? RUNTIME_SOURCES.filter((source) => source !== "scr_child.c")
     : RUNTIME_SOURCES;
