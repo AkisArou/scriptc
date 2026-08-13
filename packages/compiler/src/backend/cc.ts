@@ -542,10 +542,13 @@ export function mobileTargetRefusal(
  * keys that disable persistent caching. */
 const appleSdkMemos = new Map<string, string>();
 function appleSdkRoot(sdk: "iphoneos" | "iphonesimulator", env: NodeJS.ProcessEnv): string {
-  const key = `${sdk}\0${env["DEVELOPER_DIR"] ?? ""}`;
+  const key = [sdk, env["PATH"] ?? "", env["DEVELOPER_DIR"] ?? "", env["SDKROOT"] ?? ""].join("\0");
   const memo = appleSdkMemos.get(key);
   if (memo !== undefined) return memo;
-  const probe = spawnSync("xcrun", ["--sdk", sdk, "--show-sdk-path"], { encoding: "utf8" });
+  const probe = spawnSync("xcrun", ["--sdk", sdk, "--show-sdk-path"], {
+    encoding: "utf8",
+    env,
+  });
   const path = probe.status === 0 ? (probe.stdout ?? "").trim() : "";
   if (path === "" || !existsSync(join(path, "usr", "include"))) {
     throw new Error(

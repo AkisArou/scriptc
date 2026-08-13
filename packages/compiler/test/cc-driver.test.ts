@@ -15,7 +15,7 @@
  * PATH — the driver pins above run everywhere.
  */
 import { execFile, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -72,6 +72,26 @@ test("an empty ANDROID_NDK_ROOT does not mask ANDROID_NDK_HOME", async () => {
     ANDROID_NDK_HOME: home,
   });
   expect(driver.targetArgs).toContain(join(sysroot, "usr", "include"));
+});
+
+test.skipIf(process.platform === "win32")("iOS SDK discovery uses the resolver's explicit environment", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scr-ios-sdk-env-"));
+  const bin = join(dir, "bin");
+  const sdk = join(dir, "Custom.sdk");
+  await mkdir(bin);
+  await mkdir(join(sdk, "usr", "include"), { recursive: true });
+  const xcrun = join(bin, "xcrun");
+  await writeFile(xcrun, '#!/bin/sh\nprintf "%s\\n" "$SCRIPTC_TEST_SDK_PATH"\n');
+  await chmod(xcrun, 0o755);
+
+  const driver = resolveCc({
+    PATH: bin,
+    SCRIPTC_CC: "zigcc",
+    SCRIPTC_TARGET: "aarch64-apple-ios",
+    DEVELOPER_DIR: join(dir, "CustomXcode.app", "Contents", "Developer"),
+    SCRIPTC_TEST_SDK_PATH: sdk,
+  }, "darwin");
+  expect(driver.targetArgs).toContain(sdk);
 });
 
 test("zigcc resolves to `zig cc`; linux triples add their libc target flags", () => {

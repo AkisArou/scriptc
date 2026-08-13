@@ -107,8 +107,9 @@
  * and symbol checks ride llvm-nm when plain nm is absent.
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
 import { compile, compileLibrary, IPHONEOS_MIN_VERSION, ANDROID_MIN_API, loadLibraryProfile } from "@scriptc/compiler";
@@ -1103,6 +1104,21 @@ test.each([
   },
 );
 
+test("M12: Android emulator port claims skip live serials and do not collide", () => {
+  let first: AndroidPortClaim | null = null;
+  let second: AndroidPortClaim | null = null;
+  try {
+    first = claimAndroidLanePort([`emulator-${ANDROID_PORT_MIN}`]);
+    second = claimAndroidLanePort([`emulator-${ANDROID_PORT_MIN}`]);
+    expect(first.port).not.toBe(ANDROID_PORT_MIN);
+    expect(second.port).not.toBe(ANDROID_PORT_MIN);
+    expect(second.port).not.toBe(first.port);
+  } finally {
+    if (second !== null) releaseAndroidLanePort(second);
+    if (first !== null) releaseAndroidLanePort(first);
+  }
+});
+
 /* ── M13: iOS (SCRIPTC_IOS=1) ─────────────────────────────────────────────── */
 
 const APPLE_MOBILE_TARGETS = ["aarch64-apple-ios", "aarch64-apple-ios-simulator"] as const;
@@ -1137,6 +1153,31 @@ function buildAppleProbe(archives: string[], source: string, tag: string, target
  * is reused; otherwise the first available iPhone boots headlessly and the
  * suite shuts it down again. */
 let bootedSimulator: { udid: string; bootedByUs: boolean } | null = null;
+type SimulatorDevice = { udid: string; state: string; name: string };
+type SimulatorListing = { devices: Record<string, SimulatorDevice[]> };
+
+function availableIphoneSimulators(listing: SimulatorListing): SimulatorDevice[] {
+  return Object.entries(listing.devices)
+    .filter(([runtime]) => runtime.includes(".SimRuntime.iOS-"))
+    .flatMap(([, devices]) => devices)
+    .filter((device) => device.name.startsWith("iPhone"));
+}
+
+test("M12: simulator reuse ignores booted devices from non-iOS runtimes", () => {
+  const devices = availableIphoneSimulators({
+    devices: {
+      "com.apple.CoreSimulator.SimRuntime.tvOS-26-0": [
+        { udid: "tv", state: "Booted", name: "Apple TV" },
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-26-0": [
+        { udid: "phone", state: "Shutdown", name: "iPhone 17" },
+        { udid: "tablet", state: "Booted", name: "iPad Pro" },
+      ],
+    },
+  });
+  expect(devices.map((device) => device.udid)).toEqual(["phone"]);
+});
+
 function shutdownOwnedSimulator(): void {
   if (bootedSimulator?.bootedByUs !== true) return;
   const owned = bootedSimulator;
@@ -1152,14 +1193,14 @@ function ensureBootedSimulator(): string {
   if (bootedSimulator !== null) return bootedSimulator.udid;
   const listing = JSON.parse(
     execFileSync("xcrun", ["simctl", "list", "devices", "available", "--json"], { encoding: "utf8" }),
-  ) as { devices: Record<string, { udid: string; state: string; name: string }[]> };
-  const devices = Object.values(listing.devices).flat();
+  ) as SimulatorListing;
+  const devices = availableIphoneSimulators(listing);
   const booted = devices.find((device) => device.state === "Booted");
   if (booted !== undefined) {
     bootedSimulator = { udid: booted.udid, bootedByUs: false };
     return booted.udid;
   }
-  const candidate = devices.find((device) => device.name.startsWith("iPhone")) ?? devices[0];
+  const candidate = devices[0];
   if (candidate === undefined) {
     throw new Error("SCRIPTC_IOS=1 needs at least one available simulator (xcrun simctl list devices available).");
   }
@@ -1342,15 +1383,31 @@ function buildAndroidProbe(archives: string[], source: string, tag: string): str
 /** The device the execution legs share: a running emulator/device is
  * reused when it carries arm64-v8a and API 26+; otherwise a headless arm64
  * AVD is written directly (the emulator reads ~/.android/avd — no
- * avdmanager/Java dependency) and booted on a lane-private port, then torn
- * down by the suite. */
-let androidDevice: {
-  serial: string;
-  startedByUs: boolean;
-  emulator?: ReturnType<typeof spawn>;
-} | null = null;
-const ANDROID_LANE_AVD = "scriptc-mobile-lane";
-const ANDROID_LANE_PORT = 5586;
+ * avdmanager/Java dependency) and booted on an exclusively claimed port,
+ * then torn down by the suite. The UUID-scoped AVD name and ownership
+ * marker keep concurrent lanes and pre-existing user AVDs out of scope. */
+interface AndroidPortClaim {
+  port: number;
+  lockPath: string;
+}
+
+type AndroidDevice =
+  | { serial: string; startedByUs: false }
+  | {
+      serial: string;
+      startedByUs: true;
+      adbOwned: boolean;
+      emulator: ReturnType<typeof spawn>;
+      portClaim: AndroidPortClaim;
+    };
+
+let androidDevice: AndroidDevice | null = null;
+const ANDROID_LANE_OWNER = `${process.pid}-${randomUUID()}`;
+const ANDROID_LANE_AVD = `scriptc-mobile-lane-${ANDROID_LANE_OWNER}`;
+const ANDROID_PORT_MIN = 5554;
+const ANDROID_PORT_MAX = 5682;
+const ANDROID_PORT_LOCK_ROOT = join(tmpdir(), "scriptc-mobile-emulator-ports");
+const ANDROID_AVD_OWNER_FILE = ".scriptc-owner";
 
 function adbDevices(adb: string): string[] {
   return execFileSync(adb, ["devices"], { encoding: "utf8" })
@@ -1380,26 +1437,132 @@ function compatibleAndroidDevice(adb: string, serial: string): boolean {
   return abiList !== null && sdkLevel !== null && isCompatibleAndroidDevice(abiList, sdkLevel);
 }
 
+function claimAndroidLanePort(runningSerials: readonly string[]): AndroidPortClaim {
+  mkdirSync(ANDROID_PORT_LOCK_ROOT, { recursive: true });
+  const portCount = (ANDROID_PORT_MAX - ANDROID_PORT_MIN) / 2 + 1;
+  const seed = (process.pid + Number.parseInt(ANDROID_LANE_OWNER.slice(-8), 16)) % portCount;
+  for (let offset = 0; offset < portCount; offset++) {
+    const port = ANDROID_PORT_MIN + 2 * ((seed + offset) % portCount);
+    if (runningSerials.includes(`emulator-${port}`)) continue;
+    const lockPath = join(ANDROID_PORT_LOCK_ROOT, `${port}.lock`);
+    try {
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ owner: ANDROID_LANE_OWNER, pid: process.pid }),
+        { flag: "wx", mode: 0o600 },
+      );
+      return { port, lockPath };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+  throw new Error(`no unclaimed even Android emulator port is available in ${ANDROID_PORT_MIN}-${ANDROID_PORT_MAX}`);
+}
+
+function releaseAndroidLanePort(claim: AndroidPortClaim): void {
+  try {
+    const record = JSON.parse(readFileSync(claim.lockPath, "utf8")) as { owner?: unknown };
+    if (record.owner === ANDROID_LANE_OWNER) rmSync(claim.lockPath, { force: true });
+  } catch {
+    /* a missing or foreign lock is not ours to remove */
+  }
+}
+
 function removeAndroidLaneAvd(): void {
-  rmSync(join(homedir(), ".android", "avd", `${ANDROID_LANE_AVD}.avd`), { recursive: true, force: true });
-  rmSync(join(homedir(), ".android", "avd", `${ANDROID_LANE_AVD}.ini`), { force: true });
+  const avdRoot = join(homedir(), ".android", "avd");
+  const avdDir = join(avdRoot, `${ANDROID_LANE_AVD}.avd`);
+  const iniPath = join(avdRoot, `${ANDROID_LANE_AVD}.ini`);
+  try {
+    if (readFileSync(join(avdDir, ANDROID_AVD_OWNER_FILE), "utf8") !== ANDROID_LANE_OWNER) return;
+  } catch {
+    return;
+  }
+  let ownsIni = false;
+  try {
+    ownsIni = readFileSync(iniPath, "utf8").includes(`path=${avdDir}\n`);
+  } catch {
+    /* the ini may not have been written before setup failed */
+  }
+  rmSync(avdDir, { recursive: true, force: true });
+  if (ownsIni) rmSync(iniPath, { force: true });
 }
 
 function stopOwnedAndroidDevice(): void {
   if (androidDevice?.startedByUs !== true) return;
   const owned = androidDevice;
   androidDevice = null;
-  try {
-    execFileSync(androidTool("adb"), ["-s", owned.serial, "emu", "kill"], { timeout: 30_000 });
-  } catch {
-    /* the emulator may have failed before adb connected */
+  if (owned.adbOwned) {
+    try {
+      execFileSync(androidTool("adb"), ["-s", owned.serial, "emu", "kill"], { timeout: 30_000 });
+    } catch {
+      /* the emulator may have exited after its identity was verified */
+    }
   }
   try {
-    owned.emulator?.kill("SIGTERM");
+    owned.emulator.kill("SIGTERM");
   } catch {
     /* process cleanup is best-effort — never mask a real failure */
   }
   removeAndroidLaneAvd();
+  releaseAndroidLanePort(owned.portClaim);
+}
+
+function createAndroidLaneAvd(image: { sysdir: string; api: string }): void {
+  const avdRoot = join(homedir(), ".android", "avd");
+  const avdDir = join(avdRoot, `${ANDROID_LANE_AVD}.avd`);
+  mkdirSync(avdRoot, { recursive: true });
+  mkdirSync(avdDir);
+  let marked = false;
+  try {
+    writeFileSync(join(avdDir, ANDROID_AVD_OWNER_FILE), ANDROID_LANE_OWNER, { flag: "wx", mode: 0o600 });
+    marked = true;
+    writeFileSync(
+      join(avdRoot, `${ANDROID_LANE_AVD}.ini`),
+      `avd.ini.encoding=UTF-8\npath=${avdDir}\npath.rel=avd/${ANDROID_LANE_AVD}.avd\ntarget=${image.api}\n`,
+      { flag: "wx" },
+    );
+    writeFileSync(
+      join(avdDir, "config.ini"),
+      [
+        `AvdId=${ANDROID_LANE_AVD}`,
+        "PlayStore.enabled=false",
+        "abi.type=arm64-v8a",
+        "avd.ini.encoding=UTF-8",
+        "disk.dataPartition.size=2G",
+        "hw.cpu.arch=arm64",
+        "hw.cpu.ncore=4",
+        "hw.gpu.enabled=no",
+        "hw.gpu.mode=off",
+        "hw.keyboard=yes",
+        "hw.lcd.density=440",
+        "hw.lcd.height=2280",
+        "hw.lcd.width=1080",
+        "hw.ramSize=2048",
+        "hw.sdCard=no",
+        `image.sysdir.1=${image.sysdir}`,
+        "tag.display=Google APIs",
+        "tag.id=google_apis",
+        "",
+      ].join("\n"),
+      { flag: "wx" },
+    );
+  } catch (err) {
+    if (marked) removeAndroidLaneAvd();
+    else rmSync(avdDir, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+function androidEmulatorAvdName(adb: string, serial: string): string | null {
+  const result = spawnSync(adb, ["-s", serial, "emu", "avd", "name"], {
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  if (result.status !== 0) return null;
+  return (result.stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line !== "" && line !== "OK") ?? null;
 }
 
 async function ensureAndroidDevice(): Promise<string> {
@@ -1444,48 +1607,38 @@ async function ensureAndroidDevice(): Promise<string> {
         "(sdkmanager 'system-images;android-<api>;google_apis;arm64-v8a') to boot one.",
     );
   }
-  const avdRoot = join(homedir(), ".android", "avd");
-  const avdDir = join(avdRoot, `${ANDROID_LANE_AVD}.avd`);
-  mkdirSync(avdDir, { recursive: true });
-  writeFileSync(
-    join(avdRoot, `${ANDROID_LANE_AVD}.ini`),
-    `avd.ini.encoding=UTF-8\npath=${avdDir}\npath.rel=avd/${ANDROID_LANE_AVD}.avd\ntarget=${image.api}\n`,
-  );
-  writeFileSync(
-    join(avdDir, "config.ini"),
-    [
-      `AvdId=${ANDROID_LANE_AVD}`,
-      "PlayStore.enabled=false",
-      "abi.type=arm64-v8a",
-      "avd.ini.encoding=UTF-8",
-      "disk.dataPartition.size=2G",
-      "hw.cpu.arch=arm64",
-      "hw.cpu.ncore=4",
-      "hw.gpu.enabled=no",
-      "hw.gpu.mode=off",
-      "hw.keyboard=yes",
-      "hw.lcd.density=440",
-      "hw.lcd.height=2280",
-      "hw.lcd.width=1080",
-      "hw.ramSize=2048",
-      "hw.sdCard=no",
-      `image.sysdir.1=${image.sysdir}`,
-      "tag.display=Google APIs",
-      "tag.id=google_apis",
-      "",
-    ].join("\n"),
-  );
-  const emulator = spawn(
-    androidTool("emulator"),
-    [
-      "-avd", ANDROID_LANE_AVD,
-      "-port", String(ANDROID_LANE_PORT),
-      "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot", "-gpu", "off",
-    ],
-    { detached: true, stdio: "ignore" },
-  );
-  const serial = `emulator-${ANDROID_LANE_PORT}`;
-  androidDevice = { serial, startedByUs: true, emulator };
+  const portClaim = claimAndroidLanePort(running);
+  try {
+    createAndroidLaneAvd(image);
+  } catch (err) {
+    releaseAndroidLanePort(portClaim);
+    throw err;
+  }
+  let emulator: ReturnType<typeof spawn>;
+  try {
+    emulator = spawn(
+      androidTool("emulator"),
+      [
+        "-avd", ANDROID_LANE_AVD,
+        "-port", String(portClaim.port),
+        "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot", "-gpu", "off",
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+  } catch (err) {
+    removeAndroidLaneAvd();
+    releaseAndroidLanePort(portClaim);
+    throw err;
+  }
+  const serial = `emulator-${portClaim.port}`;
+  const ownedDevice: Extract<AndroidDevice, { startedByUs: true }> = {
+    serial,
+    startedByUs: true,
+    adbOwned: false,
+    emulator,
+    portClaim,
+  };
+  androidDevice = ownedDevice;
   let emulatorError: Error | null = null;
   emulator.once("error", (err) => {
     emulatorError = err;
@@ -1495,14 +1648,27 @@ async function ensureAndroidDevice(): Promise<string> {
     const deadline = Date.now() + 300_000;
     for (;;) {
       if (emulatorError !== null) throw emulatorError;
-      if (emulator.exitCode !== null) {
-        throw new Error(`the Android emulator exited before boot completed (exit ${emulator.exitCode})`);
+      if (emulator.exitCode !== null || emulator.signalCode !== null) {
+        throw new Error(
+          `the Android emulator exited before boot completed (` +
+            (emulator.exitCode !== null ? `exit ${emulator.exitCode}` : `signal ${emulator.signalCode}`) +
+            `)`,
+        );
       }
       const probe = spawnSync(adb, ["-s", serial, "shell", "getprop", "sys.boot_completed"], {
         encoding: "utf8",
         timeout: 15_000,
       });
-      if ((probe.stdout ?? "").trim() === "1") break;
+      if ((probe.stdout ?? "").trim() === "1") {
+        const avdName = androidEmulatorAvdName(adb, serial);
+        if (avdName !== ANDROID_LANE_AVD) {
+          throw new Error(
+            `${serial} belongs to AVD '${avdName ?? "<unknown>"}', not this lane's '${ANDROID_LANE_AVD}'`,
+          );
+        }
+        ownedDevice.adbOwned = true;
+        break;
+      }
       if (Date.now() > deadline) throw new Error("the Android emulator did not finish booting within 5 minutes");
       await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
