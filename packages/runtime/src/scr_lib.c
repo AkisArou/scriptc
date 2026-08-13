@@ -106,6 +106,7 @@ extern char **environ; /* env snapshot (scr_env_pairs) */
 
 static SCR_TL int scr_lib_argc = 0;
 static SCR_TL char **scr_lib_argv = NULL;
+static SCR_TL bool scr_lib_skip_reexec_arg = false;
 static SCR_TL ScrArr *scr_argv_arr = NULL;    /* interned process.argv */
 static SCR_TL ScrStr *scr_platform_str = NULL; /* interned process.platform */
 static SCR_TL ScrStr *scr_exec_path_str = NULL; /* interned process.execPath */
@@ -133,9 +134,28 @@ static void scr_lib_cleanup(void) {
  * atexit handlers (the emitted library init never calls this; keeping it out
  * the archive's objects free of any atexit reference — the K8 ambient
  * audit's bar). */
+static bool scr_lib_same_executable_arg(const char *a, const char *b) {
+  if (strcmp(a, b) == 0) return true;
+  char resolved_a[PATH_MAX], resolved_b[PATH_MAX];
+#ifdef _WIN32
+  const char *use_a = _fullpath(resolved_a, a, sizeof resolved_a) != NULL ? resolved_a : a;
+  const char *use_b = _fullpath(resolved_b, b, sizeof resolved_b) != NULL ? resolved_b : b;
+  return _stricmp(use_a, use_b) == 0;
+#else
+  const char *use_a = realpath(a, resolved_a) != NULL ? resolved_a : a;
+  const char *use_b = realpath(b, resolved_b) != NULL ? resolved_b : b;
+  return strcmp(use_a, use_b) == 0;
+#endif
+}
+
 void scr_lib_init(int argc, char **argv) {
   scr_lib_argc = argc;
   scr_lib_argv = argv;
+  /* Node self-reexecution spells `spawn(process.execPath,
+   * [process.argv[1], ...args])`. In a native binary argv[0] already IS the
+   * entry executable, so collapse that repeated first argument before
+   * exposing Node's [exec, script, ...args] process.argv shape. */
+  scr_lib_skip_reexec_arg = argc >= 2 && scr_lib_same_executable_arg(argv[0], argv[1]);
   atexit(scr_lib_cleanup);
 }
 #endif /* !SCR_LIB */
@@ -151,18 +171,21 @@ void scr_lib_session_cleanup(void) { scr_lib_cleanup(); }
 /* Raw argv accessors for the island's process shim (scr_island.c): the
  * island's process.argv must match the static world's ["scriptc",
  * argv[0], ...] shape exactly, so both build from the same stash. */
-int scr_lib_arg_count(void) { return scr_lib_argc; }
-const char *scr_lib_arg(int i) { return scr_lib_argv[i]; }
+int scr_lib_arg_count(void) { return scr_lib_argc - (scr_lib_skip_reexec_arg ? 1 : 0); }
+const char *scr_lib_arg(int i) {
+  return scr_lib_argv[i + (scr_lib_skip_reexec_arg && i > 0 ? 1 : 0)];
+}
 
 ScrArr *scr_process_argv(void) {
   if (!scr_argv_arr) {
     /* ["scriptc", argv[0], argv[1], ...]: positions and length line up
      * with Node's [node-path, script-path, ...args]; the argv[0]/argv[1]
      * VALUES diverge (SEMANTICS.md). */
-    scr_argv_arr = scr_arr_new(SCR_ELEM_STR, (size_t)scr_lib_argc + 1);
+    int argc = scr_lib_arg_count();
+    scr_argv_arr = scr_arr_new(SCR_ELEM_STR, (size_t)argc + 1);
     scr_arr_push_ref(scr_argv_arr, scr_str_new("scriptc", 7));
-    for (int i = 0; i < scr_lib_argc; i++) {
-      const char *a = scr_lib_argv[i];
+    for (int i = 0; i < argc; i++) {
+      const char *a = scr_lib_arg(i);
       scr_arr_push_ref(scr_argv_arr, scr_str_new(a, strlen(a)));
     }
   }

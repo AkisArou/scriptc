@@ -2,7 +2,7 @@
  * scaffolding, plus the interned resolve/child-exit thunks that adapt typed
  * payloads onto the runtime's promise and child-process machinery. */
 import type { CEmitter } from "./emitter.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFsRenameThunk, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectResThunk, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFsRenameThunk, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
 import { cDecl, cType, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
 
@@ -563,6 +563,35 @@ import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/
       three
         ? `  ((void (*)(ScrClosure *, ScrHttpReq *, ScrUnion *, ScrBytes *))sc_cb->fn)(sc_cb, sc_req, sc_u, sc_head);`
         : `  ((void (*)(ScrClosure *, ScrHttpReq *, ScrUnion *))sc_cb->fn)(sc_cb, sc_req, sc_u);`,
+      `}`,
+    );
+    return sym;
+  }
+
+  export function connectResThunkFor(E: CEmitter, cbT: IrType): string {
+    if (cbT.kind !== "func") throw new Error("emitter bug: connect listener shape");
+    const key = `res:${typeKey(cbT)}`;
+    let sym = E.connectSockThunks.get(key);
+    if (sym) return sym;
+    sym = mangleConnectResThunk(E.connectSockThunks.size);
+    E.connectSockThunks.set(key, sym);
+    const p1 = cbT.params[1];
+    const def = p1?.kind === "union" ? E.unionsById.get(p1.unionId) : undefined;
+    const tag = def ? def.arms.findIndex((a) => a.kind === "httpRes") : -1;
+    if (p1?.kind === "union" && tag < 0) throw new Error("emitter bug: connect listener union lacks its response arm");
+    E.walkerProtos.push(`static void ${sym}(ScrClosure *sc_cb, ScrHttpReq *sc_req, ScrHttpRes *sc_res);`);
+    const second = p1?.kind === "union"
+      ? `ScrUnion *sc_u = scr_union_new_ref(${tag}, sc_res, &scr_http_res_retain_v, &scr_http_res_release_v, NULL);`
+      : "";
+    const arg = p1?.kind === "union" ? "sc_u" : "sc_res";
+    E.walkerDefs.push(
+      `static void ${sym}(ScrClosure *sc_cb, ScrHttpReq *sc_req, ScrHttpRes *sc_res) {`,
+      ...(second ? [`  ${second}`] : []),
+      ...(cbT.params.length === 0
+        ? ["  scr_http_req_release(sc_req);", "  scr_http_res_release(sc_res);", "  ((void (*)(ScrClosure *))sc_cb->fn)(sc_cb);"]
+        : cbT.params.length === 1
+          ? ["  scr_http_res_release(sc_res);", "  ((void (*)(ScrClosure *, ScrHttpReq *))sc_cb->fn)(sc_cb, sc_req);"]
+          : [`  ((void (*)(ScrClosure *, ScrHttpReq *, ${p1?.kind === "union" ? "ScrUnion" : "ScrHttpRes"} *))sc_cb->fn)(sc_cb, sc_req, ${arg});`]),
       `}`,
     );
     return sym;

@@ -1235,13 +1235,10 @@ function lowerNetServerMethodCall(L: Lowerer, call: ts.CallExpression,
       // HTTP CONNECT — the tunneling handover: (req, socket, head), fired
       // INSTEAD of 'request' for CONNECT-method requests (the 'upgrade'
       // machinery's twin; no listener destroys the socket, Node's
-      // default). Under the allowHTTP1 lowering the h2 compat server's
-      // 'connect' only ever fires for HTTP/1.1 CONNECT, so the second
-      // argument is ALWAYS the raw socket — a listener typing it
-      // `Http2ServerResponse | net.Socket` (portless's RFC 8441 handler)
-      // takes the union with the socket wrapped at its arm; `instanceof
-      // net.Socket` narrows it (always true at runtime here, exactly like
-      // Node's allowHTTP1 HTTP/1.1 arm).
+      // default). An allowHTTP1 server supplies a raw socket for HTTP/1.1
+      // CONNECT and an Http2ServerResponse for valid traditional/extended
+      // HTTP/2 CONNECT, so portless's union-typed listener selects the
+      // protocol arm with `instanceof net.Socket`.
       const cb = L.lowerExpr(args[1]!);
       if (cb.type.kind !== "func" || cb.type.params.length > 3) {
         L.unsupported(
@@ -1313,21 +1310,24 @@ function lowerNetServerMethodCall(L: Lowerer, call: ts.CallExpression,
       return { kind: "libCall", fn: "http.serverOnUpgrade", args: [receiver, cb, once], type: VOID, loc };
     }
     if (event === "sessionError") {
-      // 'sessionError' is an HTTP/2 SESSION event — the allowHTTP1
-      // lowering serves every connection as HTTP/1.1, so no session ever
-      // exists and the event NEVER fires (SEMANTICS.md divergence 57).
-      // The registration is honest dead weight: the callback is built and
-      // released, never called — so its parameters need no checking
-      // beyond the closure shape.
       const cb = L.lowerExpr(args[1]!);
-      if (cb.type.kind !== "func" || cb.type.ret.kind !== "void") {
+      if (cb.type.kind !== "func" || cb.type.ret.kind !== "void" || cb.type.params.length > 2) {
         L.unsupported(
           "SC1090",
           args[1]!,
-          "sessionError listeners returning a value (make the callback body a block)",
+          "sessionError listeners with more than two parameters or returning a value",
         );
       }
-      return { kind: "libCall", fn: "http2.serverOnSessionError", args: [receiver, cb], type: VOID, loc };
+      const [err, session] = cb.type.params;
+      if ((err !== undefined && !(err.kind === "object" && err.className === "%Error")) ||
+          (session !== undefined && session.kind !== "http2Session")) {
+        L.unsupported(
+          "SC1090",
+          args[1]!,
+          "sessionError listeners whose parameters are not (error: Error, session: ServerHttp2Session)",
+        );
+      }
+      return { kind: "libCall", fn: "http2.serverOnSessionError", args: [receiver, cb, once], type: VOID, loc };
     }
     L.noLowering(
       `server.${name}(${event === null ? "non-literal event" : `"${event}"`}, ...)`,
@@ -1653,7 +1653,7 @@ function lowerNetSocketMethodCall(L: Lowerer, call: ts.CallExpression,
  * slot). Null when the receiver is neither. */
 export function lowerServerMethodCall(L: Lowerer, call: ts.CallExpression,
   access: ts.PropertyAccessExpression,): IrExpr | null {
-  if (call.questionDotToken || access.questionDotToken) return null;
+  if (call.questionDotToken || (access.questionDotToken && !L.chainHandled.has(access))) return null;
   return (
     lowerServerCloseBind(L, call, access) ??
     lowerNetServerMethodCall(L, call, access) ??
@@ -1895,13 +1895,17 @@ function lowerH2SessionMethodCall(L: Lowerer, call: ts.CallExpression,
 
 /** Method calls on ClientHttp2Stream / ServerHttp2Stream receivers. */
 function lowerH2StreamMethodCall(L: Lowerer, call: ts.CallExpression,
-  access: ts.PropertyAccessExpression,): IrExpr | null {
-  if (L.mapTypeOf(L.typeOf(access.expression))?.kind !== "http2Stream") return null;
-  if (!L.isStdlibMember(access)) return null;
+  access: ts.PropertyAccessExpression, receiverOverride?: IrExpr,): IrExpr | null {
+  const compatReqStream =
+    ts.isPropertyAccessExpression(access.expression) &&
+    access.expression.name.text === "stream" &&
+    L.mapTypeOf(L.typeOf(access.expression.expression))?.kind === "httpReq";
+  if (L.mapTypeOf(L.typeOf(access.expression))?.kind !== "http2Stream" && !compatReqStream) return null;
+  if (!L.isStdlibMember(access) && !compatReqStream) return null;
   const name = access.name.text;
   const loc = locOf(call);
   const args = call.arguments;
-  const receiver = () => handleReceiver(L, access.expression, HTTP2STREAM_T);
+  const receiver = () => receiverOverride ?? handleReceiver(L, access.expression, HTTP2STREAM_T);
   if (name === "respond") {
     requireStatementPosition(L, call, "stream.respond(...)");
     const headersArg = args.length >= 1
@@ -1996,6 +2000,38 @@ function lowerH2StreamMethodCall(L: Lowerer, call: ts.CallExpression,
     "respond/write/end/close/destroy/setEncoding/resume/pause and on(...) are the lowered stream members");
 }
 
+/** A compatibility request's `req.stream?.method(...)`: the static Node
+ * type omits the HTTP/1 undefined arm, so build the runtime guard explicitly.
+ * The body receives the narrowed backing stream directly, preserving lazy
+ * argument evaluation on the HTTP/1 arm. */
+export function lowerCompatReqStreamOptionalCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): IrExpr | null {
+  if (!ts.isPropertyAccessExpression(call.expression) || !call.expression.questionDotToken) return null;
+  const stream = call.expression.expression;
+  if (!ts.isPropertyAccessExpression(stream) || stream.name.text !== "stream" ||
+      L.mapTypeOf(L.typeOf(stream.expression))?.kind !== "httpReq") return null;
+  const loc = locOf(call);
+  const unionT: IrType = { kind: "union", unionId: L.unions.intern([HTTP2STREAM_T, UNDEFINED_T]) };
+  const guarded: IrExpr = {
+    kind: "libCall",
+    fn: "http.reqH2Stream",
+    args: [handleReceiver(L, stream.expression, HTTPREQ_T)],
+    type: unionT,
+    loc,
+  };
+  const id = `chain.${L.chainCounter++}`;
+  const body = lowerH2StreamMethodCall(
+    L,
+    call,
+    call.expression,
+    { kind: "chainRecv", id, type: HTTP2STREAM_T, loc },
+  );
+  if (body === null) return null;
+  return { kind: "optChain", id, receiver: guarded, body, type: VOID, loc };
+}
+
 /** The composed `server.address().port` read — the crypto
  * randomBytes(n).toString(enc) precedent: the AddressInfo record between
  * the two reads never materializes; the runtime answers the bound port
@@ -2060,17 +2096,40 @@ export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpressio
       const receiver = handleReceiver(L, expr.expression, HTTPREQ_T);
       return { kind: "libCall", fn: "http.reqStatusMessage", args: [receiver], type: L.envValueType(), loc };
     }
-    if (name === "stream" || name === "session") {
-      // Http2ServerRequest's h2-only members. On the allowHTTP1 lowering
-      // every connection is HTTP/1.1, where Node answers undefined for
-      // both — the CALL forms lower in lower-calls.ts (guarded ?. no-ops,
-      // unguarded throws Node's exact TypeError); a bare read in any
-      // other position has no undefined-typed value form here, so the
-      // fence names the compiling shapes.
+    if (name === "stream") {
+      const parent = expr.parent;
+      if (ts.isPropertyAccessExpression(parent) && parent.expression === expr &&
+          ts.isCallExpression(parent.parent) && parent.parent.expression === parent) {
+        const receiver = handleReceiver(L, expr.expression, HTTPREQ_T);
+        if (parent.questionDotToken) {
+          const type: IrType = {
+            kind: "union",
+            unionId: L.unions.intern([HTTP2STREAM_T, UNDEFINED_T]),
+          };
+          return { kind: "libCall", fn: "http.reqH2Stream", args: [receiver], type, loc };
+        }
+        return {
+          kind: "libCall",
+          fn: "http.reqH2StreamOrThrow",
+          args: [receiver, { kind: "strLit", value: parent.name.text, type: STRING, loc }],
+          type: HTTP2STREAM_T,
+          loc,
+        };
+      }
+      L.noLowering(
+        "reading 'stream' from a request outside a method call",
+        expr,
+        "call req.stream methods directly; optional calls remain undefined on HTTP/1 and use the live stream on HTTP/2",
+      );
+    }
+    if (name === "session") {
+      // Http2ServerRequest's h2-only members are not exposed through the
+      // compatibility request handle yet. The call forms retain their
+      // guarded-no-op / unguarded-TypeError stance; other reads fence.
       L.noLowering(
         `reading '${name}' (an HTTP/2-only member) from a request`,
         expr,
-        "the allowHTTP1 lowering serves every connection as HTTP/1.1, where Node answers undefined — method calls compile (req.stream?.on(...) no-ops; unguarded req.stream.on(...) throws Node's TypeError); other reads have no lowering",
+        "compatibility requests do not expose their backing h2 stream/session yet; guarded method calls no-op and other reads have no lowering",
       );
     }
     if (name === "headers") {
@@ -2096,7 +2155,7 @@ export function lowerServerProperty(L: Lowerer, expr: ts.PropertyAccessExpressio
     L.noLowering(
       "reading 'stream' (an HTTP/2-only member) from a response",
       expr,
-      "the allowHTTP1 lowering serves every connection as HTTP/1.1, where Node answers undefined — guard method calls with '?.' or drop the use",
+      "compatibility responses do not expose their backing h2 stream yet — guard method calls with '?.' or drop the use",
     );
   }
   if (recvKind === "netSocket" && expr.name.text === "encrypted") {
@@ -3177,12 +3236,10 @@ function lowerHttpsModuleCall(L: Lowerer, expr: ts.CallExpression,
   );
 }
 
-/** The h2 SESSION-tuning options of http2.createSecureServer: knobs that
- * configure HTTP/2 sessions, which the allowHTTP1 lowering never creates
- * (every connection serves HTTP/1.1 — SEMANTICS.md divergence 57). They
- * are accepted and IGNORED — Node before 22.11 ignores the streamReset
- * pair the same way — but only with LITERAL values, so nothing observable
- * (a call, a read) is silently skipped. */
+/** The h2 SESSION-tuning options of http2.createSecureServer. This slice
+ * runs most at their defaults, so they are accepted and ignored only with
+ * literal values; settings.enableConnectProtocol is parsed explicitly
+ * below because it changes the wire protocol and CONNECT dispatch. */
 const HTTP2_IGNORED_TUNING_OPTIONS: ReadonlySet<string> = new Set([
   "streamResetBurst",
   "streamResetRate",
@@ -3213,13 +3270,9 @@ function stripParensAndCasts(node: ts.Expression): ts.Expression {
   }
 }
 
-/** Module-function calls on http2 import bindings. The ONE lowered member
- * is createSecureServer with allowHTTP1: true — the honest HTTP/1.1
- * fallback: the existing TLS server + HTTP/1.1 parser, ALPN advertising
- * http/1.1 only (h2-capable clients negotiate down; h2-only clients fail
- * the handshake — SEMANTICS.md divergence 57). The handler arrives later
- * via server.on("request", ...); h2 sessions (connect, the h2c
- * createServer) and h2-only servers keep their fences. */
+/** Module-function calls on http2 import bindings. createServer lowers h2c;
+ * createSecureServer lowers h2 over TLS, with allowHTTP1 selecting one
+ * dual-ALPN server whose request/connect listeners mirror across parsers. */
 function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
   bi: { module: string; member: string },
   loc: SrcLoc,): IrExpr {
@@ -3397,6 +3450,7 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
     let key: IrExpr | null = null;
     let sni: IrExpr | null = null;
     let allowHttp1 = false;
+    let enableConnectProtocol = false;
     // The SNICallback value shape: (servername: string, cb) => void where
     // cb is (err: Error | null, ctx?: SecureContext) => void — cb may
     // declare fewer params (the emitted answer thunk matches its ABI),
@@ -3494,16 +3548,15 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
       }
       const k = (prop.name as ts.Identifier | ts.StringLiteral).text;
       if (k === "allowHTTP1") {
-        // A literal true or false: true keeps the compatibility server
-        // (HTTP/1.1 only — divergence 57's remaining arm); false IS the
-        // absent default — the h2-only ALPN server below. A runtime
+        // A literal true or false: true selects the dual h2/http1 server;
+        // false IS the absent default — the h2-only ALPN server below. A runtime
         // value would pick a protocol stack dynamically — fence.
         if (initializer !== null && initializer.kind === ts.SyntaxKind.FalseKeyword) return;
         if (initializer === null || initializer.kind !== ts.SyntaxKind.TrueKeyword) {
           L.noLowering(
             "createSecureServer with a non-literal allowHTTP1 option",
             prop,
-            "allowHTTP1 picks the protocol stack (true: the HTTP/1.1 compatibility server; false/absent: the ALPN=h2 server) — spell it as a literal",
+            "allowHTTP1 picks the protocol stack (true: dual h2/http1; false/absent: ALPN=h2 only) — spell it as a literal",
           );
         }
         allowHttp1 = true;
@@ -3548,6 +3601,22 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
           e.properties.every(
             (p) => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && isScalarLiteral(p.initializer),
           );
+        if (k === "settings" && initializer !== null && ts.isObjectLiteralExpression(initializer)) {
+          for (const setting of initializer.properties) {
+            if (ts.isPropertyAssignment(setting) && ts.isIdentifier(setting.name) &&
+                setting.name.text === "enableConnectProtocol") {
+              if (setting.initializer.kind !== ts.SyntaxKind.TrueKeyword &&
+                  setting.initializer.kind !== ts.SyntaxKind.FalseKeyword) {
+                L.noLowering(
+                  "settings.enableConnectProtocol with a non-boolean literal",
+                  setting,
+                  "spell enableConnectProtocol as true or false",
+                );
+              }
+              enableConnectProtocol = setting.initializer.kind === ts.SyntaxKind.TrueKeyword;
+            }
+          }
+        }
         if (initializer !== null &&
             (isScalarLiteral(initializer) || isLiteralObjectOfLiterals(initializer))) {
           return;
@@ -3555,7 +3624,7 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
         L.noLowering(
           `createSecureServer option '${k}' with a non-literal value`,
           prop,
-          "h2 session-tuning options are accepted with literal values (settings: a literal of literals) and ignored — the allowHTTP1 lowering serves HTTP/1.1 only, which has no h2 sessions to tune",
+          "h2 session-tuning options are accepted with literal values but are not applied yet",
         );
       }
       if (k === "SNICallback") {
@@ -3596,29 +3665,29 @@ function lowerHttp2ModuleCall(L: Lowerer, expr: ts.CallExpression,
         L.noLowering(
           "createSecureServer with an SNICallback and no allowHTTP1",
           optsNode,
-          "SNICallback lowers on the allowHTTP1 compatibility server — the ALPN=h2 server serves one cert/key pair",
+          "SNICallback lowers on the dual allowHTTP1 server — the h2-only server serves one cert/key pair",
         );
       }
       if (handlerNode !== null) {
         const cb = lowerRequestHandlerArg(L, handlerNode);
-        return { kind: "libCall", fn: "http2.createSecureServerH2Req", args: [cert, key, cb], type: NETSERVER_T, loc };
+        return { kind: "libCall", fn: "http2.createSecureServerH2Req", args: [cert, key, cb, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
       }
-      return { kind: "libCall", fn: "http2.createSecureServerH2", args: [cert, key], type: NETSERVER_T, loc };
+      return { kind: "libCall", fn: "http2.createSecureServerH2", args: [cert, key, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
     }
     if (sni !== null) {
-      return { kind: "libCall", fn: "http2.createSecureServerSni", args: [cert, key, sni], type: NETSERVER_T, loc };
+      return { kind: "libCall", fn: "http2.createSecureServerSni", args: [cert, key, sni, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
     }
     if (handlerNode !== null) {
       const cb = lowerRequestHandlerArg(L, handlerNode);
-      return { kind: "libCall", fn: "http2.createSecureServerReq", args: [cert, key, cb], type: NETSERVER_T, loc };
+      return { kind: "libCall", fn: "http2.createSecureServerReq", args: [cert, key, cb, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
     }
-    return { kind: "libCall", fn: "http2.createSecureServer", args: [cert, key], type: NETSERVER_T, loc };
+    return { kind: "libCall", fn: "http2.createSecureServer", args: [cert, key, boolLit(enableConnectProtocol, loc)], type: NETSERVER_T, loc };
   }
   L.noLowering(
     `http2.${bi.member}`,
     expr,
     builtinFenceHintOf("http2", bi.member) ??
-      "createSecureServer({ allowHTTP1: true, cert, key }) is the lowered http2 surface — it serves HTTP/1.1 only (ALPN never advertises h2); h2 sessions have no lowering",
+      "createSecureServer({ allowHTTP1: true, cert, key }) and the h2-only form are lowered",
     L.resolveValueSymbol(expr.expression as ts.Identifier),
   );
 }

@@ -472,6 +472,10 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "http.serverOnConnect": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
   "http.clientOnUpgrade": { argTypes: [HTTPCLIENTREQ_T, null, BOOL], result: VOID },
   "http.reqSocket": { argTypes: [HTTPREQ_T], result: NETSOCKET_T },
+  // reqH2Stream's program-interned Http2Stream | undefined result is
+  // checked in the special libCall cases below.
+  "http.reqH2Stream": { argTypes: [HTTPREQ_T], result: VOID },
+  "http.reqH2StreamOrThrow": { argTypes: [HTTPREQ_T, STRING], result: HTTP2STREAM_T },
   "http.reqPipeRes": { argTypes: [HTTPREQ_T, HTTPRES_T], result: VOID },
   "http.reqPipeClient": { argTypes: [HTTPREQ_T, HTTPCLIENTREQ_T], result: VOID },
   "http.reqPipeSock": { argTypes: [HTTPREQ_T, NETSOCKET_T], result: VOID },
@@ -530,8 +534,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "tls.createServerDynCb": { argTypes: [DYN, null], result: NETSERVER_T },
   "https.createServerDyn": { argTypes: [DYN], result: NETSERVER_T },
   "https.createServerDynCb": { argTypes: [DYN, null], result: NETSERVER_T },
-  "http2.createSecureServerReq": { argTypes: [null, null, null], result: NETSERVER_T },
-  "http2.createSecureServerH2Req": { argTypes: [null, null, null], result: NETSERVER_T },
+  "http2.createSecureServerReq": { argTypes: [null, null, null, BOOL], result: NETSERVER_T },
+  "http2.createSecureServerH2Req": { argTypes: [null, null, null, BOOL], result: NETSERVER_T },
   "http2.createSecureServerDyn": { argTypes: [DYN], result: NETSERVER_T },
   "http2.createSecureServerDynCb": { argTypes: [DYN, null], result: NETSERVER_T },
   // tls.connect(port, host, opts[, cb]) — port -1 / host "" read the
@@ -557,18 +561,17 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // http2's allowHTTP1 compatibility server (divergence 57): cert/key
   // like tls.createServer; the 'request' handler arrives separately via
   // http.serverOnRequest (shape checked in the libCall case, like
-  // http.createServer's). serverOnSessionError's callback is any void
-  // closure — it is released unread (no h2 session ever fires it).
-  "http2.createSecureServer": { argTypes: [null, null], result: NETSERVER_T },
+  // http.createServer's). sessionError callback shape is checked below.
+  "http2.createSecureServer": { argTypes: [null, null, BOOL], result: NETSERVER_T },
   // The SNI-callback form: arg 2 is the JS SNICallback closure — a
   // `(servername, cb) => void` func, or its `| undefined` union from the
   // conditional-spread spelling (the libCall case checks the shape).
-  "http2.createSecureServerSni": { argTypes: [null, null, null], result: NETSERVER_T },
+  "http2.createSecureServerSni": { argTypes: [null, null, null, BOOL], result: NETSERVER_T },
   // The ALPN=h2 server (createSecureServer without allowHTTP1): the real
   // h2 session machinery behind the TLS handshake.
-  "http2.createSecureServerH2": { argTypes: [null, null], result: NETSERVER_T },
+  "http2.createSecureServerH2": { argTypes: [null, null, BOOL], result: NETSERVER_T },
   "http.serverOnRequest": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
-  "http2.serverOnSessionError": { argTypes: [NETSERVER_T, null], result: VOID },
+  "http2.serverOnSessionError": { argTypes: [NETSERVER_T, null, BOOL], result: VOID },
   "http2.streamNoop": { argTypes: [], result: VOID },
   "http2.streamUndefCall": { argTypes: [STRING], result: VOID },
   // The REAL h2c surface (scr_http2.c). Callback slots are null (the
@@ -1908,6 +1911,23 @@ function validateFunction(
         expectType(e.left, ut, "unionEq left");
         expectType(e.right, ut, "unionEq right");
         if (e.type.kind !== "bool") err("unionEq must be bool", e.loc);
+        break;
+      }
+      case "unionFuncEq": {
+        checkExpr(e.union);
+        checkExpr(e.func);
+        const def = unions.get(e.unionId);
+        if (!def) err(`unionFuncEq of unknown union ${e.unionId}`, e.loc);
+        expectType(e.union, { kind: "union", unionId: e.unionId }, "unionFuncEq union");
+        const arm = def?.arms[e.tag];
+        if (!Number.isInteger(e.tag) || arm?.kind !== "func") {
+          err(`unionFuncEq tag ${e.tag} must select a function arm of ${e.unionId}`, e.loc);
+        }
+        if ((def?.arms.filter((candidate) => candidate.kind === "func").length ?? 0) !== 1) {
+          err(`unionFuncEq requires exactly one function arm in ${e.unionId}`, e.loc);
+        }
+        if (e.func.type.kind !== "func") err("unionFuncEq function operand must be func", e.loc);
+        if (e.type.kind !== "bool") err("unionFuncEq must be bool", e.loc);
         break;
       }
       case "strConcat":
@@ -3655,7 +3675,12 @@ function validateFunction(
         }
         if (e.fn === "http2.serverOnSessionError") {
           const cbT = e.args[1]?.type;
-          if (cbT?.kind !== "func" || cbT.ret.kind !== "void") {
+          const ok = cbT?.kind === "func" && cbT.ret.kind === "void" &&
+            cbT.params.length <= 2 &&
+            (cbT.params[0] === undefined ||
+              (cbT.params[0].kind === "object" && cbT.params[0].className === "%Error")) &&
+            (cbT.params[1] === undefined || cbT.params[1].kind === "http2Session");
+          if (!ok) {
             err(`libCall http2.serverOnSessionError callback shape (frontend must fence)`, e.loc);
           }
           break;
@@ -3860,6 +3885,14 @@ function validateFunction(
           if (!ok) {
             err(`libCall http.reqStatusMessage must return the 'string | undefined' union`, e.loc);
           }
+          break;
+        }
+        if (e.fn === "http.reqH2Stream") {
+          const def = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
+          const ok = def && def.arms.length === 2 &&
+            def.arms.some((a) => a.kind === "http2Stream") &&
+            def.arms.some((a) => a.kind === "undefinedT");
+          if (!ok) err(`libCall http.reqH2Stream must return the 'Http2Stream | undefined' union`, e.loc);
           break;
         }
         if (e.fn === "http.reqHeader" || e.fn === "http.resGetHeader") {

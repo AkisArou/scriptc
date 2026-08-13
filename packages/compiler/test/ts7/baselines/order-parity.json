@@ -5506,9 +5506,27 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2675-process-self-reexec.ts": {
+   "order": [
+    "<repo>/tests/corpus/2675-process-self-reexec.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2676-indexed-read-strict-equality.ts": {
+   "order": [
+    "<repo>/tests/corpus/2676-indexed-read-strict-equality.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2676-top-level-await-ambiguous/main.ts": {
    "order": [
     "<repo>/tests/corpus/2676-top-level-await-ambiguous/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2677-runtime-optional-closure.ts": {
+   "order": [
+    "<repo>/tests/corpus/2677-runtime-optional-closure.ts"
    ],
    "diags": []
   },
@@ -7645,6 +7663,12 @@
   "<repo>/tests/diagnostics/regex.ts": {
    "order": [
     "<repo>/tests/diagnostics/regex.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/runtime-optional-capture-chain.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/runtime-optional-capture-chain.ts"
    ],
    "diags": []
   },

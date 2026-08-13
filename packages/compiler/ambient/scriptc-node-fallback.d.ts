@@ -2444,18 +2444,10 @@ declare module "node:https" {
   export * from "https";
 }
 
-/* node:http2 — the COMPATIBILITY slice (SEMANTICS.md divergence 57):
- * createSecureServer({ allowHTTP1: true, cert, key }) is the https
- * server without an eager handler — ALPN advertises http/1.1 ONLY, so
- * h2-capable clients negotiate down and every connection serves
- * HTTP/1.1 (h2-only clients fail the handshake; no multiplexing, no
- * server push). The handler arrives via server.on("request", ...);
- * Http2ServerRequest/Response ARE the http req/res surface (exactly
- * what Node hands an allowHTTP1 server's HTTP/1.1 connections), with
- * the h2-only members (stream, session) answering undefined behind a
- * '?.' guard and fencing unguarded. 'sessionError' registers and never
- * fires (no h2 session ever exists). h2 sessions themselves — connect,
- * the h2c createServer — have no lowering. */
+/* node:http2 — the compatibility surface: allowHTTP1 servers negotiate
+ * h2 or HTTP/1.1 and expose the shared request/response API. HTTP/2
+ * requests retain their backing stream; server session failures surface
+ * through sessionError. */
 declare module "http2" {
   import { Socket } from "net";
   export interface Http2Stream {
@@ -2529,7 +2521,7 @@ declare module "http2" {
     on(event: "request", listener: (req: Http2ServerRequest, res: Http2ServerResponse) => void): void;
     on(event: "error", listener: (err: Error) => void): void;
     on(event: "close", listener: () => void): void;
-    on(event: "sessionError", listener: () => void): void;
+    on(event: "sessionError", listener: (err: Error, session: ServerHttp2Session) => void): void;
     /* The ALPN=h2 server's surface (createSecureServer WITHOUT
      * allowHTTP1 — the real h2-over-TLS stack): per-stream and
      * per-session listeners, exactly the h2c server's. */

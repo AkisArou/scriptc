@@ -228,6 +228,9 @@ export function mangleNetLookupAnswerThunk(n: number): string {
 export function mangleConnectSockThunk(n: number): string {
   return `sc_h2conn_${n}`;
 }
+export function mangleConnectResThunk(n: number): string {
+  return `sc_h2conn_res_${n}`;
+}
 
 /** Emitted EventEmitter listener invoke adapter (va_list → the listener's
  * typed parameter prefix, each retained per the callee-owns convention),

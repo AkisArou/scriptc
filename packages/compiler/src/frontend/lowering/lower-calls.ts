@@ -17,8 +17,8 @@ import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
 import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerFileHandleMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
-import { droppableStatic, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
-import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
+import { droppableStatic, lowerAbsenceProbe, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
+import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerCompatReqStreamOptionalCall, lowerHttpClientFnCall } from "./lower-server.js";
 import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
 import { lowerConsoleInspectArg, lowerFormatCall } from "./lower-inspect.js";
@@ -2844,27 +2844,22 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // lowering for the chain to guard).
     const processOptional = L.lowerProcessOptionalMethodCall(expr);
     if (processOptional) return processOptional;
+    const reqStreamOptional = lowerCompatReqStreamOptionalCall(L, expr);
+    if (reqStreamOptional) return reqStreamOptional;
     // `t.unref?.()` on a Timeout handle — same story: the method always
     // exists, so the optional call is the call.
     if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
       const timeoutOptional = L.lowerTimeoutMethodCall(expr, expr.expression);
       if (timeoutOptional) return timeoutOptional;
     }
-    // `req.stream?.on(...)` — the http2 compatibility request's h2-only
-    // stream member, guarded. The allowHTTP1 lowering serves every
-    // connection as HTTP/1.1, where Node answers undefined for req.stream:
-    // the optional chain short-circuits, the arguments never evaluate, and
-    // the whole statement is a no-op — exactly what lowers here (a VOID
-    // no-op the emitter drops). The receiver is restricted to an
-    // identifier so no evaluation is skipped, and to statement position so
-    // no value is consumed (an unguarded or computed use meets the pointed
-    // per-member fence in lower-server.ts instead).
+    // `req.session?.m(...)` remains absent on compatibility requests. Live
+    // `req.stream` calls now pass through the normal optional-chain and h2
+    // stream lowering using lowerServerProperty's checked getter.
     if (
       ts.isPropertyAccessExpression(expr.expression) &&
       ts.isPropertyAccessExpression(expr.expression.expression) &&
       !expr.expression.expression.questionDotToken &&
-      (expr.expression.expression.name.text === "stream" ||
-        expr.expression.expression.name.text === "session") &&
+      expr.expression.expression.name.text === "session" &&
       ts.isIdentifier(expr.expression.expression.expression) &&
       L.mapTypeOf(L.typeOf(expr.expression.expression.expression))?.kind === "httpReq" &&
       L.isStdlibMember(expr.expression.expression)
@@ -3552,10 +3547,67 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
           const x = L.lowerExprExpecting(expr.arguments[0]!, F64);
           return { kind: "libCall", fn: "num.isNaN", args: [x], type: BOOL, loc };
         }
-        const s = L.lowerExprExpecting(expr.arguments[0]!, STRING);
         const radix: IrExpr = expr.arguments[1]
           ? L.lowerExprExpecting(expr.arguments[1], F64)
           : { kind: "numLit", value: 0, type: F64, loc };
+        const optional = lowerAbsenceProbe(L, expr.arguments[0]!);
+        if (optional?.type.kind === "union") {
+          const def = L.unions.get(optional.type.unionId);
+          const stringTag = def?.arms.findIndex((arm) => arm.kind === "string") ?? -1;
+          if (
+            def &&
+            stringTag >= 0 &&
+            def.arms.every((arm) => arm.kind === "string" || isUnitType(arm))
+          ) {
+            const unionT = optional.type;
+            const key = `parseInt.optional:${unionT.unionId}`;
+            let helper = L.widthHelpers.get(key);
+            if (!helper) {
+              helper = `%parseInt.optional.${L.widthHelpers.size}`;
+              L.widthHelpers.set(key, helper);
+              const value: IrExpr = { kind: "varRef", localId: "value.0", type: unionT, loc };
+              const radixRef: IrExpr = { kind: "varRef", localId: "radix.0", type: F64, loc };
+              const body: IrStmt[] = def.arms.flatMap((arm, tag): IrStmt[] =>
+                isUnitType(arm)
+                  ? [{
+                      kind: "if",
+                      cond: { kind: "unionIsTag", unionId: unionT.unionId, tag, negated: false, value, type: BOOL, loc },
+                      then: [{ kind: "return", value: { kind: "numLit", value: NaN, type: F64, loc }, loc }],
+                      else_: null,
+                      loc,
+                    }]
+                  : [],
+              );
+              body.push({
+                kind: "return",
+                value: {
+                  kind: "libCall",
+                  fn: "num.parseInt",
+                  args: [{ kind: "unionNarrow", unionId: unionT.unionId, tag: stringTag, value, type: STRING, loc }, radixRef],
+                  type: F64,
+                  loc,
+                },
+                loc,
+              });
+              L.liftedFns.push({
+                name: helper,
+                params: [
+                  { localId: "value.0", name: "value", type: unionT },
+                  { localId: "radix.0", name: "radix", type: F64 },
+                ],
+                returnType: F64,
+                locals: [
+                  { id: "value.0", name: "value", type: unionT, mutable: true },
+                  { id: "radix.0", name: "radix", type: F64, mutable: true },
+                ],
+                body,
+                loc,
+              });
+            }
+            return { kind: "call", callee: helper, args: [optional, radix], type: F64, loc };
+          }
+        }
+        const s = L.lowerExprExpecting(expr.arguments[0]!, STRING);
         return { kind: "libCall", fn: "num.parseInt", args: [s, radix], type: F64, loc };
       }
       // STATIC parseFloat/isFinite over exactly-typed arguments —

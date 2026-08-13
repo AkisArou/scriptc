@@ -153,7 +153,10 @@ const hostInvariantContractPattern = [
 // Logically portable acceptance suites whose oracle lives in an external
 // worktree that is intentionally not uploaded. Run them locally in both
 // flavors, sharding suites whose individual cases are independently addressable.
-const localLaneFiles = ["tests/harness/prettier-e2e.test.ts"];
+const localLaneFiles = [
+  "tests/harness/prettier-e2e.test.ts",
+  "tests/harness/portless-e2e.test.ts",
+];
 const localCaseShardedFiles = ["tests/harness/vercel-e2e.test.ts"];
 
 const { values } = parseArgs({

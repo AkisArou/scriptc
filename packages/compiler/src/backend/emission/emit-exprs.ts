@@ -2778,6 +2778,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const call = `${E.unionEqHelper(e.unionId, e.sameValue)}(${l.name}, ${r.name})`;
         return E.newTemp(e.type, e.negated ? `!${call}` : call);
       }
+      case "unionFuncEq": {
+        const u = E.emitExpr(e.union);
+        const f = E.emitExpr(e.func);
+        const test = `(${u.name}->tag == ${e.tag} && scr_union_peek(${u.name}) == ${f.name})`;
+        return E.newTemp(e.type, e.negated ? `!${test}` : test);
+      }
       case "caughtTest": {
         // Kind-tag tests read the snapshot directly; instanceof compares an
         // OBJ payload's vtable preorder against the class's compile-time
@@ -4404,6 +4410,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           case "http.reqSocket":
             return finish(`scr_http_req_socket(${arg(0)})`);
+          case "http.reqH2Stream": {
+            if (e.type.kind !== "union") throw new Error("emitter bug: http.reqH2Stream result is not a union");
+            const def = E.unionsById.get(e.type.unionId);
+            const streamTag = def ? def.arms.findIndex((a) => a.kind === "http2Stream") : -1;
+            const undefTag = E.undefinedArmTag(e.type);
+            if (streamTag < 0 || undefTag < 0) throw new Error("emitter bug: http.reqH2Stream union lacks its arms");
+            const st = E.newTemp({ kind: "http2Stream" }, `scr_http_req_h2_stream(${arg(0)})`);
+            E.moveTemp(st);
+            const present = `scr_union_new_ref(${streamTag}, ${st.name}, &scr_http2_stream_retain_v, &scr_http2_stream_release_v, NULL)`;
+            return E.newTemp(e.type, `${st.name} ? ${present} : ${E.unitInstanceRef(e.type.unionId, undefTag)}`);
+          }
+          case "http.reqH2StreamOrThrow":
+            return finish(`scr_http_req_h2_stream_or_throw(${arg(0)}, ${arg(1)})`);
           case "http.reqRawHeaders":
             return finish(`scr_http_req_raw_headers(${arg(0)})`);
           case "http.reqHeaderPairs":
@@ -4463,7 +4482,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 : cbT.params.length === 2 ? "scr_http_upgrade_thunk2"
                 : cbT.params.length === 1 ? "scr_http_upgrade_thunk1"
                 : "scr_http_upgrade_thunk0";
-            E.line(`scr_http_server_on_connect(${arg(0)}, ${cb.name}, &${adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
+            const h2Def = p1?.kind === "union" ? E.unionsById.get(p1.unionId) : undefined;
+            const h2Adapter = cbT.params.length >= 2
+              ? h2Def?.arms.some((arm) => arm.kind === "httpRes") ? `&${E.connectResThunkFor(cbT)}` : "NULL"
+              : cbT.params.length === 1 ? "&scr_http_handler_thunk1" : "&scr_http_handler_thunk0";
+            E.line(`scr_http_server_on_connect(${arg(0)}, ${cb.name}, &${adapter}, ${h2Adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
           }
           case "net.sockPipeRes":
@@ -4833,14 +4856,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             );
           }
           case "http2.createSecureServer":
-            // The allowHTTP1 compatibility server (SEMANTICS.md divergence
-            // 56): the https server with NO eager handler — 'request'
-            // listeners arrive via http.serverOnRequest. ALPN advertises
-            // http/1.1 only (scr_tls.c), so h2-capable clients negotiate
-            // down and every connection serves HTTP/1.1.
             E.usesTimers = true;
             return finish(
-              `scr_https_create_server((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len, NULL, NULL)`,
+              `scr_http2_create_secure_server_allow_http1((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len, NULL, NULL, NULL, NULL, ${arg(2)})`,
             );
           case "http2.createSecureServerH2":
             // The REAL h2-over-TLS server (no allowHTTP1): ALPN advertises
@@ -4848,7 +4866,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // 'stream'/'session' listeners, exactly the h2c surface.
             E.usesTimers = true;
             return finish(
-              `scr_http2_create_secure_server((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len)`,
+              `scr_http2_create_secure_server((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len, ${arg(2)})`,
             );
           case "http2.createSecureServerReq":
           case "http2.createSecureServerH2Req": {
@@ -4867,8 +4885,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const certKey = `(const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len`;
             return finish(
               fn === "http2.createSecureServerReq"
-                ? `scr_https_create_server(${certKey}, ${cb.name}, &${adapter})`
-                : `scr_http2_create_secure_server_req(${certKey}, ${cb.name}, &${adapter})`,
+                ? `scr_http2_create_secure_server_allow_http1(${certKey}, ${cb.name}, &${adapter}, NULL, NULL, ${arg(3)})`
+                : `scr_http2_create_secure_server_req(${certKey}, ${cb.name}, &${adapter}, ${arg(3)})`,
             );
           }
           case "http2.createSecureServerDyn":
@@ -4925,7 +4943,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             }
             const answer = E.sniAnswerThunkFor(cbFuncT.params[1]);
             return finish(
-              `scr_https_create_server_sni((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len, ${cbExpr}, (void *)&${answer})`,
+              `scr_http2_create_secure_server_allow_http1((const char *)${arg(0)}->data, ${arg(0)}->len, (const char *)${arg(1)}->data, ${arg(1)}->len, NULL, NULL, ${cbExpr}, (void *)&${answer}, ${arg(3)})`,
             );
           }
           case "tls.createSecureContext":
@@ -4965,14 +4983,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`scr_http_server_on_request(${arg(0)}, ${cb.name}, &${adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
           }
-          case "http2.serverOnSessionError":
-            // 'sessionError' is an h2 SESSION event and the compatibility
-            // server never creates a session: the registration is honest
-            // dead weight. Receiver and callback temps evaluate (JS
-            // evaluates them) and release through the ordinary temp
-            // lifecycle — the closure is built, never installed, never
-            // called; no runtime call is emitted at all.
+          case "http2.serverOnSessionError": {
+            const cbT = e.args[1]!.type;
+            if (cbT.kind !== "func") throw new Error("emitter bug: sessionError listener not a func");
+            const cb = args[1]!;
+            E.moveTemp(cb);
+            const adapter = cbT.params.length === 2
+              ? "scr_http2_session_error_thunk2"
+              : cbT.params.length === 1
+                ? "scr_http2_session_error_thunk1"
+                : "scr_http2_session_error_thunk0";
+            E.line(`scr_http2_server_on_session_error(${arg(0)}, ${cb.name}, &${adapter}, ${arg(2)});${E.srcComment(e.loc)}`);
             return { name: "", type: e.type };
+          }
           case "http2.streamNoop":
             // `req.stream?.on(...)`: stream is undefined on every
             // connection the allowHTTP1 lowering accepts — the optional
