@@ -15,7 +15,7 @@
  * PATH — the driver pins above run everywhere.
  */
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -57,6 +57,21 @@ test("SCRIPTC_TARGET without zigcc is an error, never a silent clang cross build
 test("unknown SCRIPTC_CC values are rejected", () => {
   expect(() => resolveCc({ SCRIPTC_CC: "gcc" })).toThrow(/unknown SCRIPTC_CC/);
   expect(() => resolveCc({ SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm64-wasi" })).toThrow(/supported: wasm32-wasi/);
+});
+
+test("an empty ANDROID_NDK_ROOT does not mask ANDROID_NDK_HOME", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scr-android-ndk-home-"));
+  const home = join(dir, "ndk-home");
+  const sysroot = join(home, "toolchains", "llvm", "prebuilt", "test-host", "sysroot");
+  await mkdir(join(sysroot, "usr", "include", "aarch64-linux-android"), { recursive: true });
+
+  const driver = resolveCc({
+    SCRIPTC_CC: "zigcc",
+    SCRIPTC_TARGET: "aarch64-linux-android",
+    ANDROID_NDK_ROOT: "",
+    ANDROID_NDK_HOME: home,
+  });
+  expect(driver.targetArgs).toContain(join(sysroot, "usr", "include"));
 });
 
 test("zigcc resolves to `zig cc`; linux triples add their libc target flags", () => {

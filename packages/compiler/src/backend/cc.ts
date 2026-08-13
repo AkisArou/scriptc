@@ -582,8 +582,9 @@ function androidNdkSysroot(env: NodeJS.ProcessEnv): string {
   const memo = ndkSysrootMemos.get(key);
   if (memo !== undefined) return memo;
   const ndkRoots: string[] = [];
-  const explicit = env["ANDROID_NDK_ROOT"] ?? env["ANDROID_NDK_HOME"];
-  if (explicit !== undefined && explicit !== "") {
+  const explicit = [env["ANDROID_NDK_ROOT"], env["ANDROID_NDK_HOME"]]
+    .find((root): root is string => root !== undefined && root !== "");
+  if (explicit !== undefined) {
     ndkRoots.push(explicit);
   } else {
     const sdkRoots = [
@@ -3358,7 +3359,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   if (isMobileTarget(driver.target)) {
     throw new Error(
       `SCRIPTC_TARGET=${driver.target} builds library-mode static archives only — ` +
-        `compile with a library profile (scriptc build --lib <profile>) and link the archive from the app project.`,
+        `compile with a library profile (SCRIPTC_CC=zigcc scriptc build --lib --profile <profile.json>) and link the archive from the app project.`,
     );
   }
   const runtimeSources = targetPlatform(driver) === "wasi"

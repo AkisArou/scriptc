@@ -848,7 +848,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
         diagnostics: [
           targetRefusalDiag(
             mobileTarget,
-            "standalone executable builds — mobile targets produce library-mode static archives (scriptc build --lib <profile>) for an embedding app to link",
+            "standalone executable builds — mobile targets produce library-mode static archives (SCRIPTC_CC=zigcc scriptc build --lib --profile <profile.json>) for an embedding app to link",
             entryLoc,
           ),
         ],

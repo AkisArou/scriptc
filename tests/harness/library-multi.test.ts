@@ -1084,9 +1084,22 @@ test.each(MOBILE_TARGETS)(
       if (!result.ok) {
         expect(result.diagnostics[0]!.code).toBe("SC3002");
         expect(result.diagnostics[0]!.message).toContain(target);
-        expect(result.diagnostics[0]!.message).toContain("--lib");
+        expect(result.diagnostics[0]!.message).toContain("SCRIPTC_CC=zigcc scriptc build --lib --profile <profile.json>");
       }
     });
+  },
+);
+
+test.each([
+  ["arm64-v8a,armeabi-v7a", "26", true],
+  ["arm64-v8a", "35", true],
+  ["x86_64,x86", "35", false],
+  ["arm64-v8a", "25", false],
+  ["arm64-v8a", "not-an-api", false],
+] as const)(
+  "M12: Android device compatibility filters ABI %s at API %s",
+  (abiList, sdkLevel, expected) => {
+    expect(isCompatibleAndroidDevice(abiList, sdkLevel)).toBe(expected);
   },
 );
 
@@ -1124,6 +1137,17 @@ function buildAppleProbe(archives: string[], source: string, tag: string, target
  * is reused; otherwise the first available iPhone boots headlessly and the
  * suite shuts it down again. */
 let bootedSimulator: { udid: string; bootedByUs: boolean } | null = null;
+function shutdownOwnedSimulator(): void {
+  if (bootedSimulator?.bootedByUs !== true) return;
+  const owned = bootedSimulator;
+  bootedSimulator = null;
+  try {
+    execFileSync("xcrun", ["simctl", "shutdown", owned.udid]);
+  } catch {
+    /* shutdown is best-effort — never mask a real failure */
+  }
+}
+
 function ensureBootedSimulator(): string {
   if (bootedSimulator !== null) return bootedSimulator.udid;
   const listing = JSON.parse(
@@ -1140,20 +1164,19 @@ function ensureBootedSimulator(): string {
     throw new Error("SCRIPTC_IOS=1 needs at least one available simulator (xcrun simctl list devices available).");
   }
   execFileSync("xcrun", ["simctl", "boot", candidate.udid]);
-  execFileSync("xcrun", ["simctl", "bootstatus", candidate.udid, "-b"], { timeout: 300_000 });
   bootedSimulator = { udid: candidate.udid, bootedByUs: true };
+  try {
+    execFileSync("xcrun", ["simctl", "bootstatus", candidate.udid, "-b"], { timeout: 300_000 });
+  } catch (err) {
+    shutdownOwnedSimulator();
+    throw err;
+  }
   return candidate.udid;
 }
 
 describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
   afterAll(() => {
-    if (bootedSimulator?.bootedByUs === true) {
-      try {
-        execFileSync("xcrun", ["simctl", "shutdown", bootedSimulator.udid]);
-      } catch {
-        /* shutdown is best-effort — never mask a real failure */
-      }
-    }
+    shutdownOwnedSimulator();
   });
 
   test("the iOS toolchain is present", () => {
@@ -1272,8 +1295,9 @@ function androidSdkRoots(): string[] {
  * build invokes), used here to link probes at the API 26 floor. */
 function androidNdkClang(): string | null {
   const ndkRoots: string[] = [];
-  const explicit = process.env["ANDROID_NDK_ROOT"] ?? process.env["ANDROID_NDK_HOME"];
-  if (explicit !== undefined && explicit !== "") ndkRoots.push(explicit);
+  const explicit = [process.env["ANDROID_NDK_ROOT"], process.env["ANDROID_NDK_HOME"]]
+    .find((root): root is string => root !== undefined && root !== "");
+  if (explicit !== undefined) ndkRoots.push(explicit);
   for (const sdk of androidSdkRoots()) {
     const ndkDir = join(sdk, "ndk");
     if (!existsSync(ndkDir)) continue;
@@ -1316,10 +1340,15 @@ function buildAndroidProbe(archives: string[], source: string, tag: string): str
 }
 
 /** The device the execution legs share: a running emulator/device is
- * reused; otherwise a headless arm64 AVD is written directly (the emulator
- * reads ~/.android/avd — no avdmanager/Java dependency) and booted on a
- * lane-private port, then torn down by the suite. */
-let androidDevice: { serial: string; startedByUs: boolean } | null = null;
+ * reused when it carries arm64-v8a and API 26+; otherwise a headless arm64
+ * AVD is written directly (the emulator reads ~/.android/avd — no
+ * avdmanager/Java dependency) and booted on a lane-private port, then torn
+ * down by the suite. */
+let androidDevice: {
+  serial: string;
+  startedByUs: boolean;
+  emulator?: ReturnType<typeof spawn>;
+} | null = null;
 const ANDROID_LANE_AVD = "scriptc-mobile-lane";
 const ANDROID_LANE_PORT = 5586;
 
@@ -1332,13 +1361,55 @@ function adbDevices(adb: string): string[] {
     .map((line) => line.split(/\s+/)[0]!);
 }
 
+function isCompatibleAndroidDevice(abiList: string, sdkLevel: string): boolean {
+  const abis = abiList.split(",").map((abi) => abi.trim());
+  const sdk = Number.parseInt(sdkLevel.trim(), 10);
+  return abis.includes("arm64-v8a") && Number.isFinite(sdk) && sdk >= ANDROID_MIN_API;
+}
+
+function compatibleAndroidDevice(adb: string, serial: string): boolean {
+  const getprop = (name: string): string | null => {
+    const result = spawnSync(adb, ["-s", serial, "shell", "getprop", name], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    return result.status === 0 ? (result.stdout ?? "").trim() : null;
+  };
+  const abiList = getprop("ro.product.cpu.abilist") || getprop("ro.product.cpu.abi");
+  const sdkLevel = getprop("ro.build.version.sdk");
+  return abiList !== null && sdkLevel !== null && isCompatibleAndroidDevice(abiList, sdkLevel);
+}
+
+function removeAndroidLaneAvd(): void {
+  rmSync(join(homedir(), ".android", "avd", `${ANDROID_LANE_AVD}.avd`), { recursive: true, force: true });
+  rmSync(join(homedir(), ".android", "avd", `${ANDROID_LANE_AVD}.ini`), { force: true });
+}
+
+function stopOwnedAndroidDevice(): void {
+  if (androidDevice?.startedByUs !== true) return;
+  const owned = androidDevice;
+  androidDevice = null;
+  try {
+    execFileSync(androidTool("adb"), ["-s", owned.serial, "emu", "kill"], { timeout: 30_000 });
+  } catch {
+    /* the emulator may have failed before adb connected */
+  }
+  try {
+    owned.emulator?.kill("SIGTERM");
+  } catch {
+    /* process cleanup is best-effort — never mask a real failure */
+  }
+  removeAndroidLaneAvd();
+}
+
 async function ensureAndroidDevice(): Promise<string> {
   if (androidDevice !== null) return androidDevice.serial;
   const adb = androidTool("adb");
   const running = adbDevices(adb);
-  if (running.length > 0) {
-    androidDevice = { serial: running[0]!, startedByUs: false };
-    return androidDevice.serial;
+  const compatible = running.find((serial) => compatibleAndroidDevice(adb, serial));
+  if (compatible !== undefined) {
+    androidDevice = { serial: compatible, startedByUs: false };
+    return compatible;
   }
   // No device: write the AVD and boot it headless. The system image is the
   // newest installed arm64-v8a one.
@@ -1346,7 +1417,16 @@ async function ensureAndroidDevice(): Promise<string> {
     for (const sdk of androidSdkRoots()) {
       const imagesDir = join(sdk, "system-images");
       if (!existsSync(imagesDir)) continue;
-      const apis = readdirSync(imagesDir).filter((name) => name.startsWith("android-")).sort().reverse();
+      const apis = readdirSync(imagesDir)
+        .filter((name) => {
+          const api = Number.parseInt(name.replace(/^android-/, ""), 10);
+          return name.startsWith("android-") && Number.isFinite(api) && api >= ANDROID_MIN_API;
+        })
+        .sort(
+          (a, b) =>
+            Number.parseInt(b.replace(/^android-/, ""), 10) -
+            Number.parseInt(a.replace(/^android-/, ""), 10),
+        );
       for (const api of apis) {
         for (const tag of readdirSync(join(imagesDir, api)).sort()) {
           const abiDir = join(imagesDir, api, tag, "arm64-v8a");
@@ -1360,7 +1440,7 @@ async function ensureAndroidDevice(): Promise<string> {
   })();
   if (image === null) {
     throw new Error(
-      "SCRIPTC_ANDROID=1 needs a running device or an installed arm64-v8a system image " +
+      "SCRIPTC_ANDROID=1 needs a compatible running device or an installed API-26+ arm64-v8a system image " +
         "(sdkmanager 'system-images;android-<api>;google_apis;arm64-v8a') to boot one.",
     );
   }
@@ -1404,19 +1484,32 @@ async function ensureAndroidDevice(): Promise<string> {
     ],
     { detached: true, stdio: "ignore" },
   );
-  emulator.unref();
   const serial = `emulator-${ANDROID_LANE_PORT}`;
-  const deadline = Date.now() + 300_000;
-  for (;;) {
-    const probe = spawnSync(adb, ["-s", serial, "shell", "getprop", "sys.boot_completed"], {
-      encoding: "utf8",
-      timeout: 15_000,
-    });
-    if ((probe.stdout ?? "").trim() === "1") break;
-    if (Date.now() > deadline) throw new Error("the Android emulator did not finish booting within 5 minutes");
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  androidDevice = { serial, startedByUs: true, emulator };
+  let emulatorError: Error | null = null;
+  emulator.once("error", (err) => {
+    emulatorError = err;
+  });
+  emulator.unref();
+  try {
+    const deadline = Date.now() + 300_000;
+    for (;;) {
+      if (emulatorError !== null) throw emulatorError;
+      if (emulator.exitCode !== null) {
+        throw new Error(`the Android emulator exited before boot completed (exit ${emulator.exitCode})`);
+      }
+      const probe = spawnSync(adb, ["-s", serial, "shell", "getprop", "sys.boot_completed"], {
+        encoding: "utf8",
+        timeout: 15_000,
+      });
+      if ((probe.stdout ?? "").trim() === "1") break;
+      if (Date.now() > deadline) throw new Error("the Android emulator did not finish booting within 5 minutes");
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+  } catch (err) {
+    stopOwnedAndroidDevice();
+    throw err;
   }
-  androidDevice = { serial, startedByUs: true };
   return serial;
 }
 
@@ -1441,15 +1534,7 @@ function adbRun(serial: string, probe: string, tag: string): string {
 
 describe.skipIf(!androidOn)("mobile targets: Android (SCRIPTC_ANDROID=1)", () => {
   afterAll(() => {
-    if (androidDevice?.startedByUs === true) {
-      try {
-        execFileSync(androidTool("adb"), ["-s", androidDevice.serial, "emu", "kill"], { timeout: 30_000 });
-      } catch {
-        /* teardown is best-effort — never mask a real failure */
-      }
-      rmSync(join(homedir(), ".android", "avd", `${ANDROID_LANE_AVD}.avd`), { recursive: true, force: true });
-      rmSync(join(homedir(), ".android", "avd", `${ANDROID_LANE_AVD}.ini`), { force: true });
-    }
+    stopOwnedAndroidDevice();
   });
 
   test("the Android toolchain is present", () => {
