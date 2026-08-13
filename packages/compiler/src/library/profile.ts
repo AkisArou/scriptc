@@ -115,7 +115,23 @@
  * classic artifact, byte-for-byte. Localization follows the archive's
  * object format: ELF and COFF archives localize on any supported host
  * (native or cross); Mach-O localization runs the macOS host linker, so
- * macos targets build on darwin hosts and refuse elsewhere with SC3002.
+ * macos and ios targets build on darwin hosts and refuse elsewhere with
+ * SC3002.
+ *
+ * Mobile targets: SCRIPTC_TARGET=aarch64-apple-ios,
+ * aarch64-apple-ios-simulator, and aarch64-linux-android build library
+ * archives for an embedding app to link (Xcode / Gradle+NDK); the
+ * executable lane refuses those triples with SC3002. The minimum-version
+ * floors are part of the target contract: iOS archives build for iOS 15.0
+ * (every object carries LC_BUILD_VERSION minos 15.0 for the device or
+ * simulator platform), Android archives for API level 26 (the bionic stub
+ * level the embedder's minSdkVersion must meet). iOS targets require a
+ * darwin host with Xcode's iPhoneOS/iPhoneSimulator SDK; Android targets
+ * require an NDK (ANDROID_NDK_ROOT, or discovered under the SDK's ndk/
+ * directory) on any host. Both `localize_runtime` and
+ * `instance_per_thread` compose with the mobile targets exactly as on
+ * desktop targets: iOS localization rides the Mach-O recipe, Android the
+ * in-process ELF transform.
  *
  * Thread-instanced state (`abi.instance_per_thread: true`): every mutable
  * piece of the archive's state — the runtime units' internals AND the

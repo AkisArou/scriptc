@@ -75,16 +75,44 @@
  *                        box (SCRIPTC_WIN=1) — including the M7-style
  *                        thread-instanced+localized composition there
  *
+ * Mobile library targets (aarch64-apple-ios, aarch64-apple-ios-simulator,
+ * aarch64-linux-android — library-mode-only triples):
+ *
+ *   M12 admission        always-run refusal shape: an iOS triple off a
+ *                        darwin host refuses SC3002 before any toolchain
+ *                        runs; near-miss mobile spellings refuse with the
+ *                        supported set named; the executable lane refuses
+ *                        mobile triples with the pointer to --lib
+ *   M13 iOS              SCRIPTC_IOS=1 (darwin host, Xcode with the
+ *                        iPhoneOS + iPhoneSimulator SDKs, zig): localized
+ *                        a/b archives build per target and emission with
+ *                        M1's symbol exactness, the ambient audit, and the
+ *                        iOS 15.0 LC_BUILD_VERSION floor; simulator probes
+ *                        EXECUTE on a booted simulator (simctl spawn) —
+ *                        the M2 two-instance acceptance run and the M6
+ *                        four-thread instancing run, byte-for-byte against
+ *                        the desktop expectations; device-arch archives
+ *                        are build+link verified (no device to execute)
+ *   M14 Android          SCRIPTC_ANDROID=1 (an NDK plus adb/emulator):
+ *                        localized a/b archives build per emission with
+ *                        the same symbol/audit bars, probes link with the
+ *                        NDK's API-26 clang, and EXECUTE on an emulator
+ *                        (a running device is reused; otherwise a headless
+ *                        arm64 AVD is created and booted) — the M2 and M6
+ *                        acceptance runs, byte-for-byte
+ *
  * Windows hosts run M1/M2/M6/M7 natively through the same gates as darwin
  * and linux: probes compile with `zig cc` (the box's toolchain), archives
  * carry CRLF-normalized probe output (the mingw CRT's text-mode stdout),
  * and symbol checks ride llvm-nm when plain nm is absent.
  */
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { describe, expect, test } from "vitest";
-import { compileLibrary, loadLibraryProfile } from "@scriptc/compiler";
+import { afterAll, describe, expect, test } from "vitest";
+import { compile, compileLibrary, IPHONEOS_MIN_VERSION, ANDROID_MIN_API, loadLibraryProfile } from "@scriptc/compiler";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureDir = join(repoRoot, "tests/library-mode/multi");
@@ -718,7 +746,7 @@ type CrossTarget = (typeof CROSS_TARGETS)[number];
 function buildInstanceCross(
   instance: "a" | "b",
   emission: Emission,
-  target: CrossTarget,
+  target: CrossTarget | MobileTarget,
 ): Promise<string> {
   const key = `x-${instance}-${emission}-${target}`;
   let archive = built.get(key);
@@ -950,5 +978,802 @@ describe.skipIf(!crossOn)("cross-target localization", () => {
       },
       300_000,
     );
+  });
+});
+
+/* ── M12–M14: mobile library targets ──────────────────────────────────────
+ * M12 runs everywhere (pure admission shape, no toolchain). The executed
+ * lanes are env-gated like M10/M11: SCRIPTC_IOS=1 needs a darwin host with
+ * Xcode's iPhoneOS/iPhoneSimulator SDKs, zig, and a bootable simulator;
+ * SCRIPTC_ANDROID=1 needs an NDK plus adb (a running emulator/device is
+ * reused; otherwise a headless arm64 AVD is created and booted). Mobile
+ * builds are plain-flavor: the sanitized lanes stay host contracts. */
+
+const MOBILE_TARGETS = [
+  "aarch64-apple-ios",
+  "aarch64-apple-ios-simulator",
+  "aarch64-linux-android",
+] as const;
+type MobileTarget = (typeof MOBILE_TARGETS)[number];
+
+const iosOn = process.env["SCRIPTC_IOS"] === "1";
+const androidOn = process.env["SCRIPTC_ANDROID"] === "1";
+
+/** Run a fixture build with SCRIPTC_CC/SCRIPTC_TARGET threaded through the
+ * env the cc driver reads (the buildInstanceCross pattern, for arbitrary
+ * fixture profiles). */
+async function withMobileTarget<T>(target: string, body: () => Promise<T>): Promise<T> {
+  const prevCc = process.env["SCRIPTC_CC"];
+  const prevTarget = process.env["SCRIPTC_TARGET"];
+  process.env["SCRIPTC_CC"] = "zigcc";
+  process.env["SCRIPTC_TARGET"] = target;
+  try {
+    return await body();
+  } finally {
+    if (prevCc === undefined) delete process.env["SCRIPTC_CC"];
+    else process.env["SCRIPTC_CC"] = prevCc;
+    if (prevTarget === undefined) delete process.env["SCRIPTC_TARGET"];
+    else process.env["SCRIPTC_TARGET"] = prevTarget;
+  }
+}
+
+/* ── M12: admission (always runs — no toolchain, no SDKs) ────────────────── */
+
+test("M12: an iOS target refuses library builds off a darwin host with SC3002", async () => {
+  const outDir = join(cacheDir, "mobile-host-refusal");
+  mkdirSync(outDir, { recursive: true });
+  const profile = JSON.parse(readFileSync(join(fixtureDir, "profile_a.json"), "utf8")) as {
+    entry: string;
+  };
+  profile.entry = join(fixtureDir, profile.entry);
+  const profilePath = join(outDir, "profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+  // The refusal is a pure env/host check that fires before any toolchain
+  // discovery, so neither zig nor an SDK need exist here.
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platformDescriptor, value: "linux" });
+  try {
+    await withMobileTarget("aarch64-apple-ios", async () => {
+      const result = await compileLibrary({ profilePath, outDir });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.diagnostics[0]!.code).toBe("SC3002");
+        expect(result.diagnostics[0]!.message).toContain("aarch64-apple-ios");
+        expect(result.diagnostics[0]!.message).toContain("macOS hosts");
+      }
+    });
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
+  }
+});
+
+test.each(["aarch64-ios", "x86_64-linux-android", "armv7-linux-androideabi"])(
+  "M12: near-miss mobile triple %s refuses with the supported set named",
+  async (target) => {
+    const outDir = join(cacheDir, `mobile-spelling-refusal-${target}`);
+    mkdirSync(outDir, { recursive: true });
+    const profile = JSON.parse(readFileSync(join(fixtureDir, "profile_a.json"), "utf8")) as {
+      entry: string;
+    };
+    profile.entry = join(fixtureDir, profile.entry);
+    const profilePath = join(outDir, "profile.json");
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+    await withMobileTarget(target, async () => {
+      const result = await compileLibrary({ profilePath, outDir });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.diagnostics[0]!.code).toBe("SC3002");
+        expect(result.diagnostics[0]!.message).toContain(target);
+        for (const supported of MOBILE_TARGETS) {
+          expect(result.diagnostics[0]!.message).toContain(supported);
+        }
+      }
+    });
+  },
+);
+
+test.each(MOBILE_TARGETS)(
+  "M12: the executable lane refuses %s with the pointer to --lib",
+  async (target) => {
+    const outDir = join(cacheDir, `mobile-exe-refusal-${target}`);
+    mkdirSync(outDir, { recursive: true });
+    const entry = join(outDir, "main.ts");
+    writeFileSync(entry, 'console.log("hi");\n');
+    await withMobileTarget(target, async () => {
+      const result = await compile(entry, { outDir, outPath: join(outDir, "main") });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.diagnostics[0]!.code).toBe("SC3002");
+        expect(result.diagnostics[0]!.message).toContain(target);
+        expect(result.diagnostics[0]!.message).toContain("SCRIPTC_CC=zigcc scriptc build --lib --profile <profile.json>");
+      }
+    });
+  },
+);
+
+test.each([
+  ["arm64-v8a,armeabi-v7a", "26", true],
+  ["arm64-v8a", "35", true],
+  ["x86_64,x86", "35", false],
+  ["arm64-v8a", "25", false],
+  ["arm64-v8a", "not-an-api", false],
+] as const)(
+  "M12: Android device compatibility filters ABI %s at API %s",
+  (abiList, sdkLevel, expected) => {
+    expect(isCompatibleAndroidDevice(abiList, sdkLevel)).toBe(expected);
+  },
+);
+
+test("M12: Android emulator port claims skip live serials and do not collide", () => {
+  let first: AndroidPortClaim | null = null;
+  let second: AndroidPortClaim | null = null;
+  try {
+    first = claimAndroidLanePort([`emulator-${ANDROID_PORT_MIN}`]);
+    second = claimAndroidLanePort([`emulator-${ANDROID_PORT_MIN}`]);
+    expect(first.port).not.toBe(ANDROID_PORT_MIN);
+    expect(second.port).not.toBe(ANDROID_PORT_MIN);
+    expect(second.port).not.toBe(first.port);
+  } finally {
+    if (second !== null) releaseAndroidLanePort(second);
+    if (first !== null) releaseAndroidLanePort(first);
+  }
+});
+
+/* ── M13: iOS (SCRIPTC_IOS=1) ─────────────────────────────────────────────── */
+
+const APPLE_MOBILE_TARGETS = ["aarch64-apple-ios", "aarch64-apple-ios-simulator"] as const;
+
+function appleSdkName(target: string): "iphoneos" | "iphonesimulator" {
+  return target === "aarch64-apple-ios" ? "iphoneos" : "iphonesimulator";
+}
+
+/** Link a probe against iOS archives with the host Xcode clang — exactly
+ * what an embedder's Xcode build performs. Link success asserts every
+ * undefined in the localized member resolves against the selected SDK. */
+function buildAppleProbe(archives: string[], source: string, tag: string, target: string): string {
+  const outDir = join(cacheDir, "probes");
+  mkdirSync(outDir, { recursive: true });
+  const bin = join(outDir, `probe-${tag}`);
+  const clangTarget = `arm64-apple-ios${IPHONEOS_MIN_VERSION}${target === "aarch64-apple-ios" ? "" : "-simulator"}`;
+  execFileSync("xcrun", [
+    "--sdk", appleSdkName(target),
+    "clang",
+    "-std=c11",
+    "-pthread",
+    "-target", clangTarget,
+    source,
+    ...archives,
+    "-lm",
+    "-o", bin,
+  ]);
+  return bin;
+}
+
+/** The booted simulator the execution legs share: an already-booted device
+ * is reused; otherwise the first available iPhone boots headlessly and the
+ * suite shuts it down again. */
+let bootedSimulator: { udid: string; bootedByUs: boolean } | null = null;
+type SimulatorDevice = { udid: string; state: string; name: string };
+type SimulatorListing = { devices: Record<string, SimulatorDevice[]> };
+
+function availableIphoneSimulators(listing: SimulatorListing): SimulatorDevice[] {
+  return Object.entries(listing.devices)
+    .filter(([runtime]) => runtime.includes(".SimRuntime.iOS-"))
+    .flatMap(([, devices]) => devices)
+    .filter((device) => device.name.startsWith("iPhone"));
+}
+
+test("M12: simulator reuse ignores booted devices from non-iOS runtimes", () => {
+  const devices = availableIphoneSimulators({
+    devices: {
+      "com.apple.CoreSimulator.SimRuntime.tvOS-26-0": [
+        { udid: "tv", state: "Booted", name: "Apple TV" },
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-26-0": [
+        { udid: "phone", state: "Shutdown", name: "iPhone 17" },
+        { udid: "tablet", state: "Booted", name: "iPad Pro" },
+      ],
+    },
+  });
+  expect(devices.map((device) => device.udid)).toEqual(["phone"]);
+});
+
+function shutdownOwnedSimulator(): void {
+  if (bootedSimulator?.bootedByUs !== true) return;
+  const owned = bootedSimulator;
+  bootedSimulator = null;
+  try {
+    execFileSync("xcrun", ["simctl", "shutdown", owned.udid]);
+  } catch {
+    /* shutdown is best-effort — never mask a real failure */
+  }
+}
+
+function ensureBootedSimulator(): string {
+  if (bootedSimulator !== null) return bootedSimulator.udid;
+  const listing = JSON.parse(
+    execFileSync("xcrun", ["simctl", "list", "devices", "available", "--json"], { encoding: "utf8" }),
+  ) as SimulatorListing;
+  const devices = availableIphoneSimulators(listing);
+  const booted = devices.find((device) => device.state === "Booted");
+  if (booted !== undefined) {
+    bootedSimulator = { udid: booted.udid, bootedByUs: false };
+    return booted.udid;
+  }
+  const candidate = devices[0];
+  if (candidate === undefined) {
+    throw new Error("SCRIPTC_IOS=1 needs at least one available simulator (xcrun simctl list devices available).");
+  }
+  execFileSync("xcrun", ["simctl", "boot", candidate.udid]);
+  bootedSimulator = { udid: candidate.udid, bootedByUs: true };
+  try {
+    execFileSync("xcrun", ["simctl", "bootstatus", candidate.udid, "-b"], { timeout: 300_000 });
+  } catch (err) {
+    shutdownOwnedSimulator();
+    throw err;
+  }
+  return candidate.udid;
+}
+
+describe.skipIf(!iosOn)("mobile targets: iOS (SCRIPTC_IOS=1)", () => {
+  afterAll(() => {
+    shutdownOwnedSimulator();
+  });
+
+  test("the iOS toolchain is present", () => {
+    // Fail, never skip: SCRIPTC_IOS=1 promises an iOS verdict.
+    for (const sdk of ["iphoneos", "iphonesimulator"] as const) {
+      const path = execFileSync("xcrun", ["--sdk", sdk, "--show-sdk-path"], { encoding: "utf8" }).trim();
+      expect(path, `xcrun --sdk ${sdk} --show-sdk-path`).not.toBe("");
+    }
+    execFileSync("zig", ["version"], { encoding: "utf8" });
+  });
+
+  describe.each(APPLE_MOBILE_TARGETS)("target %s", (target) => {
+    describe.each(EMISSIONS)("%s emission", (emission) => {
+      test("M13: localized archives build; symbols exact, ambient audit holds, iOS 15.0 floor stamped, probe links", async (ctx) => {
+        if (nmTool === null) ctx.skip("no nm on PATH for the symbol-exactness check");
+        const archiveA = await buildInstanceCross("a", emission, target);
+        const archiveB = await buildInstanceCross("b", emission, target);
+        for (const [archive, declared] of [
+          [archiveA, A_SYMBOLS],
+          [archiveB, B_SYMBOLS],
+        ] as const) {
+          const { defined, undef } = nmSymbols(archive);
+          expect([...defined].sort()).toEqual([...declared].sort());
+          expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
+          for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
+            expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
+          }
+          // The version floor is part of the target contract: every member
+          // carries LC_BUILD_VERSION with the device (2) or simulator (7)
+          // platform and minos 15.0.
+          const loadCommands = execFileSync("otool", ["-l", archive], { encoding: "utf8" });
+          expect(loadCommands).toContain("LC_BUILD_VERSION");
+          expect(loadCommands).toContain(`minos ${IPHONEOS_MIN_VERSION}`);
+          expect(loadCommands).toContain(`platform ${target === "aarch64-apple-ios" ? "2" : "7"}`);
+        }
+        buildAppleProbe([archiveA, archiveB], join(fixtureDir, "probe.c"), `ios-${emission}-${target}`, target);
+      }, 240_000);
+    });
+  });
+
+  describe("M13 simulator execution", () => {
+    test.for(EMISSIONS)(
+      "the two-instance probe runs on a booted simulator (%s emission)",
+      async (emission) => {
+        const target = "aarch64-apple-ios-simulator";
+        const archiveA = await buildInstanceCross("a", emission, target);
+        const archiveB = await buildInstanceCross("b", emission, target);
+        const probe = buildAppleProbe(
+          [archiveA, archiveB],
+          join(fixtureDir, "probe.c"),
+          `ios-run-${emission}`,
+          target,
+        );
+        const udid = ensureBootedSimulator();
+        const out = execFileSync("xcrun", ["simctl", "spawn", udid, probe], {
+          encoding: "utf8",
+          timeout: 120_000,
+        });
+        expect(out).toBe(PROBE_EXPECTED);
+      },
+      600_000,
+    );
+
+    test("a thread-instanced and runtime-localized archive runs on the simulator", async () => {
+      const target = "aarch64-apple-ios-simulator";
+      const key = `ios-t-llvm-${target}`;
+      let archive = built.get(key);
+      if (archive === undefined) {
+        archive = withMobileTarget(target, async () => {
+          const outDir = join(cacheDir, key);
+          mkdirSync(outDir, { recursive: true });
+          const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+            entry: string;
+            emission: string;
+            abi: Record<string, unknown>;
+          };
+          profile.emission = "llvm";
+          profile.entry = join(threadFixtureDir, profile.entry);
+          profile.abi["localize_runtime"] = true;
+          const profilePath = join(outDir, "profile.json");
+          writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+          const result = await compileLibrary({ profilePath, outDir });
+          if (!result.ok) {
+            throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+          }
+          return result.archivePath;
+        });
+        built.set(key, archive);
+      }
+      const probe = buildAppleProbe([await archive], join(threadFixtureDir, "probe.c"), "ios-run-t", target);
+      const udid = ensureBootedSimulator();
+      const out = execFileSync("xcrun", ["simctl", "spawn", udid, probe], {
+        encoding: "utf8",
+        timeout: 120_000,
+      });
+      expect(out).toBe(THREADED_EXPECTED);
+    }, 600_000);
+  });
+});
+
+/* ── M14: Android (SCRIPTC_ANDROID=1) ─────────────────────────────────────── */
+
+/** The SDK roots the NDK/emulator discovery searches: the explicit
+ * environment first, then the platform-default install location. */
+function androidSdkRoots(): string[] {
+  return [
+    process.env["ANDROID_HOME"],
+    process.env["ANDROID_SDK_ROOT"],
+    process.platform === "darwin"
+      ? join(homedir(), "Library", "Android", "sdk")
+      : join(homedir(), "Android", "Sdk"),
+  ].filter((root): root is string => root !== undefined && root !== "" && existsSync(root));
+}
+
+/** The NDK's clang driver — the embedder-side link tool (what a Gradle/NDK
+ * build invokes), used here to link probes at the API 26 floor. */
+function androidNdkClang(): string | null {
+  const ndkRoots: string[] = [];
+  const explicit = [process.env["ANDROID_NDK_ROOT"], process.env["ANDROID_NDK_HOME"]]
+    .find((root): root is string => root !== undefined && root !== "");
+  if (explicit !== undefined) ndkRoots.push(explicit);
+  for (const sdk of androidSdkRoots()) {
+    const ndkDir = join(sdk, "ndk");
+    if (!existsSync(ndkDir)) continue;
+    ndkRoots.push(...readdirSync(ndkDir).sort().reverse().map((version) => join(ndkDir, version)));
+  }
+  for (const ndk of ndkRoots) {
+    const prebuilt = join(ndk, "toolchains", "llvm", "prebuilt");
+    if (!existsSync(prebuilt)) continue;
+    for (const host of readdirSync(prebuilt).sort()) {
+      const clang = join(prebuilt, host, "bin", "clang");
+      if (existsSync(clang)) return clang;
+    }
+  }
+  return null;
+}
+
+function androidTool(name: "adb" | "emulator"): string {
+  for (const sdk of androidSdkRoots()) {
+    const path = join(sdk, name === "adb" ? "platform-tools" : "emulator", name);
+    if (existsSync(path)) return path;
+  }
+  return name; // PATH fallback
+}
+
+function buildAndroidProbe(archives: string[], source: string, tag: string): string {
+  const outDir = join(cacheDir, "probes");
+  mkdirSync(outDir, { recursive: true });
+  const bin = join(outDir, `probe-${tag}`);
+  const clang = androidNdkClang();
+  if (clang === null) throw new Error("SCRIPTC_ANDROID=1 needs an NDK (ANDROID_NDK_ROOT or <sdk>/ndk).");
+  execFileSync(clang, [
+    `--target=aarch64-linux-android${ANDROID_MIN_API}`,
+    "-std=c11",
+    source,
+    ...archives,
+    "-lm",
+    "-o", bin,
+  ]);
+  return bin;
+}
+
+/** The device the execution legs share: a running emulator/device is
+ * reused when it carries arm64-v8a and API 26+; otherwise a headless arm64
+ * AVD is written directly (the emulator reads ~/.android/avd — no
+ * avdmanager/Java dependency) and booted on an exclusively claimed port,
+ * then torn down by the suite. The UUID-scoped AVD name and ownership
+ * marker keep concurrent lanes and pre-existing user AVDs out of scope. */
+interface AndroidPortClaim {
+  port: number;
+  lockPath: string;
+}
+
+type AndroidDevice =
+  | { serial: string; startedByUs: false }
+  | {
+      serial: string;
+      startedByUs: true;
+      adbOwned: boolean;
+      emulator: ReturnType<typeof spawn>;
+      portClaim: AndroidPortClaim;
+    };
+
+let androidDevice: AndroidDevice | null = null;
+const ANDROID_LANE_OWNER = `${process.pid}-${randomUUID()}`;
+const ANDROID_LANE_AVD = `scriptc-mobile-lane-${ANDROID_LANE_OWNER}`;
+const ANDROID_PORT_MIN = 5554;
+const ANDROID_PORT_MAX = 5682;
+const ANDROID_PORT_LOCK_ROOT = join(tmpdir(), "scriptc-mobile-emulator-ports");
+const ANDROID_AVD_OWNER_FILE = ".scriptc-owner";
+
+function adbDevices(adb: string): string[] {
+  return execFileSync(adb, ["devices"], { encoding: "utf8" })
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith("\tdevice") || line.endsWith(" device"))
+    .map((line) => line.split(/\s+/)[0]!);
+}
+
+function isCompatibleAndroidDevice(abiList: string, sdkLevel: string): boolean {
+  const abis = abiList.split(",").map((abi) => abi.trim());
+  const sdk = Number.parseInt(sdkLevel.trim(), 10);
+  return abis.includes("arm64-v8a") && Number.isFinite(sdk) && sdk >= ANDROID_MIN_API;
+}
+
+function compatibleAndroidDevice(adb: string, serial: string): boolean {
+  const getprop = (name: string): string | null => {
+    const result = spawnSync(adb, ["-s", serial, "shell", "getprop", name], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    return result.status === 0 ? (result.stdout ?? "").trim() : null;
+  };
+  const abiList = getprop("ro.product.cpu.abilist") || getprop("ro.product.cpu.abi");
+  const sdkLevel = getprop("ro.build.version.sdk");
+  return abiList !== null && sdkLevel !== null && isCompatibleAndroidDevice(abiList, sdkLevel);
+}
+
+function claimAndroidLanePort(runningSerials: readonly string[]): AndroidPortClaim {
+  mkdirSync(ANDROID_PORT_LOCK_ROOT, { recursive: true });
+  const portCount = (ANDROID_PORT_MAX - ANDROID_PORT_MIN) / 2 + 1;
+  const seed = (process.pid + Number.parseInt(ANDROID_LANE_OWNER.slice(-8), 16)) % portCount;
+  for (let offset = 0; offset < portCount; offset++) {
+    const port = ANDROID_PORT_MIN + 2 * ((seed + offset) % portCount);
+    if (runningSerials.includes(`emulator-${port}`)) continue;
+    const lockPath = join(ANDROID_PORT_LOCK_ROOT, `${port}.lock`);
+    try {
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ owner: ANDROID_LANE_OWNER, pid: process.pid }),
+        { flag: "wx", mode: 0o600 },
+      );
+      return { port, lockPath };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+  throw new Error(`no unclaimed even Android emulator port is available in ${ANDROID_PORT_MIN}-${ANDROID_PORT_MAX}`);
+}
+
+function releaseAndroidLanePort(claim: AndroidPortClaim): void {
+  try {
+    const record = JSON.parse(readFileSync(claim.lockPath, "utf8")) as { owner?: unknown };
+    if (record.owner === ANDROID_LANE_OWNER) rmSync(claim.lockPath, { force: true });
+  } catch {
+    /* a missing or foreign lock is not ours to remove */
+  }
+}
+
+function removeAndroidLaneAvd(): void {
+  const avdRoot = join(homedir(), ".android", "avd");
+  const avdDir = join(avdRoot, `${ANDROID_LANE_AVD}.avd`);
+  const iniPath = join(avdRoot, `${ANDROID_LANE_AVD}.ini`);
+  try {
+    if (readFileSync(join(avdDir, ANDROID_AVD_OWNER_FILE), "utf8") !== ANDROID_LANE_OWNER) return;
+  } catch {
+    return;
+  }
+  let ownsIni = false;
+  try {
+    ownsIni = readFileSync(iniPath, "utf8").includes(`path=${avdDir}\n`);
+  } catch {
+    /* the ini may not have been written before setup failed */
+  }
+  rmSync(avdDir, { recursive: true, force: true });
+  if (ownsIni) rmSync(iniPath, { force: true });
+}
+
+function stopOwnedAndroidDevice(): void {
+  if (androidDevice?.startedByUs !== true) return;
+  const owned = androidDevice;
+  androidDevice = null;
+  if (owned.adbOwned) {
+    try {
+      execFileSync(androidTool("adb"), ["-s", owned.serial, "emu", "kill"], { timeout: 30_000 });
+    } catch {
+      /* the emulator may have exited after its identity was verified */
+    }
+  }
+  try {
+    owned.emulator.kill("SIGTERM");
+  } catch {
+    /* process cleanup is best-effort — never mask a real failure */
+  }
+  removeAndroidLaneAvd();
+  releaseAndroidLanePort(owned.portClaim);
+}
+
+function createAndroidLaneAvd(image: { sysdir: string; api: string }): void {
+  const avdRoot = join(homedir(), ".android", "avd");
+  const avdDir = join(avdRoot, `${ANDROID_LANE_AVD}.avd`);
+  mkdirSync(avdRoot, { recursive: true });
+  mkdirSync(avdDir);
+  let marked = false;
+  try {
+    writeFileSync(join(avdDir, ANDROID_AVD_OWNER_FILE), ANDROID_LANE_OWNER, { flag: "wx", mode: 0o600 });
+    marked = true;
+    writeFileSync(
+      join(avdRoot, `${ANDROID_LANE_AVD}.ini`),
+      `avd.ini.encoding=UTF-8\npath=${avdDir}\npath.rel=avd/${ANDROID_LANE_AVD}.avd\ntarget=${image.api}\n`,
+      { flag: "wx" },
+    );
+    writeFileSync(
+      join(avdDir, "config.ini"),
+      [
+        `AvdId=${ANDROID_LANE_AVD}`,
+        "PlayStore.enabled=false",
+        "abi.type=arm64-v8a",
+        "avd.ini.encoding=UTF-8",
+        "disk.dataPartition.size=2G",
+        "hw.cpu.arch=arm64",
+        "hw.cpu.ncore=4",
+        "hw.gpu.enabled=no",
+        "hw.gpu.mode=off",
+        "hw.keyboard=yes",
+        "hw.lcd.density=440",
+        "hw.lcd.height=2280",
+        "hw.lcd.width=1080",
+        "hw.ramSize=2048",
+        "hw.sdCard=no",
+        `image.sysdir.1=${image.sysdir}`,
+        "tag.display=Google APIs",
+        "tag.id=google_apis",
+        "",
+      ].join("\n"),
+      { flag: "wx" },
+    );
+  } catch (err) {
+    if (marked) removeAndroidLaneAvd();
+    else rmSync(avdDir, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+function androidEmulatorAvdName(adb: string, serial: string): string | null {
+  const result = spawnSync(adb, ["-s", serial, "emu", "avd", "name"], {
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  if (result.status !== 0) return null;
+  return (result.stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line !== "" && line !== "OK") ?? null;
+}
+
+async function ensureAndroidDevice(): Promise<string> {
+  if (androidDevice !== null) return androidDevice.serial;
+  const adb = androidTool("adb");
+  const running = adbDevices(adb);
+  const compatible = running.find((serial) => compatibleAndroidDevice(adb, serial));
+  if (compatible !== undefined) {
+    androidDevice = { serial: compatible, startedByUs: false };
+    return compatible;
+  }
+  // No device: write the AVD and boot it headless. The system image is the
+  // newest installed arm64-v8a one.
+  const image = ((): { sdk: string; sysdir: string; api: string } | null => {
+    for (const sdk of androidSdkRoots()) {
+      const imagesDir = join(sdk, "system-images");
+      if (!existsSync(imagesDir)) continue;
+      const apis = readdirSync(imagesDir)
+        .filter((name) => {
+          const api = Number.parseInt(name.replace(/^android-/, ""), 10);
+          return name.startsWith("android-") && Number.isFinite(api) && api >= ANDROID_MIN_API;
+        })
+        .sort(
+          (a, b) =>
+            Number.parseInt(b.replace(/^android-/, ""), 10) -
+            Number.parseInt(a.replace(/^android-/, ""), 10),
+        );
+      for (const api of apis) {
+        for (const tag of readdirSync(join(imagesDir, api)).sort()) {
+          const abiDir = join(imagesDir, api, tag, "arm64-v8a");
+          if (existsSync(abiDir)) {
+            return { sdk, sysdir: `system-images/${api}/${tag}/arm64-v8a/`, api };
+          }
+        }
+      }
+    }
+    return null;
+  })();
+  if (image === null) {
+    throw new Error(
+      "SCRIPTC_ANDROID=1 needs a compatible running device or an installed API-26+ arm64-v8a system image " +
+        "(sdkmanager 'system-images;android-<api>;google_apis;arm64-v8a') to boot one.",
+    );
+  }
+  const portClaim = claimAndroidLanePort(running);
+  try {
+    createAndroidLaneAvd(image);
+  } catch (err) {
+    releaseAndroidLanePort(portClaim);
+    throw err;
+  }
+  let emulator: ReturnType<typeof spawn>;
+  try {
+    emulator = spawn(
+      androidTool("emulator"),
+      [
+        "-avd", ANDROID_LANE_AVD,
+        "-port", String(portClaim.port),
+        "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot", "-gpu", "off",
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+  } catch (err) {
+    removeAndroidLaneAvd();
+    releaseAndroidLanePort(portClaim);
+    throw err;
+  }
+  const serial = `emulator-${portClaim.port}`;
+  const ownedDevice: Extract<AndroidDevice, { startedByUs: true }> = {
+    serial,
+    startedByUs: true,
+    adbOwned: false,
+    emulator,
+    portClaim,
+  };
+  androidDevice = ownedDevice;
+  let emulatorError: Error | null = null;
+  emulator.once("error", (err) => {
+    emulatorError = err;
+  });
+  emulator.unref();
+  try {
+    const deadline = Date.now() + 300_000;
+    for (;;) {
+      if (emulatorError !== null) throw emulatorError;
+      if (emulator.exitCode !== null || emulator.signalCode !== null) {
+        throw new Error(
+          `the Android emulator exited before boot completed (` +
+            (emulator.exitCode !== null ? `exit ${emulator.exitCode}` : `signal ${emulator.signalCode}`) +
+            `)`,
+        );
+      }
+      const probe = spawnSync(adb, ["-s", serial, "shell", "getprop", "sys.boot_completed"], {
+        encoding: "utf8",
+        timeout: 15_000,
+      });
+      if ((probe.stdout ?? "").trim() === "1") {
+        const avdName = androidEmulatorAvdName(adb, serial);
+        if (avdName !== ANDROID_LANE_AVD) {
+          throw new Error(
+            `${serial} belongs to AVD '${avdName ?? "<unknown>"}', not this lane's '${ANDROID_LANE_AVD}'`,
+          );
+        }
+        ownedDevice.adbOwned = true;
+        break;
+      }
+      if (Date.now() > deadline) throw new Error("the Android emulator did not finish booting within 5 minutes");
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+  } catch (err) {
+    stopOwnedAndroidDevice();
+    throw err;
+  }
+  return serial;
+}
+
+/** Push a probe and run it on the device, returning its stdout. */
+function adbRun(serial: string, probe: string, tag: string): string {
+  const adb = androidTool("adb");
+  const remote = `/data/local/tmp/scriptc-mobile-lane-${tag}`;
+  execFileSync(adb, ["-s", serial, "push", probe, remote], { timeout: 60_000 });
+  try {
+    return execFileSync(adb, ["-s", serial, "shell", `chmod 755 ${remote} && ${remote}`], {
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+  } finally {
+    try {
+      execFileSync(adb, ["-s", serial, "shell", `rm -f ${remote}`], { timeout: 30_000 });
+    } catch {
+      /* cleanup is best-effort — never mask the real failure */
+    }
+  }
+}
+
+describe.skipIf(!androidOn)("mobile targets: Android (SCRIPTC_ANDROID=1)", () => {
+  afterAll(() => {
+    stopOwnedAndroidDevice();
+  });
+
+  test("the Android toolchain is present", () => {
+    // Fail, never skip: SCRIPTC_ANDROID=1 promises an Android verdict.
+    expect(androidNdkClang(), "an NDK (ANDROID_NDK_ROOT or <sdk>/ndk)").not.toBeNull();
+    execFileSync("zig", ["version"], { encoding: "utf8" });
+  });
+
+  describe.each(EMISSIONS)("%s emission", (emission) => {
+    test("M14: localized archives build; symbols exact, ambient audit holds, probe links at API 26", async (ctx) => {
+      if (nmTool === null) ctx.skip("no nm on PATH for the symbol-exactness check");
+      const archiveA = await buildInstanceCross("a", emission, "aarch64-linux-android");
+      const archiveB = await buildInstanceCross("b", emission, "aarch64-linux-android");
+      for (const [archive, declared] of [
+        [archiveA, A_SYMBOLS],
+        [archiveB, B_SYMBOLS],
+      ] as const) {
+        const { defined, undef } = nmSymbols(archive);
+        expect([...defined].sort()).toEqual([...declared].sort());
+        expect([...undef].filter((s) => s.startsWith("scr_") || s.startsWith("ma_") || s.startsWith("mb_"))).toEqual([]);
+        for (const banned of ["sigaction", "signal", "pthread_create", "atexit", "setvbuf"]) {
+          expect(undef.has(banned), `undefined reference to ${banned}`).toBe(false);
+        }
+      }
+      buildAndroidProbe([archiveA, archiveB], join(fixtureDir, "probe.c"), `android-${emission}`);
+    }, 240_000);
+  });
+
+  describe("M14 emulator execution", () => {
+    test.for(EMISSIONS)(
+      "the two-instance probe runs on the emulator (%s emission)",
+      async (emission) => {
+        const archiveA = await buildInstanceCross("a", emission, "aarch64-linux-android");
+        const archiveB = await buildInstanceCross("b", emission, "aarch64-linux-android");
+        const probe = buildAndroidProbe(
+          [archiveA, archiveB],
+          join(fixtureDir, "probe.c"),
+          `android-run-${emission}`,
+        );
+        const serial = await ensureAndroidDevice();
+        expect(adbRun(serial, probe, `m2-${emission}`)).toBe(PROBE_EXPECTED);
+      },
+      600_000,
+    );
+
+    test("a thread-instanced and runtime-localized archive runs on the emulator", async () => {
+      const key = "android-t-llvm";
+      let archive = built.get(key);
+      if (archive === undefined) {
+        archive = withMobileTarget("aarch64-linux-android", async () => {
+          const outDir = join(cacheDir, key);
+          mkdirSync(outDir, { recursive: true });
+          const profile = JSON.parse(readFileSync(join(threadFixtureDir, "profile_t.json"), "utf8")) as {
+            entry: string;
+            emission: string;
+            abi: Record<string, unknown>;
+          };
+          profile.emission = "llvm";
+          profile.entry = join(threadFixtureDir, profile.entry);
+          profile.abi["localize_runtime"] = true;
+          const profilePath = join(outDir, "profile.json");
+          writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+          const result = await compileLibrary({ profilePath, outDir });
+          if (!result.ok) {
+            throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+          }
+          return result.archivePath;
+        });
+        built.set(key, archive);
+      }
+      const probe = buildAndroidProbe([await archive], join(threadFixtureDir, "probe.c"), "android-run-t");
+      const serial = await ensureAndroidDevice();
+      expect(adbRun(serial, probe, "m6")).toBe(THREADED_EXPECTED);
+    }, 600_000);
   });
 });
