@@ -50,7 +50,9 @@ import {
   mangleFnClosure,
   mangleFunction,
   mangleLocal,
+  mangleNativeField,
   mangleRawParam,
+  mangleNativeStruct,
   mangleVtSlot,
   mangleWrapper,
 } from "../mangle.js";
@@ -228,6 +230,7 @@ export class CEmitter {
   readonly ffiByName = new Map<string, IrFfiImport>();
   /** Validated generic Native IR bindings, keyed by stable binding id. */
   readonly nativeById = new Map<string, IrNativeBinding>();
+  readonly nativeTypesById = new Map<string, NonNullable<IrModule["nativeTypes"]>[number]>();
   /** One C-ABI trampoline per manifest callback entry. Raw function
    * pointers additionally get a distinct TLS context slot, so two
    * callbacks with the same signature never alias each other's closure. */
@@ -406,6 +409,9 @@ export class CEmitter {
     }
     for (const entry of mod.nativeBindings ?? []) {
       this.nativeById.set(entry.id, entry);
+    }
+    for (const definition of mod.nativeTypes ?? []) {
+      this.nativeTypesById.set(definition.id, definition);
     }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
@@ -624,6 +630,7 @@ export class CEmitter {
       `#include "scr_runtime.h"`,
       `#include <limits.h>`,
       `#include <math.h>`,
+      `#include <stddef.h>`,
       `#include <stdio.h>`,
       `#include <stdlib.h>`,
       ``,
@@ -642,6 +649,7 @@ export class CEmitter {
     // so the instances they intern must both exist in the map by flush
     // time and be DEFINED earlier in the file than the newFn bodies.
     const structDefs: string[] = [];
+    this.emitNativeStructDefs(structDefs);
     this.emitStructDefs(structDefs);
     for (const [text, sym] of this.literals) {
       const bytes = Buffer.from(text, "utf8");
@@ -1268,6 +1276,44 @@ export class CEmitter {
     return emitStructDefs(this, out);
   }
 
+  private emitNativeStructDefs(out: string[]): void {
+    const pointerBytes = (this.mod.nativeTarget?.pointerBits ?? 0) / 8;
+    const scalarSize = (scalar: string): number => {
+      if (scalar === "f64" || scalar === "i64" || scalar === "u64") return 8;
+      if (scalar === "isize" || scalar === "usize") return pointerBytes;
+      const bits = Number(scalar.slice(1));
+      if (bits === 8 || bits === 16 || bits === 32) return bits / 8;
+      throw new Error(`emitter bug: unsupported native scalar '${scalar}' in aggregate`);
+    };
+    for (const definition of this.mod.nativeTypes ?? []) {
+      const name = mangleNativeStruct(definition.id);
+      out.push(`typedef struct __attribute__((aligned(${definition.alignment}))) ${name} {`);
+      let cursor = 0;
+      let padding = 0;
+      for (const field of definition.fields) {
+        if (field.offset > cursor) {
+          out.push(`  uint8_t sc_pad_${padding++}[${field.offset - cursor}];`);
+        }
+        out.push(`  ${cDecl(field.type, mangleNativeField(field.name))};`);
+        cursor = field.offset + scalarSize(field.type.scalar);
+      }
+      if (definition.size > cursor) {
+        out.push(`  uint8_t sc_pad_${padding}[${definition.size - cursor}];`);
+      }
+      out.push(
+        `} ${name};`,
+        `_Static_assert(sizeof(${name}) == ${definition.size}, "Native IR aggregate size mismatch");`,
+        `_Static_assert(_Alignof(${name}) == ${definition.alignment}, "Native IR aggregate alignment mismatch");`,
+      );
+      for (const field of definition.fields) {
+        out.push(
+          `_Static_assert(offsetof(${name}, ${mangleNativeField(field.name)}) == ${field.offset}, "Native IR aggregate field offset mismatch");`,
+        );
+      }
+      out.push("");
+    }
+  }
+
   /* ── vtables (class hierarchies) ──────────────────────────────────────
    * One vtable struct type per hierarchy (named after the root): a ScrVt
    * head — the class's preorder interval for instanceof and its DIRECT
@@ -1625,6 +1671,8 @@ export class CEmitter {
     if (t.kind === "void") this.line(`return;`);
     else if (t.kind === "f64" || t.kind === "date") this.line(`return 0;`);
     else if (t.kind === "bool") this.line(`return false;`);
+    else if (t.kind === "nativeScalar") this.line(`return 0;`);
+    else if (t.kind === "nativeStruct") this.line(`return (${cType(t)}){0};`);
     else this.line(`return NULL;`);
   }
 
@@ -1947,6 +1995,11 @@ export class CEmitter {
         // non-NULL pointers, so the honest constant reads as a pointer
         // test (no unused-value warnings, operand still evaluated).
         return `${t.name} != NULL`;
+      case "nativeStruct":
+        // Source nominal aggregates are declared as interfaces, hence are
+        // object-truthy if a condition reaches this generic path. The value
+        // has already been evaluated into `t`.
+        return `((void)${t.name}, true)`;
       case "procStream":
         // A stream value is a JS object (always truthy); the scalar fd
         // representation is 1 or 2, so the honest constant reads as its

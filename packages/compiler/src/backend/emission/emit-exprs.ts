@@ -4,7 +4,7 @@
 import type { CEmitter, Temp } from "./emitter.js";
 import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
-import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
+import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
@@ -548,6 +548,21 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           e.type,
           cNativeScalarLiteral(e.type, e.value, E.mod.nativeTarget?.pointerBits),
         );
+      case "nativeStructLit": {
+        const definition = E.nativeTypesById.get(e.type.typeId);
+        if (definition === undefined) {
+          throw new Error(`emitter bug: unknown native struct ${e.type.typeId}`);
+        }
+        const values = new Map(e.fields.map((field) => [field.name, E.emitExpr(field.value)]));
+        const initializer = definition.fields
+          .map((field) => `.${mangleNativeField(field.name)} = ${values.get(field.name)!.name}`)
+          .join(", ");
+        return E.newTemp(e.type, `(${cType(e.type)}){ ${initializer} }`);
+      }
+      case "nativeStructGet": {
+        const value = E.emitExpr(e.value);
+        return E.newTemp(e.type, `${value.name}.${mangleNativeField(e.field)}`);
+      }
       case "boolLit":
         return E.newTemp(e.type, e.value ? "true" : "false");
       case "strLit": {

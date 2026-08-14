@@ -26,7 +26,7 @@ import { mixinFnOfCallee } from "./lower-mixins.js";
 import { isConstAssertionTypeNode, isGenericCallableMemberType, isParseArgsDynTypeName, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
-import { lowerNativeCall } from "./lower-native.js";
+import { lowerNativeCall, lowerNativeStructFieldRead } from "./lower-native.js";
 
 /** An assignable `obj.field` target — a class field, a record field, or a
  * class ACCESSOR property (reads become getter calls, writes setter calls;
@@ -3324,6 +3324,12 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     }
     if (e.type.kind === "union") {
       L.requireTruthyUnion(e.type.unionId, node);
+      return { kind: "toBool", operand: e, type: BOOL, loc: e.loc };
+    }
+    if (e.type.kind === "nativeStruct") {
+      // Native nominal structs are exposed to source as interfaces. Like
+      // ordinary JavaScript objects they are always truthy, while the
+      // operand must still be evaluated for its effects.
       return { kind: "toBool", operand: e, type: BOOL, loc: e.loc };
     }
     if (REF_TRUTHY_KINDS.has(e.type.kind)) {
@@ -9965,6 +9971,10 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * ordinary closure values, so bare references to them work (unlike class
    * methods, which have no bound-value form). */
   export function lowerFieldRead(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
+    const nativeReceiver = L.mapTypeOf(L.typeOf(expr.expression));
+    if (nativeReceiver?.kind === "nativeStruct" && expr.questionDotToken === undefined) {
+      return lowerNativeStructFieldRead(L, expr, nativeReceiver);
+    }
     const target = L.fieldTarget(expr);
     if (target) return L.fieldGetExpr(target, locOf(expr), expr);
     if (expr.questionDotToken) return null;

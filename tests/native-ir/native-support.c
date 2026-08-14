@@ -1,5 +1,11 @@
 #include <stdint.h>
 
+typedef struct ScriptcTestPadded {
+  uint8_t tag;
+  uint64_t value;
+  double ratio;
+} ScriptcTestPadded;
+
 intptr_t scriptc_test_isize_identity(intptr_t value) {
   return value;
 }
@@ -25,6 +31,21 @@ int32_t scriptc_test_verify_exact_integers(
                  unsigned64 == UINT64_MAX &&
                  signedSize == INTPTR_MIN &&
                  unsignedSize == UINTPTR_MAX
+             ? 42
+             : 1;
+}
+
+int32_t scriptc_test_verify_padded(
+    ScriptcTestPadded value,
+    uint8_t tag,
+    uint64_t scalarValue,
+    double ratio) {
+  return value.tag == UINT8_C(7) &&
+                 value.value == UINT64_C(4277009102) &&
+                 value.ratio == 0.5 &&
+                 tag == value.tag &&
+                 scalarValue == value.value &&
+                 ratio == value.ratio
              ? 42
              : 1;
 }

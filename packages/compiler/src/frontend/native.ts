@@ -1,15 +1,21 @@
-import type { IrNativeScalarType } from "../ir/nodes.js";
+import type { IrNativeStructDef, IrNativeValueType } from "../ir/nodes.js";
 
-/** One exported TypeScript declaration that denotes an exact Native IR
- * scalar. Source spelling is never used as evidence: the frontend resolves
- * this module/name pair to the checker's declaration symbol. */
+/** One exported TypeScript declaration that denotes an exact Native IR value.
+ * Source spelling is never used as evidence: the frontend resolves this
+ * module/name pair to the checker's declaration symbol. */
 export interface NativeSourceType {
   readonly declaration: {
     readonly module: string;
     readonly name: string;
   };
-  readonly type: Readonly<IrNativeScalarType>;
+  readonly type: Readonly<IrNativeValueType>;
 }
+
+export type NativeStructDefinition = Readonly<
+  Omit<IrNativeStructDef, "fields"> & {
+    readonly fields: readonly Readonly<IrNativeStructDef["fields"][number]>[];
+  }
+>;
 
 export interface NativeFrontendBinding {
   readonly id: string;
@@ -25,11 +31,11 @@ export interface NativeFrontendBinding {
   readonly variadic: false;
   readonly parameters: readonly {
     readonly name: string;
-    readonly type: Readonly<IrNativeScalarType>;
+    readonly type: Readonly<IrNativeValueType>;
     readonly passMode: "value";
   }[];
   readonly result: {
-    readonly type: Readonly<IrNativeScalarType> | { readonly kind: "void" };
+    readonly type: Readonly<IrNativeValueType> | { readonly kind: "void" };
     readonly passMode: "value";
   };
 }
@@ -39,13 +45,16 @@ export interface NativeFrontendBinding {
  * ScriptC, while this layer sees only exact source identities, the target ABI
  * facts needed to interpret generic types, and Native IR. */
 export interface NativeFrontendInput {
-  /** ABI fact selected by the embedder. Pointer-sized Native IR types are
-   * resolved against this width, and the compiler driver verifies it against
-   * the selected backend target before lowering. */
+  /** ABI facts selected by the embedder. Pointer-sized Native IR types are
+   * resolved against this width; aggregate lowering additionally keys on the
+   * ABI identity. The compiler driver verifies both against the selected
+   * backend target before lowering. */
   readonly target: {
     readonly pointerBits: 32 | 64;
+    readonly abi: string;
   };
   readonly sourceTypes: readonly NativeSourceType[];
+  readonly types: readonly NativeStructDefinition[];
   readonly bindings: readonly NativeFrontendBinding[];
 }
 

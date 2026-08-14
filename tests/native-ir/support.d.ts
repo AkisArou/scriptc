@@ -8,6 +8,7 @@ import type {
   i64,
   u64,
   usize,
+  Padded,
 } from "@native-typescript/scabi-c-v1-fixture";
 
 declare const nativeScalar: unique symbol;
@@ -27,4 +28,10 @@ export declare function verifyExactIntegers(
   unsigned64: u64,
   signedSize: isize,
   unsignedSize: usize,
+): i32;
+export declare function verifyPadded(
+  value: Padded,
+  tag: u8,
+  scalarValue: u64,
+  ratio: import("@native-typescript/scabi-c-v1-fixture").f64,
 ): i32;

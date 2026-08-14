@@ -1,6 +1,14 @@
 import { resolve } from "node:path";
 import { nativeBindingDiag, nativeConversionDiag, nativeSignatureDiag } from "../../diagnostics/diagnostic.js";
-import type { IrExpr, IrNativeBinding, IrNativeScalarType, SrcLoc } from "../../ir/nodes.js";
+import type {
+  IrExpr,
+  IrNativeBinding,
+  IrNativeScalarType,
+  IrNativeStructDef,
+  IrNativeStructType,
+  IrNativeValueType,
+  SrcLoc,
+} from "../../ir/nodes.js";
 import { nativeIntegerInfo, typeEquals } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
@@ -11,7 +19,8 @@ import { PoisonError, type Lowerer } from "./lowerer.js";
 export type NativeInputBinding = NativeFrontendInput["bindings"][number];
 
 export interface ResolvedNativeFrontend {
-  readonly typesBySymbol: ReadonlyMap<ts.Symbol, IrNativeScalarType>;
+  readonly typesBySymbol: ReadonlyMap<ts.Symbol, IrNativeValueType>;
+  readonly typeDefsById: ReadonlyMap<string, NativeFrontendInput["types"][number]>;
   readonly bindingsBySymbol: ReadonlyMap<ts.Symbol, NativeInputBinding>;
 }
 
@@ -37,7 +46,8 @@ export function resolveNativeFrontend(
   L: Lowerer,
   input: NativeFrontendInput | undefined,
 ): ResolvedNativeFrontend {
-  const typesBySymbol = new Map<ts.Symbol, IrNativeScalarType>();
+  const typesBySymbol = new Map<ts.Symbol, IrNativeValueType>();
+  const typeDefsById = new Map((input?.types ?? []).map((type) => [type.id, type]));
   const bindingsBySymbol = new Map<ts.Symbol, NativeInputBinding>();
   for (const sourceType of input?.sourceTypes ?? []) {
     const symbol = declarationSymbol(L, sourceType.declaration);
@@ -50,13 +60,13 @@ export function resolveNativeFrontend(
     const symbol = declarationSymbol(L, binding.declaration);
     if (symbol !== null) bindingsBySymbol.set(symbol, binding);
   }
-  return { typesBySymbol, bindingsBySymbol };
+  return { typesBySymbol, typeDefsById, bindingsBySymbol };
 }
 
 export function nativeTypeOf(
   L: Lowerer,
   type: ts.Type,
-): IrNativeScalarType | null {
+): IrNativeValueType | null {
   for (const symbol of [type.getAliasSymbol(), type.getSymbol()]) {
     if (symbol === undefined) continue;
     const resolved = symbol.flags & ts.SymbolFlags.Alias
@@ -194,6 +204,10 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   );
   L.usesNativeTarget = true;
   L.usedNativeBindingIds.add(binding.id);
+  for (const parameter of binding.parameters) {
+    if (parameter.type.kind === "nativeStruct") L.usedNativeTypeIds.add(parameter.type.typeId);
+  }
+  if (binding.result.type.kind === "nativeStruct") L.usedNativeTypeIds.add(binding.result.type.typeId);
   return {
     kind: "nativeCall",
     binding: binding.id,
@@ -236,6 +250,23 @@ function exactIntegerLiteral(
   return value.toString();
 }
 
+function exactFloatLiteral(node: ts.Expression): string | null {
+  let expression = node;
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  let sign = 1;
+  if (
+    ts.isPrefixUnaryExpression(expression) &&
+    (expression.operator === ts.SyntaxKind.MinusToken || expression.operator === ts.SyntaxKind.PlusToken)
+  ) {
+    sign = expression.operator === ts.SyntaxKind.MinusToken ? -1 : 1;
+    expression = expression.operand;
+  }
+  if (!ts.isNumericLiteral(expression)) return null;
+  const value = sign * Number(expression.text);
+  if (!Number.isFinite(value)) return null;
+  return Object.is(value, -0) ? "-0" : String(value);
+}
+
 /** Exact-scalar assertions are representation constructors, not erased
  * JavaScript casts. Fixed-width integers up to 32 bits accept decimal number
  * literals; 64-bit and pointer-sized integers accept decimal BigInt literals.
@@ -258,12 +289,16 @@ export function lowerNativeScalarAssertion(
   if (pointerBits !== 32 && pointerBits !== 64) {
     throw new Error("native frontend input has no valid target pointer width");
   }
-  const value = exactIntegerLiteral(expr.expression, target, pointerBits);
+  const value = target.scalar === "f64"
+    ? exactFloatLiteral(expr.expression)
+    : exactIntegerLiteral(expr.expression, target, pointerBits);
   if (value === null) {
     L.pushDiag(
       nativeConversionDiag(
         target.scalar,
-        target.scalar === "isize" ||
+        target.scalar === "f64"
+          ? "the source is not a finite numeric literal or the same exact type"
+          : target.scalar === "isize" ||
           target.scalar === "usize" ||
           nativeIntegerInfo(target.scalar, pointerBits)?.bits === 64
           ? "the source is not a provably in-range decimal BigInt literal or the same exact type"
@@ -274,6 +309,84 @@ export function lowerNativeScalarAssertion(
     throw new PoisonError();
   }
   return { kind: "nativeScalarLit", value, type: { ...target }, loc: locOf(expr) };
+}
+
+/** A direct object-literal assertion is the sole aggregate constructor in
+ * this slice. It copies exact native field values into nominal aggregate
+ * storage; arbitrary JavaScript objects and post-hoc reinterpretation are
+ * deliberately rejected. */
+export function lowerNativeStructAssertion(
+  L: Lowerer,
+  expr: ts.AsExpression | ts.TypeAssertion,
+  target: IrNativeStructType,
+): IrExpr {
+  const definition = L.nativeTypeDefsById.get(target.typeId);
+  if (definition === undefined) throw new Error(`missing native struct definition '${target.typeId}'`);
+  const source = L.mapTypeOf(L.typeOf(expr.expression));
+  if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
+  if (!ts.isObjectLiteralExpression(expr.expression)) {
+    L.pushDiag(nativeConversionDiag(target.typeId, "the source is not a direct object literal or the same nominal native type", locOf(expr)));
+    throw new PoisonError();
+  }
+  const initializers = new Map<string, ts.Expression>();
+  for (const property of expr.expression.properties) {
+    if (!ts.isPropertyAssignment(property)) {
+      L.pushDiag(nativeConversionDiag(target.typeId, "native aggregate constructors require explicit property assignments without spreads or shorthand", locOf(property)));
+      throw new PoisonError();
+    }
+    const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)
+      ? property.name.text
+      : null;
+    if (name === null || initializers.has(name)) {
+      L.pushDiag(nativeConversionDiag(target.typeId, "native aggregate field names must be unique identifiers or string literals", locOf(property)));
+      throw new PoisonError();
+    }
+    initializers.set(name, property.initializer);
+  }
+  const expected = new Set(definition.fields.map((field) => field.name));
+  const unexpected = [...initializers.keys()].filter((name) => !expected.has(name));
+  const missing = definition.fields.filter((field) => !initializers.has(field.name)).map((field) => field.name);
+  if (unexpected.length > 0 || missing.length > 0) {
+    const details = [
+      ...(missing.length > 0 ? [`missing field(s): ${missing.join(", ")}`] : []),
+      ...(unexpected.length > 0 ? [`unknown field(s): ${unexpected.join(", ")}`] : []),
+    ];
+    L.pushDiag(nativeConversionDiag(target.typeId, details.join("; "), locOf(expr)));
+    throw new PoisonError();
+  }
+  const expectedFields = new Map(definition.fields.map((field) => [field.name, field]));
+  // Preserve JavaScript object-literal evaluation order. Backends may place
+  // the resulting temporaries in physical-layout order only after every
+  // initializer has been evaluated in source order.
+  const fields = [...initializers].map(([name, initializer]) => ({
+    name,
+    value: L.lowerExprExpecting(initializer, expectedFields.get(name)!.type),
+  }));
+  L.usesNativeTarget = true;
+  L.usedNativeTypeIds.add(target.typeId);
+  return { kind: "nativeStructLit", fields, type: { ...target }, loc: locOf(expr) };
+}
+
+export function lowerNativeStructFieldRead(
+  L: Lowerer,
+  expr: ts.PropertyAccessExpression,
+  target: IrNativeStructType,
+): IrExpr {
+  const definition = L.nativeTypeDefsById.get(target.typeId);
+  if (definition === undefined) throw new Error(`missing native struct definition '${target.typeId}'`);
+  const field = definition.fields.find((candidate) => candidate.name === expr.name.text);
+  if (field === undefined) {
+    throw new Error(`TypeScript checker exposed unknown native struct field '${expr.name.text}'`);
+  }
+  L.usesNativeTarget = true;
+  L.usedNativeTypeIds.add(target.typeId);
+  return {
+    kind: "nativeStructGet",
+    value: L.lowerExpr(expr.expression),
+    field: field.name,
+    type: { ...field.type },
+    loc: locOf(expr),
+  };
 }
 
 export function materializeNativeBinding(binding: NativeInputBinding): IrNativeBinding {
@@ -289,5 +402,19 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
       passMode: "value",
     })),
     result: { type: { ...binding.result.type }, passMode: "value" },
+  };
+}
+
+export function materializeNativeType(
+  definition: NativeFrontendInput["types"][number],
+): IrNativeStructDef {
+  return {
+    ...definition,
+    declaration: { ...definition.declaration },
+    abi: { ...definition.abi },
+    fields: definition.fields.map((field) => ({
+      ...field,
+      type: { ...field.type },
+    })),
   };
 }

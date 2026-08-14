@@ -12,6 +12,7 @@ import {
   mangleRecordRelease,
   mangleRecordRetain,
   mangleRecordStruct,
+  mangleNativeStruct,
 } from "../mangle.js";
 
 export function cType(t: IrType): string {
@@ -38,7 +39,11 @@ export function cType(t: IrType): string {
           return "intptr_t";
         case "usize":
           return "uintptr_t";
+        case "f64":
+          return "double";
       }
+    case "nativeStruct":
+      return mangleNativeStruct(t.typeId);
     case "f64":
     case "date":
       return "double";
@@ -157,6 +162,7 @@ export function cNativeScalarLiteral(
   value: string,
   pointerBits?: 32 | 64,
 ): string {
+  if (type.scalar === "f64") return cNumberLiteral(Number(value));
   if (type.scalar === "u64") return `UINT64_C(${value})`;
   if (type.scalar === "i64") {
     if (value === "-9223372036854775808") {
@@ -353,6 +359,8 @@ export function boxKindC(t: IrType): string {
   switch (t.kind) {
     case "nativeScalar":
       throw new Error("emitter bug: exact native scalars do not use JavaScript capture boxes");
+    case "nativeStruct":
+      throw new Error("emitter bug: native structs do not use JavaScript capture boxes");
     case "f64":
     case "date":
       return "SCR_BOX_F64";
@@ -538,6 +546,8 @@ export function elemKindC(elem: IrType): string {
   switch (elem.kind) {
     case "nativeScalar":
       throw new Error("emitter bug: exact native scalar arrays are not implemented");
+    case "nativeStruct":
+      throw new Error("emitter bug: native struct arrays are not implemented");
     case "f64":
       return "SCR_ELEM_F64";
     case "bool":

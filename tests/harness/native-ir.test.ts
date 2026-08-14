@@ -22,6 +22,7 @@ const repoRoot = join(import.meta.dirname, "../..");
 const scratch = mkdtempSync(join(tmpdir(), "scriptc-native-ir-"));
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 const loc: SrcLoc = { file: "native-ir.ts", start: 0, end: 0 };
+const nativePackage = "@native-typescript/scabi-c-v1-fixture";
 const I8 = nativeScalarType("i8");
 const U8 = nativeScalarType("u8");
 const I16 = nativeScalarType("i16");
@@ -32,8 +33,25 @@ const I64 = nativeScalarType("i64");
 const U64 = nativeScalarType("u64");
 const ISIZE = nativeScalarType("isize");
 const USIZE = nativeScalarType("usize");
+const NATIVE_F64 = nativeScalarType("f64");
+const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
+const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
+const PADDED_DEFINITION = {
+  id: PADDED_ID,
+  declaration: { module: nativePackage, name: "Padded" },
+  size: 24,
+  alignment: 8,
+  packing: "default",
+  triviallyCopyable: true,
+  destruction: "trivial",
+  abi: { kind: "indirect", alignment: 8 },
+  fields: [
+    { name: "tag", type: U8, offset: 0 },
+    { name: "value", type: U64, offset: 8 },
+    { name: "ratio", type: NATIVE_F64, offset: 16 },
+  ],
+} as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
-const nativePackage = "@native-typescript/scabi-c-v1-fixture";
 
 const exactIntegerBindings = [
   { scalar: "i8", declaration: "i8Identity", symbol: "nts_i8_identity" },
@@ -48,23 +66,39 @@ const exactIntegerBindings = [
 ] as const;
 
 const localNativeInput: NativeFrontendInput = {
-  target: { pointerBits: 64 },
-  sourceTypes: exactIntegerBindings.map(({ scalar }) => ({
-    declaration: { module: nativePackage, name: scalar },
-    type: nativeScalarType(scalar),
-  })),
-  bindings: exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
-    const type = nativeScalarType(scalar);
-    return {
-      id: `native-typescript.fixture.c-v1@0.0.0#${scalar}_identity`,
-      declaration: { module: nativePackage, name: declaration },
-      entry: { kind: "c-symbol" as const, symbol },
+  target: { pointerBits: 64, abi: "sysv-amd64" },
+  sourceTypes: [
+    ...exactIntegerBindings.map(({ scalar }) => ({
+      declaration: { module: nativePackage, name: scalar },
+      type: nativeScalarType(scalar),
+    })),
+    { declaration: { module: nativePackage, name: "f64" }, type: NATIVE_F64 },
+    { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
+  ],
+  types: [PADDED_DEFINITION],
+  bindings: [
+    ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
+      const type = nativeScalarType(scalar);
+      return {
+        id: `native-typescript.fixture.c-v1@0.0.0#${scalar}_identity`,
+        declaration: { module: nativePackage, name: declaration },
+        entry: { kind: "c-symbol" as const, symbol },
+        callingConvention: "c" as const,
+        variadic: false as const,
+        parameters: [{ name: "value", type, passMode: "value" as const }],
+        result: { type, passMode: "value" as const },
+      };
+    }),
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#padded_roundtrip",
+      declaration: { module: nativePackage, name: "paddedRoundtrip" },
+      entry: { kind: "c-symbol", symbol: "nts_padded_roundtrip" },
       callingConvention: "c",
-      variadic: false as const,
-      parameters: [{ name: "value", type, passMode: "value" as const }],
-      result: { type, passMode: "value" as const },
-    };
-  }),
+      variadic: false,
+      parameters: [{ name: "value", type: PADDED, passMode: "value" }],
+      result: { type: PADDED, passMode: "value" },
+    },
+  ],
 };
 
 function frontendNativeInput(): NativeFrontendInput {
@@ -81,6 +115,7 @@ function frontendNativeInput(): NativeFrontendInput {
         type: ISIZE,
       },
     ],
+    types: translated.types,
     bindings: [
       ...translated.bindings,
       {
@@ -130,6 +165,20 @@ function frontendNativeInput(): NativeFrontendInput {
         ],
         result: { type: I32, passMode: "value" },
       },
+      {
+        id: "scriptc-test@1#verify-padded",
+        declaration: { module: "scriptc-native-test", name: "verifyPadded" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_padded" },
+        callingConvention: "c",
+        variadic: false,
+        parameters: [
+          { name: "value", type: PADDED, passMode: "value" },
+          { name: "tag", type: U8, passMode: "value" },
+          { name: "scalarValue", type: U64, passMode: "value" },
+          { name: "ratio", type: NATIVE_F64, passMode: "value" },
+        ],
+        result: { type: I32, passMode: "value" },
+      },
     ],
   };
 }
@@ -159,7 +208,7 @@ function exactI32Module(value = "42"): IrModule {
     irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
-    nativeTarget: { pointerBits: 64 },
+    nativeTarget: { pointerBits: 64, abi: "sysv-amd64" },
     nativeBindings: [
       {
         id: "fixture.i32_identity",
@@ -216,7 +265,7 @@ function exactScalarLiteralModule(
     sourceFile: loc.file,
     entry: "__main",
     ...(scalar === "isize" || scalar === "usize"
-      ? { nativeTarget: { pointerBits } }
+      ? { nativeTarget: { pointerBits, abi: "test" } }
       : {}),
     functions: [
       {
@@ -244,7 +293,7 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
     irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
-    nativeTarget: { pointerBits },
+    nativeTarget: { pointerBits, abi: "test" },
     nativeBindings: [
       {
         id: "fixture.pointer_sizes",
@@ -422,6 +471,26 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
   );
 });
 
+test("Native IR rejects undeclared and internally inconsistent native structs", () => {
+  const undeclared = exactI32Module();
+  undeclared.nativeBindings![0]!.parameters[0]!.type = PADDED;
+  expect(validateModule(undeclared).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "value" has an unsupported exact type',
+  );
+
+  const invalidLayout = exactI32Module();
+  invalidLayout.nativeTypes = [
+    {
+      ...PADDED_DEFINITION,
+      abi: { kind: "indirect", alignment: 16 },
+      fields: PADDED_DEFINITION.fields.map((field) => ({ ...field, type: { ...field.type } })),
+    },
+  ];
+  expect(validateModule(invalidLayout).map((error) => error.message)).toContain(
+    `Native IR type "${PADDED_ID}" has unsupported value or ABI metadata`,
+  );
+});
+
 test("the frontend rejects an out-of-range exact i32 constructor before linking", async () => {
   const outDir = join(scratch, "frontend-out-of-range");
   const result = await compile(join(repoRoot, "tests/native-ir/out-of-range.ts"), {
@@ -495,7 +564,7 @@ test("the compiler rejects Native IR input for a different pointer width", async
     outPath: join(outDir, "program"),
     backend: "c",
     externalTypes: nativeExternalTypes(),
-    native: { ...native, target: { pointerBits: 32 } },
+    native: { ...native, target: { pointerBits: 32, abi: "test" } },
   });
   expect(result.ok).toBe(false);
   if (result.ok) return;
@@ -503,11 +572,26 @@ test("the compiler rejects Native IR input for a different pointer width", async
 
   const analysis = analyze(join(repoRoot, "tests/native-ir/missing-symbol.ts"), {
     externalTypes: nativeExternalTypes(),
-    native: { ...native, target: { pointerBits: 32 } },
+    native: { ...native, target: { pointerBits: 32, abi: "test" } },
   });
   expect(analysis.coverage.diagnostics.map((diagnostic) => diagnostic.code)).toContain(
     "SC5101",
   );
+});
+
+test("the compiler rejects a reached aggregate for a different target ABI", async () => {
+  const outDir = join(scratch, "aggregate-target-mismatch");
+  const native = frontendNativeInput();
+  const result = await compile(join(repoRoot, "tests/native-ir/aggregate.ts"), {
+    outDir,
+    outPath: join(outDir, "program"),
+    backend: "c",
+    externalTypes: nativeExternalTypes(),
+    native: { ...native, target: { ...native.target, abi: "ms-x64" } },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain("SC5101");
 });
 
 test("unused Native IR input remains inert even when its target differs", async () => {
@@ -520,7 +604,7 @@ test("unused Native IR input remains inert even when its target differs", async 
       outPath: join(outDir, "program"),
       backend: "c",
       externalTypes: nativeExternalTypes(),
-      native: { ...native, target: { pointerBits: 32 } },
+      native: { ...native, target: { pointerBits: 32, abi: "test" } },
     },
   );
   expect(result.ok ? [] : result.diagnostics).toEqual([]);
@@ -542,7 +626,7 @@ test("a pointer-sized literal without a native call still records target facts",
   expect(result.ok ? [] : result.diagnostics).toEqual([]);
   if (!result.ok || result.irPath === undefined) return;
   const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
-  expect(mod.nativeTarget).toEqual({ pointerBits: 64 });
+  expect(mod.nativeTarget).toEqual({ pointerBits: 64, abi: "sysv-amd64" });
   expect(mod.nativeBindings).toBeUndefined();
   expect(validateModule(mod)).toEqual([]);
 });
@@ -579,6 +663,23 @@ test("a reached native symbol missing from the link fails as SC5105", async () =
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5105"]);
+});
+
+test("the frontend refuses to reinterpret an ordinary object as a native struct", async () => {
+  const outDir = join(scratch, "aggregate-object-reinterpret");
+  const result = await compile(
+    join(repoRoot, "tests/native-ir/aggregate-object-reinterpret.ts"),
+    {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend: "c",
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+    },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5104"]);
 });
 
 describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (backend) => {
@@ -643,6 +744,52 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(json).toContain('"kind": "nativeScalarLit"');
     expect(json).not.toContain('"kind": "numLit"');
 
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (backend) => {
+  test("constructs and round-trips the authoritative padded struct by value", async () => {
+    const outDir = join(scratch, `aggregate-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/aggregate.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native aggregate frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeTypes).toEqual([
+      expect.objectContaining({
+        id: PADDED_ID,
+        size: 24,
+        alignment: 8,
+        abi: { kind: "indirect", alignment: 8 },
+      }),
+    ]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "aggregate.c" : "aggregate.ll"),
+      "utf8",
+    );
+    if (backend === "c") {
+      expect(generated).toContain("Native IR aggregate field offset mismatch");
+    } else {
+      expect(generated).toContain("sret(");
+      expect(generated).toContain("byval(");
+    }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

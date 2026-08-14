@@ -164,7 +164,7 @@ export function nativeSignatureDiag(id: string, detail: string, loc: SrcLoc): Sc
   };
 }
 
-/** SC5104 — an exact native scalar was requested from a JavaScript value
+/** SC5104 — an exact native value was requested from a JavaScript value
  * without a conversion whose representation can be proven at compile time. */
 export function nativeConversionDiag(type: string, detail: string, loc: SrcLoc): ScrDiagnostic {
   return {
@@ -172,7 +172,7 @@ export function nativeConversionDiag(type: string, detail: string, loc: SrcLoc):
     message: `cannot construct exact native ${type}: ${detail}`,
     loc,
     hint:
-      "use an in-range integer literal assertion or an operation that already returns the same exact native type",
+      "use a supported literal representation constructor or an operation that already returns the same exact native type",
   };
 }
 

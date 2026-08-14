@@ -1190,9 +1190,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   const nativeDeclarations = new Set<string>();
   const nativePointerBits = mod.nativeTarget?.pointerBits;
   const validNativeTarget = nativePointerBits === 32 || nativePointerBits === 64;
-  if (mod.nativeTarget !== undefined && !validNativeTarget) {
+  if (
+    mod.nativeTarget !== undefined &&
+    (!validNativeTarget || typeof mod.nativeTarget.abi !== "string" || mod.nativeTarget.abi.length === 0)
+  ) {
     errors.push({
-      message: `Native IR target has invalid pointer width "${String(nativePointerBits)}"`,
+      message: `Native IR target has invalid pointer width or ABI identity`,
       loc: moduleLoc,
     });
   }
@@ -1207,6 +1210,66 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   // characters remain forbidden; backends never derive symbols from IDs.
   const nativeId = /^[A-Za-z0-9@][A-Za-z0-9@/_.:#-]*$/;
   const cIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const nativeTypesById = new Map<string, NonNullable<IrModule["nativeTypes"]>[number]>();
+  const validNativeScalar = (type: IrType): boolean =>
+    type.kind === "nativeScalar" &&
+    (type.scalar === "f64" ||
+      nativeIntegerInfo(type.scalar, validNativeTarget ? nativePointerBits : undefined) !== null);
+  const nativeScalarSize = (scalar: string): number | null => {
+    if (scalar === "f64") return 8;
+    const info = nativeIntegerInfo(scalar, validNativeTarget ? nativePointerBits : undefined);
+    return info === null ? null : info.bits / 8;
+  };
+  for (const definition of mod.nativeTypes ?? []) {
+    if (!nativeId.test(definition.id) || nativeTypesById.has(definition.id)) {
+      errors.push({ message: `invalid or duplicate Native IR type id "${definition.id}"`, loc: moduleLoc });
+    }
+    if (
+      !Number.isSafeInteger(definition.size) || definition.size <= 0 ||
+      !Number.isSafeInteger(definition.alignment) || definition.alignment <= 0 ||
+      (definition.alignment & (definition.alignment - 1)) !== 0 ||
+      definition.size % definition.alignment !== 0
+    ) {
+      errors.push({ message: `Native IR type "${definition.id}" has invalid size or alignment`, loc: moduleLoc });
+    }
+    if (
+      definition.packing !== "default" || definition.triviallyCopyable !== true ||
+      definition.destruction !== "trivial" || definition.abi.kind !== "indirect" ||
+      !Number.isSafeInteger(definition.abi.alignment) || definition.abi.alignment <= 0 ||
+      (definition.abi.alignment & (definition.abi.alignment - 1)) !== 0 ||
+      definition.abi.alignment > definition.alignment
+    ) {
+      errors.push({ message: `Native IR type "${definition.id}" has unsupported value or ABI metadata`, loc: moduleLoc });
+    }
+    const names = new Set<string>();
+    let cursor = 0;
+    for (const field of definition.fields) {
+      const size = nativeScalarSize(field.type.scalar);
+      if (field.name === "" || names.has(field.name) || size === null) {
+        errors.push({ message: `Native IR type "${definition.id}" has an invalid field "${field.name}"`, loc: moduleLoc });
+      } else if (
+        definition.alignment < size ||
+        !Number.isSafeInteger(field.offset) ||
+        field.offset < cursor ||
+        field.offset % size !== 0
+      ) {
+        errors.push({ message: `Native IR type "${definition.id}" field "${field.name}" has an invalid offset`, loc: moduleLoc });
+      } else {
+        cursor = field.offset + size;
+      }
+      names.add(field.name);
+    }
+    if (cursor > definition.size) {
+      errors.push({ message: `Native IR type "${definition.id}" fields exceed its declared size`, loc: moduleLoc });
+    }
+    nativeTypesById.set(definition.id, definition);
+  }
+  const validNativeValue = (type: IrType): boolean =>
+    validNativeScalar(type) ||
+    (type.kind === "nativeStruct" && nativeTypesById.has(type.typeId));
+  if ((mod.nativeTypes?.length ?? 0) > 0 && (!validNativeTarget || mod.nativeTarget?.abi === "")) {
+    errors.push({ message: "Native IR aggregate types require complete module target ABI facts", loc: moduleLoc });
+  }
   for (const binding of mod.nativeBindings ?? []) {
     if (!nativeId.test(binding.id)) {
       errors.push({ message: `invalid Native IR binding id "${binding.id}"`, loc: moduleLoc });
@@ -1278,10 +1341,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
-      if (
-        parameter.type.kind !== "nativeScalar" ||
-        nativeIntegerInfo(parameter.type.scalar, validNativeTarget ? nativePointerBits : undefined) === null
-      ) {
+      if (!validNativeValue(parameter.type)) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
           loc: moduleLoc,
@@ -1296,11 +1356,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     if (
       binding.result.type.kind !== "void" &&
-      (binding.result.type.kind !== "nativeScalar" ||
-        nativeIntegerInfo(
-          binding.result.type.scalar,
-          validNativeTarget ? nativePointerBits : undefined,
-        ) === null)
+      !validNativeValue(binding.result.type)
     ) {
       errors.push({
         message: `Native IR binding "${binding.id}" result has an unsupported exact type`,
@@ -1694,6 +1750,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       functionsByName,
       ffiByName,
       nativeById,
+      nativeTypesById,
       classesByName,
       recordsById,
       unionsById,
@@ -1710,6 +1767,7 @@ function validateFunction(
   functions: Map<string, IrFunction>,
   ffiByName: Map<string, NonNullable<IrModule["ffiImports"]>[number]>,
   nativeById: Map<string, NonNullable<IrModule["nativeBindings"]>[number]>,
+  nativeTypesById: Map<string, NonNullable<IrModule["nativeTypes"]>[number]>,
   classes: Map<string, IrClassDef>,
   records: Map<string, IrRecordShape>,
   unions: Map<string, IrUnionDef>,
@@ -1866,6 +1924,14 @@ function validateFunction(
         }
         break;
       case "nativeScalarLit": {
+        if (e.type.scalar === "f64") {
+          const value = Number(e.value);
+          const canonical = Object.is(value, -0) ? "-0" : String(value);
+          if (!Number.isFinite(value) || canonical !== e.value) {
+            err(`native f64 literal has invalid canonical finite spelling "${e.value}"`, e.loc);
+          }
+          break;
+        }
         const info = nativeIntegerInfo(
           e.type.scalar,
           nativePointerBits,
@@ -1882,6 +1948,40 @@ function validateFunction(
         if (value < info.min || value > info.max) {
           err(`native ${e.type.scalar} literal ${e.value} is out of range`, e.loc);
         }
+        break;
+      }
+      case "nativeStructLit": {
+        const definition = nativeTypesById.get(e.type.typeId);
+        if (definition === undefined) {
+          err(`native struct literal names undeclared type "${e.type.typeId}"`, e.loc);
+          break;
+        }
+        const fields = new Map<string, IrExpr>();
+        for (const field of e.fields) {
+          checkExpr(field.value);
+          if (fields.has(field.name)) err(`native struct literal repeats field "${field.name}"`, e.loc);
+          fields.set(field.name, field.value);
+        }
+        for (const field of definition.fields) {
+          const value = fields.get(field.name);
+          if (value === undefined) err(`native struct literal is missing field "${field.name}"`, e.loc);
+          else expectType(value, field.type, `native struct field ${field.name}`);
+          fields.delete(field.name);
+        }
+        for (const name of fields.keys()) err(`native struct literal has unknown field "${name}"`, e.loc);
+        break;
+      }
+      case "nativeStructGet": {
+        checkExpr(e.value);
+        if (e.value.type.kind !== "nativeStruct") {
+          err("nativeStructGet receiver is not a native struct", e.loc);
+          break;
+        }
+        const definition = nativeTypesById.get(e.value.type.typeId);
+        const field = definition?.fields.find((candidate) => candidate.name === e.field);
+        if (definition === undefined) err(`nativeStructGet names undeclared type "${e.value.type.typeId}"`, e.loc);
+        else if (field === undefined) err(`native struct ${definition.id} has no field "${e.field}"`, e.loc);
+        else if (!typeEquals(e.type, field.type)) err(`nativeStructGet ${definition.id}.${e.field} type mismatch`, e.loc);
         break;
       }
       case "strLit":
@@ -2056,9 +2156,10 @@ function validateFunction(
           e.operand.type.kind !== "f64" &&
           e.operand.type.kind !== "string" &&
           e.operand.type.kind !== "union" &&
+          e.operand.type.kind !== "nativeStruct" &&
           !REF_TRUTHY_KINDS.has(e.operand.type.kind)
         ) {
-          err(`toBool operand must be f64|string|union|ref, got ${e.operand.type.kind}`, e.loc);
+          err(`toBool operand must be f64|string|union|nativeStruct|ref, got ${e.operand.type.kind}`, e.loc);
         }
         if (e.operand.type.kind === "union") checkTruthyUnion(e.operand.type.unionId, e.loc);
         if (e.type.kind !== "bool") err("toBool must be bool", e.loc);

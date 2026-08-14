@@ -84,7 +84,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCall
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import {
   buildClassGraph,
@@ -199,6 +199,11 @@ export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): 
   ) {
     throw new Error(
       `LLVM emitter target mismatch: Native IR requires ${mod.nativeTarget.pointerBits}-bit pointers, backend selected ${pointerBits}-bit pointers`,
+    );
+  }
+  if ((mod.nativeTypes?.length ?? 0) > 0 && mod.nativeTarget?.abi !== "sysv-amd64") {
+    throw new Error(
+      `LLVM emitter does not implement Native IR indirect aggregates for ABI '${String(mod.nativeTarget?.abi)}'`,
     );
   }
   return new LlEmitter(mod, { ...options, pointerBits }).emit();
@@ -1025,6 +1030,7 @@ class LlEmitter {
   private readonly ffiByName = new Map<string, IrFfiImport>();
   /** Validated generic Native IR bindings, keyed by stable binding id. */
   private readonly nativeById = new Map<string, IrNativeBinding>();
+  private readonly nativeTypesById = new Map<string, NonNullable<IrModule["nativeTypes"]>[number]>();
   /** C-ABI callback trampolines and (for raw/no-userdata callbacks) their
    * distinct call-scoped TLS closure slots. */
   private readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
@@ -1156,6 +1162,9 @@ class LlEmitter {
     for (const entry of mod.nativeBindings ?? []) {
       this.nativeById.set(entry.id, entry);
     }
+    for (const definition of mod.nativeTypes ?? []) {
+      this.nativeTypesById.set(definition.id, definition);
+    }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
     this.indirectMayThrow = mt.indirect;
@@ -1248,7 +1257,11 @@ class LlEmitter {
           case "isize":
           case "usize":
             return this.sizeType;
+          case "f64":
+            return "double";
         }
+      case "nativeStruct":
+        return `%${mangleNativeStruct(t.typeId)}`;
       case "f64":
       case "date":
         return "double";
@@ -1321,12 +1334,19 @@ class LlEmitter {
       case "isize":
       case "usize":
         return type;
+      case "f64":
+        return type;
     }
   }
 
   private nativeParameterType(
     t: IrNativeBinding["parameters"][number]["type"],
   ): string {
+    if (t.kind === "nativeStruct") {
+      const definition = this.nativeTypesById.get(t.typeId);
+      if (definition === undefined) throw new Error(`llvm emitter bug: unknown native struct ${t.typeId}`);
+      return `ptr byval(${this.llType(t)}) align ${definition.abi.alignment}`;
+    }
     const type = this.llType(t);
     switch (t.scalar) {
       case "i8":
@@ -1342,7 +1362,37 @@ class LlEmitter {
       case "isize":
       case "usize":
         return type;
+      case "f64":
+        return type;
     }
+  }
+
+  private nativeStructLayout(typeId: string): {
+    readonly definition: NonNullable<IrModule["nativeTypes"]>[number];
+    readonly members: readonly string[];
+    readonly fieldIndices: ReadonlyMap<string, number>;
+  } {
+    const definition = this.nativeTypesById.get(typeId);
+    if (definition === undefined) throw new Error(`llvm emitter bug: unknown native struct ${typeId}`);
+    const pointerBytes = this.sizeType === "i32" ? 4 : 8;
+    const scalarSize = (scalar: string): number => {
+      if (scalar === "f64" || scalar === "i64" || scalar === "u64") return 8;
+      if (scalar === "isize" || scalar === "usize") return pointerBytes;
+      const bits = Number(scalar.slice(1));
+      if (bits === 8 || bits === 16 || bits === 32) return bits / 8;
+      throw new Error(`llvm emitter bug: unsupported native scalar '${scalar}' in aggregate`);
+    };
+    const members: string[] = [];
+    const fieldIndices = new Map<string, number>();
+    let cursor = 0;
+    for (const field of definition.fields) {
+      if (field.offset > cursor) members.push(`[${field.offset - cursor} x i8]`);
+      fieldIndices.set(field.name, members.length);
+      members.push(this.llType(field.type));
+      cursor = field.offset + scalarSize(field.type.scalar);
+    }
+    if (definition.size > cursor) members.push(`[${definition.size - cursor} x i8]`);
+    return { definition, members, fieldIndices };
   }
 
   // ── module assembly ─────────────────────────────────────────────────────
@@ -1773,6 +1823,10 @@ class LlEmitter {
       `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
     ];
+    for (const definition of this.mod.nativeTypes ?? []) {
+      const layout = this.nativeStructLayout(definition.id);
+      out.push(`%${mangleNativeStruct(definition.id)} = type { ${layout.members.join(", ")} }`);
+    }
     out.push(...shapes.typeDefs);
     out.push(...classShapes.typeDefs);
     // Thread-instanced library state (abi.instance_per_thread): the
@@ -1886,8 +1940,17 @@ class LlEmitter {
     if (ffiCallbacks.globals.length > 0) out.push(``);
     for (const g of globals) {
       const ty = this.llType(g.type);
-      const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
-      out.push(`@${mangleGlobal(g.id)} = internal ${tl}global ${ty} ${zero} ; ${g.name}`);
+      const zero = g.type.kind === "nativeStruct"
+        ? "zeroinitializer"
+        : ty === "double"
+          ? f64Lit(0)
+          : ty === "ptr"
+            ? "null"
+            : "false";
+      const alignment = g.type.kind === "nativeStruct"
+        ? `, align ${this.nativeStructLayout(g.type.typeId).definition.alignment}`
+        : "";
+      out.push(`@${mangleGlobal(g.id)} = internal ${tl}global ${ty} ${zero}${alignment} ; ${g.name}`);
     }
     if (globals.length > 0) out.push(``);
     out.push(...helpers);
@@ -2147,7 +2210,13 @@ class LlEmitter {
     // the executable main, %main itself, and the escaped-exception check.
     const zeroStores = globals.map((g) => {
       const ty = this.llType(g.type);
-      const zero = ty === "double" ? f64Lit(0) : ty === "ptr" ? "null" : "false";
+      const zero = g.type.kind === "nativeStruct"
+        ? "zeroinitializer"
+        : ty === "double"
+          ? f64Lit(0)
+          : ty === "ptr"
+            ? "null"
+            : "false";
       return `  store ${ty} ${zero}, ptr @${mangleGlobal(g.id)} ; ${g.name}`;
     });
     out.push(
@@ -3003,6 +3072,12 @@ class LlEmitter {
     if (t.kind === "void") this.B.terminate("ret void");
     else if (t.kind === "f64" || t.kind === "date") this.B.terminate(`ret double ${f64Lit(0)}`);
     else if (t.kind === "bool") this.B.terminate("ret i1 false");
+    else if (t.kind === "nativeScalar") {
+      const type = this.llType(t);
+      this.B.terminate(`ret ${type} ${type === "double" ? f64Lit(0) : "0"}`);
+    } else if (t.kind === "nativeStruct") {
+      this.B.terminate(`ret ${this.llType(t)} zeroinitializer`);
+    }
     else this.B.terminate("ret ptr null");
   }
 
@@ -3080,6 +3155,8 @@ class LlEmitter {
         return t;
       }
       case "date":
+        return "true";
+      case "nativeStruct":
         return "true";
       case "array":
       case "record":
@@ -4717,7 +4794,37 @@ class LlEmitter {
       case "numLit":
         return { name: f64Lit(e.value), type: e.type };
       case "nativeScalarLit":
-        return { name: e.value, type: e.type };
+        return { name: e.type.scalar === "f64" ? f64Lit(Number(e.value)) : e.value, type: e.type };
+      case "nativeStructLit": {
+        const layout = this.nativeStructLayout(e.type.typeId);
+        const values = new Map(e.fields.map((field) => [field.name, this.emitExpr(field.value)]));
+        let aggregate = "zeroinitializer";
+        for (const field of layout.definition.fields) {
+          const next = B.tmp();
+          const value = values.get(field.name);
+          const index = layout.fieldIndices.get(field.name);
+          if (value === undefined || index === undefined) {
+            throw new Error(`llvm emitter bug: missing native struct field ${field.name}`);
+          }
+          B.line(
+            `${next} = insertvalue ${this.llType(e.type)} ${aggregate}, ${this.llType(field.type)} ${value.name}, ${index}`,
+          );
+          aggregate = next;
+        }
+        return { name: aggregate, type: e.type };
+      }
+      case "nativeStructGet": {
+        if (e.value.type.kind !== "nativeStruct") {
+          throw new Error("llvm emitter bug: nativeStructGet receiver is not a native struct");
+        }
+        const layout = this.nativeStructLayout(e.value.type.typeId);
+        const index = layout.fieldIndices.get(e.field);
+        if (index === undefined) throw new Error(`llvm emitter bug: unknown native field ${e.field}`);
+        const value = this.emitExpr(e.value);
+        const result = B.tmp();
+        B.line(`${result} = extractvalue ${this.llType(e.value.type)} ${value.name}, ${index}`);
+        return { name: result, type: e.type };
+      }
       case "boolLit":
         return { name: e.value ? "true" : "false", type: e.type };
       case "strLit": {
@@ -6174,16 +6281,55 @@ class LlEmitter {
           throw new Error(`llvm emitter bug: unknown Native IR binding ${e.binding}`);
         }
         const args = e.args.map((arg) => this.emitExpr(arg));
-        const returnType = this.nativeReturnType(binding.result.type);
+        const aggregateResult = binding.result.type.kind === "nativeStruct"
+          ? this.nativeStructLayout(binding.result.type.typeId)
+          : null;
+        const returnType = aggregateResult === null ? this.nativeReturnType(binding.result.type) : "void";
         const parameterTypes = binding.parameters.map((parameter) =>
           this.nativeParameterType(parameter.type)
         );
+        const declarationParameters = [...parameterTypes];
+        let resultSlot: string | null = null;
+        if (aggregateResult !== null) {
+          resultSlot = B.tmp();
+          B.entryAllocas.push(
+            `${resultSlot} = alloca ${this.llType(binding.result.type)}, align ${aggregateResult.definition.alignment}`,
+          );
+          declarationParameters.unshift(
+            `ptr sret(${this.llType(binding.result.type)}) align ${aggregateResult.definition.abi.alignment}`,
+          );
+        }
         this.declare(
-          `declare ${returnType} @${binding.entry.symbol}(${parameterTypes.join(", ")})`,
+          `declare ${returnType} @${binding.entry.symbol}(${declarationParameters.join(", ")})`,
         );
+        const callArgs: string[] = [];
+        if (aggregateResult !== null) {
+          callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
+        }
+        binding.parameters.forEach((parameter, index) => {
+          const arg = args[index]!;
+          if (parameter.type.kind === "nativeStruct") {
+            const layout = this.nativeStructLayout(parameter.type.typeId);
+            const slot = B.tmp();
+            const type = this.llType(parameter.type);
+            B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
+            B.line(`store ${type} ${arg.name}, ptr ${slot}, align ${layout.definition.alignment}`);
+            callArgs.push(`${parameterTypes[index]} ${slot}`);
+          } else {
+            callArgs.push(`${parameterTypes[index]} ${arg.name}`);
+          }
+        });
         const call =
           `call ${returnType} @${binding.entry.symbol}(` +
-          `${args.map((arg, i) => `${parameterTypes[i]} ${arg.name}`).join(", ")})`;
+          `${callArgs.join(", ")})`;
+        if (aggregateResult !== null) {
+          B.line(call);
+          const result = B.tmp();
+          B.line(
+            `${result} = load ${this.llType(binding.result.type)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
+          );
+          return { name: result, type: e.type };
+        }
         if (binding.result.type.kind === "void") {
           B.line(call);
           return { name: "", type: e.type };

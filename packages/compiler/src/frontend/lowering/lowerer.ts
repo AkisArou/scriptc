@@ -95,7 +95,7 @@ import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonIm
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerFfiCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction, validateFfiImports } from "./lower-calls.js";
-import { lowerNativeCall, lowerNativeScalarAssertion, materializeNativeBinding, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding } from "./lower-native.js";
+import { lowerNativeCall, lowerNativeScalarAssertion, lowerNativeStructAssertion, materializeNativeBinding, materializeNativeType, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding, type ResolvedNativeFrontend } from "./lower-native.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
@@ -1257,11 +1257,13 @@ export class Lowerer {
   /** Manifest-neutral native input resolved exclusively by checker symbol. */
   readonly nativeInput: NativeFrontendInput | undefined;
   readonly nativeTypesBySymbol: ReadonlyMap<ts.Symbol, IrNativeBinding["parameters"][number]["type"]>;
+  readonly nativeTypeDefsById: ResolvedNativeFrontend["typeDefsById"];
   readonly nativeBindingsBySymbol: ReadonlyMap<ts.Symbol, NativeInputBinding>;
   readonly validatedNativeBindingSymbols = new Set<ts.Symbol>();
   /** Reachability accounting: only calls that survive this pass contribute a
    * binding record to the assembled module. */
   readonly usedNativeBindingIds = new Set<string>();
+  readonly usedNativeTypeIds = new Set<string>();
   /** A reached native call or target-sized scalar requires the input's target
    * ABI facts to survive on the assembled module. */
   usesNativeTarget = false;
@@ -1331,6 +1333,7 @@ export class Lowerer {
     this.checker = program.getTypeChecker();
     const native = resolveNativeFrontend(this, this.nativeInput);
     this.nativeTypesBySymbol = native.typesBySymbol;
+    this.nativeTypeDefsById = native.typeDefsById;
     this.nativeBindingsBySymbol = native.bindingsBySymbol;
     this.typeCtx = {
       checker: this.checker,
@@ -2285,7 +2288,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 7,
+            irVersion: 8,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,
@@ -2298,7 +2301,15 @@ export class Lowerer {
               ? {
                   nativeTarget: {
                     pointerBits: this.nativeInput!.target.pointerBits,
+                    abi: this.nativeInput!.target.abi,
                   },
+                }
+              : {}),
+            ...(this.usedNativeTypeIds.size > 0
+              ? {
+                  nativeTypes: (this.nativeInput?.types ?? [])
+                    .filter((definition) => this.usedNativeTypeIds.has(definition.id))
+                    .map(materializeNativeType),
                 }
               : {}),
             ...(this.usedNativeBindingIds.size > 0
@@ -7580,6 +7591,9 @@ export class Lowerer {
     const nativeTarget = this.mapTypeOf(this.checker.getTypeFromTypeNode(expr.type));
     if (nativeTarget?.kind === "nativeScalar") {
       return lowerNativeScalarAssertion(this, expr, nativeTarget);
+    }
+    if (nativeTarget?.kind === "nativeStruct") {
+      return lowerNativeStructAssertion(this, expr, nativeTarget);
     }
     // ISLAND value cast to a PROMISE type (`factory(opts) as Promise<Mod>`
     // — the Node-typed async-API shape): promises never have a validated

@@ -17,6 +17,15 @@ function sanitize(name: string): string {
   );
 }
 
+/** Injective encoding for embedder-owned opaque identifiers. Unlike compiler
+ * ids, these may legitimately differ only by `.` versus `_`, so every
+ * non-alphanumeric code point (including `_`) must be escaped. */
+function sanitizeOpaque(name: string): string {
+  return name.replace(/[^A-Za-z0-9]/gu, (ch) =>
+    `_x${ch.codePointAt(0)!.toString(16)}_`,
+  );
+}
+
 export function mangleFunction(name: string): string {
   return `sc_f_${sanitize(name)}`;
 }
@@ -113,6 +122,14 @@ export function mangleClassGcFree(className: string): string {
  * sc_new_Y, ...) so no user class name can collide with a record symbol. */
 export function mangleRecordStruct(shapeId: string): string {
   return `sc_rs_${sanitize(shapeId)}`;
+}
+/** Nominal by-value aggregate type from Native IR. */
+export function mangleNativeStruct(typeId: string): string {
+  return `sc_nt_${sanitizeOpaque(typeId)}`;
+}
+/** Field identity inside a nominal Native IR aggregate. */
+export function mangleNativeField(fieldName: string): string {
+  return `sc_nf_${sanitizeOpaque(fieldName)}`;
 }
 export function mangleRecordNew(shapeId: string): string {
   return `sc_rnew_${sanitize(shapeId)}`;

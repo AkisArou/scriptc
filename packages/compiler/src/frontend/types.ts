@@ -281,6 +281,8 @@ export class UnionRegistry {
  * a back-reference renders as "..." instead of expanding forever. */
 export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegistry, seen: Set<string> = new Set()): string {
   switch (t.kind) {
+    case "nativeStruct":
+      return `native struct ${t.typeId}`;
     case "nativeScalar":
       return t.scalar;
     case "f64":

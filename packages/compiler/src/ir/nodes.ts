@@ -45,7 +45,8 @@ export const IR_NATIVE_INTEGER_SCALARS = [
   "usize",
 ] as const;
 
-export type IrNativeScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
+export type IrNativeIntegerScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
+export type IrNativeScalar = IrNativeIntegerScalar | "f64";
 
 export interface IrNativeIntegerInfo {
   readonly bits: 8 | 16 | 32 | 64;
@@ -115,8 +116,18 @@ export interface IrNativeScalarType {
   scalar: IrNativeScalar;
 }
 
+/** Nominal native aggregate value. `typeId` resolves only through the
+ * module's validated Native IR type table; it is never an ordinary
+ * JavaScript record or object representation. */
+export interface IrNativeStructType {
+  kind: "nativeStruct";
+  typeId: string;
+}
+
+export type IrNativeValueType = IrNativeScalarType | IrNativeStructType;
+
 export type IrType =
-  | IrNativeScalarType
+  | IrNativeValueType
   | { kind: "f64" }
   /** The supported ES Date value slice: a scalar TimeClip'd millisecond
    * value. Getters and toISOString observe only this slot, so copying it
@@ -419,6 +430,9 @@ export const F64: IrType = { kind: "f64" };
 export function nativeScalarType(scalar: IrNativeScalar): IrNativeScalarType {
   return { kind: "nativeScalar", scalar };
 }
+export function nativeStructType(typeId: string): IrNativeStructType {
+  return { kind: "nativeStruct", typeId };
+}
 export const DATE_T: IrType = { kind: "date" };
 export const BYTES_U8: IrType = { kind: "bytes", elem: "u8" };
 export const STRING: IrType = { kind: "string" };
@@ -606,6 +620,8 @@ export function typeKey(t: IrType): string {
   switch (t.kind) {
     case "nativeScalar":
       return `native:${t.scalar}`;
+    case "nativeStruct":
+      return `native-struct:${t.typeId}`;
     case "f64":
     case "date":
     case "string":
@@ -673,6 +689,9 @@ export function typeKey(t: IrType): string {
 export function typeEquals(a: IrType, b: IrType): boolean {
   if (a.kind === "nativeScalar") {
     return b.kind === "nativeScalar" && a.scalar === b.scalar;
+  }
+  if (a.kind === "nativeStruct") {
+    return b.kind === "nativeStruct" && a.typeId === b.typeId;
   }
   if (a.kind === "array") return b.kind === "array" && typeEquals(a.elem, b.elem);
   if (a.kind === "bytes") return b.kind === "bytes" && a.elem === b.elem;
@@ -790,7 +809,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 7;
+  irVersion: 8;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -850,12 +869,16 @@ export interface IrModule {
    * lowering emits them when it reaches a native call or target-sized value. */
   nativeTarget?: {
     pointerBits: 32 | 64;
+    abi: string;
   };
+  /** Reached nominal native aggregate definitions. Layout and indirect ABI
+   * passing are embedder-provided facts, not backend-inferred heuristics. */
+  nativeTypes?: IrNativeStructDef[];
   /** Generic Native IR bindings. Calls refer to the stable opaque `id`;
    * only this validated table carries the backend symbol spelling.
-   * The first slice is value-only exact scalars. Aggregates, handles,
-   * ownership, callbacks, and target-specific entries extend this table
-   * rather than introducing another call path. */
+   * Exact scalars and trivial indirect aggregates share this value-only path.
+   * Handles, ownership, callbacks, and target-specific entries extend this
+   * table rather than introducing another call path. */
   nativeBindings?: IrNativeBinding[];
   /** Outbound native FFI declarations used by `ffiCall` expressions.
    * These are link-time C ABI imports, not runtime dynamic-library handles:
@@ -882,13 +905,29 @@ export interface IrNativeBinding {
   variadic: false;
   parameters: {
     name: string;
-    type: IrNativeScalarType;
+    type: IrNativeValueType;
     passMode: "value";
   }[];
   result: {
-    type: IrNativeScalarType | { kind: "void" };
+    type: IrNativeValueType | { kind: "void" };
     passMode: "value";
   };
+}
+
+export interface IrNativeStructDef {
+  id: string;
+  declaration: { module: string; name: string };
+  size: number;
+  alignment: number;
+  packing: "default";
+  triviallyCopyable: true;
+  destruction: "trivial";
+  abi: { kind: "indirect"; alignment: number };
+  fields: {
+    name: string;
+    type: IrNativeScalarType;
+    offset: number;
+  }[];
 }
 
 export type IrFfiValueParamClass = "f64" | "bool" | "u8" | "u32" | "i32" | "string" | "bytes";
@@ -4298,9 +4337,25 @@ export type IrExpr =
   | { kind: "numLit"; value: number; spelling?: string; type: IrType; loc: SrcLoc }
   /** An exact Native IR scalar literal. Its canonical spelling is retained
    * as text so every current and future exact width can serialize without
-   * a JavaScript-number round trip. The initial i32 slice uses base-10 with
-   * an optional leading minus. */
+   * a JavaScript-number round trip. Integers use canonical base-10; f64 uses
+   * the canonical finite JavaScript-number spelling. */
   | { kind: "nativeScalarLit"; value: string; type: IrNativeScalarType; loc: SrcLoc }
+  /** Explicit compile-time construction of a nominal native struct. It is
+   * not a JavaScript object conversion: fields are exact native values and
+   * the backend materializes the authoritative aggregate representation. */
+  | {
+      kind: "nativeStructLit";
+      fields: { name: string; value: IrExpr }[];
+      type: IrNativeStructType;
+      loc: SrcLoc;
+    }
+  | {
+      kind: "nativeStructGet";
+      value: IrExpr;
+      field: string;
+      type: IrNativeScalarType;
+      loc: SrcLoc;
+    }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.
@@ -5490,6 +5545,7 @@ function isJsonSafeAt(
     case "caught":
     case "promise":
     case "generator":
+    case "nativeStruct":
     case "void":
       return false;
     // Representable exactly as a union arm in record-field position (the

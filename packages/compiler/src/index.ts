@@ -113,7 +113,7 @@ export { validateSidecar } from "./library/sidecar-validate.js";
 export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
-export type { NativeFrontendBinding, NativeFrontendInput, NativeSourceType } from "./frontend/native.js";
+export type { NativeFrontendBinding, NativeFrontendInput, NativeSourceType, NativeStructDefinition } from "./frontend/native.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
@@ -241,6 +241,9 @@ function invalidNativeInputTarget(
       entryPath,
     );
   }
+  if (typeof native.target?.abi !== "string" || native.target.abi.length === 0) {
+    return nativeTargetDiag("embedder input has no target ABI identity", entryPath);
+  }
   return null;
 }
 
@@ -252,12 +255,24 @@ function nativeModuleTargetMismatch(
   if (mod.nativeTarget === undefined) return null;
   const pointerBits = mod.nativeTarget.pointerBits;
   const selected = buildTargetPointerBits(platform);
-  return pointerBits === selected
-    ? null
-    : nativeTargetDiag(
+  if (pointerBits !== selected) {
+    return nativeTargetDiag(
         `embedder input requires ${pointerBits}-bit pointers, selected backend target uses ${selected}-bit pointers`,
         entryPath,
       );
+  }
+  if ((mod.nativeTypes?.length ?? 0) > 0) {
+    const selectedAbi = platform === "linux" && process.arch === "x64"
+      ? "sysv-amd64"
+      : null;
+    if (selectedAbi === null || mod.nativeTarget.abi !== selectedAbi) {
+      return nativeTargetDiag(
+        `embedder input requires aggregate ABI '${mod.nativeTarget.abi}', selected backend target provides '${selectedAbi ?? "none"}'`,
+        entryPath,
+      );
+    }
+  }
+  return null;
 }
 
 /** APIs that require host capabilities absent from portable WASI Preview 1.
