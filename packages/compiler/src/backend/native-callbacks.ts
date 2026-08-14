@@ -1,6 +1,7 @@
 import type {
   IrFfiImport,
   IrNativeBinding,
+  IrNativeCallbackContract,
   IrNativeCallbackType,
 } from "../ir/nodes.js";
 
@@ -9,6 +10,7 @@ export interface NativeCallbackAdapter {
   readonly bindingId: string;
   readonly argument: number;
   readonly callback: IrNativeCallbackType;
+  readonly contract: IrNativeCallbackContract;
 }
 
 export function nativeCallbackAdapterKey(bindingId: string, argument: number): string {
@@ -42,6 +44,13 @@ export function allocateNativeCallbackAdapters(
         symbol = `sc_native_cb_${suffix++}`;
       } while (reserved.has(symbol));
       reserved.add(symbol);
+      const contract =
+        binding.arguments[parameter.projection.argument]?.callback;
+      if (contract === undefined) {
+        throw new Error(
+          `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no contract`,
+        );
+      }
       adapters.set(
         nativeCallbackAdapterKey(binding.id, parameter.projection.argument),
         {
@@ -49,6 +58,7 @@ export function allocateNativeCallbackAdapters(
           bindingId: binding.id,
           argument: parameter.projection.argument,
           callback: parameter.type,
+          contract,
         },
       );
     }

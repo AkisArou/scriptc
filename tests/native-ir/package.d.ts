@@ -25,6 +25,12 @@ export interface Counter {
   dispose(): void;
 }
 
+export interface Subscription {
+  emit(value: i32): i32;
+  emitForeign(value: i32): i32;
+  dispose(): void;
+}
+
 export declare function i8Identity(value: i8): i8;
 export declare function u8Identity(value: u8): u8;
 export declare function i16Identity(value: i16): i16;
@@ -43,6 +49,9 @@ export declare function callScoped(
 ): i32;
 export declare function failErrno(errorNumber: i32): never;
 export declare function createCounter(initialValue: i32): Counter;
+export declare function subscribe(
+  callback: (value: i32) => void,
+): Subscription;
 export declare function counterDestroyedCount(): i32;
 export declare function counterVerify(
   actualValue: i32,

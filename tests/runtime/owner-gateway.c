@@ -242,6 +242,25 @@ static void verify_stop_races_admission(void) {
   gateway = NULL;
 }
 
+static void verify_failure_wake(void) {
+  atomic_store(&wakes, 0);
+  gateway = scr_owner_gateway_new(wake_owner, NULL);
+  assert(gateway != NULL);
+  scr_owner_gateway_report_failure(gateway, SCR_OWNER_GATEWAY_FAILURE_OOM);
+  scr_owner_gateway_report_failure(gateway, SCR_OWNER_GATEWAY_FAILURE_OOM);
+  assert(atomic_load(&wakes) == 1);
+  assert(scr_owner_gateway_pending(gateway));
+  assert(scr_owner_gateway_take_failure(gateway) ==
+         SCR_OWNER_GATEWAY_FAILURE_OOM);
+  assert(scr_owner_gateway_take_failure(gateway) ==
+         SCR_OWNER_GATEWAY_FAILURE_NONE);
+  assert(!scr_owner_gateway_pending(gateway));
+  scr_owner_gateway_stop_accepting(gateway);
+  assert(scr_owner_gateway_quiescent(gateway));
+  assert(scr_owner_gateway_destroy(gateway));
+  gateway = NULL;
+}
+
 int main(void) {
   verify_interrupted_snapshot();
   verify_concurrent_admission();
@@ -249,6 +268,7 @@ int main(void) {
   verify_reentrant_discard();
   verify_reentrant_stop_and_drain();
   verify_stop_races_admission();
+  verify_failure_wake();
   puts("owner gateway: ok");
   return 0;
 }

@@ -173,6 +173,23 @@ int main(void) {
   assert(scr_retained_callbacks_shutdown(false));
   assert(!scr_retained_callbacks_configured());
 
+  /* A failed native factory has no registration owner: payloads admitted
+   * during the attempted call are destroyed, never delivered later. */
+  assert(scr_retained_callbacks_configure(wake_owner, &wakes));
+  closure = new_closure();
+  token = scr_retained_callbacks_register(closure, &signature);
+  assert(token != NULL);
+  assert(scr_callback_token_admit(
+      token, &new_invocation(19, false)->invocation));
+  scr_retained_callbacks_abandon(token);
+  assert(scr_retained_callbacks_drain(0) == 1);
+  assert(((TestClosureState *)closure->fn)->total == 0);
+  assert(scr_retained_callbacks_active() == 0);
+  scr_closure_release(closure);
+  assert(atomic_load(&closures_freed) == 3);
+  assert(atomic_load(&invocations_destroyed) == 103);
+  assert(scr_retained_callbacks_shutdown(true));
+
   puts("retained callbacks: ok");
   return 0;
 }

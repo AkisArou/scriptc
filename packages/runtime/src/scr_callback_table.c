@@ -121,6 +121,12 @@ bool scr_callback_table_begin_close(ScrCallbackTable *table,
   return scr_callback_token_begin_close(token);
 }
 
+bool scr_callback_table_abandon(ScrCallbackTable *table,
+                                ScrCallbackToken *token) {
+  if (scr_callback_table_entry(table, token) == NULL) return false;
+  return scr_callback_token_abandon(token);
+}
+
 bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
                                               ScrCallbackToken *token) {
   if (scr_callback_table_entry(table, token) == NULL) return false;

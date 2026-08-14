@@ -1,6 +1,7 @@
 import type {
   IrNativeAbiType,
   IrNativeArgumentType,
+  IrNativeCallbackContract,
   IrNativeHandleDef,
   IrNativeParameterProjection,
   IrNativeStructDef,
@@ -49,6 +50,7 @@ export interface NativeFrontendBinding {
   readonly arguments: readonly {
     readonly name: string;
     readonly type: Readonly<IrNativeArgumentType>;
+    readonly callback?: Readonly<IrNativeCallbackContract>;
   }[];
   readonly parameters: readonly {
     readonly name: string;
@@ -58,7 +60,10 @@ export interface NativeFrontendBinding {
       | { readonly kind: "value" }
       | { readonly kind: "borrowed"; readonly scope: "call" }
       | { readonly kind: "owned"; readonly transfer: "to-native" }
-      | { readonly kind: "callScoped" };
+      | {
+          readonly kind: "callback";
+          readonly lifetime: "call" | "until-cancelled";
+        };
     readonly projection: Readonly<IrNativeParameterProjection>;
   }[];
   readonly result: {

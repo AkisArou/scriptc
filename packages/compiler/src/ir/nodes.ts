@@ -174,6 +174,34 @@ export type IrNativeCallbackArgumentType = {
   ret: IrNativeScalarType | { kind: "void" };
 };
 
+export type IrNativeCallbackContract =
+  | {
+      lifetime: "call";
+      registrationOwner: { kind: "native-call" };
+      allowedInvocationExecutors: ["same-as-caller"];
+      deliveryExecutor: "same-as-caller";
+      synchronousReturn: true;
+      transports: { kind: "borrow" }[];
+      reentrancy: "required";
+      postDisposal: "not-invoked";
+      shutdown: "drain";
+    }
+  | {
+      lifetime: "until-cancelled";
+      registrationOwner: { kind: "result" };
+      cancellationBinding: string;
+      allowedInvocationExecutors: (
+        | "same-as-caller"
+        | "any-attached-thread"
+      )[];
+      deliveryExecutor: "runtime-owner";
+      synchronousReturn: false;
+      transports: { kind: "copy" }[];
+      reentrancy: "allowed" | "required";
+      postDisposal: "not-invoked";
+      shutdown: "drain";
+    };
+
 export function nativeCallbackArgumentType(
   signature: IrNativeCallbackSignature,
 ): IrNativeCallbackArgumentType {
@@ -896,7 +924,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 14;
+  irVersion: 15;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -1000,6 +1028,10 @@ export interface IrNativeBinding {
   arguments: {
     name: string;
     type: IrNativeArgumentType;
+    /** Required exactly when `type` is a callback. The logical contract is
+     * kept beside the source value while physical function/context slots
+     * merely project it into the ABI. */
+    callback?: IrNativeCallbackContract;
   }[];
   /** Physical ABI slots in declaration order. Multiple slots may project
    * from one logical argument (for example UTF-8 data plus byte length). */
@@ -1011,7 +1043,7 @@ export interface IrNativeBinding {
       | { kind: "value" }
       | { kind: "borrowed"; scope: "call" }
       | { kind: "owned"; transfer: "to-native" }
-      | { kind: "callScoped" };
+      | { kind: "callback"; lifetime: "call" | "until-cancelled" };
     projection: IrNativeParameterProjection;
   }[];
   result: {
@@ -1045,7 +1077,10 @@ export interface IrNativeHandleDef {
   id: string;
   declaration: { module: string; name: string };
   nativeName: string;
-  threadSafety: "confined";
+  /** Foreign resource safety. ScriptC handle cells remain owner-confined;
+   * `shared` permits the native implementation to use the resource from
+   * its own worker/callback threads without exposing the managed cell. */
+  threadSafety: "confined" | "shared";
   identity: "none" | "pointer" | "binding" | "platform";
 }
 

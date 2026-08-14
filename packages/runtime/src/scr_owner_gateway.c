@@ -16,6 +16,7 @@ struct ScrOwnerGateway {
   ScrOwnerGatewayWakeFn wake;
   void *wake_context;
   _Atomic ScrOwnerGatewayState state;
+  ScrOwnerGatewayFailure failure;
   bool wake_armed;
   bool draining;
 };
@@ -74,6 +75,34 @@ bool scr_owner_gateway_admit(ScrOwnerGateway *gateway,
   if (!accepted) event->destroy(event);
   else if (wake) scr_owner_gateway_wake(gateway);
   return accepted;
+}
+
+void scr_owner_gateway_report_failure(ScrOwnerGateway *gateway,
+                                      ScrOwnerGatewayFailure failure) {
+  if (gateway == NULL || failure == SCR_OWNER_GATEWAY_FAILURE_NONE) return;
+  bool wake = false;
+  scr_owner_gateway_lock(gateway);
+  if (atomic_load_explicit(&gateway->state, memory_order_relaxed) ==
+          SCR_OWNER_GATEWAY_RUNNING &&
+      gateway->failure == SCR_OWNER_GATEWAY_FAILURE_NONE) {
+    gateway->failure = failure;
+    if (!gateway->wake_armed) {
+      gateway->wake_armed = true;
+      wake = true;
+    }
+  }
+  scr_owner_gateway_unlock(gateway);
+  if (wake) scr_owner_gateway_wake(gateway);
+}
+
+ScrOwnerGatewayFailure scr_owner_gateway_take_failure(
+    ScrOwnerGateway *gateway) {
+  if (gateway == NULL) return SCR_OWNER_GATEWAY_FAILURE_NONE;
+  scr_owner_gateway_lock(gateway);
+  ScrOwnerGatewayFailure failure = gateway->failure;
+  gateway->failure = SCR_OWNER_GATEWAY_FAILURE_NONE;
+  scr_owner_gateway_unlock(gateway);
+  return failure;
 }
 
 /* Detach one admission-order snapshot, bounded only while walking links.
@@ -210,6 +239,7 @@ size_t scr_owner_gateway_discard(ScrOwnerGateway *gateway) {
   gateway->head = NULL;
   gateway->tail = NULL;
   gateway->wake_armed = false;
+  gateway->failure = SCR_OWNER_GATEWAY_FAILURE_NONE;
   atomic_store_explicit(&gateway->state, SCR_OWNER_GATEWAY_STOPPED,
                         memory_order_release);
   scr_owner_gateway_unlock(gateway);
@@ -227,7 +257,8 @@ size_t scr_owner_gateway_discard(ScrOwnerGateway *gateway) {
 bool scr_owner_gateway_pending(ScrOwnerGateway *gateway) {
   if (gateway == NULL) return false;
   scr_owner_gateway_lock(gateway);
-  bool pending = gateway->head != NULL;
+  bool pending = gateway->head != NULL ||
+                 gateway->failure != SCR_OWNER_GATEWAY_FAILURE_NONE;
   scr_owner_gateway_unlock(gateway);
   return pending;
 }
@@ -242,7 +273,9 @@ bool scr_owner_gateway_quiescent(ScrOwnerGateway *gateway) {
   scr_owner_gateway_lock(gateway);
   bool ready = atomic_load_explicit(&gateway->state, memory_order_relaxed) ==
                    SCR_OWNER_GATEWAY_STOPPED &&
-               gateway->head == NULL && !gateway->draining;
+               gateway->head == NULL &&
+               gateway->failure == SCR_OWNER_GATEWAY_FAILURE_NONE &&
+               !gateway->draining;
   scr_owner_gateway_unlock(gateway);
   return ready;
 }

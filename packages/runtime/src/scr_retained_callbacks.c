@@ -43,22 +43,27 @@ bool scr_retained_callbacks_configured(void) {
 
 ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
                                                    const void *signature) {
-  if (!scr_retained_accepting || closure == NULL || signature == NULL) {
-    return NULL;
+  if (!scr_retained_accepting || scr_retained_table == NULL) {
+    scr_trap("scriptc: retained callback service is not configured or is shutting down\n");
+  }
+  if (closure == NULL || signature == NULL) {
+    scr_trap("scriptc: invalid retained callback registration metadata\n");
   }
   /* The table's register operation takes ownership only on success. Retain
    * first so this public operation borrows the compiler-owned argument. */
   ScrClosure *root = scr_closure_retain(closure);
   ScrCallbackToken *token =
       scr_callback_table_register(scr_retained_table, root, signature);
-  if (token == NULL) scr_closure_release(root);
+  if (token == NULL) {
+    scr_closure_release(root);
+    scr_trap("scriptc: out of memory registering retained callback\n");
+  }
   return token;
 }
 
 void scr_retained_callbacks_abandon(ScrCallbackToken *token) {
   if (token == NULL || scr_retained_table == NULL ||
-      !scr_callback_table_begin_close(scr_retained_table, token) ||
-      !scr_callback_table_cancellation_complete(scr_retained_table, token)) {
+      !scr_callback_table_abandon(scr_retained_table, token)) {
     scr_trap("scriptc: invalid staged retained callback cancellation\n");
   }
   (void)scr_callback_table_collect(scr_retained_table);
@@ -74,7 +79,15 @@ void scr_retained_callbacks_attach(ScrNativeHandle *handle,
 
 size_t scr_retained_callbacks_drain(size_t budget) {
   if (scr_retained_gateway == NULL) return 0;
+  if (scr_owner_gateway_take_failure(scr_retained_gateway) ==
+      SCR_OWNER_GATEWAY_FAILURE_OOM) {
+    scr_trap("scriptc: out of memory in retained callback transport\n");
+  }
   size_t delivered = scr_owner_gateway_drain(scr_retained_gateway, budget);
+  if (scr_owner_gateway_take_failure(scr_retained_gateway) ==
+      SCR_OWNER_GATEWAY_FAILURE_OOM) {
+    scr_trap("scriptc: out of memory in retained callback transport\n");
+  }
   (void)scr_callback_table_collect(scr_retained_table);
   return delivered;
 }
@@ -92,7 +105,7 @@ bool scr_retained_callbacks_shutdown(bool deliver_pending) {
   scr_owner_gateway_stop_accepting(scr_retained_gateway);
   if (deliver_pending) {
     while (scr_owner_gateway_pending(scr_retained_gateway)) {
-      if (scr_owner_gateway_drain(scr_retained_gateway, 0) == 0 ||
+      if (scr_retained_callbacks_drain(0) == 0 ||
           scr_exc_pending()) {
         return false;
       }

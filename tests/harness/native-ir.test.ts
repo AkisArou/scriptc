@@ -11,7 +11,7 @@ import { afterAll, describe, expect, test } from "vitest";
 import { compileC } from "../../packages/compiler/src/backend/cc.js";
 import { emitModule } from "../../packages/compiler/src/backend/emission/emitter.js";
 import { emitLlvmModule } from "../../packages/compiler/src/backend/llvm/emitter.js";
-import type { IrExpr, IrModule, IrNativeScalar, IrNativeValueType, SrcLoc } from "../../packages/compiler/src/ir/nodes.js";
+import type { IrExpr, IrModule, IrNativeCallbackContract, IrNativeScalar, IrNativeValueType, SrcLoc } from "../../packages/compiler/src/ir/nodes.js";
 import { nativeCallbackArgumentType, nativeScalarType } from "../../packages/compiler/src/ir/nodes.js";
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
@@ -41,10 +41,50 @@ const CALL_I32_CALLBACK = {
   context: { placement: "last" },
 } as const;
 const CALL_I32_SOURCE = nativeCallbackArgumentType(CALL_I32_CALLBACK);
+const CALL_I32_CONTRACT = {
+  lifetime: "call",
+  registrationOwner: { kind: "native-call" },
+  allowedInvocationExecutors: ["same-as-caller"],
+  deliveryExecutor: "same-as-caller",
+  synchronousReturn: true,
+  transports: [{ kind: "borrow" }],
+  reentrancy: "required",
+  postDisposal: "not-invoked",
+  shutdown: "drain",
+} as const satisfies IrNativeCallbackContract;
+const RETAINED_I32_CALLBACK = {
+  callingConvention: "c",
+  parameters: [I32],
+  result: { kind: "void" },
+  context: { placement: "last" },
+} as const;
+const RETAINED_I32_SOURCE = nativeCallbackArgumentType(RETAINED_I32_CALLBACK);
+const RETAINED_I32_CONTRACT = {
+  lifetime: "until-cancelled",
+  registrationOwner: { kind: "result" },
+  cancellationBinding:
+    "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+  allowedInvocationExecutors: [
+    "same-as-caller",
+    "any-attached-thread",
+  ],
+  deliveryExecutor: "runtime-owner",
+  synchronousReturn: false,
+  transports: [{ kind: "copy" }],
+  reentrancy: "allowed",
+  postDisposal: "not-invoked",
+  shutdown: "drain",
+} as const satisfies IrNativeCallbackContract;
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
 const COUNTER_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter";
 const COUNTER = { kind: "nativeHandle", typeId: COUNTER_ID } as const;
+const SUBSCRIPTION_ID =
+  "native-typescript.fixture.c-v1@0.0.0#type:subscription";
+const SUBSCRIPTION = {
+  kind: "nativeHandle",
+  typeId: SUBSCRIPTION_ID,
+} as const;
 const PADDED_DEFINITION = {
   kind: "struct",
   id: PADDED_ID,
@@ -67,6 +107,14 @@ const COUNTER_DEFINITION = {
   declaration: { module: nativePackage, name: "Counter" },
   nativeName: "NtsCounter",
   threadSafety: "confined",
+  identity: "pointer",
+} as const satisfies NativeFrontendInput["types"][number];
+const SUBSCRIPTION_DEFINITION = {
+  kind: "handle",
+  id: SUBSCRIPTION_ID,
+  declaration: { module: nativePackage, name: "Subscription" },
+  nativeName: "NtsSubscription",
+  threadSafety: "shared",
   identity: "pointer",
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
@@ -114,8 +162,12 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "f64" }, type: NATIVE_F64 },
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
+    {
+      declaration: { module: nativePackage, name: "Subscription" },
+      type: SUBSCRIPTION,
+    },
   ],
-  types: [PADDED_DEFINITION, COUNTER_DEFINITION],
+  types: [PADDED_DEFINITION, COUNTER_DEFINITION, SUBSCRIPTION_DEFINITION],
   exports: [],
   bindings: [
     ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
@@ -206,7 +258,7 @@ const localNativeInput: NativeFrontendInput = {
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [
-        { name: "callback", type: CALL_I32_SOURCE },
+        { name: "callback", type: CALL_I32_SOURCE, callback: CALL_I32_CONTRACT },
         { name: "value", type: I32 },
       ],
       parameters: [
@@ -214,14 +266,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callScoped" },
+          ownership: { kind: "callback", lifetime: "call" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callScoped" },
+          ownership: { kind: "callback", lifetime: "call" },
           projection: { kind: "callbackContext", argument: 0 },
         },
         {
@@ -247,6 +299,105 @@ const localNativeInput: NativeFrontendInput = {
       ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#subscription_create",
+      declaration: { module: nativePackage, name: "subscribe" },
+      entry: { kind: "c-symbol", symbol: "nts_subscription_create" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "nullable" },
+      arguments: [
+        {
+          name: "callback",
+          type: RETAINED_I32_SOURCE,
+          callback: RETAINED_I32_CONTRACT,
+        },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: RETAINED_I32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: SUBSCRIPTION,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor:
+            "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+        },
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+      declaration: { module: nativePackage, name: "Subscription.dispose" },
+      entry: { kind: "c-symbol", symbol: "nts_subscription_destroy" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        {
+          name: "subscription",
+          type: SUBSCRIPTION,
+          passMode: "pointer",
+          ownership: { kind: "owned", transfer: "to-native" },
+        },
+      ]),
+      result: {
+        type: NATIVE_VOID,
+        passMode: "value",
+        ownership: { kind: "value" },
+      },
+    },
+    ...(["emit", "emitForeign"] as const).map((method) => ({
+      id:
+        `native-typescript.fixture.c-v1@0.0.0#subscription_${method === "emit" ? "emit" : "emit_foreign"}`,
+      declaration: { module: nativePackage, name: `Subscription.${method}` },
+      entry: {
+        kind: "c-symbol" as const,
+        symbol:
+          method === "emit"
+            ? "nts_subscription_emit"
+            : "nts_subscription_emit_foreign",
+      },
+      callingConvention: "c" as const,
+      variadic: false as const,
+      sourceCall: { kind: "method" as const, receiverArgument: 0 },
+      error: { kind: "errno" as const, failureValue: "-1" },
+      ...directSignature([
+        {
+          name: "subscription",
+          type: SUBSCRIPTION,
+          passMode: "pointer",
+          ownership: { kind: "borrowed" as const, scope: "call" as const },
+        },
+        {
+          name: "value",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" as const },
+        },
+      ]),
+      result: {
+        type: I32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+      },
+    })),
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
@@ -476,7 +627,7 @@ function frontendNativeInput(): NativeFrontendInput {
         sourceCall: { kind: "function" },
         error: { kind: "errno", failureValue: "-1" },
         arguments: [
-          { name: "callback", type: CALL_I32_SOURCE },
+          { name: "callback", type: CALL_I32_SOURCE, callback: CALL_I32_CONTRACT },
           { name: "value", type: I32 },
         ],
         parameters: [
@@ -484,14 +635,14 @@ function frontendNativeInput(): NativeFrontendInput {
             name: "callback",
             type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
             passMode: "pointer",
-            ownership: { kind: "callScoped" },
+            ownership: { kind: "callback", lifetime: "call" },
             projection: { kind: "callbackFunction", argument: 0 },
           },
           {
             name: "context",
             type: { kind: "nativeContext", addressSpace: 0 },
             passMode: "pointer",
-            ownership: { kind: "callScoped" },
+            ownership: { kind: "callback", lifetime: "call" },
             projection: { kind: "callbackContext", argument: 0 },
           },
           {
@@ -534,7 +685,7 @@ function frontendNativeInput(): NativeFrontendInput {
         sourceCall: { kind: "function" },
         error: { kind: "nullable" },
         arguments: [
-          { name: "callback", type: CALL_I32_SOURCE },
+          { name: "callback", type: CALL_I32_SOURCE, callback: CALL_I32_CONTRACT },
           { name: "succeed", type: I32 },
         ],
         parameters: [
@@ -542,14 +693,14 @@ function frontendNativeInput(): NativeFrontendInput {
             name: "callback",
             type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
             passMode: "pointer",
-            ownership: { kind: "callScoped" },
+            ownership: { kind: "callback", lifetime: "call" },
             projection: { kind: "callbackFunction", argument: 0 },
           },
           {
             name: "context",
             type: { kind: "nativeContext", addressSpace: 0 },
             passMode: "pointer",
-            ownership: { kind: "callScoped" },
+            ownership: { kind: "callback", lifetime: "call" },
             projection: { kind: "callbackContext", argument: 0 },
           },
           {
@@ -569,6 +720,53 @@ function frontendNativeInput(): NativeFrontendInput {
             destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
           },
         },
+      },
+      ...([
+        ["callbacksConfigure", "scriptc_test_callbacks_configure", []],
+        [
+          "callbacksWaitAndDrain",
+          "scriptc_test_callbacks_wait_and_drain",
+          [
+            {
+              name: "expectedWakes",
+              type: I32,
+              passMode: "value",
+              ownership: { kind: "value" },
+            },
+          ],
+        ],
+        ["callbacksActive", "scriptc_test_callbacks_active", []],
+        ["callbacksShutdown", "scriptc_test_callbacks_shutdown", []],
+      ] as const).map(([name, symbol, parameters]) => ({
+        id: `scriptc-test@1#${name}`,
+        declaration: { module: "scriptc-native-test", name },
+        entry: { kind: "c-symbol" as const, symbol },
+        callingConvention: "c" as const,
+        variadic: false as const,
+        sourceCall: { kind: "function" as const },
+        error: NO_NATIVE_ERROR,
+        ...directSignature(parameters),
+        result: {
+          type: I32,
+          passMode: "value" as const,
+          ownership: { kind: "value" as const },
+        },
+      })),
+      {
+        id: "scriptc-test@1#verify-retained",
+        declaration: { module: "scriptc-native-test", name: "verifyRetained" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_retained" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
+        ...directSignature([
+          { name: "total", type: I32, passMode: "value", ownership: { kind: "value" } },
+          { name: "activeBefore", type: I32, passMode: "value", ownership: { kind: "value" } },
+          { name: "activeAfter", type: I32, passMode: "value", ownership: { kind: "value" } },
+          { name: "shutdown", type: I32, passMode: "value", ownership: { kind: "value" } },
+        ]),
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
       },
     ],
   };
@@ -918,6 +1116,13 @@ function supportObject(): string {
   );
 }
 
+function retainedSupportObject(): string {
+  return compileNativeObject(
+    join(repoRoot, "tests/native-ir/native-retained-support.c"),
+    "native-retained-support.o",
+  );
+}
+
 test("Native IR validates and serializes an exact i32 call without a number carrier", () => {
   const mod = exactI32Module("-2147483648");
   expect(validateModule(mod)).toEqual([]);
@@ -1093,7 +1298,9 @@ test("Native IR rejects malformed or ambiguous borrowed-byte projections", () =>
 test("Native IR rejects malformed or ambiguous call-scoped callback projections", () => {
   const mod = exactI32Module();
   const binding = mod.nativeBindings![0]!;
-  binding.arguments = [{ name: "callback", type: CALL_I32_SOURCE }];
+  binding.arguments = [
+    { name: "callback", type: CALL_I32_SOURCE, callback: CALL_I32_CONTRACT },
+  ];
   binding.parameters = [
     {
       name: "callback",
@@ -1106,7 +1313,7 @@ test("Native IR rejects malformed or ambiguous call-scoped callback projections"
       name: "context",
       type: { kind: "nativeContext", addressSpace: 0 },
       passMode: "pointer",
-      ownership: { kind: "callScoped" },
+      ownership: { kind: "callback", lifetime: "call" },
       projection: { kind: "callbackContext", argument: 0 },
     },
   ];
@@ -1115,14 +1322,14 @@ test("Native IR rejects malformed or ambiguous call-scoped callback projections"
   );
 
   const missingContext = structuredClone(mod);
-  missingContext.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callScoped" };
+  missingContext.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback", lifetime: "call" };
   missingContext.nativeBindings![0]!.parameters.pop();
   expect(validateModule(missingContext).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" argument "callback" has an incomplete or ambiguous ABI projection',
   );
 
   const wrongSignature = structuredClone(mod);
-  wrongSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callScoped" };
+  wrongSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback", lifetime: "call" };
   const callbackType = wrongSignature.nativeBindings![0]!.parameters[0]!.type;
   if (callbackType.kind !== "nativeCallback") throw new Error("test fixture lost its callback type");
   callbackType.signature.result = U32;
@@ -1131,7 +1338,7 @@ test("Native IR rejects malformed or ambiguous call-scoped callback projections"
   );
 
   const missingSignature = structuredClone(mod);
-  missingSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callScoped" };
+  missingSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback", lifetime: "call" };
   const malformedCallbackType = missingSignature.nativeBindings![0]!.parameters[0]!.type;
   Reflect.deleteProperty(malformedCallbackType, "signature");
   expect(() => validateModule(missingSignature)).not.toThrow();
@@ -1662,7 +1869,11 @@ describe.each(["c", "llvm"] as const)("Native IR call-scoped callbacks, %s backe
       expect.objectContaining({
         id: "native-typescript.fixture.c-v1@0.0.0#call_scoped",
         arguments: [
-          { name: "callback", type: CALL_I32_SOURCE },
+          {
+            name: "callback",
+            type: CALL_I32_SOURCE,
+            callback: CALL_I32_CONTRACT,
+          },
           { name: "value", type: I32 },
         ],
         parameters: [
@@ -1686,6 +1897,62 @@ describe.each(["c", "llvm"] as const)("Native IR call-scoped callbacks, %s backe
     });
   });
 });
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR retained callbacks, %s backend",
+  (backend) => {
+    test("copies foreign-thread payloads and invokes the rooted closure on the owner", async () => {
+      const outDir = join(scratch, `callback-retained-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/callback-retained.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [
+            fixtureObject(),
+            supportObject(),
+            retainedSupportObject(),
+          ],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("native retained callback compile did not emit IR");
+      }
+      const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+      expect(validateModule(mod)).toEqual([]);
+      expect(mod.nativeBindings).toContainEqual(
+        expect.objectContaining({
+          id: "native-typescript.fixture.c-v1@0.0.0#subscription_create",
+          arguments: [
+            {
+              name: "callback",
+              type: RETAINED_I32_SOURCE,
+              callback: RETAINED_I32_CONTRACT,
+            },
+          ],
+        }),
+      );
+      const generated = readFileSync(
+        join(outDir, backend === "c" ? "callback-retained.c" : "callback-retained.ll"),
+        "utf8",
+      );
+      expect(generated).toContain("scr_callback_invocation_alloc");
+      expect(generated).toContain("scr_retained_callbacks_attach");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
 
 describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (backend) => {
   test("snapshots errno and throws a catchable operation-qualified Error", async () => {

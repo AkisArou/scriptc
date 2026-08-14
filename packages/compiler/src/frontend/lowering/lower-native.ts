@@ -3,6 +3,7 @@ import { nativeBindingDiag, nativeConversionDiag, nativeSignatureDiag } from "..
 import type {
   IrExpr,
   IrNativeBinding,
+  IrNativeCallbackContract,
   IrNativeHandleDef,
   IrNativeHandleType,
   IrNativeScalarType,
@@ -488,6 +489,9 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
     arguments: binding.arguments.map((argument) => ({
       name: argument.name,
       type: { ...argument.type },
+      ...(argument.callback === undefined
+        ? {}
+        : { callback: materializeNativeCallbackContract(argument.callback) }),
     })),
     parameters: binding.parameters.map((parameter) => ({
       name: parameter.name,
@@ -501,6 +505,25 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
       passMode: binding.result.passMode,
       ownership: { ...binding.result.ownership },
     },
+  };
+}
+
+function materializeNativeCallbackContract(
+  contract: Readonly<IrNativeCallbackContract>,
+): IrNativeCallbackContract {
+  if (contract.lifetime === "call") {
+    return {
+      ...contract,
+      registrationOwner: { kind: "native-call" },
+      allowedInvocationExecutors: ["same-as-caller"],
+      transports: contract.transports.map(() => ({ kind: "borrow" })),
+    };
+  }
+  return {
+    ...contract,
+    registrationOwner: { kind: "result" },
+    allowedInvocationExecutors: [...contract.allowedInvocationExecutors],
+    transports: contract.transports.map(() => ({ kind: "copy" })),
   };
 }
 

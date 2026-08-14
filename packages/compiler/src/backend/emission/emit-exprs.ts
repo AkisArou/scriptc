@@ -2264,8 +2264,26 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
         };
         const callbacksMayThrow = binding.arguments.some(
-          (argument) => argument.type.kind === "func",
+          (argument) =>
+            argument.type.kind === "func" &&
+            argument.callback?.lifetime === "call",
         );
+        const retainedTokens = new Map<number, string>();
+        binding.arguments.forEach((argument, argumentIndex) => {
+          if (
+            argument.type.kind !== "func" ||
+            argument.callback?.lifetime !== "until-cancelled"
+          ) {
+            return;
+          }
+          const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
+          const token = `sc_t${E.tempCounter++}`;
+          E.line(
+            `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
+              `${args[argumentIndex]!.name}, &${adapter.symbol}_signature);`,
+          );
+          retainedTokens.set(argumentIndex, token);
+        });
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
         );
@@ -2300,7 +2318,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             case "callbackFunction":
               return `&${E.nativeCallbackAdapter(binding.id, parameter.projection.argument).symbol}`;
             case "callbackContext":
-              return `(void *)${arg.name}`;
+              return `(void *)${retainedTokens.get(parameter.projection.argument) ?? arg.name}`;
             case "argument": {
               if (parameter.type.kind !== "nativeHandle") return arg.name;
               const raw = `sc_t${E.tempCounter++}`;
@@ -2340,15 +2358,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             result = E.newTemp(e.type, "NULL");
             E.line(`if (${raw} == NULL) {`);
             E.indent++;
+            for (const token of retainedTokens.values()) {
+              E.line(`scr_retained_callbacks_abandon(${token});`);
+            }
             E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
             E.indent--;
             E.line("} else {");
             E.indent++;
             E.line(`${result.name} = ${wrap};`);
+            for (const token of retainedTokens.values()) {
+              E.line(`scr_retained_callbacks_attach(${result.name}, ${token});`);
+            }
             E.indent--;
             E.line("}");
           } else {
             result = E.newTemp(e.type, wrap);
+            for (const token of retainedTokens.values()) {
+              E.line(`scr_retained_callbacks_attach(${result.name}, ${token});`);
+            }
           }
           E.emitPendingCheck();
           releaseArguments();

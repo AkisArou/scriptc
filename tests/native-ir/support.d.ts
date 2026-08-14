@@ -48,3 +48,13 @@ export declare function callbackNullableCounter(
   callback: (value: i32) => i32,
   succeed: i32,
 ): Counter;
+export declare function callbacksConfigure(): i32;
+export declare function callbacksWaitAndDrain(expectedWakes: i32): i32;
+export declare function callbacksActive(): i32;
+export declare function callbacksShutdown(): i32;
+export declare function verifyRetained(
+  total: i32,
+  activeBefore: i32,
+  activeAfter: i32,
+  shutdown: i32,
+): i32;

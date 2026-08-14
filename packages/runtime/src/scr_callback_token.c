@@ -24,6 +24,7 @@ struct ScrCallbackToken {
   uint64_t generation;
   const void *signature;
   bool cancellation_complete;
+  bool deliver_admitted;
 };
 
 static ScrCallbackTokenState scr_callback_word_state(uintptr_t word) {
@@ -53,6 +54,7 @@ ScrCallbackToken *scr_callback_token_new(ScrOwnerGateway *gateway,
   token->slot = slot;
   token->generation = generation;
   token->signature = signature;
+  token->deliver_admitted = true;
   return token;
 }
 
@@ -74,7 +76,8 @@ static bool scr_callback_token_acquire(ScrCallbackToken *token) {
 static bool scr_callback_invocation_deliver(ScrOwnerGatewayEvent *base) {
   ScrCallbackInvocation *invocation = (ScrCallbackInvocation *)base;
   ScrCallbackToken *token = invocation->token;
-  return invocation->invoke(invocation, token->owner_context, token->slot,
+  return !token->deliver_admitted ||
+         invocation->invoke(invocation, token->owner_context, token->slot,
                             token->generation);
 }
 
@@ -107,6 +110,16 @@ bool scr_callback_token_admit(ScrCallbackToken *token,
   return scr_owner_gateway_admit(token->gateway, &invocation->event);
 }
 
+void *scr_callback_invocation_alloc(ScrCallbackToken *token, size_t size) {
+  if (token == NULL || size < sizeof(ScrCallbackInvocation)) return NULL;
+  void *invocation = calloc(1, size);
+  if (invocation == NULL) {
+    scr_owner_gateway_report_failure(token->gateway,
+                                     SCR_OWNER_GATEWAY_FAILURE_OOM);
+  }
+  return invocation;
+}
+
 bool scr_callback_token_begin_close(ScrCallbackToken *token) {
   if (token == NULL) return false;
   uintptr_t word = atomic_load_explicit(&token->gate, memory_order_acquire);
@@ -119,6 +132,12 @@ bool scr_callback_token_begin_close(ScrCallbackToken *token) {
       return true;
     }
   }
+}
+
+bool scr_callback_token_abandon(ScrCallbackToken *token) {
+  if (!scr_callback_token_begin_close(token)) return false;
+  token->deliver_admitted = false;
+  return scr_callback_token_cancellation_complete(token);
 }
 
 bool scr_callback_token_cancellation_complete(ScrCallbackToken *token) {

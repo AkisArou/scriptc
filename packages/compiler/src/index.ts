@@ -1098,6 +1098,11 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       // keep that optional TU out of programs that never call fsp.open.
       fileHandle: moduleUsesFileHandle(lowered.module),
       nativeHandle: (lowered.module.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
+      retainedCallbacks: (lowered.module.nativeBindings ?? []).some((binding) =>
+        binding.arguments.some(
+          (argument) => argument.callback?.lifetime === "until-cancelled",
+        )
+      ),
       // The link switch for scr_fetch.c (the native bridge over scr_net +
       // scr_tls + scr_http's client parser + zlib — cc.ts implies those
       // units into the link): embedded npm code that references fetch gets
@@ -2142,6 +2147,11 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
     nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
+    retainedCallbacks: (mod.nativeBindings ?? []).some((binding) =>
+      binding.arguments.some(
+        (argument) => argument.callback?.lifetime === "until-cancelled",
+      )
+    ),
   });
 
   // The sidecar lands beside the compiled object, written by the same

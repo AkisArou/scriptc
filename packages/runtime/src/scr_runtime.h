@@ -82,12 +82,24 @@ typedef enum {
   SCR_OWNER_GATEWAY_STOPPED = 2,
 } ScrOwnerGatewayState;
 
+typedef enum {
+  SCR_OWNER_GATEWAY_FAILURE_NONE = 0,
+  SCR_OWNER_GATEWAY_FAILURE_OOM = 1,
+} ScrOwnerGatewayFailure;
+
 ScrOwnerGateway *scr_owner_gateway_new(ScrOwnerGatewayWakeFn wake,
                                         void *wake_context);
 /* Event ownership always transfers. Rejected events are destroyed before
  * false is returned, so producers never need an owner-thread cleanup path. */
 bool scr_owner_gateway_admit(ScrOwnerGateway *gateway,
                              ScrOwnerGatewayEvent *event);
+/* Allocation-free producer failure signaling. The first failure arms the
+ * same coalesced target wake as an event; the owner consumes it explicitly
+ * and decides the language/runtime failure policy. */
+void scr_owner_gateway_report_failure(ScrOwnerGateway *gateway,
+                                      ScrOwnerGatewayFailure failure);
+ScrOwnerGatewayFailure scr_owner_gateway_take_failure(
+    ScrOwnerGateway *gateway);
 /* Invoke at most `budget` owner deliveries; zero means the detached snapshot
  * is unbounded. A false delivery leaves later events queued in FIFO order.
  * Nested drains are harmless no-ops; lifecycle operations remain reentrant. */
@@ -144,9 +156,16 @@ ScrCallbackToken *scr_callback_token_new(ScrOwnerGateway *gateway,
  * the calling thread without touching ScriptC heap state. */
 bool scr_callback_token_admit(ScrCallbackToken *token,
                               ScrCallbackInvocation *invocation);
+/* Allocate a zeroed generated invocation record. OOM is reported to the
+ * owner gateway without entering ScriptC or invoking a foreign-thread trap
+ * sink; NULL tells the void native trampoline to return. */
+void *scr_callback_invocation_alloc(ScrCallbackToken *token, size_t size);
 /* Owner-only. The transition linearizes against admission: every admission
  * that won before CLOSING remains deliverable and owns a lease. */
 bool scr_callback_token_begin_close(ScrCallbackToken *token);
+/* Failed staged registration: close admission and suppress delivery of work
+ * already queued for an owner that never came into existence. */
+bool scr_callback_token_abandon(ScrCallbackToken *token);
 /* Owner-only, and only after the native cancellation operation guarantees
  * that no callback can still start or retain the opaque token pointer. */
 bool scr_callback_token_cancellation_complete(ScrCallbackToken *token);
@@ -183,6 +202,8 @@ void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
                                  const void *signature);
 bool scr_callback_table_begin_close(ScrCallbackTable *table,
                                     ScrCallbackToken *token);
+bool scr_callback_table_abandon(ScrCallbackTable *table,
+                                ScrCallbackToken *token);
 bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
                                               ScrCallbackToken *token);
 /* Claims the single result/native owner edge for a staged registration. */
@@ -5751,7 +5772,7 @@ ScrArr *scr_tls_ca_root(void);        /* +1; === getCACertificates("bundled") */
  * ERR_CRYPTO_OPERATION_FAILED and leaves the set unchanged. Borrows. */
 void scr_tls_ca_set_default(ScrArr *certs);
 /* scr_tls.c's anchor consult: true iff setDefaultCACertificates ran;
- * *pem/*len then carry the concatenated NUL-terminated blocks (len 0 =
+ * *pem and *len then carry the concatenated NUL-terminated blocks (len 0 =
  * the empty set — verification fails, Node's own consequence), and *gen
  * a counter that bumps per set so the parsed chain re-parses on change. */
 bool scr_tls_ca_default_override(const char **pem, size_t *len, uint64_t *gen);

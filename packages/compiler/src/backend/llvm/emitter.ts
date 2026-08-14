@@ -1556,6 +1556,94 @@ class LlEmitter {
       const externalRet = this.nativeReturnType(signature.result);
       const rawRet = this.llType(signature.result);
       const pendingResult = rawRet === "double" ? f64Lit(0) : "0";
+      if (adapter.contract.lifetime === "until-cancelled") {
+        const invocationType = `%${adapter.symbol}_invocation`;
+        const signatureId = `@${adapter.symbol}_signature`;
+        const invoke = `@${adapter.symbol}_invoke`;
+        const destroy = `@${adapter.symbol}_destroy`;
+        const fields = [
+          ...Array.from({ length: 7 }, () => "ptr"),
+          ...signature.parameters.map((parameter) => this.llType(parameter)),
+        ];
+        defs.push(
+          `${invocationType} = type { ${fields.join(", ")} }`,
+          `${signatureId} = internal constant i8 0`,
+          `define internal void ${destroy}(ptr %event) ${FN_ATTRS} {`,
+          `entry:`,
+          `  call void @free(ptr %event)`,
+          `  ret void`,
+          `}`,
+          ``,
+          `define internal i1 ${invoke}(ptr %base, ptr %owner, ${this.sizeType} %slot, i64 %generation) ${FN_ATTRS} {`,
+          `entry:`,
+          `  %cb = call ptr @scr_callback_table_acquire(ptr %owner, ${this.sizeType} %slot, i64 %generation, ptr ${signatureId})`,
+          `  %missing = icmp eq ptr %cb, null`,
+          `  br i1 %missing, label %expired, label %ready`,
+          `expired:`,
+          `  call void @scr_trap(ptr ${this.cstr("scriptc: retained callback identity expired before delivery\n")})`,
+          `  unreachable`,
+          `ready:`,
+          `  %pending.before = call zeroext i1 @scr_exc_pending()`,
+          `  br i1 %pending.before, label %skip, label %invoke`,
+          `invoke:`,
+          `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+          `  %fn = load ptr, ptr %fnp`,
+        );
+        const callArgs = ["ptr %cb"];
+        signature.parameters.forEach((parameter, index) => {
+          defs.push(
+            `  %a${index}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${7 + index}`,
+            `  %a${index} = load ${this.llType(parameter)}, ptr %a${index}.ptr`,
+          );
+          callArgs.push(`${this.llType(parameter)} %a${index}`);
+        });
+        defs.push(
+          `  call void %fn(${callArgs.join(", ")})`,
+          `  %pending.after = call zeroext i1 @scr_exc_pending()`,
+          `  %continue = xor i1 %pending.after, true`,
+          `  br label %release`,
+          `skip:`,
+          `  br label %release`,
+          `release:`,
+          `  %keep = phi i1 [ %continue, %invoke ], [ false, %skip ]`,
+          `  call void @scr_closure_release(ptr %cb)`,
+          `  ret i1 %keep`,
+          `}`,
+          ``,
+          `define internal void @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
+          `entry:`,
+          `  %record = call ptr @scr_callback_invocation_alloc(ptr %ctx, ${this.sizeType} ptrtoint (ptr getelementptr (${invocationType}, ptr null, i32 1) to ${this.sizeType}))`,
+          `  %allocation.failed = icmp eq ptr %record, null`,
+          `  br i1 %allocation.failed, label %return, label %initialize`,
+          `initialize:`,
+          `  %signature.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 3`,
+          `  store ptr ${signatureId}, ptr %signature.ptr`,
+          `  %invoke.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 4`,
+          `  store ptr ${invoke}, ptr %invoke.ptr`,
+          `  %destroy.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 5`,
+          `  store ptr ${destroy}, ptr %destroy.ptr`,
+        );
+        signature.parameters.forEach((parameter, index) => {
+          defs.push(
+            `  %copy${index}.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 ${7 + index}`,
+            `  store ${this.llType(parameter)} %a${index}, ptr %copy${index}.ptr`,
+          );
+        });
+        defs.push(
+          `  %admitted = call zeroext i1 @scr_callback_token_admit(ptr %ctx, ptr %record)`,
+          `  br label %return`,
+          `return:`,
+          `  ret void`,
+          `}`,
+          ``,
+        );
+        this.declare(`declare void @free(ptr)`);
+        this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
+        this.declare(`declare void @scr_closure_release(ptr)`);
+        this.declare(`declare ptr @scr_callback_invocation_alloc(ptr, ${this.sizeType})`);
+        this.declare(`declare zeroext i1 @scr_callback_token_admit(ptr, ptr)`);
+        continue;
+      }
       defs.push(
         `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
         `entry:`,
@@ -6429,8 +6517,29 @@ class LlEmitter {
           }
         };
         const callbacksMayThrow = binding.arguments.some(
-          (argument) => argument.type.kind === "func",
+          (argument) =>
+            argument.type.kind === "func" &&
+            argument.callback?.lifetime === "call",
         );
+        const retainedTokens = new Map<number, string>();
+        binding.arguments.forEach((argument, argumentIndex) => {
+          if (
+            argument.type.kind !== "func" ||
+            argument.callback?.lifetime !== "until-cancelled"
+          ) {
+            return;
+          }
+          const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
+          this.declare(
+            `declare ptr @scr_retained_callbacks_register(ptr, ptr)`,
+          );
+          const token = B.tmp();
+          B.line(
+            `${token} = call ptr @scr_retained_callbacks_register(` +
+              `ptr ${args[argumentIndex]!.name}, ptr @${adapter.symbol}_signature)`,
+          );
+          retainedTokens.set(argumentIndex, token);
+        });
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
         );
@@ -6519,7 +6628,9 @@ class LlEmitter {
               break;
             }
             case "callbackContext":
-              callArgs.push(`${parameterTypes[index]} ${arg.name}`);
+              callArgs.push(
+                `${parameterTypes[index]} ${retainedTokens.get(parameter.projection.argument) ?? arg.name}`,
+              );
               break;
             case "argument":
               if (parameter.type.kind === "nativeStruct") {
@@ -6589,6 +6700,16 @@ class LlEmitter {
             B.line(`${isNull} = icmp eq ptr ${raw}, null`);
             B.condBr(isNull, nullBlock, wrapBlock);
             B.startBlock(nullBlock);
+            if (retainedTokens.size > 0) {
+              this.declare(
+                `declare void @scr_retained_callbacks_abandon(ptr)`,
+              );
+              for (const token of retainedTokens.values()) {
+                B.line(
+                  `call void @scr_retained_callbacks_abandon(ptr ${token})`,
+                );
+              }
+            }
             this.declare("declare zeroext i1 @scr_exc_pending()");
             const pending = B.tmp();
             B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
@@ -6604,6 +6725,16 @@ class LlEmitter {
                 `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
                 `ptr ${this.cstr(definition.nativeName)})`,
             );
+            if (retainedTokens.size > 0) {
+              this.declare(
+                `declare void @scr_retained_callbacks_attach(ptr, ptr)`,
+              );
+              for (const token of retainedTokens.values()) {
+                B.line(
+                  `call void @scr_retained_callbacks_attach(ptr ${wrapped}, ptr ${token})`,
+                );
+              }
+            }
             B.line(`store ptr ${wrapped}, ptr ${resultSlot}`);
             B.br(continuation);
             B.startBlock(continuation);
@@ -6616,6 +6747,16 @@ class LlEmitter {
                 `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
                 `ptr ${this.cstr(definition.nativeName)})`,
             );
+            if (retainedTokens.size > 0) {
+              this.declare(
+                `declare void @scr_retained_callbacks_attach(ptr, ptr)`,
+              );
+              for (const token of retainedTokens.values()) {
+                B.line(
+                  `call void @scr_retained_callbacks_attach(ptr ${result}, ptr ${token})`,
+                );
+              }
+            }
           }
           const value = this.own({ name: result, type: e.type });
           this.emitPendingCheck();

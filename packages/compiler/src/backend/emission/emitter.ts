@@ -1947,6 +1947,59 @@ export class CEmitter {
         "void *sc_ctx",
       ];
       const ret = cType(signature.result).trim();
+      if (adapter.contract.lifetime === "until-cancelled") {
+        const invocation = `${adapter.symbol}_invocation`;
+        const signatureId = `${adapter.symbol}_signature`;
+        const invoke = `${adapter.symbol}_invoke`;
+        const destroy = `${adapter.symbol}_destroy`;
+        const sourceType = nativeCallbackArgumentType(signature);
+        out.push(
+          `static const unsigned char ${signatureId};`,
+          `typedef struct {`,
+          `  ScrCallbackInvocation base;`,
+          ...signature.parameters.map((parameter, index) =>
+            `  ${cType(parameter).trim()} sc_a${index};`
+          ),
+          `} ${invocation};`,
+          `static void ${destroy}(ScrOwnerGatewayEvent *sc_event) {`,
+          `  free(sc_event);`,
+          `}`,
+          `static bool ${invoke}(ScrCallbackInvocation *sc_base, void *sc_owner, size_t sc_slot, uint64_t sc_generation) {`,
+          `  ${invocation} *sc_invocation = (${invocation} *)sc_base;`,
+          `  ScrClosure *sc_cb = (ScrClosure *)scr_callback_table_acquire(`,
+          `      (ScrCallbackTable *)sc_owner, sc_slot, sc_generation, &${signatureId});`,
+          `  if (sc_cb == NULL) scr_trap("scriptc: retained callback identity expired before delivery\\n");`,
+          `  if (scr_exc_pending()) {`,
+          `    scr_closure_release(sc_cb);`,
+          `    return false;`,
+          `  }`,
+        );
+        const args = signature.parameters.map((_parameter, index) =>
+          `sc_invocation->sc_a${index}`
+        );
+        const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+        out.push(
+          `  ${call};`,
+          `  bool sc_continue = !scr_exc_pending();`,
+          `  scr_closure_release(sc_cb);`,
+          `  return sc_continue;`,
+          `}`,
+          `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
+          `  ScrCallbackToken *sc_token = (ScrCallbackToken *)sc_ctx;`,
+          `  ${invocation} *sc_invocation = (${invocation} *)scr_callback_invocation_alloc(sc_token, sizeof(${invocation}));`,
+          `  if (sc_invocation == NULL) return;`,
+          `  sc_invocation->base.signature = &${signatureId};`,
+          `  sc_invocation->base.invoke = &${invoke};`,
+          `  sc_invocation->base.payload_destroy = &${destroy};`,
+          ...signature.parameters.map((_parameter, index) =>
+            `  sc_invocation->sc_a${index} = sc_a${index};`
+          ),
+          `  (void)scr_callback_token_admit(sc_token, &sc_invocation->base);`,
+          `}`,
+          ``,
+        );
+        continue;
+      }
       out.push(
         `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
         `  ScrClosure *sc_cb = (ScrClosure *)sc_ctx;`,

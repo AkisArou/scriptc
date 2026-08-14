@@ -1238,7 +1238,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       if (
         definition.declaration.module === "" || definition.declaration.name === "" ||
         definition.nativeName === "" ||
-        definition.threadSafety !== "confined" ||
+        !["confined", "shared"].includes(definition.threadSafety) ||
         !["none", "pointer", "binding", "platform"].includes(definition.identity)
       ) {
         errors.push({ message: `Native IR handle type "${definition.id}" has invalid metadata`, loc: moduleLoc });
@@ -1308,6 +1308,68 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       candidate.params.every(validNativeScalar) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null && result.kind === "void"));
+  };
+  const validNativeCallbackContract = (
+    contract: unknown,
+    type: IrNativeCallbackArgumentType,
+  ): boolean => {
+    if (!Array.isArray(type.params)) return false;
+    if (typeof contract !== "object" || contract === null) return false;
+    const candidate = contract as Record<string, unknown>;
+    const transports = candidate["transports"];
+    if (
+      !Array.isArray(transports) ||
+      transports.length !== type.params.length
+    ) {
+      return false;
+    }
+    const transportKinds = transports.map((transport) =>
+      typeof transport === "object" && transport !== null &&
+      Object.keys(transport).length === 1
+        ? (transport as { kind?: unknown }).kind
+        : null
+    );
+    const owner = candidate["registrationOwner"];
+    const executors = candidate["allowedInvocationExecutors"];
+    if (
+      typeof owner !== "object" || owner === null ||
+      Object.keys(owner).length !== 1 ||
+      !Array.isArray(executors)
+    ) {
+      return false;
+    }
+    if (candidate["lifetime"] === "call") {
+      return Object.keys(candidate).sort().join(",") ===
+          "allowedInvocationExecutors,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,synchronousReturn,transports" &&
+        (owner as { kind?: unknown }).kind === "native-call" &&
+        executors.length === 1 && executors[0] === "same-as-caller" &&
+        candidate["deliveryExecutor"] === "same-as-caller" &&
+        candidate["synchronousReturn"] === true &&
+        transportKinds.every((kind) => kind === "borrow") &&
+        candidate["reentrancy"] === "required" &&
+        candidate["postDisposal"] === "not-invoked" &&
+        candidate["shutdown"] === "drain";
+    }
+    if (candidate["lifetime"] === "until-cancelled") {
+      const allowed = new Set(["same-as-caller", "any-attached-thread"]);
+      return Object.keys(candidate).sort().join(",") ===
+          "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,synchronousReturn,transports" &&
+        (owner as { kind?: unknown }).kind === "result" &&
+        typeof candidate["cancellationBinding"] === "string" &&
+        candidate["cancellationBinding"] !== "" &&
+        executors.length > 0 &&
+        executors.every((executor) => allowed.has(String(executor))) &&
+        new Set(executors).size === executors.length &&
+        candidate["deliveryExecutor"] === "runtime-owner" &&
+        candidate["synchronousReturn"] === false &&
+        transportKinds.every((kind) => kind === "copy") &&
+        (candidate["reentrancy"] === "allowed" ||
+          candidate["reentrancy"] === "required") &&
+        candidate["postDisposal"] === "not-invoked" &&
+        candidate["shutdown"] === "drain" &&
+        type.ret.kind === "void";
+    }
+    return false;
   };
   const validNativeCallback = (
     type: NonNullable<IrModule["nativeBindings"]>[number]["parameters"][number]["type"],
@@ -1468,6 +1530,16 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
+      if (
+        argument.type.kind === "func"
+          ? !validNativeCallbackContract(argument.callback, argument.type)
+          : argument.callback !== undefined
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" argument "${argument.name}" has an invalid callback contract`,
+          loc: moduleLoc,
+        });
+      }
     }
     const projectionsByArgument = binding.arguments.map(() => ({
       direct: 0,
@@ -1508,8 +1580,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ? parameter.ownership.kind !== "borrowed" && parameter.ownership.kind !== "owned"
           : pointerParameter
             ? parameter.ownership.kind !== "borrowed"
-            : callbackParameter || contextParameter
-              ? parameter.ownership.kind !== "callScoped"
+          : callbackParameter || contextParameter
+              ? parameter.ownership.kind !== "callback"
             : parameter.ownership.kind !== "value"
       ) {
         errors.push({
@@ -1631,7 +1703,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             parameter.type.kind !== "nativeCallback" ||
             !validNativeCallback(parameter.type) ||
             !typeEquals(sourceArgument.type, nativeCallbackArgumentType(parameter.type.signature)) ||
-            parameter.ownership.kind !== "callScoped"
+            parameter.ownership.kind !== "callback" ||
+            parameter.ownership.lifetime !== sourceArgument.callback?.lifetime
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-function projection`,
@@ -1645,7 +1718,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             sourceArgument.type.kind !== "func" ||
             parameter.type.kind !== "nativeContext" ||
             !validNativeContext(parameter.type) ||
-            parameter.ownership.kind !== "callScoped"
+            parameter.ownership.kind !== "callback" ||
+            parameter.ownership.lifetime !== sourceArgument.callback?.lifetime
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-context projection`,
@@ -1714,6 +1788,30 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     nativeById.set(binding.id, binding);
     nativeSymbols.add(binding.entry.symbol);
     nativeDeclarations.add(declarationKey);
+  }
+  for (const binding of mod.nativeBindings ?? []) {
+    for (const argument of binding.arguments) {
+      const contract = argument.callback;
+      if (argument.type.kind !== "func" || contract?.lifetime !== "until-cancelled") {
+        continue;
+      }
+      if (
+        binding.result.type.kind !== "nativeHandle" ||
+        binding.result.ownership.kind !== "owned" ||
+        contract.cancellationBinding !== binding.result.ownership.destructor
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" retained callback "${argument.name}" must be owned and cancelled by its result handle destructor`,
+          loc: moduleLoc,
+        });
+      }
+      if (!nativeById.has(contract.cancellationBinding)) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" retained callback "${argument.name}" names an unknown cancellation binding "${contract.cancellationBinding}"`,
+          loc: moduleLoc,
+        });
+      }
+    }
   }
   const nativeDestructorIds = new Set<string>();
   for (const binding of mod.nativeBindings ?? []) {
