@@ -30,9 +30,47 @@ export interface SrcLoc {
 export type IrBytesElem = "u8" | "u32" | "i32" | "f32";
 
 /** Exact, non-JavaScript scalar representations carried by Native IR.
- * Each added name describes value semantics as well as ABI width: the
- * initial `i32` slice never passes through f64. */
-export type IrNativeScalar = "i32";
+ * Each name fixes signedness, width, and value semantics. These values
+ * never pass through the JavaScript f64 carrier. */
+export const IR_NATIVE_INTEGER_SCALARS = [
+  "i8",
+  "u8",
+  "i16",
+  "u16",
+  "i32",
+  "u32",
+] as const;
+
+export type IrNativeScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
+
+export interface IrNativeIntegerInfo {
+  readonly bits: 8 | 16 | 32;
+  readonly signed: boolean;
+  readonly min: bigint;
+  readonly max: bigint;
+}
+
+/** Returns the semantic bounds of a serialized Native IR scalar name.
+ * Accepting `string` keeps validation safe for untrusted JSON even though
+ * well-typed compiler code normally supplies `IrNativeScalar`. */
+export function nativeIntegerInfo(scalar: string): IrNativeIntegerInfo | null {
+  switch (scalar) {
+    case "i8":
+      return { bits: 8, signed: true, min: -128n, max: 127n };
+    case "u8":
+      return { bits: 8, signed: false, min: 0n, max: 255n };
+    case "i16":
+      return { bits: 16, signed: true, min: -32768n, max: 32767n };
+    case "u16":
+      return { bits: 16, signed: false, min: 0n, max: 65535n };
+    case "i32":
+      return { bits: 32, signed: true, min: -2147483648n, max: 2147483647n };
+    case "u32":
+      return { bits: 32, signed: false, min: 0n, max: 4294967295n };
+    default:
+      return null;
+  }
+}
 
 export interface IrNativeScalarType {
   kind: "nativeScalar";
@@ -714,7 +752,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 4;
+  irVersion: 5;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions

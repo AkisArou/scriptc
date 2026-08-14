@@ -18,8 +18,18 @@ export function cType(t: IrType): string {
   switch (t.kind) {
     case "nativeScalar":
       switch (t.scalar) {
+        case "i8":
+          return "int8_t";
+        case "u8":
+          return "uint8_t";
+        case "i16":
+          return "int16_t";
+        case "u16":
+          return "uint16_t";
         case "i32":
           return "int32_t";
+        case "u32":
+          return "uint32_t";
       }
     case "f64":
     case "date":

@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { nativeBindingDiag, nativeConversionDiag, nativeSignatureDiag } from "../../diagnostics/diagnostic.js";
 import type { IrExpr, IrNativeBinding, IrNativeScalarType, SrcLoc } from "../../ir/nodes.js";
-import { typeEquals } from "../../ir/nodes.js";
+import { nativeIntegerInfo, typeEquals } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -202,7 +202,10 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   };
 }
 
-function decimalI32Literal(node: ts.Expression): string | null {
+function decimalIntegerLiteral(
+  node: ts.Expression,
+  target: IrNativeScalarType,
+): string | null {
   let expression = node;
   while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
   let negative = false;
@@ -215,13 +218,14 @@ function decimalI32Literal(node: ts.Expression): string | null {
   }
   if (!ts.isNumericLiteral(expression) || !/^[0-9]+$/.test(expression.text)) return null;
   const value = BigInt(`${negative ? "-" : ""}${expression.text}`);
-  if (value < -2147483648n || value > 2147483647n) return null;
+  const info = nativeIntegerInfo(target.scalar);
+  if (info === null || value < info.min || value > info.max) return null;
   return value.toString();
 }
 
 /** Exact-scalar assertions are representation constructors, not erased
- * JavaScript casts. The initial i32 slice accepts a provably in-range
- * decimal literal or a value already carrying exact i32. */
+ * JavaScript casts. Narrow integers accept a provably in-range decimal
+ * literal or a value already carrying the same exact type. */
 export function lowerNativeScalarAssertion(
   L: Lowerer,
   expr: ts.AsExpression | ts.TypeAssertion,
@@ -229,7 +233,7 @@ export function lowerNativeScalarAssertion(
 ): IrExpr {
   const source = L.mapTypeOf(L.typeOf(expr.expression));
   if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
-  const value = target.scalar === "i32" ? decimalI32Literal(expr.expression) : null;
+  const value = decimalIntegerLiteral(expr.expression, target);
   if (value === null) {
     L.pushDiag(
       nativeConversionDiag(

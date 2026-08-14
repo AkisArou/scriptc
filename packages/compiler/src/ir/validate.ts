@@ -18,7 +18,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1264,7 +1264,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
-      if (parameter.type.kind !== "nativeScalar" || parameter.type.scalar !== "i32") {
+      if (
+        parameter.type.kind !== "nativeScalar" ||
+        nativeIntegerInfo(parameter.type.scalar) === null
+      ) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
           loc: moduleLoc,
@@ -1279,7 +1282,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     if (
       binding.result.type.kind !== "void" &&
-      (binding.result.type.kind !== "nativeScalar" || binding.result.type.scalar !== "i32")
+      (binding.result.type.kind !== "nativeScalar" ||
+        nativeIntegerInfo(binding.result.type.scalar) === null)
     ) {
       errors.push({
         message: `Native IR binding "${binding.id}" result has an unsupported exact type`,
@@ -1843,17 +1847,18 @@ function validateFunction(
         }
         break;
       case "nativeScalarLit": {
-        if (e.type.scalar !== "i32") {
+        const info = nativeIntegerInfo(e.type.scalar);
+        if (info === null) {
           err(`native scalar literal has unsupported type "${String(e.type.scalar)}"`, e.loc);
           break;
         }
         if (!/^-?(?:0|[1-9][0-9]*)$/.test(e.value) || e.value === "-0") {
-          err(`native i32 literal has non-canonical decimal spelling "${e.value}"`, e.loc);
+          err(`native ${e.type.scalar} literal has non-canonical decimal spelling "${e.value}"`, e.loc);
           break;
         }
         const value = BigInt(e.value);
-        if (value < -2147483648n || value > 2147483647n) {
-          err(`native i32 literal ${e.value} is out of range`, e.loc);
+        if (value < info.min || value > info.max) {
+          err(`native ${e.type.scalar} literal ${e.value} is out of range`, e.loc);
         }
         break;
       }

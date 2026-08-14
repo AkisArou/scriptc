@@ -1224,7 +1224,14 @@ class LlEmitter {
     switch (t.kind) {
       case "nativeScalar":
         switch (t.scalar) {
+          case "i8":
+          case "u8":
+            return "i8";
+          case "i16":
+          case "u16":
+            return "i16";
           case "i32":
+          case "u32":
             return "i32";
         }
       case "f64":
@@ -1276,6 +1283,42 @@ class LlEmitter {
         return "void";
       default:
         throw new LlvmUnsupportedError(`type:${t.kind}`);
+    }
+  }
+
+  /** C's default ABI extends integer values narrower than `int` at call
+   * boundaries. LLVM represents that contract with parameter/return
+   * attributes rather than in the integer type itself. */
+  private nativeReturnType(t: IrNativeBinding["result"]["type"]): string {
+    const type = this.llType(t);
+    if (t.kind !== "nativeScalar") return type;
+    switch (t.scalar) {
+      case "i8":
+      case "i16":
+        return `signext ${type}`;
+      case "u8":
+      case "u16":
+        return `zeroext ${type}`;
+      case "i32":
+      case "u32":
+        return type;
+    }
+  }
+
+  private nativeParameterType(
+    t: IrNativeBinding["parameters"][number]["type"],
+  ): string {
+    const type = this.llType(t);
+    switch (t.scalar) {
+      case "i8":
+      case "i16":
+        return `${type} signext`;
+      case "u8":
+      case "u16":
+        return `${type} zeroext`;
+      case "i32":
+      case "u32":
+        return type;
     }
   }
 
@@ -6108,8 +6151,10 @@ class LlEmitter {
           throw new Error(`llvm emitter bug: unknown Native IR binding ${e.binding}`);
         }
         const args = e.args.map((arg) => this.emitExpr(arg));
-        const returnType = this.llType(binding.result.type);
-        const parameterTypes = binding.parameters.map((parameter) => this.llType(parameter.type));
+        const returnType = this.nativeReturnType(binding.result.type);
+        const parameterTypes = binding.parameters.map((parameter) =>
+          this.nativeParameterType(parameter.type)
+        );
         this.declare(
           `declare ${returnType} @${binding.entry.symbol}(${parameterTypes.join(", ")})`,
         );

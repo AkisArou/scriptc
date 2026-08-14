@@ -1,6 +1,15 @@
 declare const nativeScalar: unique symbol;
 
+export type i8 = number & { readonly [nativeScalar]: "i8" };
+export type u8 = number & { readonly [nativeScalar]: "u8" };
+export type i16 = number & { readonly [nativeScalar]: "i16" };
+export type u16 = number & { readonly [nativeScalar]: "u16" };
 export type i32 = number & { readonly [nativeScalar]: "i32" };
+export type u32 = number & { readonly [nativeScalar]: "u32" };
 
+export declare function i8Identity(value: i8): i8;
+export declare function u8Identity(value: u8): u8;
+export declare function i16Identity(value: i16): i16;
+export declare function u16Identity(value: u16): u16;
 export declare function i32Identity(value: i32): i32;
-
+export declare function u32Identity(value: u32): u32;
