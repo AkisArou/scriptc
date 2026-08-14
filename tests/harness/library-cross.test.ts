@@ -121,6 +121,7 @@ interface LibProfile {
     sink_register_symbol: string;
     collect_symbol: string | null;
     result_reset_symbol: string | null;
+    callback_register_symbol?: string;
   };
   exports: { symbol: string }[];
   sidecar?: { build_id_symbol: string; abi_version_symbol: string } | null;
@@ -136,6 +137,7 @@ function declaredSymbols(p: LibProfile): string[] {
     p.abi.sink_register_symbol,
     ...(p.abi.collect_symbol !== null ? [p.abi.collect_symbol] : []),
     ...(p.abi.result_reset_symbol !== null ? [p.abi.result_reset_symbol] : []),
+    ...(p.abi.callback_register_symbol !== undefined ? [p.abi.callback_register_symbol] : []),
     ...(p.sidecar != null ? [p.sidecar.build_id_symbol, p.sidecar.abi_version_symbol] : []),
   ];
 }
