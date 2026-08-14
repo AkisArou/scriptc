@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBuildDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
@@ -32,6 +32,7 @@ import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
+import type { NativeFrontendInput } from "./frontend/native.js";
 
 export const VERSION = "0.0.1";
 
@@ -112,6 +113,7 @@ export { validateSidecar } from "./library/sidecar-validate.js";
 export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
+export type { NativeFrontendBinding, NativeFrontendInput, NativeSourceType } from "./frontend/native.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
@@ -160,6 +162,14 @@ export interface CompileOptions {
    * lower to direct C ABI calls, and its archive/system-library inputs are
    * appended to the executable link. */
   ffiProfilePath?: string;
+  /** Declaration surfaces used to resolve embedder-owned native source
+   * identities. Runtime values remain fenced unless `native` claims their
+   * exact exported checker symbol. */
+  externalTypes?: Readonly<Record<string, string>>;
+  /** Manifest-neutral exact source identities and Native IR bindings. */
+  native?: NativeFrontendInput;
+  /** Target-compatible objects/archives that define reached native symbols. */
+  nativeLinkInputs?: readonly string[];
 }
 
 export type CompileResult =
@@ -352,6 +362,8 @@ export interface AnalyzeOptions {
    * to analyze project code, but imported runtime values remain explicit
    * SC1010 blockers rather than being counted as executable. */
   externalTypes?: Readonly<Record<string, string>>;
+  /** Analyze with generic embedder-supplied native declaration semantics. */
+  native?: NativeFrontendInput;
 }
 
 /* ── the frontend, one pipeline shape ───────────────────────────────────
@@ -515,6 +527,7 @@ function runFrontend(
   entryPath: string,
   npmStatic?: readonly string[] | "auto" | "lib",
   externalTypes?: Readonly<Record<string, string>>,
+  native?: NativeFrontendInput,
 ): Frontend {
   const statuses: NpmStaticStatus[] = [];
   const npmSites = new Map<string, SrcLoc>();
@@ -526,7 +539,7 @@ function runFrontend(
     const scout = loadProgram(entryPath, { externalTypes });
     let retained = false;
     try {
-      const scoutPreflight = checkPreflight(scout);
+      const scoutPreflight = checkPreflight(scout, native);
       requested =
         npmStatic === "lib"
           ? detectAutoPackages(scout, statuses, "lib", judged, npmSites)
@@ -592,7 +605,7 @@ function runFrontend(
   // exactly like auto's — "the user asked for these packages" buys the
   // attempt, not a broken build.
   let load = reusableScout ?? loadProgram(entryPath, { npmStatic: requested, externalTypes });
-  let preflight = reusablePreflight ?? checkPreflight(load);
+  let preflight = reusablePreflight ?? checkPreflight(load, native);
   // Library mode's fixpoint: the opted-in packages' files joined the
   // program just now, and THEIR bare edges (import statements and
   // top-level requires) name packages the scout could not see. Judge each
@@ -607,7 +620,7 @@ function runFrontend(
       requested = [...requested, ...grown];
       load.dispose();
       load = loadProgram(entryPath, { npmStatic: requested, externalTypes });
-      preflight = checkPreflight(load);
+      preflight = checkPreflight(load, native);
     }
   }
   const effective = new Set(requested);
@@ -640,7 +653,7 @@ function runFrontend(
     }
     load.dispose();
     load = loadProgram(entryPath, { npmStatic: effective, externalTypes });
-    preflight = checkPreflight(load);
+    preflight = checkPreflight(load, native);
   }
   // The last resort, ALL modes: an opt-in can change the PROGRAM's OWN
   // typecheck through errors that name no package at all (the inferred
@@ -675,18 +688,18 @@ function runFrontend(
     // that still fail drop everything left.
     for (const p of [...effective]) {
       const probe = loadProgram(entryPath, { npmStatic: [p], externalTypes });
-      const probeDiags = checkPreflight(probe);
+      const probeDiags = checkPreflight(probe, native);
       probe.dispose();
       if (probeDiags.some((d) => d.code === "SC0001")) dropWithNote(p);
     }
     load.dispose();
     load = loadProgram(entryPath, { npmStatic: effective, externalTypes });
-    preflight = checkPreflight(load);
+    preflight = checkPreflight(load, native);
     if (preflight.some((d) => d.code === "SC0001") && effective.size > 0) {
       for (const p of [...effective]) dropWithNote(p);
       load.dispose();
       load = loadProgram(entryPath, { npmStatic: effective, externalTypes });
-      preflight = checkPreflight(load);
+      preflight = checkPreflight(load, native);
     }
   }
   for (const p of requested) {
@@ -731,6 +744,7 @@ function runFrontend(
       startupCrash: finalLoad.startupCrash ?? null,
       externalTypes: finalLoad.externalTypes,
       externalTypeSpecifiersByFile: finalLoad.externalTypeSpecifiersByFile,
+      ...(native !== undefined ? { native } : {}),
     }),
     npmStatic: statuses,
     npmImportSites: npmSites,
@@ -758,7 +772,7 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
     }
     ffi = loaded.profile;
   }
-  const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes);
+  const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes, opts.native);
   try {
     const emptyStats = { statementsTotal: 0, statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 };
 
@@ -865,7 +879,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       };
     }
   }
-  const fe = runFrontend(entryPath, opts.npmStatic);
+  const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes, opts.native);
   let lowered: LowerResult;
   let entryText: string;
   let sourceTexts: Map<string, string>;
@@ -1065,11 +1079,16 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       // cc.ts also compiles it under the tls gate (scr_tls.c consults the
       // unit's default-set override for its trust anchors).
       tlsCa: moduleUsesTlsCa(lowered.module),
-      ...(ffi !== null
+      ...((ffi?.libraries.length ?? 0) + (opts.nativeLinkInputs?.length ?? 0) > 0
         ? {
-            linkInputs: ffi.libraries,
-            systemLibraries: ffi.systemLibraries,
+            linkInputs: [
+              ...(ffi?.libraries ?? []),
+              ...(opts.nativeLinkInputs ?? []),
+            ],
           }
+        : {}),
+      ...(ffi !== null && ffi.systemLibraries.length > 0
+        ? { systemLibraries: ffi.systemLibraries }
         : {}),
     });
   } catch (err) {
@@ -1082,6 +1101,13 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
             opts.ffiProfilePath ?? entryPath,
           ),
         ],
+        sourceTexts,
+      };
+    }
+    if ((lowered.module?.nativeBindings?.length ?? 0) > 0 && err instanceof CcCompileError) {
+      return {
+        ok: false,
+        diagnostics: [nativeBuildDiag(ffiNativeBuildDetail(err), entryPath)],
         sourceTexts,
       };
     }

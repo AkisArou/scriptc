@@ -26,6 +26,7 @@ import { mixinFnOfCallee } from "./lower-mixins.js";
 import { isConstAssertionTypeNode, isGenericCallableMemberType, isParseArgsDynTypeName, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
+import { lowerNativeCall } from "./lower-native.js";
 
 /** An assignable `obj.field` target — a class field, a record field, or a
  * class ACCESSOR property (reads become getter calls, writes setter calls;
@@ -145,6 +146,18 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     // enclosing optChain — read the bind temp instead of re-lowering.
     const chainRecv = L.chainRecvByNode.get(expr);
     if (chainRecv) return { ...chainRecv, loc };
+
+    // Exact native calls are the one configured runtime meaning an
+    // external declaration value may have. Claim them before the general
+    // checker-only external-module fence; all other value uses still fail.
+    if (ts.isCallExpression(expr)) {
+      const native = lowerNativeCall(L, expr);
+      if (native !== null) return native;
+    }
+    if (ts.isAsExpression(expr) || ts.isTypeAssertion(expr)) {
+      const target = L.mapTypeOf(L.checker.getTypeFromTypeNode(expr.type));
+      if (target?.kind === "nativeScalar") return L.lowerAsExpression(expr);
+    }
 
     // --external-types supplies CHECKER truth only. A value rooted in one
     // of those declarations has no runtime implementation in scriptc, so

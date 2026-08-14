@@ -770,8 +770,8 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
-  /** Generic Native IR bindings. Calls refer to the stable manifest-local
-   * `id`; only this validated table carries the backend symbol spelling.
+  /** Generic Native IR bindings. Calls refer to the stable opaque `id`;
+   * only this validated table carries the backend symbol spelling.
    * The first slice is value-only exact scalars. Aggregates, handles,
    * ownership, callbacks, and target-specific entries extend this table
    * rather than introducing another call path. */
@@ -790,7 +790,8 @@ export interface IrModule {
 }
 
 export interface IrNativeBinding {
-  /** Stable manifest-local identity used by `nativeCall`. */
+  /** Stable identity used by `nativeCall`, unique within this module.
+   * Embedders may qualify a manifest-local ID with its package instance. */
   id: string;
   /** Source declaration identity. It is metadata at the IR/backend seam;
    * the frontend integration uses it to prove the called symbol. */

@@ -548,6 +548,9 @@ export interface TypeMapperCtx {
   unions: UnionRegistry;
   classNamer: ClassNamer;
   resolveTypeParam?: TypeParamResolver;
+  /** Exact embedder-owned source type identities. Consulted before any
+   * JavaScript carrier mapping so a branded i32 can never collapse to f64. */
+  resolveNativeType?: (type: ts.Type) => IrType | null;
   /** The ts-level twin of resolveTypeParam (bound CHECKER types), consulted
    * only where literal identity matters — indexed accesses (`T[K]`) inside
    * generic bodies whose K is bound to a literal key. */
@@ -581,10 +584,10 @@ export interface TypeMapperCtx {
    * under --dynamic: the package's implementation runs in the embedded
    * engine, so its values are island handles. */
   isNpmFile: (sf: ts.SourceFile) => boolean;
-  /** True for a declaration file explicitly mapped by coverage's
-   * --external-types option. These declarations are trusted as structural
-   * type descriptions for project-owned values, but their imported runtime
-   * bindings are fenced separately by the Lowerer. */
+  /** True for a declaration file explicitly mapped by the embedder's
+   * external-types option. These declarations are trusted as structural
+   * type descriptions; imported runtime bindings are fenced separately
+   * unless an exact Native IR declaration claims them. */
   isExternalTypeFile: (sf: ts.SourceFile) => boolean;
   /** --dynamic: `any` maps to the island handle type (jsval). Off, `any`
    * stays unmapped and the requires-dynamic diagnostic fires per site. */
@@ -715,6 +718,8 @@ function classExprNeverRegisters(decl: ts.ClassLikeDeclaration): boolean {
 
 function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const { checker, unions, classNamer, resolveTypeParam } = ctx;
+  const nativeType = ctx.resolveNativeType?.(type) ?? null;
+  if (nativeType !== null) return nativeType;
   if (resolveTypeParam && type.flags & ts.TypeFlags.TypeParameter) {
     const bound = resolveTypeParam(type);
     if (bound) {

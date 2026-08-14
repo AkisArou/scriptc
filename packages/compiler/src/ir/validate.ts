@@ -1188,7 +1188,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   >();
   const nativeSymbols = new Set<string>();
   const nativeDeclarations = new Set<string>();
-  const nativeId = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+  // IDs are opaque stable identities and may be qualified by a package
+  // instance (`scope/name@version#binding`). Whitespace and control
+  // characters remain forbidden; backends never derive symbols from IDs.
+  const nativeId = /^[A-Za-z0-9@][A-Za-z0-9@/_.:#-]*$/;
   const cIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
   for (const binding of mod.nativeBindings ?? []) {
     if (!nativeId.test(binding.id)) {

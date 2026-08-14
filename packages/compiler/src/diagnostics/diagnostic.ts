@@ -48,7 +48,9 @@
  *            binding that is not an ambient function declaration
  *            (SC5002), and a TypeScript signature that does not match its
  *            declared native ABI classes (SC5003), and native toolchain
- *            failures while applying a valid profile (SC5004)
+ *            failures while applying a valid profile (SC5004); generic
+ *            Native IR declaration resolution/signature/exact-conversion
+ *            failures use SC5102-SC5104, and native link failures SC5105
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -122,6 +124,54 @@ export function ffiNativeBuildDiag(detail: string, profilePath: string): ScrDiag
     hint:
       "check that every native symbol and system library exists, archive/object ordering is correct, " +
       "and each input matches the selected target",
+  };
+}
+
+/** SC5102 — a generic Native IR declaration identity did not resolve to the
+ * exact signature-only TypeScript export supplied by the embedder. */
+export function nativeBindingDiag(id: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC5102",
+    message: `Native IR binding '${id}' cannot be resolved: ${detail}`,
+    loc,
+    hint:
+      "map the declaration module to its .d.ts surface and bind the exact exported signature-only function symbol",
+  };
+}
+
+/** SC5103 — the resolved TypeScript declaration and exact Native IR ABI
+ * disagree. */
+export function nativeSignatureDiag(id: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC5103",
+    message: `Native IR binding '${id}' has an incompatible signature: ${detail}`,
+    loc,
+    hint:
+      "native declarations must use the exact source types mapped by the embedder; JavaScript number is not an exact integer carrier",
+  };
+}
+
+/** SC5104 — an exact native scalar was requested from a JavaScript value
+ * without a conversion whose representation can be proven at compile time. */
+export function nativeConversionDiag(type: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC5104",
+    message: `cannot construct exact native ${type}: ${detail}`,
+    loc,
+    hint:
+      "use an in-range integer literal assertion or an operation that already returns the same exact native type",
+  };
+}
+
+/** SC5105 — linking the embedder-supplied native inputs failed after the
+ * frontend and Native IR had validated successfully. */
+export function nativeBuildDiag(detail: string, entryPath: string): ScrDiagnostic {
+  return {
+    code: "SC5105",
+    message: `Native IR build failed: ${detail}`,
+    loc: { file: entryPath, start: 0, end: 0 },
+    hint:
+      "check that every reached native symbol has a target-compatible object or archive in nativeLinkInputs",
   };
 }
 

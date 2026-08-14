@@ -56,6 +56,7 @@ import { probeNodeImportRefusal, probeNodeRequireRefusal } from "./npm.js";
 import { isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
 import { provenanceEntryFor, provenancePaths } from "./provenance-registry.js";
 import { cjsLexerVisibleNames } from "./cjs-lexer.js";
+import { nativeRuntimeMembers, type NativeFrontendInput } from "./native.js";
 import {
   ADOPTED_OPTIONS,
   ambientDtsPath,
@@ -206,7 +207,7 @@ export interface LoadResult {
    * checkPreflight. */
   startupCrash?: StartupCrash | null;
   configDiags: ScrDiagnostic[];
-  /** Coverage-only external host modules: exact bare specifier → local
+  /** Embedder-owned external host modules: exact bare specifier → local
    * declaration file. These participate in checker resolution but never
    * become runtime module edges. */
   externalTypes: ReadonlyMap<string, string>;
@@ -250,6 +251,38 @@ function externalHostModuleDiag7(specifier: string, node: ts.Node): ScrDiagnosti
     `the '${specifier}' external host module (types supplied by --external-types, but no runtime implementation or scriptc lowering was provided)`,
     "the declaration mapping is analysis-only: coverage continues through project code, while executing this module requires an embedder integration with explicit runtime semantics",
   );
+}
+
+function nativeImportClaimed7(
+  declaration: ts.ImportDeclaration,
+  members: ReadonlySet<string> | undefined,
+): boolean {
+  if (members === undefined || declaration.importClause === undefined) return false;
+  const clause = declaration.importClause;
+  if (clause.name !== undefined) return false;
+  if (clause.namedBindings === undefined || !ts.isNamedImports(clause.namedBindings)) return false;
+  let runtimeMember = false;
+  for (const element of clause.namedBindings.elements) {
+    if (element.isTypeOnly) continue;
+    runtimeMember = true;
+    if (!members.has((element.propertyName ?? element.name).text)) return false;
+  }
+  return runtimeMember;
+}
+
+function nativeReexportClaimed7(
+  declaration: ts.ExportDeclaration,
+  members: ReadonlySet<string> | undefined,
+): boolean {
+  if (members === undefined || declaration.exportClause === undefined) return false;
+  if (!ts.isNamedExports(declaration.exportClause)) return false;
+  let runtimeMember = false;
+  for (const element of declaration.exportClause.elements) {
+    if (element.isTypeOnly) continue;
+    runtimeMember = true;
+    if (!members.has((element.propertyName ?? element.name).text)) return false;
+  }
+  return runtimeMember;
 }
 
 /** Expand each mapped declaration entry through RELATIVE declaration
@@ -377,8 +410,8 @@ export function loadProgram(
      * modules this load (npm-static.ts owns the doctrine). Every load
      * RESETS the module state, so flagless loads always start clean. */
     npmStatic?: Iterable<string>;
-    /** Coverage-only type surfaces for modules supplied by an embedder.
-     * Exact bare specifiers only; values never become runtime edges. */
+    /** Type surfaces for modules supplied by an embedder. Exact bare
+     * specifiers only; values never become runtime module edges. */
     externalTypes?: ReadonlyMap<string, string> | Readonly<Record<string, string>> | undefined;
   },
 ): LoadResult & { dispose: () => void } {
@@ -454,8 +487,11 @@ export function loadProgram(
  * module evaluation order: fills load.moduleOrder (the SourceFiles
  * themselves — the lowering consumes them directly) and returns the
  * preflight diagnostics. The lowerer runs only on programs that pass. */
-export function checkPreflight(load: LoadResult): ScrDiagnostic[] {
-  const { diags, moduleOrder, startupCrash } = preflight7(load);
+export function checkPreflight(
+  load: LoadResult,
+  native?: NativeFrontendInput,
+): ScrDiagnostic[] {
+  const { diags, moduleOrder, startupCrash } = preflight7(load, native);
   load.moduleOrder = moduleOrder;
   load.startupCrash = startupCrash;
   return diags;
@@ -1574,13 +1610,17 @@ export function checkPreflightTs7(
   }
 }
 
-function preflight7(load: LoadResult): {
+function preflight7(
+  load: LoadResult,
+  native?: NativeFrontendInput,
+): {
   diags: ScrDiagnostic[];
   moduleOrder: ts.SourceFile[];
   startupCrash: StartupCrash | null;
 } {
   const { program, entry } = load;
   const diags: ScrDiagnostic[] = [...load.configDiags];
+  const nativeMembers = nativeRuntimeMembers(native);
 
   // Workspace-linked packages register BEFORE the tsc gate. Their files
   // live at realpaths OUTSIDE node_modules (the monorepo-tool symlink
@@ -1935,6 +1975,7 @@ function preflight7(load: LoadResult): {
         if (!stmt.moduleSpecifier) continue;
         const fromSpec = ts.isStringLiteral(stmt.moduleSpecifier) ? stmt.moduleSpecifier.text : "";
         if (load.externalTypes.has(fromSpec)) {
+          if (nativeReexportClaimed7(stmt, nativeMembers.get(fromSpec))) continue;
           diags.push(externalHostModuleDiag7(fromSpec, stmt));
           continue;
         }
@@ -2007,6 +2048,7 @@ function preflight7(load: LoadResult): {
       if (specNode === undefined || !ts.isStringLiteral(specNode)) continue;
       const spec = specNode.text;
       if (load.externalTypes.has(spec)) {
+        if (nativeImportClaimed7(stmt, nativeMembers.get(spec))) continue;
         diags.push(externalHostModuleDiag7(spec, stmt));
         continue;
       }

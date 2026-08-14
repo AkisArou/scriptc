@@ -44,6 +44,7 @@ import type {
   IrGlobal,
   IrLocal,
   IrModule,
+  IrNativeBinding,
   IrParam,
   IrRecordShape,
   IrStmt,
@@ -53,6 +54,7 @@ import type {
 } from "../../ir/nodes.js";
 import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
 import { type DynamicImportResolution, type NpmBuiltinUse, type NpmLazyTrap } from "../npm.js";
+import type { NativeFrontendInput } from "../native.js";
 import { provenanceActive } from "../provenance-registry.js";
 import {
   ambientDtsPath,
@@ -93,6 +95,7 @@ import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonIm
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerFfiCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction, validateFfiImports } from "./lower-calls.js";
+import { lowerNativeCall, lowerNativeScalarAssertion, materializeNativeBinding, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding } from "./lower-native.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
@@ -352,6 +355,9 @@ export interface LowerOptions {
    * imports; without this option ambient declarations keep Node's ordinary
    * ReferenceError behavior. */
   ffiImports?: readonly IrFfiImport[];
+  /** Generic, manifest-neutral native declaration/type input supplied by an
+   * embedder. Only reached binding calls are emitted into the IR module. */
+  native?: NativeFrontendInput;
   /** LIBRARY mode's host-callback surface marker: the `ffiImports` above
    * are profile-declared callback channels, not native-manifest bindings.
    * Flips the binding diagnostics to the library flavor (SC4024), keeps a
@@ -360,8 +366,9 @@ export interface LowerOptions {
    * program-authored signature-only ambient function with the callback
    * teaching instead of the ambient ReferenceError lowering. */
   libraryCallbacks?: boolean;
-  /** Coverage-only external host type surfaces. Their declarations inform
-   * the checker, while every runtime value use remains an SC1010 fence. */
+  /** Embedder-owned external type surfaces. Their declarations inform the
+   * checker; runtime values remain SC1010 fences unless `native` claims the
+   * exact exported declaration. */
   externalTypes?: ReadonlyMap<string, string>;
   /** The mapped entries plus relative declaration dependencies, attributed
    * to their owning external specifier. */
@@ -389,6 +396,8 @@ export interface LowererMode {
   startupCrash?: StartupCrash | null;
   /** The build's outbound native FFI declarations. */
   ffiImports?: readonly IrFfiImport[];
+  /** LowerOptions.native, threaded through every lowering pass. */
+  native?: NativeFrontendInput;
   /** LowerOptions.libraryCallbacks (see there). */
   libraryCallbacks?: boolean;
   /** Program-validated ambient declaration symbols for each FFI name.
@@ -458,6 +467,7 @@ export function lowerToIr(
     });
   }
   const ffiImports = options.ffiImports ?? [];
+  const native = options.native;
   const libraryCallbacks = options.libraryCallbacks ?? false;
   const externalTypes = options.externalTypes ?? new Map<string, string>();
   const externalTypeSpecifiersByFile = options.externalTypeSpecifiersByFile ??
@@ -465,6 +475,7 @@ export function lowerToIr(
   const validation = new Lowerer(program, entry, moduleOrder, dynamic, {
     targetPlatform,
     ffiImports,
+    ...(native !== undefined ? { native } : {}),
     libraryCallbacks,
     externalTypes,
     externalTypeSpecifiersByFile,
@@ -481,6 +492,7 @@ export function lowerToIr(
     : new Lowerer(program, entry, moduleOrder, dynamic, {
         targetPlatform,
         ffiImports,
+        ...(native !== undefined ? { native } : {}),
         libraryCallbacks,
         externalTypes,
         externalTypeSpecifiersByFile,
@@ -492,6 +504,7 @@ export function lowerToIr(
     targetPlatform,
     startupCrash,
     ffiImports,
+    ...(native !== undefined ? { native } : {}),
     libraryCallbacks,
     ffiBindingSymbols: ffiValidation.symbolsByName,
     externalTypes,
@@ -507,6 +520,7 @@ export function lowerToIr(
     alreadyFlushed: emit.flushedSymbols,
     targetPlatform,
     ffiImports,
+    ...(native !== undefined ? { native } : {}),
     libraryCallbacks,
     ffiBindingSymbols: ffiValidation.symbolsByName,
     externalTypes,
@@ -1240,6 +1254,14 @@ export class Lowerer {
   readonly ffiImportsByName: ReadonlyMap<string, IrFfiImport>;
   /** Non-null after whole-program FFI declaration validation. */
   readonly ffiBindingSymbols: ReadonlyMap<string, ReadonlySet<ts.Symbol>> | null;
+  /** Manifest-neutral native input resolved exclusively by checker symbol. */
+  readonly nativeInput: NativeFrontendInput | undefined;
+  readonly nativeTypesBySymbol: ReadonlyMap<ts.Symbol, IrNativeBinding["parameters"][number]["type"]>;
+  readonly nativeBindingsBySymbol: ReadonlyMap<ts.Symbol, NativeInputBinding>;
+  readonly validatedNativeBindingSymbols = new Set<ts.Symbol>();
+  /** Reachability accounting: only calls that survive this pass contribute a
+   * binding record to the assembled module. */
+  readonly usedNativeBindingIds = new Set<string>();
   /** Exact specifier mappings and their reverse declaration-file lookup. */
   readonly externalTypes: ReadonlyMap<string, string>;
   readonly externalTypeSpecifiersByFile: ReadonlyMap<string, readonly string[]>;
@@ -1299,16 +1321,21 @@ export class Lowerer {
     this.libraryCallbacks = mode.libraryCallbacks ?? false;
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
+    this.nativeInput = mode.native;
     this.externalTypes = mode.externalTypes ?? new Map();
     this.externalTypeSpecifiersByFile = mode.externalTypeSpecifiersByFile ??
       directExternalTypeSpecifiersByFile(this.externalTypes);
     this.checker = program.getTypeChecker();
+    const native = resolveNativeFrontend(this, this.nativeInput);
+    this.nativeTypesBySymbol = native.typesBySymbol;
+    this.nativeBindingsBySymbol = native.bindingsBySymbol;
     this.typeCtx = {
       checker: this.checker,
       shapes: this.shapes,
       unions: this.unions,
       classNamer: this.classNamer,
       resolveTypeParam: this.typeParamResolver,
+      resolveNativeType: (type) => nativeTypeOf(this, type),
       resolveTypeParamTs: this.typeParamTsResolver,
       genericClassInstance: (decl, ref) => this.genericClassInstanceType(decl, ref),
       mixinClassInstance: (decl) =>
@@ -2264,6 +2291,13 @@ export class Lowerer {
             globals: this.globalsList,
             ...(this.npmEmbedded ? { embedded: this.npmEmbedded } : {}),
             entry: ENTRY_NAME,
+            ...(this.usedNativeBindingIds.size > 0
+              ? {
+                  nativeBindings: (this.nativeInput?.bindings ?? [])
+                    .filter((binding) => this.usedNativeBindingIds.has(binding.id))
+                    .map(materializeNativeBinding),
+                }
+              : {}),
             ...(this.ffiImports.length > 0 ? { ffiImports: [...this.ffiImports] } : {}),
           };
     return {
@@ -7533,6 +7567,10 @@ export class Lowerer {
   }
 
   lowerAsExpression(expr: ts.AsExpression | ts.TypeAssertion): IrExpr {
+    const nativeTarget = this.mapTypeOf(this.checker.getTypeFromTypeNode(expr.type));
+    if (nativeTarget?.kind === "nativeScalar") {
+      return lowerNativeScalarAssertion(this, expr, nativeTarget);
+    }
     // ISLAND value cast to a PROMISE type (`factory(opts) as Promise<Mod>`
     // — the Node-typed async-API shape): promises never have a validated
     // exit, so instead of refusing the build the cast DEFERS the failure
@@ -7602,6 +7640,7 @@ export class Lowerer {
     // promise-returning ambient global, and `import` is a keyword callee no
     // identifier path matches.
     return (
+      lowerNativeCall(this, expr) ??
       lowerFfiCall(this, expr) ??
       lowerFetchCall(this, expr) ??
       lowerStaticFetchCompanionCall(this, expr) ??
