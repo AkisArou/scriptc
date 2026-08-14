@@ -111,7 +111,8 @@ bool scr_owner_gateway_destroy(ScrOwnerGateway *gateway);
 typedef struct ScrCallbackToken ScrCallbackToken;
 typedef struct ScrCallbackInvocation ScrCallbackInvocation;
 typedef bool (*ScrCallbackInvocationFn)(ScrCallbackInvocation *invocation,
-                                        size_t slot, uint64_t generation);
+                                        void *owner_context, size_t slot,
+                                        uint64_t generation);
 
 struct ScrCallbackInvocation {
   ScrOwnerGatewayEvent event;
@@ -131,6 +132,7 @@ typedef enum {
 } ScrCallbackTokenState;
 
 ScrCallbackToken *scr_callback_token_new(ScrOwnerGateway *gateway,
+                                          void *owner_context,
                                           size_t slot, uint64_t generation,
                                           const void *signature);
 /* Invocation ownership always transfers. Successful admission acquires a
@@ -149,6 +151,41 @@ bool scr_callback_token_cancellation_complete(ScrCallbackToken *token);
 bool scr_callback_token_try_destroy(ScrCallbackToken *token);
 ScrCallbackTokenState scr_callback_token_state(ScrCallbackToken *token);
 size_t scr_callback_token_leases(ScrCallbackToken *token);
+void *scr_callback_token_owner_context(ScrCallbackToken *token);
+size_t scr_callback_token_slot(ScrCallbackToken *token);
+uint64_t scr_callback_token_generation(ScrCallbackToken *token);
+
+/* ── retained-callback owner table (scr_callback_table.c) ────────────────
+ * An active native registration is an explicit external root. The table
+ * strongly owns its owner-only anchor until native cancellation completes
+ * and all transport leases finish; foreign threads see only the token above.
+ * Hooks keep the transport/lifecycle core independent from one closure ABI. */
+typedef struct ScrCallbackTable ScrCallbackTable;
+typedef void *(*ScrCallbackAnchorRetainFn)(void *anchor);
+typedef void (*ScrCallbackAnchorReleaseFn)(void *anchor);
+
+ScrCallbackTable *scr_callback_table_new(
+    ScrOwnerGateway *gateway, ScrCallbackAnchorRetainFn retain_anchor,
+    ScrCallbackAnchorReleaseFn release_anchor);
+/* Anchor ownership moves only on success. The returned token is the native
+ * context pointer and remains owned by this table entry. */
+ScrCallbackToken *scr_callback_table_register(ScrCallbackTable *table,
+                                               void *anchor,
+                                               const void *signature);
+/* Owner-only lookup for an admitted invocation. Returns a retained anchor;
+ * closing entries remain visible until their already-admitted leases finish. */
+void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
+                                 uint64_t generation,
+                                 const void *signature);
+bool scr_callback_table_begin_close(ScrCallbackTable *table,
+                                    ScrCallbackToken *token);
+bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
+                                              ScrCallbackToken *token);
+/* Owner-only reap after gateway drains/discards. Returns entries disposed. */
+size_t scr_callback_table_collect(ScrCallbackTable *table);
+size_t scr_callback_table_active(ScrCallbackTable *table);
+/* Requires no entries and a stopped, empty gateway. */
+bool scr_callback_table_destroy(ScrCallbackTable *table);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
  * Every unrecoverable runtime trap — OOM, semantic range traps, internal-

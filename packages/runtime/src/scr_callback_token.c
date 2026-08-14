@@ -19,6 +19,7 @@
 struct ScrCallbackToken {
   _Atomic uintptr_t gate;
   ScrOwnerGateway *gateway;
+  void *owner_context;
   size_t slot;
   uint64_t generation;
   const void *signature;
@@ -37,13 +38,18 @@ static ScrCallbackTokenState scr_callback_word_state(uintptr_t word) {
 }
 
 ScrCallbackToken *scr_callback_token_new(ScrOwnerGateway *gateway,
+                                          void *owner_context,
                                           size_t slot, uint64_t generation,
                                           const void *signature) {
-  if (gateway == NULL || generation == 0 || signature == NULL) return NULL;
+  if (gateway == NULL || owner_context == NULL || generation == 0 ||
+      signature == NULL) {
+    return NULL;
+  }
   ScrCallbackToken *token = calloc(1, sizeof *token);
   if (token == NULL) return NULL;
   atomic_init(&token->gate, 0);
   token->gateway = gateway;
+  token->owner_context = owner_context;
   token->slot = slot;
   token->generation = generation;
   token->signature = signature;
@@ -68,7 +74,8 @@ static bool scr_callback_token_acquire(ScrCallbackToken *token) {
 static bool scr_callback_invocation_deliver(ScrOwnerGatewayEvent *base) {
   ScrCallbackInvocation *invocation = (ScrCallbackInvocation *)base;
   ScrCallbackToken *token = invocation->token;
-  return invocation->invoke(invocation, token->slot, token->generation);
+  return invocation->invoke(invocation, token->owner_context, token->slot,
+                            token->generation);
 }
 
 static void scr_callback_invocation_destroy(ScrOwnerGatewayEvent *base) {
@@ -147,4 +154,16 @@ size_t scr_callback_token_leases(ScrCallbackToken *token) {
   uintptr_t word = atomic_load_explicit(&token->gate, memory_order_acquire);
   uintptr_t leases = word & SCR_CALLBACK_LEASE_MASK;
   return (size_t)leases;
+}
+
+void *scr_callback_token_owner_context(ScrCallbackToken *token) {
+  return token == NULL ? NULL : token->owner_context;
+}
+
+size_t scr_callback_token_slot(ScrCallbackToken *token) {
+  return token == NULL ? SIZE_MAX : token->slot;
+}
+
+uint64_t scr_callback_token_generation(ScrCallbackToken *token) {
+  return token == NULL ? 0 : token->generation;
 }

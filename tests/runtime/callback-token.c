@@ -20,6 +20,7 @@ static const char expected_signature;
 static const char wrong_signature;
 static ScrOwnerGateway *gateway;
 static ScrCallbackToken *token;
+static const char owner_context;
 static size_t next_sequence[PRODUCERS];
 static _Atomic size_t allocated;
 static _Atomic size_t admitted;
@@ -29,9 +30,10 @@ static _Atomic size_t producers_done;
 
 static void wake_owner(void *context) { (void)context; }
 
-static bool invoke_callback(ScrCallbackInvocation *base, size_t slot,
-                            uint64_t generation) {
+static bool invoke_callback(ScrCallbackInvocation *base, void *context,
+                            size_t slot, uint64_t generation) {
   TestInvocation *invocation = (TestInvocation *)base;
+  assert(context == &owner_context);
   assert(slot == 17);
   assert(generation == 29);
   assert(next_sequence[invocation->producer] == invocation->sequence);
@@ -71,7 +73,8 @@ static void reset_counts(void) {
 static void new_transport(void) {
   gateway = scr_owner_gateway_new(wake_owner, NULL);
   assert(gateway != NULL);
-  token = scr_callback_token_new(gateway, 17, 29, &expected_signature);
+  token = scr_callback_token_new(gateway, (void *)&owner_context, 17, 29,
+                                 &expected_signature);
   assert(token != NULL);
 }
 
