@@ -6,6 +6,8 @@ export type i16 = number & { readonly [nativeScalar]: "i16" };
 export type u16 = number & { readonly [nativeScalar]: "u16" };
 export type i32 = number & { readonly [nativeScalar]: "i32" };
 export type u32 = number & { readonly [nativeScalar]: "u32" };
+export type i64 = bigint & { readonly [nativeScalar]: "i64" };
+export type u64 = bigint & { readonly [nativeScalar]: "u64" };
 
 export declare function i8Identity(value: i8): i8;
 export declare function u8Identity(value: u8): u8;
@@ -13,3 +15,5 @@ export declare function i16Identity(value: i16): i16;
 export declare function u16Identity(value: u16): u16;
 export declare function i32Identity(value: i32): i32;
 export declare function u32Identity(value: u32): u32;
+export declare function i64Identity(value: i64): i64;
+export declare function u64Identity(value: u64): u64;

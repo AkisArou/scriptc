@@ -30,6 +30,10 @@ export function cType(t: IrType): string {
           return "int32_t";
         case "u32":
           return "uint32_t";
+        case "i64":
+          return "int64_t";
+        case "u64":
+          return "uint64_t";
       }
     case "f64":
     case "date":
@@ -139,6 +143,25 @@ export function cType(t: IrType): string {
       throw new Error("unreachable");
     }
   }
+}
+
+/** C spelling for an already-validated exact native integer literal. The
+ * fixed-width macros avoid implementation-dependent literal typing at the
+ * signed and unsigned 64-bit boundaries. */
+export function cNativeScalarLiteral(
+  type: IrType & { readonly kind: "nativeScalar" },
+  value: string,
+): string {
+  if (type.scalar === "u64") return `UINT64_C(${value})`;
+  if (type.scalar === "i64") {
+    if (value === "-9223372036854775808") {
+      return "(-INT64_C(9223372036854775807) - INT64_C(1))";
+    }
+    return value.startsWith("-")
+      ? `(-INT64_C(${value.slice(1)}))`
+      : `INT64_C(${value})`;
+  }
+  return `(${cType(type).trim()})(${value})`;
 }
 
 /** The retain call (+1, returns the value) for one refcounted type. */

@@ -39,12 +39,14 @@ export const IR_NATIVE_INTEGER_SCALARS = [
   "u16",
   "i32",
   "u32",
+  "i64",
+  "u64",
 ] as const;
 
 export type IrNativeScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
 
 export interface IrNativeIntegerInfo {
-  readonly bits: 8 | 16 | 32;
+  readonly bits: 8 | 16 | 32 | 64;
   readonly signed: boolean;
   readonly min: bigint;
   readonly max: bigint;
@@ -67,6 +69,20 @@ export function nativeIntegerInfo(scalar: string): IrNativeIntegerInfo | null {
       return { bits: 32, signed: true, min: -2147483648n, max: 2147483647n };
     case "u32":
       return { bits: 32, signed: false, min: 0n, max: 4294967295n };
+    case "i64":
+      return {
+        bits: 64,
+        signed: true,
+        min: -9223372036854775808n,
+        max: 9223372036854775807n,
+      };
+    case "u64":
+      return {
+        bits: 64,
+        signed: false,
+        min: 0n,
+        max: 18446744073709551615n,
+      };
     default:
       return null;
   }
@@ -752,7 +768,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 5;
+  irVersion: 6;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions

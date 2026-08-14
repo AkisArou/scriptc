@@ -23,3 +23,11 @@ int32_t nts_i32_identity(int32_t value) {
 uint32_t nts_u32_identity(uint32_t value) {
   return value;
 }
+
+int64_t nts_i64_identity(int64_t value) {
+  return value;
+}
+
+uint64_t nts_u64_identity(uint64_t value) {
+  return value;
+}

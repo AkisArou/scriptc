@@ -1233,6 +1233,9 @@ class LlEmitter {
           case "i32":
           case "u32":
             return "i32";
+          case "i64":
+          case "u64":
+            return "i64";
         }
       case "f64":
       case "date":
@@ -1301,6 +1304,8 @@ class LlEmitter {
         return `zeroext ${type}`;
       case "i32":
       case "u32":
+      case "i64":
+      case "u64":
         return type;
     }
   }
@@ -1318,6 +1323,8 @@ class LlEmitter {
         return `${type} zeroext`;
       case "i32":
       case "u32":
+      case "i64":
+      case "u64":
         return type;
     }
   }

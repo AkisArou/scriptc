@@ -202,10 +202,12 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   };
 }
 
-function decimalIntegerLiteral(
+function exactIntegerLiteral(
   node: ts.Expression,
   target: IrNativeScalarType,
 ): string | null {
+  const info = nativeIntegerInfo(target.scalar);
+  if (info === null) return null;
   let expression = node;
   while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
   let negative = false;
@@ -213,19 +215,28 @@ function decimalIntegerLiteral(
     ts.isPrefixUnaryExpression(expression) &&
     (expression.operator === ts.SyntaxKind.MinusToken || expression.operator === ts.SyntaxKind.PlusToken)
   ) {
+    if (info.bits === 64 && expression.operator === ts.SyntaxKind.PlusToken) return null;
     negative = expression.operator === ts.SyntaxKind.MinusToken;
     expression = expression.operand;
   }
-  if (!ts.isNumericLiteral(expression) || !/^[0-9]+$/.test(expression.text)) return null;
-  const value = BigInt(`${negative ? "-" : ""}${expression.text}`);
-  const info = nativeIntegerInfo(target.scalar);
-  if (info === null || value < info.min || value > info.max) return null;
+  const digits = info.bits === 64
+    ? ts.isBigIntLiteral(expression) && /^[0-9]+n$/.test(expression.text)
+      ? expression.text.slice(0, -1)
+      : null
+    : ts.isNumericLiteral(expression) && /^[0-9]+$/.test(expression.text)
+      ? expression.text
+      : null;
+  if (digits === null) return null;
+  const value = BigInt(`${negative ? "-" : ""}${digits}`);
+  if (value < info.min || value > info.max) return null;
   return value.toString();
 }
 
 /** Exact-scalar assertions are representation constructors, not erased
- * JavaScript casts. Narrow integers accept a provably in-range decimal
- * literal or a value already carrying the same exact type. */
+ * JavaScript casts. Integers up to 32 bits accept decimal number literals;
+ * 64-bit integers accept decimal BigInt literals. Either width also accepts
+ * a value already carrying the same exact type. General JavaScript BigInt
+ * values remain outside ScriptC's static representation. */
 export function lowerNativeScalarAssertion(
   L: Lowerer,
   expr: ts.AsExpression | ts.TypeAssertion,
@@ -233,12 +244,14 @@ export function lowerNativeScalarAssertion(
 ): IrExpr {
   const source = L.mapTypeOf(L.typeOf(expr.expression));
   if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
-  const value = decimalIntegerLiteral(expr.expression, target);
+  const value = exactIntegerLiteral(expr.expression, target);
   if (value === null) {
     L.pushDiag(
       nativeConversionDiag(
         target.scalar,
-        "the source is not a provably in-range decimal integer literal or the same exact type",
+        nativeIntegerInfo(target.scalar)?.bits === 64
+          ? "the source is not a provably in-range decimal BigInt literal or the same exact type"
+          : "the source is not a provably in-range decimal number literal or the same exact type",
         locOf(expr),
       ),
     );

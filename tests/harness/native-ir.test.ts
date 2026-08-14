@@ -28,24 +28,28 @@ const I16 = nativeScalarType("i16");
 const U16 = nativeScalarType("u16");
 const I32 = nativeScalarType("i32");
 const U32 = nativeScalarType("u32");
+const I64 = nativeScalarType("i64");
+const U64 = nativeScalarType("u64");
 const NATIVE_VOID = { kind: "void" } as const;
 const nativePackage = "@native-typescript/scabi-c-v1-fixture";
 
-const narrowIntegerBindings = [
+const exactIntegerBindings = [
   { scalar: "i8", declaration: "i8Identity", symbol: "nts_i8_identity" },
   { scalar: "u8", declaration: "u8Identity", symbol: "nts_u8_identity" },
   { scalar: "i16", declaration: "i16Identity", symbol: "nts_i16_identity" },
   { scalar: "u16", declaration: "u16Identity", symbol: "nts_u16_identity" },
   { scalar: "i32", declaration: "i32Identity", symbol: "nts_i32_identity" },
   { scalar: "u32", declaration: "u32Identity", symbol: "nts_u32_identity" },
+  { scalar: "i64", declaration: "i64Identity", symbol: "nts_i64_identity" },
+  { scalar: "u64", declaration: "u64Identity", symbol: "nts_u64_identity" },
 ] as const;
 
 const localNativeInput: NativeFrontendInput = {
-  sourceTypes: narrowIntegerBindings.map(({ scalar }) => ({
+  sourceTypes: exactIntegerBindings.map(({ scalar }) => ({
     declaration: { module: nativePackage, name: scalar },
     type: nativeScalarType(scalar),
   })),
-  bindings: narrowIntegerBindings.map(({ scalar, declaration, symbol }) => {
+  bindings: exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
     const type = nativeScalarType(scalar);
     return {
       id: `native-typescript.fixture.c-v1@0.0.0#${scalar}_identity`,
@@ -87,9 +91,9 @@ function frontendNativeInput(): NativeFrontendInput {
         result: { type: I32, passMode: "value" },
       },
       {
-        id: "scriptc-test@1#verify-narrow-integers",
-        declaration: { module: "scriptc-native-test", name: "verifyNarrowIntegers" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_narrow" },
+        id: "scriptc-test@1#verify-exact-integers",
+        declaration: { module: "scriptc-native-test", name: "verifyExactIntegers" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_exact_integers" },
         callingConvention: "c",
         variadic: false,
         parameters: [
@@ -99,6 +103,8 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "unsigned16", type: U16, passMode: "value" },
           { name: "signed32", type: I32, passMode: "value" },
           { name: "unsigned32", type: U32, passMode: "value" },
+          { name: "signed64", type: I64, passMode: "value" },
+          { name: "unsigned64", type: U64, passMode: "value" },
         ],
         result: { type: I32, passMode: "value" },
       },
@@ -248,7 +254,7 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   expect(deserializeModule(json)).toEqual(mod);
 });
 
-test("Native IR validates every narrow integer's signed bounds", () => {
+test("Native IR validates every exact integer's signed bounds", () => {
   const cases: readonly [IrNativeScalar, string, string][] = [
     ["i8", "-128", "127"],
     ["u8", "0", "255"],
@@ -256,6 +262,8 @@ test("Native IR validates every narrow integer's signed bounds", () => {
     ["u16", "0", "65535"],
     ["i32", "-2147483648", "2147483647"],
     ["u32", "0", "4294967295"],
+    ["i64", "-9223372036854775808", "9223372036854775807"],
+    ["u64", "0", "18446744073709551615"],
   ];
   for (const [scalar, min, max] of cases) {
     for (const value of [min, max]) {
@@ -328,6 +336,43 @@ test("the frontend rejects an out-of-range unsigned constructor before linking",
   expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5104"]);
 });
 
+test("the frontend rejects an out-of-range exact i64 BigInt constructor", async () => {
+  const outDir = join(scratch, "frontend-i64-out-of-range");
+  const result = await compile(
+    join(repoRoot, "tests/native-ir/i64-out-of-range.ts"),
+    {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend: "c",
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+    },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5104"]);
+});
+
+test("the frontend keeps number and BigInt exact-integer carriers distinct", async () => {
+  const outDir = join(scratch, "frontend-carrier-mismatch");
+  const result = await compile(
+    join(repoRoot, "tests/native-ir/carrier-mismatch.ts"),
+    {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend: "c",
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+    },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+    "SC0001",
+    "SC0001",
+  ]);
+});
+
 test("a reached native symbol missing from the link fails as SC5105", async () => {
   const outDir = join(scratch, "frontend-missing-symbol");
   const result = await compile(join(repoRoot, "tests/native-ir/missing-symbol.ts"), {
@@ -389,12 +434,14 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(mod.nativeBindings?.map((binding) => binding.id).sort()).toEqual([
       "native-typescript.fixture.c-v1@0.0.0#i16_identity",
       "native-typescript.fixture.c-v1@0.0.0#i32_identity",
+      "native-typescript.fixture.c-v1@0.0.0#i64_identity",
       "native-typescript.fixture.c-v1@0.0.0#i8_identity",
       "native-typescript.fixture.c-v1@0.0.0#u16_identity",
       "native-typescript.fixture.c-v1@0.0.0#u32_identity",
+      "native-typescript.fixture.c-v1@0.0.0#u64_identity",
       "native-typescript.fixture.c-v1@0.0.0#u8_identity",
       "scriptc-test@1#exit",
-      "scriptc-test@1#verify-narrow-integers",
+      "scriptc-test@1#verify-exact-integers",
     ]);
     const json = serializeModule(mod);
     expect(json).toContain('"kind": "nativeScalarLit"');
