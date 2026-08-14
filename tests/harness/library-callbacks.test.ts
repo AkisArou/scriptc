@@ -39,8 +39,11 @@
  *                          teaching; a callback-free profile keeps the
  *                          ambient ReferenceError lowering (the standing
  *                          guarantee), and an unused declared channel is
- *                          legal capacity (SC4001 profile shapes live in
- *                          library-profile.test.ts)
+ *                          legal capacity; declaration-file ambient names
+ *                          stay builtins rather than becoming channels, and
+ *                          unsupported program-authored ambient shapes
+ *                          refuse instead of disappearing (SC4001 profile
+ *                          shapes live in library-profile.test.ts)
  *   CB7 composition        a runtime-localized AND thread-instanced
  *                          archive with channels: two embedder threads
  *                          register different contexts, chunks route to
@@ -308,6 +311,13 @@ survived, sink_calls=1
     expect(diags[0]!.message).toContain("does not fit profile class 'bytes'");
   });
 
+  test("CB6: a called function-valued ambient refuses SC4024 instead of disappearing", async () => {
+    const diags = await buildRefusal(emission, { tag: "ambient-const", entry: "lib_ambient_const.ts" });
+    expect(diags.map((d) => d.code)).toEqual(["SC4024"]);
+    expect(diags[0]!.message).toContain("library callback 'orphan'");
+    expect(diags[0]!.message).toContain("does not resolve exclusively to signature-only function declarations");
+  });
+
   platformTest("CB6: a callback-free profile keeps the ambient ReferenceError lowering", async () => {
     // The standing guarantee's behavioral half: without a callbacks
     // section the same signature-only declaration keeps Node's
@@ -343,6 +353,20 @@ survived, sink_calls=1
 reg emitChunk: 0
 unused ready
 stream(3,7) = 42
+`);
+  });
+
+  platformTest("CB6: declaration-file ambient names remain builtins or unused capacity", async () => {
+    const { archive, outDir } = await buildLibrary(emission, {
+      tag: "builtin-names",
+      profileFile: "profile_builtins.json",
+    });
+    const probe = buildProbe("probe_builtins.c", archive, outDir);
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(`finite: 0
+nan: 1
 `);
   });
 

@@ -2660,7 +2660,10 @@ export interface FfiValidationResult {
  * Candidate declarations are signature-only functions bearing the manifest
  * name anywhere in the program. Multiple scoped declarations are all native
  * bindings under the existing name-based call surface, so every candidate
- * must fit the one manifest ABI. */
+ * must fit the one manifest ABI. Library callbacks additionally exclude
+ * declaration files: lib.d.ts/@types names are existing TypeScript ambient
+ * surface, never program-authored callback declarations merely because a
+ * profile channel happens to share their spelling. */
 export function validateFfiImports(L: Lowerer): FfiValidationResult {
   const diagnostics: ScrDiagnostic[] = [];
   const symbolsByName = new Map<string, ReadonlySet<ts.Symbol>>();
@@ -2670,6 +2673,7 @@ export function validateFfiImports(L: Lowerer): FfiValidationResult {
   if (configuredNames.size === 0) return { diagnostics, symbolsByName };
 
   for (const file of L.program.getSourceFiles()) {
+    if (L.libraryCallbacks && file.isDeclarationFile) continue;
     ts.walkPreorder(file, (node) => {
       if (ts.isFunctionDeclaration(node)) {
         if (
@@ -2709,6 +2713,14 @@ export function validateFfiImports(L: Lowerer): FfiValidationResult {
             { file: L.entry.fileName, start: 0, end: 0 },
           ),
         );
+      } else {
+        // Preserve the distinction between unused capacity and a binding
+        // whose program declaration was found but failed validation. The
+        // latter deliberately leaves no map entry so calls poison without
+        // duplicating the program-level diagnostic; the empty set lets call
+        // lowering inspect same-named builtins, implementations, and
+        // unsupported ambient declaration shapes individually.
+        symbolsByName.set(binding.name, new Set());
       }
       continue;
     }
@@ -2793,10 +2805,42 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       // binding. Poison the statement without duplicating that diagnostic.
       if (validSymbols === undefined) throw new PoisonError();
       if (!validSymbols.has(symbol)) {
-        // TypeScript resolved this call to a distinct local declaration.
-        // The manifest owns only the exact validated ambient binding; a
-        // same-named function with a body remains ordinary scriptc code.
-        return null;
+        if (L.libraryCallbacks) {
+          const declarations = L.checker.declarationsOf(symbol);
+          const programDeclarations = declarations.filter(
+            (decl) => !decl.getSourceFile().isDeclarationFile,
+          );
+          const programAmbient =
+            programDeclarations.length > 0 &&
+            programDeclarations.every(
+              (decl) =>
+                (ts.getCombinedModifierFlags(decl as ts.Declaration) &
+                  ts.ModifierFlags.Ambient) !== 0,
+            );
+          if (programAmbient) {
+            // A called, program-authored ambient with a configured channel
+            // name is not unused capacity. Validate the resolved symbol now
+            // so unsupported declaration forms (`declare const cb: ...`)
+            // refuse SC4024 instead of silently dropping the call. A valid
+            // declaration missed by the up-front syntax walk may proceed as
+            // the callback binding after this exact-symbol check.
+            const diagnostic = ffiDeclarationDiagnostic(L, binding, symbol, loc);
+            if (diagnostic !== null) {
+              L.pushDiag(diagnostic);
+              throw new PoisonError();
+            }
+          } else {
+            // Declaration-file ambients (including standard-library
+            // builtins) and same-named program implementations remain their
+            // ordinary TypeScript bindings; the profile does not claim them.
+            return null;
+          }
+        } else {
+          // TypeScript resolved this call to a distinct local declaration.
+          // The manifest owns only the exact validated ambient binding; a
+          // same-named function with a body remains ordinary scriptc code.
+          return null;
+        }
       }
     } else {
       const diagnostic = ffiDeclarationDiagnostic(L, binding, symbol, loc);
