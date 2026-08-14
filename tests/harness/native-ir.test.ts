@@ -16,7 +16,7 @@ import { nativeCallbackArgumentType, nativeScalarType } from "../../packages/com
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
 import type { NativeFrontendInput } from "../../packages/compiler/src/frontend/native.js";
-import { analyze, compile } from "../../packages/compiler/src/index.js";
+import { analyze, compile, compileLibrary } from "../../packages/compiler/src/index.js";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const scratch = mkdtempSync(join(tmpdir(), "scriptc-native-ir-"));
@@ -116,6 +116,7 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
   ],
   types: [PADDED_DEFINITION, COUNTER_DEFINITION],
+  exports: [],
   bindings: [
     ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
       const type = nativeScalarType(scalar);
@@ -352,6 +353,7 @@ function frontendNativeInput(): NativeFrontendInput {
       },
     ],
     types: translated.types,
+    exports: translated.exports,
     bindings: [
       ...translated.bindings,
       {
@@ -583,6 +585,125 @@ function nativeExternalTypes(): Record<string, string> {
 }
 
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+describe.each(["llvm", "c"] as const)("exact Native IR library exports, %s emission", (emission) => {
+  test("exports an exact i32 TypeScript function to a C host", async () => {
+    const outDir = join(scratch, `native-export-${emission}`);
+    mkdirSync(outDir, { recursive: true });
+    const profilePath = join(outDir, "profile.json");
+    writeFileSync(profilePath, JSON.stringify({
+      profile_format: 1,
+      name: "native-ir-export-conformance",
+      entry: join(repoRoot, "tests/native-ir/export-library.ts"),
+      emission,
+      abi: {
+        prefix: "nx_",
+        init_symbol: "nx_init",
+        sink_register_symbol: "nx_set_panic_sink",
+        collect_symbol: null,
+        result_reset_symbol: null,
+      },
+      exports: [],
+    }, null, 2));
+
+    const native: NativeFrontendInput = {
+      target: localNativeInput.target,
+      sourceTypes: localNativeInput.sourceTypes,
+      types: [],
+      bindings: [],
+      exports: [{
+        id: "native-typescript.fixture.c-v1@0.0.0#ts_add_i32",
+        sourceExport: "ntsTsAddI32",
+        declaration: {
+          module: nativePackage,
+          name: "FixtureLibraryExports.ntsTsAddI32",
+        },
+        entry: { kind: "c-symbol", symbol: "nts_ts_add_i32" },
+        callingConvention: "c",
+        variadic: false,
+        error: NO_NATIVE_ERROR,
+        parameters: [
+          { name: "left", type: I32, passMode: "value", ownership: { kind: "value" } },
+          { name: "right", type: I32, passMode: "value", ownership: { kind: "value" } },
+        ],
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      }],
+    };
+    const result = await compileLibrary({
+      profilePath,
+      outDir,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native,
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok) return;
+
+    const defined = execFileSync("nm", ["-g", "--defined-only", result.archivePath], {
+      encoding: "utf8",
+    });
+    expect(defined).toMatch(/\bnts_ts_add_i32\b/);
+
+    const probePath = join(outDir, "probe.c");
+    const probeBin = join(outDir, "probe");
+    writeFileSync(probePath, `
+#include <stdint.h>
+#include <stddef.h>
+#include <limits.h>
+
+extern void nx_init(void);
+extern void nx_set_panic_sink(
+  void (*fn)(void *, const uint8_t *, size_t, uint64_t),
+  void *ctx
+);
+extern int32_t nts_ts_add_i32(int32_t left, int32_t right);
+
+static int sink_called = 0;
+static void sink(void *ctx, const uint8_t *msg, size_t len, uint64_t addr) {
+  (void)ctx; (void)msg; (void)len; (void)addr;
+  sink_called = 1;
+}
+
+int main(void) {
+  nx_set_panic_sink(sink, NULL);
+  nx_init();
+  if (nts_ts_add_i32(20, 22) != 42) return 1;
+  if (nts_ts_add_i32(INT32_MAX, 43) != INT32_MIN + 42) return 2;
+  if (nts_ts_add_i32(INT32_MIN, -1) != INT32_MAX) return 3;
+  return sink_called ? 4 : 0;
+}
+`);
+    execFileSync("clang", [
+      "-std=c11",
+      ...(sanitize ? ["-fsanitize=address"] : []),
+      probePath,
+      result.archivePath,
+      "-lm",
+      "-o",
+      probeBin,
+    ]);
+    const run = spawnSync(probeBin, [], { encoding: "utf8", timeout: 60_000 });
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr }).toEqual({
+      status: 0,
+      signal: null,
+      stderr: "",
+    });
+
+    if (result.irPath !== undefined) {
+      const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+      expect(mod.lib?.nativeExports).toEqual([
+        expect.objectContaining({
+          id: "native-typescript.fixture.c-v1@0.0.0#ts_add_i32",
+          symbol: "nts_ts_add_i32",
+          fnName: "ntsTsAddI32",
+          returns: I32,
+        }),
+      ]);
+      expect(validateModule(mod)).toEqual([]);
+    }
+  });
+});
 
 function exactI32Module(value = "42"): IrModule {
   const literal: IrExpr = { kind: "nativeScalarLit", value, type: I32, loc };
@@ -872,7 +993,7 @@ test("Native IR requires target facts for bindings and backends reject width mis
   const missingTarget = exactI32Module();
   delete missingTarget.nativeTarget;
   expect(validateModule(missingTarget).map((error) => error.message)).toContain(
-    "Native IR bindings require module target ABI facts",
+    "Native IR bindings and exports require module target ABI facts",
   );
   expect(() => emitLlvmModule(exactI32Module(), { pointerBits: 32 })).toThrow(
     /target mismatch/,
@@ -1297,6 +1418,46 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(json).toContain('"kind": "nativeScalarLit"');
     expect(json).not.toContain('"kind": "numLit"');
 
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("wraps exact i32 addition, subtraction, and multiplication without signed overflow", async () => {
+    const outDir = join(scratch, `arithmetic-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/arithmetic.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native arithmetic frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(serializeModule(mod)).toContain('"kind": "nativeIntegerBin"');
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "arithmetic.c" : "arithmetic.ll"),
+      "utf8",
+    );
+    if (backend === "c") {
+      expect(generated).toContain("scr_native_i32_add");
+      expect(generated).toContain("scr_native_i32_sub");
+      expect(generated).toContain("scr_native_i32_mul");
+    } else {
+      expect(generated).toMatch(/= add i32/);
+      expect(generated).toMatch(/= sub i32/);
+      expect(generated).toMatch(/= mul i32/);
+    }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

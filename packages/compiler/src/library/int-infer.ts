@@ -1271,6 +1271,7 @@ class FnAnalyzer {
         return e.fn.startsWith("math.") && e.args.every((a) => this.isPure(a));
       case "numLit":
       case "nativeScalarLit":
+      case "nativeIntegerBin":
       case "strLit":
       case "boolLit":
       case "varRef":
@@ -1303,6 +1304,7 @@ class FnAnalyzer {
       case "numLit":
         return constVal(e.value, e.spelling);
       case "nativeScalarLit":
+      case "nativeIntegerBin":
         return { ...TOP };
       case "varRef":
         return this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
@@ -1395,6 +1397,7 @@ class FnAnalyzer {
     switch (e.kind) {
       case "numLit":
       case "nativeScalarLit":
+      case "nativeIntegerBin":
       case "strLit":
       case "boolLit":
       case "unitLit":
@@ -1470,6 +1473,7 @@ class FnAnalyzer {
       case "numLit":
         return constVal(e.value, e.spelling);
       case "nativeScalarLit":
+      case "nativeIntegerBin":
       case "strLit":
       case "boolLit":
       case "unitLit":

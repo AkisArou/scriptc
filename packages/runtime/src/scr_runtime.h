@@ -729,6 +729,46 @@ void scr_throw_error_msg_code(int kind, const char *message, size_t len, const c
 int scr_native_errno_snapshot(void);
 void scr_native_throw_errno(int error_number, const char *operation);
 void scr_native_throw_null(const char *operation);
+
+/* Exact Native IR integer arithmetic. Work exclusively in the matching
+ * unsigned representation, then copy wrapped signed bits rather than using
+ * an out-of-range unsigned-to-signed conversion. This keeps +, -, and * free
+ * of signed-overflow UB and implementation-defined signed reconstruction. */
+#define SCR_NATIVE_UNSIGNED_BIN(T, W, N, OP, S)                         \
+  static inline T scr_native_##N##_##S(T a, T b) {                     \
+    return (T)((W)a OP (W)b);                                          \
+  }
+#define SCR_NATIVE_SIGNED_BIN(T, U, W, N, OP, S)                       \
+  static inline T scr_native_##N##_##S(T a, T b) {                     \
+    U bits = (U)((W)(U)a OP (W)(U)b);                                  \
+    T result;                                                          \
+    memcpy(&result, &bits, sizeof result);                             \
+    return result;                                                     \
+  }
+#define SCR_NATIVE_UNSIGNED_ARITH(T, W, N)                             \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, +, add)                            \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, -, sub)                            \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, *, mul)
+#define SCR_NATIVE_SIGNED_ARITH(T, U, W, N)                            \
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, +, add)                           \
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, -, sub)                           \
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, *, mul)
+
+SCR_NATIVE_SIGNED_ARITH(int8_t, uint8_t, uint32_t, i8)
+SCR_NATIVE_UNSIGNED_ARITH(uint8_t, uint32_t, u8)
+SCR_NATIVE_SIGNED_ARITH(int16_t, uint16_t, uint32_t, i16)
+SCR_NATIVE_UNSIGNED_ARITH(uint16_t, uint32_t, u16)
+SCR_NATIVE_SIGNED_ARITH(int32_t, uint32_t, uint32_t, i32)
+SCR_NATIVE_UNSIGNED_ARITH(uint32_t, uint32_t, u32)
+SCR_NATIVE_SIGNED_ARITH(int64_t, uint64_t, uint64_t, i64)
+SCR_NATIVE_UNSIGNED_ARITH(uint64_t, uint64_t, u64)
+SCR_NATIVE_SIGNED_ARITH(intptr_t, uintptr_t, uintptr_t, isize)
+SCR_NATIVE_UNSIGNED_ARITH(uintptr_t, uintptr_t, usize)
+
+#undef SCR_NATIVE_SIGNED_ARITH
+#undef SCR_NATIVE_UNSIGNED_ARITH
+#undef SCR_NATIVE_SIGNED_BIN
+#undef SCR_NATIVE_UNSIGNED_BIN
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
 void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);

@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBuildDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
@@ -21,7 +21,7 @@ import {
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrFfiImport, type IrLibSection, type IrModule, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, nativeIntegerInfo, typeEquals, type IrFfiImport, type IrLibSection, type IrModule, type IrNativeScalarType, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -32,7 +32,7 @@ import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
-import type { NativeFrontendInput } from "./frontend/native.js";
+import type { NativeFrontendExport, NativeFrontendInput } from "./frontend/native.js";
 
 export const VERSION = "0.0.1";
 
@@ -113,7 +113,7 @@ export { validateSidecar } from "./library/sidecar-validate.js";
 export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
-export type { NativeFrontendBinding, NativeFrontendInput, NativeHandleDefinition, NativeSourceType, NativeStructDefinition, NativeTypeDefinition } from "./frontend/native.js";
+export type { NativeFrontendBinding, NativeFrontendExport, NativeFrontendInput, NativeHandleDefinition, NativeSourceType, NativeStructDefinition, NativeTypeDefinition } from "./frontend/native.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
@@ -1230,6 +1230,10 @@ export interface CompileLibraryOptions {
   outPath?: string;
   emitIr?: boolean;
   sanitize?: boolean;
+  /** Declaration surfaces and manifest-neutral Native IR contracts used by
+   * exact native imports and C-callable exports in the library graph. */
+  externalTypes?: Readonly<Record<string, string>>;
+  native?: NativeFrontendInput;
 }
 
 export type CompileLibraryResult =
@@ -1417,9 +1421,162 @@ function resolveLibrarySection(
           }
         : {}),
       exports,
+      nativeExports: [],
       trapOverlays,
     },
   };
+}
+
+const C_NATIVE_EXPORT_SYMBOL = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function nativeExportScalar(
+  type: NativeFrontendExport["parameters"][number]["type"] | NativeFrontendExport["result"]["type"],
+  pointerBits: 32 | 64,
+): IrNativeScalarType | { kind: "void" } | null {
+  if (type.kind === "void") return { kind: "void" };
+  if (type.kind !== "nativeScalar") return null;
+  if (type.scalar !== "f64" && nativeIntegerInfo(type.scalar, pointerBits) === null) return null;
+  return { kind: "nativeScalar", scalar: type.scalar };
+}
+
+/** Resolve exact Native IR exports against the same entry-module function
+ * table as library profiles. Their ABI is deliberately independent of the
+ * profile's f64-backed marshalling classes; only the lifecycle/trap funnel is
+ * shared. */
+function resolveNativeLibraryExports(
+  input: NativeFrontendInput | undefined,
+  entryInfo: Map<string, EntryExportInfo>,
+  mod: IrModule,
+  entryPath: string,
+): ScrDiagnostic[] {
+  const configured = input?.exports ?? [];
+  if (configured.length === 0) return [];
+  const diagnostics: ScrDiagnostic[] = [];
+  const fnByName = new Map(mod.functions.map((fn) => [fn.name, fn]));
+  const symbols = new Set([
+    mod.lib!.initSymbol,
+    mod.lib!.sinkRegisterSymbol,
+    ...(mod.lib!.collectSymbol === null ? [] : [mod.lib!.collectSymbol]),
+    ...(mod.lib!.resultResetSymbol === null ? [] : [mod.lib!.resultResetSymbol]),
+    ...(mod.lib!.callbackRegisterSymbol === undefined ? [] : [mod.lib!.callbackRegisterSymbol]),
+    ...mod.lib!.exports.map((entry) => entry.symbol),
+  ]);
+  const ids = new Set<string>();
+  const pointerBits = input!.target.pointerBits;
+
+  for (const entry of configured) {
+    const info = entryInfo.get(entry.sourceExport);
+    const loc = info?.loc ?? { file: entryPath, start: 0, end: 0 };
+    if (ids.has(entry.id)) {
+      diagnostics.push(nativeBindingDiag(entry.id, "the native export id is configured more than once", loc));
+      continue;
+    }
+    ids.add(entry.id);
+    if (
+      entry.entry.kind !== "c-symbol" ||
+      !C_NATIVE_EXPORT_SYMBOL.test(entry.entry.symbol)
+    ) {
+      diagnostics.push(nativeBindingDiag(entry.id, `the export entry is not a valid C symbol ('${entry.entry.symbol}')`, loc));
+      continue;
+    }
+    if (symbols.has(entry.entry.symbol)) {
+      diagnostics.push(nativeBindingDiag(entry.id, `C symbol '${entry.entry.symbol}' collides with another library entry`, loc));
+      continue;
+    }
+    symbols.add(entry.entry.symbol);
+    if (info === undefined) {
+      diagnostics.push(nativeBindingDiag(entry.id, `entry module has no exported function '${entry.sourceExport}'`, loc));
+      continue;
+    }
+    if (info.generic || info.async || info.generator) {
+      diagnostics.push(
+        nativeSignatureDiag(
+          entry.id,
+          "native exports must be concrete synchronous functions",
+          info.loc,
+        ),
+      );
+      continue;
+    }
+    if (
+      entry.callingConvention !== "c" ||
+      entry.variadic !== false ||
+      entry.error.kind !== "no-fail"
+    ) {
+      diagnostics.push(nativeSignatureDiag(entry.id, "only non-variadic no-fail C exports are supported", info.loc));
+      continue;
+    }
+    const fn = fnByName.get(entry.sourceExport);
+    if (fn === undefined) {
+      diagnostics.push(nativeBindingDiag(entry.id, `export '${entry.sourceExport}' did not lower to a compiled function`, info.loc));
+      continue;
+    }
+    if (fn.params.length !== entry.parameters.length) {
+      diagnostics.push(
+        nativeSignatureDiag(
+          entry.id,
+          `compiled function has ${fn.params.length} parameter(s), ABI declares ${entry.parameters.length}`,
+          info.loc,
+        ),
+      );
+      continue;
+    }
+    const params: NonNullable<IrLibSection["nativeExports"]>[number]["params"] = [];
+    let valid = true;
+    for (const [index, parameter] of entry.parameters.entries()) {
+      const type = nativeExportScalar(parameter.type, pointerBits);
+      if (
+        type === null ||
+        type.kind === "void" ||
+        parameter.passMode !== "value" ||
+        parameter.ownership.kind !== "value"
+      ) {
+        diagnostics.push(nativeSignatureDiag(entry.id, `parameter ${index + 1} is outside the exact scalar value slice`, info.loc));
+        valid = false;
+        continue;
+      }
+      if (!typeEquals(fn.params[index]!.type, type)) {
+        diagnostics.push(
+          nativeSignatureDiag(
+            entry.id,
+            `parameter ${index + 1} has IR type '${fn.params[index]!.type.kind}', ABI requires exact '${type.scalar}'`,
+            info.loc,
+          ),
+        );
+        valid = false;
+      }
+      params.push({ name: parameter.name, type });
+    }
+    const result = nativeExportScalar(entry.result.type, pointerBits);
+    if (
+      result === null ||
+      entry.result.passMode !== "value" ||
+      entry.result.ownership.kind !== "value"
+    ) {
+      diagnostics.push(nativeSignatureDiag(entry.id, "result is outside the exact scalar-or-void value slice", info.loc));
+      valid = false;
+    } else if (!typeEquals(fn.returnType, result)) {
+      diagnostics.push(
+        nativeSignatureDiag(
+          entry.id,
+          `return has IR type '${fn.returnType.kind}', ABI requires '${result.kind === "void" ? "void" : result.scalar}'`,
+          info.loc,
+        ),
+      );
+      valid = false;
+    }
+    if (!valid || result === null) continue;
+    mod.lib!.nativeExports.push({
+      id: entry.id,
+      symbol: entry.entry.symbol,
+      fnName: entry.sourceExport,
+      declaration: { ...entry.declaration },
+      params,
+      returns: result,
+      error: { kind: "no-fail" },
+    });
+  }
+  return diagnostics;
 }
 
 /** The export map's integer-slot obligations (ask 4): i64/u64 params and
@@ -1622,6 +1779,14 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const profile = loadedProfile.profile;
   const entryPath = profile.entry;
   const buildPlatform = buildTargetPlatform();
+  const invalidNativeTarget = invalidNativeInputTarget(opts.native, entryPath);
+  if (invalidNativeTarget !== null) {
+    return {
+      ok: false,
+      diagnostics: decorateLibraryRefusals([invalidNativeTarget], profile),
+      sourceTexts: new Map(),
+    };
+  }
 
   // Mobile-target admission first — a pure env/host check, so a refused
   // pairing never reaches toolchain discovery. iOS targets (device and
@@ -1696,7 +1861,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   // no build-transform markers), automatically — the library path has no
   // island/dynamic tier to offer (SC4006's ground), so eligibility needs
   // no flag and a miss is a refusal, never a fallback.
-  const fe = runFrontend(entryPath, "lib");
+  const fe = runFrontend(entryPath, "lib", opts.externalTypes, opts.native);
   let lowered: LowerResult;
   let entryText: string;
   let sourceTexts: Map<string, string>;
@@ -1799,6 +1964,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         libRoots: [
           ...new Set([
             ...profile.exports.map((e) => e.export),
+            ...(opts.native?.exports ?? []).map((entry) => entry.sourceExport),
             ...(profile.sidecar?.integerSlots ?? [])
               .map((s) => /^helpers\.([^.]+)\.(?:params\[\d+\]|return)$/.exec(s.slot)?.[1])
               .filter((n): n is string => n !== undefined),
@@ -1825,6 +1991,9 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     sourceTexts,
   });
 
+  const nativeTargetMismatch = nativeModuleTargetMismatch(mod, buildPlatform, entryPath);
+  if (nativeTargetMismatch !== null) return fail([nativeTargetMismatch]);
+
   // Export resolution first (SC4002/SC4003/SC4004/SC4007 anchor at the
   // mapped declaration — a mapped async export reports as SC4004, not the
   // graph-wide gate), then the async_free requirement (ratified, SC4005),
@@ -1833,13 +2002,20 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   // is emitted, so the narrowed library link set below is structural fact.
   const resolved = resolveLibrarySection(profile, entryInfo, mod, entryPath);
   if ("diagnostics" in resolved) return fail(resolved.diagnostics);
+  mod.lib = resolved.lib;
+  const nativeExportDiagnostics = resolveNativeLibraryExports(
+    opts.native,
+    entryInfo,
+    mod,
+    entryPath,
+  );
+  if (nativeExportDiagnostics.length > 0) return fail(nativeExportDiagnostics);
   const asyncSurface = moduleLibAsyncSurface(mod);
   if (asyncSurface !== null) {
     return fail([libAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc)]);
   }
   const fenced = evaluateLibraryFences(mod, profile);
   if (fenced.length > 0) return fail(fenced);
-  mod.lib = resolved.lib;
 
   // Ask 4's declared integer slots: the export map's i64/u64 classes
   // seed the config here; sidecar-declared slots (record fields, msg
@@ -1946,6 +2122,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
           ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
           : []),
         ...profile.exports.map((e) => e.symbol),
+        ...mod.lib.nativeExports.map((entry) => entry.symbol),
       ]
     : undefined;
   await compileLibArchive({

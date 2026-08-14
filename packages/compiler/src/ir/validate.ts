@@ -1202,9 +1202,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       loc: moduleLoc,
     });
   }
-  if ((mod.nativeBindings?.length ?? 0) > 0 && !validNativeTarget) {
+  if (
+    ((mod.nativeBindings?.length ?? 0) > 0 || (mod.lib?.nativeExports.length ?? 0) > 0) &&
+    !validNativeTarget
+  ) {
     errors.push({
-      message: "Native IR bindings require module target ABI facts",
+      message: "Native IR bindings and exports require module target ABI facts",
       loc: moduleLoc,
     });
   }
@@ -1821,6 +1824,59 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         errors.push({ message: `library callback "${cb.name}" has no matching ffiImport`, loc: entryLoc });
       }
     });
+    const librarySymbols = new Set([
+      mod.lib.initSymbol,
+      mod.lib.sinkRegisterSymbol,
+      ...(mod.lib.collectSymbol === null ? [] : [mod.lib.collectSymbol]),
+      ...(mod.lib.resultResetSymbol === null ? [] : [mod.lib.resultResetSymbol]),
+      ...(mod.lib.callbackRegisterSymbol === undefined ? [] : [mod.lib.callbackRegisterSymbol]),
+      ...mod.lib.exports.map((entry) => entry.symbol),
+    ]);
+    const nativeExportIds = new Set<string>();
+    for (const e of mod.lib.nativeExports) {
+      const fn = functionsByName.get(e.fnName);
+      if (!nativeId.test(e.id) || nativeExportIds.has(e.id)) {
+        errors.push({ message: `library native export has invalid or duplicate id "${e.id}"`, loc: entryLoc });
+      }
+      nativeExportIds.add(e.id);
+      if (!cIdentifier.test(e.symbol) || librarySymbols.has(e.symbol)) {
+        errors.push({ message: `library native export "${e.id}" has invalid or duplicate C symbol "${e.symbol}"`, loc: entryLoc });
+      }
+      librarySymbols.add(e.symbol);
+      if (e.declaration.module === "" || e.declaration.name === "") {
+        errors.push({ message: `library native export "${e.id}" has an empty declaration identity`, loc: entryLoc });
+      }
+      if (e.error.kind !== "no-fail" || Object.keys(e.error).length !== 1) {
+        errors.push({ message: `library native export "${e.id}" has an invalid error contract`, loc: entryLoc });
+      }
+      if (!fn) {
+        errors.push({ message: `library native export "${e.symbol}": missing function "${e.fnName}"`, loc: entryLoc });
+        continue;
+      }
+      if (fn.async === true || fn.generator !== undefined || fn.captures !== undefined) {
+        errors.push({ message: `library native export "${e.symbol}": function is async, generator, or capturing`, loc: fn.loc });
+      }
+      if (fn.params.length !== e.params.length) {
+        errors.push({ message: `library native export "${e.symbol}": parameter count mismatch`, loc: fn.loc });
+        continue;
+      }
+      const names = new Set<string>();
+      e.params.forEach((parameter, index) => {
+        if (parameter.name === "" || names.has(parameter.name)) {
+          errors.push({ message: `library native export "${e.symbol}": empty or duplicate parameter name`, loc: fn.loc });
+        }
+        names.add(parameter.name);
+        if (!validNativeScalar(parameter.type) || !typeEquals(parameter.type, fn.params[index]!.type)) {
+          errors.push({ message: `library native export "${e.symbol}": parameter ${index} exact type mismatch`, loc: fn.loc });
+        }
+      });
+      if (
+        !(validNativeScalar(e.returns) || e.returns.kind === "void") ||
+        !typeEquals(e.returns, fn.returnType)
+      ) {
+        errors.push({ message: `library native export "${e.symbol}": return exact type mismatch`, loc: fn.loc });
+      }
+    }
   }
   const classesByName = new Map<string, IrClassDef>();
   for (const cls of mod.classes ?? []) {
@@ -2329,6 +2385,20 @@ function validateFunction(
         const value = BigInt(e.value);
         if (value < info.min || value > info.max) {
           err(`native ${e.type.scalar} literal ${e.value} is out of range`, e.loc);
+        }
+        break;
+      }
+      case "nativeIntegerBin": {
+        checkExpr(e.left);
+        checkExpr(e.right);
+        if (nativeIntegerInfo(e.type.scalar, nativePointerBits) === null) {
+          err(`native integer operation has unsupported type "${String(e.type.scalar)}"`, e.loc);
+        }
+        if (!typeEquals(e.left.type, e.type)) {
+          err(`native integer ${e.op} left operand type does not match result`, e.loc);
+        }
+        if (!typeEquals(e.right.type, e.type)) {
+          err(`native integer ${e.op} right operand type does not match result`, e.loc);
         }
         break;
       }

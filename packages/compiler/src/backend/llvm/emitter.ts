@@ -2270,6 +2270,7 @@ class LlEmitter {
     if (lib.resultResetSymbol !== null) emitSymConst(lib.resultResetSymbol);
     if (lib.collectSymbol !== null) emitSymConst(lib.collectSymbol);
     for (const e of lib.exports) emitSymConst(e.symbol);
+    for (const e of lib.nativeExports) emitSymConst(e.symbol);
     out.push(``);
     // The runtime detected-trap overlay table (scr_runtime.h declares it,
     // the library trap funnel consults it): flat code/teaching/remediation
@@ -2545,6 +2546,39 @@ class LlEmitter {
       }
       out.push(
         `define ${retType} @${e.symbol}(${params.join(", ")}) ${FN_ATTRS} { ; library export ${e.fnName}`,
+        `entry:`,
+        ...body,
+        `}`,
+        ``,
+      );
+    }
+    for (const e of lib.nativeExports) {
+      const params = e.params.map((parameter, index) =>
+        `${this.nativeParameterType(parameter.type)} %a${index}`
+      );
+      const args = e.params.map((parameter, index) =>
+        `${this.llType(parameter.type)} %a${index}`
+      ).join(", ");
+      const returnType = this.nativeReturnType(e.returns);
+      const body = [
+        `  call void @scr_library_entry(i1 zeroext ${autoReset ? "true" : "false"}, ptr ${symConst(e.symbol)})`,
+      ];
+      if (e.returns.kind === "void") {
+        body.push(
+          `  call void @${mangleFunction(e.fnName)}(${args})`,
+          `  call void @scr_library_check_exc()`,
+          `  ret void`,
+        );
+      } else {
+        const internalType = this.llType(e.returns);
+        body.push(
+          `  %r = call ${internalType} @${mangleFunction(e.fnName)}(${args})`,
+          `  call void @scr_library_check_exc()`,
+          `  ret ${internalType} %r`,
+        );
+      }
+      out.push(
+        `define ${returnType} @${e.symbol}(${params.join(", ")}) ${FN_ATTRS} { ; exact native export ${e.fnName}`,
         `entry:`,
         ...body,
         `}`,
@@ -4893,6 +4927,14 @@ class LlEmitter {
         return { name: f64Lit(e.value), type: e.type };
       case "nativeScalarLit":
         return { name: e.type.scalar === "f64" ? f64Lit(Number(e.value)) : e.value, type: e.type };
+      case "nativeIntegerBin": {
+        const left = this.emitExpr(e.left);
+        const right = this.emitExpr(e.right);
+        const result = B.tmp();
+        const operation = e.op === "+" ? "add" : e.op === "-" ? "sub" : "mul";
+        B.line(`${result} = ${operation} ${this.llType(e.type)} ${left.name}, ${right.name}`);
+        return { name: result, type: e.type };
+      }
       case "nativeStructLit": {
         const layout = this.nativeStructLayout(e.type.typeId);
         const values = new Map(e.fields.map((field) => [field.name, this.emitExpr(field.value)]));

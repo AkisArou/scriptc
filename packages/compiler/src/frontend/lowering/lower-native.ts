@@ -338,6 +338,39 @@ export function lowerNativeScalarAssertion(
   if (target.scalar === "isize" || target.scalar === "usize") {
     L.usesNativeTarget = true;
   }
+  let arithmeticExpression: ts.Expression = expr.expression;
+  while (ts.isParenthesizedExpression(arithmeticExpression)) {
+    arithmeticExpression = arithmeticExpression.expression;
+  }
+  if (
+    target.scalar !== "f64" &&
+    ts.isBinaryExpression(arithmeticExpression)
+  ) {
+    const operation = arithmeticExpression.operatorToken.kind === ts.SyntaxKind.PlusToken
+      ? "+"
+      : arithmeticExpression.operatorToken.kind === ts.SyntaxKind.MinusToken
+        ? "-"
+        : arithmeticExpression.operatorToken.kind === ts.SyntaxKind.AsteriskToken
+          ? "*"
+          : null;
+    if (operation !== null) {
+      const left = L.lowerExpr(arithmeticExpression.left);
+      const right = L.lowerExpr(arithmeticExpression.right);
+      if (
+        typeEquals(left.type, target) &&
+        typeEquals(right.type, target)
+      ) {
+        return {
+          kind: "nativeIntegerBin",
+          op: operation,
+          left,
+          right,
+          type: { ...target },
+          loc: locOf(expr),
+        };
+      }
+    }
+  }
   const source = L.mapTypeOf(L.typeOf(expr.expression));
   if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
   const pointerBits = L.nativeInput?.target.pointerBits;
@@ -357,7 +390,7 @@ export function lowerNativeScalarAssertion(
           target.scalar === "usize" ||
           nativeIntegerInfo(target.scalar, pointerBits)?.bits === 64
           ? "the source is not a provably in-range decimal BigInt literal or the same exact type"
-          : "the source is not a provably in-range decimal number literal or the same exact type",
+          : "the source is not a provably in-range decimal number literal, same exact type, or same-type exact integer +, -, or * expression",
         locOf(expr),
       ),
     );

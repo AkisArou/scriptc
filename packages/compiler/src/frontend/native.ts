@@ -74,6 +74,39 @@ export interface NativeFrontendBinding {
   };
 }
 
+/** One C-callable entry implemented by an exported function in the library
+ * entry module. This first slice is intentionally exact-scalar-only: it is a
+ * Native IR boundary, distinct from library profiles' JavaScript-value
+ * marshalling classes. */
+export interface NativeFrontendExport {
+  readonly id: string;
+  /** Exported function name in the compilation entry module. */
+  readonly sourceExport: string;
+  /** Source contract identity retained for reports and diagnostics. */
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly entry: {
+    readonly kind: "c-symbol";
+    readonly symbol: string;
+  };
+  readonly callingConvention: "c";
+  readonly variadic: false;
+  readonly error: { readonly kind: "no-fail" };
+  readonly parameters: readonly {
+    readonly name: string;
+    readonly type: Readonly<IrNativeValueType>;
+    readonly passMode: "value";
+    readonly ownership: { readonly kind: "value" };
+  }[];
+  readonly result: {
+    readonly type: Readonly<IrNativeValueType> | { readonly kind: "void" };
+    readonly passMode: "value";
+    readonly ownership: { readonly kind: "value" };
+  };
+}
+
 /** Embedder-supplied native semantics for one frontend run. This contract is
  * deliberately manifest-neutral: SCABI and target planning live above
  * ScriptC, while this layer sees only exact source identities, the target ABI
@@ -90,6 +123,7 @@ export interface NativeFrontendInput {
   readonly sourceTypes: readonly NativeSourceType[];
   readonly types: readonly NativeTypeDefinition[];
   readonly bindings: readonly NativeFrontendBinding[];
+  readonly exports: readonly NativeFrontendExport[];
 }
 
 /** Runtime members an external declaration module may provide without

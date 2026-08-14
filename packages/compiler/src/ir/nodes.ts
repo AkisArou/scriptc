@@ -52,6 +52,7 @@ export const IR_NATIVE_INTEGER_SCALARS = [
 
 export type IrNativeIntegerScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
 export type IrNativeScalar = IrNativeIntegerScalar | "f64";
+export type IrNativeIntegerBinOp = "+" | "-" | "*";
 
 export interface IrNativeIntegerInfo {
   readonly bits: 8 | 16 | 32 | 64;
@@ -895,7 +896,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 13;
+  irVersion: 14;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -1162,6 +1163,19 @@ export interface IrLibExport {
   inboundIntTrap?: string;
 }
 
+/** One exact Native IR entry exported from a library artifact. Unlike
+ * IrLibExport, these values never use the JavaScript f64 marshalling classes:
+ * the C ABI and the compiled TypeScript function carry the same exact type. */
+export interface IrNativeExport {
+  id: string;
+  symbol: string;
+  fnName: string;
+  declaration: { module: string; name: string };
+  params: { name: string; type: IrNativeScalarType }[];
+  returns: IrNativeScalarType | { kind: "void" };
+  error: { kind: "no-fail" };
+}
+
 /** One runtime-trap overlay row: the profile's teaching (replaces the
  * baseline human line as field 0) and/or remediation (the optional fourth
  * field) for one runtime detected-trap code. At least one of the two is
@@ -1223,6 +1237,9 @@ export interface IrLibSection {
   /** The resolved host-callback channels, slot-ordered. */
   callbacks?: IrLibCallback[];
   exports: IrLibExport[];
+  /** Exact Native IR entries, resolved independently of the profile's
+   * JavaScript-value export map but sharing its lifecycle and trap funnel. */
+  nativeExports: IrNativeExport[];
   /** Profile-declared teaching/remediation overlays for the runtime
    * detected-trap code family (SC4013–SC4019, diagnostics registry): both
    * backends emit these as the program TU's overlay table
@@ -4460,6 +4477,18 @@ export type IrExpr =
    * a JavaScript-number round trip. Integers use canonical base-10; f64 uses
    * the canonical finite JavaScript-number spelling. */
   | { kind: "nativeScalarLit"; value: string; type: IrNativeScalarType; loc: SrcLoc }
+  /** Fixed-width integer arithmetic. Both operands and the result carry the
+   * same exact native integer type. Operations wrap modulo that type's width;
+   * signed values are interpreted from the wrapped bits as two's complement,
+   * so neither backend may lower this through signed C arithmetic. */
+  | {
+      kind: "nativeIntegerBin";
+      op: IrNativeIntegerBinOp;
+      left: IrExpr;
+      right: IrExpr;
+      type: IrNativeScalarType;
+      loc: SrcLoc;
+    }
   /** Explicit compile-time construction of a nominal native struct. It is
    * not a JavaScript object conversion: fields are exact native values and
    * the backend materializes the authoritative aggregate representation. */

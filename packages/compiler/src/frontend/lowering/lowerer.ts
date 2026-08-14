@@ -1327,6 +1327,7 @@ export class Lowerer {
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
     this.nativeInput = mode.native;
+    if ((this.nativeInput?.exports.length ?? 0) > 0) this.usesNativeTarget = true;
     this.externalTypes = mode.externalTypes ?? new Map();
     this.externalTypeSpecifiersByFile = mode.externalTypeSpecifiersByFile ??
       directExternalTypeSpecifiersByFile(this.externalTypes);
@@ -2288,7 +2289,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 13,
+            irVersion: 14,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,

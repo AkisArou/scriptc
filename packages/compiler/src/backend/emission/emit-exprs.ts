@@ -548,6 +548,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           e.type,
           cNativeScalarLiteral(e.type, e.value, E.mod.nativeTarget?.pointerBits),
         );
+      case "nativeIntegerBin": {
+        const left = E.emitExpr(e.left);
+        const right = E.emitExpr(e.right);
+        const operation = e.op === "+" ? "add" : e.op === "-" ? "sub" : "mul";
+        return E.newTemp(
+          e.type,
+          `scr_native_${e.type.scalar}_${operation}(${left.name}, ${right.name})`,
+        );
+      }
       case "nativeStructLit": {
         const definition = E.nativeTypesById.get(e.type.typeId);
         if (definition?.kind !== "struct") {

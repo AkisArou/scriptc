@@ -1298,6 +1298,28 @@ export class CEmitter {
       }
       out.push(`}`, ``);
     }
+    for (const e of lib.nativeExports) {
+      const params = e.params.map((parameter, index) =>
+        `${cType(parameter.type).trim()} a${index}`
+      );
+      const args = e.params.map((_parameter, index) => `a${index}`).join(", ");
+      const returnType = e.returns.kind === "void" ? "void" : cType(e.returns).trim();
+      const call = `${mangleFunction(e.fnName)}(${args})`;
+      out.push(
+        `${returnType} ${e.symbol}(${params.length > 0 ? params.join(", ") : "void"}) {`,
+        `  scr_library_entry(${autoReset ? "true" : "false"}, "${e.symbol}");`,
+      );
+      if (e.returns.kind === "void") {
+        out.push(`  ${call};`, `  scr_library_check_exc();`);
+      } else {
+        out.push(
+          `  ${cDecl(e.returns, "sc_r")} = ${call};`,
+          `  scr_library_check_exc();`,
+          `  return sc_r;`,
+        );
+      }
+      out.push(`}`, ``);
+    }
   }
 
   emitAsyncScaffolding(out: string[]): void {
