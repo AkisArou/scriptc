@@ -13,6 +13,7 @@ typedef struct {
   void *anchor;
   ScrCallbackToken *token;
   bool retired;
+  bool owner_claimed;
 } ScrCallbackTableEntry;
 
 struct ScrCallbackTable {
@@ -126,6 +127,17 @@ bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
   return scr_callback_token_cancellation_complete(token);
 }
 
+bool scr_callback_table_claim_owner(ScrCallbackTable *table,
+                                    ScrCallbackToken *token) {
+  ScrCallbackTableEntry *entry = scr_callback_table_entry(table, token);
+  if (entry == NULL || entry->owner_claimed ||
+      scr_callback_token_state(token) != SCR_CALLBACK_TOKEN_ACTIVE) {
+    return false;
+  }
+  entry->owner_claimed = true;
+  return true;
+}
+
 size_t scr_callback_table_collect(ScrCallbackTable *table) {
   if (table == NULL || table->collecting) return 0;
   table->collecting = true;
@@ -141,6 +153,7 @@ size_t scr_callback_table_collect(ScrCallbackTable *table) {
     entry->token = NULL;
     entry->anchor = NULL;
     entry->signature = NULL;
+    entry->owner_claimed = false;
     if (entry->generation == UINT64_MAX) entry->retired = true;
     else entry->generation++;
     table->active--;

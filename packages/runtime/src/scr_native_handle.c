@@ -10,12 +10,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+typedef struct ScrNativeLifecycleEdge {
+  void *context;
+  ScrNativeLifecycleFn begin;
+  ScrNativeLifecycleFn complete;
+  ScrNativeLifecycleFn destroy_context;
+  struct ScrNativeLifecycleEdge *next;
+} ScrNativeLifecycleEdge;
+
 struct ScrNativeHandle {
   size_t rc;
   void *foreign;
   ScrNativeDestructor destructor;
   const void *type_tag;
   const char *type_name;
+  ScrNativeLifecycleEdge *lifecycle;
 };
 
 static void scr_native_handle_type_error(const ScrNativeHandle *handle,
@@ -34,7 +43,8 @@ ScrNativeHandle *scr_native_handle_new(void *foreign,
                                        const void *type_tag,
                                        const char *type_name) {
   if (!foreign) {
-    ScrNativeHandle description = {0, NULL, destructor, type_tag, type_name};
+    ScrNativeHandle description = {
+        .destructor = destructor, .type_tag = type_tag, .type_name = type_name};
     scr_native_handle_type_error(&description, "native constructor",
                                  "the binding returned a null pointer");
     return NULL;
@@ -47,6 +57,7 @@ ScrNativeHandle *scr_native_handle_new(void *foreign,
   handle->destructor = destructor;
   handle->type_tag = type_tag;
   handle->type_name = type_name;
+  handle->lifecycle = NULL;
   scr_obj_alloc_note();
   return handle;
 }
@@ -57,10 +68,43 @@ ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle) {
 }
 
 static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle) {
+  ScrNativeLifecycleEdge *lifecycle = handle->lifecycle;
+  handle->lifecycle = NULL;
+  for (ScrNativeLifecycleEdge *edge = lifecycle; edge != NULL;
+       edge = edge->next) {
+    edge->begin(edge->context);
+  }
   void *foreign = handle->foreign;
-  if (!foreign) return;
-  handle->foreign = NULL;
-  handle->destructor(foreign);
+  if (foreign != NULL) {
+    handle->foreign = NULL;
+    handle->destructor(foreign);
+  }
+  while (lifecycle != NULL) {
+    ScrNativeLifecycleEdge *next = lifecycle->next;
+    lifecycle->complete(lifecycle->context);
+    lifecycle->destroy_context(lifecycle->context);
+    free(lifecycle);
+    lifecycle = next;
+  }
+}
+
+void scr_native_handle_attach_lifecycle(ScrNativeHandle *handle,
+                                        void *context,
+                                        ScrNativeLifecycleFn begin,
+                                        ScrNativeLifecycleFn complete,
+                                        ScrNativeLifecycleFn destroy_context) {
+  if (handle == NULL || handle->foreign == NULL || context == NULL ||
+      begin == NULL || complete == NULL || destroy_context == NULL) {
+    scr_trap("scriptc: invalid native lifecycle edge\n");
+  }
+  ScrNativeLifecycleEdge *edge = malloc(sizeof *edge);
+  if (edge == NULL) scr_trap("scriptc: out of memory\n");
+  edge->context = context;
+  edge->begin = begin;
+  edge->complete = complete;
+  edge->destroy_context = destroy_context;
+  edge->next = handle->lifecycle;
+  handle->lifecycle = edge;
 }
 
 void scr_native_handle_release(ScrNativeHandle *handle) {

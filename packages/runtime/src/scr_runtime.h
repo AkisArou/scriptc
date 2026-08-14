@@ -181,6 +181,9 @@ bool scr_callback_table_begin_close(ScrCallbackTable *table,
                                     ScrCallbackToken *token);
 bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
                                               ScrCallbackToken *token);
+/* Claims the single result/native owner edge for a staged registration. */
+bool scr_callback_table_claim_owner(ScrCallbackTable *table,
+                                    ScrCallbackToken *token);
 /* Owner-only reap after gateway drains/discards. Returns entries disposed. */
 size_t scr_callback_table_collect(ScrCallbackTable *table);
 size_t scr_callback_table_active(ScrCallbackTable *table);
@@ -2705,6 +2708,7 @@ void scr_file_handle_release_v(void *p);
  * manifest names or foreign pointers into user-visible storage. The cell
  * owns `foreign` until explicit dispose or its last ScriptC reference. */
 typedef void (*ScrNativeDestructor)(void *foreign);
+typedef void (*ScrNativeLifecycleFn)(void *context);
 ScrNativeHandle *scr_native_handle_new(void *foreign,
                                        ScrNativeDestructor destructor,
                                        const void *type_tag,
@@ -2719,6 +2723,17 @@ void *scr_native_handle_require(ScrNativeHandle *handle,
 void scr_native_handle_dispose(ScrNativeHandle *handle,
                                const void *type_tag,
                                const char *operation);
+/* Generic pre/post-destruction edge. All begin hooks run before the foreign
+ * destructor; all complete hooks run after it has quiesced native work. */
+void scr_native_handle_attach_lifecycle(ScrNativeHandle *handle,
+                                        void *context,
+                                        ScrNativeLifecycleFn begin,
+                                        ScrNativeLifecycleFn complete,
+                                        ScrNativeLifecycleFn destroy_context);
+/* Result-owned retained callback association (scr_callback_handle.c). */
+void scr_native_handle_attach_callback(ScrNativeHandle *handle,
+                                       ScrCallbackTable *table,
+                                       ScrCallbackToken *token);
 double scr_file_handle_fd(ScrFileHandle *h);
 void scr_file_handle_close(ScrFileHandle *h);
 double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,
