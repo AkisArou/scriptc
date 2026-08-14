@@ -70,6 +70,7 @@ const COUNTER_DEFINITION = {
   identity: "pointer",
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
+const NO_NATIVE_ERROR = { kind: "no-fail" } as const;
 
 type DirectNativeParameter = {
   readonly name: string;
@@ -125,6 +126,7 @@ const localNativeInput: NativeFrontendInput = {
         callingConvention: "c" as const,
         variadic: false as const,
         sourceCall: { kind: "function" as const },
+        error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type, passMode: "value", ownership: { kind: "value" } }]),
         result: { type, passMode: "value" as const, ownership: { kind: "value" as const } },
       };
@@ -136,6 +138,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" } }]),
       result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
     },
@@ -146,6 +149,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       arguments: [{ name: "data", type: { kind: "string" } }],
       parameters: [
         {
@@ -172,6 +176,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
       parameters: [
         {
@@ -198,6 +203,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       arguments: [
         { name: "callback", type: CALL_I32_SOURCE },
         { name: "value", type: I32 },
@@ -228,12 +234,26 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
+      declaration: { module: nativePackage, name: "failErrno" },
+      entry: { kind: "c-symbol", symbol: "nts_fail_errno" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "errno", failureValue: "-1" },
+      ...directSignature([
+        { name: "error_number", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
       entry: { kind: "c-symbol", symbol: "nts_counter_add" },
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
       ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
         { name: "delta", type: I32, passMode: "value", ownership: { kind: "value" } },
@@ -247,6 +267,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       ...directSignature([
         { name: "initial_value", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
@@ -267,6 +288,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
       ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
       ]),
@@ -279,6 +301,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       ...directSignature([]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
@@ -289,6 +312,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
       ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
       ]),
@@ -301,6 +325,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
       ...directSignature([
         { name: "actual_value", type: I32, passMode: "value", ownership: { kind: "value" } },
         { name: "actual_destroyed", type: I32, passMode: "value", ownership: { kind: "value" } },
@@ -336,6 +361,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: ISIZE, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
       },
@@ -346,6 +372,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
@@ -356,6 +383,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
@@ -366,6 +394,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "signed8", type: I8, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsigned8", type: U8, passMode: "value", ownership: { kind: "value" as const } },
@@ -387,6 +416,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
           { name: "tag", type: U8, passMode: "value", ownership: { kind: "value" as const } },
@@ -402,6 +432,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
         ]),
@@ -414,6 +445,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
         ]),
@@ -426,10 +458,48 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "forwarded", type: I32, passMode: "value", ownership: { kind: "value" } },
           { name: "captured", type: I32, passMode: "value", ownership: { kind: "value" } },
         ]),
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      },
+      {
+        id: "scriptc-test@1#callback-errno",
+        declaration: { module: "scriptc-native-test", name: "callbackErrno" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_callback_errno" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: { kind: "errno", failureValue: "-1" },
+        arguments: [
+          { name: "callback", type: CALL_I32_SOURCE },
+          { name: "value", type: I32 },
+        ],
+        parameters: [
+          {
+            name: "callback",
+            type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
+            passMode: "pointer",
+            ownership: { kind: "callScoped" },
+            projection: { kind: "callbackFunction", argument: 0 },
+          },
+          {
+            name: "context",
+            type: { kind: "nativeContext", addressSpace: 0 },
+            passMode: "pointer",
+            ownership: { kind: "callScoped" },
+            projection: { kind: "callbackContext", argument: 0 },
+          },
+          {
+            name: "value",
+            type: I32,
+            passMode: "value",
+            ownership: { kind: "value" },
+            projection: { kind: "argument", argument: 1 },
+          },
+        ],
         result: { type: I32, passMode: "value", ownership: { kind: "value" } },
       },
     ],
@@ -469,6 +539,7 @@ function exactI32Module(value = "42"): IrModule {
         entry: { kind: "c-symbol", symbol: "nts_i32_identity" },
         callingConvention: "c",
         variadic: false,
+        error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
@@ -478,6 +549,7 @@ function exactI32Module(value = "42"): IrModule {
         entry: { kind: "c-symbol", symbol: "exit" },
         callingConvention: "c",
         variadic: false,
+        error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
@@ -584,6 +656,7 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
         entry: { kind: "c-symbol", symbol: "scriptc_test_pointer_sizes" },
         callingConvention: "c",
         variadic: false,
+        error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
@@ -661,6 +734,23 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   const json = serializeModule(mod);
   expect(json).toContain('"value": "-2147483648"');
   expect(deserializeModule(json)).toEqual(mod);
+});
+
+test("Native IR requires explicit, range-checked error contracts", () => {
+  const missing = exactI32Module();
+  delete (missing.nativeBindings![0]! as unknown as { error?: unknown }).error;
+  expect(validateModule(missing).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" has no valid error contract',
+  );
+
+  const outOfRange = exactI32Module();
+  outOfRange.nativeBindings![0]!.error = {
+    kind: "errno",
+    failureValue: "2147483648",
+  };
+  expect(validateModule(outOfRange).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" has an invalid errno failure contract',
+  );
 });
 
 test("Native IR validates every exact integer's signed bounds", () => {
@@ -1339,6 +1429,71 @@ describe.each(["c", "llvm"] as const)("Native IR call-scoped callbacks, %s backe
     );
     expect(generated).toContain("sc_native_cb_");
     expect(generated).toContain("scr_exc_pending");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (backend) => {
+  test("snapshots errno and throws a catchable operation-qualified Error", async () => {
+    const outDir = join(scratch, `errno-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/errno.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native errno frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
+        error: { kind: "errno", failureValue: "-1" },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "errno.c" : "errno.ll"),
+      "utf8",
+    );
+    expect(generated).toContain("scr_native_errno_snapshot");
+    expect(generated).toContain("scr_native_throw_errno");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("preserves an exception already pending from the same native call", async () => {
+    const outDir = join(scratch, `errno-callback-precedence-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/errno-callback-precedence.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("native errno callback-precedence compile failed");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

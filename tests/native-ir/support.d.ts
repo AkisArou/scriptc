@@ -38,3 +38,7 @@ export declare function verifyPadded(
 export declare function verifyUtf8Hash(actual: u64): i32;
 export declare function verifyBytesHash(actual: u64): i32;
 export declare function verifyCallScoped(forwarded: i32, captured: i32): i32;
+export declare function callbackErrno(
+  callback: (value: i32) => i32,
+  value: i32,
+): i32;

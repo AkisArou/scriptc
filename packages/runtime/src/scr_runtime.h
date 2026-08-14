@@ -722,6 +722,12 @@ void scr_undef_global_read(ScrStr *name);
 void scr_error_set_code(ScrError *e, const char *code);
 ScrStr *scr_error_code(ScrError *e);
 void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
+
+/* Native IR errno boundary (scr_lib.c). The snapshot call must be the first
+ * call after an errno-sentinel result; formatting and exception allocation
+ * happen only after the exact thread-local value has been captured. */
+int scr_native_errno_snapshot(void);
+void scr_native_throw_errno(int error_number, const char *operation);
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
 void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);

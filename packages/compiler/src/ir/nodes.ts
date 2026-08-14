@@ -895,7 +895,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 12;
+  irVersion: 13;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -989,6 +989,11 @@ export interface IrNativeBinding {
   entry: { kind: "c-symbol"; symbol: string };
   callingConvention: "c";
   variadic: false;
+  /** Exact foreign failure convention. This is mandatory so backends never
+   * infer error semantics from a symbol, declaration, or native type. */
+  error:
+    | { kind: "no-fail" }
+    | { kind: "errno"; failureValue: string };
   /** Logical values evaluated by nativeCall, once and in source order. */
   arguments: {
     name: string;

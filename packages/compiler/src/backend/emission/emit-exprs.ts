@@ -2333,7 +2333,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return result;
         }
         const result = E.newTemp(e.type, call);
-        if (callbacksMayThrow) E.emitPendingCheck();
+        if (binding.error.kind === "errno") {
+          const resultType = binding.result.type;
+          if (resultType.kind !== "nativeScalar" || resultType.scalar === "f64") {
+            throw new Error(`emitter bug: errno over non-integer result in ${binding.id}`);
+          }
+          const failure = cNativeScalarLiteral(
+            resultType,
+            binding.error.failureValue,
+            E.mod.nativeTarget?.pointerBits,
+          );
+          const errorNumber = `sc_t${E.tempCounter++}`;
+          E.line(`if (${result.name} == ${failure}) {`);
+          E.indent++;
+          E.line(`int ${errorNumber} = scr_native_errno_snapshot();`);
+          E.line(`if (!scr_exc_pending()) scr_native_throw_errno(${errorNumber}, ${operation});`);
+          E.indent--;
+          E.line("}");
+        }
+        if (callbacksMayThrow || binding.error.kind !== "no-fail") E.emitPendingCheck();
         releaseArguments();
         return result;
       }

@@ -1368,6 +1368,52 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
+    const error = binding.error as unknown;
+    if (typeof error !== "object" || error === null || !("kind" in error)) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has no valid error contract`,
+        loc: moduleLoc,
+      });
+    } else if (error.kind === "errno") {
+      const failureValue = "failureValue" in error ? error.failureValue : null;
+      const resultType = binding.result.type;
+      const info = resultType.kind === "nativeScalar"
+        ? nativeIntegerInfo(
+            resultType.scalar,
+            validNativeTarget ? nativePointerBits : undefined,
+          )
+        : null;
+      let value: bigint | null = null;
+      if (
+        typeof failureValue === "string" &&
+        /^-?(?:0|[1-9][0-9]*)$/.test(failureValue) &&
+        failureValue !== "-0"
+      ) {
+        value = BigInt(failureValue);
+      }
+      if (
+        Object.keys(error).sort().join(",") !== "failureValue,kind" ||
+        info === null || value === null || value < info.min || value > info.max ||
+        binding.result.passMode !== "value" || binding.result.ownership.kind !== "value"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid errno failure contract`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (error.kind === "no-fail") {
+      if (Object.keys(error).length !== 1) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid no-fail error contract`,
+          loc: moduleLoc,
+        });
+      }
+    } else {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has unsupported error contract "${String(error.kind)}"`,
+        loc: moduleLoc,
+      });
+    }
     const declarationKey = `${binding.declaration.module}\0${binding.declaration.name}`;
     if (nativeDeclarations.has(declarationKey)) {
       errors.push({

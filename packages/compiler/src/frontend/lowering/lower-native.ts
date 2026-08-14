@@ -182,7 +182,10 @@ function validateDeclaration(
   }
   const sourceResult = L.checker.getReturnTypeOfSignature(signature);
   if (sourceResult.flags & ts.TypeFlags.Never) {
-    failSignature(L, binding, "the return type is 'never', but the native call may return", loc);
+    if (binding.error.kind === "no-fail") {
+      failSignature(L, binding, "the return type is 'never', but the native call cannot fail", loc);
+    }
+    return;
   }
   const mappedResult = L.mapTypeOf(sourceResult);
   if (mappedResult === null || !typeEquals(mappedResult, binding.result.type)) {
@@ -448,6 +451,7 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
     entry: { ...binding.entry },
     callingConvention: binding.callingConvention,
     variadic: false,
+    error: { ...binding.error },
     arguments: binding.arguments.map((argument) => ({
       name: argument.name,
       type: { ...argument.type },

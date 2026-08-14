@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <errno.h>
 
 typedef struct ScriptcTestPadded {
   uint8_t tag;
@@ -60,4 +61,15 @@ int32_t scriptc_test_verify_bytes_hash(uint64_t actual) {
 
 int32_t scriptc_test_verify_call_scoped(int32_t forwarded, int32_t captured) {
   return forwarded == 42 && captured == 42 ? 42 : 1;
+}
+
+typedef int32_t (*ScriptcTestCallback)(int32_t value, void *context);
+
+int32_t scriptc_test_callback_errno(
+    ScriptcTestCallback callback,
+    void *context,
+    int32_t value) {
+  (void)callback(value, context);
+  errno = EINVAL;
+  return -1;
 }

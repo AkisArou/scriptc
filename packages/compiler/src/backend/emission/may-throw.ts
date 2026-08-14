@@ -43,6 +43,11 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
       )
       .map((binding) => binding.id),
   );
+  const errorNativeBindings = new Set(
+    (mod.nativeBindings ?? [])
+      .filter((binding) => binding.error.kind !== "no-fail")
+      .map((binding) => binding.id),
+  );
   // Method name → every class's implementation of it (virtualCall callees).
   const methodImpls = new Map<string, string[]>();
   for (const cls of mod.classes ?? []) {
@@ -187,7 +192,10 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           // Native IR callback trampolines use the same pending-exception
           // protocol as value FFI: script exceptions unwind after the outer
           // synchronous native call returns.
-          if (callbackNativeBindings.has(rec["binding"] as string)) f.throws = true;
+          if (
+            callbackNativeBindings.has(rec["binding"] as string) ||
+            errorNativeBindings.has(rec["binding"] as string)
+          ) f.throws = true;
           break;
         case "bytesNew": {
           // The size form (`new Uint8Array(n)`) throws Node's "Invalid

@@ -6547,7 +6547,35 @@ class LlEmitter {
         }
         const result = B.tmp();
         B.line(`${result} = ${call}`);
-        if (callbacksMayThrow) this.emitPendingCheck();
+        if (binding.error.kind === "errno") {
+          const resultType = binding.result.type;
+          if (resultType.kind !== "nativeScalar" || resultType.scalar === "f64") {
+            throw new Error(`llvm emitter bug: errno over non-integer result in ${binding.id}`);
+          }
+          const failed = B.tmp();
+          const failure = binding.error.failureValue;
+          const failureBlock = B.newLabel("native.errno");
+          const throwBlock = B.newLabel("native.errno.throw");
+          const continuation = B.newLabel("native.errno.ok");
+          B.line(`${failed} = icmp eq ${this.llType(resultType)} ${result}, ${failure}`);
+          B.condBr(failed, failureBlock, continuation);
+          B.startBlock(failureBlock);
+          this.declare("declare i32 @scr_native_errno_snapshot()");
+          this.declare("declare zeroext i1 @scr_exc_pending()");
+          const errorNumber = B.tmp();
+          const pending = B.tmp();
+          B.line(`${errorNumber} = call i32 @scr_native_errno_snapshot()`);
+          B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+          B.condBr(pending, continuation, throwBlock);
+          B.startBlock(throwBlock);
+          this.declare("declare void @scr_native_throw_errno(i32, ptr)");
+          B.line(
+            `call void @scr_native_throw_errno(i32 ${errorNumber}, ptr ${operation})`,
+          );
+          B.br(continuation);
+          B.startBlock(continuation);
+        }
+        if (callbacksMayThrow || binding.error.kind !== "no-fail") this.emitPendingCheck();
         releaseArguments();
         return { name: result, type: e.type };
       }

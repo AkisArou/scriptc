@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <errno.h>
 
 typedef struct NtsPadded {
   uint8_t tag;
@@ -79,6 +80,11 @@ int32_t nts_call_scoped(
     void *context,
     int32_t value) {
   return callback(value, context);
+}
+
+int32_t nts_fail_errno(int32_t error_number) {
+  errno = error_number;
+  return -1;
 }
 
 NtsCounter *nts_counter_create(int32_t initial_value) {

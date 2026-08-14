@@ -39,6 +39,9 @@ export interface NativeFrontendBinding {
   };
   readonly callingConvention: "c";
   readonly variadic: false;
+  readonly error:
+    | { readonly kind: "no-fail" }
+    | { readonly kind: "errno"; readonly failureValue: string };
   readonly sourceCall:
     | { readonly kind: "function" }
     | { readonly kind: "method"; readonly receiverArgument: number };
