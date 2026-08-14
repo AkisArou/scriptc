@@ -54,6 +54,54 @@ void arc4random_buf(void *buf, size_t n);
  * JavaScript-visible writes flush before returning. */
 void scr_init(void);
 
+/* ── runtime-owner gateway (scr_owner_gateway.c) ─────────────────────────
+ * A target-wakeable multi-producer/single-consumer queue. Foreign producers
+ * may enqueue only transport-owned event records; they never enter compiled
+ * code or touch ScriptC heap values. `wake` must be thread-safe and merely
+ * schedule the owner executor. Delivery and lifecycle transitions are owner-
+ * executor operations. */
+typedef struct ScrOwnerGateway ScrOwnerGateway;
+typedef struct ScrOwnerGatewayEvent ScrOwnerGatewayEvent;
+typedef bool (*ScrOwnerGatewayDeliverFn)(ScrOwnerGatewayEvent *event);
+typedef void (*ScrOwnerGatewayDestroyFn)(ScrOwnerGatewayEvent *event);
+typedef void (*ScrOwnerGatewayWakeFn)(void *context);
+
+struct ScrOwnerGatewayEvent {
+  /* Intrusive queue link; producers initialize the callbacks and payload,
+   * while admission owns and overwrites this field. */
+  ScrOwnerGatewayEvent *next;
+  /* Owner-only delivery. false stops the current drain after this event. */
+  ScrOwnerGatewayDeliverFn deliver;
+  /* Thread-safe payload destruction, used after delivery and on rejection. */
+  ScrOwnerGatewayDestroyFn destroy;
+};
+
+typedef enum {
+  SCR_OWNER_GATEWAY_RUNNING = 0,
+  SCR_OWNER_GATEWAY_STOPPING = 1,
+  SCR_OWNER_GATEWAY_STOPPED = 2,
+} ScrOwnerGatewayState;
+
+ScrOwnerGateway *scr_owner_gateway_new(ScrOwnerGatewayWakeFn wake,
+                                        void *wake_context);
+/* Event ownership always transfers. Rejected events are destroyed before
+ * false is returned, so producers never need an owner-thread cleanup path. */
+bool scr_owner_gateway_admit(ScrOwnerGateway *gateway,
+                             ScrOwnerGatewayEvent *event);
+/* Invoke at most `budget` owner deliveries; zero means the detached snapshot
+ * is unbounded. A false delivery leaves later events queued in FIFO order.
+ * Nested drains are harmless no-ops; lifecycle operations remain reentrant. */
+size_t scr_owner_gateway_drain(ScrOwnerGateway *gateway, size_t budget);
+/* Idempotently reject future admissions. Already-admitted events remain. */
+void scr_owner_gateway_stop_accepting(ScrOwnerGateway *gateway);
+/* Owner-only shutdown policy for work that must not be delivered. */
+size_t scr_owner_gateway_discard(ScrOwnerGateway *gateway);
+bool scr_owner_gateway_pending(ScrOwnerGateway *gateway);
+ScrOwnerGatewayState scr_owner_gateway_state(ScrOwnerGateway *gateway);
+/* Succeeds only after STOPPED with an empty queue and after all producers
+ * have lost access to the gateway. */
+bool scr_owner_gateway_destroy(ScrOwnerGateway *gateway);
+
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
  * Every unrecoverable runtime trap — OOM, semantic range traps, internal-
  * invariant failures — funnels through this pair instead of open-coded
