@@ -1358,7 +1358,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
       argumentNames.add(argument.name);
-      if (argument.type.kind !== "string" && !validNativeValue(argument.type)) {
+      if (
+        argument.type.kind !== "string" &&
+        !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
+        !validNativeValue(argument.type)
+      ) {
         errors.push({
           message: `Native IR binding "${binding.id}" argument "${argument.name}" has an unsupported source type`,
           loc: moduleLoc,
@@ -1369,6 +1373,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       direct: 0,
       utf8Data: 0,
       utf8ByteLength: 0,
+      bytesData: 0,
+      bytesByteLength: 0,
       total: 0,
     }));
     const parameterNames = new Set<string>();
@@ -1468,15 +1474,52 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        case "bytesData":
+          projectionCounts.bytesData++;
+          if (
+            sourceArgument.type.kind !== "bytes" ||
+            sourceArgument.type.elem !== "u8" ||
+            parameter.type.kind !== "nativePointer" ||
+            parameter.type.pointee !== "u8" ||
+            parameter.type.const !== true ||
+            parameter.type.addressSpace !== 0 ||
+            parameter.ownership.kind !== "borrowed"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid byte-data projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "bytesByteLength":
+          projectionCounts.bytesByteLength++;
+          if (
+            sourceArgument.type.kind !== "bytes" ||
+            sourceArgument.type.elem !== "u8" ||
+            parameter.type.kind !== "nativeScalar" ||
+            parameter.type.scalar !== "usize" ||
+            parameter.ownership.kind !== "value"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid byte-length projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
       }
     }
     binding.arguments.forEach((argument, argumentIndex) => {
       const projections = projectionsByArgument[argumentIndex]!;
-      const valid = argument.type.kind === "string"
-        ? projections.total === 2 &&
-          projections.utf8Data === 1 &&
-          projections.utf8ByteLength === 1
-        : projections.total === 1 && projections.direct === 1;
+      const valid =
+        argument.type.kind === "string"
+          ? projections.total === 2 &&
+            projections.utf8Data === 1 &&
+            projections.utf8ByteLength === 1
+          : argument.type.kind === "bytes"
+            ? projections.total === 2 &&
+              projections.bytesData === 1 &&
+              projections.bytesByteLength === 1
+            : projections.total === 1 && projections.direct === 1;
       if (!valid) {
         errors.push({
           message: `Native IR binding "${binding.id}" argument "${argument.name}" has an incomplete or ambiguous ABI projection`,

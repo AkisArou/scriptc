@@ -36,3 +36,4 @@ export declare function verifyPadded(
   ratio: import("@native-typescript/scabi-c-v1-fixture").f64,
 ): i32;
 export declare function verifyUtf8Hash(actual: u64): i32;
+export declare function verifyBytesHash(actual: u64): i32;

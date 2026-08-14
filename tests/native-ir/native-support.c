@@ -53,3 +53,7 @@ int32_t scriptc_test_verify_padded(
 int32_t scriptc_test_verify_utf8_hash(uint64_t actual) {
   return actual == UINT64_C(4742834144205301894) ? 42 : 1;
 }
+
+int32_t scriptc_test_verify_bytes_hash(uint64_t actual) {
+  return actual == UINT64_C(4742834144205301894) ? 42 : 1;
+}

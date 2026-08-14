@@ -29,6 +29,11 @@ export interface SrcLoc {
  * other TypedArray flavors stay frontend-fenced. */
 export type IrBytesElem = "u8" | "u32" | "i32" | "f32";
 
+export interface IrBytesType {
+  kind: "bytes";
+  elem: IrBytesElem;
+}
+
 /** Exact, non-JavaScript scalar representations carried by Native IR.
  * Each name fixes signedness, width, and value semantics. These values
  * never pass through the JavaScript f64 carrier. */
@@ -144,12 +149,17 @@ export interface IrNativePointerType {
 }
 
 export type IrNativeAbiType = IrNativeValueType | IrNativePointerType;
-export type IrNativeArgumentType = IrNativeValueType | { kind: "string" };
+export type IrNativeArgumentType =
+  | IrNativeValueType
+  | { kind: "string" }
+  | (IrBytesType & { elem: "u8" });
 
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
   | { kind: "utf8Data"; argument: number }
-  | { kind: "utf8ByteLength"; argument: number };
+  | { kind: "utf8ByteLength"; argument: number }
+  | { kind: "bytesData"; argument: number }
+  | { kind: "bytesByteLength"; argument: number };
 
 export type IrType =
   | IrNativeValueType
@@ -199,7 +209,7 @@ export type IrType =
    * as array elements and union arms (tag-based narrowing, like url);
    * fenced out of map keys/values, set elements, and JSON. Holds only raw
    * bytes — never part of a cycle, no trace. */
-  | { kind: "bytes"; elem: IrBytesElem }
+  | IrBytesType
   /** A WHATWG URL instance (scr_url.c): heap, refcounted, IMMUTABLE — the
    * parsed components are frozen at construction, so getters are pure
    * reads (the mutating lib setters are fenced). Constructed by `new URL`
@@ -843,7 +853,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 10;
+  irVersion: 11;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions

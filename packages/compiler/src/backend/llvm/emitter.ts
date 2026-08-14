@@ -6298,6 +6298,13 @@ class LlEmitter {
           throw new Error(`llvm emitter bug: unknown Native IR binding ${e.binding}`);
         }
         const args = e.args.map((arg) => this.emitExpr(arg));
+        const releaseArguments = (): void => {
+          for (const arg of args) {
+            if (!isRefCounted(arg.type)) continue;
+            this.moveTemp(arg);
+            this.releaseValue(arg.name, arg.type);
+          }
+        };
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
         );
@@ -6316,6 +6323,7 @@ class LlEmitter {
               `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
           );
           this.emitPendingCheck();
+          releaseArguments();
           return { name: "", type: e.type };
         }
         const aggregateResult = binding.result.type.kind === "nativeStruct"
@@ -6360,6 +6368,22 @@ class LlEmitter {
               callArgs.push(`${parameterTypes[index]} ${len}`);
               break;
             }
+            case "bytesData": {
+              const dataPtr = B.tmp();
+              const data = B.tmp();
+              B.line(`${dataPtr} = getelementptr inbounds %ScrBytes, ptr ${arg.name}, i64 0, i32 3`);
+              B.line(`${data} = load ptr, ptr ${dataPtr}`);
+              callArgs.push(`${parameterTypes[index]} ${data}`);
+              break;
+            }
+            case "bytesByteLength": {
+              const lenPtr = B.tmp();
+              const len = B.tmp();
+              B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${arg.name}, i64 0, i32 1`);
+              B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
+              callArgs.push(`${parameterTypes[index]} ${len}`);
+              break;
+            }
             case "argument":
               if (parameter.type.kind === "nativeStruct") {
                 const layout = this.nativeStructLayout(parameter.type.typeId);
@@ -6392,10 +6416,12 @@ class LlEmitter {
           B.line(
             `${result} = load ${this.llType(binding.result.type)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
           );
+          releaseArguments();
           return { name: result, type: e.type };
         }
         if (binding.result.type.kind === "void") {
           B.line(call);
+          releaseArguments();
           return { name: "", type: e.type };
         }
         if (binding.result.type.kind === "nativeHandle") {
@@ -6419,10 +6445,12 @@ class LlEmitter {
           );
           const value = this.own({ name: result, type: e.type });
           this.emitPendingCheck();
+          releaseArguments();
           return value;
         }
         const result = B.tmp();
         B.line(`${result} = ${call}`);
+        releaseArguments();
         return { name: result, type: e.type };
       }
       case "new": {

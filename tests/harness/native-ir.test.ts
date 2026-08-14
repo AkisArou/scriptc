@@ -159,6 +159,32 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" } },
     },
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
+      declaration: { module: nativePackage, name: "hashBytes" },
+      entry: { kind: "c-symbol", symbol: "nts_hash_bytes" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
+      parameters: [
+        {
+          name: "data",
+          type: { kind: "nativePointer", pointee: "u8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "bytesData", argument: 0 },
+        },
+        {
+          name: "length",
+          type: USIZE,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesByteLength", argument: 0 },
+        },
+      ],
+      result: { type: U64, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
       entry: { kind: "c-symbol", symbol: "nts_counter_add" },
@@ -330,6 +356,18 @@ function frontendNativeInput(): NativeFrontendInput {
         id: "scriptc-test@1#verify-utf8-hash",
         declaration: { module: "scriptc-native-test", name: "verifyUtf8Hash" },
         entry: { kind: "c-symbol", symbol: "scriptc_test_verify_utf8_hash" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        ...directSignature([
+          { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
+        ]),
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      },
+      {
+        id: "scriptc-test@1#verify-bytes-hash",
+        declaration: { module: "scriptc-native-test", name: "verifyBytesHash" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_bytes_hash" },
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
@@ -678,6 +716,38 @@ test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
   );
 
   const outOfRange = borrowedUtf8Module();
+  outOfRange.nativeBindings![0]!.parameters[1]!.projection.argument = 1;
+  expect(validateModule(outOfRange).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "length" projects an invalid argument index',
+  );
+});
+
+test("Native IR rejects malformed or ambiguous borrowed-byte projections", () => {
+  const mutablePointer = borrowedUtf8Module();
+  const binding = mutablePointer.nativeBindings![0]!;
+  binding.arguments = [{ name: "data", type: { kind: "bytes", elem: "u8" } }];
+  binding.parameters[0] = {
+    name: "data",
+    type: { kind: "nativePointer", pointee: "u8", const: false, addressSpace: 0 },
+    passMode: "pointer",
+    ownership: { kind: "borrowed", scope: "call" },
+    projection: { kind: "bytesData", argument: 0 },
+  };
+  binding.parameters[1]!.projection = { kind: "bytesByteLength", argument: 0 };
+  expect(validateModule(mutablePointer).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "data" has an invalid byte-data projection',
+  );
+
+  const missingLength = structuredClone(mutablePointer);
+  const missingDataType = missingLength.nativeBindings![0]!.parameters[0]!.type;
+  if (missingDataType.kind !== "nativePointer") throw new Error("test fixture lost its pointer type");
+  missingDataType.const = true;
+  missingLength.nativeBindings![0]!.parameters.pop();
+  expect(validateModule(missingLength).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" argument "data" has an incomplete or ambiguous ABI projection',
+  );
+
+  const outOfRange = structuredClone(mutablePointer);
   outOfRange.nativeBindings![0]!.parameters[1]!.projection.argument = 1;
   expect(validateModule(outOfRange).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" parameter "length" projects an invalid argument index',
@@ -1050,6 +1120,58 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8, %s backend", (b
       expect(generated).toContain("->len");
     } else {
       expect(generated).toContain("getelementptr inbounds %ScrStr");
+    }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR borrowed bytes, %s backend", (backend) => {
+  test.each([
+    ["Uint8Array", "bytes.ts"],
+    ["Buffer", "bytes-buffer.ts"],
+  ] as const)("passes an offset %s view once and observes backing-store mutation", async (_kind, source) => {
+    const stem = source.slice(0, -3);
+    const outDir = join(scratch, `${stem}-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir", source), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native borrowed-byte frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
+        arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
+        parameters: [
+          expect.objectContaining({ projection: { kind: "bytesData", argument: 0 } }),
+          expect.objectContaining({ projection: { kind: "bytesByteLength", argument: 0 } }),
+        ],
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? `${stem}.c` : `${stem}.ll`),
+      "utf8",
+    );
+    if (backend === "c") {
+      expect(generated).toContain("->data");
+      expect(generated).toContain("->len");
+    } else {
+      expect(generated).toContain("getelementptr inbounds %ScrBytes");
     }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({

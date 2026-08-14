@@ -2247,6 +2247,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           throw new Error(`emitter bug: unknown Native IR binding ${e.binding}`);
         }
         const args = e.args.map((arg) => E.emitExpr(arg));
+        const releaseArguments = (): void => {
+          for (const arg of args) {
+            if (!isRefCounted(arg.type)) continue;
+            E.moveTemp(arg);
+            E.releaseValue(arg.name, arg.type);
+          }
+        };
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
         );
@@ -2264,6 +2271,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});${E.srcComment(e.loc)}`,
           );
           E.emitPendingCheck();
+          releaseArguments();
           return { name: "", type: e.type };
         }
         const nativeArgs = binding.parameters.map((parameter) => {
@@ -2272,6 +2280,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             case "utf8Data":
               return `(const void *)${arg.name}->data`;
             case "utf8ByteLength":
+              return `${arg.name}->len`;
+            case "bytesData":
+              return `(const void *)${arg.name}->data`;
+            case "bytesByteLength":
               return `${arg.name}->len`;
             case "argument": {
               if (parameter.type.kind !== "nativeHandle") return arg.name;
@@ -2288,6 +2300,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);
+          releaseArguments();
           return { name: "", type: e.type };
         }
         if (binding.result.type.kind === "nativeHandle") {
@@ -2308,9 +2321,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))})`,
           );
           E.emitPendingCheck();
+          releaseArguments();
           return result;
         }
-        return E.newTemp(e.type, call);
+        const result = E.newTemp(e.type, call);
+        releaseArguments();
+        return result;
       }
       case "closure": {
         const target = E.fnByName.get(e.fnName);
