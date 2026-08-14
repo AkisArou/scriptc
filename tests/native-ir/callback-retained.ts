@@ -3,7 +3,7 @@ import {
   callbacksActive,
   callbacksConfigure,
   callbacksShutdown,
-  callbacksWaitAndDrain,
+  callbacksWaitAndDispatch,
   exit,
   verifyRetained,
 } from "scriptc-native-test";
@@ -13,12 +13,15 @@ callbacksConfigure();
 let total = 0 as i32;
 const subscription = subscribe((value): void => {
   total = (total + value) as i32;
+  queueMicrotask((): void => {
+    total = (total * (2 as i32)) as i32;
+  });
 });
 
 subscription.emit(5 as i32);
-callbacksWaitAndDrain(1 as i32);
+callbacksWaitAndDispatch(1 as i32);
 subscription.emitForeign(37 as i32);
-callbacksWaitAndDrain(2 as i32);
+callbacksWaitAndDispatch(2 as i32);
 const activeBefore = callbacksActive();
 
 subscription.dispose();

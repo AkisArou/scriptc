@@ -2811,10 +2811,16 @@ void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
  * thread-safe owner wake before registrations can be created. Registration
  * borrows the closure and installs an explicit table root. Generated native
  * thunks admit copied payload records through the returned opaque token;
- * only drain enters ScriptC code. `shutdown` first closes admission, then
- * drains or discards queued records and succeeds only after every native
- * registration has completed cancellation. It is intentionally retryable
- * after a false result, but cannot be called from inside a drain turn. */
+ * only owner dispatch enters ScriptC code. One dispatch consumes at most one
+ * event so the target can run a microtask checkpoint between callback turns.
+ * Shutdown is explicit: stop admission, dispose native result owners so their
+ * registrations cancel, deliver one turn at a time or discard, then destroy.
+ * Destroy is retryable while registrations or invocation leases remain. */
+typedef enum {
+  SCR_RETAINED_CALLBACK_DISPATCH_IDLE = 0,
+  SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED = 1,
+  SCR_RETAINED_CALLBACK_DISPATCH_EXCEPTION = 2,
+} ScrRetainedCallbackDispatch;
 bool scr_retained_callbacks_configure(ScrOwnerGatewayWakeFn wake,
                                       void *wake_context);
 bool scr_retained_callbacks_configured(void);
@@ -2822,9 +2828,12 @@ ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
                                                    const void *signature);
 void scr_retained_callbacks_prepare(ScrNativeHandle *handle,
                                     ScrCallbackToken *token);
-size_t scr_retained_callbacks_drain(size_t budget);
+bool scr_retained_callbacks_pending(void);
+ScrRetainedCallbackDispatch scr_retained_callbacks_dispatch(void);
 size_t scr_retained_callbacks_active(void);
-bool scr_retained_callbacks_shutdown(bool deliver_pending);
+void scr_retained_callbacks_stop_accepting(void);
+size_t scr_retained_callbacks_discard(void);
+bool scr_retained_callbacks_destroy(void);
 double scr_file_handle_fd(ScrFileHandle *h);
 void scr_file_handle_close(ScrFileHandle *h);
 double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,
@@ -4211,6 +4220,18 @@ int scr_exit_code_hint_get(void);
  * poll(2) sleep, or -1 when it can't wake for every pending child. */
 int scr_children_wake_fd(void);
 double scr_now_ms(void); /* the loop's monotonic clock, in ms */
+/* Drain one complete post-task checkpoint without polling host events,
+ * timers, or I/O. This is the owner-loop seam for an attached platform
+ * scheduler: nextTicks and promise/microtask jobs run to joint exhaustion,
+ * unhandled rejections are decided, and scheduled cycle collection runs.
+ * A pending exception remains in the active exception cell for the target's
+ * uncaught-callback policy. */
+typedef enum {
+  SCR_LOOP_CHECKPOINT_COMPLETE = 0,
+  SCR_LOOP_CHECKPOINT_EXCEPTION = 1,
+  SCR_LOOP_CHECKPOINT_UNHANDLED_REJECTION = 2,
+} ScrLoopCheckpointResult;
+ScrLoopCheckpointResult scr_loop_checkpoint(void);
 /* Run to ordinary loop exhaustion, except that a non-NULL executable
  * module-root promise stops the loop as soon as it is rejected at a
  * microtask checkpoint. Fulfilled roots do not stop the loop: Node keeps

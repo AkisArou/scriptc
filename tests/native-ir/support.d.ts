@@ -49,7 +49,7 @@ export declare function callbackNullableCounter(
   succeed: i32,
 ): Counter;
 export declare function callbacksConfigure(): i32;
-export declare function callbacksWaitAndDrain(expectedWakes: i32): i32;
+export declare function callbacksWaitAndDispatch(expectedWakes: i32): i32;
 export declare function callbacksActive(): i32;
 export declare function callbacksShutdown(): i32;
 export declare function verifyRetained(

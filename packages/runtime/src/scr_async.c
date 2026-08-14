@@ -2216,24 +2216,24 @@ void scr_loop_set_stream(bool (*pending)(void), void (*dispatch)(void)) {
  * microtask checkpoints between macrotasks). */
 bool scr_loop_has_ready(void) { return scr_ready_len > 0; }
 
-bool scr_loop_run(ScrPromise *top_level) {
-  /* The FIRST checkpoint after the synchronous main body runs promise
-   * jobs BEFORE the first tick drain: Node's main-module evaluation is
-   * itself awaited (the runMain continuation is a microtask queued after
-   * the body's own), so microtasks scheduled during the body beat ticks
-   * scheduled during the body exactly once, at startup — differentially
-   * pinned. Every later checkpoint drains ticks first. */
-  bool first_checkpoint = true;
-  bool rejection_failed = false;
+typedef enum {
+  SCR_CHECKPOINT_COMPLETE = 0,
+  SCR_CHECKPOINT_EXCEPTION = 1,
+  SCR_CHECKPOINT_UNHANDLED_REJECTION = 2,
+  SCR_CHECKPOINT_TOP_LEVEL_REJECTED = 3,
+} ScrCheckpointResult;
+
+static ScrCheckpointResult scr_loop_checkpoint_impl(bool entry_checkpoint,
+                                                     ScrPromise *top_level) {
+  bool first_pass = true;
   for (;;) {
-    if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) break;
-    /* process.nextTick callbacks BEFORE promise jobs (Node's checkpoint
-     * order): the tick queue to exhaustion, then the microtask queue to
-     * exhaustion, and back while either has work — a microtask's
-     * nextTick runs before the turn proceeds, but never preempts the
-     * microtask queue mid-drain (V8 drains it fully). A tick's uncaught
-     * throw ends the loop like any listener's (main reports it). */
-    if (!first_checkpoint) {
+    if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) {
+      return SCR_CHECKPOINT_TOP_LEVEL_REJECTED;
+    }
+    /* The executable entry checkpoint alone runs its already-queued promise
+     * jobs before process.nextTick. Every ordinary host/callback checkpoint
+     * starts with ticks, including the public attached-loop seam. */
+    if (!entry_checkpoint || !first_pass) {
       while (scr_nt_head != NULL) {
         ScrNtick *t = scr_nt_head;
         scr_nt_head = t->next;
@@ -2247,44 +2247,63 @@ bool scr_loop_run(ScrPromise *top_level) {
           else ((void (*)(ScrClosure *))cb->fn)(cb);
           scr_closure_release(cb);
         } else {
-          raw(); /* one stream tick, FIFO with the user ticks around it */
+          raw();
         }
-        if (scr_exc_pending()) return false;
+        if (scr_exc_pending()) return SCR_CHECKPOINT_EXCEPTION;
       }
     }
-    /* Microtasks to exhaustion (Node: promise jobs before timers). */
     while (scr_ready_len > 0) {
       ScrFiber *f = scr_ready[scr_ready_head++];
       scr_ready_len--;
       scr_resume_fiber(f);
+      if (scr_exc_pending()) return SCR_CHECKPOINT_EXCEPTION;
     }
-    first_checkpoint = false;
-    /* The ESM loader observes a rejected entry evaluation at a promise-job
-     * checkpoint and terminates before later ref'd timers or I/O can run.
-     * Wait until this checkpoint's ready queue is drained — the root's
-     * rejection handler is itself promise-job ordered — then leave through
-     * the normal teardown below. A fulfilled root deliberately does not
-     * stop the loop. */
-    if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) break;
+    first_pass = false;
+    if (top_level != NULL && top_level->state == SCR_PROM_REJECTED) {
+      return SCR_CHECKPOINT_TOP_LEVEL_REJECTED;
+    }
     if (scr_nt_head != NULL) continue;
-    /* Node decides unhandled rejections at the END of each complete
-     * nextTick/microtask checkpoint, before advancing to timers or I/O.
-     * A rejected executable module root wins over OTHER rejections from
-     * this same checkpoint (the root check above); rejections from an
-     * earlier checkpoint have already delivered here. Handled listeners
-     * may enqueue more jobs or ref'd work, so return to the checkpoint
-     * head instead of declaring the loop exhausted underneath them. */
     if (scr_report_unhandled_rejections()) {
+      return SCR_CHECKPOINT_UNHANDLED_REJECTION;
+    }
+    if (scr_ready_len > 0 || scr_nt_head != NULL || scr_nunhandled > 0) continue;
+    scr_cyc_collect_scheduled();
+    return SCR_CHECKPOINT_COMPLETE;
+  }
+}
+
+ScrLoopCheckpointResult scr_loop_checkpoint(void) {
+  ScrCheckpointResult result = scr_loop_checkpoint_impl(false, NULL);
+  switch (result) {
+  case SCR_CHECKPOINT_COMPLETE: return SCR_LOOP_CHECKPOINT_COMPLETE;
+  case SCR_CHECKPOINT_EXCEPTION: return SCR_LOOP_CHECKPOINT_EXCEPTION;
+  case SCR_CHECKPOINT_UNHANDLED_REJECTION:
+    return SCR_LOOP_CHECKPOINT_UNHANDLED_REJECTION;
+  case SCR_CHECKPOINT_TOP_LEVEL_REJECTED:
+    scr_trap("scriptc: impossible top-level result in host checkpoint\n");
+  }
+  scr_trap("scriptc: invalid loop checkpoint result\n");
+}
+
+bool scr_loop_run(ScrPromise *top_level) {
+  /* The FIRST checkpoint after the synchronous main body runs promise
+   * jobs BEFORE the first tick drain: Node's main-module evaluation is
+   * itself awaited (the runMain continuation is a microtask queued after
+   * the body's own), so microtasks scheduled during the body beat ticks
+   * scheduled during the body exactly once, at startup — differentially
+   * pinned. Every later checkpoint drains ticks first. */
+  bool first_checkpoint = true;
+  bool rejection_failed = false;
+  for (;;) {
+    ScrCheckpointResult checkpoint =
+        scr_loop_checkpoint_impl(first_checkpoint, top_level);
+    first_checkpoint = false;
+    if (checkpoint == SCR_CHECKPOINT_EXCEPTION) return false;
+    if (checkpoint == SCR_CHECKPOINT_TOP_LEVEL_REJECTED) break;
+    if (checkpoint == SCR_CHECKPOINT_UNHANDLED_REJECTION) {
       rejection_failed = true;
       break;
     }
-    if (scr_ready_len > 0 || scr_nt_head != NULL || scr_nunhandled > 0) continue;
-    /* Quiescent between turns (microtasks drained, nothing running):
-     * collect any cycles the turn left behind. One SCHEDULED pass — almost
-     * always a nursery one, sized to the turn's own garbage. A full sweep
-     * here would walk the whole live heap every turn, which is precisely
-     * what the generations exist to avoid. No-op on an empty buffer. */
-    scr_cyc_collect_scheduled();
     /* Completed callback-style filesystem work is delivered on the main
      * runtime thread. A worker may have finished while synchronous user code
      * occupied that thread. Deliver exactly one completion per checkpoint:

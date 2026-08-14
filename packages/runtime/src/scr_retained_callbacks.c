@@ -69,42 +69,61 @@ void scr_retained_callbacks_prepare(ScrNativeHandle *handle,
   scr_native_handle_prepare_callback(handle, scr_retained_table, token);
 }
 
-size_t scr_retained_callbacks_drain(size_t budget) {
-  if (scr_retained_gateway == NULL) return 0;
+bool scr_retained_callbacks_pending(void) {
+  return scr_owner_gateway_pending(scr_retained_gateway);
+}
+
+ScrRetainedCallbackDispatch scr_retained_callbacks_dispatch(void) {
+  if (scr_retained_gateway == NULL) {
+    return SCR_RETAINED_CALLBACK_DISPATCH_IDLE;
+  }
+  if (scr_exc_pending()) {
+    return SCR_RETAINED_CALLBACK_DISPATCH_EXCEPTION;
+  }
   if (scr_owner_gateway_take_failure(scr_retained_gateway) ==
       SCR_OWNER_GATEWAY_FAILURE_OOM) {
     scr_trap("scriptc: out of memory in retained callback transport\n");
   }
-  size_t delivered = scr_owner_gateway_drain(scr_retained_gateway, budget);
+  size_t delivered = scr_owner_gateway_drain(scr_retained_gateway, 1);
   if (scr_owner_gateway_take_failure(scr_retained_gateway) ==
       SCR_OWNER_GATEWAY_FAILURE_OOM) {
     scr_trap("scriptc: out of memory in retained callback transport\n");
   }
   (void)scr_callback_table_collect(scr_retained_table);
-  return delivered;
+  if (scr_exc_pending()) {
+    return SCR_RETAINED_CALLBACK_DISPATCH_EXCEPTION;
+  }
+  return delivered == 0 ? SCR_RETAINED_CALLBACK_DISPATCH_IDLE
+                        : SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED;
 }
 
 size_t scr_retained_callbacks_active(void) {
   return scr_callback_table_active(scr_retained_table);
 }
 
-bool scr_retained_callbacks_shutdown(bool deliver_pending) {
-  if (scr_retained_gateway == NULL && scr_retained_table == NULL) return true;
+void scr_retained_callbacks_stop_accepting(void) {
+  if (scr_retained_gateway == NULL && scr_retained_table == NULL) return;
   if (scr_retained_gateway == NULL || scr_retained_table == NULL) {
     scr_trap("scriptc: invalid retained callback service state\n");
   }
   scr_retained_accepting = false;
   scr_owner_gateway_stop_accepting(scr_retained_gateway);
-  if (deliver_pending) {
-    while (scr_owner_gateway_pending(scr_retained_gateway)) {
-      if (scr_retained_callbacks_drain(0) == 0 ||
-          scr_exc_pending()) {
-        return false;
-      }
-    }
-  } else {
-    (void)scr_owner_gateway_discard(scr_retained_gateway);
+}
+
+size_t scr_retained_callbacks_discard(void) {
+  if (scr_retained_gateway == NULL) return 0;
+  scr_retained_callbacks_stop_accepting();
+  size_t discarded = scr_owner_gateway_discard(scr_retained_gateway);
+  (void)scr_callback_table_collect(scr_retained_table);
+  return discarded;
+}
+
+bool scr_retained_callbacks_destroy(void) {
+  if (scr_retained_gateway == NULL && scr_retained_table == NULL) return true;
+  if (scr_retained_gateway == NULL || scr_retained_table == NULL) {
+    scr_trap("scriptc: invalid retained callback service state\n");
   }
+  if (scr_retained_accepting) return false;
   (void)scr_callback_table_collect(scr_retained_table);
   if (scr_callback_table_active(scr_retained_table) != 0 ||
       !scr_owner_gateway_quiescent(scr_retained_gateway)) {
@@ -116,5 +135,6 @@ bool scr_retained_callbacks_shutdown(bool deliver_pending) {
   }
   scr_retained_table = NULL;
   scr_retained_gateway = NULL;
+  scr_retained_accepting = false;
   return true;
 }

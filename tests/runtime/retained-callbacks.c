@@ -10,6 +10,7 @@ typedef struct {
   ScrCallbackInvocation invocation;
   int32_t value;
   bool shutdown_inside;
+  bool throws;
 } TestInvocation;
 
 typedef struct {
@@ -28,6 +29,7 @@ static _Atomic size_t invocations_destroyed;
 static _Atomic size_t wakes;
 static ScrCallbackTable *attached_table;
 static ScrCallbackToken *attached_token;
+static bool exception_pending;
 
 void scr_closure_release(ScrClosure *closure) {
   assert(closure != NULL && closure->rc != 0 && closure->rc != SIZE_MAX);
@@ -42,7 +44,7 @@ _Noreturn void scr_trap(const char *message) {
   abort();
 }
 
-bool scr_exc_pending(void) { return false; }
+bool scr_exc_pending(void) { return exception_pending; }
 
 void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
                                         ScrCallbackTable *table,
@@ -86,11 +88,13 @@ static bool invoke_callback(ScrCallbackInvocation *base, void *owner_context,
   state->total += invocation->value;
   if (invocation->shutdown_inside) {
     /* Re-entrant shutdown must refuse destruction while this invocation is
-     * using the table. The outer drain remains responsible for the record. */
-    assert(!scr_retained_callbacks_shutdown(false));
+     * using the table. The outer dispatch remains responsible for the record. */
+    scr_retained_callbacks_stop_accepting();
+    assert(!scr_retained_callbacks_destroy());
   }
+  if (invocation->throws) exception_pending = true;
   scr_closure_release(closure);
-  return true;
+  return !scr_exc_pending();
 }
 
 static void destroy_invocation(ScrOwnerGatewayEvent *base) {
@@ -98,7 +102,8 @@ static void destroy_invocation(ScrOwnerGatewayEvent *base) {
   free(base);
 }
 
-static TestInvocation *new_invocation(int32_t value, bool shutdown_inside) {
+static TestInvocation *new_invocation(int32_t value, bool shutdown_inside,
+                                      bool throws) {
   TestInvocation *invocation = calloc(1, sizeof *invocation);
   assert(invocation != NULL);
   invocation->invocation.signature = &signature;
@@ -106,13 +111,15 @@ static TestInvocation *new_invocation(int32_t value, bool shutdown_inside) {
   invocation->invocation.payload_destroy = destroy_invocation;
   invocation->value = value;
   invocation->shutdown_inside = shutdown_inside;
+  invocation->throws = throws;
   return invocation;
 }
 
 static void *produce(void *opaque) {
   Producer *producer = opaque;
   for (int32_t i = 0; i < producer->count; i++) {
-    TestInvocation *invocation = new_invocation(producer->first + i, false);
+    TestInvocation *invocation =
+        new_invocation(producer->first + i, false, false);
     assert(scr_callback_token_admit(producer->token,
                                     &invocation->invocation));
   }
@@ -152,18 +159,24 @@ int main(void) {
   assert(atomic_load(&wakes) == 1);
   TestClosureState *state = closure->fn;
   size_t delivered = 0;
-  while (delivered != 100) delivered += scr_retained_callbacks_drain(17);
+  while (delivered != 100) {
+    ScrRetainedCallbackDispatch result = scr_retained_callbacks_dispatch();
+    assert(result == SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED);
+    delivered++;
+  }
   assert(state->total == 5050);
   assert(atomic_load(&invocations_destroyed) == 100);
 
   scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
   commit_prepared();
   cancel_attached();
-  assert(scr_retained_callbacks_drain(0) == 0);
+  assert(scr_retained_callbacks_dispatch() ==
+         SCR_RETAINED_CALLBACK_DISPATCH_IDLE);
   assert(scr_retained_callbacks_active() == 0 && closure->rc == 1);
   scr_closure_release(closure);
   assert(atomic_load(&closures_freed) == 1);
-  assert(scr_retained_callbacks_shutdown(true));
+  scr_retained_callbacks_stop_accepting();
+  assert(scr_retained_callbacks_destroy());
   assert(!scr_retained_callbacks_configured());
 
   /* Destruction is fenced while an owner delivery is still executing. */
@@ -172,19 +185,23 @@ int main(void) {
   token = scr_retained_callbacks_register(closure, &signature);
   assert(token != NULL);
   assert(scr_callback_token_admit(
-      token, &new_invocation(7, true)->invocation));
+      token, &new_invocation(7, true, false)->invocation));
   assert(scr_callback_token_admit(
-      token, &new_invocation(11, false)->invocation));
-  assert(scr_retained_callbacks_drain(0) == 1);
+      token, &new_invocation(11, false, false)->invocation));
+  assert(scr_retained_callbacks_dispatch() ==
+         SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED);
   assert(((TestClosureState *)closure->fn)->total == 7);
-  assert(atomic_load(&invocations_destroyed) == 102);
+  assert(atomic_load(&invocations_destroyed) == 101);
   assert(scr_retained_callbacks_configured());
   scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
   abandon_prepared();
+  assert(scr_retained_callbacks_active() == 1);
+  assert(scr_retained_callbacks_discard() == 1);
+  assert(atomic_load(&invocations_destroyed) == 102);
   assert(scr_retained_callbacks_active() == 0);
   scr_closure_release(closure);
   assert(atomic_load(&closures_freed) == 2);
-  assert(scr_retained_callbacks_shutdown(false));
+  assert(scr_retained_callbacks_destroy());
   assert(!scr_retained_callbacks_configured());
 
   /* A failed native factory has no registration owner: payloads admitted
@@ -194,16 +211,49 @@ int main(void) {
   token = scr_retained_callbacks_register(closure, &signature);
   assert(token != NULL);
   assert(scr_callback_token_admit(
-      token, &new_invocation(19, false)->invocation));
+      token, &new_invocation(19, false, false)->invocation));
   scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
   abandon_prepared();
-  assert(scr_retained_callbacks_drain(0) == 1);
+  assert(scr_retained_callbacks_dispatch() ==
+         SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED);
   assert(((TestClosureState *)closure->fn)->total == 0);
   assert(scr_retained_callbacks_active() == 0);
   scr_closure_release(closure);
   assert(atomic_load(&closures_freed) == 3);
   assert(atomic_load(&invocations_destroyed) == 103);
-  assert(scr_retained_callbacks_shutdown(true));
+  scr_retained_callbacks_stop_accepting();
+  assert(scr_retained_callbacks_destroy());
+
+  /* A callback exception is an explicit owner-turn outcome. It remains in
+   * the active exception cell for the target's sink and fences later events. */
+  assert(scr_retained_callbacks_configure(wake_owner, &wakes));
+  closure = new_closure();
+  token = scr_retained_callbacks_register(closure, &signature);
+  assert(token != NULL);
+  assert(scr_callback_token_admit(
+      token, &new_invocation(23, false, true)->invocation));
+  assert(scr_callback_token_admit(
+      token, &new_invocation(29, false, false)->invocation));
+  assert(scr_retained_callbacks_dispatch() ==
+         SCR_RETAINED_CALLBACK_DISPATCH_EXCEPTION);
+  assert(exception_pending);
+  assert(((TestClosureState *)closure->fn)->total == 23);
+  assert(atomic_load(&invocations_destroyed) == 104);
+  assert(scr_retained_callbacks_dispatch() ==
+         SCR_RETAINED_CALLBACK_DISPATCH_EXCEPTION);
+  assert(atomic_load(&invocations_destroyed) == 104);
+  exception_pending = false;
+  assert(scr_retained_callbacks_dispatch() ==
+         SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED);
+  assert(((TestClosureState *)closure->fn)->total == 52);
+  assert(atomic_load(&invocations_destroyed) == 105);
+  scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
+  abandon_prepared();
+  assert(scr_retained_callbacks_active() == 0);
+  scr_closure_release(closure);
+  assert(atomic_load(&closures_freed) == 4);
+  scr_retained_callbacks_stop_accepting();
+  assert(scr_retained_callbacks_destroy());
 
   puts("retained callbacks: ok");
   return 0;

@@ -23,14 +23,16 @@ int32_t scriptc_test_callbacks_configure(void) {
       : 0;
 }
 
-int32_t scriptc_test_callbacks_wait_and_drain(int32_t expected_wakes) {
+int32_t scriptc_test_callbacks_wait_and_dispatch(int32_t expected_wakes) {
   pthread_mutex_lock(&callback_wake_mutex);
   while (atomic_load_explicit(&callback_wakes, memory_order_acquire) <
          expected_wakes) {
     pthread_cond_wait(&callback_wake_condition, &callback_wake_mutex);
   }
   pthread_mutex_unlock(&callback_wake_mutex);
-  return (int32_t)scr_retained_callbacks_drain(0);
+  ScrRetainedCallbackDispatch dispatched = scr_retained_callbacks_dispatch();
+  if (dispatched != SCR_RETAINED_CALLBACK_DISPATCH_DELIVERED) return 0;
+  return scr_loop_checkpoint() == SCR_LOOP_CHECKPOINT_COMPLETE ? 1 : 0;
 }
 
 int32_t scriptc_test_callbacks_active(void) {
@@ -38,7 +40,8 @@ int32_t scriptc_test_callbacks_active(void) {
 }
 
 int32_t scriptc_test_callbacks_shutdown(void) {
-  return scr_retained_callbacks_shutdown(true) ? 1 : 0;
+  scr_retained_callbacks_stop_accepting();
+  return scr_retained_callbacks_destroy() ? 1 : 0;
 }
 
 int32_t scriptc_test_verify_retained(
@@ -46,7 +49,7 @@ int32_t scriptc_test_verify_retained(
     int32_t active_before,
     int32_t active_after,
     int32_t shutdown) {
-  return total == 42 && active_before == 1 && active_after == 0 && shutdown == 1
-      ? 42
+  return total == 94 && active_before == 1 && active_after == 0 && shutdown == 1
+      ? 94
       : 1;
 }

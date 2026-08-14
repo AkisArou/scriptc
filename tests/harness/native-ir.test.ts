@@ -724,8 +724,8 @@ function frontendNativeInput(): NativeFrontendInput {
       ...([
         ["callbacksConfigure", "scriptc_test_callbacks_configure", []],
         [
-          "callbacksWaitAndDrain",
-          "scriptc_test_callbacks_wait_and_drain",
+          "callbacksWaitAndDispatch",
+          "scriptc_test_callbacks_wait_and_dispatch",
           [
             {
               name: "expectedWakes",
@@ -1963,7 +1963,7 @@ describe.each(["c", "llvm"] as const)(
         status: run.status,
         signal: run.signal,
         stderr: run.stderr.toString(),
-      }).toEqual({ status: 42, signal: null, stderr: "" });
+      }).toEqual({ status: 94, signal: null, stderr: "" });
     });
   },
 );
