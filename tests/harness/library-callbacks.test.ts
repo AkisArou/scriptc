@@ -39,11 +39,13 @@
  *                          teaching; a callback-free profile keeps the
  *                          ambient ReferenceError lowering (the standing
  *                          guarantee), and an unused declared channel is
- *                          legal capacity; declaration-file ambient names
- *                          stay builtins rather than becoming channels, and
- *                          unsupported program-authored ambient shapes
- *                          refuse instead of disappearing (SC4001 profile
- *                          shapes live in library-profile.test.ts)
+ *                          legal capacity; standard/package declaration-file
+ *                          ambient names stay builtins rather than becoming
+ *                          channels, project-owned .d.ts declarations remain
+ *                          authored callback surface, and unsupported
+ *                          program-authored ambient shapes refuse instead of
+ *                          disappearing (SC4001 profile shapes live in
+ *                          library-profile.test.ts)
  *   CB7 composition        a runtime-localized AND thread-instanced
  *                          archive with channels: two embedder threads
  *                          register different contexts, chunks route to
@@ -368,6 +370,20 @@ stream(3,7) = 42
     expect(run.stdout).toBe(`finite: 0
 nan: 1
 keyword: 7.5
+`);
+  });
+
+  platformTest("CB6: a callback declared in a project .d.ts remains authored surface", async () => {
+    const { archive, outDir } = await buildLibrary(emission, {
+      tag: "project-dts",
+      entry: "lib_project_dts.ts",
+    });
+    const probe = buildProbe("probe_project_dts.c", archive, outDir);
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(`seq=2 len=2 bytes=C7
+result=9
 `);
   });
 

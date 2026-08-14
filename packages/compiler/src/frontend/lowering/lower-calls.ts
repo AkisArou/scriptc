@@ -2656,14 +2656,23 @@ export interface FfiValidationResult {
   symbolsByName: ReadonlyMap<string, ReadonlySet<ts.Symbol>>;
 }
 
+/** True when a library callback may claim declarations from this file.
+ * Ordinary program source is always eligible. Declaration files are
+ * eligible only when they are project-owned: the standard library and
+ * installed/workspace package declarations are existing ambient surfaces,
+ * never callback declarations merely because a profile channel shares their
+ * spelling. */
+function libraryCallbackOwnsFile(L: Lowerer, file: ts.SourceFile): boolean {
+  return !file.isDeclarationFile || (!L.isStdlibFile(file) && !L.isNpmFile(file));
+}
+
 /** Resolve and validate every configured outbound binding before emit.
  * Candidate declarations are signature-only functions bearing the manifest
  * name anywhere in the program. Multiple scoped declarations are all native
  * bindings under the existing name-based call surface, so every candidate
  * must fit the one manifest ABI. Library callbacks additionally exclude
- * declaration files: lib.d.ts/@types names are existing TypeScript ambient
- * surface, never program-authored callback declarations merely because a
- * profile channel happens to share their spelling. */
+ * standard-library and package declaration files while retaining project
+ * declaration files as authored callback surface. */
 export function validateFfiImports(L: Lowerer): FfiValidationResult {
   const diagnostics: ScrDiagnostic[] = [];
   const symbolsByName = new Map<string, ReadonlySet<ts.Symbol>>();
@@ -2673,7 +2682,7 @@ export function validateFfiImports(L: Lowerer): FfiValidationResult {
   if (configuredNames.size === 0) return { diagnostics, symbolsByName };
 
   for (const file of L.program.getSourceFiles()) {
-    if (L.libraryCallbacks && file.isDeclarationFile) continue;
+    if (L.libraryCallbacks && !libraryCallbackOwnsFile(L, file)) continue;
     ts.walkPreorder(file, (node) => {
       if (ts.isFunctionDeclaration(node)) {
         if (
@@ -2807,13 +2816,14 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       if (!validSymbols.has(symbol)) {
         if (L.libraryCallbacks) {
           const declarations = L.checker.declarationsOf(symbol);
-          const programDeclarations = declarations.filter(
-            (decl) => !decl.getSourceFile().isDeclarationFile,
+          const programDeclarations = declarations.filter((decl) =>
+            libraryCallbackOwnsFile(L, decl.getSourceFile())
           );
           const programAmbient =
             programDeclarations.length > 0 &&
             programDeclarations.every(
               (decl) =>
+                decl.getSourceFile().isDeclarationFile ||
                 (ts.getCombinedModifierFlags(decl as ts.Declaration) &
                   ts.ModifierFlags.Ambient) !== 0,
             );
@@ -2830,9 +2840,9 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
               throw new PoisonError();
             }
           } else {
-            // Declaration-file ambients (including standard-library
-            // builtins) and same-named program implementations remain their
-            // ordinary TypeScript bindings; the profile does not claim them.
+            // Standard-library/package ambients and same-named program
+            // implementations remain their ordinary TypeScript bindings;
+            // the profile does not claim them.
             return null;
           }
         } else {
