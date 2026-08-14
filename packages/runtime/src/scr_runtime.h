@@ -98,6 +98,10 @@ void scr_owner_gateway_stop_accepting(ScrOwnerGateway *gateway);
 size_t scr_owner_gateway_discard(ScrOwnerGateway *gateway);
 bool scr_owner_gateway_pending(ScrOwnerGateway *gateway);
 ScrOwnerGatewayState scr_owner_gateway_state(ScrOwnerGateway *gateway);
+/* True only at an outer owner boundary where the stopped gateway has no
+ * queued or currently-delivering work. Unlike state/pending inspected as two
+ * separate operations, this is one lock-protected destruction predicate. */
+bool scr_owner_gateway_quiescent(ScrOwnerGateway *gateway);
 /* Succeeds only after STOPPED with an empty queue and after all producers
  * have lost access to the gateway. */
 bool scr_owner_gateway_destroy(ScrOwnerGateway *gateway);
@@ -2781,6 +2785,25 @@ void scr_native_handle_attach_lifecycle(ScrNativeHandle *handle,
 void scr_native_handle_attach_callback(ScrNativeHandle *handle,
                                        ScrCallbackTable *table,
                                        ScrCallbackToken *token);
+/* Per-ScriptC-instance retained-callback service. The target configures its
+ * thread-safe owner wake before registrations can be created. Registration
+ * borrows the closure and installs an explicit table root. Generated native
+ * thunks admit copied payload records through the returned opaque token;
+ * only drain enters ScriptC code. `shutdown` first closes admission, then
+ * drains or discards queued records and succeeds only after every native
+ * registration has completed cancellation. It is intentionally retryable
+ * after a false result, but cannot be called from inside a drain turn. */
+bool scr_retained_callbacks_configure(ScrOwnerGatewayWakeFn wake,
+                                      void *wake_context);
+bool scr_retained_callbacks_configured(void);
+ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
+                                                   const void *signature);
+void scr_retained_callbacks_abandon(ScrCallbackToken *token);
+void scr_retained_callbacks_attach(ScrNativeHandle *handle,
+                                   ScrCallbackToken *token);
+size_t scr_retained_callbacks_drain(size_t budget);
+size_t scr_retained_callbacks_active(void);
+bool scr_retained_callbacks_shutdown(bool deliver_pending);
 double scr_file_handle_fd(ScrFileHandle *h);
 void scr_file_handle_close(ScrFileHandle *h);
 double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,

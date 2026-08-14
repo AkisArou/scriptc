@@ -230,6 +230,10 @@ export interface CcOptions {
   /** Native IR contains opaque foreign handles: compiles the generic
    * ownership cell and its checked borrowed-pointer accessors. */
   nativeHandle?: boolean;
+  /** Native IR contains result-owned retained callbacks: compiles the
+   * foreign-thread ingress gateway, closure-root table, token/handle
+   * lifecycle edge, and per-instance owner service. Implies nativeHandle. */
+  retainedCallbacks?: boolean;
   /** The embedded npm graph references fetch (index.ts detects it on the
    * IR): compiles the NATIVE fetch bridge (scr_fetch.c over scr_net +
    * scr_tls + scr_http's client parser + zlib — the socket units join
@@ -1408,6 +1412,7 @@ export interface LibArchiveOptions {
   copying?: boolean;
   textDecoderLegacy?: boolean;
   nativeHandle?: boolean;
+  retainedCallbacks?: boolean;
 }
 
 export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> {
@@ -1437,7 +1442,16 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.emitter ? ["scr_events_emitter.c", "scr_dyn_handle.c"] : []),
     ...(opts.zlib ? ["scr_zlib.c"] : []),
     ...(opts.copying ? ["scr_copying.c"] : []),
-    ...(opts.nativeHandle ? ["scr_native_handle.c"] : []),
+    ...(opts.nativeHandle || opts.retainedCallbacks ? ["scr_native_handle.c"] : []),
+    ...(opts.retainedCallbacks
+      ? [
+          "scr_owner_gateway.c",
+          "scr_callback_token.c",
+          "scr_callback_table.c",
+          "scr_callback_handle.c",
+          "scr_retained_callbacks.c",
+        ]
+      : []),
   ];
   const cflags = [
     "-std=c11",
@@ -3546,7 +3560,18 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...runtimeSources.map((f) => rt(join(rtDir, f))),
     ...(opts.copying ? [rt(join(rtDir, "scr_copying.c"))] : []),
     ...(opts.fileHandle ? [rt(join(rtDir, "scr_file_handle.c"))] : []),
-    ...(opts.nativeHandle ? [rt(join(rtDir, "scr_native_handle.c"))] : []),
+    ...(opts.nativeHandle || opts.retainedCallbacks
+      ? [rt(join(rtDir, "scr_native_handle.c"))]
+      : []),
+    ...(opts.retainedCallbacks
+      ? [
+          rt(join(rtDir, "scr_owner_gateway.c")),
+          rt(join(rtDir, "scr_callback_token.c")),
+          rt(join(rtDir, "scr_callback_table.c")),
+          rt(join(rtDir, "scr_callback_handle.c")),
+          rt(join(rtDir, "scr_retained_callbacks.c")),
+        ]
+      : []),
     // win32 targets compile the libc-shim TU (stpcpy, arc4random_buf,
     // gmtime_r, strcasestr — the _WIN32 block in scr_runtime.h declares
     // them) and link advapi32 (the CSPRNG RtlGenRandom/SystemFunction036,

@@ -176,8 +176,7 @@ size_t scr_callback_table_active(ScrCallbackTable *table) {
 bool scr_callback_table_destroy(ScrCallbackTable *table) {
   if (table == NULL) return true;
   if (table->active != 0 || table->collecting ||
-      scr_owner_gateway_state(table->gateway) != SCR_OWNER_GATEWAY_STOPPED ||
-      scr_owner_gateway_pending(table->gateway)) {
+      !scr_owner_gateway_quiescent(table->gateway)) {
     return false;
   }
   free(table->entries);

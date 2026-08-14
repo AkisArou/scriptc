@@ -237,14 +237,19 @@ ScrOwnerGatewayState scr_owner_gateway_state(ScrOwnerGateway *gateway) {
   return atomic_load_explicit(&gateway->state, memory_order_acquire);
 }
 
-bool scr_owner_gateway_destroy(ScrOwnerGateway *gateway) {
+bool scr_owner_gateway_quiescent(ScrOwnerGateway *gateway) {
   if (gateway == NULL) return true;
   scr_owner_gateway_lock(gateway);
   bool ready = atomic_load_explicit(&gateway->state, memory_order_relaxed) ==
                    SCR_OWNER_GATEWAY_STOPPED &&
                gateway->head == NULL && !gateway->draining;
   scr_owner_gateway_unlock(gateway);
-  if (!ready) return false;
+  return ready;
+}
+
+bool scr_owner_gateway_destroy(ScrOwnerGateway *gateway) {
+  if (gateway == NULL) return true;
+  if (!scr_owner_gateway_quiescent(gateway)) return false;
   free(gateway);
   return true;
 }
