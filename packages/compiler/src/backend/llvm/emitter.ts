@@ -73,6 +73,7 @@ import type {
   IrGlobal,
   IrLocal,
   IrModule,
+  IrNativeBinding,
   IrRecordShape,
   IrStmt,
   IrType,
@@ -1013,6 +1014,8 @@ class LlEmitter {
   private readonly fnByName = new Map<string, IrFunction>();
   /** Manifest-bound native imports, used by ffiCall emission. */
   private readonly ffiByName = new Map<string, IrFfiImport>();
+  /** Validated generic Native IR bindings, keyed by stable binding id. */
+  private readonly nativeById = new Map<string, IrNativeBinding>();
   /** C-ABI callback trampolines and (for raw/no-userdata callbacks) their
    * distinct call-scoped TLS closure slots. */
   private readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
@@ -1141,6 +1144,9 @@ class LlEmitter {
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
     }
+    for (const entry of mod.nativeBindings ?? []) {
+      this.nativeById.set(entry.id, entry);
+    }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
     this.indirectMayThrow = mt.indirect;
@@ -1216,6 +1222,11 @@ class LlEmitter {
 
   private llType(t: IrType): string {
     switch (t.kind) {
+      case "nativeScalar":
+        switch (t.scalar) {
+          case "i32":
+            return "i32";
+        }
       case "f64":
       case "date":
         return "double";
@@ -4639,6 +4650,8 @@ class LlEmitter {
     switch (e.kind) {
       case "numLit":
         return { name: f64Lit(e.value), type: e.type };
+      case "nativeScalarLit":
+        return { name: e.value, type: e.type };
       case "boolLit":
         return { name: e.value ? "true" : "false", type: e.type };
       case "strLit": {
@@ -6088,6 +6101,28 @@ class LlEmitter {
         const result = { name: value, type: e.type };
         if (callbacksMayThrow) this.emitPendingCheck();
         return result;
+      }
+      case "nativeCall": {
+        const binding = this.nativeById.get(e.binding);
+        if (!binding) {
+          throw new Error(`llvm emitter bug: unknown Native IR binding ${e.binding}`);
+        }
+        const args = e.args.map((arg) => this.emitExpr(arg));
+        const returnType = this.llType(binding.result.type);
+        const parameterTypes = binding.parameters.map((parameter) => this.llType(parameter.type));
+        this.declare(
+          `declare ${returnType} @${binding.entry.symbol}(${parameterTypes.join(", ")})`,
+        );
+        const call =
+          `call ${returnType} @${binding.entry.symbol}(` +
+          `${args.map((arg, i) => `${parameterTypes[i]} ${arg.name}`).join(", ")})`;
+        if (binding.result.type.kind === "void") {
+          B.line(call);
+          return { name: "", type: e.type };
+        }
+        const result = B.tmp();
+        B.line(`${result} = ${call}`);
+        return { name: result, type: e.type };
       }
       case "new": {
         // Allocate (fields zeroed, vt stamped), then run the ctor. The

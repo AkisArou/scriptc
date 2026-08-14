@@ -1182,6 +1182,111 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     ffiByName.set(entry.name, entry);
     ffiSymbols.add(entry.symbol);
   }
+  const nativeById = new Map<
+    string,
+    NonNullable<IrModule["nativeBindings"]>[number]
+  >();
+  const nativeSymbols = new Set<string>();
+  const nativeDeclarations = new Set<string>();
+  const nativeId = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+  const cIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  for (const binding of mod.nativeBindings ?? []) {
+    if (!nativeId.test(binding.id)) {
+      errors.push({ message: `invalid Native IR binding id "${binding.id}"`, loc: moduleLoc });
+    }
+    if (nativeById.has(binding.id)) {
+      errors.push({ message: `duplicate Native IR binding id "${binding.id}"`, loc: moduleLoc });
+    }
+    if (binding.entry.kind !== "c-symbol") {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has unsupported entry kind "${String(binding.entry.kind)}"`,
+        loc: moduleLoc,
+      });
+    }
+    if (!cIdentifier.test(binding.entry.symbol)) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has invalid C symbol "${binding.entry.symbol}"`,
+        loc: moduleLoc,
+      });
+    }
+    if (nativeSymbols.has(binding.entry.symbol)) {
+      errors.push({
+        message: `duplicate Native IR C symbol "${binding.entry.symbol}"`,
+        loc: moduleLoc,
+      });
+    }
+    if (ffiSymbols.has(binding.entry.symbol)) {
+      errors.push({
+        message: `Native IR C symbol "${binding.entry.symbol}" is also declared by the value FFI`,
+        loc: moduleLoc,
+      });
+    }
+    if (binding.declaration.module === "" || binding.declaration.name === "") {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has an empty declaration identity`,
+        loc: moduleLoc,
+      });
+    }
+    const declarationKey = `${binding.declaration.module}\0${binding.declaration.name}`;
+    if (nativeDeclarations.has(declarationKey)) {
+      errors.push({
+        message: `duplicate Native IR declaration "${binding.declaration.module}"::"${binding.declaration.name}"`,
+        loc: moduleLoc,
+      });
+    }
+    if (binding.callingConvention !== "c") {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has unsupported calling convention "${String(binding.callingConvention)}"`,
+        loc: moduleLoc,
+      });
+    }
+    if (binding.variadic !== false) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" must be non-variadic in the exact-scalar slice`,
+        loc: moduleLoc,
+      });
+    }
+    const parameterNames = new Set<string>();
+    for (const parameter of binding.parameters) {
+      if (parameter.name === "" || parameterNames.has(parameter.name)) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an empty or duplicate parameter name "${parameter.name}"`,
+          loc: moduleLoc,
+        });
+      }
+      parameterNames.add(parameter.name);
+      if (parameter.passMode !== "value") {
+        errors.push({
+          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" must use value passing`,
+          loc: moduleLoc,
+        });
+      }
+      if (parameter.type.kind !== "nativeScalar" || parameter.type.scalar !== "i32") {
+        errors.push({
+          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
+          loc: moduleLoc,
+        });
+      }
+    }
+    if (binding.result.passMode !== "value") {
+      errors.push({
+        message: `Native IR binding "${binding.id}" result must use value passing`,
+        loc: moduleLoc,
+      });
+    }
+    if (
+      binding.result.type.kind !== "void" &&
+      (binding.result.type.kind !== "nativeScalar" || binding.result.type.scalar !== "i32")
+    ) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" result has an unsupported exact type`,
+        loc: moduleLoc,
+      });
+    }
+    nativeById.set(binding.id, binding);
+    nativeSymbols.add(binding.entry.symbol);
+    nativeDeclarations.add(declarationKey);
+  }
   // The lib section (library mode): every mapped function exists, is
   // synchronous, and its IR signature fits the declared marshalling
   // classes — the SC4xxx refusals ran before this landed on the module, so
@@ -1564,6 +1669,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       fn,
       functionsByName,
       ffiByName,
+      nativeById,
       classesByName,
       recordsById,
       unionsById,
@@ -1578,6 +1684,7 @@ function validateFunction(
   fn: IrFunction,
   functions: Map<string, IrFunction>,
   ffiByName: Map<string, NonNullable<IrModule["ffiImports"]>[number]>,
+  nativeById: Map<string, NonNullable<IrModule["nativeBindings"]>[number]>,
   classes: Map<string, IrClassDef>,
   records: Map<string, IrRecordShape>,
   unions: Map<string, IrUnionDef>,
@@ -1732,6 +1839,21 @@ function validateFunction(
           err("numLit must be f64", e.loc);
         }
         break;
+      case "nativeScalarLit": {
+        if (e.type.scalar !== "i32") {
+          err(`native scalar literal has unsupported type "${String(e.type.scalar)}"`, e.loc);
+          break;
+        }
+        if (!/^-?(?:0|[1-9][0-9]*)$/.test(e.value) || e.value === "-0") {
+          err(`native i32 literal has non-canonical decimal spelling "${e.value}"`, e.loc);
+          break;
+        }
+        const value = BigInt(e.value);
+        if (value < -2147483648n || value > 2147483647n) {
+          err(`native i32 literal ${e.value} is out of range`, e.loc);
+        }
+        break;
+      }
       case "strLit":
         if (e.type.kind !== "string") err("strLit must be string", e.loc);
         break;
@@ -2680,6 +2802,33 @@ function validateFunction(
         if (!typeEquals(e.type, expected)) {
           err(
             `FFI call ${e.import} type ${e.type.kind} != return class ${entry.returns}`,
+            e.loc,
+          );
+        }
+        break;
+      }
+      case "nativeCall": {
+        for (const arg of e.args) checkExpr(arg);
+        const binding = nativeById.get(e.binding);
+        if (!binding) {
+          err(`Native IR call to undeclared binding "${e.binding}"`, e.loc);
+          break;
+        }
+        if (binding.parameters.length !== e.args.length) {
+          err(
+            `Native IR call ${e.binding}: ${e.args.length} args, expected ${binding.parameters.length}`,
+            e.loc,
+          );
+        }
+        e.args.forEach((arg, i) => {
+          const parameter = binding.parameters[i];
+          if (parameter !== undefined) {
+            expectType(arg, parameter.type, `Native IR call ${e.binding} arg ${i}`);
+          }
+        });
+        if (!typeEquals(e.type, binding.result.type)) {
+          err(
+            `Native IR call ${e.binding} type ${typeKey(e.type)} != result ${typeKey(binding.result.type)}`,
             e.loc,
           );
         }

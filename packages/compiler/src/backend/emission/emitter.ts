@@ -33,6 +33,7 @@ import type {
   IrFunction,
   IrLocal,
   IrModule,
+  IrNativeBinding,
   IrStmt,
   IrType,
   IrUnionDef,
@@ -225,6 +226,8 @@ export class CEmitter {
   readonly fnByName = new Map<string, IrFunction>();
   /** Manifest-bound native imports, used by ffiCall emission. */
   readonly ffiByName = new Map<string, IrFfiImport>();
+  /** Validated generic Native IR bindings, keyed by stable binding id. */
+  readonly nativeById = new Map<string, IrNativeBinding>();
   /** One C-ABI trampoline per manifest callback entry. Raw function
    * pointers additionally get a distinct TLS context slot, so two
    * callbacks with the same signature never alias each other's closure. */
@@ -400,6 +403,9 @@ export class CEmitter {
     }
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
+    }
+    for (const entry of mod.nativeBindings ?? []) {
+      this.nativeById.set(entry.id, entry);
     }
     const mt = computeMayThrow(mod);
     this.mayThrow = mt.fns;
@@ -733,6 +739,14 @@ export class CEmitter {
       out.push(`extern ${ret} ${entry.symbol}(${params.length > 0 ? params.join(", ") : "void"});`);
     }
     if (directFfiImports.length > 0) out.push("");
+    for (const binding of this.mod.nativeBindings ?? []) {
+      const params = binding.parameters.map((parameter) => cType(parameter.type).trim());
+      out.push(
+        `extern ${cType(binding.result.type).trim()} ${binding.entry.symbol}(` +
+          `${params.length > 0 ? params.join(", ") : "void"});`,
+      );
+    }
+    if ((this.mod.nativeBindings?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
     this.emitFfiCallbackDefs(out);
     // Class objects (classes as values): construct-thunk prototypes plus
@@ -1870,6 +1884,8 @@ export class CEmitter {
    * their length — no runtime call, no ownership change. */
   truthyC(t: Temp): string {
     switch (t.type.kind) {
+      case "nativeScalar":
+        throw new Error("emitter bug: exact native scalar truthiness is not implemented");
       case "bool":
         return t.name;
       case "f64":

@@ -29,7 +29,18 @@ export interface SrcLoc {
  * other TypedArray flavors stay frontend-fenced. */
 export type IrBytesElem = "u8" | "u32" | "i32" | "f32";
 
+/** Exact, non-JavaScript scalar representations carried by Native IR.
+ * Each added name describes value semantics as well as ABI width: the
+ * initial `i32` slice never passes through f64. */
+export type IrNativeScalar = "i32";
+
+export interface IrNativeScalarType {
+  kind: "nativeScalar";
+  scalar: IrNativeScalar;
+}
+
 export type IrType =
+  | IrNativeScalarType
   | { kind: "f64" }
   /** The supported ES Date value slice: a scalar TimeClip'd millisecond
    * value. Getters and toISOString observe only this slot, so copying it
@@ -329,6 +340,9 @@ export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 export const F64: IrType = { kind: "f64" };
+export function nativeScalarType(scalar: IrNativeScalar): IrNativeScalarType {
+  return { kind: "nativeScalar", scalar };
+}
 export const DATE_T: IrType = { kind: "date" };
 export const BYTES_U8: IrType = { kind: "bytes", elem: "u8" };
 export const STRING: IrType = { kind: "string" };
@@ -416,6 +430,8 @@ export function isSupportedSetElem(t: IrType): boolean {
  * cycle analysis and docs/memory.md). Shared frontend/validator. */
 export function isSupportedMapValue(t: IrType): boolean {
   switch (t.kind) {
+    case "nativeScalar":
+      return false;
     case "f64":
     case "string":
     case "bool":
@@ -512,6 +528,8 @@ export function unionFuncSetArmsOk(arms: IrType[]): boolean {
  * the IR (not the frontend) because both ends need it. */
 export function typeKey(t: IrType): string {
   switch (t.kind) {
+    case "nativeScalar":
+      return `native:${t.scalar}`;
     case "f64":
     case "date":
     case "string":
@@ -577,6 +595,9 @@ export function typeKey(t: IrType): string {
 }
 
 export function typeEquals(a: IrType, b: IrType): boolean {
+  if (a.kind === "nativeScalar") {
+    return b.kind === "nativeScalar" && a.scalar === b.scalar;
+  }
   if (a.kind === "array") return b.kind === "array" && typeEquals(a.elem, b.elem);
   if (a.kind === "bytes") return b.kind === "bytes" && a.elem === b.elem;
   if (a.kind === "map") {
@@ -693,7 +714,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 3;
+  irVersion: 4;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -749,6 +770,12 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
+  /** Generic Native IR bindings. Calls refer to the stable manifest-local
+   * `id`; only this validated table carries the backend symbol spelling.
+   * The first slice is value-only exact scalars. Aggregates, handles,
+   * ownership, callbacks, and target-specific entries extend this table
+   * rather than introducing another call path. */
+  nativeBindings?: IrNativeBinding[];
   /** Outbound native FFI declarations used by `ffiCall` expressions.
    * These are link-time C ABI imports, not runtime dynamic-library handles:
    * executable builds resolve their symbols from the manifest's archive
@@ -760,6 +787,26 @@ export interface IrModule {
    * emissions stay conformance-identical by construction. Absent on every
    * executable build (the backends emit main() exactly as always). */
   lib?: IrLibSection;
+}
+
+export interface IrNativeBinding {
+  /** Stable manifest-local identity used by `nativeCall`. */
+  id: string;
+  /** Source declaration identity. It is metadata at the IR/backend seam;
+   * the frontend integration uses it to prove the called symbol. */
+  declaration: { module: string; name: string };
+  entry: { kind: "c-symbol"; symbol: string };
+  callingConvention: "c";
+  variadic: false;
+  parameters: {
+    name: string;
+    type: IrNativeScalarType;
+    passMode: "value";
+  }[];
+  result: {
+    type: IrNativeScalarType | { kind: "void" };
+    passMode: "value";
+  };
 }
 
 export type IrFfiValueParamClass = "f64" | "bool" | "u8" | "u32" | "i32" | "string" | "bytes";
@@ -4167,6 +4214,11 @@ export type IrExpr =
    * and non-integer spellings carry nothing, so the IR is byte-identical
    * for every program that held its numbers. */
   | { kind: "numLit"; value: number; spelling?: string; type: IrType; loc: SrcLoc }
+  /** An exact Native IR scalar literal. Its canonical spelling is retained
+   * as text so every current and future exact width can serialize without
+   * a JavaScript-number round trip. The initial i32 slice uses base-10 with
+   * an optional leading minus. */
+  | { kind: "nativeScalarLit"; value: string; type: IrNativeScalarType; loc: SrcLoc }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.
@@ -4487,6 +4539,10 @@ export type IrExpr =
    * against it. Native code is outside scriptc's exception protocol: it
    * must return normally and must not retain or mutate borrowed storage. */
   | { kind: "ffiCall"; import: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
+  /** Backend-neutral call through one validated Native IR binding. The
+   * binding id—not a source-provided symbol string—selects the entry and
+   * exact ABI signature. */
+  | { kind: "nativeCall"; binding: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
   /** Closure creation: a function value over `fnName` (a module function),
    * capturing the listed boxed locals of the CREATING function (localIds,
    * in the callee's captures[] order). The result is owned (+1); the closure
@@ -5264,6 +5320,8 @@ function isJsonSafeAt(
   visiting: Set<string>,
 ): boolean {
   switch (t.kind) {
+    case "nativeScalar":
+      return false;
     case "f64":
     case "string":
     case "bool":

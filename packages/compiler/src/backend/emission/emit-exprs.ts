@@ -543,6 +543,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
     switch (e.kind) {
       case "numLit":
         return E.newTemp(e.type, cNumberLiteral(e.value));
+      case "nativeScalarLit":
+        return E.newTemp(e.type, `(int32_t)(${e.value})`);
       case "boolLit":
         return E.newTemp(e.type, e.value ? "true" : "false");
       case "strLit": {
@@ -2220,6 +2222,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return result;
           }
         }
+      }
+      case "nativeCall": {
+        const binding = E.nativeById.get(e.binding);
+        if (!binding) {
+          throw new Error(`emitter bug: unknown Native IR binding ${e.binding}`);
+        }
+        const args = e.args.map((arg) => E.emitExpr(arg));
+        const call = `${binding.entry.symbol}(${args.map((arg) => arg.name).join(", ")})`;
+        if (binding.result.type.kind === "void") {
+          E.line(`${call};${E.srcComment(e.loc)}`);
+          return { name: "", type: e.type };
+        }
+        return E.newTemp(e.type, call);
       }
       case "closure": {
         const target = E.fnByName.get(e.fnName);

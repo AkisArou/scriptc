@@ -1255,6 +1255,7 @@ class FnAnalyzer {
       case "seqExpr":
       case "call":
       case "ffiCall":
+      case "nativeCall":
       case "callValue":
       case "new":
       case "newValue":
@@ -1269,6 +1270,7 @@ class FnAnalyzer {
       case "libCall":
         return e.fn.startsWith("math.") && e.args.every((a) => this.isPure(a));
       case "numLit":
+      case "nativeScalarLit":
       case "strLit":
       case "boolLit":
       case "varRef":
@@ -1300,6 +1302,8 @@ class FnAnalyzer {
     switch (e.kind) {
       case "numLit":
         return constVal(e.value, e.spelling);
+      case "nativeScalarLit":
+        return { ...TOP };
       case "varRef":
         return this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
       case "recordGet": {
@@ -1390,6 +1394,7 @@ class FnAnalyzer {
   private stablePathGuard(e: IrExpr): boolean {
     switch (e.kind) {
       case "numLit":
+      case "nativeScalarLit":
       case "strLit":
       case "boolLit":
       case "unitLit":
@@ -1464,6 +1469,7 @@ class FnAnalyzer {
     switch (e.kind) {
       case "numLit":
         return constVal(e.value, e.spelling);
+      case "nativeScalarLit":
       case "strLit":
       case "boolLit":
       case "unitLit":
@@ -1602,6 +1608,7 @@ class FnAnalyzer {
         return { ...TOP };
       }
       case "ffiCall":
+      case "nativeCall":
       case "yieldExpr":
       case "awaitExpr":
       case "awaitUnionExpr": {

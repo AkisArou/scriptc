@@ -16,6 +16,11 @@ import {
 
 export function cType(t: IrType): string {
   switch (t.kind) {
+    case "nativeScalar":
+      switch (t.scalar) {
+        case "i32":
+          return "int32_t";
+      }
     case "f64":
     case "date":
       return "double";
@@ -290,6 +295,8 @@ export function releaseCallC(type: IrType, expr: string): string {
 /** The runtime's box-kind tag for a boxed (captured) variable's type. */
 export function boxKindC(t: IrType): string {
   switch (t.kind) {
+    case "nativeScalar":
+      throw new Error("emitter bug: exact native scalars do not use JavaScript capture boxes");
     case "f64":
     case "date":
       return "SCR_BOX_F64";
@@ -473,6 +480,8 @@ export function cFnPtrCast(ft: IrType & { kind: "func" }): string {
  * CEmitter.arrNewC, which overrides this for traced-array elements. */
 export function elemKindC(elem: IrType): string {
   switch (elem.kind) {
+    case "nativeScalar":
+      throw new Error("emitter bug: exact native scalar arrays are not implemented");
     case "f64":
       return "SCR_ELEM_F64";
     case "bool":
