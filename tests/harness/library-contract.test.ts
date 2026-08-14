@@ -231,7 +231,7 @@ describe.each(EMISSIONS)("contract sidecar, %s emission", (emission) => {
     // exactly prefix + suffix over abi.exports — no extras, no misses.
     expect(doc.abi).toEqual({
       prefix: "kc_",
-      exports: ["abi_version", "build_id", "set_panic_sink", "init", "boot", "send", "command_msg", "title", "helper_probe", "boom"],
+      exports: ["abi_version", "build_id", "set_panic_sink", "set_callback", "init", "boot", "send", "command_msg", "title", "helper_probe", "boom"],
       snapshot_format: 2,
     });
     expect(nmDefined(archive, "kc_")).toEqual(doc.abi.exports.map((s) => `kc_${s}`).sort());

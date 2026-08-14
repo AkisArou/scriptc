@@ -13,9 +13,11 @@
   },
   "callbacks": [
     { "name": "isNaN", "params": ["f64"], "returns": "bool" },
-    { "name": "parseInt", "params": ["string", "u32"], "returns": "f64" }
+    { "name": "parseInt", "params": ["string", "u32"], "returns": "f64" },
+    { "name": "int", "params": ["f64"], "returns": "f64" }
   ],
   "exports": [
-    { "export": "checkBuiltin", "symbol": "cbb_check_builtin", "params": ["f64"], "returns": "bool" }
+    { "export": "checkBuiltin", "symbol": "cbb_check_builtin", "params": ["f64"], "returns": "bool" },
+    { "export": "callKeyword", "symbol": "cbb_call_keyword", "params": ["f64"], "returns": "f64" }
   ]
 }

@@ -356,7 +356,7 @@ stream(3,7) = 42
 `);
   });
 
-  platformTest("CB6: declaration-file ambient names remain builtins or unused capacity", async () => {
+  platformTest("CB6: declaration-file ambient names remain builtins and C-keyword channels stay indirect", async () => {
     const { archive, outDir } = await buildLibrary(emission, {
       tag: "builtin-names",
       profileFile: "profile_builtins.json",
@@ -367,6 +367,7 @@ stream(3,7) = 42
     expect(run.status).toBe(0);
     expect(run.stdout).toBe(`finite: 0
 nan: 1
+keyword: 7.5
 `);
   });
 

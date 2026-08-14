@@ -701,7 +701,16 @@ export class CEmitter {
     // Outbound native FFI declarations. string/bytes each expand from one
     // scriptc value to a borrowed pointer+length pair. Format-2 callbacks
     // and their independently positioned contexts are exact pointer slots.
-    for (const entry of this.mod.ffiImports ?? []) {
+    // Library callback channels reuse ffiCall IR but are NOT direct symbol
+    // imports: their profile names are registration keys and TypeScript
+    // bindings only, and call sites dispatch through the runtime slot. Do
+    // not emit extern declarations for them (besides inventing undefined
+    // symbols, a valid TS channel name such as `int` is a C keyword).
+    const libraryCallbackNames = new Set(this.mod.lib?.callbacks?.map((cb) => cb.name) ?? []);
+    const directFfiImports = (this.mod.ffiImports ?? []).filter(
+      (entry) => !libraryCallbackNames.has(entry.name),
+    );
+    for (const entry of directFfiImports) {
       const params = entry.params.flatMap((param): string[] => {
         if (isFfiCallbackParam(param)) return [ffiCallbackPointerTypeC(param.callback)];
         if (isFfiContextParam(param)) return ["void *"];
@@ -723,7 +732,7 @@ export class CEmitter {
       const ret = ffiNativeTypeC(entry.returns);
       out.push(`extern ${ret} ${entry.symbol}(${params.length > 0 ? params.join(", ") : "void"});`);
     }
-    if ((this.mod.ffiImports?.length ?? 0) > 0) out.push("");
+    if (directFfiImports.length > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
     this.emitFfiCallbackDefs(out);
     // Class objects (classes as values): construct-thunk prototypes plus
