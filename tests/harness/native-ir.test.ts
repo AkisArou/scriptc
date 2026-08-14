@@ -1429,7 +1429,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  test("wraps exact i32 addition, subtraction, and multiplication without signed overflow", async () => {
+  test("wraps every exact integer width without signed overflow", async () => {
     const outDir = join(scratch, `arithmetic-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/arithmetic.ts"), {
       outDir,
@@ -1453,13 +1453,32 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
       "utf8",
     );
     if (backend === "c") {
-      expect(generated).toContain("scr_native_i32_add");
-      expect(generated).toContain("scr_native_i32_sub");
-      expect(generated).toContain("scr_native_i32_mul");
+      for (const helper of [
+        "scr_native_i8_add",
+        "scr_native_u8_mul",
+        "scr_native_i16_mul",
+        "scr_native_u16_sub",
+        "scr_native_i32_add",
+        "scr_native_i32_sub",
+        "scr_native_i32_mul",
+        "scr_native_u32_mul",
+        "scr_native_i64_mul",
+        "scr_native_u64_sub",
+        "scr_native_isize_mul",
+        "scr_native_usize_sub",
+      ]) {
+        expect(generated).toContain(helper);
+      }
     } else {
+      expect(generated).toMatch(/= add i8/);
+      expect(generated).toMatch(/= mul i8/);
+      expect(generated).toMatch(/= mul i16/);
+      expect(generated).toMatch(/= sub i16/);
       expect(generated).toMatch(/= add i32/);
       expect(generated).toMatch(/= sub i32/);
       expect(generated).toMatch(/= mul i32/);
+      expect(generated).toMatch(/= mul i64/);
+      expect(generated).toMatch(/= sub i64/);
     }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
