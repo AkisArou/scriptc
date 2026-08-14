@@ -606,29 +606,32 @@ describe.each(["llvm", "c"] as const)("exact Native IR library exports, %s emiss
       exports: [],
     }, null, 2));
 
-    const native: NativeFrontendInput = {
-      target: localNativeInput.target,
-      sourceTypes: localNativeInput.sourceTypes,
-      types: [],
-      bindings: [],
-      exports: [{
-        id: "native-typescript.fixture.c-v1@0.0.0#ts_add_i32",
-        sourceExport: "ntsTsAddI32",
-        declaration: {
-          module: nativePackage,
-          name: "FixtureLibraryExports.ntsTsAddI32",
-        },
-        entry: { kind: "c-symbol", symbol: "nts_ts_add_i32" },
-        callingConvention: "c",
-        variadic: false,
-        error: NO_NATIVE_ERROR,
-        parameters: [
-          { name: "left", type: I32, passMode: "value", ownership: { kind: "value" } },
-          { name: "right", type: I32, passMode: "value", ownership: { kind: "value" } },
-        ],
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
-      }],
-    };
+    const configuredNative = process.env["SCRIPTC_NATIVE_EXPORT_FRONTEND_INPUT"];
+    const native: NativeFrontendInput = configuredNative === undefined
+      ? {
+          target: localNativeInput.target,
+          sourceTypes: localNativeInput.sourceTypes,
+          types: [],
+          bindings: [],
+          exports: [{
+            id: "native-typescript.fixture.c-v1@0.0.0#ts_add_i32",
+            sourceExport: "ntsTsAddI32",
+            declaration: {
+              module: nativePackage,
+              name: "FixtureLibraryExports.ntsTsAddI32",
+            },
+            entry: { kind: "c-symbol", symbol: "nts_ts_add_i32" },
+            callingConvention: "c",
+            variadic: false,
+            error: NO_NATIVE_ERROR,
+            parameters: [
+              { name: "left", type: I32, passMode: "value", ownership: { kind: "value" } },
+              { name: "right", type: I32, passMode: "value", ownership: { kind: "value" } },
+            ],
+            result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+          }],
+        }
+      : JSON.parse(configuredNative) as NativeFrontendInput;
     const result = await compileLibrary({
       profilePath,
       outDir,
