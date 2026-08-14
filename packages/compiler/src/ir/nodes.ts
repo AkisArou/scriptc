@@ -885,6 +885,29 @@ export interface IrLibTrapOverlay {
   remediation?: string;
 }
 
+/** One resolved host-callback channel (the profile's `callbacks` entry
+ * landed on the IR): compiled call sites of the channel's ambient binding
+ * lower as ffiCall nodes carrying the channel name, and both backends emit
+ * the same dispatch — fetch the slot's registered pointer through
+ * scr_library_cb_require (which delivers `unregisteredTrap` through the
+ * library funnel when the host never registered), then the typed indirect
+ * call with the slot's opaque context first. */
+export interface IrLibCallback {
+  /** The channel name — the registration name string, the ambient
+   * TypeScript binding, and the matching IrFfiImport's `name`. */
+  name: string;
+  /** The runtime channel slot (profile declaration order). */
+  slot: number;
+  params: ("f64" | "bool" | "string" | "bytes" | "u8" | "u32" | "i32")[];
+  returns: "f64" | "bool" | "u8" | "u32" | "i32" | "void";
+  /** The unregistered-call trap text (a DETECTED trap: plain bytes the
+   * library funnel classifies SC4025 and assembles with the current
+   * entry's symbol — unlike the SC4012 wrapper traps, the entry is only
+   * known at runtime). Built once at export resolution so both backends
+   * emit identical constants by construction. */
+  unregisteredTrap: string;
+}
+
 export interface IrLibSection {
   /** The profile's identity string (artifact header comments only). */
   profileName: string;
@@ -904,6 +927,13 @@ export interface IrLibSection {
    * thread-local storage, matching the runtime objects compiled with
    * -DSCR_THREAD_INSTANCES: one full instance per embedder thread. */
   threadInstances: boolean;
+  /** The host-callback registration symbol; present exactly when
+   * `callbacks` is (the profile pairs them — SC4001 otherwise). Both
+   * fields stay ABSENT on callback-free profiles so their serialized IR
+   * and emitted TU are unchanged byte-for-byte. */
+  callbackRegisterSymbol?: string;
+  /** The resolved host-callback channels, slot-ordered. */
+  callbacks?: IrLibCallback[];
   exports: IrLibExport[];
   /** Profile-declared teaching/remediation overlays for the runtime
    * detected-trap code family (SC4013–SC4019, diagnostics registry): both

@@ -12,7 +12,7 @@ import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
-import { ffiBindingDiag, ffiSignatureDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
+import { ffiBindingDiag, ffiSignatureDiag, libCallbackDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
@@ -2530,6 +2530,22 @@ function ffiCallbackInputDiagnostic(
   return null;
 }
 
+/** The binding surface's diagnostic flavor: native-manifest bindings
+ * speak the SC5002/SC5003 FFI codes; library-mode host callbacks are the
+ * same recognition machinery under the profile's vocabulary — SC4024 for
+ * both the binding and signature halves, with "manifest" respelled
+ * "profile" in the shared detail strings so the teaching names the
+ * document the author actually edits. */
+function ffiFlavor(L: Lowerer): {
+  binding: (name: string, detail: string, loc: SrcLoc) => ScrDiagnostic;
+  signature: (name: string, detail: string, loc: SrcLoc) => ScrDiagnostic;
+} {
+  if (!L.libraryCallbacks) return { binding: ffiBindingDiag, signature: ffiSignatureDiag };
+  const lib = (name: string, detail: string, loc: SrcLoc): ScrDiagnostic =>
+    libCallbackDiag(name, detail.replaceAll("manifest", "profile"), loc);
+  return { binding: lib, signature: lib };
+}
+
 /** The declaration half of an outbound FFI binding. Kept independent of
  * call-site argument checks so the whole manifest can be validated even
  * when a configured function is never called. */
@@ -2539,6 +2555,7 @@ function ffiDeclarationDiagnostic(
   symbol: ts.Symbol,
   loc: SrcLoc,
 ): ScrDiagnostic | null {
+  const { binding: bindingDiag, signature: signatureDiag } = ffiFlavor(L);
   const declarations = L.checker.declarationsOf(symbol);
   const functionDecls = declarations.filter(ts.isFunctionDeclaration);
   if (
@@ -2546,14 +2563,14 @@ function ffiDeclarationDiagnostic(
     declarations.some((decl) => !ts.isFunctionDeclaration(decl)) ||
     functionDecls.some((decl) => decl.body !== undefined)
   ) {
-    return ffiBindingDiag(
+    return bindingDiag(
       binding.name,
       "the configured name does not resolve exclusively to signature-only function declarations",
       loc,
     );
   }
   if (functionDecls.some((decl) => (decl.typeParameters?.length ?? 0) > 0)) {
-    return ffiSignatureDiag(
+    return signatureDiag(
       binding.name,
       "generic ambient declarations cannot describe one fixed C ABI",
       loc,
@@ -2561,7 +2578,7 @@ function ffiDeclarationDiagnostic(
   }
   const signatures = L.checker.getCallSignatures(L.checker.getTypeOfSymbol(symbol));
   if (signatures.length !== 1) {
-    return ffiSignatureDiag(
+    return signatureDiag(
       binding.name,
       `the ambient binding has ${signatures.length} call signatures; exactly one non-overloaded signature is required`,
       loc,
@@ -2571,7 +2588,7 @@ function ffiDeclarationDiagnostic(
   const params = signature.getParameters();
   const sourceParams = ffiSourceParams(binding);
   if (params.length !== sourceParams.length) {
-    return ffiSignatureDiag(
+    return signatureDiag(
       binding.name,
       `the TypeScript declaration has ${params.length} parameter(s), but the manifest declares ${sourceParams.length} source parameter(s) ` +
         `(${binding.params.length - sourceParams.length} additional native context slot(s) are compiler-supplied)`,
@@ -2587,7 +2604,7 @@ function ffiDeclarationDiagnostic(
     // declaration is different: it is a callable external contract, so a
     // `never` slot cannot truthfully describe any native parameter.
     if ((paramType.flags & ts.TypeFlags.Never) !== 0) {
-      return ffiSignatureDiag(
+      return signatureDiag(
         binding.name,
         `parameter ${i + 1} is 'never', an uninhabited TypeScript type that cannot describe a native ABI parameter`,
         loc,
@@ -2596,13 +2613,13 @@ function ffiDeclarationDiagnostic(
     if (isFfiCallbackParam(sourceParam)) {
       const callbackDiagnostic = ffiCallbackInputDiagnostic(L, sourceParam, paramType);
       if (callbackDiagnostic !== null) {
-        return ffiSignatureDiag(binding.name, callbackDiagnostic, loc);
+        return signatureDiag(binding.name, callbackDiagnostic, loc);
       }
     }
     const mapped = L.mapTypeOf(paramType);
     const expected = expectedParams[i]!;
     if (mapped === null || !typeEquals(mapped, expected)) {
-      return ffiSignatureDiag(
+      return signatureDiag(
         binding.name,
         `parameter ${i + 1} maps to '${mapped === null ? L.checker.typeToString(paramType) : L.fmt(mapped)}', ` +
           `which does not fit manifest ${ffiParamDisplay(sourceParam)}`,
@@ -2615,7 +2632,7 @@ function ffiDeclarationDiagnostic(
   // let tsc erase all control flow after the call while the linked function
   // continues, making the generated program disagree with TypeScript.
   if ((returnType.flags & ts.TypeFlags.Never) !== 0) {
-    return ffiSignatureDiag(
+    return signatureDiag(
       binding.name,
       "the return type is 'never', but a native ABI return cannot uphold TypeScript's non-returning contract",
       loc,
@@ -2624,7 +2641,7 @@ function ffiDeclarationDiagnostic(
   const declaredReturn = L.mapTypeOf(returnType);
   const expectedReturn = ffiClassType(binding.returns);
   if (declaredReturn === null || !typeEquals(declaredReturn, expectedReturn)) {
-    return ffiSignatureDiag(
+    return signatureDiag(
       binding.name,
       `the return maps to '${declaredReturn === null ? L.checker.typeToString(returnType) : L.fmt(declaredReturn)}', ` +
         `which does not fit manifest class '${binding.returns}'`,
@@ -2679,13 +2696,20 @@ export function validateFfiImports(L: Lowerer): FfiValidationResult {
   for (const binding of L.ffiImports) {
     const bySymbol = candidates.get(binding.name);
     if (bySymbol === undefined || bySymbol.size === 0) {
-      diagnostics.push(
-        ffiBindingDiag(
-          binding.name,
-          "the program has no signature-only function declaration with this name",
-          { file: L.entry.fileName, start: 0, end: 0 },
-        ),
-      );
+      // A native-manifest binding with no declaration is a broken build
+      // input. A library callback channel with no declaration is unused
+      // CAPACITY: the registration symbol still dispatches it, nothing
+      // calls it, and a later program revision may (a program that calls
+      // the name without declaring it fails ordinary typechecking first).
+      if (!L.libraryCallbacks) {
+        diagnostics.push(
+          ffiBindingDiag(
+            binding.name,
+            "the program has no signature-only function declaration with this name",
+            { file: L.entry.fileName, start: 0, end: 0 },
+          ),
+        );
+      }
       continue;
     }
     const validSymbols = new Set<ts.Symbol>();
@@ -2718,14 +2742,46 @@ export function validateFfiImports(L: Lowerer): FfiValidationResult {
 export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
     if (!ts.isIdentifier(expr.expression)) return null;
     const binding = L.ffiImportsByName.get(expr.expression.text);
-    if (binding === undefined) return null;
+    if (binding === undefined) {
+      // LIBRARY mode with a declared callback surface: a CALL of a
+      // program-authored signature-only ambient function that names no
+      // channel is the author reaching for the host seam the profile does
+      // not provide — refuse with the callback teaching instead of the
+      // ambient ReferenceError lowering. Scoped to non-declaration program
+      // files so lib.d.ts/@types ambients (parseInt, setTimeout, …) keep
+      // every existing lowering; callback-free profiles are untouched.
+      if (L.libraryCallbacks) {
+        const symbol = L.resolveValueSymbol(expr.expression);
+        const decls = symbol === null ? [] : L.checker.declarationsOf(symbol);
+        const callbackShaped =
+          decls.length > 0 &&
+          decls.every(
+            (decl) =>
+              ts.isFunctionDeclaration(decl) &&
+              decl.body === undefined &&
+              !decl.getSourceFile().isDeclarationFile,
+          );
+        if (callbackShaped) {
+          L.pushDiag(
+            libCallbackDiag(
+              expr.expression.text,
+              "the profile declares no callback channel with this name",
+              locOf(expr),
+            ),
+          );
+          throw new PoisonError();
+        }
+      }
+      return null;
+    }
     const loc = locOf(expr);
+    const { binding: bindingFlavor, signature: signatureFlavor } = ffiFlavor(L);
     const bindingError = (detail: string): never => {
-      L.pushDiag(ffiBindingDiag(binding.name, detail, loc));
+      L.pushDiag(bindingFlavor(binding.name, detail, loc));
       throw new PoisonError();
     };
     const signatureError = (detail: string): never => {
-      L.pushDiag(ffiSignatureDiag(binding.name, detail, loc));
+      L.pushDiag(signatureFlavor(binding.name, detail, loc));
       throw new PoisonError();
     };
     const symbol =

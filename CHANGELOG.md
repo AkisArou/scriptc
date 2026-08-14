@@ -4,6 +4,10 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+### Features
+
+- **Library archives call back into their host.** A profile's `callbacks` array declares named channels over the marshalling classes (bytes, string, f64, bool, and the u8/u32/i32 plumbing classes; scalar returns), and `abi.callback_register_symbol` names the registration entry point: the host supplies a function pointer and an opaque context per channel, and compiled code reaches a channel as a signature-only ambient function whose direct calls deliver synchronously on the calling thread, buffers borrowed for the duration of the call. Registrations are per instance, matching the panic sink under `abi.localize_runtime` and `abi.instance_per_thread`. Calling an unregistered channel is a structured `SC4025` trap through the sink naming the channel and the entry; a call the profile's channels cannot serve refuses at compile time with `SC4024`. Profiles without a `callbacks` section produce unchanged output.
+
 <!-- release:start -->
 
 ## 0.0.29

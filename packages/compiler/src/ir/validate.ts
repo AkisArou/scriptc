@@ -1230,6 +1230,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (!functionsByName.has(mod.entry)) {
       errors.push({ message: `library module missing its entry function "${mod.entry}"`, loc: entryLoc });
     }
+    // Host-callback channels: the register symbol and the channel list are
+    // paired (the profile loader refuses otherwise, so a miss here is a
+    // compiler bug), slots are the declaration order, and every channel
+    // has its matching ffiImport (the lowering recognizes calls by it).
+    const cbs = mod.lib.callbacks ?? [];
+    if ((cbs.length > 0) !== (mod.lib.callbackRegisterSymbol !== undefined)) {
+      errors.push({ message: "library callbacks and callbackRegisterSymbol must be present together", loc: entryLoc });
+    }
+    const cbNames = new Set<string>();
+    cbs.forEach((cb, i) => {
+      if (cb.slot !== i) {
+        errors.push({ message: `library callback "${cb.name}": slot ${cb.slot} out of declaration order (expected ${i})`, loc: entryLoc });
+      }
+      if (cbNames.has(cb.name)) {
+        errors.push({ message: `duplicate library callback channel "${cb.name}"`, loc: entryLoc });
+      }
+      cbNames.add(cb.name);
+      if (!(mod.ffiImports ?? []).some((f) => f.name === cb.name)) {
+        errors.push({ message: `library callback "${cb.name}" has no matching ffiImport`, loc: entryLoc });
+      }
+    });
   }
   const classesByName = new Map<string, IrClassDef>();
   for (const cls of mod.classes ?? []) {

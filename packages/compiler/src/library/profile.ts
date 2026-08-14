@@ -24,13 +24,22 @@
  *                                                // mode (see below); absent
  *                                                // = false, the classic
  *                                                // single-archive artifact
- *       "instance_per_thread": false             // thread-instanced state
+ *       "instance_per_thread": false,            // thread-instanced state
  *                                                // (see below); absent =
  *                                                // false, one instance per
  *                                                // linked archive
+ *       "callback_register_symbol":              // host-callback channel
+ *         "<prefix>_set_callback"                // registration (see below);
+ *                                                // required exactly when
+ *                                                // `callbacks` declares
+ *                                                // channels
  *     },
  *     "exports": [ { "export": "update", "symbol": "<prefix>_update",
  *                    "params": ["f64", "string"], "returns": "bytes" } ],
+ *     "callbacks": [ { "name": "emitChunk",       // host-callback channels
+ *                      "params": ["bytes", "u32"], // (see below); absent =
+ *                      "returns": "void" } ],      // no callback surface
+
  *     "sidecar": { ... },                      // ask-2 contract sidecar
  *                                              // (see below); absent =
  *                                              // no sidecar is emitted
@@ -158,6 +167,64 @@
  * declares both. Off by default; non-opted builds are byte-for-byte
  * unchanged.
  *
+ * Host-callback channels (`callbacks` + `abi.callback_register_symbol`):
+ * the mode's outbound seam. A library's default outbound channels are
+ * entry return values and the panic sink; a declared callback channel adds
+ * a synchronous byte/scalar path from compiled code to the embedder — the
+ * sink's pattern generalized: a profile-named registration symbol, a
+ * host-supplied function pointer plus opaque context, calls arriving on
+ * the calling thread. Each channel entry declares:
+ *
+ *   - `name`: the channel's identity — the registration name string AND
+ *     the TypeScript binding compiled code calls. Program code reaches the
+ *     channel as a signature-only ambient declaration whose signature must
+ *     fit the declared classes (`declare function emitChunk(chunk:
+ *     Uint8Array, seq: number): void`); a call of such a declaration that
+ *     names no channel refuses SC4024 (only when the profile declares at
+ *     least one channel — a callback-free profile keeps the ordinary
+ *     ambient ReferenceError semantics, and its artifact is unchanged).
+ *     Direct calls only, the FFI binding rule.
+ *   - `params`: f64, bool, string, bytes, and the u8/u32/i32 plumbing
+ *     classes (outbound plumbing rides JS's own ToUint32/ToInt32, the
+ *     executable FFI lane's rule). string/bytes arrive as (ptr, len)
+ *     pairs BORROWED for the duration of the call only.
+ *   - `returns`: f64, bool, u8, u32, i32, or void — scalars only (a
+ *     buffer return needs an ownership contract the mode does not define,
+ *     the FFI format-1 ruling).
+ *
+ * The registration symbol's C shape, one per profile:
+ *
+ *   int32_t <sym>(const char *name, void (*fn)(void), void *ctx);
+ *
+ * name selects the channel by its declared `name` (NUL-terminated); fn is
+ * stored as shown and cast to the channel's typed shape at the call site:
+ *
+ *   <ret> (*)(void *ctx, <params...>)   // ctx first, the sink's layout
+ *
+ * Returns 0 on success, -1 for an unknown or NULL name (a defined
+ * refusal, never a store). Latest registration wins; a NULL fn clears the
+ * channel; registration is a pure store — no entry prologue, no poison
+ * guard, legal before init — and registrations persist across init/reset.
+ * Calling a channel the host never registered is the SC4025 runtime trap
+ * through the panic sink (structured, naming the channel in the text and
+ * the entry the host called in the symbol field): register every channel
+ * an operation can reach before invoking that entry.
+ *
+ * Instance semantics compose exactly like the sink's: under
+ * `localize_runtime` the channel slots are per-archive (each instance owns
+ * a private registration set); under `instance_per_thread` they are
+ * per-instance THREAD-LOCAL state — a callback registered on thread T
+ * fires only for T's instance, and each serving thread registers its own
+ * channels before calling the init entry.
+ *
+ * Reentrancy is pinned like the sink's rule: a callback runs on the
+ * calling thread, inside the entry's dynamic extent, and must NOT call
+ * back into any library entry (the registration symbols included) or
+ * unwind/longjmp across library frames — read the borrowed buffers, hand
+ * the bytes to the embedder's own structures, return. The async_free
+ * posture is unchanged: a channel adds no event loop, no threads, and no
+ * reentry into the archive.
+ *
  * Marshalling classes (design §4.2 + session ruling 3 + ask 4): f64, bool,
  * string, bytes for params and returns; u8/u32/i32 are PARAM-ONLY plumbing
  * classes; i64/u64 are ask-4's declared integer boundary classes (params:
@@ -198,6 +265,35 @@ export type LibIntClass = (typeof LIB_INT_CLASSES)[number];
 
 export type LibParamClass = (typeof LIB_PARAM_CLASSES)[number];
 export type LibReturnClass = (typeof LIB_RETURN_CLASSES)[number];
+
+/** Marshalling classes legal in a CALLBACK PARAMETER position (outbound:
+ * compiled code → host). The value classes plus the u8/u32/i32 plumbing
+ * classes — outbound plumbing rides JS's own ToUint32/ToInt32 conversions
+ * (the executable FFI lane's rule), so no new coercion story exists. The
+ * declared integer classes stay export-map surface: an outbound i64/u64
+ * demands the prove-or-refuse machinery, which is scoped to export
+ * returns today. */
+export const LIB_CALLBACK_PARAM_CLASSES = ["f64", "bool", "string", "bytes", "u8", "u32", "i32"] as const;
+/** Marshalling classes legal in a CALLBACK RETURN position (inbound: host
+ * → compiled code). Scalars only — every conversion to f64 is exact by
+ * construction; a buffer return would need an ownership contract the mode
+ * does not define (the FFI format-1 ruling). */
+export const LIB_CALLBACK_RETURN_CLASSES = ["f64", "bool", "u8", "u32", "i32", "void"] as const;
+/** The runtime's fixed channel-slot capacity (scr_library.c's
+ * SCR_LIB_MAX_CALLBACKS — keep the two in step). */
+export const LIB_MAX_CALLBACKS = 32;
+
+export type LibCallbackParamClass = (typeof LIB_CALLBACK_PARAM_CLASSES)[number];
+export type LibCallbackReturnClass = (typeof LIB_CALLBACK_RETURN_CLASSES)[number];
+
+/** One declared host-callback channel (see the header contract). */
+export interface LibraryCallbackEntry {
+  /** The channel's identity: the registration name string and the
+   * TypeScript binding compiled code calls. */
+  name: string;
+  params: LibCallbackParamClass[];
+  returns: LibCallbackReturnClass;
+}
 
 export interface LibraryExportEntry {
   /** The entry module's export name. */
@@ -287,6 +383,13 @@ export interface LibraryProfile {
    * the unchanged entry family (see the header contract). False (the
    * default) keeps one instance per linked archive. */
   instancePerThread: boolean;
+  /** The host-callback registration symbol (see the header contract):
+   * non-null exactly when `callbacks` declares channels. */
+  callbackRegisterSymbol: string | null;
+  /** The declared host-callback channels, in declaration order (the order
+   * IS the runtime slot assignment). Empty when the profile declares
+   * none — the callback-free artifact is unchanged. */
+  callbacks: LibraryCallbackEntry[];
   exports: LibraryExportEntry[];
   /** The ask-2 contract-sidecar section; null = the profile declares no
    * sidecar and the invocation emits none. */
@@ -383,7 +486,7 @@ export function loadLibraryProfile(
     // the root would otherwise be silently inert — the exact footgun the
     // fence machinery refuses everywhere else.
     for (const k of Object.keys(p)) {
-      if (["profile_format", "name", "entry", "emission", "abi", "exports", "sidecar", "determinism"].includes(k)) continue;
+      if (["profile_format", "name", "entry", "emission", "abi", "exports", "callbacks", "sidecar", "determinism"].includes(k)) continue;
       if (k === "fences" || k === "teachings" || k === "remediations") {
         throw new ProfileError(
           `'${k}' at the profile root does nothing — the ask-5 determinism surface lives under 'determinism.${k}'; move it there`,
@@ -403,7 +506,7 @@ export function loadLibraryProfile(
     if (abi === null || typeof abi !== "object" || Array.isArray(abi)) {
       throw new ProfileError("'abi' must be an object");
     }
-    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime", "instance_per_thread"]);
+    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime", "instance_per_thread", "callback_register_symbol"]);
     const a = abi as Record<string, unknown>;
     const prefix = req<string>(a["prefix"], "abi.prefix", "string");
     if (!C_IDENT.test(prefix)) {
@@ -426,6 +529,7 @@ export function loadLibraryProfile(
       a["instance_per_thread"] === undefined
         ? false
         : req<boolean>(a["instance_per_thread"], "abi.instance_per_thread", "boolean");
+    const callbackRegisterSymbol = symbolField(a["callback_register_symbol"], "abi.callback_register_symbol", prefix, true);
 
     const exportsRaw = p["exports"];
     if (!Array.isArray(exportsRaw)) throw new ProfileError("'exports' must be an array");
@@ -460,6 +564,90 @@ export function loadLibraryProfile(
       }
       entries.push({ export: exportName, symbol, params, returns: returns as LibReturnClass });
     });
+
+    // Host-callback channels: the outbound seam's declaration (see the
+    // header contract). The section is strict like exports — a typo'd
+    // class or key would change the C shape the host implements with no
+    // signal.
+    const callbacks: LibraryCallbackEntry[] = [];
+    const cbRaw = p["callbacks"];
+    if (cbRaw !== undefined && cbRaw !== null) {
+      if (!Array.isArray(cbRaw)) throw new ProfileError("'callbacks' must be an array");
+      cbRaw.forEach((c, i) => {
+        const path = `callbacks[${i}]`;
+        if (c === null || typeof c !== "object" || Array.isArray(c)) {
+          throw new ProfileError(`'${path}' must be an object`);
+        }
+        rejectUnknownKeys(c, path, ["name", "params", "returns"]);
+        const cc = c as Record<string, unknown>;
+        const cbName = req<string>(cc["name"], `${path}.name`, "string");
+        // The name is BOTH the registration name string and the ambient
+        // TypeScript binding — one grammar serves both sides (and stays a
+        // clean C string literal in the generated dispatch).
+        if (!C_IDENT.test(cbName)) {
+          throw new ProfileError(
+            `'${path}.name' is not a valid channel name: '${cbName}' (a channel name is the TypeScript binding compiled code calls and the registration name string — letters, digits, underscore, not starting with a digit)`,
+          );
+        }
+        const paramsRaw = cc["params"];
+        if (!Array.isArray(paramsRaw)) throw new ProfileError(`'${path}.params' must be an array`);
+        const cbParams = paramsRaw.map((cls, j) => {
+          if (typeof cls === "string" && (cls === "i64" || cls === "u64")) {
+            throw new ProfileError(
+              `'${path}.params[${j}]': the declared integer classes are export-map surface — an outbound callback scalar is f64 (whole values ride exactly to ±(2^53 − 1)) or one of the u8/u32/i32 plumbing classes (JS ToUint32/ToInt32 semantics)`,
+            );
+          }
+          if (typeof cls !== "string" || !(LIB_CALLBACK_PARAM_CLASSES as readonly string[]).includes(cls)) {
+            throw new ProfileError(
+              `'${path}.params[${j}]' must be one of ${LIB_CALLBACK_PARAM_CLASSES.join("/")}, got ${JSON.stringify(cls)}`,
+            );
+          }
+          return cls as LibCallbackParamClass;
+        });
+        const cbReturns = req<string>(cc["returns"], `${path}.returns`, "string");
+        if (!(LIB_CALLBACK_RETURN_CLASSES as readonly string[]).includes(cbReturns)) {
+          const detail =
+            cbReturns === "string" || cbReturns === "bytes"
+              ? `'${path}.returns': a callback return stays scalar — a buffer flowing host → library needs an ownership contract the mode does not define; pass buffers as callback parameters (library → host, borrowed for the call) or entry parameters instead`
+              : `'${path}.returns' must be one of ${LIB_CALLBACK_RETURN_CLASSES.join("/")}, got '${cbReturns}'`;
+          throw new ProfileError(detail);
+        }
+        callbacks.push({ name: cbName, params: cbParams, returns: cbReturns as LibCallbackReturnClass });
+      });
+      if (callbacks.length > LIB_MAX_CALLBACKS) {
+        throw new ProfileError(
+          `'callbacks' declares ${callbacks.length} channels — the runtime's slot capacity is ${LIB_MAX_CALLBACKS}`,
+        );
+      }
+    }
+    // Presence pairing (the anti-inert posture, both directions): channels
+    // without a registration symbol are unreachable by any host, and a
+    // registration symbol without channels is a symbol that can only
+    // answer -1.
+    if (callbacks.length > 0 && callbackRegisterSymbol === null) {
+      throw new ProfileError(
+        "'callbacks' declares channels but 'abi.callback_register_symbol' is missing — the host registers channel implementations through that symbol",
+      );
+    }
+    if (callbacks.length === 0 && callbackRegisterSymbol !== null) {
+      throw new ProfileError(
+        "'abi.callback_register_symbol' is declared but 'callbacks' declares no channels — remove the symbol or declare the channels it registers",
+      );
+    }
+    {
+      const seen = new Set<string>();
+      for (const cb of callbacks) {
+        if (seen.has(cb.name)) throw new ProfileError(`callback channel '${cb.name}' is declared twice`);
+        seen.add(cb.name);
+      }
+      for (const e of entries) {
+        if (seen.has(e.export)) {
+          throw new ProfileError(
+            `'${e.export}' is both an export-map export and a callback channel name — a channel is a signature-only ambient declaration, an export is an entry function; one binding cannot be both`,
+          );
+        }
+      }
+    }
 
     // The ask-2 sidecar section: presence turns contract emission on.
     // Unknown fields inside it are refused like abi's (a typo here would
@@ -567,6 +755,7 @@ export function loadLibraryProfile(
     claim(sinkRegisterSymbol, "abi.sink_register_symbol");
     claim(collectSymbol, "abi.collect_symbol");
     claim(resultResetSymbol, "abi.result_reset_symbol");
+    claim(callbackRegisterSymbol, "abi.callback_register_symbol");
     if (sidecar !== null) {
       claim(sidecar.buildIdSymbol, "sidecar.build_id_symbol");
       claim(sidecar.abiVersionSymbol, "sidecar.abi_version_symbol");
@@ -684,6 +873,8 @@ export function loadLibraryProfile(
         resultResetSymbol,
         localizeRuntime,
         instancePerThread,
+        callbackRegisterSymbol,
+        callbacks,
         exports: entries,
         sidecar,
         profileBytes: bytes,

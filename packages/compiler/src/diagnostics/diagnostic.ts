@@ -38,7 +38,12 @@
  *            source spelling does not round-trip f64), wholeness
  *            (SC4022 — may-be-NaN or may-be-fractional at a declared
  *            i64/u64 slot), and range (SC4023 — the proven interval does
- *            not fit ±(2^53 − 1), or is negative at a u64 slot)
+ *            not fit ±(2^53 − 1), or is negative at a u64 slot), the
+ *            host-callback surface (SC4024 — a signature-only ambient
+ *            function reference the profile's callbacks section cannot
+ *            serve), and the unregistered-callback runtime trap (SC4025 —
+ *            a structured trap-teaching code in the funnel-classified
+ *            family, not a refusal)
  *   SC5xxx  native FFI: malformed manifests (SC5001), a configured
  *            binding that is not an ambient function declaration
  *            (SC5002), and a TypeScript signature that does not match its
@@ -982,6 +987,13 @@ export const LIB_INBOUND_BYTES_TRAP_CODE = "SC4012";
  *   SC4019  other detected trap (the family's residual: environment
  *           failures like getcwd/os lookups, unsupported regex
  *           operations, circular-structure conversion, the RC audit)
+ *   SC4025  host callback invoked before registration ("scriptc: library
+ *           callback ...": compiled code reached a profile-declared
+ *           callback channel the host never registered through the
+ *           profile's callback_register_symbol — a host-contract story
+ *           like SC4012, but the trap site is inside compiled code, so
+ *           the funnel assembles it and field 2 names the entry the
+ *           host called)
  *
  * There is no arithmetic/div-by-zero kind: JS division never traps, so the
  * runtime has no such site. The list here is the compile-time face of the
@@ -995,7 +1007,37 @@ export const LIB_RUNTIME_TRAP_CODES = [
   "SC4017",
   "SC4018",
   "SC4019",
+  "SC4025",
 ] as const;
+
+/** SC4025 — the unregistered host-callback trap's code (the runtime
+ * family entry above; exported for the resolver that assembles the trap
+ * message and the tests that pin it). */
+export const LIB_CALLBACK_UNREGISTERED_TRAP_CODE = "SC4025";
+
+/** SC4024 — a host-callback reference the profile cannot serve. Library
+ * mode maps signature-only ambient function declarations onto the
+ * profile's declared callback channels (the outbound seam: compiled code
+ * delivers bytes and scalars to the embedder synchronously). When the
+ * profile declares ANY callback, a call of a program-authored
+ * signature-only declaration that names no channel — or whose TypeScript
+ * signature does not fit the channel's declared classes — is a refusal,
+ * never an inert ReferenceError lowering: the author reached for the
+ * host seam and the profile does not provide it. Decorated with the
+ * profile's SC4024 teaching text like every library refusal. */
+export function libCallbackDiag(name: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC4024",
+    message: `library callback '${name}' cannot be compiled: ${detail}`,
+    loc,
+    hint:
+      "profile-declared callbacks are the library's outbound seam: declare the channel in the profile's " +
+      "'callbacks' array (name, params, returns) and keep the ambient TypeScript signature on the callback " +
+      "marshalling classes — params f64/bool/string/bytes and the u8/u32/i32 plumbing classes, " +
+      "returns f64/bool/u8/u32/i32/void; the host registers an implementation through the profile's " +
+      "abi.callback_register_symbol before calling any entry that can reach the channel",
+  };
+}
 /** SC4020 — a bare npm specifier in a library graph naming a package that
  * fails the npm-static eligibility bar (own .d.ts, unminified shipped JS,
  * no build-transform markers) or whose static compilation the preflight

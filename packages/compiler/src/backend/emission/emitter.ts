@@ -1076,6 +1076,26 @@ export class CEmitter {
       `}`,
       ``,
     );
+    if (lib.callbacks !== undefined && lib.callbacks.length > 0) {
+      // Host-callback registration: a pure store dispatch (the sink
+      // registration's rule — no entry prologue, no poison guard, legal
+      // before init). The channel name selects the slot; an unknown or
+      // NULL name is a defined -1, never a store. Latest registration
+      // wins; a NULL fn clears the channel.
+      out.push(
+        `int32_t ${lib.callbackRegisterSymbol}(const char *name, void (*fn)(void), void *ctx) {`,
+        `  if (name == NULL) return -1;`,
+      );
+      for (const cb of lib.callbacks) {
+        out.push(
+          `  if (strcmp(name, ${cStringLiteral(Buffer.from(cb.name, "utf8"))}) == 0) {`,
+          `    scr_library_cb_set(${cb.slot}, fn, ctx); /* channel '${cb.name}' */`,
+          `    return 0;`,
+          `  }`,
+        );
+      }
+      out.push(`  return -1;`, `}`, ``);
+    }
     if (lib.identity !== undefined) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt

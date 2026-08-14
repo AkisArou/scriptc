@@ -53,6 +53,35 @@ void scr_library_set_sink(ScrLibSinkFn fn, void *ctx) {
   scr_library_sink_ctx = ctx;
 }
 
+/* ── host-callback channels (scr_runtime.h's contract) ────────────────────
+ * Fixed slot storage, one pair per profile-declared channel (declaration
+ * order = slot index, assigned by the generated registration symbol's
+ * dispatch). SCR_TL gives thread-instanced archives per-instance
+ * registration; localization gives multi-instance processes per-archive
+ * slots — exactly the sink's story. The generated program TU is the only
+ * caller, with slot indices proven in range at compile time (the profile
+ * caps channels at SCR_LIB_MAX_CALLBACKS). */
+
+static SCR_TL ScrLibCbFn scr_library_cb_fns[SCR_LIB_MAX_CALLBACKS];
+static SCR_TL void *scr_library_cb_ctxs[SCR_LIB_MAX_CALLBACKS];
+
+void scr_library_cb_set(size_t slot, ScrLibCbFn fn, void *ctx) {
+  /* A pure store, the sink registration's rule: latest wins, NULL clears,
+   * not poison-guarded, persists across init/reset. */
+  scr_library_cb_fns[slot] = fn;
+  scr_library_cb_ctxs[slot] = ctx;
+}
+
+ScrLibCbFn scr_library_cb_require(size_t slot, const char *trap_msg) {
+  /* trap_msg is the call site's constant ("scriptc: library callback
+   * '<name>' invoked before registration\n") — a DETECTED trap the funnel
+   * classifies SC4025 and assembles with the entry the host called. */
+  if (scr_library_cb_fns[slot] == NULL) scr_trap(trap_msg);
+  return scr_library_cb_fns[slot];
+}
+
+void *scr_library_cb_ctx(size_t slot) { return scr_library_cb_ctxs[slot]; }
+
 /* ── the trap funnel, library expansion ───────────────────────────────────
  * Poison first (the sink may longjmp to a host frame below the entry — the
  * conforming survival pattern), then deliver exactly once, then abort:
@@ -104,6 +133,7 @@ static const struct {
   {"scriptc: SyntaxError: ", "SC4016"},     /* syntax trap (regex compile) */
   {"scriptc: out of memory", "SC4017"},     /* allocation failure */
   {"scriptc: internal error: ", "SC4018"},  /* internal invariant failure */
+  {"scriptc: library callback ", "SC4025"}, /* unregistered host callback */
 };
 
 static const char *scr_library_trap_code(const char *msg, size_t len) {

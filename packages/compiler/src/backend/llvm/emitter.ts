@@ -1611,6 +1611,15 @@ class LlEmitter {
       this.declare(`declare void @scr_library_set_sink(ptr, ptr)`);
       this.declare(`declare void @scr_library_arena_reset()`);
       this.declare(`declare void @scr_library_collect()`);
+      if ((this.mod.lib.callbacks?.length ?? 0) > 0) {
+        // Host-callback channels: the registration define's dispatch
+        // (strcmp over the declared names + the runtime slot store).
+        // The call-site fetch pair (scr_library_cb_require/_ctx) is
+        // declared at ffiCall emission like every body-driven runtime
+        // symbol.
+        this.declare(`declare void @scr_library_cb_set(${this.sizeType}, ptr, ptr)`);
+        this.declare(`declare i32 @strcmp(ptr, ptr)`);
+      }
       if (this.mod.lib.exports.some((e) => e.params.includes("string"))) {
         this.declare(`declare ptr @scr_library_str_in(ptr, ${this.sizeType})`);
       }
@@ -2084,6 +2093,41 @@ class LlEmitter {
       `}`,
       ``,
     );
+    if (lib.callbacks !== undefined && lib.callbacks.length > 0) {
+      // Host-callback channels: the per-channel name constants (the
+      // registration dispatch's strcmp operands), the per-channel
+      // unregistered-call trap constants (the ffiCall sites'
+      // scr_library_cb_require operands — same bytes as the C emission by
+      // construction), and the registration define: a pure store dispatch
+      // (the sink registration's rule — no entry prologue, no poison
+      // guard). An unknown or NULL name is a defined -1, never a store.
+      for (const cb of lib.callbacks) {
+        out.push(
+          `@sc_lib_cb_name_${cb.slot} = internal constant [${Buffer.byteLength(cb.name, "utf8") + 1} x i8] c"${llStrBytes(cb.name)}"`,
+          `@sc_lib_cb_trap_${cb.slot} = internal constant [${Buffer.byteLength(cb.unregisteredTrap, "utf8") + 1} x i8] c"${llStrBytes(cb.unregisteredTrap)}"`,
+        );
+      }
+      out.push(
+        ``,
+        `define i32 @${lib.callbackRegisterSymbol}(ptr %name, ptr %fn, ptr %ctx) ${FN_ATTRS} {`,
+        `entry:`,
+        `  %isnull = icmp eq ptr %name, null`,
+        `  br i1 %isnull, label %miss, label %try0`,
+      );
+      lib.callbacks.forEach((cb, i) => {
+        const next = i + 1 < lib.callbacks!.length ? `try${i + 1}` : "miss";
+        out.push(
+          `try${i}: ; channel '${cb.name}'`,
+          `  %cmp${i} = call i32 @strcmp(ptr %name, ptr @sc_lib_cb_name_${cb.slot})`,
+          `  %eq${i} = icmp eq i32 %cmp${i}, 0`,
+          `  br i1 %eq${i}, label %set${i}, label %${next}`,
+          `set${i}:`,
+          `  call void @scr_library_cb_set(${this.sizeType} ${cb.slot}, ptr %fn, ptr %ctx)`,
+          `  ret i32 0`,
+        );
+      });
+      out.push(`miss:`, `  ret i32 -1`, `}`, ``);
+    }
     if (lib.identity !== undefined) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt
@@ -5776,6 +5820,112 @@ class LlEmitter {
         return out;
       }
       case "ffiCall": {
+        // LIBRARY mode: every ffiCall is a profile-declared host-callback
+        // channel (the library lane loads no native-FFI manifest). Fetch
+        // the slot's registered pointer — scr_library_cb_require delivers
+        // the channel's trap constant through the funnel (SC4025) when the
+        // host never registered — then the typed indirect call, opaque
+        // context first. Marshalling matches the native ffiCall's value
+        // classes exactly; the host cannot raise a scriptc exception, so
+        // no pending check follows.
+        const libCb = this.mod.lib?.callbacks?.find((c) => c.name === e.import);
+        if (libCb !== undefined) {
+          const cbArgs = e.args.map((arg) => this.emitExpr(arg));
+          const natTypes: string[] = ["ptr"];
+          const natArgs: string[] = [];
+          libCb.params.forEach((cls, i) => {
+            const arg = cbArgs[i]!;
+            switch (cls) {
+              case "f64":
+                natTypes.push("double");
+                natArgs.push(`double ${arg.name}`);
+                break;
+              case "bool": {
+                const widened = B.tmp();
+                B.line(`${widened} = zext i1 ${arg.name} to i8`);
+                natTypes.push("i8");
+                natArgs.push(`i8 ${widened}`);
+                break;
+              }
+              case "u8":
+              case "u32": {
+                this.declare(`declare double @scr_bit_ushr(double, double)`);
+                const asDouble = B.tmp();
+                const asU32 = B.tmp();
+                B.line(`${asDouble} = call double @scr_bit_ushr(double ${arg.name}, double ${f64Lit(0)})`);
+                B.line(`${asU32} = fptoui double ${asDouble} to i32`);
+                if (cls === "u8") {
+                  const asU8 = B.tmp();
+                  B.line(`${asU8} = trunc i32 ${asU32} to i8`);
+                  natTypes.push("i8");
+                  natArgs.push(`i8 ${asU8}`);
+                } else {
+                  natTypes.push("i32");
+                  natArgs.push(`i32 ${asU32}`);
+                }
+                break;
+              }
+              case "i32": {
+                this.declare(`declare double @scr_bit_or(double, double)`);
+                const asDouble = B.tmp();
+                const asI32 = B.tmp();
+                B.line(`${asDouble} = call double @scr_bit_or(double ${arg.name}, double ${f64Lit(0)})`);
+                B.line(`${asI32} = fptosi double ${asDouble} to i32`);
+                natTypes.push("i32");
+                natArgs.push(`i32 ${asI32}`);
+                break;
+              }
+              case "string": {
+                const lenPtr = B.tmp();
+                const len = B.tmp();
+                const data = B.tmp();
+                B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 0, i32 1`);
+                B.line(`${len} = load i64, ptr ${lenPtr}`);
+                B.line(`${data} = getelementptr inbounds i8, ptr ${arg.name}, i64 24`);
+                natTypes.push("ptr", "i64");
+                natArgs.push(`ptr ${data}`, `i64 ${len}`);
+                break;
+              }
+              case "bytes": {
+                const lenPtr = B.tmp();
+                const len = B.tmp();
+                const dataPtr = B.tmp();
+                const data = B.tmp();
+                B.line(`${lenPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 8`);
+                B.line(`${len} = load i64, ptr ${lenPtr}`);
+                B.line(`${dataPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 24`);
+                B.line(`${data} = load ptr, ptr ${dataPtr}`);
+                natTypes.push("ptr", "i64");
+                natArgs.push(`ptr ${data}`, `i64 ${len}`);
+                break;
+              }
+            }
+          });
+          this.declare(`declare ptr @scr_library_cb_require(${this.sizeType}, ptr)`);
+          this.declare(`declare ptr @scr_library_cb_ctx(${this.sizeType})`);
+          const fn = B.tmp();
+          B.line(`${fn} = call ptr @scr_library_cb_require(${this.sizeType} ${libCb.slot}, ptr @sc_lib_cb_trap_${libCb.slot})`);
+          const ctx = B.tmp();
+          B.line(`${ctx} = call ptr @scr_library_cb_ctx(${this.sizeType} ${libCb.slot})`);
+          const retTy = ffiNativeTypeLl(libCb.returns);
+          const call = `call ${retTy} ${fn}(${[`ptr ${ctx}`, ...natArgs].join(", ")})`;
+          if (libCb.returns === "void") {
+            B.line(call);
+            return { name: "", type: e.type };
+          }
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          if (libCb.returns === "f64") return { name: raw, type: e.type };
+          if (libCb.returns === "bool") {
+            const value = B.tmp();
+            B.line(`${value} = icmp ne i8 ${raw}, 0`);
+            return { name: value, type: e.type };
+          }
+          const value = B.tmp();
+          const op = libCb.returns === "i32" ? "sitofp" : "uitofp";
+          B.line(`${value} = ${op} ${retTy} ${raw} to double`);
+          return { name: value, type: e.type };
+        }
         const entry = this.ffiByName.get(e.import);
         if (!entry) throw new Error(`llvm emitter bug: unknown FFI import ${e.import}`);
         const args = e.args.map((arg) => this.emitExpr(arg));

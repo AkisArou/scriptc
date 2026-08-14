@@ -53,7 +53,7 @@ $ SCRIPTC_CC=zigcc SCRIPTC_TARGET=aarch64-apple-ios scriptc build --lib --profil
 $ SCRIPTC_CC=zigcc SCRIPTC_TARGET=aarch64-linux-android scriptc build --lib --profile app.profile.json
 ```
 
-The full library-mode feature set applies: profile-declared exports and ABI entry points, contract sidecars, determinism fences, `abi.localize_runtime` (multi-instance archives — Mach-O localization runs the macOS host linker for both iOS platforms; Android rides the same in-process ELF localization as the Linux cross targets), and `abi.instance_per_thread` (thread-instanced state). The archive's external-symbol contract is unchanged: undefined references only to the target's C/math runtime and system APIs, resolved by Xcode's link against the selected SDK or the NDK clang link at API 26+. Simulator and emulator execution of the archive probes is part of the test matrix; device-architecture archives are build- and link-verified.
+The full library-mode feature set applies: profile-declared exports and ABI entry points, host-callback channels (`callbacks` + `abi.callback_register_symbol`), contract sidecars, determinism fences, `abi.localize_runtime` (multi-instance archives — Mach-O localization runs the macOS host linker for both iOS platforms; Android rides the same in-process ELF localization as the Linux cross targets), and `abi.instance_per_thread` (thread-instanced state). The archive's external-symbol contract is unchanged: undefined references only to the target's C/math runtime and system APIs, resolved by Xcode's link against the selected SDK or the NDK clang link at API 26+. Simulator and emulator execution of the archive probes is part of the test matrix; device-architecture archives are build- and link-verified.
 
 ### WebAssembly (WASI Preview 1)
 

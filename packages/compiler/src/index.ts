@@ -21,7 +21,7 @@ import {
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrFfiImport, type IrLibSection, type IrModule, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -1279,6 +1279,26 @@ function resolveLibrarySection(
       collectSymbol: profile.collectSymbol,
       resultResetSymbol: profile.resultResetSymbol,
       threadInstances: profile.instancePerThread,
+      // Host-callback channels: declaration order is the runtime slot
+      // assignment, and the unregistered-call trap text is assembled HERE,
+      // once, so both backends emit identical constant bytes (a DETECTED
+      // trap: the funnel classifies the "scriptc: library callback "
+      // prefix as SC4025 and names the entry the host called — the entry
+      // is runtime knowledge, so no compile-time SC4012-style assembly
+      // can carry it). Both fields stay absent on callback-free profiles
+      // (the byte-identity guarantee).
+      ...(profile.callbacks.length > 0
+        ? {
+            callbackRegisterSymbol: profile.callbackRegisterSymbol!,
+            callbacks: profile.callbacks.map((cb, i) => ({
+              name: cb.name,
+              slot: i,
+              params: [...cb.params],
+              returns: cb.returns,
+              unregisteredTrap: `scriptc: library callback '${cb.name}' invoked before registration\n`,
+            })),
+          }
+        : {}),
       exports,
       trapOverlays,
     },
@@ -1635,10 +1655,24 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         }
       }
     }
+    // The profile's host-callback channels ride the FFI import machinery:
+    // each channel is a signature-only ambient binding whose direct calls
+    // lower to ffiCall nodes (the classes are a subset of the FFI's), and
+    // `libraryCallbacks` flips the recognition to the library flavor —
+    // SC4024 diagnostics, unused channels legal, undeclared references
+    // refused with the callback teaching. The library lane never loads a
+    // native-FFI manifest, so the channel set owns the surface outright.
+    const cbImports: IrFfiImport[] = profile.callbacks.map((cb) => ({
+      name: cb.name,
+      symbol: cb.name,
+      params: [...cb.params],
+      returns: cb.returns,
+    }));
     try {
       lowered = fe.lower({
         dynamic: false,
         targetPlatform: buildPlatform,
+        ...(cbImports.length > 0 ? { ffiImports: cbImports, libraryCallbacks: true } : {}),
         // The profile-mapped exports are called from OUTSIDE the graph:
         // they seed reachability beside the entry's top level (an
         // executable build would dead-strip an uncalled export). A helper
@@ -1790,6 +1824,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         profile.sinkRegisterSymbol,
         ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
         ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
+        ...(profile.callbackRegisterSymbol !== null ? [profile.callbackRegisterSymbol] : []),
         ...(profile.sidecar !== null
           ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
           : []),
