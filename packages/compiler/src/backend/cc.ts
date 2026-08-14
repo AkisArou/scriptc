@@ -4,7 +4,7 @@ import { constants as fsConstants, existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { access, chmod, copyFile, link, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism, homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { localizeElfObject, mergeAndLocalizeCoffObjects } from "./object-localize.js";
 
@@ -38,6 +38,13 @@ function stableTestMemo<T>(
 }
 
 const RUNTIME_SOURCES = ["scr_number.c", "scr_string.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_path.c", "scr_url.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"];
+const RETAINED_CALLBACK_SOURCES = [
+  "scr_owner_gateway.c",
+  "scr_callback_token.c",
+  "scr_callback_table.c",
+  "scr_callback_handle.c",
+  "scr_retained_callbacks.c",
+] as const;
 
 /** The pinned quickjs-ng snapshot under packages/runtime/vendor/quickjs-ng
  * (see vendor/README.md — update both together). Keys the archive cache so
@@ -371,6 +378,49 @@ export interface CcOptions {
    * `tls` does — scr_tls.c consults its default-set override for the
    * client trust anchors. */
   tlsCa?: boolean;
+  /** Receives the exact uncached compiler invocation instead of spawning it.
+   * Supplying an executor disables ScriptC's native artifact caches; the
+   * executor owns materialization and may place the logical output elsewhere. */
+  commandExecutor?: (command: Readonly<CcCommand>) => Promise<void>;
+}
+
+export interface CcCommand {
+  readonly executable: string;
+  readonly arguments: readonly string[];
+  readonly runtimeDirectory: string;
+  readonly targetPlatform: string;
+}
+
+export type ExternalCcArgument =
+  | { readonly kind: "literal"; readonly value: string }
+  | {
+      readonly kind: "input-path";
+      readonly input: string;
+      readonly path?: string;
+    }
+  | { readonly kind: "output-path"; readonly output: string };
+
+export interface ExternalCcPlan {
+  readonly schema: "scriptc.external-cc-plan";
+  readonly schemaVersion: 1;
+  readonly driver: {
+    readonly command: string;
+  };
+  readonly targetPlatform: string;
+  readonly inputs: readonly string[];
+  readonly output: string;
+  readonly arguments: readonly ExternalCcArgument[];
+}
+
+export interface ExternalCcPlanResolution {
+  readonly plan: ExternalCcPlan;
+  readonly bindings: {
+    readonly runtimeDirectory: string;
+  };
+}
+
+export class ExternalCcPlanError extends Error {
+  override readonly name = "ExternalCcPlanError";
 }
 
 /** Structured compiler-driver failure. Most callers still let this surface
@@ -760,6 +810,95 @@ export function targetPlatform(driver: CcDriver): string {
   if (driver.target.includes("linux")) return "linux";
   if (driver.target.includes("windows")) return "win32";
   return driver.target.includes("macos") || driver.target.includes("darwin") ? "darwin" : "other";
+}
+
+/** Rewrites one exact ScriptC compiler invocation into a path-independent
+ * plan. Every absolute argument must belong to the declared program, runtime,
+ * native link inputs, or output; unknown ambient paths fail loudly. */
+export function planExternalCCommand(
+  command: Readonly<CcCommand>,
+  artifacts: {
+    readonly program: { readonly id: string; readonly path: string };
+    readonly runtime: { readonly id: string; readonly path: string };
+    readonly linkInputs: readonly {
+      readonly id: string;
+      readonly path: string;
+    }[];
+    readonly output: { readonly id: string; readonly path: string };
+  },
+): ExternalCcPlanResolution {
+  if (
+    isAbsolute(command.executable) ||
+    command.executable.includes("/") ||
+    command.executable.includes("\\")
+  ) {
+    throw new ExternalCcPlanError(
+      `External C command uses a physical executable path: ${command.executable}`,
+    );
+  }
+  const runtimePath = resolve(artifacts.runtime.path);
+  if (runtimePath !== resolve(command.runtimeDirectory)) {
+    throw new ExternalCcPlanError("External C runtime binding does not match the command");
+  }
+  const linkInputByPath = new Map(
+    artifacts.linkInputs.map(({ id, path }) => [path, id]),
+  );
+  const arguments_: ExternalCcArgument[] = command.arguments.map((argument) => {
+    if (argument === artifacts.program.path) {
+      return { kind: "input-path", input: artifacts.program.id };
+    }
+    if (argument === artifacts.output.path) {
+      return { kind: "output-path", output: artifacts.output.id };
+    }
+    const linkInput = linkInputByPath.get(argument);
+    if (linkInput !== undefined) {
+      return { kind: "input-path", input: linkInput };
+    }
+    if (isAbsolute(argument)) {
+      const absolute = resolve(argument);
+      const runtimeRelative = relative(runtimePath, absolute);
+      if (
+        runtimeRelative === "" ||
+        (!runtimeRelative.startsWith(`..${sep}`) && runtimeRelative !== "..")
+      ) {
+        const path = runtimeRelative === ""
+          ? undefined
+          : runtimeRelative.split(sep).join("/");
+        return path === undefined
+          ? { kind: "input-path", input: artifacts.runtime.id }
+          : { kind: "input-path", input: artifacts.runtime.id, path };
+      }
+      throw new ExternalCcPlanError(
+        `External C command contains undeclared absolute path ${argument}`,
+      );
+    }
+    if (argument.includes("/") || argument.includes("\\")) {
+      throw new ExternalCcPlanError(
+        `External C command contains an embedded undeclared path ${argument}`,
+      );
+    }
+    return { kind: "literal", value: argument };
+  });
+  const inputs = [
+    artifacts.runtime.id,
+    artifacts.program.id,
+    ...artifacts.linkInputs.map(({ id }) => id),
+  ];
+  const plan: ExternalCcPlan = Object.freeze({
+    schema: "scriptc.external-cc-plan",
+    schemaVersion: 1,
+    driver: Object.freeze({
+      command: command.executable,
+    }),
+    targetPlatform: command.targetPlatform,
+    inputs: Object.freeze([...new Set(inputs)]),
+    output: artifacts.output.id,
+    arguments: Object.freeze(arguments_.map((argument) => Object.freeze(argument))),
+  });
+  return Object.freeze({
+    plan,
+    bindings: Object.freeze({ runtimeDirectory: runtimePath }),
+  });
 }
 
 /** Architecture identity for host-native cache entries. Explicit cross targets
@@ -3432,6 +3571,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const configuredCacheRoot = cacheRootDir();
   const toolchainEnv = toolchainEnvironmentFingerprint();
   const persistentDriverCache =
+    opts.commandExecutor === undefined &&
     cachePolicy.runtimeObjects &&
     configuredCacheRoot !== null &&
     await compilerDriverSupportsPersistentCache(driver, toolchainEnv);
@@ -3564,13 +3704,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       ? [rt(join(rtDir, "scr_native_handle.c"))]
       : []),
     ...(opts.retainedCallbacks
-      ? [
-          rt(join(rtDir, "scr_owner_gateway.c")),
-          rt(join(rtDir, "scr_callback_token.c")),
-          rt(join(rtDir, "scr_callback_table.c")),
-          rt(join(rtDir, "scr_callback_handle.c")),
-          rt(join(rtDir, "scr_retained_callbacks.c")),
-        ]
+      ? RETAINED_CALLBACK_SOURCES.map((source) => rt(join(rtDir, source)))
       : []),
     // win32 targets compile the libc-shim TU (stpcpy, arc4random_buf,
     // gmtime_r, strcasestr — the _WIN32 block in scr_runtime.h declares
@@ -3760,7 +3894,18 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const ccName = driver.argv.join(" ");
   const runClang = async (args: string[]): Promise<void> => {
     try {
-      await execFileAsync(driver.argv[0] ?? "clang", [...driver.argv.slice(1), ...args]);
+      const executable = driver.argv[0] ?? "clang";
+      const commandArguments = [...driver.argv.slice(1), ...args];
+      if (opts.commandExecutor === undefined) {
+        await execFileAsync(executable, commandArguments);
+      } else {
+        await opts.commandExecutor(Object.freeze({
+          executable,
+          arguments: Object.freeze(commandArguments),
+          runtimeDirectory: dirname(rtDir),
+          targetPlatform: targetPlatform(driver),
+        }));
+      }
     } catch (err) {
       const stderr = (err as { stderr?: string }).stderr ?? String(err);
       const guidance =

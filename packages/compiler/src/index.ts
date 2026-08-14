@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform } from "./backend/cc.js";
+import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
@@ -36,7 +36,17 @@ import type { NativeFrontendExport, NativeFrontendInput } from "./frontend/nativ
 
 export const VERSION = "0.0.1";
 
-export { compileC, runtimeSrcDir, type CcOptions } from "./backend/cc.js";
+export {
+  ExternalCcPlanError,
+  compileC,
+  planExternalCCommand,
+  runtimeSrcDir,
+  type CcOptions,
+  type CcCommand,
+  type ExternalCcArgument,
+  type ExternalCcPlan,
+  type ExternalCcPlanResolution,
+} from "./backend/cc.js";
 export { ANDROID_MIN_API, IPHONEOS_MIN_VERSION, isAndroidTarget, isIosTarget, isMobileTarget, mobileLibraryTarget, mobileTargetRefusal } from "./backend/cc.js";
 export { emitModule } from "./backend/emission/emitter.js";
 export type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
@@ -173,6 +183,19 @@ export interface CompileOptions {
   /** Driver-neutral system library names required by reached Native IR
    * bindings. Emitted as -l<name> after nativeLinkInputs. */
   nativeSystemLibraries?: readonly string[];
+  /** Replaces ScriptC's native materializer after successful frontend and
+   * backend emission. The executor receives the complete immutable C-driver
+   * request and returns the authoritative materialized binary path or rejects.
+   * Embedders use this seam to route ScriptC products through their own
+   * artifact graph without copying feature detection or runtime-source
+   * selection. */
+  nativeBuildExecutor?: (
+    options: Readonly<CcOptions>,
+  ) => Promise<NativeBuildExecutorResult>;
+}
+
+export interface NativeBuildExecutorResult {
+  readonly binaryPath: string;
 }
 
 export type CompileResult =
@@ -1079,9 +1102,10 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     await writeFile(irPath, serializeModule(lowered.module));
   }
 
+  let binaryPath = opts.outPath;
   await mkdir(dirname(opts.outPath), { recursive: true });
   try {
-    await compileC({
+    const nativeBuild: CcOptions = Object.freeze({
       cPath,
       outPath: opts.outPath,
       // The emitted TU's non-system dependencies are the runtime/vendor tree,
@@ -1176,22 +1200,30 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       tlsCa: moduleUsesTlsCa(lowered.module),
       ...((ffi?.libraries.length ?? 0) + (opts.nativeLinkInputs?.length ?? 0) > 0
         ? {
-            linkInputs: [
+            linkInputs: Object.freeze([
               ...(ffi?.libraries ?? []),
               ...(opts.nativeLinkInputs ?? []),
-            ],
+            ]),
           }
         : {}),
       ...((ffi?.systemLibraries.length ?? 0) +
           (opts.nativeSystemLibraries?.length ?? 0) > 0
         ? {
-            systemLibraries: [
+            systemLibraries: Object.freeze([
               ...(ffi?.systemLibraries ?? []),
               ...(opts.nativeSystemLibraries ?? []),
-            ],
+            ]),
           }
         : {}),
     });
+    if (opts.nativeBuildExecutor === undefined) {
+      await compileC(nativeBuild);
+    } else {
+      ({ binaryPath } = await opts.nativeBuildExecutor(nativeBuild));
+      if (binaryPath.length === 0) {
+        throw new Error("nativeBuildExecutor returned an empty binary path");
+      }
+    }
   } catch (err) {
     if (ffi !== null && err instanceof CcCompileError) {
       return {
@@ -1216,7 +1248,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   }
   return {
     ok: true,
-    binaryPath: opts.outPath,
+    binaryPath,
     cPath,
     backend,
     ...(irPath !== undefined ? { irPath } : {}),
