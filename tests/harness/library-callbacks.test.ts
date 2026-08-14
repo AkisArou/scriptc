@@ -42,10 +42,12 @@
  *                          legal capacity; standard/package declaration-file
  *                          ambient names stay builtins rather than becoming
  *                          channels, project-owned .d.ts declarations remain
- *                          authored callback surface, and unsupported
- *                          program-authored ambient shapes refuse instead of
- *                          disappearing (SC4001 profile shapes live in
- *                          library-profile.test.ts)
+ *                          authored callback surface (including undeclared
+ *                          channel refusals), narrowed scalar return types
+ *                          refuse because they cannot cover the host ABI's
+ *                          whole domain, and unsupported program-authored
+ *                          ambient shapes refuse instead of disappearing
+ *                          (SC4001 profile shapes live in library-profile.test.ts)
  *   CB7 composition        a runtime-localized AND thread-instanced
  *                          archive with channels: two embedder threads
  *                          register different contexts, chunks route to
@@ -304,6 +306,32 @@ survived, sink_calls=1
     expect(diags[0]!.message).toContain("library callback 'sneaky'");
     expect(diags[0]!.message).toContain("declares no callback channel");
     expect(diags[0]!.note).toContain("channels are declared in the embedder profile");
+  });
+
+  test("CB6: an undeclared callback in a project .d.ts also refuses SC4024", async () => {
+    const diags = await buildRefusal(emission, {
+      tag: "undeclared-project-dts",
+      entry: "lib_undeclared_project_dts.ts",
+      determinism: { teachings: { SC4024: "channels are declared in the embedder profile" } },
+    });
+    expect(diags.map((d) => d.code)).toEqual(["SC4024"]);
+    expect(diags[0]!.message).toContain("library callback 'sneaky'");
+    expect(diags[0]!.message).toContain("declares no callback channel");
+    expect(diags[0]!.note).toContain("channels are declared in the embedder profile");
+  });
+
+  test("CB6: callback returns must cover the full scalar ABI domain", async () => {
+    const diags = await buildRefusal(emission, {
+      tag: "narrow-returns",
+      profileFile: "profile_narrow_returns.json",
+    });
+    expect(diags.map((d) => d.code)).toEqual(["SC4024", "SC4024"]);
+    expect(diags[0]!.message).toContain("library callback 'answerBool'");
+    expect(diags[0]!.message).toContain("return type is 'true'");
+    expect(diags[0]!.message).toContain("may supply any boolean");
+    expect(diags[1]!.message).toContain("library callback 'answerNumber'");
+    expect(diags[1]!.message).toContain("return type is '0'");
+    expect(diags[1]!.message).toContain("may supply any number");
   });
 
   test("CB6: a declaration off the channel's classes refuses SC4024", async () => {

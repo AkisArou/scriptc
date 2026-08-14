@@ -265,6 +265,17 @@ test.each([
     code: "SC5003",
     message: "return type is 'never'",
   },
+  {
+    id: "narrow-return",
+    name: "a narrowed TypeScript return that does not cover the native ABI domain",
+    source: [
+      "declare function nativeScale(value: number): 0;",
+      "console.log('ok');",
+      "",
+    ].join("\n"),
+    code: "SC5003",
+    message: "may supply any number",
+  },
 ])("rejects $name", async ({ id, source, code, message }) => {
   const outDir = join(cacheRoot, `reject-${id}`);
   mkdirSync(outDir, { recursive: true });

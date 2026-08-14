@@ -2530,6 +2530,27 @@ function ffiCallbackInputDiagnostic(
   return null;
 }
 
+/** Values returned by native code flow into TypeScript, so a declaration
+ * must admit the whole scalar domain the ABI class can produce. `mapType`
+ * intentionally widens literal and enum types to their storage type; that
+ * is sound for script-owned values but not for an external return contract
+ * (`(): true` cannot describe a bool callback that is free to return false). */
+function ffiReturnDomainDiagnostic(
+  L: Lowerer,
+  nativeClass: IrFfiImport["returns"],
+  returnType: ts.Type,
+): string | null {
+  if (nativeClass === "void") return null;
+  const domain = nativeClass === "bool" ? "boolean" : "number";
+  const coversDomain = nativeClass === "bool"
+    ? (returnType.flags & ts.TypeFlags.Boolean) !== 0
+    : (returnType.flags & ts.TypeFlags.Number) !== 0;
+  return coversDomain
+    ? null
+    : `the return type is '${L.checker.typeToString(returnType)}', but native class '${nativeClass}' may supply ` +
+      `any ${domain}; declare it as '${domain}'`;
+}
+
 /** The binding surface's diagnostic flavor: native-manifest bindings
  * speak the SC5002/SC5003 FFI codes; library-mode host callbacks are the
  * same recognition machinery under the profile's vocabulary — SC4024 for
@@ -2647,6 +2668,10 @@ function ffiDeclarationDiagnostic(
         `which does not fit manifest class '${binding.returns}'`,
       loc,
     );
+  }
+  const returnDomainDiagnostic = ffiReturnDomainDiagnostic(L, binding.returns, returnType);
+  if (returnDomainDiagnostic !== null) {
+    return signatureDiag(binding.name, returnDomainDiagnostic, loc);
   }
   return null;
 }
@@ -2768,9 +2793,10 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       // program-authored signature-only ambient function that names no
       // channel is the author reaching for the host seam the profile does
       // not provide — refuse with the callback teaching instead of the
-      // ambient ReferenceError lowering. Scoped to non-declaration program
-      // files so lib.d.ts/@types ambients (parseInt, setTimeout, …) keep
-      // every existing lowering; callback-free profiles are untouched.
+      // ambient ReferenceError lowering. Scoped to project-owned source and
+      // declaration files so lib.d.ts/@types/package ambients (parseInt,
+      // setTimeout, …) keep every existing lowering; callback-free profiles
+      // are untouched.
       if (L.libraryCallbacks) {
         const symbol = L.resolveValueSymbol(expr.expression);
         const decls = symbol === null ? [] : L.checker.declarationsOf(symbol);
@@ -2780,7 +2806,7 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
             (decl) =>
               ts.isFunctionDeclaration(decl) &&
               decl.body === undefined &&
-              !decl.getSourceFile().isDeclarationFile,
+              libraryCallbackOwnsFile(L, decl.getSourceFile()),
           );
         if (callbackShaped) {
           L.pushDiag(
