@@ -102,6 +102,54 @@ ScrOwnerGatewayState scr_owner_gateway_state(ScrOwnerGateway *gateway);
  * have lost access to the gateway. */
 bool scr_owner_gateway_destroy(ScrOwnerGateway *gateway);
 
+/* ── retained-callback transport token (scr_callback_token.c) ───────────
+ * The token is the native callback's opaque context. Its storage contains
+ * only immutable transport identity and an atomic state/lease word: foreign
+ * callbacks never read a closure or any other ScriptC heap value. A table
+ * slot and generation are carried to the owner-side invocation function,
+ * where the eventual callback table validates them again. */
+typedef struct ScrCallbackToken ScrCallbackToken;
+typedef struct ScrCallbackInvocation ScrCallbackInvocation;
+typedef bool (*ScrCallbackInvocationFn)(ScrCallbackInvocation *invocation,
+                                        size_t slot, uint64_t generation);
+
+struct ScrCallbackInvocation {
+  ScrOwnerGatewayEvent event;
+  /* The generated thunk initializes these three fields. `signature` is a
+   * compiler-emitted static identity, never a pointer into the runtime heap. */
+  const void *signature;
+  ScrCallbackInvocationFn invoke;
+  ScrOwnerGatewayDestroyFn payload_destroy;
+  /* Runtime-private after successful admission. */
+  ScrCallbackToken *token;
+};
+
+typedef enum {
+  SCR_CALLBACK_TOKEN_ACTIVE = 0,
+  SCR_CALLBACK_TOKEN_CLOSING = 1,
+  SCR_CALLBACK_TOKEN_DISPOSED = 2,
+} ScrCallbackTokenState;
+
+ScrCallbackToken *scr_callback_token_new(ScrOwnerGateway *gateway,
+                                          size_t slot, uint64_t generation,
+                                          const void *signature);
+/* Invocation ownership always transfers. Successful admission acquires a
+ * lease before queue publication. Rejection destroys the copied payload on
+ * the calling thread without touching ScriptC heap state. */
+bool scr_callback_token_admit(ScrCallbackToken *token,
+                              ScrCallbackInvocation *invocation);
+/* Owner-only. The transition linearizes against admission: every admission
+ * that won before CLOSING remains deliverable and owns a lease. */
+bool scr_callback_token_begin_close(ScrCallbackToken *token);
+/* Owner-only, and only after the native cancellation operation guarantees
+ * that no callback can still start or retain the opaque token pointer. */
+bool scr_callback_token_cancellation_complete(ScrCallbackToken *token);
+/* Owner-only. Frees the token only after close, cancellation, and the exact
+ * release of every admitted invocation lease. */
+bool scr_callback_token_try_destroy(ScrCallbackToken *token);
+ScrCallbackTokenState scr_callback_token_state(ScrCallbackToken *token);
+size_t scr_callback_token_leases(ScrCallbackToken *token);
+
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
  * Every unrecoverable runtime trap — OOM, semantic range traps, internal-
  * invariant failures — funnels through this pair instead of open-coded
