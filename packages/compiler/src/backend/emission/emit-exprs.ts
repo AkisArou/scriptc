@@ -2348,34 +2348,33 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             throw new Error(`emitter bug: incomplete native handle metadata in ${binding.id}`);
           }
           const raw = `sc_t${E.tempCounter++}`;
+          const prepared = `sc_t${E.tempCounter++}`;
+          E.line(
+            `ScrNativeHandle *${prepared} = scr_native_handle_prepare(` +
+              `&${destructor.entry.symbol}, &${mangleNativeHandleTag(definition.id)}, ` +
+              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
+          );
+          for (const token of retainedTokens.values()) {
+            E.line(`scr_retained_callbacks_prepare(${prepared}, ${token});`);
+          }
           E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
-          const wrap =
-            `scr_native_handle_new(${raw}, &${destructor.entry.symbol}, ` +
-            `&${mangleNativeHandleTag(definition.id)}, ` +
-            `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))})`;
           let result: Temp;
           if (binding.error.kind === "nullable") {
             result = E.newTemp(e.type, "NULL");
             E.line(`if (${raw} == NULL) {`);
             E.indent++;
-            for (const token of retainedTokens.values()) {
-              E.line(`scr_retained_callbacks_abandon(${token});`);
-            }
+            E.line(`scr_native_handle_abandon(${prepared});`);
             E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
             E.indent--;
             E.line("} else {");
             E.indent++;
-            E.line(`${result.name} = ${wrap};`);
-            for (const token of retainedTokens.values()) {
-              E.line(`scr_retained_callbacks_attach(${result.name}, ${token});`);
-            }
+            E.line(`scr_native_handle_commit(${prepared}, ${raw});`);
+            E.line(`${result.name} = ${prepared};`);
             E.indent--;
             E.line("}");
           } else {
-            result = E.newTemp(e.type, wrap);
-            for (const token of retainedTokens.values()) {
-              E.line(`scr_retained_callbacks_attach(${result.name}, ${token});`);
-            }
+            E.line(`scr_native_handle_commit(${prepared}, ${raw});`);
+            result = E.newTemp(e.type, prepared);
           }
           E.emitPendingCheck();
           releaseArguments();

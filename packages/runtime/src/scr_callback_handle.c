@@ -20,6 +20,21 @@ static void scr_callback_handle_begin(void *opaque) {
   }
 }
 
+static void scr_callback_handle_commit(void *opaque) {
+  ScrCallbackHandleEdge *edge = opaque;
+  if (!scr_callback_table_claim_owner(edge->table, edge->token)) {
+    scr_trap("scriptc: callback registration already has an owner\n");
+  }
+}
+
+static void scr_callback_handle_abandon(void *opaque) {
+  ScrCallbackHandleEdge *edge = opaque;
+  if (!scr_callback_table_abandon(edge->table, edge->token)) {
+    scr_trap("scriptc: staged callback registration could not be abandoned\n");
+  }
+  (void)scr_callback_table_collect(edge->table);
+}
+
 static void scr_callback_handle_complete(void *opaque) {
   ScrCallbackHandleEdge *edge = opaque;
   if (!scr_callback_table_cancellation_complete(edge->table, edge->token)) {
@@ -30,17 +45,15 @@ static void scr_callback_handle_complete(void *opaque) {
 
 static void scr_callback_handle_destroy(void *opaque) { free(opaque); }
 
-void scr_native_handle_attach_callback(ScrNativeHandle *handle,
-                                       ScrCallbackTable *table,
-                                       ScrCallbackToken *token) {
-  if (!scr_callback_table_claim_owner(table, token)) {
-    scr_trap("scriptc: callback registration already has an owner\n");
-  }
+void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
+                                        ScrCallbackTable *table,
+                                        ScrCallbackToken *token) {
   ScrCallbackHandleEdge *edge = malloc(sizeof *edge);
   if (edge == NULL) scr_trap("scriptc: out of memory\n");
   edge->table = table;
   edge->token = token;
-  scr_native_handle_attach_lifecycle(
-      handle, edge, scr_callback_handle_begin, scr_callback_handle_complete,
+  scr_native_handle_prepare_lifecycle(
+      handle, edge, scr_callback_handle_commit, scr_callback_handle_abandon,
+      scr_callback_handle_begin, scr_callback_handle_complete,
       scr_callback_handle_destroy);
 }

@@ -6684,7 +6684,23 @@ class LlEmitter {
             throw new Error(`llvm emitter bug: incomplete native handle metadata in ${binding.id}`);
           }
           this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
-          this.declare(`declare ptr @scr_native_handle_new(ptr, ptr, ptr, ptr)`);
+          this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
+          this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
+          this.declare(`declare void @scr_native_handle_abandon(ptr)`);
+          const prepared = B.tmp();
+          B.line(
+            `${prepared} = call ptr @scr_native_handle_prepare(` +
+              `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+              `ptr ${this.cstr(definition.nativeName)})`,
+          );
+          if (retainedTokens.size > 0) {
+            this.declare(`declare void @scr_retained_callbacks_prepare(ptr, ptr)`);
+            for (const token of retainedTokens.values()) {
+              B.line(
+                `call void @scr_retained_callbacks_prepare(ptr ${prepared}, ptr ${token})`,
+              );
+            }
+          }
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
           let result: string;
@@ -6700,16 +6716,7 @@ class LlEmitter {
             B.line(`${isNull} = icmp eq ptr ${raw}, null`);
             B.condBr(isNull, nullBlock, wrapBlock);
             B.startBlock(nullBlock);
-            if (retainedTokens.size > 0) {
-              this.declare(
-                `declare void @scr_retained_callbacks_abandon(ptr)`,
-              );
-              for (const token of retainedTokens.values()) {
-                B.line(
-                  `call void @scr_retained_callbacks_abandon(ptr ${token})`,
-                );
-              }
-            }
+            B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
             this.declare("declare zeroext i1 @scr_exc_pending()");
             const pending = B.tmp();
             B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
@@ -6719,44 +6726,15 @@ class LlEmitter {
             B.line(`call void @scr_native_throw_null(ptr ${operation})`);
             B.br(continuation);
             B.startBlock(wrapBlock);
-            const wrapped = B.tmp();
-            B.line(
-              `${wrapped} = call ptr @scr_native_handle_new(ptr ${raw}, ` +
-                `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
-                `ptr ${this.cstr(definition.nativeName)})`,
-            );
-            if (retainedTokens.size > 0) {
-              this.declare(
-                `declare void @scr_retained_callbacks_attach(ptr, ptr)`,
-              );
-              for (const token of retainedTokens.values()) {
-                B.line(
-                  `call void @scr_retained_callbacks_attach(ptr ${wrapped}, ptr ${token})`,
-                );
-              }
-            }
-            B.line(`store ptr ${wrapped}, ptr ${resultSlot}`);
+            B.line(`call void @scr_native_handle_commit(ptr ${prepared}, ptr ${raw})`);
+            B.line(`store ptr ${prepared}, ptr ${resultSlot}`);
             B.br(continuation);
             B.startBlock(continuation);
             result = B.tmp();
             B.line(`${result} = load ptr, ptr ${resultSlot}`);
           } else {
-            result = B.tmp();
-            B.line(
-              `${result} = call ptr @scr_native_handle_new(ptr ${raw}, ` +
-                `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
-                `ptr ${this.cstr(definition.nativeName)})`,
-            );
-            if (retainedTokens.size > 0) {
-              this.declare(
-                `declare void @scr_retained_callbacks_attach(ptr, ptr)`,
-              );
-              for (const token of retainedTokens.values()) {
-                B.line(
-                  `call void @scr_retained_callbacks_attach(ptr ${result}, ptr ${token})`,
-                );
-              }
-            }
+            B.line(`call void @scr_native_handle_commit(ptr ${prepared}, ptr ${raw})`);
+            result = prepared;
           }
           const value = this.own({ name: result, type: e.type });
           this.emitPendingCheck();

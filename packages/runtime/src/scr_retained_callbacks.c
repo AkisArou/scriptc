@@ -61,20 +61,12 @@ ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
   return token;
 }
 
-void scr_retained_callbacks_abandon(ScrCallbackToken *token) {
-  if (token == NULL || scr_retained_table == NULL ||
-      !scr_callback_table_abandon(scr_retained_table, token)) {
-    scr_trap("scriptc: invalid staged retained callback cancellation\n");
-  }
-  (void)scr_callback_table_collect(scr_retained_table);
-}
-
-void scr_retained_callbacks_attach(ScrNativeHandle *handle,
-                                   ScrCallbackToken *token) {
+void scr_retained_callbacks_prepare(ScrNativeHandle *handle,
+                                    ScrCallbackToken *token) {
   if (scr_retained_table == NULL) {
     scr_trap("scriptc: retained callback service is not configured\n");
   }
-  scr_native_handle_attach_callback(handle, scr_retained_table, token);
+  scr_native_handle_prepare_callback(handle, scr_retained_table, token);
 }
 
 size_t scr_retained_callbacks_drain(size_t budget) {

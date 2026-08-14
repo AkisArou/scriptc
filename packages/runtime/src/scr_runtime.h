@@ -2775,16 +2775,17 @@ ScrFileHandle *scr_file_handle_retain(ScrFileHandle *h);
 void scr_file_handle_release(ScrFileHandle *h);
 void *scr_file_handle_retain_v(void *p);
 void scr_file_handle_release_v(void *p);
-/* Native IR's opaque foreign-reference cell. `type_tag` is the address of
- * one compiler-emitted static byte, giving nominal identity without putting
- * manifest names or foreign pointers into user-visible storage. The cell
- * owns `foreign` until explicit dispose or its last ScriptC reference. */
+/* Native IR's opaque foreign-reference cell. Allocation and lifecycle-edge
+ * preparation happen before the native factory call. `commit` atomically
+ * adopts its non-null result without allocation; `abandon` rolls back a null
+ * result. Thus native resources cannot be stranded by runtime OOM. */
 typedef void (*ScrNativeDestructor)(void *foreign);
 typedef void (*ScrNativeLifecycleFn)(void *context);
-ScrNativeHandle *scr_native_handle_new(void *foreign,
-                                       ScrNativeDestructor destructor,
-                                       const void *type_tag,
-                                       const char *type_name);
+ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
+                                           const void *type_tag,
+                                           const char *type_name);
+void scr_native_handle_commit(ScrNativeHandle *handle, void *foreign);
+void scr_native_handle_abandon(ScrNativeHandle *handle);
 ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle);
 void scr_native_handle_release(ScrNativeHandle *handle);
 void *scr_native_handle_retain_v(void *handle);
@@ -2795,17 +2796,17 @@ void *scr_native_handle_require(ScrNativeHandle *handle,
 void scr_native_handle_dispose(ScrNativeHandle *handle,
                                const void *type_tag,
                                const char *operation);
-/* Generic pre/post-destruction edge. All begin hooks run before the foreign
- * destructor; all complete hooks run after it has quiesced native work. */
-void scr_native_handle_attach_lifecycle(ScrNativeHandle *handle,
-                                        void *context,
-                                        ScrNativeLifecycleFn begin,
-                                        ScrNativeLifecycleFn complete,
-                                        ScrNativeLifecycleFn destroy_context);
+/* A prepared lifecycle edge allocates before the native call. Commit adopts
+ * it with the result; abandon rolls it back. For a live handle, all begin
+ * hooks run before the foreign destructor and all complete hooks after it. */
+void scr_native_handle_prepare_lifecycle(
+    ScrNativeHandle *handle, void *context, ScrNativeLifecycleFn commit,
+    ScrNativeLifecycleFn abandon, ScrNativeLifecycleFn begin,
+    ScrNativeLifecycleFn complete, ScrNativeLifecycleFn destroy_context);
 /* Result-owned retained callback association (scr_callback_handle.c). */
-void scr_native_handle_attach_callback(ScrNativeHandle *handle,
-                                       ScrCallbackTable *table,
-                                       ScrCallbackToken *token);
+void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
+                                        ScrCallbackTable *table,
+                                        ScrCallbackToken *token);
 /* Per-ScriptC-instance retained-callback service. The target configures its
  * thread-safe owner wake before registrations can be created. Registration
  * borrows the closure and installs an explicit table root. Generated native
@@ -2819,9 +2820,8 @@ bool scr_retained_callbacks_configure(ScrOwnerGatewayWakeFn wake,
 bool scr_retained_callbacks_configured(void);
 ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
                                                    const void *signature);
-void scr_retained_callbacks_abandon(ScrCallbackToken *token);
-void scr_retained_callbacks_attach(ScrNativeHandle *handle,
-                                   ScrCallbackToken *token);
+void scr_retained_callbacks_prepare(ScrNativeHandle *handle,
+                                    ScrCallbackToken *token);
 size_t scr_retained_callbacks_drain(size_t budget);
 size_t scr_retained_callbacks_active(void);
 bool scr_retained_callbacks_shutdown(bool deliver_pending);

@@ -44,14 +44,26 @@ _Noreturn void scr_trap(const char *message) {
 
 bool scr_exc_pending(void) { return false; }
 
-void scr_native_handle_attach_callback(ScrNativeHandle *handle,
-                                       ScrCallbackTable *table,
-                                       ScrCallbackToken *token) {
+void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
+                                        ScrCallbackTable *table,
+                                        ScrCallbackToken *token) {
   assert(handle != NULL);
   assert(attached_table == NULL && attached_token == NULL);
-  assert(scr_callback_table_claim_owner(table, token));
   attached_table = table;
   attached_token = token;
+}
+
+static void commit_prepared(void) {
+  assert(attached_table != NULL && attached_token != NULL);
+  assert(scr_callback_table_claim_owner(attached_table, attached_token));
+}
+
+static void abandon_prepared(void) {
+  assert(attached_table != NULL && attached_token != NULL);
+  assert(scr_callback_table_abandon(attached_table, attached_token));
+  (void)scr_callback_table_collect(attached_table);
+  attached_table = NULL;
+  attached_token = NULL;
 }
 
 static ScrClosure *new_closure(void) {
@@ -144,7 +156,8 @@ int main(void) {
   assert(state->total == 5050);
   assert(atomic_load(&invocations_destroyed) == 100);
 
-  scr_retained_callbacks_attach((ScrNativeHandle *)(uintptr_t)1, token);
+  scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
+  commit_prepared();
   cancel_attached();
   assert(scr_retained_callbacks_drain(0) == 0);
   assert(scr_retained_callbacks_active() == 0 && closure->rc == 1);
@@ -166,7 +179,8 @@ int main(void) {
   assert(((TestClosureState *)closure->fn)->total == 7);
   assert(atomic_load(&invocations_destroyed) == 102);
   assert(scr_retained_callbacks_configured());
-  scr_retained_callbacks_abandon(token);
+  scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
+  abandon_prepared();
   assert(scr_retained_callbacks_active() == 0);
   scr_closure_release(closure);
   assert(atomic_load(&closures_freed) == 2);
@@ -181,7 +195,8 @@ int main(void) {
   assert(token != NULL);
   assert(scr_callback_token_admit(
       token, &new_invocation(19, false)->invocation));
-  scr_retained_callbacks_abandon(token);
+  scr_retained_callbacks_prepare((ScrNativeHandle *)(uintptr_t)1, token);
+  abandon_prepared();
   assert(scr_retained_callbacks_drain(0) == 1);
   assert(((TestClosureState *)closure->fn)->total == 0);
   assert(scr_retained_callbacks_active() == 0);

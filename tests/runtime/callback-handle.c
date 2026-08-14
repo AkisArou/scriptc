@@ -105,13 +105,14 @@ int main(void) {
       scr_callback_table_register(table, anchor, &signature);
   assert(token != NULL);
 
+  ScrNativeHandle *handle = scr_native_handle_prepare(
+      destroy_foreign, &type_tag, "TestSubscription");
+  assert(handle != NULL);
+  scr_native_handle_prepare_callback(handle, table, token);
   TestForeign *foreign = malloc(sizeof *foreign);
   assert(foreign != NULL);
   foreign->token = token;
-  ScrNativeHandle *handle = scr_native_handle_new(
-      foreign, destroy_foreign, &type_tag, "TestSubscription");
-  assert(handle != NULL);
-  scr_native_handle_attach_callback(handle, table, token);
+  scr_native_handle_commit(handle, foreign);
   assert(scr_callback_token_admit(
       token, &new_invocation(7)->invocation));
 
@@ -130,6 +131,26 @@ int main(void) {
   assert(atomic_load(&events_destroyed) == 2);
   scr_native_handle_release(handle);
   assert(atomic_load(&handles_allocated) == 0);
+
+  /* A failed factory rolls back its staged edge without ever claiming an
+   * owner. Payloads admitted during the call are destroyed, not delivered. */
+  anchor = calloc(1, sizeof *anchor);
+  assert(anchor != NULL);
+  anchor->rc = 1;
+  token = scr_callback_table_register(table, anchor, &signature);
+  assert(token != NULL);
+  handle = scr_native_handle_prepare(
+      destroy_foreign, &type_tag, "TestSubscription");
+  scr_native_handle_prepare_callback(handle, table, token);
+  assert(scr_callback_token_admit(
+      token, &new_invocation(41)->invocation));
+  scr_native_handle_abandon(handle);
+  assert(atomic_load(&handles_allocated) == 0);
+  assert(scr_owner_gateway_drain(gateway, 0) == 1);
+  assert(anchor->total == 0);
+  assert(scr_callback_table_collect(table) == 1);
+  assert(atomic_load(&anchors_freed) == 2);
+  assert(atomic_load(&events_destroyed) == 3);
 
   scr_owner_gateway_stop_accepting(gateway);
   assert(scr_callback_table_destroy(table));

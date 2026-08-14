@@ -1943,7 +1943,21 @@ describe.each(["c", "llvm"] as const)(
         "utf8",
       );
       expect(generated).toContain("scr_callback_invocation_alloc");
-      expect(generated).toContain("scr_retained_callbacks_attach");
+      expect(generated).toContain("scr_retained_callbacks_prepare");
+      expect(generated).toContain("scr_native_handle_commit");
+      expect(generated).toContain("scr_native_handle_abandon");
+      const prepareCall = backend === "c"
+        ? generated.indexOf("= scr_native_handle_prepare(")
+        : generated.indexOf("= call ptr @scr_native_handle_prepare(");
+      const factoryCall = backend === "c"
+        ? generated.indexOf("= nts_subscription_create(")
+        : generated.indexOf("= call ptr @nts_subscription_create(");
+      const commitCall = backend === "c"
+        ? generated.indexOf("scr_native_handle_commit(")
+        : generated.indexOf("call void @scr_native_handle_commit(");
+      expect(prepareCall).toBeGreaterThanOrEqual(0);
+      expect(factoryCall).toBeGreaterThan(prepareCall);
+      expect(commitCall).toBeGreaterThan(factoryCall);
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,
