@@ -39,8 +39,9 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeCallbackArgumentType, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -124,6 +125,17 @@ function ffiCallbackPointerTypeC(callback: IrFfiCallbackParam["callback"]): stri
 
 function ffiCallbackDummyC(callback: IrFfiCallbackParam["callback"]): string {
   return callback.returns === "void" ? "" : "0";
+}
+
+function nativeCallbackPointerTypeC(
+  callback: Extract<IrNativeBinding["parameters"][number]["type"], { kind: "nativeCallback" }>,
+): string {
+  const signature = callback.signature;
+  const params = [
+    ...signature.parameters.map((parameter) => cType(parameter).trim()),
+    "void *",
+  ];
+  return `${cType(signature.result).trim()} (*)(${params.join(", ")})`;
 }
 
 export class CEmitter {
@@ -236,6 +248,8 @@ export class CEmitter {
    * pointers additionally get a distinct TLS context slot, so two
    * callbacks with the same signature never alias each other's closure. */
   readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
+  /** One context-carrying C trampoline per logical Native IR callback. */
+  readonly nativeCallbackAdapters: Map<string, NativeCallbackAdapter>;
   readonly globalsById = new Map<string, IrGlobal>();
   readonly unionsById = new Map<string, IrUnionDef>();
   /** Active optional-chain bind temps, by chain id (chainRecv reads). */
@@ -401,6 +415,10 @@ export class CEmitter {
     sourceText?: string,
   ) {
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
+    this.nativeCallbackAdapters = allocateNativeCallbackAdapters(
+      mod.nativeBindings ?? [],
+      mod.ffiImports ?? [],
+    );
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
@@ -764,6 +782,10 @@ export class CEmitter {
           ? "void *"
           : type.kind === "nativePointer"
             ? `${type.const ? "const " : ""}void *`
+            : type.kind === "nativeCallback"
+              ? nativeCallbackPointerTypeC(type)
+              : type.kind === "nativeContext"
+                ? "void *"
             : cType(type).trim();
       const params = binding.parameters.map((parameter) => nativeAbiType(parameter.type));
       out.push(
@@ -774,6 +796,7 @@ export class CEmitter {
     if ((this.mod.nativeBindings?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
     this.emitFfiCallbackDefs(out);
+    this.emitNativeCallbackDefs(out);
     // Class objects (classes as values): construct-thunk prototypes plus
     // the immortal statics that take their addresses — after the function
     // signatures (the thunks call sc_new_*/the constructors), before
@@ -1816,6 +1839,16 @@ export class CEmitter {
     return adapter;
   }
 
+  nativeCallbackAdapter(binding: string, argument: number): NativeCallbackAdapter {
+    const adapter = this.nativeCallbackAdapters.get(
+      nativeCallbackAdapterKey(binding, argument),
+    );
+    if (!adapter) {
+      throw new Error(`emitter bug: no native callback adapter for ${binding}:${argument}`);
+    }
+    return adapter;
+  }
+
   /** C-callable trampolines for format-2 callbacks. The external callback
    * ABI is scalar C plus an optional exact-position context pointer; the
    * internal side is scriptc's (ScrClosure *env, params...) convention.
@@ -1876,6 +1909,36 @@ export class CEmitter {
           break;
       }
       out.push(`}`, ``);
+    }
+  }
+
+  /** C-callable exact-scalar Native IR callback trampolines. The physical
+   * context is the borrowed ScrClosure itself, so nested and reentrant calls
+   * require no TLS and preserve callback identity exactly. */
+  emitNativeCallbackDefs(out: string[]): void {
+    for (const adapter of this.nativeCallbackAdapters.values()) {
+      const signature = adapter.callback.signature;
+      const nativeParams = [
+        ...signature.parameters.map((parameter, index) =>
+          `${cType(parameter).trim()} sc_a${index}`
+        ),
+        "void *sc_ctx",
+      ];
+      const ret = cType(signature.result).trim();
+      out.push(
+        `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
+        `  ScrClosure *sc_cb = (ScrClosure *)sc_ctx;`,
+        `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
+        `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
+      );
+      const sourceType = nativeCallbackArgumentType(signature);
+      const args = signature.parameters.map((_parameter, index) => `sc_a${index}`);
+      const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+      if (signature.result.kind === "void") {
+        out.push(`  ${call};`, `}`, ``);
+      } else {
+        out.push(`  return ${call};`, `}`, ``);
+      }
     }
   }
 

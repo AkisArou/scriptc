@@ -148,18 +148,60 @@ export interface IrNativePointerType {
   addressSpace: 0;
 }
 
-export type IrNativeAbiType = IrNativeValueType | IrNativePointerType;
+export interface IrNativeCallbackSignature {
+  callingConvention: "c";
+  parameters: IrNativeScalarType[];
+  result: IrNativeScalarType | { kind: "void" };
+  context: { placement: "last" };
+}
+
+/** A C function pointer that exists only in a physical native signature. */
+export interface IrNativeCallbackType {
+  kind: "nativeCallback";
+  signature: IrNativeCallbackSignature;
+}
+
+/** Opaque ScriptC closure context passed beside a native callback pointer. */
+export interface IrNativeContextType {
+  kind: "nativeContext";
+  addressSpace: 0;
+}
+
+export type IrNativeCallbackArgumentType = {
+  kind: "func";
+  params: IrNativeScalarType[];
+  ret: IrNativeScalarType | { kind: "void" };
+};
+
+export function nativeCallbackArgumentType(
+  signature: IrNativeCallbackSignature,
+): IrNativeCallbackArgumentType {
+  return {
+    kind: "func",
+    params: signature.parameters.map((parameter) => ({ ...parameter })),
+    ret: { ...signature.result },
+  };
+}
+
+export type IrNativeAbiType =
+  | IrNativeValueType
+  | IrNativePointerType
+  | IrNativeCallbackType
+  | IrNativeContextType;
 export type IrNativeArgumentType =
   | IrNativeValueType
   | { kind: "string" }
-  | (IrBytesType & { elem: "u8" });
+  | (IrBytesType & { elem: "u8" })
+  | IrNativeCallbackArgumentType;
 
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
   | { kind: "bytesData"; argument: number }
-  | { kind: "bytesByteLength"; argument: number };
+  | { kind: "bytesByteLength"; argument: number }
+  | { kind: "callbackFunction"; argument: number }
+  | { kind: "callbackContext"; argument: number };
 
 export type IrType =
   | IrNativeValueType
@@ -853,7 +895,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 11;
+  irVersion: 12;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -961,7 +1003,8 @@ export interface IrNativeBinding {
     ownership:
       | { kind: "value" }
       | { kind: "borrowed"; scope: "call" }
-      | { kind: "owned"; transfer: "to-native" };
+      | { kind: "owned"; transfer: "to-native" }
+      | { kind: "callScoped" };
     projection: IrNativeParameterProjection;
   }[];
   result: {

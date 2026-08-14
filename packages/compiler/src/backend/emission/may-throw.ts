@@ -34,6 +34,15 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
       .filter((entry) => entry.params.some(isFfiCallbackParam))
       .map((entry) => entry.name),
   );
+  const callbackNativeBindings = new Set(
+    (mod.nativeBindings ?? [])
+      .filter((binding) =>
+        binding.parameters.some((parameter) =>
+          parameter.projection.kind === "callbackFunction"
+        )
+      )
+      .map((binding) => binding.id),
+  );
   // Method name → every class's implementation of it (virtualCall callees).
   const methodImpls = new Map<string, string[]>();
   for (const cls of mod.classes ?? []) {
@@ -173,6 +182,12 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           // Its exception stays pending until the outer native call
           // returns, where the emitter checks and unwinds normally.
           if (callbackFfiImports.has(rec["import"] as string)) f.throws = true;
+          break;
+        case "nativeCall":
+          // Native IR callback trampolines use the same pending-exception
+          // protocol as value FFI: script exceptions unwind after the outer
+          // synchronous native call returns.
+          if (callbackNativeBindings.has(rec["binding"] as string)) f.throws = true;
           break;
         case "bytesNew": {
           // The size form (`new Uint8Array(n)`) throws Node's "Invalid

@@ -10,6 +10,9 @@ import type {
   IrGlobal,
   IrLibFn,
   IrModule,
+  IrNativeCallbackArgumentType,
+  IrNativeCallbackSignature,
+  IrNativeScalarType,
   IrRecordShape,
   IrRegexIntrinsicMethod,
   IrStmt,
@@ -18,7 +21,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeCallbackArgumentType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1211,10 +1214,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   const nativeId = /^[A-Za-z0-9@][A-Za-z0-9@/_.:#-]*$/;
   const cIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
   const nativeTypesById = new Map<string, NonNullable<IrModule["nativeTypes"]>[number]>();
-  const validNativeScalar = (type: IrType): boolean =>
-    type.kind === "nativeScalar" &&
-    (type.scalar === "f64" ||
-      nativeIntegerInfo(type.scalar, validNativeTarget ? nativePointerBits : undefined) !== null);
+  const validNativeScalar = (type: unknown): type is IrNativeScalarType => {
+    if (typeof type !== "object" || type === null) return false;
+    const candidate = type as Partial<IrNativeScalarType>;
+    return candidate.kind === "nativeScalar" &&
+      candidate.scalar !== undefined &&
+      (candidate.scalar === "f64" ||
+        nativeIntegerInfo(candidate.scalar, validNativeTarget ? nativePointerBits : undefined) !== null);
+  };
   const nativeScalarSize = (scalar: string): number | null => {
     if (scalar === "f64") return 8;
     const info = nativeIntegerInfo(scalar, validNativeTarget ? nativePointerBits : undefined);
@@ -1287,6 +1294,37 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     ["i8", "u8"].includes(type.pointee) &&
     typeof type.const === "boolean" &&
     type.addressSpace === 0;
+  const validNativeCallbackArgument = (
+    type: unknown,
+  ): type is IrNativeCallbackArgumentType => {
+    if (typeof type !== "object" || type === null) return false;
+    const candidate = type as Partial<IrNativeCallbackArgumentType>;
+    const result = candidate.ret;
+    return candidate.kind === "func" &&
+      Array.isArray(candidate.params) &&
+      candidate.params.every(validNativeScalar) &&
+      (validNativeScalar(result) ||
+        (typeof result === "object" && result !== null && result.kind === "void"));
+  };
+  const validNativeCallback = (
+    type: NonNullable<IrModule["nativeBindings"]>[number]["parameters"][number]["type"],
+  ): boolean => {
+    if (type.kind !== "nativeCallback" || typeof type.signature !== "object" || type.signature === null) {
+      return false;
+    }
+    const signature = type.signature as Partial<IrNativeCallbackSignature>;
+    const result = signature.result;
+    const context = signature.context;
+    return signature.callingConvention === "c" &&
+      Array.isArray(signature.parameters) &&
+      signature.parameters.every(validNativeScalar) &&
+      (validNativeScalar(result) ||
+        (typeof result === "object" && result !== null && result.kind === "void")) &&
+      typeof context === "object" && context !== null && context.placement === "last";
+  };
+  const validNativeContext = (
+    type: NonNullable<IrModule["nativeBindings"]>[number]["parameters"][number]["type"],
+  ): boolean => type.kind === "nativeContext" && type.addressSpace === 0;
   if (
     (mod.nativeTypes ?? []).some((definition) => definition.kind === "struct") &&
     (!validNativeTarget || mod.nativeTarget?.abi === "")
@@ -1361,6 +1399,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       if (
         argument.type.kind !== "string" &&
         !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
+        !validNativeCallbackArgument(argument.type) &&
         !validNativeValue(argument.type)
       ) {
         errors.push({
@@ -1375,6 +1414,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       utf8ByteLength: 0,
       bytesData: 0,
       bytesByteLength: 0,
+      callbackFunction: 0,
+      callbackContext: 0,
       total: 0,
     }));
     const parameterNames = new Set<string>();
@@ -1388,7 +1429,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       parameterNames.add(parameter.name);
       const handleParameter = parameter.type.kind === "nativeHandle";
       const pointerParameter = parameter.type.kind === "nativePointer";
-      if (parameter.passMode !== (handleParameter || pointerParameter ? "pointer" : "value")) {
+      const callbackParameter = parameter.type.kind === "nativeCallback";
+      const contextParameter = parameter.type.kind === "nativeContext";
+      if (
+        parameter.passMode !==
+          (handleParameter || pointerParameter || callbackParameter || contextParameter
+            ? "pointer"
+            : "value")
+      ) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has a pass mode inconsistent with its type`,
           loc: moduleLoc,
@@ -1399,6 +1447,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ? parameter.ownership.kind !== "borrowed" && parameter.ownership.kind !== "owned"
           : pointerParameter
             ? parameter.ownership.kind !== "borrowed"
+            : callbackParameter || contextParameter
+              ? parameter.ownership.kind !== "callScoped"
             : parameter.ownership.kind !== "value"
       ) {
         errors.push({
@@ -1406,11 +1456,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
-      if (
-        parameter.type.kind === "nativePointer"
-          ? !validNativePointer(parameter.type)
-          : !validNativeValue(parameter.type)
-      ) {
+      const validParameterType = parameter.type.kind === "nativePointer"
+        ? validNativePointer(parameter.type)
+        : parameter.type.kind === "nativeCallback"
+          ? validNativeCallback(parameter.type)
+          : parameter.type.kind === "nativeContext"
+            ? validNativeContext(parameter.type)
+            : validNativeValue(parameter.type);
+      if (!validParameterType) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
           loc: moduleLoc,
@@ -1435,7 +1488,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           projectionCounts.direct++;
           if (
             parameter.type.kind === "nativePointer" ||
+            parameter.type.kind === "nativeCallback" ||
+            parameter.type.kind === "nativeContext" ||
             sourceArgument.type.kind === "string" ||
+            sourceArgument.type.kind === "bytes" ||
+            sourceArgument.type.kind === "func" ||
             !typeEquals(parameter.type, sourceArgument.type)
           ) {
             errors.push({
@@ -1506,6 +1563,35 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        case "callbackFunction":
+          projectionCounts.callbackFunction++;
+          if (
+            !validNativeCallbackArgument(sourceArgument.type) ||
+            parameter.type.kind !== "nativeCallback" ||
+            !validNativeCallback(parameter.type) ||
+            !typeEquals(sourceArgument.type, nativeCallbackArgumentType(parameter.type.signature)) ||
+            parameter.ownership.kind !== "callScoped"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-function projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "callbackContext":
+          projectionCounts.callbackContext++;
+          if (
+            sourceArgument.type.kind !== "func" ||
+            parameter.type.kind !== "nativeContext" ||
+            !validNativeContext(parameter.type) ||
+            parameter.ownership.kind !== "callScoped"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-context projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
       }
     }
     binding.arguments.forEach((argument, argumentIndex) => {
@@ -1519,6 +1605,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             ? projections.total === 2 &&
               projections.bytesData === 1 &&
               projections.bytesByteLength === 1
+            : argument.type.kind === "func"
+              ? projections.total === 2 &&
+                projections.callbackFunction === 1 &&
+                projections.callbackContext === 1
             : projections.total === 1 && projections.direct === 1;
       if (!valid) {
         errors.push({

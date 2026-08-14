@@ -81,9 +81,10 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeCallbackArgumentType, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -1038,6 +1039,8 @@ class LlEmitter {
   /** C-ABI callback trampolines and (for raw/no-userdata callbacks) their
    * distinct call-scoped TLS closure slots. */
   private readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
+  /** Context-carrying exact-scalar Native IR callback trampolines. */
+  private readonly nativeCallbackAdapters: Map<string, NativeCallbackAdapter>;
   private readonly globalTypes = new Map<string, IrType>();
   /** May-throw analysis (the C emitter's computeMayThrow, shared): pending
    * checks are emitted only after calls that can actually raise. */
@@ -1159,6 +1162,10 @@ class LlEmitter {
     // bytes behind a wasm32 object and 16 bytes behind a 64-bit object.
     this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
+    this.nativeCallbackAdapters = allocateNativeCallbackAdapters(
+      mod.nativeBindings ?? [],
+      mod.ffiImports ?? [],
+    );
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
@@ -1348,7 +1355,11 @@ class LlEmitter {
   private nativeParameterType(
     t: IrNativeBinding["parameters"][number]["type"],
   ): string {
-    if (t.kind === "nativePointer") return "ptr";
+    if (
+      t.kind === "nativePointer" ||
+      t.kind === "nativeCallback" ||
+      t.kind === "nativeContext"
+    ) return "ptr";
     if (t.kind === "nativeStruct") {
       const definition = this.nativeTypesById.get(t.typeId);
       if (definition?.kind !== "struct") throw new Error(`llvm emitter bug: unknown native struct ${t.typeId}`);
@@ -1408,6 +1419,16 @@ class LlEmitter {
   private ffiCallbackAdapter(binding: string, id: string): FfiCallbackAdapter {
     const adapter = this.ffiCallbackAdapters.get(`${binding}:${id}`);
     if (!adapter) throw new Error(`llvm emitter bug: no callback adapter for ${binding}:${id}`);
+    return adapter;
+  }
+
+  private nativeCallbackAdapter(binding: string, argument: number): NativeCallbackAdapter {
+    const adapter = this.nativeCallbackAdapters.get(
+      nativeCallbackAdapterKey(binding, argument),
+    );
+    if (!adapter) {
+      throw new Error(`llvm emitter bug: no native callback adapter for ${binding}:${argument}`);
+    }
     return adapter;
   }
 
@@ -1515,6 +1536,64 @@ class LlEmitter {
     return { globals, defs };
   }
 
+  /** LLVM definitions for exact-scalar Native IR callbacks. The context
+   * pointer is the borrowed closure, and callback exceptions remain pending
+   * until the outer native call performs its ordinary unwind check. */
+  private emitNativeCallbackDefs(): string[] {
+    const defs: string[] = [];
+    if (this.nativeCallbackAdapters.size === 0) return defs;
+    this.declare(`declare zeroext i1 @scr_exc_pending()`);
+    this.declare(`declare void @scr_trap(ptr)`);
+    const expired = this.cstr("scriptc: native callback invoked outside its call-scoped lifetime\n");
+    for (const adapter of this.nativeCallbackAdapters.values()) {
+      const signature = adapter.callback.signature;
+      const params = [
+        ...signature.parameters.map((parameter, index) =>
+          `${this.nativeParameterType(parameter)} %a${index}`
+        ),
+        "ptr %ctx",
+      ];
+      const externalRet = this.nativeReturnType(signature.result);
+      const rawRet = this.llType(signature.result);
+      const pendingResult = rawRet === "double" ? f64Lit(0) : "0";
+      defs.push(
+        `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
+        `entry:`,
+        `  %missing = icmp eq ptr %ctx, null`,
+        `  br i1 %missing, label %expired, label %ready`,
+        `expired:`,
+        `  call void @scr_trap(ptr ${expired})`,
+        `  unreachable`,
+        `ready:`,
+        `  %pending = call zeroext i1 @scr_exc_pending()`,
+        `  br i1 %pending, label %skip, label %invoke`,
+        `skip:`,
+        signature.result.kind === "void" ? `  ret void` : `  ret ${rawRet} ${pendingResult}`,
+        `invoke:`,
+        `  %fnp = getelementptr inbounds %ScrClosure, ptr %ctx, i64 0, i32 1`,
+        `  %fn = load ptr, ptr %fnp`,
+      );
+      const sourceType = nativeCallbackArgumentType(signature);
+      const callArgs = [
+        "ptr %ctx",
+        ...signature.parameters.map((parameter, index) =>
+          `${this.llType(parameter)} %a${index}`
+        ),
+      ].join(", ");
+      if (sourceType.ret.kind === "void") {
+        defs.push(`  call void %fn(${callArgs})`, `  ret void`, `}`, ``);
+      } else {
+        defs.push(
+          `  %result = call ${this.llType(sourceType.ret)} %fn(${callArgs})`,
+          `  ret ${this.llType(sourceType.ret)} %result`,
+          `}`,
+          ``,
+        );
+      }
+    }
+    return defs;
+  }
+
   emit(): string {
     // Function bodies first (the literal/unit/fn-value tables fill as they
     // emit), then the file assembles around them — the C emitter's order.
@@ -1526,6 +1605,7 @@ class LlEmitter {
     const wrappers = this.emitFnValueDefs();
     const asyncDefs = this.emitAsyncScaffolding();
     const ffiCallbacks = this.emitFfiCallbackDefs();
+    const nativeCallbacks = this.emitNativeCallbackDefs();
     const embedded = this.mod.embedded;
     const usesIsland = embedded !== undefined && embedded.modules.length > 0;
     const storeNpmText = (text: string): { bytes: Buffer; raw: number } => {
@@ -1969,6 +2049,7 @@ class LlEmitter {
     if (globals.length > 0) out.push(``);
     out.push(...helpers);
     out.push(...ffiCallbacks.defs);
+    out.push(...nativeCallbacks);
     out.push(...shapes.defs);
     out.push(...classShapes.defs);
     out.push(...classObjDefs);
@@ -6305,6 +6386,9 @@ class LlEmitter {
             this.releaseValue(arg.name, arg.type);
           }
         };
+        const callbacksMayThrow = binding.arguments.some(
+          (argument) => argument.type.kind === "func",
+        );
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
         );
@@ -6384,6 +6468,17 @@ class LlEmitter {
               callArgs.push(`${parameterTypes[index]} ${len}`);
               break;
             }
+            case "callbackFunction": {
+              const adapter = this.nativeCallbackAdapter(
+                binding.id,
+                parameter.projection.argument,
+              );
+              callArgs.push(`${parameterTypes[index]} @${adapter.symbol}`);
+              break;
+            }
+            case "callbackContext":
+              callArgs.push(`${parameterTypes[index]} ${arg.name}`);
+              break;
             case "argument":
               if (parameter.type.kind === "nativeStruct") {
                 const layout = this.nativeStructLayout(parameter.type.typeId);
@@ -6416,11 +6511,13 @@ class LlEmitter {
           B.line(
             `${result} = load ${this.llType(binding.result.type)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
           );
+          if (callbacksMayThrow) this.emitPendingCheck();
           releaseArguments();
           return { name: result, type: e.type };
         }
         if (binding.result.type.kind === "void") {
           B.line(call);
+          if (callbacksMayThrow) this.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };
         }
@@ -6450,6 +6547,7 @@ class LlEmitter {
         }
         const result = B.tmp();
         B.line(`${result} = ${call}`);
+        if (callbacksMayThrow) this.emitPendingCheck();
         releaseArguments();
         return { name: result, type: e.type };
       }

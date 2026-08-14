@@ -57,3 +57,7 @@ int32_t scriptc_test_verify_utf8_hash(uint64_t actual) {
 int32_t scriptc_test_verify_bytes_hash(uint64_t actual) {
   return actual == UINT64_C(4742834144205301894) ? 42 : 1;
 }
+
+int32_t scriptc_test_verify_call_scoped(int32_t forwarded, int32_t captured) {
+  return forwarded == 42 && captured == 42 ? 42 : 1;
+}

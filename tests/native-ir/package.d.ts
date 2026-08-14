@@ -37,6 +37,10 @@ export declare function usizeIdentity(value: usize): usize;
 export declare function paddedRoundtrip(value: Padded): Padded;
 export declare function hashUtf8(value: string): u64;
 export declare function hashBytes(value: Uint8Array): u64;
+export declare function callScoped(
+  callback: (value: i32) => i32,
+  value: i32,
+): i32;
 export declare function createCounter(initialValue: i32): Counter;
 export declare function counterDestroyedCount(): i32;
 export declare function counterVerify(

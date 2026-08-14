@@ -72,6 +72,15 @@ uint64_t nts_hash_bytes(const uint8_t *data, size_t length) {
   return hash;
 }
 
+typedef int32_t (*NtsCallCallback)(int32_t value, void *context);
+
+int32_t nts_call_scoped(
+    NtsCallCallback callback,
+    void *context,
+    int32_t value) {
+  return callback(value, context);
+}
+
 NtsCounter *nts_counter_create(int32_t initial_value) {
   NtsCounter *counter = malloc(sizeof *counter);
   if (!counter) return NULL;

@@ -53,7 +53,8 @@ export interface NativeFrontendBinding {
     readonly ownership:
       | { readonly kind: "value" }
       | { readonly kind: "borrowed"; readonly scope: "call" }
-      | { readonly kind: "owned"; readonly transfer: "to-native" };
+      | { readonly kind: "owned"; readonly transfer: "to-native" }
+      | { readonly kind: "callScoped" };
     readonly projection: Readonly<IrNativeParameterProjection>;
   }[];
   readonly result: {

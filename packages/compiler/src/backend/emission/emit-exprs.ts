@@ -2254,6 +2254,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.releaseValue(arg.name, arg.type);
           }
         };
+        const callbacksMayThrow = binding.arguments.some(
+          (argument) => argument.type.kind === "func",
+        );
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
         );
@@ -2285,6 +2288,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `(const void *)${arg.name}->data`;
             case "bytesByteLength":
               return `${arg.name}->len`;
+            case "callbackFunction":
+              return `&${E.nativeCallbackAdapter(binding.id, parameter.projection.argument).symbol}`;
+            case "callbackContext":
+              return `(void *)${arg.name}`;
             case "argument": {
               if (parameter.type.kind !== "nativeHandle") return arg.name;
               const raw = `sc_t${E.tempCounter++}`;
@@ -2300,6 +2307,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);
+          if (callbacksMayThrow) E.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };
         }
@@ -2325,6 +2333,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return result;
         }
         const result = E.newTemp(e.type, call);
+        if (callbacksMayThrow) E.emitPendingCheck();
         releaseArguments();
         return result;
       }

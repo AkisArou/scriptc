@@ -12,7 +12,7 @@ import { compileC } from "../../packages/compiler/src/backend/cc.js";
 import { emitModule } from "../../packages/compiler/src/backend/emission/emitter.js";
 import { emitLlvmModule } from "../../packages/compiler/src/backend/llvm/emitter.js";
 import type { IrExpr, IrModule, IrNativeScalar, IrNativeValueType, SrcLoc } from "../../packages/compiler/src/ir/nodes.js";
-import { nativeScalarType } from "../../packages/compiler/src/ir/nodes.js";
+import { nativeCallbackArgumentType, nativeScalarType } from "../../packages/compiler/src/ir/nodes.js";
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
 import type { NativeFrontendInput } from "../../packages/compiler/src/frontend/native.js";
@@ -34,6 +34,13 @@ const U64 = nativeScalarType("u64");
 const ISIZE = nativeScalarType("isize");
 const USIZE = nativeScalarType("usize");
 const NATIVE_F64 = nativeScalarType("f64");
+const CALL_I32_CALLBACK = {
+  callingConvention: "c",
+  parameters: [I32],
+  result: I32,
+  context: { placement: "last" },
+} as const;
+const CALL_I32_SOURCE = nativeCallbackArgumentType(CALL_I32_CALLBACK);
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
 const COUNTER_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter";
@@ -183,6 +190,42 @@ const localNativeInput: NativeFrontendInput = {
         },
       ],
       result: { type: U64, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#call_scoped",
+      declaration: { module: nativePackage, name: "callScoped" },
+      entry: { kind: "c-symbol", symbol: "nts_call_scoped" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      arguments: [
+        { name: "callback", type: CALL_I32_SOURCE },
+        { name: "value", type: I32 },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callScoped" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callScoped" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+        {
+          name: "value",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 1 },
+        },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
@@ -373,6 +416,19 @@ function frontendNativeInput(): NativeFrontendInput {
         sourceCall: { kind: "function" },
         ...directSignature([
           { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
+        ]),
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      },
+      {
+        id: "scriptc-test@1#verify-call-scoped",
+        declaration: { module: "scriptc-native-test", name: "verifyCallScoped" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_call_scoped" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        ...directSignature([
+          { name: "forwarded", type: I32, passMode: "value", ownership: { kind: "value" } },
+          { name: "captured", type: I32, passMode: "value", ownership: { kind: "value" } },
         ]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" } },
       },
@@ -751,6 +807,64 @@ test("Native IR rejects malformed or ambiguous borrowed-byte projections", () =>
   outOfRange.nativeBindings![0]!.parameters[1]!.projection.argument = 1;
   expect(validateModule(outOfRange).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" parameter "length" projects an invalid argument index',
+  );
+});
+
+test("Native IR rejects malformed or ambiguous call-scoped callback projections", () => {
+  const mod = exactI32Module();
+  const binding = mod.nativeBindings![0]!;
+  binding.arguments = [{ name: "callback", type: CALL_I32_SOURCE }];
+  binding.parameters = [
+    {
+      name: "callback",
+      type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
+      passMode: "pointer",
+      ownership: { kind: "borrowed", scope: "call" },
+      projection: { kind: "callbackFunction", argument: 0 },
+    },
+    {
+      name: "context",
+      type: { kind: "nativeContext", addressSpace: 0 },
+      passMode: "pointer",
+      ownership: { kind: "callScoped" },
+      projection: { kind: "callbackContext", argument: 0 },
+    },
+  ];
+  expect(validateModule(mod).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "callback" has invalid ownership',
+  );
+
+  const missingContext = structuredClone(mod);
+  missingContext.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callScoped" };
+  missingContext.nativeBindings![0]!.parameters.pop();
+  expect(validateModule(missingContext).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" argument "callback" has an incomplete or ambiguous ABI projection',
+  );
+
+  const wrongSignature = structuredClone(mod);
+  wrongSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callScoped" };
+  const callbackType = wrongSignature.nativeBindings![0]!.parameters[0]!.type;
+  if (callbackType.kind !== "nativeCallback") throw new Error("test fixture lost its callback type");
+  callbackType.signature.result = U32;
+  expect(validateModule(wrongSignature).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "callback" has an invalid callback-function projection',
+  );
+
+  const missingSignature = structuredClone(mod);
+  missingSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callScoped" };
+  const malformedCallbackType = missingSignature.nativeBindings![0]!.parameters[0]!.type;
+  Reflect.deleteProperty(malformedCallbackType, "signature");
+  expect(() => validateModule(missingSignature)).not.toThrow();
+  expect(validateModule(missingSignature).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "callback" has an unsupported exact type',
+  );
+
+  const missingLogicalParameters = structuredClone(wrongSignature);
+  const malformedLogicalType = missingLogicalParameters.nativeBindings![0]!.arguments[0]!.type;
+  Reflect.deleteProperty(malformedLogicalType, "params");
+  expect(() => validateModule(missingLogicalParameters)).not.toThrow();
+  expect(validateModule(missingLogicalParameters).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" argument "callback" has an unsupported source type',
   );
 });
 
@@ -1173,6 +1287,58 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed bytes, %s backend", (b
     } else {
       expect(generated).toContain("getelementptr inbounds %ScrBytes");
     }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR call-scoped callbacks, %s backend", (backend) => {
+  test.each([
+    ["forwards exact values and captured closure state", "callback-call-scoped.ts"],
+    ["propagates a callback exception after native return", "callback-call-scoped-throw.ts"],
+  ] as const)("%s", async (_label, source) => {
+    const stem = source.slice(0, -3);
+    const outDir = join(scratch, `${stem}-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir", source), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native call-scoped callback compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#call_scoped",
+        arguments: [
+          { name: "callback", type: CALL_I32_SOURCE },
+          { name: "value", type: I32 },
+        ],
+        parameters: [
+          expect.objectContaining({ projection: { kind: "callbackFunction", argument: 0 } }),
+          expect.objectContaining({ projection: { kind: "callbackContext", argument: 0 } }),
+          expect.objectContaining({ projection: { kind: "argument", argument: 1 } }),
+        ],
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? `${stem}.c` : `${stem}.ll`),
+      "utf8",
+    );
+    expect(generated).toContain("sc_native_cb_");
+    expect(generated).toContain("scr_exc_pending");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,
