@@ -95,7 +95,7 @@ import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonIm
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerFfiCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction, validateFfiImports } from "./lower-calls.js";
-import { lowerNativeCall, lowerNativeScalarAssertion, lowerNativeStructAssertion, materializeNativeBinding, materializeNativeType, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding, type ResolvedNativeFrontend } from "./lower-native.js";
+import { lowerNativeCall, lowerNativeHandleAssertion, lowerNativeScalarAssertion, lowerNativeStructAssertion, materializeNativeBinding, materializeNativeType, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding, type ResolvedNativeFrontend } from "./lower-native.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
@@ -2288,7 +2288,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 8,
+            irVersion: 9,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,
@@ -7594,6 +7594,9 @@ export class Lowerer {
     }
     if (nativeTarget?.kind === "nativeStruct") {
       return lowerNativeStructAssertion(this, expr, nativeTarget);
+    }
+    if (nativeTarget?.kind === "nativeHandle") {
+      return lowerNativeHandleAssertion(this, expr, nativeTarget);
     }
     // ISLAND value cast to a PROMISE type (`factory(opts) as Promise<Mod>`
     // — the Node-typed async-API shape): promises never have a validated

@@ -4,7 +4,7 @@
 import type { CEmitter, Temp } from "./emitter.js";
 import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
-import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
+import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
@@ -550,7 +550,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         );
       case "nativeStructLit": {
         const definition = E.nativeTypesById.get(e.type.typeId);
-        if (definition === undefined) {
+        if (definition?.kind !== "struct") {
           throw new Error(`emitter bug: unknown native struct ${e.type.typeId}`);
         }
         const values = new Map(e.fields.map((field) => [field.name, E.emitExpr(field.value)]));
@@ -2247,10 +2247,58 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           throw new Error(`emitter bug: unknown Native IR binding ${e.binding}`);
         }
         const args = e.args.map((arg) => E.emitExpr(arg));
-        const call = `${binding.entry.symbol}(${args.map((arg) => arg.name).join(", ")})`;
+        const operation = cStringLiteral(
+          Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
+        );
+        const ownedParameter = binding.parameters.findIndex(
+          (parameter) => parameter.ownership.kind === "owned",
+        );
+        if (ownedParameter >= 0) {
+          const parameter = binding.parameters[ownedParameter]!;
+          if (parameter.type.kind !== "nativeHandle") {
+            throw new Error(`emitter bug: owned non-handle parameter in ${binding.id}`);
+          }
+          E.line(
+            `scr_native_handle_dispose(${args[ownedParameter]!.name}, ` +
+              `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});${E.srcComment(e.loc)}`,
+          );
+          E.emitPendingCheck();
+          return { name: "", type: e.type };
+        }
+        const nativeArgs = binding.parameters.map((parameter, index) => {
+          if (parameter.type.kind !== "nativeHandle") return args[index]!.name;
+          const raw = `sc_t${E.tempCounter++}`;
+          E.line(
+            `void *${raw} = scr_native_handle_require(${args[index]!.name}, ` +
+              `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});`,
+          );
+          E.emitPendingCheck();
+          return raw;
+        });
+        const call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);
           return { name: "", type: e.type };
+        }
+        if (binding.result.type.kind === "nativeHandle") {
+          if (binding.result.ownership.kind !== "owned") {
+            throw new Error(`emitter bug: native handle result without ownership in ${binding.id}`);
+          }
+          const destructor = E.nativeById.get(binding.result.ownership.destructor);
+          const definition = E.nativeTypesById.get(binding.result.type.typeId);
+          if (!destructor || definition?.kind !== "handle") {
+            throw new Error(`emitter bug: incomplete native handle metadata in ${binding.id}`);
+          }
+          const raw = `sc_t${E.tempCounter++}`;
+          E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
+          const result = E.newTemp(
+            e.type,
+            `scr_native_handle_new(${raw}, &${destructor.entry.symbol}, ` +
+              `&${mangleNativeHandleTag(definition.id)}, ` +
+              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))})`,
+          );
+          E.emitPendingCheck();
+          return result;
         }
         return E.newTemp(e.type, call);
       }

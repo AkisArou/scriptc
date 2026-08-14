@@ -1,4 +1,5 @@
 declare const nativeScalar: unique symbol;
+declare const nativeResource: unique symbol;
 
 export type i8 = number & { readonly [nativeScalar]: "i8" };
 export type u8 = number & { readonly [nativeScalar]: "u8" };
@@ -17,6 +18,13 @@ export interface Padded {
   readonly ratio: f64;
 }
 
+export interface Counter {
+  readonly [nativeResource]: "Counter";
+  add(delta: i32): i32;
+  value(): i32;
+  dispose(): void;
+}
+
 export declare function i8Identity(value: i8): i8;
 export declare function u8Identity(value: u8): u8;
 export declare function i16Identity(value: i16): i16;
@@ -27,3 +35,11 @@ export declare function i64Identity(value: i64): i64;
 export declare function u64Identity(value: u64): u64;
 export declare function usizeIdentity(value: usize): usize;
 export declare function paddedRoundtrip(value: Padded): Padded;
+export declare function createCounter(initialValue: i32): Counter;
+export declare function counterDestroyedCount(): i32;
+export declare function counterVerify(
+  actualValue: i32,
+  actualDestroyed: i32,
+  expectedValue: i32,
+  expectedDestroyed: i32,
+): i32;

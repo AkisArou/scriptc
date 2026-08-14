@@ -44,6 +44,8 @@ export function cType(t: IrType): string {
       }
     case "nativeStruct":
       return mangleNativeStruct(t.typeId);
+    case "nativeHandle":
+      return "ScrNativeHandle *";
     case "f64":
     case "date":
       return "double";
@@ -196,6 +198,8 @@ export function cNativeScalarLiteral(
 /** The retain call (+1, returns the value) for one refcounted type. */
 export function retainCallC(type: IrType, expr: string): string {
   switch (type.kind) {
+    case "nativeHandle":
+      return `scr_native_handle_retain(${expr})`;
     case "string":
       return `scr_str_retain(${expr})`;
     case "array":
@@ -277,6 +281,8 @@ export function retainCallC(type: IrType, expr: string): string {
 /** The release call for one owned refcounted value (all NULL-tolerant). */
 export function releaseCallC(type: IrType, expr: string): string {
   switch (type.kind) {
+    case "nativeHandle":
+      return `scr_native_handle_release(${expr})`;
     case "string":
       return `scr_str_release(${expr})`;
     case "array":
@@ -361,6 +367,8 @@ export function boxKindC(t: IrType): string {
       throw new Error("emitter bug: exact native scalars do not use JavaScript capture boxes");
     case "nativeStruct":
       throw new Error("emitter bug: native structs do not use JavaScript capture boxes");
+    case "nativeHandle":
+      throw new Error("emitter bug: native handles go through boxNewC, not boxKindC");
     case "f64":
     case "date":
       return "SCR_BOX_F64";
@@ -439,6 +447,8 @@ export function boxKindC(t: IrType): string {
  * Bare symbol names — call sites prefix `&` where a fn ptr is passed. */
 export function vAdapters(t: IrType): { retain: string; release: string } {
   switch (t.kind) {
+    case "nativeHandle":
+      return { retain: "scr_native_handle_retain_v", release: "scr_native_handle_release_v" };
     case "string":
       return { retain: "scr_str_retain_v", release: "scr_str_release_v" };
     case "array":
@@ -548,6 +558,8 @@ export function elemKindC(elem: IrType): string {
       throw new Error("emitter bug: exact native scalar arrays are not implemented");
     case "nativeStruct":
       throw new Error("emitter bug: native struct arrays are not implemented");
+    case "nativeHandle":
+      return "SCR_ELEM_REF";
     case "f64":
       return "SCR_ELEM_F64";
     case "bool":

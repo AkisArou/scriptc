@@ -3,9 +3,11 @@ import { nativeBindingDiag, nativeConversionDiag, nativeSignatureDiag } from "..
 import type {
   IrExpr,
   IrNativeBinding,
+  IrNativeHandleDef,
+  IrNativeHandleType,
   IrNativeScalarType,
-  IrNativeStructDef,
   IrNativeStructType,
+  IrNativeTypeDef,
   IrNativeValueType,
   SrcLoc,
 } from "../../ir/nodes.js";
@@ -33,9 +35,20 @@ function declarationSymbol(
   const source = L.program.getSourceFile(tsgoPath(resolve(declarationPath)));
   if (source === undefined) return null;
   const moduleSymbol = L.checker.getSymbolAtLocation(source);
-  let symbol = moduleSymbol?.getExports().get(declaration.name as ts.__String);
+  const [root, ...members] = declaration.name.split(".");
+  if (root === undefined || root.length === 0 || members.some((member) => member.length === 0)) {
+    return null;
+  }
+  let symbol = moduleSymbol?.getExports().get(root as ts.__String);
   if (symbol === undefined) return null;
   if (symbol.flags & ts.SymbolFlags.Alias) symbol = L.checker.getAliasedSymbol(symbol);
+  for (const member of members) {
+    symbol = L.checker
+      .getPropertiesOfType(L.checker.getDeclaredTypeOfSymbol(symbol))
+      .find((property) => String(property.name) === member);
+    if (symbol === undefined) return null;
+    if (symbol.flags & ts.SymbolFlags.Alias) symbol = L.checker.getAliasedSymbol(symbol);
+  }
   return symbol;
 }
 
@@ -105,20 +118,26 @@ function validateDeclaration(
   loc: SrcLoc,
 ): void {
   const declarations = L.checker.declarationsOf(symbol);
-  const functions = declarations.filter(ts.isFunctionDeclaration);
+  const declarationGuard = (
+    declaration: ts.Node,
+  ): declaration is ts.FunctionDeclaration | ts.MethodSignature =>
+    binding.sourceCall.kind === "function"
+      ? ts.isFunctionDeclaration(declaration)
+      : declaration.kind === ts.SyntaxKind.MethodSignature;
+  const callDeclarations = declarations.filter(declarationGuard);
   if (
-    functions.length === 0 ||
-    declarations.some((declaration) => !ts.isFunctionDeclaration(declaration)) ||
-    functions.some((declaration) => declaration.body !== undefined)
+    callDeclarations.length === 0 ||
+    declarations.some((declaration) => !declarationGuard(declaration)) ||
+    callDeclarations.some((declaration) => "body" in declaration && declaration.body !== undefined)
   ) {
     failBinding(
       L,
       binding,
-      "the configured declaration does not resolve exclusively to signature-only function declarations",
+      `the configured declaration does not resolve exclusively to signature-only ${binding.sourceCall.kind} declarations`,
       loc,
     );
   }
-  if (functions.some((declaration) => (declaration.typeParameters?.length ?? 0) > 0)) {
+  if (callDeclarations.some((declaration) => (declaration.typeParameters?.length ?? 0) > 0)) {
     failSignature(L, binding, "generic declarations cannot describe one fixed native ABI", loc);
   }
   const signatures = L.checker.getCallSignatures(L.checker.getTypeOfSymbol(symbol));
@@ -132,11 +151,15 @@ function validateDeclaration(
   }
   const signature = signatures[0]!;
   const parameters = signature.getParameters();
-  if (parameters.length !== binding.parameters.length) {
+  const sourceParameters = binding.parameters.filter(
+    (_parameter, index) =>
+      binding.sourceCall.kind !== "method" || index !== binding.sourceCall.receiverParameter,
+  );
+  if (parameters.length !== sourceParameters.length) {
     failSignature(
       L,
       binding,
-      `the declaration has ${parameters.length} parameter(s), but Native IR requires ${binding.parameters.length}`,
+      `the declaration has ${parameters.length} explicit parameter(s), but Native IR requires ${sourceParameters.length}`,
       loc,
     );
   }
@@ -146,7 +169,7 @@ function validateDeclaration(
       failSignature(L, binding, `parameter ${index + 1} is 'never'`, loc);
     }
     const mapped = L.mapTypeOf(sourceType);
-    const expected = binding.parameters[index]!.type;
+    const expected = sourceParameters[index]!.type;
     if (mapped === null || !typeEquals(mapped, expected)) {
       failSignature(
         L,
@@ -175,8 +198,12 @@ function validateDeclaration(
 
 /** Lower one direct call of an exact checker-owned native declaration. */
 export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
-  if (!ts.isIdentifier(expr.expression)) return null;
-  const symbol = L.resolveValueSymbol(expr.expression);
+  const callee = expr.expression;
+  const symbol = ts.isIdentifier(callee)
+    ? L.resolveValueSymbol(callee)
+    : ts.isPropertyAccessExpression(callee)
+      ? L.checker.getSymbolAtLocation(callee.name) ?? null
+      : null;
   if (symbol === null) return null;
   const binding = L.nativeBindingsBySymbol.get(symbol);
   if (binding === undefined) return null;
@@ -191,23 +218,48 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   if (expr.arguments.some(ts.isSpreadElement)) {
     failSignature(L, binding, "spread arguments do not have a fixed native ABI", loc);
   }
-  if (expr.arguments.length !== binding.parameters.length) {
+  if (
+    (binding.sourceCall.kind === "function" && !ts.isIdentifier(callee)) ||
+    (binding.sourceCall.kind === "method" && !ts.isPropertyAccessExpression(callee))
+  ) {
+    failBinding(L, binding, `the source call is not a ${binding.sourceCall.kind}`, loc);
+  }
+  const sourceParameterCount = binding.parameters.length -
+    (binding.sourceCall.kind === "method" ? 1 : 0);
+  if (expr.arguments.length !== sourceParameterCount) {
     failSignature(
       L,
       binding,
-      `this call passes ${expr.arguments.length} argument(s), but Native IR requires exactly ${binding.parameters.length}`,
+      `this call passes ${expr.arguments.length} explicit argument(s), but Native IR requires exactly ${sourceParameterCount}`,
       loc,
     );
   }
-  const args = expr.arguments.map((argument, index) =>
+  const argumentNodes = [...expr.arguments];
+  if (binding.sourceCall.kind === "method") {
+    if (
+      binding.sourceCall.receiverParameter < 0 ||
+      binding.sourceCall.receiverParameter >= binding.parameters.length
+    ) {
+      failBinding(L, binding, "the method receiver parameter index is outside the native parameter list", loc);
+    }
+    argumentNodes.splice(binding.sourceCall.receiverParameter, 0, (callee as ts.PropertyAccessExpression).expression);
+  }
+  const args = argumentNodes.map((argument, index) =>
     L.lowerExprExpecting(argument, binding.parameters[index]!.type)
   );
   L.usesNativeTarget = true;
   L.usedNativeBindingIds.add(binding.id);
-  for (const parameter of binding.parameters) {
-    if (parameter.type.kind === "nativeStruct") L.usedNativeTypeIds.add(parameter.type.typeId);
+  if (binding.result.ownership.kind === "owned") {
+    L.usedNativeBindingIds.add(binding.result.ownership.destructor);
   }
-  if (binding.result.type.kind === "nativeStruct") L.usedNativeTypeIds.add(binding.result.type.typeId);
+  for (const parameter of binding.parameters) {
+    if (parameter.type.kind === "nativeStruct" || parameter.type.kind === "nativeHandle") {
+      L.usedNativeTypeIds.add(parameter.type.typeId);
+    }
+  }
+  if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
+    L.usedNativeTypeIds.add(binding.result.type.typeId);
+  }
   return {
     kind: "nativeCall",
     binding: binding.id,
@@ -321,7 +373,7 @@ export function lowerNativeStructAssertion(
   target: IrNativeStructType,
 ): IrExpr {
   const definition = L.nativeTypeDefsById.get(target.typeId);
-  if (definition === undefined) throw new Error(`missing native struct definition '${target.typeId}'`);
+  if (definition?.kind !== "struct") throw new Error(`missing native struct definition '${target.typeId}'`);
   const source = L.mapTypeOf(L.typeOf(expr.expression));
   if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
   if (!ts.isObjectLiteralExpression(expr.expression)) {
@@ -373,7 +425,7 @@ export function lowerNativeStructFieldRead(
   target: IrNativeStructType,
 ): IrExpr {
   const definition = L.nativeTypeDefsById.get(target.typeId);
-  if (definition === undefined) throw new Error(`missing native struct definition '${target.typeId}'`);
+  if (definition?.kind !== "struct") throw new Error(`missing native struct definition '${target.typeId}'`);
   const field = definition.fields.find((candidate) => candidate.name === expr.name.text);
   if (field === undefined) {
     throw new Error(`TypeScript checker exposed unknown native struct field '${expr.name.text}'`);
@@ -399,15 +451,27 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
     parameters: binding.parameters.map((parameter) => ({
       name: parameter.name,
       type: { ...parameter.type },
-      passMode: "value",
+      passMode: parameter.passMode,
+      ownership: { ...parameter.ownership },
     })),
-    result: { type: { ...binding.result.type }, passMode: "value" },
+    result: {
+      type: { ...binding.result.type },
+      passMode: binding.result.passMode,
+      ownership: { ...binding.result.ownership },
+    },
   };
 }
 
 export function materializeNativeType(
   definition: NativeFrontendInput["types"][number],
-): IrNativeStructDef {
+): IrNativeTypeDef {
+  if (definition.kind === "handle") {
+    const result: IrNativeHandleDef = {
+      ...definition,
+      declaration: { ...definition.declaration },
+    };
+    return result;
+  }
   return {
     ...definition,
     declaration: { ...definition.declaration },
@@ -417,4 +481,24 @@ export function materializeNativeType(
       type: { ...field.type },
     })),
   };
+}
+
+/** Opaque handles can only originate at a native ownership boundary. An
+ * assertion may preserve an already-identical handle type, but can never
+ * manufacture or reinterpret a foreign reference. */
+export function lowerNativeHandleAssertion(
+  L: Lowerer,
+  expr: ts.AsExpression | ts.TypeAssertion,
+  target: IrNativeHandleType,
+): IrExpr {
+  const source = L.mapTypeOf(L.typeOf(expr.expression));
+  if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
+  L.pushDiag(
+    nativeConversionDiag(
+      target.typeId,
+      "opaque native handles can only be returned by a configured native binding",
+      locOf(expr),
+    ),
+  );
+  throw new PoisonError();
 }

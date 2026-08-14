@@ -2159,6 +2159,7 @@ double scr_process_columns(double fd);
  * THROWS like the other sync calls. */
 typedef struct ScrStats ScrStats;
 typedef struct ScrFileHandle ScrFileHandle;
+typedef struct ScrNativeHandle ScrNativeHandle;
 typedef struct ScrPromise ScrPromise; /* full section further down */
 
 ScrStats *scr_fs_stat(ScrStr *path);  /* +1, or throws */
@@ -2566,6 +2567,25 @@ ScrFileHandle *scr_file_handle_retain(ScrFileHandle *h);
 void scr_file_handle_release(ScrFileHandle *h);
 void *scr_file_handle_retain_v(void *p);
 void scr_file_handle_release_v(void *p);
+/* Native IR's opaque foreign-reference cell. `type_tag` is the address of
+ * one compiler-emitted static byte, giving nominal identity without putting
+ * manifest names or foreign pointers into user-visible storage. The cell
+ * owns `foreign` until explicit dispose or its last ScriptC reference. */
+typedef void (*ScrNativeDestructor)(void *foreign);
+ScrNativeHandle *scr_native_handle_new(void *foreign,
+                                       ScrNativeDestructor destructor,
+                                       const void *type_tag,
+                                       const char *type_name);
+ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle);
+void scr_native_handle_release(ScrNativeHandle *handle);
+void *scr_native_handle_retain_v(void *handle);
+void scr_native_handle_release_v(void *handle);
+void *scr_native_handle_require(ScrNativeHandle *handle,
+                                const void *type_tag,
+                                const char *operation);
+void scr_native_handle_dispose(ScrNativeHandle *handle,
+                               const void *type_tag,
+                               const char *operation);
 double scr_file_handle_fd(ScrFileHandle *h);
 void scr_file_handle_close(ScrFileHandle *h);
 double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,

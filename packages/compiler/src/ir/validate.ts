@@ -1224,6 +1224,18 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (!nativeId.test(definition.id) || nativeTypesById.has(definition.id)) {
       errors.push({ message: `invalid or duplicate Native IR type id "${definition.id}"`, loc: moduleLoc });
     }
+    if (definition.kind === "handle") {
+      if (
+        definition.declaration.module === "" || definition.declaration.name === "" ||
+        definition.nativeName === "" ||
+        definition.threadSafety !== "confined" ||
+        !["none", "pointer", "binding", "platform"].includes(definition.identity)
+      ) {
+        errors.push({ message: `Native IR handle type "${definition.id}" has invalid metadata`, loc: moduleLoc });
+      }
+      nativeTypesById.set(definition.id, definition);
+      continue;
+    }
     if (
       !Number.isSafeInteger(definition.size) || definition.size <= 0 ||
       !Number.isSafeInteger(definition.alignment) || definition.alignment <= 0 ||
@@ -1266,8 +1278,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   }
   const validNativeValue = (type: IrType): boolean =>
     validNativeScalar(type) ||
-    (type.kind === "nativeStruct" && nativeTypesById.has(type.typeId));
-  if ((mod.nativeTypes?.length ?? 0) > 0 && (!validNativeTarget || mod.nativeTarget?.abi === "")) {
+    (type.kind === "nativeStruct" && nativeTypesById.get(type.typeId)?.kind === "struct") ||
+    (type.kind === "nativeHandle" && nativeTypesById.get(type.typeId)?.kind === "handle");
+  if (
+    (mod.nativeTypes ?? []).some((definition) => definition.kind === "struct") &&
+    (!validNativeTarget || mod.nativeTarget?.abi === "")
+  ) {
     errors.push({ message: "Native IR aggregate types require complete module target ABI facts", loc: moduleLoc });
   }
   for (const binding of mod.nativeBindings ?? []) {
@@ -1322,7 +1338,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     if (binding.variadic !== false) {
       errors.push({
-        message: `Native IR binding "${binding.id}" must be non-variadic in the exact-scalar slice`,
+        message: `Native IR binding "${binding.id}" must be non-variadic in the direct-call slice`,
         loc: moduleLoc,
       });
     }
@@ -1335,9 +1351,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
       parameterNames.add(parameter.name);
-      if (parameter.passMode !== "value") {
+      const handleParameter = parameter.type.kind === "nativeHandle";
+      if (parameter.passMode !== (handleParameter ? "pointer" : "value")) {
         errors.push({
-          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" must use value passing`,
+          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has a pass mode inconsistent with its type`,
+          loc: moduleLoc,
+        });
+      }
+      if (
+        handleParameter
+          ? parameter.ownership.kind !== "borrowed" && parameter.ownership.kind !== "owned"
+          : parameter.ownership.kind !== "value"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has invalid ownership`,
           loc: moduleLoc,
         });
       }
@@ -1348,11 +1375,19 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
     }
-    if (binding.result.passMode !== "value") {
+    const handleResult = binding.result.type.kind === "nativeHandle";
+    if (binding.result.passMode !== (handleResult ? "pointer" : "value")) {
       errors.push({
-        message: `Native IR binding "${binding.id}" result must use value passing`,
+        message: `Native IR binding "${binding.id}" result has a pass mode inconsistent with its type`,
         loc: moduleLoc,
       });
+    }
+    if (
+      handleResult
+        ? binding.result.ownership.kind !== "owned"
+        : binding.result.ownership.kind !== "value"
+    ) {
+      errors.push({ message: `Native IR binding "${binding.id}" result has invalid ownership`, loc: moduleLoc });
     }
     if (
       binding.result.type.kind !== "void" &&
@@ -1363,9 +1398,51 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
+    const ownedParameters = binding.parameters.filter((parameter) => parameter.ownership.kind === "owned");
+    if (
+      ownedParameters.length > 0 &&
+      (ownedParameters.length !== 1 || binding.parameters.length !== 1 || binding.result.type.kind !== "void")
+    ) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has an unsupported ownership-transfer signature`,
+        loc: moduleLoc,
+      });
+    }
     nativeById.set(binding.id, binding);
     nativeSymbols.add(binding.entry.symbol);
     nativeDeclarations.add(declarationKey);
+  }
+  const nativeDestructorIds = new Set<string>();
+  for (const binding of mod.nativeBindings ?? []) {
+    if (binding.result.ownership.kind !== "owned") continue;
+    nativeDestructorIds.add(binding.result.ownership.destructor);
+    const resultType = binding.result.type;
+    const destructor = nativeById.get(binding.result.ownership.destructor);
+    if (
+      resultType.kind !== "nativeHandle" ||
+      destructor === undefined ||
+      destructor.result.type.kind !== "void" ||
+      destructor.parameters.length !== 1 ||
+      destructor.parameters[0]?.type.kind !== "nativeHandle" ||
+      destructor.parameters[0].type.typeId !== resultType.typeId ||
+      destructor.parameters[0].ownership.kind !== "owned"
+    ) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" names an invalid handle destructor "${binding.result.ownership.destructor}"`,
+        loc: moduleLoc,
+      });
+    }
+  }
+  for (const binding of mod.nativeBindings ?? []) {
+    if (
+      binding.parameters.some((parameter) => parameter.ownership.kind === "owned") &&
+      !nativeDestructorIds.has(binding.id)
+    ) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" is an unsupported general ownership consumer`,
+        loc: moduleLoc,
+      });
+    }
   }
   // The lib section (library mode): every mapped function exists, is
   // synchronous, and its IR signature fits the declared marshalling
@@ -1952,7 +2029,7 @@ function validateFunction(
       }
       case "nativeStructLit": {
         const definition = nativeTypesById.get(e.type.typeId);
-        if (definition === undefined) {
+        if (definition?.kind !== "struct") {
           err(`native struct literal names undeclared type "${e.type.typeId}"`, e.loc);
           break;
         }
@@ -1978,8 +2055,10 @@ function validateFunction(
           break;
         }
         const definition = nativeTypesById.get(e.value.type.typeId);
-        const field = definition?.fields.find((candidate) => candidate.name === e.field);
-        if (definition === undefined) err(`nativeStructGet names undeclared type "${e.value.type.typeId}"`, e.loc);
+        const field = definition?.kind === "struct"
+          ? definition.fields.find((candidate) => candidate.name === e.field)
+          : undefined;
+        if (definition?.kind !== "struct") err(`nativeStructGet names undeclared type "${e.value.type.typeId}"`, e.loc);
         else if (field === undefined) err(`native struct ${definition.id} has no field "${e.field}"`, e.loc);
         else if (!typeEquals(e.type, field.type)) err(`nativeStructGet ${definition.id}.${e.field} type mismatch`, e.loc);
         break;

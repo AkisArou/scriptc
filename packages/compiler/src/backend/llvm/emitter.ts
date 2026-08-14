@@ -74,6 +74,7 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeStructDef,
   IrRecordShape,
   IrStmt,
   IrType,
@@ -84,7 +85,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCall
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import {
   buildClassGraph,
@@ -201,7 +202,10 @@ export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): 
       `LLVM emitter target mismatch: Native IR requires ${mod.nativeTarget.pointerBits}-bit pointers, backend selected ${pointerBits}-bit pointers`,
     );
   }
-  if ((mod.nativeTypes?.length ?? 0) > 0 && mod.nativeTarget?.abi !== "sysv-amd64") {
+  if (
+    (mod.nativeTypes ?? []).some((definition) => definition.kind === "struct") &&
+    mod.nativeTarget?.abi !== "sysv-amd64"
+  ) {
     throw new Error(
       `LLVM emitter does not implement Native IR indirect aggregates for ABI '${String(mod.nativeTarget?.abi)}'`,
     );
@@ -1262,6 +1266,8 @@ class LlEmitter {
         }
       case "nativeStruct":
         return `%${mangleNativeStruct(t.typeId)}`;
+      case "nativeHandle":
+        return "ptr";
       case "f64":
       case "date":
         return "double";
@@ -1344,9 +1350,10 @@ class LlEmitter {
   ): string {
     if (t.kind === "nativeStruct") {
       const definition = this.nativeTypesById.get(t.typeId);
-      if (definition === undefined) throw new Error(`llvm emitter bug: unknown native struct ${t.typeId}`);
+      if (definition?.kind !== "struct") throw new Error(`llvm emitter bug: unknown native struct ${t.typeId}`);
       return `ptr byval(${this.llType(t)}) align ${definition.abi.alignment}`;
     }
+    if (t.kind === "nativeHandle") return "ptr";
     const type = this.llType(t);
     switch (t.scalar) {
       case "i8":
@@ -1368,12 +1375,12 @@ class LlEmitter {
   }
 
   private nativeStructLayout(typeId: string): {
-    readonly definition: NonNullable<IrModule["nativeTypes"]>[number];
+    readonly definition: IrNativeStructDef;
     readonly members: readonly string[];
     readonly fieldIndices: ReadonlyMap<string, number>;
   } {
     const definition = this.nativeTypesById.get(typeId);
-    if (definition === undefined) throw new Error(`llvm emitter bug: unknown native struct ${typeId}`);
+    if (definition?.kind !== "struct") throw new Error(`llvm emitter bug: unknown native struct ${typeId}`);
     const pointerBytes = this.sizeType === "i32" ? 4 : 8;
     const scalarSize = (scalar: string): number => {
       if (scalar === "f64" || scalar === "i64" || scalar === "u64") return 8;
@@ -1824,6 +1831,10 @@ class LlEmitter {
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
     ];
     for (const definition of this.mod.nativeTypes ?? []) {
+      if (definition.kind === "handle") {
+        out.push(`@${mangleNativeHandleTag(definition.id)} = internal constant i8 0`);
+        continue;
+      }
       const layout = this.nativeStructLayout(definition.id);
       out.push(`%${mangleNativeStruct(definition.id)} = type { ${layout.members.join(", ")} }`);
     }
@@ -1942,6 +1953,8 @@ class LlEmitter {
       const ty = this.llType(g.type);
       const zero = g.type.kind === "nativeStruct"
         ? "zeroinitializer"
+        : g.type.kind === "nativeScalar"
+          ? g.type.scalar === "f64" ? f64Lit(0) : "0"
         : ty === "double"
           ? f64Lit(0)
           : ty === "ptr"
@@ -2212,6 +2225,8 @@ class LlEmitter {
       const ty = this.llType(g.type);
       const zero = g.type.kind === "nativeStruct"
         ? "zeroinitializer"
+        : g.type.kind === "nativeScalar"
+          ? g.type.scalar === "f64" ? f64Lit(0) : "0"
         : ty === "double"
           ? f64Lit(0)
           : ty === "ptr"
@@ -3159,6 +3174,7 @@ class LlEmitter {
       case "nativeStruct":
         return "true";
       case "array":
+      case "nativeHandle":
       case "record":
       case "object":
       case "classval":
@@ -6281,6 +6297,25 @@ class LlEmitter {
           throw new Error(`llvm emitter bug: unknown Native IR binding ${e.binding}`);
         }
         const args = e.args.map((arg) => this.emitExpr(arg));
+        const operation = this.cstr(
+          `${binding.declaration.module}.${binding.declaration.name}`,
+        );
+        const ownedParameter = binding.parameters.findIndex(
+          (parameter) => parameter.ownership.kind === "owned",
+        );
+        if (ownedParameter >= 0) {
+          const parameter = binding.parameters[ownedParameter]!;
+          if (parameter.type.kind !== "nativeHandle") {
+            throw new Error(`llvm emitter bug: owned non-handle parameter in ${binding.id}`);
+          }
+          this.declare(`declare void @scr_native_handle_dispose(ptr, ptr, ptr)`);
+          B.line(
+            `call void @scr_native_handle_dispose(ptr ${args[ownedParameter]!.name}, ` +
+              `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
+          );
+          this.emitPendingCheck();
+          return { name: "", type: e.type };
+        }
         const aggregateResult = binding.result.type.kind === "nativeStruct"
           ? this.nativeStructLayout(binding.result.type.typeId)
           : null;
@@ -6315,6 +6350,15 @@ class LlEmitter {
             B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
             B.line(`store ${type} ${arg.name}, ptr ${slot}, align ${layout.definition.alignment}`);
             callArgs.push(`${parameterTypes[index]} ${slot}`);
+          } else if (parameter.type.kind === "nativeHandle") {
+            this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
+            const raw = B.tmp();
+            B.line(
+              `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
+                `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
+            );
+            this.emitPendingCheck();
+            callArgs.push(`${parameterTypes[index]} ${raw}`);
           } else {
             callArgs.push(`${parameterTypes[index]} ${arg.name}`);
           }
@@ -6333,6 +6377,29 @@ class LlEmitter {
         if (binding.result.type.kind === "void") {
           B.line(call);
           return { name: "", type: e.type };
+        }
+        if (binding.result.type.kind === "nativeHandle") {
+          if (binding.result.ownership.kind !== "owned") {
+            throw new Error(`llvm emitter bug: native handle result without ownership in ${binding.id}`);
+          }
+          const destructor = this.nativeById.get(binding.result.ownership.destructor);
+          const definition = this.nativeTypesById.get(binding.result.type.typeId);
+          if (!destructor || definition?.kind !== "handle") {
+            throw new Error(`llvm emitter bug: incomplete native handle metadata in ${binding.id}`);
+          }
+          this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
+          this.declare(`declare ptr @scr_native_handle_new(ptr, ptr, ptr, ptr)`);
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          const result = B.tmp();
+          B.line(
+            `${result} = call ptr @scr_native_handle_new(ptr ${raw}, ` +
+              `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+              `ptr ${this.cstr(definition.nativeName)})`,
+          );
+          const value = this.own({ name: result, type: e.type });
+          this.emitPendingCheck();
+          return value;
         }
         const result = B.tmp();
         B.line(`${result} = ${call}`);

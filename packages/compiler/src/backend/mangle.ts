@@ -127,6 +127,10 @@ export function mangleRecordStruct(shapeId: string): string {
 export function mangleNativeStruct(typeId: string): string {
   return `sc_nt_${sanitizeOpaque(typeId)}`;
 }
+/** Address-identity token for one nominal opaque Native IR handle type. */
+export function mangleNativeHandleTag(typeId: string): string {
+  return `sc_nh_tag_${sanitizeOpaque(typeId)}`;
+}
 /** Field identity inside a nominal Native IR aggregate. */
 export function mangleNativeField(fieldName: string): string {
   return `sc_nf_${sanitizeOpaque(fieldName)}`;

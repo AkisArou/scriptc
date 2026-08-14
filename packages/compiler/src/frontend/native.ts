@@ -1,4 +1,4 @@
-import type { IrNativeStructDef, IrNativeValueType } from "../ir/nodes.js";
+import type { IrNativeHandleDef, IrNativeStructDef, IrNativeValueType } from "../ir/nodes.js";
 
 /** One exported TypeScript declaration that denotes an exact Native IR value.
  * Source spelling is never used as evidence: the frontend resolves this
@@ -17,6 +17,9 @@ export type NativeStructDefinition = Readonly<
   }
 >;
 
+export type NativeHandleDefinition = Readonly<IrNativeHandleDef>;
+export type NativeTypeDefinition = NativeStructDefinition | NativeHandleDefinition;
+
 export interface NativeFrontendBinding {
   readonly id: string;
   readonly declaration: {
@@ -29,14 +32,28 @@ export interface NativeFrontendBinding {
   };
   readonly callingConvention: "c";
   readonly variadic: false;
+  readonly sourceCall:
+    | { readonly kind: "function" }
+    | { readonly kind: "method"; readonly receiverParameter: number };
   readonly parameters: readonly {
     readonly name: string;
     readonly type: Readonly<IrNativeValueType>;
-    readonly passMode: "value";
+    readonly passMode: "value" | "pointer";
+    readonly ownership:
+      | { readonly kind: "value" }
+      | { readonly kind: "borrowed"; readonly scope: "call" }
+      | { readonly kind: "owned"; readonly transfer: "to-native" };
   }[];
   readonly result: {
     readonly type: Readonly<IrNativeValueType> | { readonly kind: "void" };
-    readonly passMode: "value";
+    readonly passMode: "value" | "pointer";
+    readonly ownership:
+      | { readonly kind: "value" }
+      | {
+          readonly kind: "owned";
+          readonly transfer: "to-runtime";
+          readonly destructor: string;
+        };
   };
 }
 
@@ -54,7 +71,7 @@ export interface NativeFrontendInput {
     readonly abi: string;
   };
   readonly sourceTypes: readonly NativeSourceType[];
-  readonly types: readonly NativeStructDefinition[];
+  readonly types: readonly NativeTypeDefinition[];
   readonly bindings: readonly NativeFrontendBinding[];
 }
 

@@ -36,7 +36,10 @@ const USIZE = nativeScalarType("usize");
 const NATIVE_F64 = nativeScalarType("f64");
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
+const COUNTER_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter";
+const COUNTER = { kind: "nativeHandle", typeId: COUNTER_ID } as const;
 const PADDED_DEFINITION = {
+  kind: "struct",
   id: PADDED_ID,
   declaration: { module: nativePackage, name: "Padded" },
   size: 24,
@@ -50,6 +53,14 @@ const PADDED_DEFINITION = {
     { name: "value", type: U64, offset: 8 },
     { name: "ratio", type: NATIVE_F64, offset: 16 },
   ],
+} as const satisfies NativeFrontendInput["types"][number];
+const COUNTER_DEFINITION = {
+  kind: "handle",
+  id: COUNTER_ID,
+  declaration: { module: nativePackage, name: "Counter" },
+  nativeName: "NtsCounter",
+  threadSafety: "confined",
+  identity: "pointer",
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
 
@@ -74,8 +85,9 @@ const localNativeInput: NativeFrontendInput = {
     })),
     { declaration: { module: nativePackage, name: "f64" }, type: NATIVE_F64 },
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
+    { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
   ],
-  types: [PADDED_DEFINITION],
+  types: [PADDED_DEFINITION, COUNTER_DEFINITION],
   bindings: [
     ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
       const type = nativeScalarType(scalar);
@@ -85,8 +97,9 @@ const localNativeInput: NativeFrontendInput = {
         entry: { kind: "c-symbol" as const, symbol },
         callingConvention: "c" as const,
         variadic: false as const,
-        parameters: [{ name: "value", type, passMode: "value" as const }],
-        result: { type, passMode: "value" as const },
+        sourceCall: { kind: "function" as const },
+        parameters: [{ name: "value", type, passMode: "value" as const, ownership: { kind: "value" as const } }],
+        result: { type, passMode: "value" as const, ownership: { kind: "value" as const } },
       };
     }),
     {
@@ -95,8 +108,91 @@ const localNativeInput: NativeFrontendInput = {
       entry: { kind: "c-symbol", symbol: "nts_padded_roundtrip" },
       callingConvention: "c",
       variadic: false,
-      parameters: [{ name: "value", type: PADDED, passMode: "value" }],
-      result: { type: PADDED, passMode: "value" },
+      sourceCall: { kind: "function" },
+      parameters: [{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" as const } }],
+      result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
+      declaration: { module: nativePackage, name: "Counter.add" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_add" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverParameter: 0 },
+      parameters: [
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "delta", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_create",
+      declaration: { module: nativePackage, name: "createCounter" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_create" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      parameters: [
+        { name: "initial_value", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ],
+      result: {
+        type: COUNTER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+        },
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+      declaration: { module: nativePackage, name: "Counter.dispose" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_destroy" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverParameter: 0 },
+      parameters: [
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_destroyed_count",
+      declaration: { module: nativePackage, name: "counterDestroyedCount" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_destroyed_count" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      parameters: [],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_value",
+      declaration: { module: nativePackage, name: "Counter.value" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_value" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverParameter: 0 },
+      parameters: [
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_verify",
+      declaration: { module: nativePackage, name: "counterVerify" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_verify" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      parameters: [
+        { name: "actual_value", type: I32, passMode: "value", ownership: { kind: "value" } },
+        { name: "actual_destroyed", type: I32, passMode: "value", ownership: { kind: "value" } },
+        { name: "expected_value", type: I32, passMode: "value", ownership: { kind: "value" } },
+        { name: "expected_destroyed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
   ],
 };
@@ -124,8 +220,9 @@ function frontendNativeInput(): NativeFrontendInput {
         entry: { kind: "c-symbol", symbol: "scriptc_test_isize_identity" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "value", type: ISIZE, passMode: "value" }],
-        result: { type: ISIZE, passMode: "value" },
+        sourceCall: { kind: "function" },
+        parameters: [{ name: "value", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } }],
+        result: { type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
         id: "scriptc-test@1#exit",
@@ -133,8 +230,9 @@ function frontendNativeInput(): NativeFrontendInput {
         entry: { kind: "c-symbol", symbol: "exit" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "status", type: I32, passMode: "value" }],
-        result: { type: NATIVE_VOID, passMode: "value" },
+        sourceCall: { kind: "function" },
+        parameters: [{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
         id: "scriptc-test@1#unused",
@@ -142,8 +240,9 @@ function frontendNativeInput(): NativeFrontendInput {
         entry: { kind: "c-symbol", symbol: "scriptc_test_unlinked" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "value", type: I32, passMode: "value" }],
-        result: { type: I32, passMode: "value" },
+        sourceCall: { kind: "function" },
+        parameters: [{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
         id: "scriptc-test@1#verify-exact-integers",
@@ -151,19 +250,20 @@ function frontendNativeInput(): NativeFrontendInput {
         entry: { kind: "c-symbol", symbol: "scriptc_test_verify_exact_integers" },
         callingConvention: "c",
         variadic: false,
+        sourceCall: { kind: "function" },
         parameters: [
-          { name: "signed8", type: I8, passMode: "value" },
-          { name: "unsigned8", type: U8, passMode: "value" },
-          { name: "signed16", type: I16, passMode: "value" },
-          { name: "unsigned16", type: U16, passMode: "value" },
-          { name: "signed32", type: I32, passMode: "value" },
-          { name: "unsigned32", type: U32, passMode: "value" },
-          { name: "signed64", type: I64, passMode: "value" },
-          { name: "unsigned64", type: U64, passMode: "value" },
-          { name: "signedSize", type: ISIZE, passMode: "value" },
-          { name: "unsignedSize", type: USIZE, passMode: "value" },
+          { name: "signed8", type: I8, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "unsigned8", type: U8, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "signed16", type: I16, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "unsigned16", type: U16, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "signed32", type: I32, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "unsigned32", type: U32, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "signed64", type: I64, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "unsigned64", type: U64, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
         ],
-        result: { type: I32, passMode: "value" },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
         id: "scriptc-test@1#verify-padded",
@@ -171,13 +271,14 @@ function frontendNativeInput(): NativeFrontendInput {
         entry: { kind: "c-symbol", symbol: "scriptc_test_verify_padded" },
         callingConvention: "c",
         variadic: false,
+        sourceCall: { kind: "function" },
         parameters: [
-          { name: "value", type: PADDED, passMode: "value" },
-          { name: "tag", type: U8, passMode: "value" },
-          { name: "scalarValue", type: U64, passMode: "value" },
-          { name: "ratio", type: NATIVE_F64, passMode: "value" },
+          { name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "tag", type: U8, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "scalarValue", type: U64, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "ratio", type: NATIVE_F64, passMode: "value", ownership: { kind: "value" as const } },
         ],
-        result: { type: I32, passMode: "value" },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
     ],
   };
@@ -216,8 +317,8 @@ function exactI32Module(value = "42"): IrModule {
         entry: { kind: "c-symbol", symbol: "nts_i32_identity" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "value", type: I32, passMode: "value" }],
-        result: { type: I32, passMode: "value" },
+        parameters: [{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
         id: "process.exit",
@@ -225,8 +326,8 @@ function exactI32Module(value = "42"): IrModule {
         entry: { kind: "c-symbol", symbol: "exit" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "status", type: I32, passMode: "value" }],
-        result: { type: NATIVE_VOID, passMode: "value" },
+        parameters: [{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
     ],
     functions: [
@@ -302,10 +403,10 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
         callingConvention: "c",
         variadic: false,
         parameters: [
-          { name: "signedSize", type: ISIZE, passMode: "value" },
-          { name: "unsignedSize", type: USIZE, passMode: "value" },
+          { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
+          { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
         ],
-        result: { type: NATIVE_VOID, passMode: "value" },
+        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
     ],
     functions: [
@@ -790,6 +891,47 @@ describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (ba
       expect(generated).toContain("sret(");
       expect(generated).toContain("byval(");
     }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (backend) => {
+  test.each([
+    ["explicit disposal is alias-safe and idempotent", "handle-explicit.ts"],
+    ["last-reference release runs the destructor", "handle-automatic.ts"],
+    ["captured mutable aliases share ownership", "handle-captured.ts"],
+    ["records and arrays retain the managed cell", "handle-stored.ts"],
+    ["use after dispose throws through the ordinary catch path", "handle-use-after-dispose.ts"],
+  ] as const)("%s", async (_label, source) => {
+    const stem = source.slice(0, -3);
+    const outDir = join(scratch, `${stem}-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir", source), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native handle frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeTypes).toContainEqual(
+      expect.objectContaining({
+        kind: "handle",
+        id: "native-typescript.fixture.c-v1@0.0.0#type:counter",
+      }),
+    );
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

@@ -151,6 +151,10 @@ export function computeTraced(mod: IrModule): { shapes: Set<string>; unions: Set
  * `_v`-shaped. */
 export function vAdapters(host: ShapeHost, t: IrType): { retain: string; release: string } {
   switch (t.kind) {
+    case "nativeHandle":
+      host.declare(`declare ptr @scr_native_handle_retain_v(ptr)`);
+      host.declare(`declare void @scr_native_handle_release_v(ptr)`);
+      return { retain: "@scr_native_handle_retain_v", release: "@scr_native_handle_release_v" };
     case "caught":
       // Catch-binding snapshot boxes (ScrCaught): the runtime pair is
       // already `_v`-shaped. Caught values never enter containers — these
@@ -326,6 +330,9 @@ export function retainSym(host: ShapeHost, t: IrType): string {
  * points serve where one exists; records use their emitted helper. */
 export function releaseSym(host: ShapeHost, t: IrType): string {
   switch (t.kind) {
+    case "nativeHandle":
+      host.declare(`declare void @scr_native_handle_release_v(ptr)`);
+      return "@scr_native_handle_release_v";
     case "caught":
       host.declare(`declare void @scr_caught_release(ptr)`);
       return "@scr_caught_release";
@@ -515,6 +522,7 @@ function elemKindNum(elem: IrType): number {
 export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): string {
   const useRef =
     elem.kind === "record" || elem.kind === "object" || elem.kind === "union" || elem.kind === "func" ||
+    elem.kind === "nativeHandle" ||
     elem.kind === "symbol" || // symbol identities: scr_sym_* adapters, no trace
     elem.kind === "classval" || // class objects: no-op adapters, no trace (immortal statics)
     elem.kind === "promise" || // promise entries (Promise.all inputs): full REF story
@@ -551,6 +559,7 @@ export function boxNewCall(host: ShapeHost, t: IrType): string {
   }
   if (
     t.kind === "record" || t.kind === "object" || t.kind === "classval" || t.kind === "union" ||
+    t.kind === "nativeHandle" ||
     t.kind === "array" || t.kind === "map" || t.kind === "set" || t.kind === "symbol" || t.kind === "regex" ||
     t.kind === "promise" || t.kind === "bytes" || t.kind === "url" || t.kind === "searchParams" ||
     t.kind === "stats" || t.kind === "fileHandle" || t.kind === "spawnRes" || t.kind === "child" || t.kind === "childStream" ||
@@ -591,6 +600,7 @@ export function llFieldType(t: IrType): "double" | "i8" | "ptr" {
     case "bool":
       return "i8";
     case "string":
+    case "nativeHandle":
     case "array":
     case "record":
     case "object":

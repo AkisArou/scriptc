@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { validateModule } from "../src/ir/validate.js";
-import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
+import { deserializeModule, IR_VERSION, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
 import { BOOL, F64, type IrModule } from "../src/ir/nodes.js";
 
@@ -22,7 +22,7 @@ test("fib module JSON round-trips", () => {
 test("validator rejects type mismatches and bad references", () => {
   const loc = { file: "t.ts", start: 0, end: 0 };
   const bad: IrModule = {
-    irVersion: 8,
+    irVersion: IR_VERSION,
     sourceFile: "t.ts",
     entry: "__main",
     functions: [
@@ -83,6 +83,7 @@ test("serializer round-trips ±Infinity and refuses NaN", () => {
 });
 
 test("deserializer enforces IR version", () => {
-  const json = serializeModule(fibModule).replace('"irVersion": 8', '"irVersion": 99');
-  expect(() => deserializeModule(json)).toThrow(/version mismatch/);
+  const serialized = JSON.parse(serializeModule(fibModule)) as { irVersion: number };
+  serialized.irVersion = IR_VERSION + 1;
+  expect(() => deserializeModule(JSON.stringify(serialized))).toThrow(/version mismatch/);
 });

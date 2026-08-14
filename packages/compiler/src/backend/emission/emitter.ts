@@ -51,6 +51,7 @@ import {
   mangleFunction,
   mangleLocal,
   mangleNativeField,
+  mangleNativeHandleTag,
   mangleRawParam,
   mangleNativeStruct,
   mangleVtSlot,
@@ -756,9 +757,11 @@ export class CEmitter {
     }
     if (directFfiImports.length > 0) out.push("");
     for (const binding of this.mod.nativeBindings ?? []) {
-      const params = binding.parameters.map((parameter) => cType(parameter.type).trim());
+      const nativeAbiType = (type: IrType): string =>
+        type.kind === "nativeHandle" ? "void *" : cType(type).trim();
+      const params = binding.parameters.map((parameter) => nativeAbiType(parameter.type));
       out.push(
-        `extern ${cType(binding.result.type).trim()} ${binding.entry.symbol}(` +
+        `extern ${nativeAbiType(binding.result.type)} ${binding.entry.symbol}(` +
           `${params.length > 0 ? params.join(", ") : "void"});`,
       );
     }
@@ -1286,6 +1289,10 @@ export class CEmitter {
       throw new Error(`emitter bug: unsupported native scalar '${scalar}' in aggregate`);
     };
     for (const definition of this.mod.nativeTypes ?? []) {
+      if (definition.kind === "handle") {
+        out.push(`static const unsigned char ${mangleNativeHandleTag(definition.id)} = 0;`, "");
+        continue;
+      }
       const name = mangleNativeStruct(definition.id);
       out.push(`typedef struct __attribute__((aligned(${definition.alignment}))) ${name} {`);
       let cursor = 0;
@@ -1962,6 +1969,7 @@ export class CEmitter {
         // value, ref arms true, jsval arms ask the engine).
         return `${this.unionTruthyHelper(t.type.unionId)}(${t.name})`;
       case "array":
+      case "nativeHandle":
       case "map":
       case "set":
       case "regex":

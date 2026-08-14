@@ -124,7 +124,14 @@ export interface IrNativeStructType {
   typeId: string;
 }
 
-export type IrNativeValueType = IrNativeScalarType | IrNativeStructType;
+/** Opaque managed native reference. The backend representation is a
+ * ScriptC-owned handle entry, never the foreign pointer itself. */
+export interface IrNativeHandleType {
+  kind: "nativeHandle";
+  typeId: string;
+}
+
+export type IrNativeValueType = IrNativeScalarType | IrNativeStructType | IrNativeHandleType;
 
 export type IrType =
   | IrNativeValueType
@@ -416,7 +423,7 @@ export type IrType =
 export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
   // symbol is not a JS object, but every symbol is truthy — the same
   // constant-true answer.
-  "symbol",
+  "symbol", "nativeHandle",
   "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "fileHandle", "spawnRes", "child",
   "netServer", "netSocket", "http2Session", "http2Stream", "dgramSocket", "testCtx", "httpReq", "httpRes", "httpClientReq",
   "secureCtx", "fsWatcher", "childStream", "procStream", "bytes", "func", "object", "record", "promise",
@@ -432,6 +439,9 @@ export function nativeScalarType(scalar: IrNativeScalar): IrNativeScalarType {
 }
 export function nativeStructType(typeId: string): IrNativeStructType {
   return { kind: "nativeStruct", typeId };
+}
+export function nativeHandleType(typeId: string): IrNativeHandleType {
+  return { kind: "nativeHandle", typeId };
 }
 export const DATE_T: IrType = { kind: "date" };
 export const BYTES_U8: IrType = { kind: "bytes", elem: "u8" };
@@ -622,6 +632,8 @@ export function typeKey(t: IrType): string {
       return `native:${t.scalar}`;
     case "nativeStruct":
       return `native-struct:${t.typeId}`;
+    case "nativeHandle":
+      return `native-handle:${t.typeId}`;
     case "f64":
     case "date":
     case "string":
@@ -693,6 +705,9 @@ export function typeEquals(a: IrType, b: IrType): boolean {
   if (a.kind === "nativeStruct") {
     return b.kind === "nativeStruct" && a.typeId === b.typeId;
   }
+  if (a.kind === "nativeHandle") {
+    return b.kind === "nativeHandle" && a.typeId === b.typeId;
+  }
   if (a.kind === "array") return b.kind === "array" && typeEquals(a.elem, b.elem);
   if (a.kind === "bytes") return b.kind === "bytes" && a.elem === b.elem;
   if (a.kind === "map") {
@@ -735,6 +750,7 @@ export function typeEquals(a: IrType, b: IrType): boolean {
 export function isRefCounted(t: IrType): boolean {
   return (
     t.kind === "string" ||
+    t.kind === "nativeHandle" ||
     t.kind === "array" ||
     t.kind === "map" ||
     t.kind === "set" ||
@@ -809,7 +825,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 8;
+  irVersion: 9;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -871,14 +887,14 @@ export interface IrModule {
     pointerBits: 32 | 64;
     abi: string;
   };
-  /** Reached nominal native aggregate definitions. Layout and indirect ABI
-   * passing are embedder-provided facts, not backend-inferred heuristics. */
-  nativeTypes?: IrNativeStructDef[];
+  /** Reached nominal native definitions. Aggregate layout/indirect passing
+   * and opaque-handle ownership facts are embedder-provided, not inferred. */
+  nativeTypes?: IrNativeTypeDef[];
   /** Generic Native IR bindings. Calls refer to the stable opaque `id`;
    * only this validated table carries the backend symbol spelling.
-   * Exact scalars and trivial indirect aggregates share this value-only path.
-   * Handles, ownership, callbacks, and target-specific entries extend this
-   * table rather than introducing another call path. */
+   * Exact scalars, trivial indirect aggregates, and owner-confined handles
+   * share this path. Callbacks and target-specific entries extend this table
+   * rather than introducing another call path. */
   nativeBindings?: IrNativeBinding[];
   /** Outbound native FFI declarations used by `ffiCall` expressions.
    * These are link-time C ABI imports, not runtime dynamic-library handles:
@@ -906,15 +922,23 @@ export interface IrNativeBinding {
   parameters: {
     name: string;
     type: IrNativeValueType;
-    passMode: "value";
+    passMode: "value" | "pointer";
+    ownership:
+      | { kind: "value" }
+      | { kind: "borrowed"; scope: "call" }
+      | { kind: "owned"; transfer: "to-native" };
   }[];
   result: {
     type: IrNativeValueType | { kind: "void" };
-    passMode: "value";
+    passMode: "value" | "pointer";
+    ownership:
+      | { kind: "value" }
+      | { kind: "owned"; transfer: "to-runtime"; destructor: string };
   };
 }
 
 export interface IrNativeStructDef {
+  kind: "struct";
   id: string;
   declaration: { module: string; name: string };
   size: number;
@@ -929,6 +953,17 @@ export interface IrNativeStructDef {
     offset: number;
   }[];
 }
+
+export interface IrNativeHandleDef {
+  kind: "handle";
+  id: string;
+  declaration: { module: string; name: string };
+  nativeName: string;
+  threadSafety: "confined";
+  identity: "none" | "pointer" | "binding" | "platform";
+}
+
+export type IrNativeTypeDef = IrNativeStructDef | IrNativeHandleDef;
 
 export type IrFfiValueParamClass = "f64" | "bool" | "u8" | "u32" | "i32" | "string" | "bytes";
 export type IrFfiCallbackParamClass = "f64" | "bool" | "u8" | "u32" | "i32";
@@ -5546,6 +5581,7 @@ function isJsonSafeAt(
     case "promise":
     case "generator":
     case "nativeStruct":
+    case "nativeHandle":
     case "void":
       return false;
     // Representable exactly as a union arm in record-field position (the

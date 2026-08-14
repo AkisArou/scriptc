@@ -283,6 +283,8 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
   switch (t.kind) {
     case "nativeStruct":
       return `native struct ${t.typeId}`;
+    case "nativeHandle":
+      return `native handle ${t.typeId}`;
     case "nativeScalar":
       return t.scalar;
     case "f64":

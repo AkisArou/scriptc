@@ -725,6 +725,7 @@ export interface ClassMeta {
   export function arrNewC(E: CEmitter, elem: IrType, capExpr: string | number): string {
     const useRef =
       elem.kind === "record" || elem.kind === "object" || elem.kind === "union" ||
+      elem.kind === "nativeHandle" ||
       // Promise elements (Promise.all's food): refcounted, cycle-headered
       // — the `_v` adapters and scr_promise_trace_v ride the same REF
       // machinery as record/object/union elements.
@@ -758,6 +759,7 @@ export interface ClassMeta {
     }
     if (
       t.kind === "object" || t.kind === "record" || t.kind === "union" ||
+      t.kind === "nativeHandle" ||
       t.kind === "classval" ||
       t.kind === "map" || t.kind === "set" || t.kind === "promise" ||
       t.kind === "generator" ||

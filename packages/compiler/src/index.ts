@@ -113,7 +113,7 @@ export { validateSidecar } from "./library/sidecar-validate.js";
 export { BUILD_ID_SEED, SOURCE_HASH_SEED, hex16, lengthPrefixedStream, wyhash64 } from "./library/wyhash.js";
 export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces.js";
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
-export type { NativeFrontendBinding, NativeFrontendInput, NativeSourceType, NativeStructDefinition } from "./frontend/native.js";
+export type { NativeFrontendBinding, NativeFrontendInput, NativeHandleDefinition, NativeSourceType, NativeStructDefinition, NativeTypeDefinition } from "./frontend/native.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
@@ -261,7 +261,7 @@ function nativeModuleTargetMismatch(
         entryPath,
       );
   }
-  if ((mod.nativeTypes?.length ?? 0) > 0) {
+  if ((mod.nativeTypes ?? []).some((definition) => definition.kind === "struct")) {
     const selectedAbi = platform === "linux" && process.arch === "x64"
       ? "sysv-amd64"
       : null;
@@ -1097,6 +1097,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       // FileHandle owns a native descriptor and its settled-promise adapters;
       // keep that optional TU out of programs that never call fsp.open.
       fileHandle: moduleUsesFileHandle(lowered.module),
+      nativeHandle: (lowered.module.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
       // The link switch for scr_fetch.c (the native bridge over scr_net +
       // scr_tls + scr_http's client parser + zlib — cc.ts implies those
       // units into the link): embedded npm code that references fetch gets
@@ -1963,6 +1964,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     zlib: moduleUsesZlib(mod),
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
+    nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
   });
 
   // The sidecar lands beside the compiled object, written by the same
