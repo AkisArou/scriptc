@@ -54,6 +54,15 @@ NtsPadded nts_padded_roundtrip(NtsPadded value) {
   return value;
 }
 
+uint64_t nts_hash_utf8(const char *data, size_t length) {
+  uint64_t hash = UINT64_C(14695981039346656037);
+  for (size_t index = 0; index < length; index++) {
+    hash ^= (uint8_t)data[index];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
 NtsCounter *nts_counter_create(int32_t initial_value) {
   NtsCounter *counter = malloc(sizeof *counter);
   if (!counter) return NULL;

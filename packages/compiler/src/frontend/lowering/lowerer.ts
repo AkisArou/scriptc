@@ -44,7 +44,7 @@ import type {
   IrGlobal,
   IrLocal,
   IrModule,
-  IrNativeBinding,
+  IrNativeValueType,
   IrParam,
   IrRecordShape,
   IrStmt,
@@ -1256,7 +1256,7 @@ export class Lowerer {
   readonly ffiBindingSymbols: ReadonlyMap<string, ReadonlySet<ts.Symbol>> | null;
   /** Manifest-neutral native input resolved exclusively by checker symbol. */
   readonly nativeInput: NativeFrontendInput | undefined;
-  readonly nativeTypesBySymbol: ReadonlyMap<ts.Symbol, IrNativeBinding["parameters"][number]["type"]>;
+  readonly nativeTypesBySymbol: ReadonlyMap<ts.Symbol, IrNativeValueType>;
   readonly nativeTypeDefsById: ResolvedNativeFrontend["typeDefsById"];
   readonly nativeBindingsBySymbol: ReadonlyMap<ts.Symbol, NativeInputBinding>;
   readonly validatedNativeBindingSymbols = new Set<ts.Symbol>();
@@ -2288,7 +2288,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 9,
+            irVersion: 10,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,

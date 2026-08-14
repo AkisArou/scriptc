@@ -151,9 +151,9 @@ function validateDeclaration(
   }
   const signature = signatures[0]!;
   const parameters = signature.getParameters();
-  const sourceParameters = binding.parameters.filter(
-    (_parameter, index) =>
-      binding.sourceCall.kind !== "method" || index !== binding.sourceCall.receiverParameter,
+  const sourceParameters = binding.arguments.filter(
+    (_argument, index) =>
+      binding.sourceCall.kind !== "method" || index !== binding.sourceCall.receiverArgument,
   );
   if (parameters.length !== sourceParameters.length) {
     failSignature(
@@ -224,7 +224,7 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   ) {
     failBinding(L, binding, `the source call is not a ${binding.sourceCall.kind}`, loc);
   }
-  const sourceParameterCount = binding.parameters.length -
+  const sourceParameterCount = binding.arguments.length -
     (binding.sourceCall.kind === "method" ? 1 : 0);
   if (expr.arguments.length !== sourceParameterCount) {
     failSignature(
@@ -237,24 +237,24 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   const argumentNodes = [...expr.arguments];
   if (binding.sourceCall.kind === "method") {
     if (
-      binding.sourceCall.receiverParameter < 0 ||
-      binding.sourceCall.receiverParameter >= binding.parameters.length
+      binding.sourceCall.receiverArgument < 0 ||
+      binding.sourceCall.receiverArgument >= binding.arguments.length
     ) {
-      failBinding(L, binding, "the method receiver parameter index is outside the native parameter list", loc);
+      failBinding(L, binding, "the method receiver argument index is outside the logical argument list", loc);
     }
-    argumentNodes.splice(binding.sourceCall.receiverParameter, 0, (callee as ts.PropertyAccessExpression).expression);
+    argumentNodes.splice(binding.sourceCall.receiverArgument, 0, (callee as ts.PropertyAccessExpression).expression);
   }
   const args = argumentNodes.map((argument, index) =>
-    L.lowerExprExpecting(argument, binding.parameters[index]!.type)
+    L.lowerExprExpecting(argument, binding.arguments[index]!.type)
   );
   L.usesNativeTarget = true;
   L.usedNativeBindingIds.add(binding.id);
   if (binding.result.ownership.kind === "owned") {
     L.usedNativeBindingIds.add(binding.result.ownership.destructor);
   }
-  for (const parameter of binding.parameters) {
-    if (parameter.type.kind === "nativeStruct" || parameter.type.kind === "nativeHandle") {
-      L.usedNativeTypeIds.add(parameter.type.typeId);
+  for (const argument of binding.arguments) {
+    if (argument.type.kind === "nativeStruct" || argument.type.kind === "nativeHandle") {
+      L.usedNativeTypeIds.add(argument.type.typeId);
     }
   }
   if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
@@ -448,11 +448,16 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
     entry: { ...binding.entry },
     callingConvention: binding.callingConvention,
     variadic: false,
+    arguments: binding.arguments.map((argument) => ({
+      name: argument.name,
+      type: { ...argument.type },
+    })),
     parameters: binding.parameters.map((parameter) => ({
       name: parameter.name,
       type: { ...parameter.type },
       passMode: parameter.passMode,
       ownership: { ...parameter.ownership },
+      projection: { ...parameter.projection },
     })),
     result: {
       type: { ...binding.result.type },

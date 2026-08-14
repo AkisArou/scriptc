@@ -133,6 +133,24 @@ export interface IrNativeHandleType {
 
 export type IrNativeValueType = IrNativeScalarType | IrNativeStructType | IrNativeHandleType;
 
+/** A foreign pointer that exists only in the physical native signature.
+ * It is intentionally excluded from IrType: source code and ordinary IR
+ * expressions can never observe or manufacture one. */
+export interface IrNativePointerType {
+  kind: "nativePointer";
+  pointee: "i8" | "u8";
+  const: boolean;
+  addressSpace: 0;
+}
+
+export type IrNativeAbiType = IrNativeValueType | IrNativePointerType;
+export type IrNativeArgumentType = IrNativeValueType | { kind: "string" };
+
+export type IrNativeParameterProjection =
+  | { kind: "argument"; argument: number }
+  | { kind: "utf8Data"; argument: number }
+  | { kind: "utf8ByteLength"; argument: number };
+
 export type IrType =
   | IrNativeValueType
   | { kind: "f64" }
@@ -825,7 +843,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 9;
+  irVersion: 10;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -919,14 +937,22 @@ export interface IrNativeBinding {
   entry: { kind: "c-symbol"; symbol: string };
   callingConvention: "c";
   variadic: false;
+  /** Logical values evaluated by nativeCall, once and in source order. */
+  arguments: {
+    name: string;
+    type: IrNativeArgumentType;
+  }[];
+  /** Physical ABI slots in declaration order. Multiple slots may project
+   * from one logical argument (for example UTF-8 data plus byte length). */
   parameters: {
     name: string;
-    type: IrNativeValueType;
+    type: IrNativeAbiType;
     passMode: "value" | "pointer";
     ownership:
       | { kind: "value" }
       | { kind: "borrowed"; scope: "call" }
       | { kind: "owned"; transfer: "to-native" };
+    projection: IrNativeParameterProjection;
   }[];
   result: {
     type: IrNativeValueType | { kind: "void" };

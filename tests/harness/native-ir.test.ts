@@ -11,7 +11,7 @@ import { afterAll, describe, expect, test } from "vitest";
 import { compileC } from "../../packages/compiler/src/backend/cc.js";
 import { emitModule } from "../../packages/compiler/src/backend/emission/emitter.js";
 import { emitLlvmModule } from "../../packages/compiler/src/backend/llvm/emitter.js";
-import type { IrExpr, IrModule, IrNativeScalar, SrcLoc } from "../../packages/compiler/src/ir/nodes.js";
+import type { IrExpr, IrModule, IrNativeScalar, IrNativeValueType, SrcLoc } from "../../packages/compiler/src/ir/nodes.js";
 import { nativeScalarType } from "../../packages/compiler/src/ir/nodes.js";
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
@@ -64,6 +64,26 @@ const COUNTER_DEFINITION = {
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
 
+type DirectNativeParameter = {
+  readonly name: string;
+  readonly type: IrNativeValueType;
+  readonly passMode: "value" | "pointer";
+  readonly ownership:
+    | { readonly kind: "value" }
+    | { readonly kind: "borrowed"; readonly scope: "call" }
+    | { readonly kind: "owned"; readonly transfer: "to-native" };
+};
+
+function directSignature(parameters: readonly DirectNativeParameter[]) {
+  return {
+    arguments: parameters.map(({ name, type }) => ({ name, type })),
+    parameters: parameters.map((parameter, argument) => ({
+      ...parameter,
+      projection: { kind: "argument" as const, argument },
+    })),
+  };
+}
+
 const exactIntegerBindings = [
   { scalar: "i8", declaration: "i8Identity", symbol: "nts_i8_identity" },
   { scalar: "u8", declaration: "u8Identity", symbol: "nts_u8_identity" },
@@ -98,7 +118,7 @@ const localNativeInput: NativeFrontendInput = {
         callingConvention: "c" as const,
         variadic: false as const,
         sourceCall: { kind: "function" as const },
-        parameters: [{ name: "value", type, passMode: "value" as const, ownership: { kind: "value" as const } }],
+        ...directSignature([{ name: "value", type, passMode: "value", ownership: { kind: "value" } }]),
         result: { type, passMode: "value" as const, ownership: { kind: "value" as const } },
       };
     }),
@@ -109,8 +129,34 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      parameters: [{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" as const } }],
+      ...directSignature([{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" } }]),
       result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
+      declaration: { module: nativePackage, name: "hashUtf8" },
+      entry: { kind: "c-symbol", symbol: "nts_hash_utf8" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      arguments: [{ name: "data", type: { kind: "string" } }],
+      parameters: [
+        {
+          name: "data",
+          type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "utf8Data", argument: 0 },
+        },
+        {
+          name: "length",
+          type: USIZE,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "utf8ByteLength", argument: 0 },
+        },
+      ],
+      result: { type: U64, passMode: "value", ownership: { kind: "value" } },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
@@ -118,11 +164,11 @@ const localNativeInput: NativeFrontendInput = {
       entry: { kind: "c-symbol", symbol: "nts_counter_add" },
       callingConvention: "c",
       variadic: false,
-      sourceCall: { kind: "method", receiverParameter: 0 },
-      parameters: [
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
         { name: "delta", type: I32, passMode: "value", ownership: { kind: "value" } },
-      ],
+      ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
     {
@@ -132,9 +178,9 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      parameters: [
+      ...directSignature([
         { name: "initial_value", type: I32, passMode: "value", ownership: { kind: "value" } },
-      ],
+      ]),
       result: {
         type: COUNTER,
         passMode: "pointer",
@@ -151,10 +197,10 @@ const localNativeInput: NativeFrontendInput = {
       entry: { kind: "c-symbol", symbol: "nts_counter_destroy" },
       callingConvention: "c",
       variadic: false,
-      sourceCall: { kind: "method", receiverParameter: 0 },
-      parameters: [
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
-      ],
+      ]),
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" } },
     },
     {
@@ -164,7 +210,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      parameters: [],
+      ...directSignature([]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
     {
@@ -173,10 +219,10 @@ const localNativeInput: NativeFrontendInput = {
       entry: { kind: "c-symbol", symbol: "nts_counter_value" },
       callingConvention: "c",
       variadic: false,
-      sourceCall: { kind: "method", receiverParameter: 0 },
-      parameters: [
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
-      ],
+      ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
     {
@@ -186,12 +232,12 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      parameters: [
+      ...directSignature([
         { name: "actual_value", type: I32, passMode: "value", ownership: { kind: "value" } },
         { name: "actual_destroyed", type: I32, passMode: "value", ownership: { kind: "value" } },
         { name: "expected_value", type: I32, passMode: "value", ownership: { kind: "value" } },
         { name: "expected_destroyed", type: I32, passMode: "value", ownership: { kind: "value" } },
-      ],
+      ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" } },
     },
   ],
@@ -221,7 +267,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        parameters: [{ name: "value", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } }],
+        ...directSignature([{ name: "value", type: ISIZE, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
@@ -231,7 +277,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        parameters: [{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
@@ -241,7 +287,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        parameters: [{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
@@ -251,7 +297,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        parameters: [
+        ...directSignature([
           { name: "signed8", type: I8, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsigned8", type: U8, passMode: "value", ownership: { kind: "value" as const } },
           { name: "signed16", type: I16, passMode: "value", ownership: { kind: "value" as const } },
@@ -262,7 +308,7 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "unsigned64", type: U64, passMode: "value", ownership: { kind: "value" as const } },
           { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
-        ],
+        ]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
@@ -272,13 +318,25 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        parameters: [
+        ...directSignature([
           { name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
           { name: "tag", type: U8, passMode: "value", ownership: { kind: "value" as const } },
           { name: "scalarValue", type: U64, passMode: "value", ownership: { kind: "value" as const } },
           { name: "ratio", type: NATIVE_F64, passMode: "value", ownership: { kind: "value" as const } },
-        ],
+        ]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
+      },
+      {
+        id: "scriptc-test@1#verify-utf8-hash",
+        declaration: { module: "scriptc-native-test", name: "verifyUtf8Hash" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_utf8_hash" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        ...directSignature([
+          { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
+        ]),
+        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
       },
     ],
   };
@@ -317,7 +375,7 @@ function exactI32Module(value = "42"): IrModule {
         entry: { kind: "c-symbol", symbol: "nts_i32_identity" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
       },
       {
@@ -326,7 +384,7 @@ function exactI32Module(value = "42"): IrModule {
         entry: { kind: "c-symbol", symbol: "exit" },
         callingConvention: "c",
         variadic: false,
-        parameters: [{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" as const } }],
+        ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
     ],
@@ -353,6 +411,36 @@ function exactI32Module(value = "42"): IrModule {
       },
     ],
   };
+}
+
+function borrowedUtf8Module(): IrModule {
+  const mod = exactI32Module();
+  const binding = mod.nativeBindings![0]!;
+  binding.arguments = [{ name: "data", type: { kind: "string" } }];
+  binding.parameters = [
+    {
+      name: "data",
+      type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+      passMode: "pointer",
+      ownership: { kind: "borrowed", scope: "call" },
+      projection: { kind: "utf8Data", argument: 0 },
+    },
+    {
+      name: "length",
+      type: USIZE,
+      passMode: "value",
+      ownership: { kind: "value" },
+      projection: { kind: "utf8ByteLength", argument: 0 },
+    },
+  ];
+  const exit = mod.functions[0]!.body[0]!;
+  if (exit.kind !== "exprStmt" || exit.expr.kind !== "nativeCall") {
+    throw new Error("test fixture lost its Native IR exit call");
+  }
+  const call = exit.expr.args[0]!;
+  if (call.kind !== "nativeCall") throw new Error("test fixture lost its nested native call");
+  call.args = [{ kind: "strLit", value: "hello", type: { kind: "string" }, loc }];
+  return mod;
 }
 
 function exactScalarLiteralModule(
@@ -402,10 +490,10 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
         entry: { kind: "c-symbol", symbol: "scriptc_test_pointer_sizes" },
         callingConvention: "c",
         variadic: false,
-        parameters: [
+        ...directSignature([
           { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
-        ],
+        ]),
         result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
       },
     ],
@@ -569,6 +657,30 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
   exit.expr.type = I32;
   expect(validateModule(wrongResult).map((error) => error.message)).toContain(
     "in __main: Native IR call process.exit type native:i32 != result void",
+  );
+});
+
+test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
+  expect(validateModule(borrowedUtf8Module())).toEqual([]);
+
+  const mutablePointer = borrowedUtf8Module();
+  const dataType = mutablePointer.nativeBindings![0]!.parameters[0]!.type;
+  if (dataType.kind !== "nativePointer") throw new Error("test fixture lost its pointer type");
+  dataType.const = false;
+  expect(validateModule(mutablePointer).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "data" has an invalid UTF-8 data projection',
+  );
+
+  const missingLength = borrowedUtf8Module();
+  missingLength.nativeBindings![0]!.parameters.pop();
+  expect(validateModule(missingLength).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" argument "data" has an incomplete or ambiguous ABI projection',
+  );
+
+  const outOfRange = borrowedUtf8Module();
+  outOfRange.nativeBindings![0]!.parameters[1]!.projection.argument = 1;
+  expect(validateModule(outOfRange).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "length" projects an invalid argument index',
   );
 });
 
@@ -890,6 +1002,54 @@ describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (ba
     } else {
       expect(generated).toContain("sret(");
       expect(generated).toContain("byval(");
+    }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8, %s backend", (backend) => {
+  test("evaluates once and passes exact UTF-8 bytes including embedded NUL", async () => {
+    const outDir = join(scratch, `utf8-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/utf8.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native UTF-8 frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
+        arguments: [{ name: "data", type: { kind: "string" } }],
+        parameters: [
+          expect.objectContaining({ projection: { kind: "utf8Data", argument: 0 } }),
+          expect.objectContaining({ projection: { kind: "utf8ByteLength", argument: 0 } }),
+        ],
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "utf8.c" : "utf8.ll"),
+      "utf8",
+    );
+    if (backend === "c") {
+      expect(generated).toContain("->data");
+      expect(generated).toContain("->len");
+    } else {
+      expect(generated).toContain("getelementptr inbounds %ScrStr");
     }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({

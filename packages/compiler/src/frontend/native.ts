@@ -1,4 +1,11 @@
-import type { IrNativeHandleDef, IrNativeStructDef, IrNativeValueType } from "../ir/nodes.js";
+import type {
+  IrNativeAbiType,
+  IrNativeArgumentType,
+  IrNativeHandleDef,
+  IrNativeParameterProjection,
+  IrNativeStructDef,
+  IrNativeValueType,
+} from "../ir/nodes.js";
 
 /** One exported TypeScript declaration that denotes an exact Native IR value.
  * Source spelling is never used as evidence: the frontend resolves this
@@ -34,15 +41,20 @@ export interface NativeFrontendBinding {
   readonly variadic: false;
   readonly sourceCall:
     | { readonly kind: "function" }
-    | { readonly kind: "method"; readonly receiverParameter: number };
+    | { readonly kind: "method"; readonly receiverArgument: number };
+  readonly arguments: readonly {
+    readonly name: string;
+    readonly type: Readonly<IrNativeArgumentType>;
+  }[];
   readonly parameters: readonly {
     readonly name: string;
-    readonly type: Readonly<IrNativeValueType>;
+    readonly type: Readonly<IrNativeAbiType>;
     readonly passMode: "value" | "pointer";
     readonly ownership:
       | { readonly kind: "value" }
       | { readonly kind: "borrowed"; readonly scope: "call" }
       | { readonly kind: "owned"; readonly transfer: "to-native" };
+    readonly projection: Readonly<IrNativeParameterProjection>;
   }[];
   readonly result: {
     readonly type: Readonly<IrNativeValueType> | { readonly kind: "void" };

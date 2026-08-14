@@ -1280,6 +1280,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     validNativeScalar(type) ||
     (type.kind === "nativeStruct" && nativeTypesById.get(type.typeId)?.kind === "struct") ||
     (type.kind === "nativeHandle" && nativeTypesById.get(type.typeId)?.kind === "handle");
+  const validNativePointer = (
+    type: NonNullable<IrModule["nativeBindings"]>[number]["parameters"][number]["type"],
+  ): boolean =>
+    type.kind === "nativePointer" &&
+    ["i8", "u8"].includes(type.pointee) &&
+    typeof type.const === "boolean" &&
+    type.addressSpace === 0;
   if (
     (mod.nativeTypes ?? []).some((definition) => definition.kind === "struct") &&
     (!validNativeTarget || mod.nativeTarget?.abi === "")
@@ -1342,6 +1349,28 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
+    const argumentNames = new Set<string>();
+    for (const argument of binding.arguments) {
+      if (argument.name === "" || argumentNames.has(argument.name)) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an empty or duplicate argument name "${argument.name}"`,
+          loc: moduleLoc,
+        });
+      }
+      argumentNames.add(argument.name);
+      if (argument.type.kind !== "string" && !validNativeValue(argument.type)) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" argument "${argument.name}" has an unsupported source type`,
+          loc: moduleLoc,
+        });
+      }
+    }
+    const projectionsByArgument = binding.arguments.map(() => ({
+      direct: 0,
+      utf8Data: 0,
+      utf8ByteLength: 0,
+      total: 0,
+    }));
     const parameterNames = new Set<string>();
     for (const parameter of binding.parameters) {
       if (parameter.name === "" || parameterNames.has(parameter.name)) {
@@ -1352,7 +1381,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
       parameterNames.add(parameter.name);
       const handleParameter = parameter.type.kind === "nativeHandle";
-      if (parameter.passMode !== (handleParameter ? "pointer" : "value")) {
+      const pointerParameter = parameter.type.kind === "nativePointer";
+      if (parameter.passMode !== (handleParameter || pointerParameter ? "pointer" : "value")) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has a pass mode inconsistent with its type`,
           loc: moduleLoc,
@@ -1361,20 +1391,99 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       if (
         handleParameter
           ? parameter.ownership.kind !== "borrowed" && parameter.ownership.kind !== "owned"
-          : parameter.ownership.kind !== "value"
+          : pointerParameter
+            ? parameter.ownership.kind !== "borrowed"
+            : parameter.ownership.kind !== "value"
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has invalid ownership`,
           loc: moduleLoc,
         });
       }
-      if (!validNativeValue(parameter.type)) {
+      if (
+        parameter.type.kind === "nativePointer"
+          ? !validNativePointer(parameter.type)
+          : !validNativeValue(parameter.type)
+      ) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
           loc: moduleLoc,
         });
       }
+      const sourceArgument = binding.arguments[parameter.projection.argument];
+      if (
+        !Number.isSafeInteger(parameter.projection.argument) ||
+        parameter.projection.argument < 0 ||
+        sourceArgument === undefined
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" projects an invalid argument index`,
+          loc: moduleLoc,
+        });
+        continue;
+      }
+      const projectionCounts = projectionsByArgument[parameter.projection.argument]!;
+      projectionCounts.total++;
+      switch (parameter.projection.kind) {
+        case "argument":
+          projectionCounts.direct++;
+          if (
+            parameter.type.kind === "nativePointer" ||
+            sourceArgument.type.kind === "string" ||
+            !typeEquals(parameter.type, sourceArgument.type)
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an inconsistent direct projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "utf8Data":
+          projectionCounts.utf8Data++;
+          if (
+            sourceArgument.type.kind !== "string" ||
+            parameter.type.kind !== "nativePointer" ||
+            !["i8", "u8"].includes(parameter.type.pointee) ||
+            parameter.type.const !== true ||
+            parameter.type.addressSpace !== 0 ||
+            parameter.ownership.kind !== "borrowed"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 data projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "utf8ByteLength":
+          projectionCounts.utf8ByteLength++;
+          if (
+            sourceArgument.type.kind !== "string" ||
+            parameter.type.kind !== "nativeScalar" ||
+            parameter.type.scalar !== "usize" ||
+            parameter.ownership.kind !== "value"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 byte-length projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+      }
     }
+    binding.arguments.forEach((argument, argumentIndex) => {
+      const projections = projectionsByArgument[argumentIndex]!;
+      const valid = argument.type.kind === "string"
+        ? projections.total === 2 &&
+          projections.utf8Data === 1 &&
+          projections.utf8ByteLength === 1
+        : projections.total === 1 && projections.direct === 1;
+      if (!valid) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" argument "${argument.name}" has an incomplete or ambiguous ABI projection`,
+          loc: moduleLoc,
+        });
+      }
+    });
     const handleResult = binding.result.type.kind === "nativeHandle";
     if (binding.result.passMode !== (handleResult ? "pointer" : "value")) {
       errors.push({
@@ -1401,7 +1510,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const ownedParameters = binding.parameters.filter((parameter) => parameter.ownership.kind === "owned");
     if (
       ownedParameters.length > 0 &&
-      (ownedParameters.length !== 1 || binding.parameters.length !== 1 || binding.result.type.kind !== "void")
+      (ownedParameters.length !== 1 || binding.parameters.length !== 1 || binding.arguments.length !== 1 || binding.result.type.kind !== "void")
     ) {
       errors.push({
         message: `Native IR binding "${binding.id}" has an unsupported ownership-transfer signature`,
@@ -1422,10 +1531,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       resultType.kind !== "nativeHandle" ||
       destructor === undefined ||
       destructor.result.type.kind !== "void" ||
+      destructor.arguments.length !== 1 ||
+      destructor.arguments[0]?.type.kind !== "nativeHandle" ||
+      destructor.arguments[0].type.typeId !== resultType.typeId ||
       destructor.parameters.length !== 1 ||
       destructor.parameters[0]?.type.kind !== "nativeHandle" ||
       destructor.parameters[0].type.typeId !== resultType.typeId ||
-      destructor.parameters[0].ownership.kind !== "owned"
+      destructor.parameters[0].ownership.kind !== "owned" ||
+      destructor.parameters[0].projection.kind !== "argument" ||
+      destructor.parameters[0].projection.argument !== 0
     ) {
       errors.push({
         message: `Native IR binding "${binding.id}" names an invalid handle destructor "${binding.result.ownership.destructor}"`,
@@ -3024,16 +3138,16 @@ function validateFunction(
           err(`Native IR call to undeclared binding "${e.binding}"`, e.loc);
           break;
         }
-        if (binding.parameters.length !== e.args.length) {
+        if (binding.arguments.length !== e.args.length) {
           err(
-            `Native IR call ${e.binding}: ${e.args.length} args, expected ${binding.parameters.length}`,
+            `Native IR call ${e.binding}: ${e.args.length} args, expected ${binding.arguments.length}`,
             e.loc,
           );
         }
         e.args.forEach((arg, i) => {
-          const parameter = binding.parameters[i];
-          if (parameter !== undefined) {
-            expectType(arg, parameter.type, `Native IR call ${e.binding} arg ${i}`);
+          const argument = binding.arguments[i];
+          if (argument !== undefined) {
+            expectType(arg, argument.type, `Native IR call ${e.binding} arg ${i}`);
           }
         });
         if (!typeEquals(e.type, binding.result.type)) {

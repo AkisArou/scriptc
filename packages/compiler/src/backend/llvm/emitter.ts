@@ -1348,6 +1348,7 @@ class LlEmitter {
   private nativeParameterType(
     t: IrNativeBinding["parameters"][number]["type"],
   ): string {
+    if (t.kind === "nativePointer") return "ptr";
     if (t.kind === "nativeStruct") {
       const definition = this.nativeTypesById.get(t.typeId);
       if (definition?.kind !== "struct") throw new Error(`llvm emitter bug: unknown native struct ${t.typeId}`);
@@ -6305,12 +6306,13 @@ class LlEmitter {
         );
         if (ownedParameter >= 0) {
           const parameter = binding.parameters[ownedParameter]!;
-          if (parameter.type.kind !== "nativeHandle") {
+          if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
             throw new Error(`llvm emitter bug: owned non-handle parameter in ${binding.id}`);
           }
+          const arg = args[parameter.projection.argument]!;
           this.declare(`declare void @scr_native_handle_dispose(ptr, ptr, ptr)`);
           B.line(
-            `call void @scr_native_handle_dispose(ptr ${args[ownedParameter]!.name}, ` +
+            `call void @scr_native_handle_dispose(ptr ${arg.name}, ` +
               `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
           );
           this.emitPendingCheck();
@@ -6342,25 +6344,43 @@ class LlEmitter {
           callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
         }
         binding.parameters.forEach((parameter, index) => {
-          const arg = args[index]!;
-          if (parameter.type.kind === "nativeStruct") {
-            const layout = this.nativeStructLayout(parameter.type.typeId);
-            const slot = B.tmp();
-            const type = this.llType(parameter.type);
-            B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
-            B.line(`store ${type} ${arg.name}, ptr ${slot}, align ${layout.definition.alignment}`);
-            callArgs.push(`${parameterTypes[index]} ${slot}`);
-          } else if (parameter.type.kind === "nativeHandle") {
-            this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
-            const raw = B.tmp();
-            B.line(
-              `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
-                `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
-            );
-            this.emitPendingCheck();
-            callArgs.push(`${parameterTypes[index]} ${raw}`);
-          } else {
-            callArgs.push(`${parameterTypes[index]} ${arg.name}`);
+          const arg = args[parameter.projection.argument]!;
+          switch (parameter.projection.kind) {
+            case "utf8Data": {
+              const data = B.tmp();
+              B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 1`);
+              callArgs.push(`${parameterTypes[index]} ${data}`);
+              break;
+            }
+            case "utf8ByteLength": {
+              const lenPtr = B.tmp();
+              const len = B.tmp();
+              B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 0, i32 1`);
+              B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
+              callArgs.push(`${parameterTypes[index]} ${len}`);
+              break;
+            }
+            case "argument":
+              if (parameter.type.kind === "nativeStruct") {
+                const layout = this.nativeStructLayout(parameter.type.typeId);
+                const slot = B.tmp();
+                const type = this.llType(parameter.type);
+                B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
+                B.line(`store ${type} ${arg.name}, ptr ${slot}, align ${layout.definition.alignment}`);
+                callArgs.push(`${parameterTypes[index]} ${slot}`);
+              } else if (parameter.type.kind === "nativeHandle") {
+                this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
+                const raw = B.tmp();
+                B.line(
+                  `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
+                    `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
+                );
+                this.emitPendingCheck();
+                callArgs.push(`${parameterTypes[index]} ${raw}`);
+              } else {
+                callArgs.push(`${parameterTypes[index]} ${arg.name}`);
+              }
+              break;
           }
         });
         const call =

@@ -757,8 +757,14 @@ export class CEmitter {
     }
     if (directFfiImports.length > 0) out.push("");
     for (const binding of this.mod.nativeBindings ?? []) {
-      const nativeAbiType = (type: IrType): string =>
-        type.kind === "nativeHandle" ? "void *" : cType(type).trim();
+      const nativeAbiType = (
+        type: IrNativeBinding["parameters"][number]["type"] | IrNativeBinding["result"]["type"],
+      ): string =>
+        type.kind === "nativeHandle"
+          ? "void *"
+          : type.kind === "nativePointer"
+            ? `${type.const ? "const " : ""}void *`
+            : cType(type).trim();
       const params = binding.parameters.map((parameter) => nativeAbiType(parameter.type));
       out.push(
         `extern ${nativeAbiType(binding.result.type)} ${binding.entry.symbol}(` +

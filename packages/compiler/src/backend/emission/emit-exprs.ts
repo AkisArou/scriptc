@@ -2255,25 +2255,35 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         );
         if (ownedParameter >= 0) {
           const parameter = binding.parameters[ownedParameter]!;
-          if (parameter.type.kind !== "nativeHandle") {
+          if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
             throw new Error(`emitter bug: owned non-handle parameter in ${binding.id}`);
           }
+          const arg = args[parameter.projection.argument]!;
           E.line(
-            `scr_native_handle_dispose(${args[ownedParameter]!.name}, ` +
+            `scr_native_handle_dispose(${arg.name}, ` +
               `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});${E.srcComment(e.loc)}`,
           );
           E.emitPendingCheck();
           return { name: "", type: e.type };
         }
-        const nativeArgs = binding.parameters.map((parameter, index) => {
-          if (parameter.type.kind !== "nativeHandle") return args[index]!.name;
-          const raw = `sc_t${E.tempCounter++}`;
-          E.line(
-            `void *${raw} = scr_native_handle_require(${args[index]!.name}, ` +
-              `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});`,
-          );
-          E.emitPendingCheck();
-          return raw;
+        const nativeArgs = binding.parameters.map((parameter) => {
+          const arg = args[parameter.projection.argument]!;
+          switch (parameter.projection.kind) {
+            case "utf8Data":
+              return `(const void *)${arg.name}->data`;
+            case "utf8ByteLength":
+              return `${arg.name}->len`;
+            case "argument": {
+              if (parameter.type.kind !== "nativeHandle") return arg.name;
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(
+                `void *${raw} = scr_native_handle_require(${arg.name}, ` +
+                  `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});`,
+              );
+              E.emitPendingCheck();
+              return raw;
+            }
+          }
         });
         const call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
         if (binding.result.type.kind === "void") {
