@@ -8,6 +8,7 @@ import type {
   i64,
   u64,
   usize,
+  Counter,
   Padded,
 } from "@native-typescript/scabi-c-v1-fixture";
 
@@ -42,3 +43,8 @@ export declare function callbackErrno(
   callback: (value: i32) => i32,
   value: i32,
 ): i32;
+export declare function createNullableCounter(succeed: i32): Counter;
+export declare function callbackNullableCounter(
+  callback: (value: i32) => i32,
+  succeed: i32,
+): Counter;

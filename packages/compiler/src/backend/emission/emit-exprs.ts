@@ -2322,12 +2322,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           const raw = `sc_t${E.tempCounter++}`;
           E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
-          const result = E.newTemp(
-            e.type,
+          const wrap =
             `scr_native_handle_new(${raw}, &${destructor.entry.symbol}, ` +
-              `&${mangleNativeHandleTag(definition.id)}, ` +
-              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))})`,
-          );
+            `&${mangleNativeHandleTag(definition.id)}, ` +
+            `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))})`;
+          let result: Temp;
+          if (binding.error.kind === "nullable") {
+            result = E.newTemp(e.type, "NULL");
+            E.line(`if (${raw} == NULL) {`);
+            E.indent++;
+            E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
+            E.indent--;
+            E.line("} else {");
+            E.indent++;
+            E.line(`${result.name} = ${wrap};`);
+            E.indent--;
+            E.line("}");
+          } else {
+            result = E.newTemp(e.type, wrap);
+          }
           E.emitPendingCheck();
           releaseArguments();
           return result;

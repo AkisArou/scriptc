@@ -502,6 +502,72 @@ function frontendNativeInput(): NativeFrontendInput {
         ],
         result: { type: I32, passMode: "value", ownership: { kind: "value" } },
       },
+      {
+        id: "scriptc-test@1#nullable-counter",
+        declaration: { module: "scriptc-native-test", name: "createNullableCounter" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_nullable_counter" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: { kind: "nullable" },
+        ...directSignature([
+          { name: "succeed", type: I32, passMode: "value", ownership: { kind: "value" } },
+        ]),
+        result: {
+          type: COUNTER,
+          passMode: "pointer",
+          ownership: {
+            kind: "owned",
+            transfer: "to-runtime",
+            destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+          },
+        },
+      },
+      {
+        id: "scriptc-test@1#callback-nullable-counter",
+        declaration: { module: "scriptc-native-test", name: "callbackNullableCounter" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_callback_nullable_counter" },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: { kind: "nullable" },
+        arguments: [
+          { name: "callback", type: CALL_I32_SOURCE },
+          { name: "succeed", type: I32 },
+        ],
+        parameters: [
+          {
+            name: "callback",
+            type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
+            passMode: "pointer",
+            ownership: { kind: "callScoped" },
+            projection: { kind: "callbackFunction", argument: 0 },
+          },
+          {
+            name: "context",
+            type: { kind: "nativeContext", addressSpace: 0 },
+            passMode: "pointer",
+            ownership: { kind: "callScoped" },
+            projection: { kind: "callbackContext", argument: 0 },
+          },
+          {
+            name: "succeed",
+            type: I32,
+            passMode: "value",
+            ownership: { kind: "value" },
+            projection: { kind: "argument", argument: 1 },
+          },
+        ],
+        result: {
+          type: COUNTER,
+          passMode: "pointer",
+          ownership: {
+            kind: "owned",
+            transfer: "to-runtime",
+            destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+          },
+        },
+      },
     ],
   };
 }
@@ -1494,6 +1560,37 @@ describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (bac
     );
     expect(result.ok ? [] : result.diagnostics).toEqual([]);
     if (!result.ok) throw new Error("native errno callback-precedence compile failed");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR nullable handles, %s backend", (backend) => {
+  test.each([
+    ["throws before wrapping a null owned result", "nullable-handle.ts"],
+    ["wraps and destroys a non-null owned result", "nullable-handle-success.ts"],
+    [
+      "wraps a non-null result before unwinding a pending callback exception",
+      "nullable-handle-callback-throw.ts",
+    ],
+  ] as const)("%s", async (_label, source) => {
+    const stem = source.slice(0, -3);
+    const outDir = join(scratch, `${stem}-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir", source), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("native nullable-handle compile failed");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

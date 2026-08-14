@@ -1408,6 +1408,18 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
+    } else if (error.kind === "nullable") {
+      if (
+        Object.keys(error).length !== 1 ||
+        binding.result.type.kind !== "nativeHandle" ||
+        binding.result.passMode !== "pointer" ||
+        binding.result.ownership.kind !== "owned"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid nullable failure contract`,
+          loc: moduleLoc,
+        });
+      }
     } else {
       errors.push({
         message: `Native IR binding "${binding.id}" has unsupported error contract "${String(error.kind)}"`,

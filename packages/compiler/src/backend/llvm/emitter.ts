@@ -6534,12 +6534,47 @@ class LlEmitter {
           this.declare(`declare ptr @scr_native_handle_new(ptr, ptr, ptr, ptr)`);
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          const result = B.tmp();
-          B.line(
-            `${result} = call ptr @scr_native_handle_new(ptr ${raw}, ` +
-              `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
-              `ptr ${this.cstr(definition.nativeName)})`,
-          );
+          let result: string;
+          if (binding.error.kind === "nullable") {
+            const resultSlot = B.slot();
+            B.entryAllocas.push(`${resultSlot} = alloca ptr ; nullable native handle result`);
+            B.line(`store ptr null, ptr ${resultSlot}`);
+            const isNull = B.tmp();
+            const nullBlock = B.newLabel("native.null");
+            const throwBlock = B.newLabel("native.null.throw");
+            const wrapBlock = B.newLabel("native.null.wrap");
+            const continuation = B.newLabel("native.null.ok");
+            B.line(`${isNull} = icmp eq ptr ${raw}, null`);
+            B.condBr(isNull, nullBlock, wrapBlock);
+            B.startBlock(nullBlock);
+            this.declare("declare zeroext i1 @scr_exc_pending()");
+            const pending = B.tmp();
+            B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+            B.condBr(pending, continuation, throwBlock);
+            B.startBlock(throwBlock);
+            this.declare("declare void @scr_native_throw_null(ptr)");
+            B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+            B.br(continuation);
+            B.startBlock(wrapBlock);
+            const wrapped = B.tmp();
+            B.line(
+              `${wrapped} = call ptr @scr_native_handle_new(ptr ${raw}, ` +
+                `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+                `ptr ${this.cstr(definition.nativeName)})`,
+            );
+            B.line(`store ptr ${wrapped}, ptr ${resultSlot}`);
+            B.br(continuation);
+            B.startBlock(continuation);
+            result = B.tmp();
+            B.line(`${result} = load ptr, ptr ${resultSlot}`);
+          } else {
+            result = B.tmp();
+            B.line(
+              `${result} = call ptr @scr_native_handle_new(ptr ${raw}, ` +
+                `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+                `ptr ${this.cstr(definition.nativeName)})`,
+            );
+          }
           const value = this.own({ name: result, type: e.type });
           this.emitPendingCheck();
           releaseArguments();

@@ -41,7 +41,8 @@ export interface NativeFrontendBinding {
   readonly variadic: false;
   readonly error:
     | { readonly kind: "no-fail" }
-    | { readonly kind: "errno"; readonly failureValue: string };
+    | { readonly kind: "errno"; readonly failureValue: string }
+    | { readonly kind: "nullable" };
   readonly sourceCall:
     | { readonly kind: "function" }
     | { readonly kind: "method"; readonly receiverArgument: number };

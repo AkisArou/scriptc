@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <errno.h>
+#include <stddef.h>
 
 typedef struct ScriptcTestPadded {
   uint8_t tag;
@@ -72,4 +73,18 @@ int32_t scriptc_test_callback_errno(
   (void)callback(value, context);
   errno = EINVAL;
   return -1;
+}
+
+extern void *nts_counter_create(int32_t initial_value);
+
+void *scriptc_test_nullable_counter(int32_t succeed) {
+  return succeed ? nts_counter_create(42) : NULL;
+}
+
+void *scriptc_test_callback_nullable_counter(
+    ScriptcTestCallback callback,
+    void *context,
+    int32_t succeed) {
+  (void)callback(0, context);
+  return succeed ? nts_counter_create(42) : NULL;
 }

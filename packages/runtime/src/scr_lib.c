@@ -1552,6 +1552,16 @@ void scr_native_throw_errno(int e, const char *operation) {
   free(msg);
 }
 
+void scr_native_throw_null(const char *operation) {
+  static const char suffix[] = " returned null";
+  size_t cap = strlen(operation) + sizeof suffix;
+  char *msg = malloc(cap);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  int len = snprintf(msg, cap, "%s%s", operation, suffix);
+  scr_throw_error_msg(SCR_ERR_ERROR, msg, (size_t)len);
+  free(msg);
+}
+
 /* Node on WINDOWS reports fs error paths ABSOLUTIZED and backslashed
  * (its fs binding hands the Windows API namespaced absolute paths and the
  * error keeps that spelling): open("no.bin") fails with "... open

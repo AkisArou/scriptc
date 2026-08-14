@@ -993,7 +993,8 @@ export interface IrNativeBinding {
    * infer error semantics from a symbol, declaration, or native type. */
   error:
     | { kind: "no-fail" }
-    | { kind: "errno"; failureValue: string };
+    | { kind: "errno"; failureValue: string }
+    | { kind: "nullable" };
   /** Logical values evaluated by nativeCall, once and in source order. */
   arguments: {
     name: string;
