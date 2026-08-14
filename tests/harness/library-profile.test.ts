@@ -559,3 +559,107 @@ describe("library profile fences", () => {
     expect(r.profile.fences).toEqual([]);
   });
 });
+
+describe("library profile host-callback channels", () => {
+  const withCallbacks = {
+    ...good,
+    abi: { ...good.abi, callback_register_symbol: "kx_set_callback" },
+    callbacks: [
+      { name: "emitChunk", params: ["bytes", "u32"], returns: "void" },
+      { name: "progress", params: ["f64", "f64"], returns: "i32" },
+    ],
+  };
+
+  test("well-formed channels resolve in declaration order", () => {
+    const r = loadLibraryProfile(writeProfile(withCallbacks));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.callbackRegisterSymbol).toBe("kx_set_callback");
+    expect(r.profile.callbacks).toEqual([
+      { name: "emitChunk", params: ["bytes", "u32"], returns: "void" },
+      { name: "progress", params: ["f64", "f64"], returns: "i32" },
+    ]);
+  });
+
+  test("a callback-free profile carries the empty surface", () => {
+    const r = loadLibraryProfile(writeProfile(good));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.callbackRegisterSymbol).toBeNull();
+    expect(r.profile.callbacks).toEqual([]);
+  });
+
+  test("channels without a registration symbol refuse (unreachable by any host)", () =>
+    expectSc4001(
+      { ...good, callbacks: [{ name: "emitChunk", params: ["bytes"], returns: "void" }] },
+      "abi.callback_register_symbol",
+    ));
+
+  test("a registration symbol without channels refuses (the anti-inert posture)", () =>
+    expectSc4001(
+      { ...good, abi: { ...good.abi, callback_register_symbol: "kx_set_callback" } },
+      "declares no channels",
+    ));
+
+  test("the registration symbol keeps the prefix and pairwise-distinct rules", () => {
+    expectSc4001(
+      { ...withCallbacks, abi: { ...withCallbacks.abi, callback_register_symbol: "other_set" } },
+      "must start with the profile prefix",
+    );
+    expectSc4001(
+      { ...withCallbacks, abi: { ...withCallbacks.abi, callback_register_symbol: "kx_init" } },
+      "declared twice",
+    );
+  });
+
+  test("declared integer classes refuse in callback parameter position", () =>
+    expectSc4001(
+      { ...withCallbacks, callbacks: [{ name: "x", params: ["i64"], returns: "void" }] },
+      "export-map surface",
+    ));
+
+  test("buffer returns refuse with the ownership teaching", () =>
+    expectSc4001(
+      { ...withCallbacks, callbacks: [{ name: "x", params: [], returns: "bytes" }] },
+      "ownership contract",
+    ));
+
+  test("duplicate channel names refuse", () =>
+    expectSc4001(
+      {
+        ...withCallbacks,
+        callbacks: [
+          { name: "x", params: [], returns: "void" },
+          { name: "x", params: [], returns: "void" },
+        ],
+      },
+      "declared twice",
+    ));
+
+  test("a channel name colliding with an export-map export refuses", () =>
+    expectSc4001(
+      { ...withCallbacks, callbacks: [{ name: "update", params: [], returns: "void" }] },
+      "both an export-map export and a callback channel name",
+    ));
+
+  test("unknown fields inside a channel entry refuse", () =>
+    expectSc4001(
+      { ...withCallbacks, callbacks: [{ name: "x", params: [], returns: "void", lifetime: "call" }] },
+      "callbacks[0].lifetime",
+    ));
+
+  test("a channel name must be a plain identifier (the TS binding and the C name string)", () =>
+    expectSc4001(
+      { ...withCallbacks, callbacks: [{ name: "emit-chunk", params: [], returns: "void" }] },
+      "not a valid channel name",
+    ));
+
+  test("the runtime's slot capacity caps the channel count", () =>
+    expectSc4001(
+      {
+        ...withCallbacks,
+        callbacks: Array.from({ length: 33 }, (_, i) => ({ name: `c${i}`, params: [], returns: "void" })),
+      },
+      "slot capacity is 32",
+    ));
+});

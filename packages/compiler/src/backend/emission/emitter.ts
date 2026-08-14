@@ -701,7 +701,16 @@ export class CEmitter {
     // Outbound native FFI declarations. string/bytes each expand from one
     // scriptc value to a borrowed pointer+length pair. Format-2 callbacks
     // and their independently positioned contexts are exact pointer slots.
-    for (const entry of this.mod.ffiImports ?? []) {
+    // Library callback channels reuse ffiCall IR but are NOT direct symbol
+    // imports: their profile names are registration keys and TypeScript
+    // bindings only, and call sites dispatch through the runtime slot. Do
+    // not emit extern declarations for them (besides inventing undefined
+    // symbols, a valid TS channel name such as `int` is a C keyword).
+    const libraryCallbackNames = new Set(this.mod.lib?.callbacks?.map((cb) => cb.name) ?? []);
+    const directFfiImports = (this.mod.ffiImports ?? []).filter(
+      (entry) => !libraryCallbackNames.has(entry.name),
+    );
+    for (const entry of directFfiImports) {
       const params = entry.params.flatMap((param): string[] => {
         if (isFfiCallbackParam(param)) return [ffiCallbackPointerTypeC(param.callback)];
         if (isFfiContextParam(param)) return ["void *"];
@@ -723,7 +732,7 @@ export class CEmitter {
       const ret = ffiNativeTypeC(entry.returns);
       out.push(`extern ${ret} ${entry.symbol}(${params.length > 0 ? params.join(", ") : "void"});`);
     }
-    if ((this.mod.ffiImports?.length ?? 0) > 0) out.push("");
+    if (directFfiImports.length > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
     this.emitFfiCallbackDefs(out);
     // Class objects (classes as values): construct-thunk prototypes plus
@@ -1076,6 +1085,26 @@ export class CEmitter {
       `}`,
       ``,
     );
+    if (lib.callbacks !== undefined && lib.callbacks.length > 0) {
+      // Host-callback registration: a pure store dispatch (the sink
+      // registration's rule — no entry prologue, no poison guard, legal
+      // before init). The channel name selects the slot; an unknown or
+      // NULL name is a defined -1, never a store. Latest registration
+      // wins; a NULL fn clears the channel.
+      out.push(
+        `int32_t ${lib.callbackRegisterSymbol}(const char *name, void (*fn)(void), void *ctx) {`,
+        `  if (name == NULL) return -1;`,
+      );
+      for (const cb of lib.callbacks) {
+        out.push(
+          `  if (strcmp(name, ${cStringLiteral(Buffer.from(cb.name, "utf8"))}) == 0) {`,
+          `    scr_library_cb_set(${cb.slot}, fn, ctx); /* channel '${cb.name}' */`,
+          `    return 0;`,
+          `  }`,
+        );
+      }
+      out.push(`  return -1;`, `}`, ``);
+    }
     if (lib.identity !== undefined) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt

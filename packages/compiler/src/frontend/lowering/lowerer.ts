@@ -352,6 +352,14 @@ export interface LowerOptions {
    * imports; without this option ambient declarations keep Node's ordinary
    * ReferenceError behavior. */
   ffiImports?: readonly IrFfiImport[];
+  /** LIBRARY mode's host-callback surface marker: the `ffiImports` above
+   * are profile-declared callback channels, not native-manifest bindings.
+   * Flips the binding diagnostics to the library flavor (SC4024), keeps a
+   * channel legal when no program declaration references it (an unused
+   * channel is capacity, not an error), and refuses a CALL of any other
+   * program-authored signature-only ambient function with the callback
+   * teaching instead of the ambient ReferenceError lowering. */
+  libraryCallbacks?: boolean;
   /** Coverage-only external host type surfaces. Their declarations inform
    * the checker, while every runtime value use remains an SC1010 fence. */
   externalTypes?: ReadonlyMap<string, string>;
@@ -381,6 +389,8 @@ export interface LowererMode {
   startupCrash?: StartupCrash | null;
   /** The build's outbound native FFI declarations. */
   ffiImports?: readonly IrFfiImport[];
+  /** LowerOptions.libraryCallbacks (see there). */
+  libraryCallbacks?: boolean;
   /** Program-validated ambient declaration symbols for each FFI name.
    * Undefined in discovery's legacy call-local validation path. */
   ffiBindingSymbols?: ReadonlyMap<string, ReadonlySet<ts.Symbol>>;
@@ -448,12 +458,14 @@ export function lowerToIr(
     });
   }
   const ffiImports = options.ffiImports ?? [];
+  const libraryCallbacks = options.libraryCallbacks ?? false;
   const externalTypes = options.externalTypes ?? new Map<string, string>();
   const externalTypeSpecifiersByFile = options.externalTypeSpecifiersByFile ??
     directExternalTypeSpecifiersByFile(externalTypes);
   const validation = new Lowerer(program, entry, moduleOrder, dynamic, {
     targetPlatform,
     ffiImports,
+    libraryCallbacks,
     externalTypes,
     externalTypeSpecifiersByFile,
   });
@@ -469,6 +481,7 @@ export function lowerToIr(
     : new Lowerer(program, entry, moduleOrder, dynamic, {
         targetPlatform,
         ffiImports,
+        libraryCallbacks,
         externalTypes,
         externalTypeSpecifiersByFile,
         ffiBindingSymbols: ffiValidation.symbolsByName,
@@ -479,6 +492,7 @@ export function lowerToIr(
     targetPlatform,
     startupCrash,
     ffiImports,
+    libraryCallbacks,
     ffiBindingSymbols: ffiValidation.symbolsByName,
     externalTypes,
     externalTypeSpecifiersByFile,
@@ -493,6 +507,7 @@ export function lowerToIr(
     alreadyFlushed: emit.flushedSymbols,
     targetPlatform,
     ffiImports,
+    libraryCallbacks,
     ffiBindingSymbols: ffiValidation.symbolsByName,
     externalTypes,
     externalTypeSpecifiersByFile,
@@ -1221,6 +1236,7 @@ export class Lowerer {
   readonly startupCrash: StartupCrash | null;
   /** Outbound native bindings by their source-level ambient name. */
   readonly ffiImports: readonly IrFfiImport[];
+  readonly libraryCallbacks: boolean;
   readonly ffiImportsByName: ReadonlyMap<string, IrFfiImport>;
   /** Non-null after whole-program FFI declaration validation. */
   readonly ffiBindingSymbols: ReadonlyMap<string, ReadonlySet<ts.Symbol>> | null;
@@ -1280,6 +1296,7 @@ export class Lowerer {
     this.targetPlatform = mode.targetPlatform ?? process.platform;
     this.startupCrash = mode.startupCrash ?? null;
     this.ffiImports = mode.ffiImports ?? [];
+    this.libraryCallbacks = mode.libraryCallbacks ?? false;
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
     this.externalTypes = mode.externalTypes ?? new Map();

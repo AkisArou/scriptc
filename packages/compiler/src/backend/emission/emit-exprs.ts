@@ -2054,6 +2054,72 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return t;
       }
       case "ffiCall": {
+        // LIBRARY mode: every ffiCall is a profile-declared host-callback
+        // channel (the library lane loads no native-FFI manifest). The
+        // dispatch fetches the slot's registered pointer — or delivers the
+        // channel's unregistered-call trap through the funnel (SC4025) —
+        // then makes the typed indirect call, opaque context first.
+        // Marshalling matches the native ffiCall's value classes exactly:
+        // buffers are borrowed (ptr, len) for the call's duration, the
+        // u8/u32/i32 plumbing classes ride JS's ToUint32/ToInt32, and a
+        // scalar return converts to f64 exactly. The host cannot raise a
+        // scriptc exception, so no pending check follows.
+        const libCb = E.mod.lib?.callbacks?.find((c) => c.name === e.import);
+        if (libCb !== undefined) {
+          const cbArgs = e.args.map((arg) => E.emitExpr(arg));
+          const natTypes: string[] = ["void *"];
+          const natArgs: string[] = [`scr_library_cb_ctx(${libCb.slot})`];
+          libCb.params.forEach((cls, i) => {
+            const arg = cbArgs[i]!;
+            switch (cls) {
+              case "f64":
+                natTypes.push("double");
+                natArgs.push(arg.name);
+                break;
+              case "bool":
+                natTypes.push("uint8_t");
+                natArgs.push(`(uint8_t)(${arg.name} ? 1 : 0)`);
+                break;
+              case "u8":
+                natTypes.push("uint8_t");
+                natArgs.push(`(uint8_t)(uint32_t)scr_bit_ushr(${arg.name}, 0.0)`);
+                break;
+              case "u32":
+                natTypes.push("uint32_t");
+                natArgs.push(`(uint32_t)scr_bit_ushr(${arg.name}, 0.0)`);
+                break;
+              case "i32":
+                natTypes.push("int32_t");
+                natArgs.push(`(int32_t)scr_bit_or(${arg.name}, 0.0)`);
+                break;
+              case "string":
+              case "bytes":
+                natTypes.push("const uint8_t *", "size_t");
+                natArgs.push(`(const uint8_t *)${arg.name}->data`, `${arg.name}->len`);
+                break;
+            }
+          });
+          const retC =
+            libCb.returns === "void" ? "void"
+            : libCb.returns === "f64" ? "double"
+            : libCb.returns === "bool" || libCb.returns === "u8" ? "uint8_t"
+            : libCb.returns === "u32" ? "uint32_t"
+            : "int32_t";
+          const trapLit = cStringLiteral(Buffer.from(libCb.unregisteredTrap, "utf8"));
+          const target = `((${retC} (*)(${natTypes.join(", ")}))scr_library_cb_require(${libCb.slot}, ${trapLit}))`;
+          const call = `${target}(${natArgs.join(", ")})`;
+          switch (libCb.returns) {
+            case "void":
+              E.line(`${call};${E.srcComment(e.loc)}`);
+              return { name: "", type: e.type };
+            case "f64":
+              return E.newTemp(e.type, call);
+            case "bool":
+              return E.newTemp(e.type, `(${call} != 0)`);
+            default: // u8/u32/i32 — exact widenings back to f64
+              return E.newTemp(e.type, `(double)${call}`);
+          }
+        }
         const entry = E.ffiByName.get(e.import);
         if (!entry) throw new Error(`emitter bug: unknown FFI import ${e.import}`);
         const args = e.args.map((arg) => E.emitExpr(arg));

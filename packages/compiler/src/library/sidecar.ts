@@ -216,15 +216,18 @@ export function libraryIdentityHashes(
 
 /** The profile's canonical `abi.exports` suffix order: the identity
  * getters first (abi_version, then build_id), the mode-provided entries
- * (sink registration, init, collect, reset — declared ones only), then
- * the export map in profile order. Suffix = symbol minus prefix. */
+ * (sink registration, callback registration, init, collect, reset —
+ * declared ones only), then the export map in profile order. Suffix =
+ * symbol minus prefix. */
 export function abiExportSuffixes(profile: LibraryProfile): string[] {
   const strip = (sym: string): string => sym.slice(profile.prefix.length);
   const out: string[] = [];
   if (profile.sidecar !== null) {
     out.push(strip(profile.sidecar.abiVersionSymbol), strip(profile.sidecar.buildIdSymbol));
   }
-  out.push(strip(profile.sinkRegisterSymbol), strip(profile.initSymbol));
+  out.push(strip(profile.sinkRegisterSymbol));
+  if (profile.callbackRegisterSymbol !== null) out.push(strip(profile.callbackRegisterSymbol));
+  out.push(strip(profile.initSymbol));
   if (profile.collectSymbol !== null) out.push(strip(profile.collectSymbol));
   if (profile.resultResetSymbol !== null) out.push(strip(profile.resultResetSymbol));
   for (const e of profile.exports) out.push(strip(e.symbol));

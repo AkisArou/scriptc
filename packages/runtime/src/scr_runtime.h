@@ -103,8 +103,9 @@ typedef struct ScrBytes ScrBytes;
  *
  * Every trap the runtime DETECTS arrives structured: the funnel assembles
  * the baseline human line into field 0 unchanged, a stable code for the
- * trap kind (the compiler registry's SC4013–SC4019 runtime family,
- * classified in scr_library.c), the entry symbol recorded by the trapping
+ * trap kind (the compiler registry's runtime family — SC4013–SC4019 plus
+ * the SC4025 unregistered-callback trap, classified in scr_library.c), the
+ * entry symbol recorded by the trapping
  * entry's prologue, and the profile's remediation for that code when the
  * program TU's overlay table declares one (the whole fourth field is
  * absent otherwise). A message that already begins with the marker — a
@@ -113,6 +114,39 @@ typedef struct ScrBytes ScrBytes;
 typedef void (*ScrLibSinkFn)(void *ctx, const uint8_t *msg, size_t msg_len,
                               uint64_t address);
 void scr_library_set_sink(ScrLibSinkFn fn, void *ctx); /* latest wins */
+
+/* ── host-callback channels ───────────────────────────────────────────────
+ * The panic sink's registration pattern generalized into a synchronous
+ * outbound seam: the profile declares named channels (bytes/scalar
+ * signatures), the generated registration symbol maps a channel name to a
+ * slot index here, and compiled call sites fetch the slot through
+ * scr_library_cb_require — which returns the host's pointer or delivers
+ * the call site's trap message through the funnel (the SC4025 detected
+ * trap) when the host never registered. The typed shape of each stored
+ * pointer is the channel's, with the opaque context first:
+ *
+ *   <ret> (*)(void *ctx, <params...>)
+ *
+ * Registration is a pure store like the sink's (no entry prologue, no
+ * poison guard, legal before init); latest wins, NULL clears, and
+ * registrations persist across init/reset. Slots are per-copy of this
+ * state, exactly the sink's story: per-archive under abi.localize_runtime,
+ * per-thread instance under abi.instance_per_thread (SCR_TL) — a callback
+ * registered on thread T fires only for T's instance. The host's callback
+ * runs on the calling thread inside the entry's dynamic extent and must
+ * NOT call back into any library entry (registration symbols included) or
+ * unwind/longjmp across library frames: read the borrowed buffers, copy
+ * what outlives the call, return. Buffer parameters are borrowed for the
+ * duration of the call only. */
+#define SCR_LIB_MAX_CALLBACKS 32 /* keep in step with LIB_MAX_CALLBACKS (library/profile.ts) */
+/* The stored shape: generated call sites cast a slot's pointer to the
+ * channel's typed shape before calling. */
+typedef void (*ScrLibCbFn)(void);
+void scr_library_cb_set(size_t slot, ScrLibCbFn fn, void *ctx);
+/* The call-site fetch: the registered pointer, or the funnel trap with
+ * trap_msg (never returns NULL). */
+ScrLibCbFn scr_library_cb_require(size_t slot, const char *trap_msg);
+void *scr_library_cb_ctx(size_t slot);
 
 /* Entry prologue: aborts deterministically when the library is poisoned (a
  * trap already fired — no profile entry may run again; recovery is process
@@ -162,8 +196,8 @@ _Noreturn void scr_trap_len(const char *msg, size_t len);
  * (both emissions emit identical data) and consumed by the funnel when it
  * assembles a detected trap's structured message: flat triples of
  * (code, teaching-or-NULL, remediation-or-NULL), one per runtime trap code
- * (SC4013–SC4019 family) the profile declares text for; _len counts
- * triples. A declared teaching replaces the baseline human line as field 0;
+ * (the SC4013–SC4019 family plus SC4025) the profile declares text for;
+ * _len counts triples. A declared teaching replaces the baseline human line as field 0;
  * a declared remediation becomes the optional fourth field. */
 extern const char *const scr_library_trap_overlays[];
 extern const size_t scr_library_trap_overlays_len;
