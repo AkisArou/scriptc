@@ -1188,6 +1188,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   >();
   const nativeSymbols = new Set<string>();
   const nativeDeclarations = new Set<string>();
+  const nativePointerBits = mod.nativeTarget?.pointerBits;
+  const validNativeTarget = nativePointerBits === 32 || nativePointerBits === 64;
+  if (mod.nativeTarget !== undefined && !validNativeTarget) {
+    errors.push({
+      message: `Native IR target has invalid pointer width "${String(nativePointerBits)}"`,
+      loc: moduleLoc,
+    });
+  }
+  if ((mod.nativeBindings?.length ?? 0) > 0 && !validNativeTarget) {
+    errors.push({
+      message: "Native IR bindings require module target ABI facts",
+      loc: moduleLoc,
+    });
+  }
   // IDs are opaque stable identities and may be qualified by a package
   // instance (`scope/name@version#binding`). Whitespace and control
   // characters remain forbidden; backends never derive symbols from IDs.
@@ -1266,7 +1280,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
       if (
         parameter.type.kind !== "nativeScalar" ||
-        nativeIntegerInfo(parameter.type.scalar) === null
+        nativeIntegerInfo(parameter.type.scalar, validNativeTarget ? nativePointerBits : undefined) === null
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
@@ -1283,7 +1297,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (
       binding.result.type.kind !== "void" &&
       (binding.result.type.kind !== "nativeScalar" ||
-        nativeIntegerInfo(binding.result.type.scalar) === null)
+        nativeIntegerInfo(
+          binding.result.type.scalar,
+          validNativeTarget ? nativePointerBits : undefined,
+        ) === null)
     ) {
       errors.push({
         message: `Native IR binding "${binding.id}" result has an unsupported exact type`,
@@ -1681,6 +1698,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       recordsById,
       unionsById,
       globalsById,
+      validNativeTarget ? nativePointerBits : undefined,
       errors,
     );
   }
@@ -1696,6 +1714,7 @@ function validateFunction(
   records: Map<string, IrRecordShape>,
   unions: Map<string, IrUnionDef>,
   globals: Map<string, IrGlobal>,
+  nativePointerBits: 32 | 64 | undefined,
   errors: IrValidationError[],
 ): void {
   const locals = new Map(fn.locals.map((l) => [l.id, l]));
@@ -1847,7 +1866,10 @@ function validateFunction(
         }
         break;
       case "nativeScalarLit": {
-        const info = nativeIntegerInfo(e.type.scalar);
+        const info = nativeIntegerInfo(
+          e.type.scalar,
+          nativePointerBits,
+        );
         if (info === null) {
           err(`native scalar literal has unsupported type "${String(e.type.scalar)}"`, e.loc);
           break;

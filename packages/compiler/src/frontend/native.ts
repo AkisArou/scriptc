@@ -36,8 +36,15 @@ export interface NativeFrontendBinding {
 
 /** Embedder-supplied native semantics for one frontend run. This contract is
  * deliberately manifest-neutral: SCABI and target planning live above
- * ScriptC, while this layer sees only exact source identities and Native IR. */
+ * ScriptC, while this layer sees only exact source identities, the target ABI
+ * facts needed to interpret generic types, and Native IR. */
 export interface NativeFrontendInput {
+  /** ABI fact selected by the embedder. Pointer-sized Native IR types are
+   * resolved against this width, and the compiler driver verifies it against
+   * the selected backend target before lowering. */
+  readonly target: {
+    readonly pointerBits: 32 | 64;
+  };
   readonly sourceTypes: readonly NativeSourceType[];
   readonly bindings: readonly NativeFrontendBinding[];
 }

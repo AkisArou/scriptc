@@ -544,7 +544,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "numLit":
         return E.newTemp(e.type, cNumberLiteral(e.value));
       case "nativeScalarLit":
-        return E.newTemp(e.type, cNativeScalarLiteral(e.type, e.value));
+        return E.newTemp(
+          e.type,
+          cNativeScalarLiteral(e.type, e.value, E.mod.nativeTarget?.pointerBits),
+        );
       case "boolLit":
         return E.newTemp(e.type, e.value ? "true" : "false");
       case "strLit": {

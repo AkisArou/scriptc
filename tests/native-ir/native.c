@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 
 int8_t nts_i8_identity(int8_t value) {
   return value;
@@ -29,5 +30,9 @@ int64_t nts_i64_identity(int64_t value) {
 }
 
 uint64_t nts_u64_identity(uint64_t value) {
+  return value;
+}
+
+size_t nts_usize_identity(size_t value) {
   return value;
 }

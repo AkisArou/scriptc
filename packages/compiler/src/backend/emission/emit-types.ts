@@ -34,6 +34,10 @@ export function cType(t: IrType): string {
           return "int64_t";
         case "u64":
           return "uint64_t";
+        case "isize":
+          return "intptr_t";
+        case "usize":
+          return "uintptr_t";
       }
     case "f64":
     case "date":
@@ -151,6 +155,7 @@ export function cType(t: IrType): string {
 export function cNativeScalarLiteral(
   type: IrType & { readonly kind: "nativeScalar" },
   value: string,
+  pointerBits?: 32 | 64,
 ): string {
   if (type.scalar === "u64") return `UINT64_C(${value})`;
   if (type.scalar === "i64") {
@@ -160,6 +165,24 @@ export function cNativeScalarLiteral(
     return value.startsWith("-")
       ? `(-INT64_C(${value.slice(1)}))`
       : `INT64_C(${value})`;
+  }
+  if (type.scalar === "isize" || type.scalar === "usize") {
+    if (pointerBits !== 32 && pointerBits !== 64) {
+      throw new Error(`emitter bug: native ${type.scalar} has no target pointer width`);
+    }
+    const signed = type.scalar === "isize";
+    const macro = `${signed ? "INT" : "UINT"}${pointerBits}_C`;
+    const min = pointerBits === 32 ? "-2147483648" : "-9223372036854775808";
+    let literal: string;
+    if (signed && value === min) {
+      const max = pointerBits === 32 ? "2147483647" : "9223372036854775807";
+      literal = `(-${macro}(${max}) - ${macro}(1))`;
+    } else {
+      literal = signed && value.startsWith("-")
+        ? `(-${macro}(${value.slice(1)}))`
+        : `${macro}(${value})`;
+    }
+    return `((${cType(type).trim()})${literal})`;
   }
   return `(${cType(type).trim()})(${value})`;
 }

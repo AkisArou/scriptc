@@ -1262,6 +1262,9 @@ export class Lowerer {
   /** Reachability accounting: only calls that survive this pass contribute a
    * binding record to the assembled module. */
   readonly usedNativeBindingIds = new Set<string>();
+  /** A reached native call or target-sized scalar requires the input's target
+   * ABI facts to survive on the assembled module. */
+  usesNativeTarget = false;
   /** Exact specifier mappings and their reverse declaration-file lookup. */
   readonly externalTypes: ReadonlyMap<string, string>;
   readonly externalTypeSpecifiersByFile: ReadonlyMap<string, readonly string[]>;
@@ -2282,7 +2285,7 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 6,
+            irVersion: 7,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,
@@ -2291,6 +2294,13 @@ export class Lowerer {
             globals: this.globalsList,
             ...(this.npmEmbedded ? { embedded: this.npmEmbedded } : {}),
             entry: ENTRY_NAME,
+            ...(this.usesNativeTarget
+              ? {
+                  nativeTarget: {
+                    pointerBits: this.nativeInput!.target.pointerBits,
+                  },
+                }
+              : {}),
             ...(this.usedNativeBindingIds.size > 0
               ? {
                   nativeBindings: (this.nativeInput?.bindings ?? [])

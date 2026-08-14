@@ -1,5 +1,9 @@
 #include <stdint.h>
 
+intptr_t scriptc_test_isize_identity(intptr_t value) {
+  return value;
+}
+
 int32_t scriptc_test_verify_exact_integers(
     int8_t signed8,
     uint8_t unsigned8,
@@ -8,7 +12,9 @@ int32_t scriptc_test_verify_exact_integers(
     int32_t signed32,
     uint32_t unsigned32,
     int64_t signed64,
-    uint64_t unsigned64) {
+    uint64_t unsigned64,
+    intptr_t signedSize,
+    uintptr_t unsignedSize) {
   return signed8 == INT8_MIN &&
                  unsigned8 == UINT8_MAX &&
                  signed16 == INT16_MIN &&
@@ -16,7 +22,9 @@ int32_t scriptc_test_verify_exact_integers(
                  signed32 == INT32_MIN &&
                  unsigned32 == UINT32_MAX &&
                  signed64 == INT64_MIN &&
-                 unsigned64 == UINT64_MAX
+                 unsigned64 == UINT64_MAX &&
+                 signedSize == INTPTR_MIN &&
+                 unsignedSize == UINTPTR_MAX
              ? 42
              : 1;
 }

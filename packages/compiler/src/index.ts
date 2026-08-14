@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBuildDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBuildDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
@@ -220,6 +220,44 @@ function targetRefusalDiag(target: string, surface: string, loc: SrcLoc): ScrDia
     message: `${target} target does not support ${surface}`,
     loc,
   };
+}
+
+/** ScriptC's current native target set is 64-bit; wasm32-wasi is the sole
+ * 32-bit backend target. Keep this one fact shared by analysis and compile so
+ * Native IR target validation cannot drift from LLVM selection. */
+function buildTargetPointerBits(platform: string): 32 | 64 {
+  return platform === "wasi" ? 32 : 64;
+}
+
+function invalidNativeInputTarget(
+  native: NativeFrontendInput | undefined,
+  entryPath: string,
+): ScrDiagnostic | null {
+  if (native === undefined) return null;
+  const pointerBits = native.target?.pointerBits;
+  if (pointerBits !== 32 && pointerBits !== 64) {
+    return nativeTargetDiag(
+      "embedder input has no valid 32- or 64-bit pointer width",
+      entryPath,
+    );
+  }
+  return null;
+}
+
+function nativeModuleTargetMismatch(
+  mod: IrModule,
+  platform: string,
+  entryPath: string,
+): ScrDiagnostic | null {
+  if (mod.nativeTarget === undefined) return null;
+  const pointerBits = mod.nativeTarget.pointerBits;
+  const selected = buildTargetPointerBits(platform);
+  return pointerBits === selected
+    ? null
+    : nativeTargetDiag(
+        `embedder input requires ${pointerBits}-bit pointers, selected backend target uses ${selected}-bit pointers`,
+        entryPath,
+      );
 }
 
 /** APIs that require host capabilities absent from portable WASI Preview 1.
@@ -772,6 +810,20 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
     }
     ffi = loaded.profile;
   }
+  const buildPlatform = buildTargetPlatform();
+  const invalidNativeTarget = invalidNativeInputTarget(opts.native, entryPath);
+  if (invalidNativeTarget !== null) {
+    return {
+      coverage: {
+        file: entryPath,
+        dynamic: opts.dynamic ?? false,
+        stats: { statementsTotal: 0, statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 },
+        diagnostics: [invalidNativeTarget],
+        preflightFailed: true,
+      },
+      sourceTexts: new Map(),
+    };
+  }
   const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes, opts.native);
   try {
     const emptyStats = { statementsTotal: 0, statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 };
@@ -806,9 +858,12 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
     const lowered = fe.lower({
       dynamic: opts.dynamic ?? false,
       coverage: true,
-      targetPlatform: buildTargetPlatform(),
+      targetPlatform: buildPlatform,
       ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
     });
+    const targetMismatch = lowered.module === null
+      ? null
+      : nativeModuleTargetMismatch(lowered.module, buildPlatform, entryPath);
     const provenance = provenanceSources();
     return {
       coverage: {
@@ -818,7 +873,11 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
         // The import fences report as blockers alongside the statement-level
         // ones (use sites of the fenced bindings emit matching diagnostics,
         // which the report groups with these).
-        diagnostics: [...preflight, ...lowered.diagnostics],
+        diagnostics: [
+          ...preflight,
+          ...lowered.diagnostics,
+          ...(targetMismatch === null ? [] : [targetMismatch]),
+        ],
         ...(lowered.runtimeFences.length > 0 ? { runtimeFences: lowered.runtimeFences } : {}),
         ...(lowered.unreached ? { unreached: lowered.unreached } : {}),
         ...(lowered.npmBuiltins ? { npmBuiltins: lowered.npmBuiltins } : {}),
@@ -849,6 +908,15 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     ffi = loaded.profile;
   }
   const buildPlatform = buildTargetPlatform();
+  const buildPointerBits = buildTargetPointerBits(buildPlatform);
+  const invalidNativeTarget = invalidNativeInputTarget(opts.native, entryPath);
+  if (invalidNativeTarget !== null) {
+    return {
+      ok: false,
+      diagnostics: [invalidNativeTarget],
+      sourceTexts: new Map(),
+    };
+  }
   // Mobile triples are library-mode targets: the archive an embedding app
   // links is the artifact, and only the library-admissible runtime surface
   // is verified on those device classes. The executable lane refuses before
@@ -911,6 +979,13 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
     if (lowered.module === null) return fail(lowered.diagnostics);
 
+    const targetMismatch = nativeModuleTargetMismatch(
+      lowered.module,
+      buildPlatform,
+      entryPath,
+    );
+    if (targetMismatch !== null) return fail([targetMismatch]);
+
     const validation = validateModule(lowered.module);
     if (validation.length > 0) {
       return fail(validation.map((v) => iceDiag(v.message, v.loc)));
@@ -955,7 +1030,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   if (opts.backend !== "c") {
     try {
       const ll = emitLlvmModule(lowered.module!, {
-        pointerBits: buildPlatform === "wasi" ? 32 : 64,
+        pointerBits: buildPointerBits,
         wasi: buildPlatform === "wasi",
       });
       cPath = join(opts.outDir, `${stem}.ll`);

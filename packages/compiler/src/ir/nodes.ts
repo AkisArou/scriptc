@@ -41,6 +41,8 @@ export const IR_NATIVE_INTEGER_SCALARS = [
   "u32",
   "i64",
   "u64",
+  "isize",
+  "usize",
 ] as const;
 
 export type IrNativeScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
@@ -55,7 +57,10 @@ export interface IrNativeIntegerInfo {
 /** Returns the semantic bounds of a serialized Native IR scalar name.
  * Accepting `string` keeps validation safe for untrusted JSON even though
  * well-typed compiler code normally supplies `IrNativeScalar`. */
-export function nativeIntegerInfo(scalar: string): IrNativeIntegerInfo | null {
+export function nativeIntegerInfo(
+  scalar: string,
+  pointerBits?: 32 | 64,
+): IrNativeIntegerInfo | null {
   switch (scalar) {
     case "i8":
       return { bits: 8, signed: true, min: -128n, max: 127n };
@@ -83,6 +88,23 @@ export function nativeIntegerInfo(scalar: string): IrNativeIntegerInfo | null {
         min: 0n,
         max: 18446744073709551615n,
       };
+    case "isize":
+      return pointerBits === 32
+        ? { bits: 32, signed: true, min: -2147483648n, max: 2147483647n }
+        : pointerBits === 64
+          ? {
+              bits: 64,
+              signed: true,
+              min: -9223372036854775808n,
+              max: 9223372036854775807n,
+            }
+          : null;
+    case "usize":
+      return pointerBits === 32
+        ? { bits: 32, signed: false, min: 0n, max: 4294967295n }
+        : pointerBits === 64
+          ? { bits: 64, signed: false, min: 0n, max: 18446744073709551615n }
+          : null;
     default:
       return null;
   }
@@ -768,7 +790,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 6;
+  irVersion: 7;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -824,6 +846,11 @@ export interface IrModule {
   unions?: IrUnionDef[];
   /** Name of the synthetic function holding top-level statements. */
   entry: string;
+  /** Target ABI facts required to interpret target-sized Native IR. Production
+   * lowering emits them when it reaches a native call or target-sized value. */
+  nativeTarget?: {
+    pointerBits: 32 | 64;
+  };
   /** Generic Native IR bindings. Calls refer to the stable opaque `id`;
    * only this validated table carries the backend symbol spelling.
    * The first slice is value-only exact scalars. Aggregates, handles,

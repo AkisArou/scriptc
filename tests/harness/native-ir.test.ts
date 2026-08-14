@@ -16,7 +16,7 @@ import { nativeScalarType } from "../../packages/compiler/src/ir/nodes.js";
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
 import type { NativeFrontendInput } from "../../packages/compiler/src/frontend/native.js";
-import { compile } from "../../packages/compiler/src/index.js";
+import { analyze, compile } from "../../packages/compiler/src/index.js";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const scratch = mkdtempSync(join(tmpdir(), "scriptc-native-ir-"));
@@ -30,6 +30,8 @@ const I32 = nativeScalarType("i32");
 const U32 = nativeScalarType("u32");
 const I64 = nativeScalarType("i64");
 const U64 = nativeScalarType("u64");
+const ISIZE = nativeScalarType("isize");
+const USIZE = nativeScalarType("usize");
 const NATIVE_VOID = { kind: "void" } as const;
 const nativePackage = "@native-typescript/scabi-c-v1-fixture";
 
@@ -42,9 +44,11 @@ const exactIntegerBindings = [
   { scalar: "u32", declaration: "u32Identity", symbol: "nts_u32_identity" },
   { scalar: "i64", declaration: "i64Identity", symbol: "nts_i64_identity" },
   { scalar: "u64", declaration: "u64Identity", symbol: "nts_u64_identity" },
+  { scalar: "usize", declaration: "usizeIdentity", symbol: "nts_usize_identity" },
 ] as const;
 
 const localNativeInput: NativeFrontendInput = {
+  target: { pointerBits: 64 },
   sourceTypes: exactIntegerBindings.map(({ scalar }) => ({
     declaration: { module: nativePackage, name: scalar },
     type: nativeScalarType(scalar),
@@ -69,9 +73,25 @@ function frontendNativeInput(): NativeFrontendInput {
     ? localNativeInput
     : JSON.parse(configured) as NativeFrontendInput;
   return {
-    sourceTypes: translated.sourceTypes,
+    target: translated.target,
+    sourceTypes: [
+      ...translated.sourceTypes,
+      {
+        declaration: { module: "scriptc-native-test", name: "isize" },
+        type: ISIZE,
+      },
+    ],
     bindings: [
       ...translated.bindings,
+      {
+        id: "scriptc-test@1#isize-identity",
+        declaration: { module: "scriptc-native-test", name: "isizeIdentity" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_isize_identity" },
+        callingConvention: "c",
+        variadic: false,
+        parameters: [{ name: "value", type: ISIZE, passMode: "value" }],
+        result: { type: ISIZE, passMode: "value" },
+      },
       {
         id: "scriptc-test@1#exit",
         declaration: { module: "scriptc-native-test", name: "exit" },
@@ -105,6 +125,8 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "unsigned32", type: U32, passMode: "value" },
           { name: "signed64", type: I64, passMode: "value" },
           { name: "unsigned64", type: U64, passMode: "value" },
+          { name: "signedSize", type: ISIZE, passMode: "value" },
+          { name: "unsignedSize", type: USIZE, passMode: "value" },
         ],
         result: { type: I32, passMode: "value" },
       },
@@ -137,6 +159,7 @@ function exactI32Module(value = "42"): IrModule {
     irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
+    nativeTarget: { pointerBits: 64 },
     nativeBindings: [
       {
         id: "fixture.i32_identity",
@@ -185,12 +208,16 @@ function exactI32Module(value = "42"): IrModule {
 function exactScalarLiteralModule(
   scalar: IrNativeScalar,
   value: string,
+  pointerBits: 32 | 64 = 64,
 ): IrModule {
   const type = nativeScalarType(scalar);
   return {
     irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
+    ...(scalar === "isize" || scalar === "usize"
+      ? { nativeTarget: { pointerBits } }
+      : {}),
     functions: [
       {
         name: "__main",
@@ -201,6 +228,56 @@ function exactScalarLiteralModule(
           {
             kind: "exprStmt",
             expr: { kind: "nativeScalarLit", value, type, loc },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+  };
+}
+
+function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
+  const signedMin = pointerBits === 32 ? "-2147483648" : "-9223372036854775808";
+  const unsignedMax = pointerBits === 32 ? "4294967295" : "18446744073709551615";
+  return {
+    irVersion: IR_VERSION,
+    sourceFile: loc.file,
+    entry: "__main",
+    nativeTarget: { pointerBits },
+    nativeBindings: [
+      {
+        id: "fixture.pointer_sizes",
+        declaration: { module: "scriptc:test", name: "pointerSizes" },
+        entry: { kind: "c-symbol", symbol: "scriptc_test_pointer_sizes" },
+        callingConvention: "c",
+        variadic: false,
+        parameters: [
+          { name: "signedSize", type: ISIZE, passMode: "value" },
+          { name: "unsignedSize", type: USIZE, passMode: "value" },
+        ],
+        result: { type: NATIVE_VOID, passMode: "value" },
+      },
+    ],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: NATIVE_VOID,
+        locals: [],
+        body: [
+          {
+            kind: "exprStmt",
+            expr: {
+              kind: "nativeCall",
+              binding: "fixture.pointer_sizes",
+              args: [
+                { kind: "nativeScalarLit", value: signedMin, type: ISIZE, loc },
+                { kind: "nativeScalarLit", value: unsignedMax, type: USIZE, loc },
+              ],
+              type: NATIVE_VOID,
+              loc,
+            },
             loc,
           },
         ],
@@ -264,6 +341,8 @@ test("Native IR validates every exact integer's signed bounds", () => {
     ["u32", "0", "4294967295"],
     ["i64", "-9223372036854775808", "9223372036854775807"],
     ["u64", "0", "18446744073709551615"],
+    ["isize", "-9223372036854775808", "9223372036854775807"],
+    ["usize", "0", "18446744073709551615"],
   ];
   for (const [scalar, min, max] of cases) {
     for (const value of [min, max]) {
@@ -272,6 +351,44 @@ test("Native IR validates every exact integer's signed bounds", () => {
       expect(deserializeModule(serializeModule(mod))).toEqual(mod);
     }
   }
+});
+
+test("Native IR resolves pointer-sized bounds from the module target", () => {
+  expect(validateModule(exactScalarLiteralModule("isize", "-2147483648", 32))).toEqual([]);
+  expect(validateModule(exactScalarLiteralModule("usize", "4294967295", 32))).toEqual([]);
+  expect(
+    validateModule(exactScalarLiteralModule("usize", "4294967296", 32)).map(
+      (error) => error.message,
+    ),
+  ).toContain("in __main: native usize literal 4294967296 is out of range");
+});
+
+test("C and LLVM lower pointer-sized scalars at the selected width", () => {
+  const mod = pointerScalarCallModule(32);
+  expect(validateModule(mod)).toEqual([]);
+
+  const c = emitModule(mod);
+  expect(c).toContain("sizeof(uintptr_t) * CHAR_BIT == 32");
+  expect(c).toContain("extern void scriptc_test_pointer_sizes(intptr_t, uintptr_t);");
+  expect(c).toContain("INT32_C(2147483647)");
+  expect(c).toContain("UINT32_C(4294967295)");
+
+  const llvm = emitLlvmModule(mod, { pointerBits: 32 });
+  expect(llvm).toContain("declare void @scriptc_test_pointer_sizes(i32, i32)");
+  expect(llvm).toContain(
+    "call void @scriptc_test_pointer_sizes(i32 -2147483648, i32 4294967295)",
+  );
+});
+
+test("Native IR requires target facts for bindings and backends reject width mismatch", () => {
+  const missingTarget = exactI32Module();
+  delete missingTarget.nativeTarget;
+  expect(validateModule(missingTarget).map((error) => error.message)).toContain(
+    "Native IR bindings require module target ABI facts",
+  );
+  expect(() => emitLlvmModule(exactI32Module(), { pointerBits: 32 })).toThrow(
+    /target mismatch/,
+  );
 });
 
 test("Native IR rejects invalid binding identity, exact types, and i32 literals", () => {
@@ -351,6 +468,83 @@ test("the frontend rejects an out-of-range exact i64 BigInt constructor", async 
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5104"]);
+});
+
+test("the frontend rejects a usize constructor outside the selected target width", async () => {
+  const outDir = join(scratch, "frontend-usize-out-of-range");
+  const result = await compile(
+    join(repoRoot, "tests/native-ir/usize-out-of-range.ts"),
+    {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend: "c",
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+    },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5104"]);
+});
+
+test("the compiler rejects Native IR input for a different pointer width", async () => {
+  const outDir = join(scratch, "frontend-target-mismatch");
+  const native = frontendNativeInput();
+  const result = await compile(join(repoRoot, "tests/native-ir/missing-symbol.ts"), {
+    outDir,
+    outPath: join(outDir, "program"),
+    backend: "c",
+    externalTypes: nativeExternalTypes(),
+    native: { ...native, target: { pointerBits: 32 } },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["SC5101"]);
+
+  const analysis = analyze(join(repoRoot, "tests/native-ir/missing-symbol.ts"), {
+    externalTypes: nativeExternalTypes(),
+    native: { ...native, target: { pointerBits: 32 } },
+  });
+  expect(analysis.coverage.diagnostics.map((diagnostic) => diagnostic.code)).toContain(
+    "SC5101",
+  );
+});
+
+test("unused Native IR input remains inert even when its target differs", async () => {
+  const outDir = join(scratch, "frontend-unused-target");
+  const native = frontendNativeInput();
+  const result = await compile(
+    join(repoRoot, "tests/native-ir/unused-native-input.ts"),
+    {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend: "c",
+      externalTypes: nativeExternalTypes(),
+      native: { ...native, target: { pointerBits: 32 } },
+    },
+  );
+  expect(result.ok ? [] : result.diagnostics).toEqual([]);
+});
+
+test("a pointer-sized literal without a native call still records target facts", async () => {
+  const outDir = join(scratch, "frontend-pointer-literal-only");
+  const result = await compile(
+    join(repoRoot, "tests/native-ir/pointer-literal-only.ts"),
+    {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend: "c",
+      emitIr: true,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+    },
+  );
+  expect(result.ok ? [] : result.diagnostics).toEqual([]);
+  if (!result.ok || result.irPath === undefined) return;
+  const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+  expect(mod.nativeTarget).toEqual({ pointerBits: 64 });
+  expect(mod.nativeBindings).toBeUndefined();
+  expect(validateModule(mod)).toEqual([]);
 });
 
 test("the frontend keeps number and BigInt exact-integer carriers distinct", async () => {
@@ -440,7 +634,9 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
       "native-typescript.fixture.c-v1@0.0.0#u32_identity",
       "native-typescript.fixture.c-v1@0.0.0#u64_identity",
       "native-typescript.fixture.c-v1@0.0.0#u8_identity",
+      "native-typescript.fixture.c-v1@0.0.0#usize_identity",
       "scriptc-test@1#exit",
+      "scriptc-test@1#isize-identity",
       "scriptc-test@1#verify-exact-integers",
     ]);
     const json = serializeModule(mod);

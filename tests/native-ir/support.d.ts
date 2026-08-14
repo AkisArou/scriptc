@@ -7,10 +7,15 @@ import type {
   u32,
   i64,
   u64,
+  usize,
 } from "@native-typescript/scabi-c-v1-fixture";
+
+declare const nativeScalar: unique symbol;
+export type isize = bigint & { readonly [nativeScalar]: "isize" };
 
 export declare function exit(status: i32): void;
 export declare function unused(value: i32): i32;
+export declare function isizeIdentity(value: isize): isize;
 export declare function verifyExactIntegers(
   signed8: i8,
   unsigned8: u8,
@@ -20,4 +25,6 @@ export declare function verifyExactIntegers(
   unsigned32: u32,
   signed64: i64,
   unsigned64: u64,
+  signedSize: isize,
+  unsignedSize: usize,
 ): i32;

@@ -49,8 +49,9 @@
  *            (SC5002), and a TypeScript signature that does not match its
  *            declared native ABI classes (SC5003), and native toolchain
  *            failures while applying a valid profile (SC5004); generic
- *            Native IR declaration resolution/signature/exact-conversion
- *            failures use SC5102-SC5104, and native link failures SC5105
+ *            Native IR target mismatch (SC5101), declaration resolution/
+ *            signature/exact-conversion failures (SC5102-SC5104), and
+ *            native link failures (SC5105)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -75,6 +76,18 @@ export interface ScrDiagnostic {
 }
 
 /* ── SC5xxx: native FFI ───────────────────────────────────────────────── */
+
+/** SC5101 — embedder-provided Native IR target facts disagree with the
+ * compiler target, so target-sized representations would be ambiguous. */
+export function nativeTargetDiag(detail: string, entryPath: string): ScrDiagnostic {
+  return {
+    code: "SC5101",
+    message: `Native IR target mismatch: ${detail}`,
+    loc: { file: entryPath, start: 0, end: 0 },
+    hint:
+      "translate native bindings from a SCABI manifest built for the same target selected by ScriptC",
+  };
+}
 
 /** SC5001 — the outbound native-FFI manifest is malformed or unreadable. */
 export function ffiProfileDiag(detail: string, profilePath: string): ScrDiagnostic {

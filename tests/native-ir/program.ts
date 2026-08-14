@@ -7,6 +7,7 @@ import {
   u32Identity,
   i64Identity,
   u64Identity,
+  usizeIdentity,
   type i8,
   type u8,
   type i16,
@@ -15,8 +16,14 @@ import {
   type u32,
   type i64,
   type u64,
+  type usize,
 } from "@native-typescript/scabi-c-v1-fixture";
-import { exit, verifyExactIntegers } from "scriptc-native-test";
+import {
+  exit,
+  isizeIdentity,
+  verifyExactIntegers,
+  type isize,
+} from "scriptc-native-test";
 
 exit(
   verifyExactIntegers(
@@ -28,5 +35,7 @@ exit(
     u32Identity(4294967295 as u32),
     i64Identity(-9223372036854775808n as i64),
     u64Identity(18446744073709551615n as u64),
+    isizeIdentity(-9223372036854775808n as isize),
+    usizeIdentity(18446744073709551615n as usize),
   ),
 );

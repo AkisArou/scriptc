@@ -192,7 +192,16 @@ export interface LlvmTargetOptions {
 }
 
 export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
-  return new LlEmitter(mod, options).emit();
+  const pointerBits = options.pointerBits ?? 64;
+  if (
+    mod.nativeTarget !== undefined &&
+    mod.nativeTarget.pointerBits !== pointerBits
+  ) {
+    throw new Error(
+      `LLVM emitter target mismatch: Native IR requires ${mod.nativeTarget.pointerBits}-bit pointers, backend selected ${pointerBits}-bit pointers`,
+    );
+  }
+  return new LlEmitter(mod, { ...options, pointerBits }).emit();
 }
 
 /** Exact double literal: LLVM's 16-digit hex form round-trips every f64
@@ -1236,6 +1245,9 @@ class LlEmitter {
           case "i64":
           case "u64":
             return "i64";
+          case "isize":
+          case "usize":
+            return this.sizeType;
         }
       case "f64":
       case "date":
@@ -1306,6 +1318,8 @@ class LlEmitter {
       case "u32":
       case "i64":
       case "u64":
+      case "isize":
+      case "usize":
         return type;
     }
   }
@@ -1325,6 +1339,8 @@ class LlEmitter {
       case "u32":
       case "i64":
       case "u64":
+      case "isize":
+      case "usize":
         return type;
     }
   }

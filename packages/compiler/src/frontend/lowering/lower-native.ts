@@ -192,6 +192,7 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   const args = expr.arguments.map((argument, index) =>
     L.lowerExprExpecting(argument, binding.parameters[index]!.type)
   );
+  L.usesNativeTarget = true;
   L.usedNativeBindingIds.add(binding.id);
   return {
     kind: "nativeCall",
@@ -205,9 +206,12 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
 function exactIntegerLiteral(
   node: ts.Expression,
   target: IrNativeScalarType,
+  pointerBits: 32 | 64,
 ): string | null {
-  const info = nativeIntegerInfo(target.scalar);
+  const info = nativeIntegerInfo(target.scalar, pointerBits);
   if (info === null) return null;
+  const pointerSized = target.scalar === "isize" || target.scalar === "usize";
+  const bigintCarrier = pointerSized || info.bits === 64;
   let expression = node;
   while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
   let negative = false;
@@ -215,11 +219,11 @@ function exactIntegerLiteral(
     ts.isPrefixUnaryExpression(expression) &&
     (expression.operator === ts.SyntaxKind.MinusToken || expression.operator === ts.SyntaxKind.PlusToken)
   ) {
-    if (info.bits === 64 && expression.operator === ts.SyntaxKind.PlusToken) return null;
+    if (bigintCarrier && expression.operator === ts.SyntaxKind.PlusToken) return null;
     negative = expression.operator === ts.SyntaxKind.MinusToken;
     expression = expression.operand;
   }
-  const digits = info.bits === 64
+  const digits = bigintCarrier
     ? ts.isBigIntLiteral(expression) && /^[0-9]+n$/.test(expression.text)
       ? expression.text.slice(0, -1)
       : null
@@ -233,23 +237,35 @@ function exactIntegerLiteral(
 }
 
 /** Exact-scalar assertions are representation constructors, not erased
- * JavaScript casts. Integers up to 32 bits accept decimal number literals;
- * 64-bit integers accept decimal BigInt literals. Either width also accepts
- * a value already carrying the same exact type. General JavaScript BigInt
- * values remain outside ScriptC's static representation. */
+ * JavaScript casts. Fixed-width integers up to 32 bits accept decimal number
+ * literals; 64-bit and pointer-sized integers accept decimal BigInt literals.
+ * The stable BigInt carrier keeps an `isize`/`usize` declaration independent
+ * of whether the selected target is 32- or 64-bit; its range still follows
+ * that target. Every type also accepts a value already carrying the same
+ * exact representation. General JavaScript BigInt values remain outside
+ * ScriptC's static representation. */
 export function lowerNativeScalarAssertion(
   L: Lowerer,
   expr: ts.AsExpression | ts.TypeAssertion,
   target: IrNativeScalarType,
 ): IrExpr {
+  if (target.scalar === "isize" || target.scalar === "usize") {
+    L.usesNativeTarget = true;
+  }
   const source = L.mapTypeOf(L.typeOf(expr.expression));
   if (source !== null && typeEquals(source, target)) return L.lowerExpr(expr.expression);
-  const value = exactIntegerLiteral(expr.expression, target);
+  const pointerBits = L.nativeInput?.target.pointerBits;
+  if (pointerBits !== 32 && pointerBits !== 64) {
+    throw new Error("native frontend input has no valid target pointer width");
+  }
+  const value = exactIntegerLiteral(expr.expression, target, pointerBits);
   if (value === null) {
     L.pushDiag(
       nativeConversionDiag(
         target.scalar,
-        nativeIntegerInfo(target.scalar)?.bits === 64
+        target.scalar === "isize" ||
+          target.scalar === "usize" ||
+          nativeIntegerInfo(target.scalar, pointerBits)?.bits === 64
           ? "the source is not a provably in-range decimal BigInt literal or the same exact type"
           : "the source is not a provably in-range decimal number literal or the same exact type",
         locOf(expr),
