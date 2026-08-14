@@ -52,6 +52,9 @@ export declare function callbacksConfigure(): i32;
 export declare function callbacksWaitAndDispatch(expectedWakes: i32): i32;
 export declare function callbacksActive(): i32;
 export declare function callbacksShutdown(): i32;
+export declare function callbacksConfigureAttached(): i32;
+export declare function callbacksConfigureAttachedTimer(): i32;
+export declare function callbacksObserveAttached(value: i32): void;
 export declare function verifyRetained(
   total: i32,
   activeBefore: i32,

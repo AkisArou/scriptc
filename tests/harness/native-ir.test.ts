@@ -753,6 +753,74 @@ function frontendNativeInput(): NativeFrontendInput {
         },
       })),
       {
+        id: "scriptc-test@1#callbacksConfigureAttached",
+        declaration: {
+          module: "scriptc-native-test",
+          name: "callbacksConfigureAttached",
+        },
+        entry: {
+          kind: "c-symbol",
+          symbol: "scriptc_test_callbacks_configure_attached",
+        },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
+        ...directSignature([]),
+        result: {
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+        },
+      },
+      {
+        id: "scriptc-test@1#callbacksConfigureAttachedTimer",
+        declaration: {
+          module: "scriptc-native-test",
+          name: "callbacksConfigureAttachedTimer",
+        },
+        entry: {
+          kind: "c-symbol",
+          symbol: "scriptc_test_callbacks_configure_attached_timer",
+        },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
+        ...directSignature([]),
+        result: {
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+        },
+      },
+      {
+        id: "scriptc-test@1#callbacksObserveAttached",
+        declaration: {
+          module: "scriptc-native-test",
+          name: "callbacksObserveAttached",
+        },
+        entry: {
+          kind: "c-symbol",
+          symbol: "scriptc_test_callbacks_observe_attached",
+        },
+        callingConvention: "c",
+        variadic: false,
+        sourceCall: { kind: "function" },
+        error: NO_NATIVE_ERROR,
+        ...directSignature([{
+          name: "value",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+        }]),
+        result: {
+          type: NATIVE_VOID,
+          passMode: "value",
+          ownership: { kind: "value" },
+        },
+      },
+      {
         id: "scriptc-test@1#verify-retained",
         declaration: { module: "scriptc-native-test", name: "verifyRetained" },
         entry: { kind: "c-symbol", symbol: "scriptc_test_verify_retained" },
@@ -1901,6 +1969,78 @@ describe.each(["c", "llvm"] as const)("Native IR call-scoped callbacks, %s backe
 describe.each(["c", "llvm"] as const)(
   "Native IR retained callbacks, %s backend",
   (backend) => {
+    test("hands executable liveness to an attached owner loop", async () => {
+      const outDir = join(scratch, `callback-attached-loop-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/callback-attached-loop.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [
+            fixtureObject(),
+            supportObject(),
+            retainedSupportObject(),
+          ],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) {
+        throw new Error("native attached-loop compile failed");
+      }
+      const generated = readFileSync(
+        join(
+          outDir,
+          backend === "c"
+            ? "callback-attached-loop.c"
+            : "callback-attached-loop.ll",
+        ),
+        "utf8",
+      );
+      expect(generated).toContain("scr_loop_run");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 0, signal: null, stderr: "" });
+    });
+
+    test("hands its next timer deadline to the attached owner loop", async () => {
+      const outDir = join(scratch, `callback-attached-timer-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/callback-attached-timer.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [
+            fixtureObject(),
+            supportObject(),
+            retainedSupportObject(),
+          ],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) {
+        throw new Error("native attached-loop timer compile failed");
+      }
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 0, signal: null, stderr: "" });
+    });
+
     test("copies foreign-thread payloads and invokes the rooted closure on the owner", async () => {
       const outDir = join(scratch, `callback-retained-${backend}`);
       const result = await compile(

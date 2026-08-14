@@ -128,9 +128,12 @@ function emitterEvents(L: Lowerer): Map<string, EventSig> {
       }
     }
   };
-  const mergeListener = (name: string, params: (IrType | null)[]): void => {
+  const mergeListener = (
+    name: string,
+    params: readonly (IrType | null)[],
+  ): void => {
     if (params.some((p) => p === null)) return;
-    const prefix = params as IrType[];
+    const prefix = params as readonly IrType[];
     const sig = sigOf(name);
     if (sig.conflict) return;
     if (sig.fromEmit) {
@@ -146,7 +149,7 @@ function emitterEvents(L: Lowerer): Map<string, EventSig> {
           return;
         }
       }
-      sig.tuple = prefix;
+      sig.tuple = [...prefix];
       return;
     }
     for (let i = 0; i < prefix.length; i++) {

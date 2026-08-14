@@ -21,7 +21,7 @@ import {
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, nativeIntegerInfo, typeEquals, type IrFfiImport, type IrLibSection, type IrModule, type IrNativeScalarType, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesRetainedCallbacks, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, nativeIntegerInfo, typeEquals, type IrFfiImport, type IrLibSection, type IrModule, type IrNativeScalarType, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -170,6 +170,9 @@ export interface CompileOptions {
   native?: NativeFrontendInput;
   /** Target-compatible objects/archives that define reached native symbols. */
   nativeLinkInputs?: readonly string[];
+  /** Driver-neutral system library names required by reached Native IR
+   * bindings. Emitted as -l<name> after nativeLinkInputs. */
+  nativeSystemLibraries?: readonly string[];
 }
 
 export type CompileResult =
@@ -1098,11 +1101,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       // keep that optional TU out of programs that never call fsp.open.
       fileHandle: moduleUsesFileHandle(lowered.module),
       nativeHandle: (lowered.module.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
-      retainedCallbacks: (lowered.module.nativeBindings ?? []).some((binding) =>
-        binding.arguments.some(
-          (argument) => argument.callback?.lifetime === "until-cancelled",
-        )
-      ),
+      retainedCallbacks: moduleUsesRetainedCallbacks(lowered.module),
       // The link switch for scr_fetch.c (the native bridge over scr_net +
       // scr_tls + scr_http's client parser + zlib — cc.ts implies those
       // units into the link): embedded npm code that references fetch gets
@@ -1183,8 +1182,14 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
             ],
           }
         : {}),
-      ...(ffi !== null && ffi.systemLibraries.length > 0
-        ? { systemLibraries: ffi.systemLibraries }
+      ...((ffi?.systemLibraries.length ?? 0) +
+          (opts.nativeSystemLibraries?.length ?? 0) > 0
+        ? {
+            systemLibraries: [
+              ...(ffi?.systemLibraries ?? []),
+              ...(opts.nativeSystemLibraries ?? []),
+            ],
+          }
         : {}),
     });
   } catch (err) {
@@ -2147,11 +2152,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
     nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
-    retainedCallbacks: (mod.nativeBindings ?? []).some((binding) =>
-      binding.arguments.some(
-        (argument) => argument.callback?.lifetime === "until-cancelled",
-      )
-    ),
+    retainedCallbacks: moduleUsesRetainedCallbacks(mod),
   });
 
   // The sidecar lands beside the compiled object, written by the same

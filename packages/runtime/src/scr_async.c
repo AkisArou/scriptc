@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2143,6 +2144,35 @@ static void scr_resume_fiber(ScrFiber *f) {
 static bool (*scr_io_pending_fn)(void) = NULL;
 static void (*scr_io_poll_fn)(double max_wait_ms) = NULL;
 
+/* An attached platform scheduler is a first-class liveness and sleep source,
+ * not a native call that blocks while a JavaScript frame is suspended. The
+ * target gets one host turn per poll and the ordinary loop regains control
+ * between turns. */
+static ScrAttachedLoopPendingFn scr_attached_pending_fn = NULL;
+static ScrAttachedLoopPollFn scr_attached_poll_fn = NULL;
+static void *scr_attached_context = NULL;
+
+bool scr_loop_set_attached(ScrAttachedLoopPendingFn pending,
+                           ScrAttachedLoopPollFn poll, void *context) {
+  if (pending == NULL || poll == NULL || scr_attached_poll_fn != NULL) {
+    return false;
+  }
+  scr_attached_pending_fn = pending;
+  scr_attached_poll_fn = poll;
+  scr_attached_context = context;
+  return true;
+}
+
+bool scr_loop_clear_attached(void *context) {
+  if (scr_attached_poll_fn == NULL || scr_attached_context != context) {
+    return false;
+  }
+  scr_attached_pending_fn = NULL;
+  scr_attached_poll_fn = NULL;
+  scr_attached_context = NULL;
+  return true;
+}
+
 void scr_loop_set_io(bool (*pending)(void), void (*poll)(double)) {
   scr_io_pending_fn = pending;
   scr_io_poll_fn = poll;
@@ -2382,6 +2412,8 @@ bool scr_loop_run(ScrPromise *top_level) {
           (scr_net_pending_fn != NULL && scr_net_pending_fn()) ||
           (scr_dgram_pending_fn != NULL && scr_dgram_pending_fn()) ||
           (scr_watch_pending_fn != NULL && scr_watch_pending_fn()) ||
+          (scr_attached_pending_fn != NULL &&
+           scr_attached_pending_fn(scr_attached_context)) ||
           scr_fs_renames_pending();
       if (held) {
         scr_children_poll();
@@ -2401,6 +2433,8 @@ bool scr_loop_run(ScrPromise *top_level) {
     bool net = scr_net_pending_fn != NULL && scr_net_pending_fn();
     bool dgram = scr_dgram_pending_fn != NULL && scr_dgram_pending_fn();
     bool watch = scr_watch_pending_fn != NULL && scr_watch_pending_fn();
+    bool attached = scr_attached_pending_fn != NULL &&
+                    scr_attached_pending_fn(scr_attached_context);
     bool renames = scr_fs_renames_pending();
     /* Timer liveness counts only REF'd timers: an unref'd timer stays in
      * the heap (and fires if the loop runs on for other reasons) but does
@@ -2408,7 +2442,7 @@ bool scr_loop_run(ScrPromise *top_level) {
      * Children follow the same rule: an unref'd child is still REAPED
      * while the loop runs (kids drives the sweeps and sleeps above) but
      * only reffed ones keep the process alive. */
-    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch && !renames) break;
+    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch && !attached && !renames) break;
     /* Sleep to the earliest deadline, then run every due timer (each may
      * enqueue microtasks, which the next iteration drains first). Who
      * sleeps depends on what is pending:
@@ -2435,15 +2469,37 @@ bool scr_loop_run(ScrPromise *top_level) {
     if (renames && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
     /* An armed island timer (AbortSignal.timeout) caps the sleep: it must
      * fire on time even while the poller waits on socket readiness. */
+    bool island_timer_armed = false;
     if (scr_island_deadline_fn != NULL) {
       double isl_due = scr_island_deadline_fn();
+      island_timer_armed = isl_due < HUGE_VAL;
       if (isl_due < due) due = isl_due;
     }
     /* Pending immediates are always-ready work: no sleep — run due timers
      * (Node's timers phase precedes check), then the check phase below. */
     if (scr_pending_immediates > 0) due = now;
     bool evw = scr_events_watching_fn != NULL && scr_events_watching_fn();
-    if (io) {
+    if (attached) {
+      /* A host dispatcher and ScriptC's fd pollers cannot both own a blocking
+       * wait without a shared poll set. Refuse the ambiguous composition
+       * instead of adding periodic polling latency or losing wakeups. Timers
+       * are safe: their deadline is handed to the host below. */
+      if (io || island_timer_armed || evw || net || dgram || watch || kids ||
+          renames) {
+        scr_trap("scriptc: attached loop cannot compose with poller-backed runtime work\n");
+      }
+      double max_wait_ms = scr_ntimers == 0 ? -1.0 : (due > now ? due - now : 0.0);
+      if (scr_pending_immediates > 0) max_wait_ms = 0.0;
+      ScrAttachedLoopPollResult polled =
+          scr_attached_poll_fn(scr_attached_context, max_wait_ms);
+      if (polled == SCR_ATTACHED_LOOP_POLL_FAILED) return true;
+      if (polled != SCR_ATTACHED_LOOP_POLL_COMPLETE) {
+        scr_trap("scriptc: attached loop returned an invalid poll result\n");
+      }
+      now = scr_now_ms();
+      if (scr_exc_pending()) return false;
+      if (scr_ready_len > 0 || scr_nt_head != NULL) continue;
+    } else if (io) {
       if (kids && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       /* Signals/stdin/net can't wake curl's fd wait (and its poll retries
        * on EINTR), so they re-impose a coarser cap — bounded Ctrl-C and

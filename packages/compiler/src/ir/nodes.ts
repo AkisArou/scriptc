@@ -151,7 +151,7 @@ export interface IrNativePointerType {
 
 export interface IrNativeCallbackSignature {
   callingConvention: "c";
-  parameters: IrNativeScalarType[];
+  parameters: readonly IrNativeScalarType[];
   result: IrNativeScalarType | { kind: "void" };
   context: { placement: "last" };
 }
@@ -170,7 +170,7 @@ export interface IrNativeContextType {
 
 export type IrNativeCallbackArgumentType = {
   kind: "func";
-  params: IrNativeScalarType[];
+  params: readonly IrNativeScalarType[];
   ret: IrNativeScalarType | { kind: "void" };
 };
 
@@ -178,10 +178,10 @@ export type IrNativeCallbackContract =
   | {
       lifetime: "call";
       registrationOwner: { kind: "native-call" };
-      allowedInvocationExecutors: ["same-as-caller"];
+      allowedInvocationExecutors: readonly ["same-as-caller"];
       deliveryExecutor: "same-as-caller";
       synchronousReturn: true;
-      transports: { kind: "borrow" }[];
+      transports: readonly { kind: "borrow" }[];
       reentrancy: "required";
       postDisposal: "not-invoked";
       shutdown: "drain";
@@ -190,13 +190,13 @@ export type IrNativeCallbackContract =
       lifetime: "until-cancelled";
       registrationOwner: { kind: "result" };
       cancellationBinding: string;
-      allowedInvocationExecutors: (
+      allowedInvocationExecutors: readonly (
         | "same-as-caller"
         | "any-attached-thread"
       )[];
       deliveryExecutor: "runtime-owner";
       synchronousReturn: false;
-      transports: { kind: "copy" }[];
+      transports: readonly { kind: "copy" }[];
       reentrancy: "allowed" | "required";
       postDisposal: "not-invoked";
       shutdown: "drain";
@@ -421,7 +421,7 @@ export type IrType =
    * (fn.length semantics). Rest-marked values are only ever CALLED
    * through the dyn boundary (boxed thunks); direct static calls box
    * first (lower-calls). */
-  | { kind: "func"; params: IrType[]; ret: IrType; rest?: true; restAbi?: "jsval" }
+  | { kind: "func"; params: readonly IrType[]; ret: IrType; rest?: true; restAbi?: "jsval" }
   | { kind: "object"; className: string } // heap, refcounted class instance
   /** The class STATIC side as a value — `typeof C`, the type of the class
    * name itself and of `new (…) => T` constructor-typed slots. Runtime
@@ -6978,6 +6978,17 @@ export function moduleUsesTlsCa(mod: IrModule): boolean {
   };
   visit(mod);
   return found;
+}
+
+/** A retained native callback keeps an attached target executable alive even
+ * when the source contains no ScriptC async function or timer. The target
+ * configures the concrete owner-loop source during top-level initialization. */
+export function moduleUsesRetainedCallbacks(mod: IrModule): boolean {
+  return (mod.nativeBindings ?? []).some((binding) =>
+    binding.arguments.some(
+      (argument) => argument.callback?.lifetime === "until-cancelled",
+    )
+  );
 }
 
 /* ── library mode's async_free gate ──────────────────────────────────────

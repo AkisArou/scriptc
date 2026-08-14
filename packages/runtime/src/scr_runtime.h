@@ -4232,6 +4232,29 @@ typedef enum {
   SCR_LOOP_CHECKPOINT_UNHANDLED_REJECTION = 2,
 } ScrLoopCheckpointResult;
 ScrLoopCheckpointResult scr_loop_checkpoint(void);
+/* Attach one platform event source to the executable scheduler. `pending`
+ * participates in loop liveness; `poll` dispatches at most one host turn and
+ * may block for max_wait_ms (-1 means no ScriptC deadline). Host callbacks
+ * enter compiled code through the retained-callback owner gateway and must
+ * perform their own scr_loop_checkpoint after each delivered callback.
+ *
+ * ScriptC timers compose with the host poll through max_wait_ms. Poller-backed
+ * ScriptC I/O is deliberately rejected while an attached source is live until
+ * a shared poll-set contract exists: silently polling either side would add
+ * latency or lose wakeups. Configuration is single-assignment per executable
+ * runtime instance. */
+typedef bool (*ScrAttachedLoopPendingFn)(void *context);
+typedef enum {
+  SCR_ATTACHED_LOOP_POLL_COMPLETE = 0,
+  SCR_ATTACHED_LOOP_POLL_FAILED = 1,
+} ScrAttachedLoopPollResult;
+typedef ScrAttachedLoopPollResult (*ScrAttachedLoopPollFn)(
+    void *context, double max_wait_ms);
+bool scr_loop_set_attached(ScrAttachedLoopPendingFn pending,
+                           ScrAttachedLoopPollFn poll, void *context);
+/* Removes the configured source when context is its exact identity. This is
+ * both the configuration rollback path and the post-loop teardown fence. */
+bool scr_loop_clear_attached(void *context);
 /* Run to ordinary loop exhaustion, except that a non-NULL executable
  * module-root promise stops the loop as soon as it is rejected at a
  * microtask checkpoint. Fulfilled roots do not stop the loop: Node keeps
