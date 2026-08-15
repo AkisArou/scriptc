@@ -6,6 +6,7 @@ import type {
   IrNativeParameterProjection,
   IrNativeResultAbiType,
   IrNativeResultProjection,
+  IrNativeScalarType,
   IrNativeStructDef,
   IrNativeValueType,
 } from "../ir/nodes.js";
@@ -19,6 +20,16 @@ export interface NativeSourceType {
     readonly name: string;
   };
   readonly type: Readonly<IrNativeValueType>;
+}
+
+export interface NativeFrontendConstant {
+  readonly id: string;
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly type: Readonly<IrNativeScalarType>;
+  readonly value: string;
 }
 
 export type NativeStructDefinition = Readonly<
@@ -145,6 +156,7 @@ export interface NativeFrontendInput {
     readonly abi: string;
   };
   readonly sourceTypes: readonly NativeSourceType[];
+  readonly constants: readonly NativeFrontendConstant[];
   readonly types: readonly NativeTypeDefinition[];
   readonly bindings: readonly NativeFrontendBinding[];
   readonly exports: readonly NativeFrontendExport[];
@@ -161,6 +173,11 @@ export function nativeRuntimeMembers(
     const members = mutable.get(binding.declaration.module) ?? new Set<string>();
     members.add(binding.declaration.name.split(".", 1)[0]!);
     mutable.set(binding.declaration.module, members);
+  }
+  for (const constant of input?.constants ?? []) {
+    const members = mutable.get(constant.declaration.module) ?? new Set<string>();
+    members.add(constant.declaration.name.split(".", 1)[0]!);
+    mutable.set(constant.declaration.module, members);
   }
   return mutable;
 }

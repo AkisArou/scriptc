@@ -14,6 +14,10 @@ export type u64 = bigint & { readonly [nativeScalar]: "u64" };
 export type usize = bigint & { readonly [nativeScalar]: "usize" };
 export type f64 = number & { readonly [nativeScalar]: "f64" };
 
+export declare namespace FixtureValue {
+  const answer: i32;
+}
+
 export interface Padded {
   readonly tag: u8;
   readonly value: u64;

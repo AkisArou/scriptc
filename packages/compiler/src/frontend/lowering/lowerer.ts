@@ -1260,6 +1260,7 @@ export class Lowerer {
   readonly nativeTypeDefsById: ResolvedNativeFrontend["typeDefsById"];
   readonly nativeBindingsBySymbol: ReadonlyMap<ts.Symbol, readonly NativeInputBinding[]>;
   readonly nativeBindingsByDeclaration: ResolvedNativeFrontend["bindingsByDeclaration"];
+  readonly nativeConstantsBySymbol: ResolvedNativeFrontend["constantsBySymbol"];
   readonly validatedNativeBindingIds = new Set<string>();
   /** Reachability accounting: only calls that survive this pass contribute a
    * binding record to the assembled module. */
@@ -1338,6 +1339,7 @@ export class Lowerer {
     this.nativeTypeDefsById = native.typeDefsById;
     this.nativeBindingsBySymbol = native.bindingsBySymbol;
     this.nativeBindingsByDeclaration = native.bindingsByDeclaration;
+    this.nativeConstantsBySymbol = native.constantsBySymbol;
     this.typeCtx = {
       checker: this.checker,
       shapes: this.shapes,

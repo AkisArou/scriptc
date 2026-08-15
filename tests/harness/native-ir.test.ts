@@ -346,6 +346,12 @@ const localNativeInput: NativeFrontendInput = {
       type: SUBSCRIPTION,
     },
   ],
+  constants: [{
+    id: "native-typescript.fixture.c-v1@0.0.0#fixture_answer",
+    declaration: { module: nativePackage, name: "FixtureValue.answer" },
+    type: I32,
+    value: "42",
+  }],
   types: [
     PADDED_DEFINITION,
     PAIR32_DEFINITION,
@@ -854,6 +860,7 @@ function frontendNativeInput(): NativeFrontendInput {
         type: ISIZE,
       },
     ],
+    constants: translated.constants,
     types: translated.types,
     exports: translated.exports,
     bindings: [
@@ -2210,6 +2217,35 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(json).toContain('"kind": "nativeScalarLit"');
     expect(json).not.toContain('"kind": "numLit"');
 
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("lowers an external native constant as an exact literal", async () => {
+    const outDir = join(scratch, `native-constant-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/native-constant.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native constant frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(serializeModule(mod)).toMatch(
+      /"kind": "nativeScalarLit",\s+"value": "42"/,
+    );
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

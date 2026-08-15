@@ -22,12 +22,14 @@ import * as ts from "../ts7/adapter.js";
 import { PoisonError, type Lowerer } from "./lowerer.js";
 
 export type NativeInputBinding = NativeFrontendInput["bindings"][number];
+export type NativeInputConstant = NativeFrontendInput["constants"][number];
 
 export interface ResolvedNativeFrontend {
   readonly typesBySymbol: ReadonlyMap<ts.Symbol, IrNativeValueType>;
   readonly typeDefsById: ReadonlyMap<string, NativeFrontendInput["types"][number]>;
   readonly bindingsBySymbol: ReadonlyMap<ts.Symbol, readonly NativeInputBinding[]>;
   readonly bindingsByDeclaration: ReadonlyMap<ts.Node, readonly NativeInputBinding[]>;
+  readonly constantsBySymbol: ReadonlyMap<ts.Symbol, NativeInputConstant>;
 }
 
 function declarationSymbol(
@@ -70,6 +72,7 @@ export function resolveNativeFrontend(
   const typesBySymbol = new Map<ts.Symbol, IrNativeValueType>();
   const typeDefsById = new Map((input?.types ?? []).map((type) => [type.id, type]));
   const mutableBindingsBySymbol = new Map<ts.Symbol, NativeInputBinding[]>();
+  const constantsBySymbol = new Map<ts.Symbol, NativeInputConstant>();
   for (const sourceType of input?.sourceTypes ?? []) {
     const symbol = declarationSymbol(L, sourceType.declaration);
     if (symbol !== null) {
@@ -93,6 +96,10 @@ export function resolveNativeFrontend(
       mutableBindingsBySymbol.set(symbol, bindings);
     }
   }
+  for (const constant of input?.constants ?? []) {
+    const symbol = declarationSymbol(L, constant.declaration, "value");
+    if (symbol !== null) constantsBySymbol.set(symbol, constant);
+  }
   const bindingsBySymbol = new Map(
     [...mutableBindingsBySymbol].map(([symbol, bindings]) => [
       symbol,
@@ -105,7 +112,13 @@ export function resolveNativeFrontend(
       bindingsByDeclaration.set(declaration, bindings);
     }
   }
-  return { typesBySymbol, typeDefsById, bindingsBySymbol, bindingsByDeclaration };
+  return {
+    typesBySymbol,
+    typeDefsById,
+    bindingsBySymbol,
+    bindingsByDeclaration,
+    constantsBySymbol,
+  };
 }
 
 function nativeBindingByKind(
@@ -357,6 +370,47 @@ function nativeExpressionSymbol(L: Lowerer, expression: ts.Expression): ts.Symbo
       : null;
   if (symbol === null || !(symbol.flags & ts.SymbolFlags.Alias)) return symbol;
   return L.checker.getAliasedSymbol(symbol);
+}
+
+export function lowerNativeConstant(
+  L: Lowerer,
+  expression: ts.Identifier | ts.PropertyAccessExpression,
+): IrExpr | null {
+  const symbol = nativeExpressionSymbol(L, expression);
+  if (symbol === null) return null;
+  const constant = L.nativeConstantsBySymbol.get(symbol);
+  if (constant === undefined) return null;
+  const loc = locOf(expression);
+  const declarations = L.checker.declarationsOf(symbol);
+  const validDeclaration = (declaration: ts.Node): boolean =>
+    (ts.isVariableDeclaration(declaration) && declaration.initializer === undefined) ||
+    declaration.kind === ts.SyntaxKind.PropertySignature;
+  if (declarations.length === 0 || declarations.some((declaration) => !validDeclaration(declaration))) {
+    L.pushDiag(nativeBindingDiag(
+      constant.id,
+      "the configured constant does not resolve exclusively to ambient value declarations",
+      loc,
+    ));
+    throw new PoisonError();
+  }
+  const mapped = L.mapTypeOf(L.typeOf(expression));
+  if (mapped === null || !typeEquals(mapped, constant.type)) {
+    L.pushDiag(nativeSignatureDiag(
+      constant.id,
+      `the constant maps to '${mapped === null ? L.checker.typeToString(L.typeOf(expression)) : L.fmt(mapped)}', not '${L.fmt(constant.type)}'`,
+      loc,
+    ));
+    throw new PoisonError();
+  }
+  if (constant.type.scalar === "isize" || constant.type.scalar === "usize") {
+    L.usesNativeTarget = true;
+  }
+  return {
+    kind: "nativeScalarLit",
+    value: constant.value,
+    type: { ...constant.type },
+    loc,
+  };
 }
 
 function lowerNativeInvocation(
