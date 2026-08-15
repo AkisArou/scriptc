@@ -1157,6 +1157,7 @@ function exactI32Module(value = "42"): IrModule {
       {
         id: "fixture.i32_identity",
         declaration: { module: "@native-typescript/scabi-c-v1-fixture", name: "i32Identity" },
+        sourceAccess: "call",
         entry: { kind: "c-symbol", symbol: "nts_i32_identity" },
         callingConvention: "c",
         variadic: false,
@@ -1167,6 +1168,7 @@ function exactI32Module(value = "42"): IrModule {
       {
         id: "process.exit",
         declaration: { module: "scriptc:test", name: "exit" },
+        sourceAccess: "call",
         entry: { kind: "c-symbol", symbol: "exit" },
         callingConvention: "c",
         variadic: false,
@@ -1288,6 +1290,7 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
       {
         id: "fixture.pointer_sizes",
         declaration: { module: "scriptc:test", name: "pointerSizes" },
+        sourceAccess: "call",
         entry: { kind: "c-symbol", symbol: "scriptc_test_pointer_sizes" },
         callingConvention: "c",
         variadic: false,
@@ -1380,10 +1383,11 @@ test("Native IR validates and serializes an exact i32 call without a number carr
 
 test("Native IR validates exact integer-backed boolean results", () => {
   const mod = exactI32Module();
-  const binding = structuredClone(localNativeInput.bindings.find(
+  const frontendBinding = structuredClone(localNativeInput.bindings.find(
     ({ declaration }) => declaration.name === "nativeTrue",
   ));
-  if (binding === undefined) throw new Error("test fixture lost nativeTrue");
+  if (frontendBinding === undefined) throw new Error("test fixture lost nativeTrue");
+  const binding = { ...frontendBinding, sourceAccess: "call" as const };
   mod.nativeBindings = [...mod.nativeBindings!, binding];
   expect(validateModule(mod)).toEqual([]);
   expect(deserializeModule(serializeModule(mod))).toEqual(mod);
@@ -1402,10 +1406,11 @@ test("Native IR validates exact integer-backed boolean results", () => {
 
 test("Native IR validates exact integer-backed boolean parameters", () => {
   const mod = exactI32Module();
-  const binding = structuredClone(localNativeInput.bindings.find(
+  const frontendBinding = structuredClone(localNativeInput.bindings.find(
     ({ declaration }) => declaration.name === "nativeNot",
   ));
-  if (binding === undefined) throw new Error("test fixture lost nativeNot");
+  if (frontendBinding === undefined) throw new Error("test fixture lost nativeNot");
+  const binding = { ...frontendBinding, sourceAccess: "call" as const };
   mod.nativeBindings = [...mod.nativeBindings!, binding];
   expect(validateModule(mod)).toEqual([]);
   expect(deserializeModule(serializeModule(mod))).toEqual(mod);

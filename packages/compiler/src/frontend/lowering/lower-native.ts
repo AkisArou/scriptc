@@ -25,7 +25,8 @@ export type NativeInputBinding = NativeFrontendInput["bindings"][number];
 export interface ResolvedNativeFrontend {
   readonly typesBySymbol: ReadonlyMap<ts.Symbol, IrNativeValueType>;
   readonly typeDefsById: ReadonlyMap<string, NativeFrontendInput["types"][number]>;
-  readonly bindingsBySymbol: ReadonlyMap<ts.Symbol, NativeInputBinding>;
+  readonly bindingsBySymbol: ReadonlyMap<ts.Symbol, readonly NativeInputBinding[]>;
+  readonly bindingsByDeclaration: ReadonlyMap<ts.Node, readonly NativeInputBinding[]>;
 }
 
 function declarationSymbol(
@@ -67,7 +68,7 @@ export function resolveNativeFrontend(
 ): ResolvedNativeFrontend {
   const typesBySymbol = new Map<ts.Symbol, IrNativeValueType>();
   const typeDefsById = new Map((input?.types ?? []).map((type) => [type.id, type]));
-  const bindingsBySymbol = new Map<ts.Symbol, NativeInputBinding>();
+  const mutableBindingsBySymbol = new Map<ts.Symbol, NativeInputBinding[]>();
   for (const sourceType of input?.sourceTypes ?? []) {
     const symbol = declarationSymbol(L, sourceType.declaration);
     if (symbol !== null) {
@@ -79,13 +80,48 @@ export function resolveNativeFrontend(
     const symbol = declarationSymbol(
       L,
       binding.declaration,
-      binding.sourceCall.kind === "method" || binding.sourceCall.kind === "getter"
+      binding.sourceCall.kind === "method" ||
+          binding.sourceCall.kind === "getter" ||
+          binding.sourceCall.kind === "setter"
         ? "instance"
         : "value",
     );
-    if (symbol !== null) bindingsBySymbol.set(symbol, binding);
+    if (symbol !== null) {
+      const bindings = mutableBindingsBySymbol.get(symbol) ?? [];
+      bindings.push(binding);
+      mutableBindingsBySymbol.set(symbol, bindings);
+    }
   }
-  return { typesBySymbol, typeDefsById, bindingsBySymbol };
+  const bindingsBySymbol = new Map(
+    [...mutableBindingsBySymbol].map(([symbol, bindings]) => [
+      symbol,
+      Object.freeze([...bindings]),
+    ] as const),
+  );
+  const bindingsByDeclaration = new Map<ts.Node, readonly NativeInputBinding[]>();
+  for (const [symbol, bindings] of bindingsBySymbol) {
+    for (const declaration of L.checker.declarationsOf(symbol)) {
+      bindingsByDeclaration.set(declaration, bindings);
+    }
+  }
+  return { typesBySymbol, typeDefsById, bindingsBySymbol, bindingsByDeclaration };
+}
+
+function nativeBindingByKind(
+  L: Lowerer,
+  symbol: ts.Symbol,
+  kinds: readonly NativeInputBinding["sourceCall"]["kind"][],
+): NativeInputBinding | undefined {
+  let bindings = L.nativeBindingsBySymbol.get(symbol);
+  if (bindings === undefined) {
+    for (const declaration of L.checker.declarationsOf(symbol)) {
+      bindings = L.nativeBindingsByDeclaration.get(declaration);
+      if (bindings !== undefined) break;
+    }
+  }
+  return bindings?.find((binding) =>
+    kinds.includes(binding.sourceCall.kind)
+  );
 }
 
 export function nativeTypeOf(
@@ -160,9 +196,10 @@ function validateDeclaration(
       return ts.isFunctionDeclaration(declaration) ||
         (ts.isMethodDeclaration(declaration) && hasStaticModifier(declaration));
     }
-    if (binding.sourceCall.kind === "getter") {
+    if (binding.sourceCall.kind === "getter" || binding.sourceCall.kind === "setter") {
       return declaration.kind === ts.SyntaxKind.PropertySignature ||
-        (ts.isGetAccessorDeclaration(declaration) &&
+        ((ts.isGetAccessorDeclaration(declaration) ||
+          ts.isSetAccessorDeclaration(declaration)) &&
           !hasStaticModifier(declaration));
     }
     return declaration.kind === ts.SyntaxKind.MethodSignature ||
@@ -201,6 +238,38 @@ function validateDeclaration(
     }
     return;
   }
+  if (binding.sourceCall.kind === "setter") {
+    if (
+      binding.arguments.length !== 2 ||
+      binding.sourceCall.receiverArgument !== 0 ||
+      binding.sourceCall.valueArgument !== 1 ||
+      binding.result.type.kind !== "void" ||
+      binding.result.projection.kind !== "direct"
+    ) {
+      failSignature(
+        L,
+        binding,
+        "a native setter requires receiver argument 0, value argument 1, and a direct void result",
+        loc,
+      );
+    }
+    const setters = callDeclarations.filter(ts.isSetAccessorDeclaration);
+    if (setters.length !== 1 || setters[0]!.parameters.length !== 1) {
+      failSignature(L, binding, "a native setter requires exactly one setter declaration with one value parameter", loc);
+    }
+    const sourceType = L.checker.getTypeAtLocation(setters[0]!.parameters[0]!);
+    const mapped = L.mapTypeOf(sourceType);
+    const expected = binding.arguments[binding.sourceCall.valueArgument]!.type;
+    if (mapped === null || !typeEquals(mapped, expected)) {
+      failSignature(
+        L,
+        binding,
+        `the setter value maps to '${mapped === null ? L.checker.typeToString(sourceType) : L.fmt(mapped)}', not '${L.fmt(expected)}'`,
+        loc,
+      );
+    }
+    return;
+  }
   if (callDeclarations.some((declaration) => {
     const callable = declaration as
       | ts.ClassDeclaration
@@ -227,7 +296,9 @@ function validateDeclaration(
   const parameters = signature.getParameters();
   const sourceParameters = binding.arguments.filter(
     (_argument, index) =>
-      (binding.sourceCall.kind !== "method" && binding.sourceCall.kind !== "getter") ||
+      (binding.sourceCall.kind !== "method" &&
+        binding.sourceCall.kind !== "getter" &&
+        binding.sourceCall.kind !== "setter") ||
         index !== binding.sourceCall.receiverArgument,
   );
   if (parameters.length !== sourceParameters.length) {
@@ -278,7 +349,10 @@ function nativeExpressionSymbol(L: Lowerer, expression: ts.Expression): ts.Symbo
   const symbol = ts.isIdentifier(expression)
     ? L.resolveValueSymbol(expression)
     : ts.isPropertyAccessExpression(expression)
-      ? L.checker.getSymbolAtLocation(expression.name) ?? null
+      ? L.checker.getPropertyOfType(
+          L.typeOf(expression.expression),
+          expression.name.text,
+        ) ?? L.checker.getSymbolAtLocation(expression.name) ?? null
       : null;
   if (symbol === null || !(symbol.flags & ts.SymbolFlags.Alias)) return symbol;
   return L.checker.getAliasedSymbol(symbol);
@@ -290,12 +364,12 @@ function lowerNativeInvocation(
   symbol: ts.Symbol,
   explicitArguments: readonly ts.Expression[],
   receiver: ts.Expression | null,
-  sourceResult: ts.Type,
+  sourceResult: ts.Type | null,
   loc: SrcLoc,
 ): IrExpr {
-  if (!L.validatedNativeBindingSymbols.has(symbol)) {
+  if (!L.validatedNativeBindingIds.has(binding.id)) {
     validateDeclaration(L, binding, symbol, loc);
-    L.validatedNativeBindingSymbols.add(symbol);
+    L.validatedNativeBindingIds.add(binding.id);
   }
   const sourceParameterCount = binding.arguments.length - (receiver === null ? 0 : 1);
   if (explicitArguments.length !== sourceParameterCount) {
@@ -309,7 +383,9 @@ function lowerNativeInvocation(
   const argumentNodes = [...explicitArguments];
   if (receiver !== null) {
     if (
-      (binding.sourceCall.kind !== "method" && binding.sourceCall.kind !== "getter") ||
+      (binding.sourceCall.kind !== "method" &&
+        binding.sourceCall.kind !== "getter" &&
+        binding.sourceCall.kind !== "setter") ||
       binding.sourceCall.receiverArgument < 0 ||
       binding.sourceCall.receiverArgument >= binding.arguments.length
     ) {
@@ -338,8 +414,12 @@ function lowerNativeInvocation(
   if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
     L.useNativeType(binding.result.type.typeId);
   }
-  const mappedResult = L.mapTypeOf(sourceResult);
-  const resultType: IrType = sourceResult.flags & ts.TypeFlags.Never
+  const mappedResult = sourceResult === null ? null : L.mapTypeOf(sourceResult);
+  const resultType: IrType = sourceResult === null
+    ? binding.result.type.kind === "void" && binding.result.projection.kind === "direct"
+      ? { kind: "void" }
+      : failBinding(L, binding, "a native setter must have a direct void result", loc)
+    : sourceResult.flags & ts.TypeFlags.Never
     ? binding.error.kind !== "no-fail" &&
         binding.result.projection.kind === "direct" &&
         binding.result.type.kind !== "nativePointer"
@@ -362,7 +442,11 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   const callee = expr.expression;
   const symbol = nativeExpressionSymbol(L, callee);
   if (symbol === null) return null;
-  const binding = L.nativeBindingsBySymbol.get(symbol);
+  const binding = nativeBindingByKind(
+    L,
+    symbol,
+    ["function", "method", "constructor", "getter", "setter"],
+  );
   if (binding === undefined) return null;
   const loc = locOf(expr);
   if (binding.sourceCall.kind === "constructor") {
@@ -370,6 +454,9 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   }
   if (binding.sourceCall.kind === "getter") {
     failBinding(L, binding, "a native getter must be read as a property", loc);
+  }
+  if (binding.sourceCall.kind === "setter") {
+    failBinding(L, binding, "a native setter must be written as a property", loc);
   }
   if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
     failSignature(L, binding, "only direct, non-generic calls are supported", loc);
@@ -402,8 +489,8 @@ export function lowerNativeGet(
 ): IrExpr | null {
   const symbol = nativeExpressionSymbol(L, expr);
   if (symbol === null) return null;
-  const binding = L.nativeBindingsBySymbol.get(symbol);
-  if (binding === undefined || binding.sourceCall.kind !== "getter") return null;
+  const binding = nativeBindingByKind(L, symbol, ["getter"]);
+  if (binding === undefined) return null;
   const loc = locOf(expr);
   if (expr.questionDotToken !== undefined) {
     failSignature(L, binding, "optional native getter access is unsupported", loc);
@@ -419,11 +506,40 @@ export function lowerNativeGet(
   );
 }
 
+/** Lower one statement-position write of an exact checker-owned native setter. */
+export function lowerNativeSet(
+  L: Lowerer,
+  expr: ts.PropertyAccessExpression,
+  value: ts.Expression,
+): IrExpr | null {
+  const symbol = nativeExpressionSymbol(L, expr);
+  if (symbol === null) return null;
+  const binding = nativeBindingByKind(L, symbol, ["setter"]);
+  if (binding === undefined) return null;
+  const loc = locOf(expr);
+  if (expr.questionDotToken !== undefined) {
+    failSignature(L, binding, "optional native setter access is unsupported", loc);
+  }
+  return lowerNativeInvocation(
+    L,
+    binding,
+    symbol,
+    [value],
+    expr.expression,
+    null,
+    loc,
+  );
+}
+
 /** Lower `new C(...)` for one exact external native class declaration. */
 export function lowerNativeConstruct(L: Lowerer, expr: ts.NewExpression): IrExpr | null {
   const symbol = nativeExpressionSymbol(L, expr.expression);
   if (symbol === null) return null;
-  const binding = L.nativeBindingsBySymbol.get(symbol);
+  const binding = nativeBindingByKind(
+    L,
+    symbol,
+    ["constructor", "function", "method", "getter", "setter"],
+  );
   if (binding === undefined) return null;
   const loc = locOf(expr);
   if (binding.sourceCall.kind !== "constructor") {
@@ -648,6 +764,11 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
   return {
     id: binding.id,
     declaration: { ...binding.declaration },
+    sourceAccess: binding.sourceCall.kind === "getter"
+      ? "read"
+      : binding.sourceCall.kind === "setter"
+        ? "write"
+        : "call",
     entry: { ...binding.entry },
     callingConvention: binding.callingConvention,
     variadic: false,

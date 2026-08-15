@@ -27,6 +27,7 @@ import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } fr
 import { isParseArgsDynTypeName, isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
 import { probeNodeRequireRefusal } from "../npm.js";
+import { lowerNativeSet } from "./lower-native.js";
 
 /** `const X = /* @__PURE__ *\/ makeX()` at a module's top level: every
  * declarator initialized by a call (or `new`) carrying the bundler PURE
@@ -4285,6 +4286,10 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         }
         if (ts.isElementAccessExpression(expr.left)) return L.lowerElementWrite(expr);
         if (ts.isPropertyAccessExpression(expr.left)) {
+          const native = lowerNativeSet(L, expr.left, expr.right);
+          if (native !== null) {
+            return { kind: "exprStmt", expr: native, loc: locOf(expr) };
+          }
           // `process.env.NAME = v` — setenv(3): later env reads and spawned
           // children observe the write, exactly Node. Values are strings
           // (Node stringifies everything; a non-string RHS fences instead

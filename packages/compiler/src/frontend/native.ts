@@ -54,7 +54,12 @@ export interface NativeFrontendBinding {
     | { readonly kind: "function" }
     | { readonly kind: "constructor" }
     | { readonly kind: "method"; readonly receiverArgument: number }
-    | { readonly kind: "getter"; readonly receiverArgument: number };
+    | { readonly kind: "getter"; readonly receiverArgument: number }
+    | {
+        readonly kind: "setter";
+        readonly receiverArgument: number;
+        readonly valueArgument: number;
+      };
   readonly arguments: readonly {
     readonly name: string;
     readonly type: Readonly<IrNativeArgumentType>;

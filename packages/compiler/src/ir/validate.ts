@@ -1573,7 +1573,18 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
-    const declarationKey = `${binding.declaration.module}\0${binding.declaration.name}`;
+    if (
+      binding.sourceAccess !== "call" &&
+      binding.sourceAccess !== "read" &&
+      binding.sourceAccess !== "write"
+    ) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has invalid source access "${String(binding.sourceAccess)}"`,
+        loc: moduleLoc,
+      });
+    }
+    const declarationKey =
+      `${binding.declaration.module}\0${binding.declaration.name}\0${binding.sourceAccess}`;
     if (nativeDeclarations.has(declarationKey)) {
       errors.push({
         message: `duplicate Native IR declaration "${binding.declaration.module}"::"${binding.declaration.name}"`,
@@ -1834,7 +1845,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           const callbackSourceProjectionValid = (() => {
             if (
               sourceArgument.type.kind !== "func" ||
+              !validNativeCallbackArgument(sourceArgument.type) ||
               parameter.type.kind !== "nativeCallback" ||
+              !validNativeCallback(parameter.type) ||
               callbackContract === undefined ||
               callbackContract.transports.length !==
                 parameter.type.signature.parameters.length ||

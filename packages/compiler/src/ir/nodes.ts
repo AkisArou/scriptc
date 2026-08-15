@@ -944,7 +944,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 16 as const;
+export const IR_VERSION = 17 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1039,6 +1039,9 @@ export interface IrNativeBinding {
   /** Source declaration identity. It is metadata at the IR/backend seam;
    * the frontend integration uses it to prove the called symbol. */
   declaration: { module: string; name: string };
+  /** Source operation role. Read and write may intentionally share one
+   * declaration identity for a native accessor pair. */
+  sourceAccess: "call" | "read" | "write";
   entry: { kind: "c-symbol"; symbol: string };
   callingConvention: "c";
   variadic: false;
