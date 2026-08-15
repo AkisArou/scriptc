@@ -30,6 +30,12 @@ export interface PairF64 {
   readonly second: f64;
 }
 
+export interface NestedPair32 {
+  readonly left: Pair32;
+  readonly right: Pair32;
+  readonly marker: i64;
+}
+
 export interface CounterBase {
   readonly [nativeCounterBaseResource]: true;
   value(): i32;
@@ -75,6 +81,7 @@ export declare function paddedRoundtrip(value: Padded): Padded;
 export declare function pair32Transform(value: Pair32): Pair32;
 export declare function pairF64Transform(value: PairF64): PairF64;
 export declare function pairF64Verify(value: PairF64): i32;
+export declare function nestedPair32Transform(value: NestedPair32): NestedPair32;
 export declare function hashUtf8(value: string): u64;
 export declare function cStringObserve(value: string): void;
 export declare function hashBytes(value: Uint8Array): u64;

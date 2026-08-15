@@ -22,6 +22,12 @@ typedef struct NtsPairF64 {
   double second;
 } NtsPairF64;
 
+typedef struct NtsNestedPair32 {
+  NtsPair32 left;
+  NtsPair32 right;
+  int64_t marker;
+} NtsNestedPair32;
+
 typedef struct NtsCounter {
   int32_t value;
 } NtsCounter;
@@ -109,6 +115,19 @@ NtsPairF64 nts_pair_f64_transform(NtsPairF64 value) {
 
 int32_t nts_pair_f64_verify(NtsPairF64 value) {
   return value.first == 7.5 && value.second == 42.0 ? 42 : 1;
+}
+
+NtsNestedPair32 nts_nested_pair32_transform(NtsNestedPair32 value) {
+  if (value.left.first != 40 || value.left.second != 2 ||
+      value.right.first != 3 || value.right.second != 4 || value.marker != 9) {
+    abort();
+  }
+  NtsNestedPair32 result = {
+    value.right,
+    {value.left.second, value.left.first + 2},
+    value.marker + 1,
+  };
+  return result;
 }
 
 uint64_t nts_hash_utf8(const char *data, size_t length) {

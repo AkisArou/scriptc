@@ -1099,7 +1099,7 @@ export interface IrNativeStructDef {
   };
   fields: {
     name: string;
-    type: IrNativeScalarType;
+    type: IrNativeScalarType | IrNativeStructType;
     offset: number;
   }[];
 }
@@ -4597,7 +4597,7 @@ export type IrExpr =
       kind: "nativeStructGet";
       value: IrExpr;
       field: string;
-      type: IrNativeScalarType;
+      type: IrNativeScalarType | IrNativeStructType;
       loc: SrcLoc;
     }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }

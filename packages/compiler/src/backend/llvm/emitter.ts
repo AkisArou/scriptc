@@ -1485,6 +1485,14 @@ class LlEmitter {
       if (bits === 8 || bits === 16 || bits === 32) return bits / 8;
       throw new Error(`llvm emitter bug: unsupported native scalar '${scalar}' in aggregate`);
     };
+    const fieldSize = (field: IrNativeStructDef["fields"][number]): number => {
+      if (field.type.kind === "nativeScalar") return scalarSize(field.type.scalar);
+      const nested = this.nativeTypesById.get(field.type.typeId);
+      if (nested?.kind !== "struct") {
+        throw new Error(`llvm emitter bug: unknown nested native struct ${field.type.typeId}`);
+      }
+      return nested.size;
+    };
     const members: string[] = [];
     const fieldIndices = new Map<string, number>();
     let cursor = 0;
@@ -1492,7 +1500,7 @@ class LlEmitter {
       if (field.offset > cursor) members.push(`[${field.offset - cursor} x i8]`);
       fieldIndices.set(field.name, members.length);
       members.push(this.llType(field.type));
-      cursor = field.offset + scalarSize(field.type.scalar);
+      cursor = field.offset + fieldSize(field);
     }
     if (definition.size > cursor) members.push(`[${definition.size - cursor} x i8]`);
     return { definition, members, fieldIndices };

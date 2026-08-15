@@ -34,6 +34,7 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeStructDef,
   IrStmt,
   IrType,
   IrUnionDef,
@@ -1347,35 +1348,59 @@ export class CEmitter {
     const handleDefinitions = (this.mod.nativeTypes ?? []).filter(
       (definition) => definition.kind === "handle",
     );
+    const structsById = new Map(
+      (this.mod.nativeTypes ?? [])
+        .filter((definition) => definition.kind === "struct")
+        .map((definition) => [definition.id, definition]),
+    );
+    const structDefinitions: IrNativeStructDef[] = [];
+    const visitedStructs = new Set<string>();
+    const visitStruct = (definition: IrNativeStructDef): void => {
+      if (visitedStructs.has(definition.id)) return;
+      visitedStructs.add(definition.id);
+      for (const field of definition.fields) {
+        if (field.type.kind !== "nativeStruct") continue;
+        const nested = structsById.get(field.type.typeId);
+        if (nested === undefined) throw new Error(`emitter bug: unknown nested native struct ${field.type.typeId}`);
+        visitStruct(nested);
+      }
+      structDefinitions.push(definition);
+    };
+    const nativeFieldSize = (field: IrNativeStructDef["fields"][number]): number => {
+      if (field.type.kind === "nativeScalar") return scalarSize(field.type.scalar);
+      const nested = structsById.get(field.type.typeId);
+      if (nested === undefined) throw new Error(`emitter bug: unknown nested native struct ${field.type.typeId}`);
+      return nested.size;
+    };
+    for (const definition of structsById.values()) visitStruct(definition);
     for (const definition of handleDefinitions) {
       out.push(`static const ScrNativeHandleType ${mangleNativeHandleTag(definition.id)};`);
     }
     if (handleDefinitions.length > 0) out.push("");
-    for (const definition of this.mod.nativeTypes ?? []) {
-      if (definition.kind === "handle") {
-        const tag = mangleNativeHandleTag(definition.id);
-        if (definition.upcasts.length > 0) {
-          out.push(
-            `static const ScrNativeHandleType *const ${tag}_upcasts[] = {`,
-            ...definition.upcasts.map((upcast) =>
-              `  &${mangleNativeHandleTag(upcast.target)},`
-            ),
-            `};`,
-            `static const ScrNativeHandleType ${tag} = {`,
-            `  ${tag}_upcasts,`,
-            `  ${definition.upcasts.length},`,
-            `  ${definition.cycleCollection === "traceable" ? "true" : "false"},`,
-            `};`,
-            "",
-          );
-        } else {
-          out.push(
-            `static const ScrNativeHandleType ${tag} = {NULL, 0, ${definition.cycleCollection === "traceable" ? "true" : "false"}};`,
-            "",
-          );
-        }
-        continue;
+    for (const definition of handleDefinitions) {
+      const tag = mangleNativeHandleTag(definition.id);
+      if (definition.upcasts.length > 0) {
+        out.push(
+          `static const ScrNativeHandleType *const ${tag}_upcasts[] = {`,
+          ...definition.upcasts.map((upcast) =>
+            `  &${mangleNativeHandleTag(upcast.target)},`
+          ),
+          `};`,
+          `static const ScrNativeHandleType ${tag} = {`,
+          `  ${tag}_upcasts,`,
+          `  ${definition.upcasts.length},`,
+          `  ${definition.cycleCollection === "traceable" ? "true" : "false"},`,
+          `};`,
+          "",
+        );
+      } else {
+        out.push(
+          `static const ScrNativeHandleType ${tag} = {NULL, 0, ${definition.cycleCollection === "traceable" ? "true" : "false"}};`,
+          "",
+        );
       }
+    }
+    for (const definition of structDefinitions) {
       const name = mangleNativeStruct(definition.id);
       out.push(`typedef struct __attribute__((aligned(${definition.alignment}))) ${name} {`);
       let cursor = 0;
@@ -1385,7 +1410,7 @@ export class CEmitter {
           out.push(`  uint8_t sc_pad_${padding++}[${field.offset - cursor}];`);
         }
         out.push(`  ${cDecl(field.type, mangleNativeField(field.name))};`);
-        cursor = field.offset + scalarSize(field.type.scalar);
+        cursor = field.offset + nativeFieldSize(field);
       }
       if (definition.size > cursor) {
         out.push(`  uint8_t sc_pad_${padding}[${definition.size - cursor}];`);

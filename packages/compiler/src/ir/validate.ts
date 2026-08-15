@@ -16,6 +16,7 @@ import type {
   IrNativePhysicalAbiType,
   IrNativePhysicalAbiValue,
   IrNativeScalarType,
+  IrNativeStructDef,
   IrRecordShape,
   IrRegexIntrinsicMethod,
   IrStmt,
@@ -1335,28 +1336,53 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     ) {
       errors.push({ message: `Native IR type "${definition.id}" has unsupported value or ABI metadata`, loc: moduleLoc });
     }
-    const names = new Set<string>();
-    let cursor = 0;
-    for (const field of definition.fields) {
-      const size = nativeScalarSize(field.type.scalar);
-      if (field.name === "" || names.has(field.name) || size === null) {
-        errors.push({ message: `Native IR type "${definition.id}" has an invalid field "${field.name}"`, loc: moduleLoc });
-      } else if (
-        definition.alignment < size ||
-        !Number.isSafeInteger(field.offset) ||
-        field.offset < cursor ||
-        field.offset % size !== 0
-      ) {
-        errors.push({ message: `Native IR type "${definition.id}" field "${field.name}" has an invalid offset`, loc: moduleLoc });
-      } else {
-        cursor = field.offset + size;
-      }
-      names.add(field.name);
-    }
-    if (cursor > definition.size) {
-      errors.push({ message: `Native IR type "${definition.id}" fields exceed its declared size`, loc: moduleLoc });
-    }
     nativeTypesById.set(definition.id, definition);
+  }
+  const nativeStructLayout = (
+    definition: IrNativeStructDef,
+    active: Set<string>,
+  ): { readonly size: number; readonly alignment: number } | null => {
+    if (active.has(definition.id)) return null;
+    active.add(definition.id);
+    try {
+      let cursor = 0;
+      const names = new Set<string>();
+      for (const field of definition.fields) {
+        const nested = field.type.kind === "nativeStruct"
+          ? nativeTypesById.get(field.type.typeId)
+          : null;
+        const fieldLayout = field.type.kind === "nativeScalar"
+          ? (() => {
+              const size = nativeScalarSize(field.type.scalar);
+              return size === null ? null : { size, alignment: size };
+            })()
+          : nested?.kind === "struct"
+            ? nativeStructLayout(nested, active)
+            : null;
+        if (field.name === "" || names.has(field.name) || fieldLayout === null) {
+          errors.push({ message: `Native IR type "${definition.id}" has an invalid field "${field.name}"`, loc: moduleLoc });
+        } else if (
+          definition.alignment < fieldLayout.alignment ||
+          !Number.isSafeInteger(field.offset) ||
+          field.offset < cursor ||
+          field.offset % fieldLayout.alignment !== 0
+        ) {
+          errors.push({ message: `Native IR type "${definition.id}" field "${field.name}" has an invalid offset`, loc: moduleLoc });
+        } else {
+          cursor = field.offset + fieldLayout.size;
+        }
+        names.add(field.name);
+      }
+      if (cursor > definition.size) {
+        errors.push({ message: `Native IR type "${definition.id}" fields exceed its declared size`, loc: moduleLoc });
+      }
+      return { size: definition.size, alignment: definition.alignment };
+    } finally {
+      active.delete(definition.id);
+    }
+  };
+  for (const definition of nativeTypesById.values()) {
+    if (definition.kind === "struct") nativeStructLayout(definition, new Set());
   }
   for (const definition of nativeTypesById.values()) {
     if (definition.kind !== "handle" || !Array.isArray(definition.upcasts)) continue;

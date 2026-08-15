@@ -15,6 +15,7 @@ import type { IrExpr, IrModule, IrNativeCallbackContract, IrNativeScalar, IrNati
 import { nativeCallbackArgumentType, nativeScalarType } from "../../packages/compiler/src/ir/nodes.js";
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
+import { mangleNativeStruct } from "../../packages/compiler/src/backend/mangle.js";
 import type { NativeFrontendInput } from "../../packages/compiler/src/frontend/native.js";
 import { materializeNativeBinding } from "../../packages/compiler/src/frontend/lowering/lower-native.js";
 import { analyze, compile, compileLibrary } from "../../packages/compiler/src/index.js";
@@ -84,6 +85,8 @@ const PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair32";
 const PAIR32 = { kind: "nativeStruct", typeId: PAIR32_ID } as const;
 const PAIR_F64_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair_f64";
 const PAIR_F64 = { kind: "nativeStruct", typeId: PAIR_F64_ID } as const;
+const NESTED_PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:nested_pair32";
+const NESTED_PAIR32 = { kind: "nativeStruct", typeId: NESTED_PAIR32_ID } as const;
 const DIRECT_I64_AGGREGATE_ABI = {
   result: {
     type: { kind: "integer", bits: 64 },
@@ -231,6 +234,22 @@ const PAIR_F64_DEFINITION = {
     { name: "second", type: NATIVE_F64, offset: 8 },
   ],
 } as const satisfies NativeFrontendInput["types"][number];
+const NESTED_PAIR32_DEFINITION = {
+  kind: "struct",
+  id: NESTED_PAIR32_ID,
+  declaration: { module: nativePackage, name: "NestedPair32" },
+  size: 24,
+  alignment: 8,
+  packing: "default",
+  triviallyCopyable: true,
+  destruction: "trivial",
+  abi: PADDED_ABI,
+  fields: [
+    { name: "left", type: PAIR32, offset: 0 },
+    { name: "right", type: PAIR32, offset: 8 },
+    { name: "marker", type: I64, offset: 16 },
+  ],
+} as const satisfies NativeFrontendInput["types"][number];
 const COUNTER_DEFINITION = {
   kind: "handle",
   id: COUNTER_ID,
@@ -318,6 +337,7 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
     { declaration: { module: nativePackage, name: "Pair32" }, type: PAIR32 },
     { declaration: { module: nativePackage, name: "PairF64" }, type: PAIR_F64 },
+    { declaration: { module: nativePackage, name: "NestedPair32" }, type: NESTED_PAIR32 },
     { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
     { declaration: { module: nativePackage, name: "CounterMiddle" }, type: COUNTER_MIDDLE },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
@@ -330,6 +350,7 @@ const localNativeInput: NativeFrontendInput = {
     PADDED_DEFINITION,
     PAIR32_DEFINITION,
     PAIR_F64_DEFINITION,
+    NESTED_PAIR32_DEFINITION,
     COUNTER_BASE_DEFINITION,
     COUNTER_MIDDLE_DEFINITION,
     COUNTER_DEFINITION,
@@ -453,6 +474,17 @@ const localNativeInput: NativeFrontendInput = {
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PAIR_F64, passMode: "value", ownership: { kind: "value" } }]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#nested_pair32_transform",
+      declaration: { module: nativePackage, name: "nestedPair32Transform" },
+      entry: { kind: "c-symbol", symbol: "nts_nested_pair32_transform" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([{ name: "value", type: NESTED_PAIR32, passMode: "value", ownership: { kind: "value" } }]),
+      result: { type: NESTED_PAIR32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
@@ -1914,6 +1946,15 @@ test("Native IR rejects undeclared and internally inconsistent native structs", 
   expect(validateModule(invalidLayout).map((error) => error.message)).toContain(
     `Native IR type "${PADDED_ID}" has unsupported value or ABI metadata`,
   );
+
+  const recursive = exactI32Module();
+  recursive.nativeTypes = [{
+    ...PAIR32_DEFINITION,
+    fields: [{ name: "self", type: PAIR32, offset: 0 }],
+  }];
+  expect(validateModule(recursive).map((error) => error.message)).toContain(
+    `Native IR type "${PAIR32_ID}" has an invalid field "self"`,
+  );
 });
 
 test("the frontend rejects an out-of-range exact i32 constructor before linking", async () => {
@@ -2459,6 +2500,54 @@ describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (ba
       expect(generated).toContain("declare { double, double } @nts_pair_f64_transform(double, double)");
       expect(generated).toContain("declare i32 @nts_pair_f64_verify(double, double)");
       expect(generated).toContain("extractvalue { double, double }");
+    }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("constructs and reads nested nominal aggregate fields", async () => {
+    const outDir = join(scratch, `aggregate-nested-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/aggregate-nested.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("nested native aggregate frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeTypes).toEqual([
+      expect.objectContaining({ id: PAIR32_ID }),
+      expect.objectContaining({
+        id: NESTED_PAIR32_ID,
+        fields: [
+          { name: "left", type: PAIR32, offset: 0 },
+          { name: "right", type: PAIR32, offset: 8 },
+          { name: "marker", type: I64, offset: 16 },
+        ],
+      }),
+    ]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "aggregate-nested.c" : "aggregate-nested.ll"),
+      "utf8",
+    );
+    if (backend === "c") {
+      expect(generated.indexOf(`} ${mangleNativeStruct(PAIR32_ID)};`)).toBeLessThan(
+        generated.indexOf(`} ${mangleNativeStruct(NESTED_PAIR32_ID)};`),
+      );
+    } else {
+      expect(generated).toContain(`%${mangleNativeStruct(NESTED_PAIR32_ID)} = type { %${mangleNativeStruct(PAIR32_ID)}`);
     }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
