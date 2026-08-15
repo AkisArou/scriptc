@@ -79,7 +79,9 @@ export function resolveNativeFrontend(
     const symbol = declarationSymbol(
       L,
       binding.declaration,
-      binding.sourceCall.kind === "method" ? "instance" : "value",
+      binding.sourceCall.kind === "method" || binding.sourceCall.kind === "getter"
+        ? "instance"
+        : "value",
     );
     if (symbol !== null) bindingsBySymbol.set(symbol, binding);
   }
@@ -158,6 +160,11 @@ function validateDeclaration(
       return ts.isFunctionDeclaration(declaration) ||
         (ts.isMethodDeclaration(declaration) && hasStaticModifier(declaration));
     }
+    if (binding.sourceCall.kind === "getter") {
+      return declaration.kind === ts.SyntaxKind.PropertySignature ||
+        (ts.isGetAccessorDeclaration(declaration) &&
+          !hasStaticModifier(declaration));
+    }
     return declaration.kind === ts.SyntaxKind.MethodSignature ||
       (ts.isMethodDeclaration(declaration) && !hasStaticModifier(declaration));
   };
@@ -173,6 +180,26 @@ function validateDeclaration(
       `the configured declaration does not resolve exclusively to signature-only ${binding.sourceCall.kind} declarations`,
       loc,
     );
+  }
+  if (binding.sourceCall.kind === "getter") {
+    if (
+      binding.arguments.length !== 1 ||
+      binding.sourceCall.receiverArgument !== 0
+    ) {
+      failSignature(L, binding, "a native getter requires exactly one receiver argument", loc);
+    }
+    const sourceResult = L.checker.getTypeOfSymbol(symbol);
+    const mappedResult = L.mapTypeOf(sourceResult);
+    if (mappedResult === null || !matchesNativeResultSource(L, binding, mappedResult)) {
+      failSignature(
+        L,
+        binding,
+        `the getter maps to '${mappedResult === null ? L.checker.typeToString(sourceResult) : L.fmt(mappedResult)}', ` +
+          `not the '${binding.result.projection.kind}' native result projection`,
+        loc,
+      );
+    }
+    return;
   }
   if (callDeclarations.some((declaration) => {
     const callable = declaration as
@@ -200,7 +227,8 @@ function validateDeclaration(
   const parameters = signature.getParameters();
   const sourceParameters = binding.arguments.filter(
     (_argument, index) =>
-      binding.sourceCall.kind !== "method" || index !== binding.sourceCall.receiverArgument,
+      (binding.sourceCall.kind !== "method" && binding.sourceCall.kind !== "getter") ||
+        index !== binding.sourceCall.receiverArgument,
   );
   if (parameters.length !== sourceParameters.length) {
     failSignature(
@@ -281,7 +309,7 @@ function lowerNativeInvocation(
   const argumentNodes = [...explicitArguments];
   if (receiver !== null) {
     if (
-      binding.sourceCall.kind !== "method" ||
+      (binding.sourceCall.kind !== "method" && binding.sourceCall.kind !== "getter") ||
       binding.sourceCall.receiverArgument < 0 ||
       binding.sourceCall.receiverArgument >= binding.arguments.length
     ) {
@@ -296,6 +324,11 @@ function lowerNativeInvocation(
   L.usedNativeBindingIds.add(binding.id);
   if (binding.result.ownership.kind === "owned") {
     L.usedNativeBindingIds.add(binding.result.ownership.destructor);
+  }
+  for (const argument of binding.arguments) {
+    if (argument.callback?.lifetime === "until-cancelled") {
+      L.usedNativeBindingIds.add(argument.callback.cancellationBinding);
+    }
   }
   for (const argument of binding.arguments) {
     if (argument.type.kind === "nativeStruct" || argument.type.kind === "nativeHandle") {
@@ -335,6 +368,9 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   if (binding.sourceCall.kind === "constructor") {
     failBinding(L, binding, "a native constructor must be invoked with 'new'", loc);
   }
+  if (binding.sourceCall.kind === "getter") {
+    failBinding(L, binding, "a native getter must be read as a property", loc);
+  }
   if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
     failSignature(L, binding, "only direct, non-generic calls are supported", loc);
   }
@@ -354,6 +390,30 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
     binding.sourceCall.kind === "method"
       ? (callee as ts.PropertyAccessExpression).expression
       : null,
+    L.typeOf(expr),
+    loc,
+  );
+}
+
+/** Lower one direct read of an exact checker-owned native getter. */
+export function lowerNativeGet(
+  L: Lowerer,
+  expr: ts.PropertyAccessExpression,
+): IrExpr | null {
+  const symbol = nativeExpressionSymbol(L, expr);
+  if (symbol === null) return null;
+  const binding = L.nativeBindingsBySymbol.get(symbol);
+  if (binding === undefined || binding.sourceCall.kind !== "getter") return null;
+  const loc = locOf(expr);
+  if (expr.questionDotToken !== undefined) {
+    failSignature(L, binding, "optional native getter access is unsupported", loc);
+  }
+  return lowerNativeInvocation(
+    L,
+    binding,
+    symbol,
+    [],
+    expr.expression,
     L.typeOf(expr),
     loc,
   );

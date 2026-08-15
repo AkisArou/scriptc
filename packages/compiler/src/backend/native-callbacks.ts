@@ -19,6 +19,28 @@ export function nativeCallbackAdapterKey(bindingId: string, argument: number): s
   return `${bindingId}\0${argument}`;
 }
 
+/** Logical handle argument cancelled by an explicit, non-consuming callback
+ * cancellation binding. Owned destructor calls already run lifecycle teardown
+ * inside ScrNativeHandle and are intentionally excluded. */
+export function nativeCallbackCancellationArgument(
+  bindings: readonly IrNativeBinding[],
+  binding: IrNativeBinding,
+): number | undefined {
+  const cancellation = bindings.some((registration) =>
+    registration.arguments.some((argument) =>
+      argument.type.kind === "func" &&
+      argument.callback?.lifetime === "until-cancelled" &&
+      argument.callback.cancellationBinding === binding.id
+    )
+  );
+  if (
+    !cancellation ||
+    binding.parameters.some((parameter) => parameter.ownership.kind === "owned")
+  ) return undefined;
+  const argument = binding.arguments.findIndex(({ type }) => type.kind === "nativeHandle");
+  return argument < 0 ? undefined : argument;
+}
+
 /** Allocate callback-trampoline symbols outside every external symbol set.
  * The logical callback argument is the stable identity: its function and
  * context projections necessarily share this one adapter. */

@@ -2039,11 +2039,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
       if (
         binding.result.type.kind !== "nativeHandle" ||
-        binding.result.ownership.kind !== "owned" ||
-        contract.cancellationBinding !== binding.result.ownership.destructor
+        binding.result.ownership.kind !== "owned"
       ) {
         errors.push({
-          message: `Native IR binding "${binding.id}" retained callback "${argument.name}" must be owned and cancelled by its result handle destructor`,
+          message: `Native IR binding "${binding.id}" retained callback "${argument.name}" must be owned by its result handle`,
           loc: moduleLoc,
         });
       }
@@ -2078,11 +2077,36 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           });
         }
       }
-      if (!nativeById.has(contract.cancellationBinding)) {
+      const cancellation = nativeById.get(contract.cancellationBinding);
+      if (cancellation === undefined) {
         errors.push({
           message: `Native IR binding "${binding.id}" retained callback "${argument.name}" names an unknown cancellation binding "${contract.cancellationBinding}"`,
           loc: moduleLoc,
         });
+      } else if (binding.result.type.kind === "nativeHandle") {
+        const cancellationArgument = cancellation.arguments[0];
+        const cancellationParameter = cancellation.parameters[0];
+        const cancellationOwnership = cancellationParameter?.ownership;
+        const validOwnership = cancellationOwnership?.kind === "owned" ||
+          (cancellationOwnership?.kind === "borrowed" &&
+            cancellationOwnership.scope === "call");
+        if (
+          cancellation.arguments.length !== 1 ||
+          cancellationArgument?.type.kind !== "nativeHandle" ||
+          cancellationArgument.type.typeId !== binding.result.type.typeId ||
+          cancellation.parameters.length !== 1 ||
+          cancellationParameter?.type.kind !== "nativeHandle" ||
+          cancellationParameter.type.typeId !== binding.result.type.typeId ||
+          !validOwnership ||
+          cancellationParameter.projection.kind !== "argument" ||
+          cancellationParameter.projection.argument !== 0 ||
+          cancellation.result.type.kind !== "void"
+        ) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" retained callback "${argument.name}" names an invalid cancellation binding "${contract.cancellationBinding}"`,
+            loc: moduleLoc,
+          });
+        }
       }
     }
   }

@@ -84,7 +84,7 @@ import type {
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, type NativeCallbackAdapter } from "../native-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -6755,6 +6755,25 @@ class LlEmitter {
               break;
           }
         });
+        const cancellationArgument = nativeCallbackCancellationArgument(
+          this.mod.nativeBindings ?? [],
+          binding,
+        );
+        let cancellationStarted: string | undefined;
+        if (cancellationArgument !== undefined) {
+          const source = args[cancellationArgument]!;
+          const type = binding.arguments[cancellationArgument]?.type;
+          if (type?.kind !== "nativeHandle" || binding.result.type.kind !== "void") {
+            throw new Error(`llvm emitter bug: invalid callback cancellation binding ${binding.id}`);
+          }
+          this.declare(`declare zeroext i1 @scr_native_handle_callbacks_begin(ptr, ptr, ptr)`);
+          cancellationStarted = B.tmp();
+          B.line(
+            `${cancellationStarted} = call zeroext i1 @scr_native_handle_callbacks_begin(` +
+              `ptr ${source.name}, ptr @${mangleNativeHandleTag(type.typeId)}, ptr ${operation})`,
+          );
+          this.emitPendingCheck();
+        }
         const call =
           `call ${returnType} @${binding.entry.symbol}(` +
           `${callArgs.join(", ")})`;
@@ -6770,6 +6789,19 @@ class LlEmitter {
         }
         if (binding.result.type.kind === "void") {
           B.line(call);
+          if (cancellationStarted !== undefined) {
+            this.declare(`declare void @scr_native_handle_callbacks_complete(ptr)`);
+            const complete = B.newLabel("native.cancel.complete");
+            const done = B.newLabel("native.cancel.done");
+            B.condBr(cancellationStarted, complete, done);
+            B.startBlock(complete);
+            B.line(
+              `call void @scr_native_handle_callbacks_complete(` +
+                `ptr ${args[cancellationArgument!]!.name})`,
+            );
+            B.br(done);
+            B.startBlock(done);
+          }
           if (callbacksMayThrow) this.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };

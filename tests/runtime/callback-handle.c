@@ -19,6 +19,7 @@ typedef struct {
 
 typedef struct {
   ScrCallbackToken *token;
+  bool connected;
 } TestForeign;
 
 static const char signature;
@@ -111,8 +112,10 @@ static TestInvocation *new_invocation(int32_t value) {
 static void destroy_foreign(void *opaque) {
   TestForeign *foreign = opaque;
   /* The lifecycle edge must close admission before native cancellation. */
-  assert(!scr_callback_token_admit(
-      foreign->token, &new_invocation(99)->invocation));
+  if (foreign->connected) {
+    assert(!scr_callback_token_admit(
+        foreign->token, &new_invocation(99)->invocation));
+  }
   atomic_fetch_add(&foreign_destroyed, 1);
   free(foreign);
 }
@@ -144,6 +147,7 @@ int main(void) {
   TestForeign *foreign = malloc(sizeof *foreign);
   assert(foreign != NULL);
   foreign->token = token;
+  foreign->connected = true;
   scr_native_handle_commit(handle, foreign);
   assert(scr_callback_token_admit(
       token, &new_invocation(7)->invocation));
@@ -164,6 +168,41 @@ int main(void) {
   scr_native_handle_release(handle);
   assert(atomic_load(&handles_allocated) == 0);
 
+  /* Explicit cancellation closes and removes only the callback lifecycle;
+   * the native handle remains live and repeated cancellation is idempotent. */
+  anchor = calloc(1, sizeof *anchor);
+  assert(anchor != NULL);
+  anchor->rc = 1;
+  token = scr_callback_table_register(table, anchor, &signature);
+  assert(token != NULL);
+  handle = scr_native_handle_prepare(
+      destroy_foreign, &handle_type, "TestConnection");
+  scr_native_handle_prepare_callback(handle, table, token);
+  foreign = malloc(sizeof *foreign);
+  assert(foreign != NULL);
+  foreign->token = token;
+  foreign->connected = true;
+  scr_native_handle_commit(handle, foreign);
+  assert(scr_callback_token_admit(token, &new_invocation(11)->invocation));
+  assert(scr_native_handle_callbacks_begin(
+      handle, &handle_type, "TestConnection.disconnect"));
+  assert(!scr_callback_token_admit(token, &new_invocation(99)->invocation));
+  foreign->connected = false;
+  scr_native_handle_callbacks_complete(handle);
+  assert(!scr_native_handle_callbacks_begin(
+      handle, &handle_type, "TestConnection.disconnect"));
+  assert(scr_native_handle_require(
+      handle, &handle_type, "TestConnection.connected") == foreign);
+  assert(scr_owner_gateway_drain(gateway, 0) == 1);
+  assert(anchor->total == 11);
+  assert(scr_callback_table_collect(table) == 1);
+  assert(atomic_load(&anchors_freed) == 2);
+  assert(atomic_load(&events_destroyed) == 4);
+  scr_native_handle_dispose(handle, &handle_type, "TestConnection.release");
+  scr_native_handle_release(handle);
+  assert(atomic_load(&foreign_destroyed) == 2);
+  assert(atomic_load(&handles_allocated) == 0);
+
   /* A failed factory rolls back its staged edge without ever claiming an
    * owner. Payloads admitted during the call are destroyed, not delivered. */
   anchor = calloc(1, sizeof *anchor);
@@ -178,10 +217,10 @@ int main(void) {
       token, &new_invocation(41)->invocation));
   scr_native_handle_abandon(handle);
   assert(atomic_load(&handles_allocated) == 0);
-  assert(atomic_load(&anchors_freed) == 2);
+  assert(atomic_load(&anchors_freed) == 3);
   assert(scr_owner_gateway_drain(gateway, 0) == 1);
   assert(scr_callback_table_collect(table) == 1);
-  assert(atomic_load(&events_destroyed) == 3);
+  assert(atomic_load(&events_destroyed) == 5);
 
   /* Receiver ownership is a collector-visible graph, not an external root:
    * receiver -> subscription -> closure -> receiver is reclaimed together. */
@@ -206,6 +245,7 @@ int main(void) {
   foreign = malloc(sizeof *foreign);
   assert(foreign != NULL);
   foreign->token = token;
+  foreign->connected = true;
   scr_native_handle_commit(handle, foreign);
 
   scr_native_handle_release(handle);
@@ -213,8 +253,8 @@ int main(void) {
   assert(scr_callback_table_active(table) == 1);
   scr_collect_cycles();
   assert(scr_callback_table_active(table) == 0);
-  assert(atomic_load(&anchors_freed) == 3);
-  assert(atomic_load(&foreign_destroyed) == 2);
+  assert(atomic_load(&anchors_freed) == 4);
+  assert(atomic_load(&foreign_destroyed) == 3);
   assert(atomic_load(&receivers_destroyed) == 1);
   assert(atomic_load(&handles_allocated) == 0);
 

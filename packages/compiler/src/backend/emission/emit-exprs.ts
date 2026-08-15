@@ -8,6 +8,7 @@ import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mang
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
+import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2364,9 +2365,33 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             }
           }
         });
+        const cancellationArgument = nativeCallbackCancellationArgument(
+          E.mod.nativeBindings ?? [],
+          binding,
+        );
+        let cancellationStarted: string | undefined;
+        if (cancellationArgument !== undefined) {
+          const source = args[cancellationArgument]!;
+          const type = binding.arguments[cancellationArgument]?.type;
+          if (type?.kind !== "nativeHandle" || binding.result.type.kind !== "void") {
+            throw new Error(`emitter bug: invalid callback cancellation binding ${binding.id}`);
+          }
+          cancellationStarted = `sc_t${E.tempCounter++}`;
+          E.line(
+            `bool ${cancellationStarted} = scr_native_handle_callbacks_begin(` +
+              `${source.name}, &${mangleNativeHandleTag(type.typeId)}, ${operation});`,
+          );
+          E.emitPendingCheck();
+        }
         const call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);
+          if (cancellationStarted !== undefined) {
+            E.line(
+              `if (${cancellationStarted}) ` +
+                `scr_native_handle_callbacks_complete(${args[cancellationArgument!]!.name});`,
+            );
+          }
           if (callbacksMayThrow) E.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };

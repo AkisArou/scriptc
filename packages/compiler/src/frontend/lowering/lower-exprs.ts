@@ -26,7 +26,7 @@ import { mixinFnOfCallee } from "./lower-mixins.js";
 import { isConstAssertionTypeNode, isGenericCallableMemberType, isParseArgsDynTypeName, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
-import { lowerNativeCall, lowerNativeConstruct, lowerNativeStructFieldRead } from "./lower-native.js";
+import { lowerNativeCall, lowerNativeConstruct, lowerNativeGet, lowerNativeStructFieldRead } from "./lower-native.js";
 
 /** An assignable `obj.field` target — a class field, a record field, or a
  * class ACCESSOR property (reads become getter calls, writes setter calls;
@@ -156,6 +156,10 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     }
     if (ts.isNewExpression(expr)) {
       const native = lowerNativeConstruct(L, expr);
+      if (native !== null) return native;
+    }
+    if (ts.isPropertyAccessExpression(expr)) {
+      const native = lowerNativeGet(L, expr);
       if (native !== null) return native;
     }
     if (ts.isAsExpression(expr) || ts.isTypeAssertion(expr)) {

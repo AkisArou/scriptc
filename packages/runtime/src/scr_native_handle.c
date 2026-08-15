@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 typedef struct ScrNativeLifecycleEdge {
+  ScrNativeLifecycleKind kind;
   void *context;
   ScrNativeLifecycleFn commit;
   ScrNativeLifecycleFn abandon;
@@ -22,6 +23,7 @@ typedef struct ScrNativeLifecycleEdge {
   ScrNativeLifecycleFn collect_complete;
   ScrNativeLifecycleFn destroy_context;
   struct ScrNativeLifecycleEdge *next;
+  bool cancelling;
 } ScrNativeLifecycleEdge;
 
 typedef struct ScrNativeOwnerEdge {
@@ -213,7 +215,8 @@ static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle,
 }
 
 void scr_native_handle_prepare_lifecycle(
-    ScrNativeHandle *handle, void *context, ScrNativeLifecycleFn commit,
+    ScrNativeHandle *handle, ScrNativeLifecycleKind kind, void *context,
+    ScrNativeLifecycleFn commit,
     ScrNativeLifecycleFn abandon, ScrNativeLifecycleFn begin,
     ScrNativeLifecycleFn complete, ScrNativeLifecycleTraceFn trace,
     ScrNativeLifecycleFn collect_begin,
@@ -227,6 +230,7 @@ void scr_native_handle_prepare_lifecycle(
   }
   ScrNativeLifecycleEdge *edge = malloc(sizeof *edge);
   if (edge == NULL) scr_trap("scriptc: out of memory\n");
+  edge->kind = kind;
   edge->context = context;
   edge->commit = commit;
   edge->abandon = abandon;
@@ -237,6 +241,7 @@ void scr_native_handle_prepare_lifecycle(
   edge->collect_complete = collect_complete;
   edge->destroy_context = destroy_context;
   edge->next = handle->lifecycle;
+  edge->cancelling = false;
   handle->lifecycle = edge;
 }
 
@@ -336,6 +341,51 @@ static bool scr_native_handle_valid_type(ScrNativeHandle *handle,
     return false;
   }
   return true;
+}
+
+bool scr_native_handle_callbacks_begin(ScrNativeHandle *handle,
+                                       const ScrNativeHandleType *type,
+                                       const char *operation) {
+  if (!scr_native_handle_valid_type(handle, type, operation)) return false;
+  if (handle->state != SCR_NATIVE_HANDLE_LIVE) {
+    scr_native_handle_type_error(handle, operation, "the handle is already disposed");
+    return false;
+  }
+  bool began = false;
+  for (ScrNativeLifecycleEdge *edge = handle->lifecycle; edge != NULL;
+       edge = edge->next) {
+    if (edge->kind != SCR_NATIVE_LIFECYCLE_CALLBACK) continue;
+    if (edge->cancelling) {
+      scr_trap("scriptc: reentrant native callback cancellation\n");
+    }
+    edge->cancelling = true;
+    edge->begin(edge->context);
+    began = true;
+  }
+  return began;
+}
+
+void scr_native_handle_callbacks_complete(ScrNativeHandle *handle) {
+  if (handle == NULL || handle->state != SCR_NATIVE_HANDLE_LIVE) {
+    scr_trap("scriptc: invalid native callback cancellation completion\n");
+  }
+  bool completed = false;
+  ScrNativeLifecycleEdge **cursor = &handle->lifecycle;
+  while (*cursor != NULL) {
+    ScrNativeLifecycleEdge *edge = *cursor;
+    if (edge->kind != SCR_NATIVE_LIFECYCLE_CALLBACK || !edge->cancelling) {
+      cursor = &edge->next;
+      continue;
+    }
+    edge->complete(edge->context);
+    *cursor = edge->next;
+    edge->destroy_context(edge->context);
+    free(edge);
+    completed = true;
+  }
+  if (!completed) {
+    scr_trap("scriptc: native callback cancellation was not begun\n");
+  }
 }
 
 void *scr_native_handle_require(ScrNativeHandle *handle,

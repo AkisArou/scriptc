@@ -2813,6 +2813,9 @@ typedef void (*ScrNativeDestructor)(void *foreign);
 typedef void (*ScrNativeLifecycleFn)(void *context);
 typedef void (*ScrNativeLifecycleTraceFn)(void *context, ScrTraceVisit visit,
                                           void *visit_context);
+typedef enum {
+  SCR_NATIVE_LIFECYCLE_CALLBACK = 1,
+} ScrNativeLifecycleKind;
 typedef struct ScrNativeHandleType {
   const struct ScrNativeHandleType *const *identity_upcasts;
   size_t identity_upcast_count;
@@ -2843,12 +2846,20 @@ void scr_native_handle_dispose(ScrNativeHandle *handle,
  * it with the result; abandon rolls it back. For a live handle, all begin
  * hooks run before the foreign destructor and all complete hooks after it. */
 void scr_native_handle_prepare_lifecycle(
-    ScrNativeHandle *handle, void *context, ScrNativeLifecycleFn commit,
+    ScrNativeHandle *handle, ScrNativeLifecycleKind kind, void *context,
+    ScrNativeLifecycleFn commit,
     ScrNativeLifecycleFn abandon, ScrNativeLifecycleFn begin,
     ScrNativeLifecycleFn complete, ScrNativeLifecycleTraceFn trace,
     ScrNativeLifecycleFn collect_begin,
     ScrNativeLifecycleFn collect_complete,
     ScrNativeLifecycleFn destroy_context);
+/* Explicit non-consuming callback cancellation. Begin closes admission before
+ * the native cancellation call; complete runs after native quiescence and
+ * removes those callback lifecycle edges. Repeated cancellation returns false. */
+bool scr_native_handle_callbacks_begin(ScrNativeHandle *handle,
+                                       const ScrNativeHandleType *type,
+                                       const char *operation);
+void scr_native_handle_callbacks_complete(ScrNativeHandle *handle);
 /* Preallocates a receiver -> result ownership edge. Commit of `child` adopts
  * it without allocation; abandonment rolls it back. Both handle types must
  * be cycle-collected so the edge is visible to trial deletion. */

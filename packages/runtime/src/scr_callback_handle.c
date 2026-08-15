@@ -101,7 +101,8 @@ void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
   edge->token = token;
   edge->anchor = NULL;
   scr_native_handle_prepare_lifecycle(
-      handle, edge, scr_callback_handle_commit, scr_callback_handle_abandon,
+      handle, SCR_NATIVE_LIFECYCLE_CALLBACK, edge,
+      scr_callback_handle_commit, scr_callback_handle_abandon,
       scr_callback_handle_begin, scr_callback_handle_complete,
       scr_callback_handle_trace, scr_callback_handle_collect_begin,
       scr_callback_handle_collect_complete,
