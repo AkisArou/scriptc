@@ -5256,7 +5256,16 @@ class LlEmitter {
           ">>": "scr_bit_shr",
           ">>>": "scr_bit_ushr",
         };
-        if ((e.op === "===" || e.op === "!==") && e.left.type.kind === "bool") {
+        if (
+          (e.op === "===" || e.op === "!==") &&
+          e.left.type.kind === "nativeScalar"
+        ) {
+          if (e.left.type.scalar === "f64") {
+            B.line(`${t} = fcmp ${e.op === "===" ? "oeq" : "une"} double ${l.name}, ${r.name}`);
+          } else {
+            B.line(`${t} = icmp ${e.op === "===" ? "eq" : "ne"} ${this.llType(e.left.type)} ${l.name}, ${r.name}`);
+          }
+        } else if ((e.op === "===" || e.op === "!==") && e.left.type.kind === "bool") {
           B.line(`${t} = icmp ${e.op === "===" ? "eq" : "ne"} i1 ${l.name}, ${r.name}`);
         } else if ((e.op === "===" || e.op === "!==") && this.llType(e.left.type) === "ptr") {
           // Reference identity (JS object equality) — closures, arrays,

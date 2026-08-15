@@ -1410,6 +1410,30 @@ function exactI32Module(value = "42"): IrModule {
   };
 }
 
+function exactF64EqualityModule(): IrModule {
+  const mod = exactI32Module();
+  const statement = mod.functions[0]!.body[0]!;
+  if (statement.kind !== "exprStmt" || statement.expr.kind !== "nativeCall") {
+    throw new Error("test fixture lost its Native IR exit call");
+  }
+  statement.expr.args[0] = {
+    kind: "ternary",
+    cond: {
+      kind: "bin",
+      op: "!==",
+      left: { kind: "nativeScalarLit", value: "1.5", type: NATIVE_F64, loc },
+      right: { kind: "nativeScalarLit", value: "1.25", type: NATIVE_F64, loc },
+      type: { kind: "bool" },
+      loc,
+    },
+    then: { kind: "nativeScalarLit", value: "42", type: I32, loc },
+    else_: { kind: "nativeScalarLit", value: "1", type: I32, loc },
+    type: I32,
+    loc,
+  };
+  return mod;
+}
+
 function borrowedUtf8Module(): IrModule {
   const mod = exactI32Module();
   const binding = mod.nativeBindings![0]!;
@@ -1587,6 +1611,22 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   const json = serializeModule(mod);
   expect(json).toContain('"value": "-2147483648"');
   expect(deserializeModule(json)).toEqual(mod);
+});
+
+test("Native IR rejects equality between different exact native scalar types", () => {
+  const mod = exactF64EqualityModule();
+  const statement = mod.functions[0]!.body[0]!;
+  if (statement.kind !== "exprStmt" || statement.expr.kind !== "nativeCall") {
+    throw new Error("test fixture lost its Native IR exit call");
+  }
+  const result = statement.expr.args[0]!;
+  if (result.kind !== "ternary" || result.cond.kind !== "bin") {
+    throw new Error("test fixture lost its exact scalar equality");
+  }
+  result.cond.right = { kind: "nativeScalarLit", value: "1", type: I32, loc };
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    "in __main: bin !== on native scalars: operand types differ",
+  );
 });
 
 test("Native IR validates exact integer-backed boolean results", () => {
@@ -2256,6 +2296,62 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
       /"kind": "nativeScalarLit",\s+"value": "42"/,
     );
     const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("compares exact native scalars without a JavaScript-number conversion", async () => {
+    const outDir = join(scratch, `native-scalar-equality-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/native-scalar-equality.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native scalar equality frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(serializeModule(mod)).toContain('"op": "==="');
+    expect(serializeModule(mod)).toContain('"op": "!=="');
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("emits exact native f64 equality in the selected backend", async () => {
+    const mod = exactF64EqualityModule();
+    expect(validateModule(mod)).toEqual([]);
+    const outDir = join(scratch, `native-f64-equality-${backend}`);
+    mkdirSync(outDir, { recursive: true });
+    const sourcePath = join(outDir, backend === "c" ? "program.c" : "program.ll");
+    writeFileSync(
+      sourcePath,
+      backend === "c" ? emitModule(mod) : emitLlvmModule(mod, { pointerBits: 64 }),
+    );
+    const binaryPath = join(outDir, "program");
+    await compileC({
+      cPath: sourcePath,
+      outPath: binaryPath,
+      linkInputs: [fixtureObject()],
+      sanitize,
+    });
+    const run = spawnSync(binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,
       signal: null,

@@ -7972,6 +7972,17 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         const negated = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
         if (bothNum) return { kind: "bin", op: negated ? "!==" : "===", left, right, type: BOOL, loc };
         if (bothStr) return { kind: "strEq", negated, left, right, type: BOOL, loc };
+        // Exact native scalars compare in their physical representation.
+        // TypeScript has already checked source-level nominal compatibility;
+        // Native IR additionally requires the same scalar width/signedness so
+        // equality never introduces a JavaScript-number conversion.
+        if (
+          left.type.kind === "nativeScalar" &&
+          right.type.kind === "nativeScalar" &&
+          typeEquals(left.type, right.type)
+        ) {
+          return { kind: "bin", op: negated ? "!==" : "===", left, right, type: BOOL, loc };
+        }
         // bool === bool: a plain value compare (the config-drift checks'
         // `desired.lanMode !== actual.lanMode` shape).
         if (left.type.kind === "bool" && right.type.kind === "bool") {

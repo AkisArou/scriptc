@@ -3013,6 +3013,10 @@ function validateFunction(
           if (!typeEquals(e.left.type, e.right.type)) {
             err(`bin ${e.op} on references: operand types differ`, e.loc);
           }
+        } else if (isEq && e.left.type.kind === "nativeScalar") {
+          if (!typeEquals(e.left.type, e.right.type)) {
+            err(`bin ${e.op} on native scalars: operand types differ`, e.loc);
+          }
         } else if (isEq && e.left.type.kind === "bool") {
           // bool === bool: a plain value compare.
           expectType(e.right, { kind: "bool" }, `bin ${e.op} right`);
