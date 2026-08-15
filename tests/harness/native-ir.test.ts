@@ -2887,7 +2887,7 @@ describe.each(["c", "llvm"] as const)("Native IR checked UTF-8 C strings, %s bac
     });
   });
 
-  test("projects direct and union string/null values to a nullable native pointer", async () => {
+  localFixtureTest("projects direct and union string/null values to a nullable native pointer", async () => {
     const outDir = join(scratch, `nullable-utf8-c-string-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/nullable-utf8-c-string.ts"), {
       outDir,
