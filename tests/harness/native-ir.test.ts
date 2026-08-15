@@ -80,6 +80,99 @@ const RETAINED_I32_CONTRACT = {
 } as const satisfies IrNativeCallbackContract;
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
+const PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair32";
+const PAIR32 = { kind: "nativeStruct", typeId: PAIR32_ID } as const;
+const PAIR_F64_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair_f64";
+const PAIR_F64 = { kind: "nativeStruct", typeId: PAIR_F64_ID } as const;
+const DIRECT_I64_AGGREGATE_ABI = {
+  result: {
+    type: { kind: "integer", bits: 64 },
+    alignment: null,
+    stackAlignment: null,
+    extension: null,
+    inRegister: false,
+    byValue: false,
+    structureReturn: false,
+  },
+  parameters: [{
+    type: { kind: "integer", bits: 64 },
+    alignment: null,
+    stackAlignment: null,
+    extension: null,
+    inRegister: false,
+    byValue: false,
+    structureReturn: false,
+  }],
+} as const;
+const EXPANDED_F64_AGGREGATE_ABI = {
+  result: {
+    type: {
+      kind: "struct",
+      packed: false,
+      fields: [
+        { kind: "float", format: "double" },
+        { kind: "float", format: "double" },
+      ],
+    },
+    alignment: null,
+    stackAlignment: null,
+    extension: null,
+    inRegister: false,
+    byValue: false,
+    structureReturn: false,
+  },
+  parameters: [
+    {
+      type: { kind: "float", format: "double" },
+      alignment: null,
+      stackAlignment: null,
+      extension: null,
+      inRegister: false,
+      byValue: false,
+      structureReturn: false,
+    },
+    {
+      type: { kind: "float", format: "double" },
+      alignment: null,
+      stackAlignment: null,
+      extension: null,
+      inRegister: false,
+      byValue: false,
+      structureReturn: false,
+    },
+  ],
+} as const;
+const PADDED_ABI = {
+  result: {
+    type: { kind: "void" },
+    alignment: null,
+    stackAlignment: null,
+    extension: null,
+    inRegister: false,
+    byValue: false,
+    structureReturn: false,
+  },
+  parameters: [
+    {
+      type: { kind: "pointer", addressSpace: 0 },
+      alignment: 8,
+      stackAlignment: null,
+      extension: null,
+      inRegister: false,
+      byValue: false,
+      structureReturn: true,
+    },
+    {
+      type: { kind: "pointer", addressSpace: 0 },
+      alignment: 8,
+      stackAlignment: null,
+      extension: null,
+      inRegister: false,
+      byValue: true,
+      structureReturn: false,
+    },
+  ],
+} as const;
 const COUNTER_BASE_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter_base";
 const COUNTER_BASE = { kind: "nativeHandle", typeId: COUNTER_BASE_ID } as const;
 const COUNTER_MIDDLE_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter_middle";
@@ -101,11 +194,41 @@ const PADDED_DEFINITION = {
   packing: "default",
   triviallyCopyable: true,
   destruction: "trivial",
-  abi: { kind: "indirect", alignment: 8 },
+  abi: PADDED_ABI,
   fields: [
     { name: "tag", type: U8, offset: 0 },
     { name: "value", type: U64, offset: 8 },
     { name: "ratio", type: NATIVE_F64, offset: 16 },
+  ],
+} as const satisfies NativeFrontendInput["types"][number];
+const PAIR32_DEFINITION = {
+  kind: "struct",
+  id: PAIR32_ID,
+  declaration: { module: nativePackage, name: "Pair32" },
+  size: 8,
+  alignment: 4,
+  packing: "default",
+  triviallyCopyable: true,
+  destruction: "trivial",
+  abi: DIRECT_I64_AGGREGATE_ABI,
+  fields: [
+    { name: "first", type: I32, offset: 0 },
+    { name: "second", type: I32, offset: 4 },
+  ],
+} as const satisfies NativeFrontendInput["types"][number];
+const PAIR_F64_DEFINITION = {
+  kind: "struct",
+  id: PAIR_F64_ID,
+  declaration: { module: nativePackage, name: "PairF64" },
+  size: 16,
+  alignment: 8,
+  packing: "default",
+  triviallyCopyable: true,
+  destruction: "trivial",
+  abi: EXPANDED_F64_AGGREGATE_ABI,
+  fields: [
+    { name: "first", type: NATIVE_F64, offset: 0 },
+    { name: "second", type: NATIVE_F64, offset: 8 },
   ],
 } as const satisfies NativeFrontendInput["types"][number];
 const COUNTER_DEFINITION = {
@@ -193,6 +316,8 @@ const localNativeInput: NativeFrontendInput = {
     })),
     { declaration: { module: nativePackage, name: "f64" }, type: NATIVE_F64 },
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
+    { declaration: { module: nativePackage, name: "Pair32" }, type: PAIR32 },
+    { declaration: { module: nativePackage, name: "PairF64" }, type: PAIR_F64 },
     { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
     { declaration: { module: nativePackage, name: "CounterMiddle" }, type: COUNTER_MIDDLE },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
@@ -203,6 +328,8 @@ const localNativeInput: NativeFrontendInput = {
   ],
   types: [
     PADDED_DEFINITION,
+    PAIR32_DEFINITION,
+    PAIR_F64_DEFINITION,
     COUNTER_BASE_DEFINITION,
     COUNTER_MIDDLE_DEFINITION,
     COUNTER_DEFINITION,
@@ -293,6 +420,39 @@ const localNativeInput: NativeFrontendInput = {
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" } }]),
       result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#pair32_transform",
+      declaration: { module: nativePackage, name: "pair32Transform" },
+      entry: { kind: "c-symbol", symbol: "nts_pair32_transform" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([{ name: "value", type: PAIR32, passMode: "value", ownership: { kind: "value" } }]),
+      result: { type: PAIR32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#pair_f64_transform",
+      declaration: { module: nativePackage, name: "pairF64Transform" },
+      entry: { kind: "c-symbol", symbol: "nts_pair_f64_transform" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([{ name: "value", type: PAIR_F64, passMode: "value", ownership: { kind: "value" } }]),
+      result: { type: PAIR_F64, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#pair_f64_verify",
+      declaration: { module: nativePackage, name: "pairF64Verify" },
+      entry: { kind: "c-symbol", symbol: "nts_pair_f64_verify" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([{ name: "value", type: PAIR_F64, passMode: "value", ownership: { kind: "value" } }]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
@@ -1747,7 +1907,7 @@ test("Native IR rejects undeclared and internally inconsistent native structs", 
   invalidLayout.nativeTypes = [
     {
       ...PADDED_DEFINITION,
-      abi: { kind: "indirect", alignment: 16 },
+      abi: { ...PADDED_ABI, parameters: [] },
       fields: PADDED_DEFINITION.fields.map((field) => ({ ...field, type: { ...field.type } })),
     },
   ];
@@ -2217,7 +2377,7 @@ describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (ba
         id: PADDED_ID,
         size: 24,
         alignment: 8,
-        abi: { kind: "indirect", alignment: 8 },
+        abi: PADDED_ABI,
       }),
     ]);
     const generated = readFileSync(
@@ -2229,6 +2389,76 @@ describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (ba
     } else {
       expect(generated).toContain("sret(");
       expect(generated).toContain("byval(");
+    }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("coerces a direct-register struct exactly as target Clang classified it", async () => {
+    const outDir = join(scratch, `aggregate-direct-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/aggregate-direct.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("direct native aggregate frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeTypes).toEqual([
+      expect.objectContaining({ id: PAIR32_ID, abi: DIRECT_I64_AGGREGATE_ABI }),
+    ]);
+    if (backend === "llvm") {
+      const generated = readFileSync(join(outDir, "aggregate-direct.ll"), "utf8");
+      expect(generated).toContain("declare i64 @nts_pair32_transform(i64)");
+      expect(generated).not.toContain("sret(");
+      expect(generated).not.toContain("byval(");
+    }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("expands one logical struct into multiple physical ABI values", async () => {
+    const outDir = join(scratch, `aggregate-expanded-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/aggregate-expanded.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("expanded native aggregate frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeTypes).toEqual([
+      expect.objectContaining({ id: PAIR_F64_ID, abi: EXPANDED_F64_AGGREGATE_ABI }),
+    ]);
+    if (backend === "llvm") {
+      const generated = readFileSync(join(outDir, "aggregate-expanded.ll"), "utf8");
+      expect(generated).toContain("declare { double, double } @nts_pair_f64_transform(double, double)");
+      expect(generated).toContain("declare i32 @nts_pair_f64_verify(double, double)");
+      expect(generated).toContain("extractvalue { double, double }");
     }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({

@@ -7,6 +7,7 @@ import type {
   IrNativeHandleDef,
   IrNativeHandleType,
   IrNativeScalarType,
+  IrNativeStructDef,
   IrNativeStructType,
   IrNativeTypeDef,
   IrNativeValueType,
@@ -831,12 +832,35 @@ export function materializeNativeType(
   return {
     ...definition,
     declaration: { ...definition.declaration },
-    abi: { ...definition.abi },
+    abi: {
+      result: cloneNativePhysicalAbiValue(definition.abi.result),
+      parameters: definition.abi.parameters.map(cloneNativePhysicalAbiValue),
+    },
     fields: definition.fields.map((field) => ({
       ...field,
       type: { ...field.type },
     })),
   };
+}
+
+function cloneNativePhysicalAbiType(
+  type: IrNativeStructDef["abi"]["result"]["type"],
+): IrNativeStructDef["abi"]["result"]["type"] {
+  switch (type.kind) {
+    case "array":
+    case "vector":
+      return { ...type, element: cloneNativePhysicalAbiType(type.element) };
+    case "struct":
+      return { ...type, fields: type.fields.map(cloneNativePhysicalAbiType) };
+    default:
+      return { ...type };
+  }
+}
+
+function cloneNativePhysicalAbiValue(
+  value: IrNativeStructDef["abi"]["result"],
+): IrNativeStructDef["abi"]["result"] {
+  return { ...value, type: cloneNativePhysicalAbiType(value.type) };
 }
 
 /** Opaque handles can only originate at a native ownership boundary. An

@@ -13,6 +13,8 @@ import type {
   IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
   IrNativePointerType,
+  IrNativePhysicalAbiType,
+  IrNativePhysicalAbiValue,
   IrNativeScalarType,
   IrRecordShape,
   IrRegexIntrinsicMethod,
@@ -1237,6 +1239,58 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const info = nativeIntegerInfo(scalar, validNativeTarget ? nativePointerBits : undefined);
     return info === null ? null : info.bits / 8;
   };
+  const validNativePhysicalType = (
+    type: IrNativePhysicalAbiType,
+    allowVoid: boolean,
+    depth = 0,
+  ): boolean => {
+    if (depth > 16 || typeof type !== "object" || type === null) return false;
+    switch (type.kind) {
+      case "void":
+        return allowVoid;
+      case "integer":
+        return Number.isSafeInteger(type.bits) && type.bits > 0;
+      case "float":
+        return ["half", "bfloat", "float", "double", "fp128", "x86_fp80"].includes(type.format);
+      case "pointer":
+        return Number.isSafeInteger(type.addressSpace) && type.addressSpace >= 0;
+      case "array":
+        return Number.isSafeInteger(type.count) && type.count > 0 &&
+          validNativePhysicalType(type.element, false, depth + 1);
+      case "vector":
+        return Number.isSafeInteger(type.count) && type.count > 0 &&
+          typeof type.scalable === "boolean" &&
+          validNativePhysicalType(type.element, false, depth + 1);
+      case "struct":
+        return typeof type.packed === "boolean" && Array.isArray(type.fields) &&
+          type.fields.every((field) => validNativePhysicalType(field, false, depth + 1));
+      case "aggregate":
+        return true;
+      default:
+        return false;
+    }
+  };
+  const validNativePhysicalValue = (
+    value: IrNativePhysicalAbiValue,
+    result: boolean,
+  ): boolean => {
+    const alignmentValid = (alignment: number | null): boolean =>
+      alignment === null || (
+        Number.isSafeInteger(alignment) && alignment > 0 &&
+        (alignment & (alignment - 1)) === 0
+      );
+    return typeof value === "object" && value !== null &&
+      validNativePhysicalType(value.type, result) &&
+      alignmentValid(value.alignment) && alignmentValid(value.stackAlignment) &&
+      (value.extension === null || value.extension === "sign" || value.extension === "zero") &&
+      (value.extension === null || value.type.kind === "integer") &&
+      typeof value.inRegister === "boolean" &&
+      typeof value.byValue === "boolean" &&
+      typeof value.structureReturn === "boolean" &&
+      !(value.byValue && value.structureReturn) &&
+      ((!value.byValue && !value.structureReturn) || value.type.kind === "pointer") &&
+      (!result || (!value.byValue && !value.structureReturn));
+  };
   for (const definition of mod.nativeTypes ?? []) {
     if (!nativeId.test(definition.id) || nativeTypesById.has(definition.id)) {
       errors.push({ message: `invalid or duplicate Native IR type id "${definition.id}"`, loc: moduleLoc });
@@ -1263,12 +1317,21 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     ) {
       errors.push({ message: `Native IR type "${definition.id}" has invalid size or alignment`, loc: moduleLoc });
     }
+    const physicalParameters = definition.abi?.parameters;
+    const structureReturns = Array.isArray(physicalParameters)
+      ? physicalParameters.filter((parameter) => parameter.structureReturn)
+      : [];
+    const voidResult = definition.abi?.result?.type?.kind === "void";
     if (
       definition.packing !== "default" || definition.triviallyCopyable !== true ||
-      definition.destruction !== "trivial" || definition.abi.kind !== "indirect" ||
-      !Number.isSafeInteger(definition.abi.alignment) || definition.abi.alignment <= 0 ||
-      (definition.abi.alignment & (definition.abi.alignment - 1)) !== 0 ||
-      definition.abi.alignment > definition.alignment
+      definition.destruction !== "trivial" ||
+      definition.abi === undefined ||
+      !validNativePhysicalValue(definition.abi.result, true) ||
+      !Array.isArray(physicalParameters) || physicalParameters.length === 0 ||
+      !physicalParameters.every((parameter) => validNativePhysicalValue(parameter, false)) ||
+      (voidResult
+        ? structureReturns.length !== 1 || physicalParameters[0]?.structureReturn !== true
+        : structureReturns.length !== 0)
     ) {
       errors.push({ message: `Native IR type "${definition.id}" has unsupported value or ABI metadata`, loc: moduleLoc });
     }

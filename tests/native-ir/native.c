@@ -12,6 +12,16 @@ typedef struct NtsPadded {
   double ratio;
 } NtsPadded;
 
+typedef struct NtsPair32 {
+  int32_t first;
+  int32_t second;
+} NtsPair32;
+
+typedef struct NtsPairF64 {
+  double first;
+  double second;
+} NtsPairF64;
+
 typedef struct NtsCounter {
   int32_t value;
 } NtsCounter;
@@ -83,6 +93,22 @@ int32_t nts_boolean_true(void) { return 1; }
 
 NtsPadded nts_padded_roundtrip(NtsPadded value) {
   return value;
+}
+
+NtsPair32 nts_pair32_transform(NtsPair32 value) {
+  if (value.first != 40 || value.second != 2) abort();
+  NtsPair32 result = { value.second, value.first + 2 };
+  return result;
+}
+
+NtsPairF64 nts_pair_f64_transform(NtsPairF64 value) {
+  if (value.first != 1.5 || value.second != 2.5) abort();
+  NtsPairF64 result = { 7.5, 42.0 };
+  return result;
+}
+
+int32_t nts_pair_f64_verify(NtsPairF64 value) {
+  return value.first == 7.5 && value.second == 42.0 ? 42 : 1;
 }
 
 uint64_t nts_hash_utf8(const char *data, size_t length) {

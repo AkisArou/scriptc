@@ -944,7 +944,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 17 as const;
+export const IR_VERSION = 18 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1093,12 +1093,38 @@ export interface IrNativeStructDef {
   packing: "default";
   triviallyCopyable: true;
   destruction: "trivial";
-  abi: { kind: "indirect"; alignment: number };
+  abi: {
+    result: IrNativePhysicalAbiValue;
+    parameters: readonly IrNativePhysicalAbiValue[];
+  };
   fields: {
     name: string;
     type: IrNativeScalarType;
     offset: number;
   }[];
+}
+
+/** Target-Clang's physical function type for one nominal aggregate. The
+ * `aggregate` leaf denotes the logical struct itself; every other leaf is
+ * target-independent LLVM ABI vocabulary. */
+export type IrNativePhysicalAbiType =
+  | { kind: "void" }
+  | { kind: "integer"; bits: number }
+  | { kind: "float"; format: "half" | "bfloat" | "float" | "double" | "fp128" | "x86_fp80" }
+  | { kind: "pointer"; addressSpace: number }
+  | { kind: "array"; count: number; element: IrNativePhysicalAbiType }
+  | { kind: "vector"; count: number; scalable: boolean; element: IrNativePhysicalAbiType }
+  | { kind: "struct"; packed: boolean; fields: readonly IrNativePhysicalAbiType[] }
+  | { kind: "aggregate" };
+
+export interface IrNativePhysicalAbiValue {
+  type: IrNativePhysicalAbiType;
+  alignment: number | null;
+  stackAlignment: number | null;
+  extension: "sign" | "zero" | null;
+  inRegister: boolean;
+  byValue: boolean;
+  structureReturn: boolean;
 }
 
 export interface IrNativeHandleDef {

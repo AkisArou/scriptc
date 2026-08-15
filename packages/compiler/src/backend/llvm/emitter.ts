@@ -74,6 +74,8 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativePhysicalAbiType,
+  IrNativePhysicalAbiValue,
   IrNativeStructDef,
   IrRecordShape,
   IrStmt,
@@ -1369,7 +1371,11 @@ class LlEmitter {
     if (t.kind === "nativeStruct") {
       const definition = this.nativeTypesById.get(t.typeId);
       if (definition?.kind !== "struct") throw new Error(`llvm emitter bug: unknown native struct ${t.typeId}`);
-      return `ptr byval(${this.llType(t)}) align ${definition.abi.alignment}`;
+      const parameters = this.nativeStructSourceParameters(definition);
+      if (parameters.length !== 1) {
+        throw new LlvmUnsupportedError("expanded native aggregate export");
+      }
+      return this.nativePhysicalParameter(parameters[0]!, definition);
     }
     if (t.kind === "nativeHandle") return "ptr";
     const type = this.llType(t);
@@ -1390,6 +1396,78 @@ class LlEmitter {
       case "f64":
         return type;
     }
+  }
+
+  private nativePhysicalType(
+    type: IrNativePhysicalAbiType,
+    aggregate: IrNativeStructDef,
+  ): string {
+    switch (type.kind) {
+      case "void":
+        return "void";
+      case "integer":
+        return `i${type.bits}`;
+      case "float":
+        return type.format;
+      case "pointer":
+        return type.addressSpace === 0 ? "ptr" : `ptr addrspace(${type.addressSpace})`;
+      case "array":
+        return `[${type.count} x ${this.nativePhysicalType(type.element, aggregate)}]`;
+      case "vector":
+        return type.scalable
+          ? `<vscale x ${type.count} x ${this.nativePhysicalType(type.element, aggregate)}>`
+          : `<${type.count} x ${this.nativePhysicalType(type.element, aggregate)}>`;
+      case "struct": {
+        const fields = type.fields.map((field) => this.nativePhysicalType(field, aggregate)).join(", ");
+        return type.packed ? `<{ ${fields} }>` : `{ ${fields} }`;
+      }
+      case "aggregate":
+        return `%${mangleNativeStruct(aggregate.id)}`;
+    }
+  }
+
+  private nativePhysicalAttributes(
+    value: IrNativePhysicalAbiValue,
+    aggregate: IrNativeStructDef,
+  ): string[] {
+    const attributes: string[] = [];
+    if (value.extension !== null) attributes.push(`${value.extension}ext`);
+    if (value.inRegister) attributes.push("inreg");
+    if (value.byValue) attributes.push(`byval(%${mangleNativeStruct(aggregate.id)})`);
+    if (value.structureReturn) attributes.push(`sret(%${mangleNativeStruct(aggregate.id)})`);
+    if (value.alignment !== null) attributes.push(`align ${value.alignment}`);
+    if (value.stackAlignment !== null) attributes.push(`alignstack(${value.stackAlignment})`);
+    return attributes;
+  }
+
+  private nativePhysicalParameter(
+    value: IrNativePhysicalAbiValue,
+    aggregate: IrNativeStructDef,
+  ): string {
+    return [
+      this.nativePhysicalType(value.type, aggregate),
+      ...this.nativePhysicalAttributes(value, aggregate),
+    ].join(" ");
+  }
+
+  private nativePhysicalResult(
+    value: IrNativePhysicalAbiValue,
+    aggregate: IrNativeStructDef,
+  ): string {
+    return [
+      ...this.nativePhysicalAttributes(value, aggregate),
+      this.nativePhysicalType(value.type, aggregate),
+    ].join(" ");
+  }
+
+  private nativeStructReturnStorage(definition: IrNativeStructDef): IrNativePhysicalAbiValue | null {
+    return definition.abi.result.type.kind === "void"
+      ? definition.abi.parameters[0] ?? null
+      : null;
+  }
+
+  private nativeStructSourceParameters(definition: IrNativeStructDef): readonly IrNativePhysicalAbiValue[] {
+    return definition.abi.parameters.slice(this.nativeStructReturnStorage(definition) === null ? 0 : 1);
   }
 
   private nativeStructLayout(typeId: string): {
@@ -6643,30 +6721,45 @@ class LlEmitter {
         const aggregateResult = aggregateType !== null
           ? this.nativeStructLayout(aggregateType.typeId)
           : null;
-        const returnType = aggregateResult === null ? this.nativeReturnType(binding.result.type) : "void";
-        const parameterTypes = binding.parameters.map((parameter) =>
-          this.nativeParameterType(parameter.type)
-        );
-        const declarationParameters = [...parameterTypes];
+        const returnStorage = aggregateResult === null
+          ? null
+          : this.nativeStructReturnStorage(aggregateResult.definition);
+        const returnType = aggregateResult === null
+          ? this.nativeReturnType(binding.result.type)
+          : this.nativePhysicalResult(aggregateResult.definition.abi.result, aggregateResult.definition);
+        const parameterTypes = binding.parameters.map((parameter) => {
+          if (parameter.type.kind !== "nativeStruct") {
+            return [this.nativeParameterType(parameter.type)];
+          }
+          const definition = this.nativeStructLayout(parameter.type.typeId).definition;
+          return this.nativeStructSourceParameters(definition).map((physical) =>
+            this.nativePhysicalParameter(physical, definition)
+          );
+        });
+        const declarationParameters = parameterTypes.flat();
         let resultSlot: string | null = null;
-        if (aggregateResult !== null) {
+        if (aggregateResult !== null && returnStorage !== null) {
           resultSlot = B.tmp();
           B.entryAllocas.push(
             `${resultSlot} = alloca ${this.llType(aggregateType!)}, align ${aggregateResult.definition.alignment}`,
           );
           declarationParameters.unshift(
-            `ptr sret(${this.llType(aggregateType!)}) align ${aggregateResult.definition.abi.alignment}`,
+            this.nativePhysicalParameter(returnStorage, aggregateResult.definition),
           );
         }
         this.declare(
           `declare ${returnType} @${binding.entry.symbol}(${declarationParameters.join(", ")})`,
         );
         const callArgs: string[] = [];
-        if (aggregateResult !== null) {
+        if (aggregateResult !== null && returnStorage !== null) {
           callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
         }
         binding.parameters.forEach((parameter, index) => {
           const arg = args[parameter.projection.argument]!;
+          const parameterType = parameterTypes[index]?.[0];
+          if (parameterType === undefined) {
+            throw new Error(`llvm emitter bug: missing physical parameter in ${binding.id}`);
+          }
           switch (parameter.projection.kind) {
             case "boolean": {
               if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "bool") {
@@ -6674,11 +6767,11 @@ class LlEmitter {
               }
               const value = B.tmp();
               B.line(
-                `${value} = select i1 ${arg.name}, ${parameterTypes[index]} ` +
-                  `${parameter.projection.trueValue}, ${parameterTypes[index]} ` +
+                `${value} = select i1 ${arg.name}, ${parameterType} ` +
+                  `${parameter.projection.trueValue}, ${parameterType} ` +
                   `${parameter.projection.falseValue}`,
               );
-              callArgs.push(`${parameterTypes[index]} ${value}`);
+              callArgs.push(`${parameterType} ${value}`);
               break;
             }
             case "utf8CString": {
@@ -6686,13 +6779,13 @@ class LlEmitter {
               this.declare("declare ptr @scr_str_c_data(ptr)");
               B.line(`${data} = call ptr @scr_str_c_data(ptr ${arg.name})`);
               this.emitPendingCheck();
-              callArgs.push(`${parameterTypes[index]} ${data}`);
+              callArgs.push(`${parameterType} ${data}`);
               break;
             }
             case "utf8Data": {
               const data = B.tmp();
               B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 1`);
-              callArgs.push(`${parameterTypes[index]} ${data}`);
+              callArgs.push(`${parameterType} ${data}`);
               break;
             }
             case "utf8ByteLength": {
@@ -6700,7 +6793,7 @@ class LlEmitter {
               const len = B.tmp();
               B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 0, i32 1`);
               B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
-              callArgs.push(`${parameterTypes[index]} ${len}`);
+              callArgs.push(`${parameterType} ${len}`);
               break;
             }
             case "bytesData": {
@@ -6708,7 +6801,7 @@ class LlEmitter {
               const data = B.tmp();
               B.line(`${dataPtr} = getelementptr inbounds %ScrBytes, ptr ${arg.name}, i64 0, i32 3`);
               B.line(`${data} = load ptr, ptr ${dataPtr}`);
-              callArgs.push(`${parameterTypes[index]} ${data}`);
+              callArgs.push(`${parameterType} ${data}`);
               break;
             }
             case "bytesByteLength": {
@@ -6716,7 +6809,7 @@ class LlEmitter {
               const len = B.tmp();
               B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${arg.name}, i64 0, i32 1`);
               B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
-              callArgs.push(`${parameterTypes[index]} ${len}`);
+              callArgs.push(`${parameterType} ${len}`);
               break;
             }
             case "callbackFunction": {
@@ -6724,22 +6817,58 @@ class LlEmitter {
                 binding.id,
                 parameter.projection.argument,
               );
-              callArgs.push(`${parameterTypes[index]} @${adapter.symbol}`);
+              callArgs.push(`${parameterType} @${adapter.symbol}`);
               break;
             }
             case "callbackContext":
               callArgs.push(
-                `${parameterTypes[index]} ${retainedTokens.get(parameter.projection.argument) ?? arg.name}`,
+                `${parameterType} ${retainedTokens.get(parameter.projection.argument) ?? arg.name}`,
               );
               break;
             case "argument":
               if (parameter.type.kind === "nativeStruct") {
                 const layout = this.nativeStructLayout(parameter.type.typeId);
+                const physical = this.nativeStructSourceParameters(layout.definition);
                 const slot = B.tmp();
                 const type = this.llType(parameter.type);
                 B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
                 B.line(`store ${type} ${arg.name}, ptr ${slot}, align ${layout.definition.alignment}`);
-                callArgs.push(`${parameterTypes[index]} ${slot}`);
+                if (physical.length === 1 && physical[0]!.type.kind === "aggregate") {
+                  callArgs.push(`${parameterType} ${arg.name}`);
+                } else if (physical.every((value) => value.type.kind === "pointer")) {
+                  if (physical.length !== 1) {
+                    throw new Error(`llvm emitter bug: aggregate ${parameter.type.typeId} has multiple indirect inputs`);
+                  }
+                  const pointer = physical[0]!.type;
+                  if (pointer.kind !== "pointer") throw new Error("llvm emitter bug: narrowed pointer disappeared");
+                  if (pointer.addressSpace === 0) {
+                    callArgs.push(`${parameterType} ${slot}`);
+                  } else {
+                    const cast = B.tmp();
+                    B.line(`${cast} = addrspacecast ptr ${slot} to ptr addrspace(${pointer.addressSpace})`);
+                    callArgs.push(`${parameterType} ${cast}`);
+                  }
+                } else {
+                  if (physical.some((value) => value.type.kind === "pointer")) {
+                    throw new Error(`llvm emitter bug: aggregate ${parameter.type.typeId} mixes indirect and direct inputs`);
+                  }
+                  const physicalTypes = physical.map((value) =>
+                    this.nativePhysicalType(value.type, layout.definition)
+                  );
+                  const representation = physicalTypes.length === 1
+                    ? physicalTypes[0]!
+                    : `{ ${physicalTypes.join(", ")} }`;
+                  const loaded = B.tmp();
+                  B.line(`${loaded} = load ${representation}, ptr ${slot}, align ${layout.definition.alignment}`);
+                  physical.forEach((_value, physicalIndex) => {
+                    let value = loaded;
+                    if (physical.length > 1) {
+                      value = B.tmp();
+                      B.line(`${value} = extractvalue ${representation} ${loaded}, ${physicalIndex}`);
+                    }
+                    callArgs.push(`${parameterTypes[index]![physicalIndex]} ${value}`);
+                  });
+                }
               } else if (parameter.type.kind === "nativeHandle") {
                 this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
                 const raw = B.tmp();
@@ -6748,9 +6877,9 @@ class LlEmitter {
                     `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
                 );
                 this.emitPendingCheck();
-                callArgs.push(`${parameterTypes[index]} ${raw}`);
+                callArgs.push(`${parameterType} ${raw}`);
               } else {
-                callArgs.push(`${parameterTypes[index]} ${arg.name}`);
+                callArgs.push(`${parameterType} ${arg.name}`);
               }
               break;
           }
@@ -6777,8 +6906,36 @@ class LlEmitter {
         const call =
           `call ${returnType} @${binding.entry.symbol}(` +
           `${callArgs.join(", ")})`;
-        if (aggregateResult !== null) {
+        if (aggregateResult !== null && returnStorage !== null) {
           B.line(call);
+          const result = B.tmp();
+          B.line(
+            `${result} = load ${this.llType(aggregateType!)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
+          );
+          if (callbacksMayThrow) this.emitPendingCheck();
+          releaseArguments();
+          return { name: result, type: e.type };
+        }
+        if (aggregateResult !== null) {
+          const physicalType = this.nativePhysicalType(
+            aggregateResult.definition.abi.result.type,
+            aggregateResult.definition,
+          );
+          const physical = B.tmp();
+          B.line(`${physical} = ${call}`);
+          if (aggregateResult.definition.abi.result.type.kind === "aggregate") {
+            if (callbacksMayThrow) this.emitPendingCheck();
+            releaseArguments();
+            return { name: physical, type: e.type };
+          }
+          resultSlot = B.tmp();
+          B.entryAllocas.push(
+            `${resultSlot} = alloca ${this.llType(aggregateType!)}, align ${aggregateResult.definition.alignment}`,
+          );
+          B.line(
+            `store ${this.llType(aggregateType!)} zeroinitializer, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
+          );
+          B.line(`store ${physicalType} ${physical}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`);
           const result = B.tmp();
           B.line(
             `${result} = load ${this.llType(aggregateType!)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
