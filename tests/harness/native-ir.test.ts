@@ -547,6 +547,26 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#nullable_c_string_observe",
+      declaration: { module: nativePackage, name: "nullableCStringObserve" },
+      entry: { kind: "c-symbol", symbol: "nts_nullable_c_string_observe" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "data", type: { kind: "nullableString" } }],
+      parameters: [
+        {
+          name: "data",
+          type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "utf8CString", argument: 0 },
+        },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
       declaration: { module: nativePackage, name: "hashBytes" },
       entry: { kind: "c-symbol", symbol: "nts_hash_bytes" },
@@ -2859,6 +2879,47 @@ describe.each(["c", "llvm"] as const)("Native IR checked UTF-8 C strings, %s bac
       "utf8",
     );
     expect(generated).toContain("scr_str_c_data");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("projects direct and union string/null values to a nullable native pointer", async () => {
+    const outDir = join(scratch, `nullable-utf8-c-string-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/nullable-utf8-c-string.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("nullable native UTF-8 C-string frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#nullable_c_string_observe",
+        arguments: [{ name: "data", type: { kind: "nullableString" } }],
+        parameters: [
+          expect.objectContaining({ projection: { kind: "utf8CString", argument: 0 } }),
+        ],
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "nullable-utf8-c-string.c" : "nullable-utf8-c-string.ll"),
+      "utf8",
+    );
+    expect(generated).toContain("scr_str_c_data");
+    expect(generated).toContain(backend === "c" ? "scr_union_peek" : "phi ptr");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

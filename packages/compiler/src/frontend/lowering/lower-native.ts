@@ -200,6 +200,27 @@ function matchesNativeResultSource(
     arms.some((arm) => arm.kind === "nullT");
 }
 
+function matchesNativeArgumentSource(
+  L: Lowerer,
+  expected: NativeInputBinding["arguments"][number]["type"],
+  mapped: IrType,
+): boolean {
+  if (expected.kind !== "nullableString") return typeEquals(mapped, expected);
+  if (mapped.kind === "string" || mapped.kind === "nullT") return true;
+  if (mapped.kind !== "union") return false;
+  const arms = L.unions.get(mapped.unionId)?.arms;
+  return arms?.length === 2 &&
+    arms.some((arm) => arm.kind === "string") &&
+    arms.some((arm) => arm.kind === "nullT");
+}
+
+function formatNativeArgumentType(
+  L: Lowerer,
+  type: NativeInputBinding["arguments"][number]["type"],
+): string {
+  return type.kind === "nullableString" ? "string | null" : L.fmt(type);
+}
+
 function validateDeclaration(
   L: Lowerer,
   binding: NativeInputBinding,
@@ -283,11 +304,11 @@ function validateDeclaration(
     const sourceType = L.checker.getTypeAtLocation(setters[0]!.parameters[0]!);
     const mapped = L.mapTypeOf(sourceType);
     const expected = binding.arguments[binding.sourceCall.valueArgument]!.type;
-    if (mapped === null || !typeEquals(mapped, expected)) {
+    if (mapped === null || !matchesNativeArgumentSource(L, expected, mapped)) {
       failSignature(
         L,
         binding,
-        `the setter value maps to '${mapped === null ? L.checker.typeToString(sourceType) : L.fmt(mapped)}', not '${L.fmt(expected)}'`,
+        `the setter value maps to '${mapped === null ? L.checker.typeToString(sourceType) : L.fmt(mapped)}', not '${formatNativeArgumentType(L, expected)}'`,
         loc,
       );
     }
@@ -339,12 +360,12 @@ function validateDeclaration(
     }
     const mapped = L.mapTypeOf(sourceType);
     const expected = sourceParameters[index]!.type;
-    if (mapped === null || !typeEquals(mapped, expected)) {
+    if (mapped === null || !matchesNativeArgumentSource(L, expected, mapped)) {
       failSignature(
         L,
         binding,
         `parameter ${index + 1} maps to '${mapped === null ? L.checker.typeToString(sourceType) : L.fmt(mapped)}', ` +
-          `not '${L.fmt(expected)}'`,
+          `not '${formatNativeArgumentType(L, expected)}'`,
         loc,
       );
     }
@@ -457,9 +478,19 @@ function lowerNativeInvocation(
     }
     argumentNodes.splice(binding.sourceCall.receiverArgument, 0, receiver);
   }
-  const args = argumentNodes.map((argument, index) =>
-    L.lowerExprExpecting(argument, binding.arguments[index]!.type)
-  );
+  const args = argumentNodes.map((argument, index) => {
+    const expected = binding.arguments[index]!.type;
+    if (expected.kind !== "nullableString") {
+      return L.lowerExprExpecting(argument, expected);
+    }
+    const mapped = L.mapTypeOf(
+      L.checker.getContextualType(argument) ?? L.typeOf(argument),
+    );
+    if (mapped === null || !matchesNativeArgumentSource(L, expected, mapped)) {
+      failSignature(L, binding, `argument ${index + 1} is not string | null`, loc);
+    }
+    return L.lowerExprExpecting(argument, mapped);
+  });
   L.usesNativeTarget = true;
   L.usedNativeBindingIds.add(binding.id);
   if (binding.result.ownership.kind === "owned") {

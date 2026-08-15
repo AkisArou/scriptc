@@ -229,6 +229,7 @@ export type IrNativeArgumentType =
   | IrNativeValueType
   | { kind: "bool" }
   | { kind: "string" }
+  | { kind: "nullableString" }
   | (IrBytesType & { elem: "u8" })
   | IrNativeCallbackArgumentType;
 

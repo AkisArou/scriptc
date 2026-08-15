@@ -89,6 +89,7 @@ export declare function pairF64Verify(value: PairF64): i32;
 export declare function nestedPair32Transform(value: NestedPair32): NestedPair32;
 export declare function hashUtf8(value: string): u64;
 export declare function cStringObserve(value: string): void;
+export declare function nullableCStringObserve(value: string | null): i32;
 export declare function hashBytes(value: Uint8Array): u64;
 export declare function callScoped(
   callback: (value: i32) => i32,

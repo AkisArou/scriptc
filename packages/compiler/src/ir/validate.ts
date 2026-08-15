@@ -1704,6 +1704,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       if (
         argument.type.kind !== "bool" &&
         argument.type.kind !== "string" &&
+        argument.type.kind !== "nullableString" &&
         !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
         !validNativeCallbackArgument(argument.type) &&
         !validNativeValue(argument.type)
@@ -1809,6 +1810,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             parameter.type.kind === "nativeCallback" ||
             parameter.type.kind === "nativeContext" ||
             sourceArgument.type.kind === "string" ||
+            sourceArgument.type.kind === "nullableString" ||
             sourceArgument.type.kind === "bytes" ||
             sourceArgument.type.kind === "func" ||
             !typeEquals(parameter.type, sourceArgument.type)
@@ -1853,7 +1855,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         case "utf8CString":
           projectionCounts.utf8CString++;
           if (
-            sourceArgument.type.kind !== "string" ||
+            (sourceArgument.type.kind !== "string" &&
+              sourceArgument.type.kind !== "nullableString") ||
             parameter.type.kind !== "nativePointer" ||
             !["i8", "u8"].includes(parameter.type.pointee) ||
             parameter.type.const !== true ||
@@ -1962,10 +1965,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                   callbackContract.registrationOwner.kind !== "argument"
                 ) return false;
                 projectedOwner = true;
-                expected = binding.arguments[
+                const ownerType = binding.arguments[
                   callbackContract.registrationOwner.argument
                 ]?.type;
-                if (expected?.kind !== "nativeHandle") return false;
+                if (ownerType?.kind !== "nativeHandle") return false;
+                expected = ownerType;
               }
               if (
                 expected === undefined ||
@@ -2009,9 +2013,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     binding.arguments.forEach((argument, argumentIndex) => {
       const projections = projectionsByArgument[argumentIndex]!;
       const valid =
-        argument.type.kind === "string"
+        argument.type.kind === "string" || argument.type.kind === "nullableString"
           ? (projections.total === 1 && projections.utf8CString === 1) ||
-            (projections.total === 2 &&
+            (argument.type.kind === "string" && projections.total === 2 &&
               projections.utf8Data === 1 &&
               projections.utf8ByteLength === 1)
           : argument.type.kind === "bool"
@@ -3934,7 +3938,22 @@ function validateFunction(
         e.args.forEach((arg, i) => {
           const argument = binding.arguments[i];
           if (argument !== undefined) {
-            expectType(arg, argument.type, `Native IR call ${e.binding} arg ${i}`);
+            if (argument.type.kind === "nullableString") {
+              const arms = arg.type.kind === "union"
+                ? unions.get(arg.type.unionId)?.arms
+                : undefined;
+              if (
+                arg.type.kind !== "string" &&
+                arg.type.kind !== "nullT" &&
+                !(arms?.length === 2 &&
+                  arms.some((arm) => arm.kind === "string") &&
+                  arms.some((arm) => arm.kind === "nullT"))
+              ) {
+                err(`Native IR call ${e.binding} arg ${i} must be string | null`, arg.loc);
+              }
+            } else {
+              expectType(arg, argument.type, `Native IR call ${e.binding} arg ${i}`);
+            }
           }
         });
         const resultProjection = binding.result.projection as

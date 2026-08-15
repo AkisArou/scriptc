@@ -6802,6 +6802,45 @@ class LlEmitter {
               break;
             }
             case "utf8CString": {
+              const sourceType = binding.arguments[parameter.projection.argument]!.type;
+              if (sourceType.kind === "nullableString") {
+                if (arg.type.kind === "nullT") {
+                  callArgs.push(`${parameterType} null`);
+                  break;
+                }
+                if (arg.type.kind === "union") {
+                  const arms = this.unionsById.get(arg.type.unionId)?.arms;
+                  const stringTag = arms?.findIndex((arm) => arm.kind === "string") ?? -1;
+                  const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
+                  if (stringTag < 0 || nullTag < 0) {
+                    throw new Error(`llvm emitter bug: nullable C-string argument lacks string/null arms in ${binding.id}`);
+                  }
+                  const tag = this.unionTag(arg.name);
+                  const present = B.newLabel("native.cstr.present");
+                  const absent = B.newLabel("native.cstr.absent");
+                  const done = B.newLabel("native.cstr.done");
+                  const isString = B.tmp();
+                  B.line(`${isString} = icmp eq i32 ${tag}, ${stringTag}`);
+                  B.condBr(isString, present, absent);
+                  B.startBlock(present);
+                  const payload = this.unionPeek(arg.name);
+                  this.declare("declare ptr @scr_str_c_data(ptr)");
+                  const presentData = B.tmp();
+                  B.line(`${presentData} = call ptr @scr_str_c_data(ptr ${payload})`);
+                  B.br(done);
+                  B.startBlock(absent);
+                  B.br(done);
+                  B.startBlock(done);
+                  const data = B.tmp();
+                  B.line(`${data} = phi ptr [ ${presentData}, %${present} ], [ null, %${absent} ]`);
+                  this.emitPendingCheck();
+                  callArgs.push(`${parameterType} ${data}`);
+                  break;
+                }
+                if (arg.type.kind !== "string") {
+                  throw new Error(`llvm emitter bug: nullable C-string argument has ${arg.type.kind} type in ${binding.id}`);
+                }
+              }
               const data = B.tmp();
               this.declare("declare ptr @scr_str_c_data(ptr)");
               B.line(`${data} = call ptr @scr_str_c_data(ptr ${arg.name})`);

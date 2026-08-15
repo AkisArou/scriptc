@@ -2346,6 +2346,28 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `${arg.name} ? ${trueValue} : ${falseValue}`;
             }
             case "utf8CString": {
+              const sourceType = binding.arguments[parameter.projection.argument]!.type;
+              if (sourceType.kind === "nullableString") {
+                if (arg.type.kind === "nullT") return "NULL";
+                if (arg.type.kind === "union") {
+                  const arms = E.unionsById.get(arg.type.unionId)?.arms;
+                  const stringTag = arms?.findIndex((arm) => arm.kind === "string") ?? -1;
+                  const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
+                  if (stringTag < 0 || nullTag < 0) {
+                    throw new Error(`emitter bug: nullable C-string argument lacks string/null arms in ${binding.id}`);
+                  }
+                  const raw = `sc_t${E.tempCounter++}`;
+                  E.line(
+                    `const char *${raw} = ${arg.name}->tag == ${stringTag} ` +
+                      `? scr_str_c_data((ScrStr *)scr_union_peek(${arg.name})) : NULL;`,
+                  );
+                  E.emitPendingCheck();
+                  return raw;
+                }
+                if (arg.type.kind !== "string") {
+                  throw new Error(`emitter bug: nullable C-string argument has ${arg.type.kind} type in ${binding.id}`);
+                }
+              }
               const raw = `sc_t${E.tempCounter++}`;
               E.line(`const char *${raw} = scr_str_c_data(${arg.name});`);
               E.emitPendingCheck();

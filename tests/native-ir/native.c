@@ -149,6 +149,12 @@ void nts_c_string_observe(const char *data) {
   abort();
 }
 
+int32_t nts_nullable_c_string_observe(const char *data) {
+  if (data == NULL) return 1;
+  if (strcmp(data, "native") == 0) return 2;
+  abort();
+}
+
 uint64_t nts_hash_bytes(const uint8_t *data, size_t length) {
   uint64_t hash = UINT64_C(14695981039346656037);
   for (size_t index = 0; index < length; index++) {
