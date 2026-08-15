@@ -52,7 +52,7 @@ export const IR_NATIVE_INTEGER_SCALARS = [
 
 export type IrNativeIntegerScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
 export type IrNativeScalar = IrNativeIntegerScalar | "f64";
-export type IrNativeIntegerBinOp = "+" | "-" | "*";
+export type IrNativeIntegerBinOp = "+" | "-" | "*" | "&" | "|" | "^";
 
 export interface IrNativeIntegerInfo {
   readonly bits: 8 | 16 | 32 | 64;
@@ -4572,10 +4572,11 @@ export type IrExpr =
    * a JavaScript-number round trip. Integers use canonical base-10; f64 uses
    * the canonical finite JavaScript-number spelling. */
   | { kind: "nativeScalarLit"; value: string; type: IrNativeScalarType; loc: SrcLoc }
-  /** Fixed-width integer arithmetic. Both operands and the result carry the
-   * same exact native integer type. Operations wrap modulo that type's width;
-   * signed values are interpreted from the wrapped bits as two's complement,
-   * so neither backend may lower this through signed C arithmetic. */
+  /** Fixed-width integer arithmetic and bitwise operations. Both operands and
+   * the result carry the same exact native integer type. Arithmetic wraps
+   * modulo that type's width; signed values are interpreted from the resulting
+   * bits as two's complement, so no backend may introduce signed C overflow or
+   * a JavaScript ToInt32 conversion. */
   | {
       kind: "nativeIntegerBin";
       op: IrNativeIntegerBinOp;

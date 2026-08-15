@@ -785,10 +785,11 @@ void scr_native_throw_errno(int error_number, const char *operation);
 void scr_native_throw_null(const char *operation);
 void scr_native_throw_boolean(const char *operation);
 
-/* Exact Native IR integer arithmetic. Work exclusively in the matching
- * unsigned representation, then copy wrapped signed bits rather than using
- * an out-of-range unsigned-to-signed conversion. This keeps +, -, and * free
- * of signed-overflow UB and implementation-defined signed reconstruction. */
+/* Exact Native IR integer arithmetic and bitwise operations. Work exclusively
+ * in the matching unsigned representation, then copy wrapped signed bits
+ * rather than using an out-of-range unsigned-to-signed conversion. This keeps
+ * +, -, and * free of signed-overflow UB, preserves exact-width &, |, and ^,
+ * and avoids implementation-defined signed reconstruction. */
 #define SCR_NATIVE_UNSIGNED_BIN(T, W, N, OP, S)                         \
   static inline T scr_native_##N##_##S(T a, T b) {                     \
     return (T)((W)a OP (W)b);                                          \
@@ -800,28 +801,34 @@ void scr_native_throw_boolean(const char *operation);
     memcpy(&result, &bits, sizeof result);                             \
     return result;                                                     \
   }
-#define SCR_NATIVE_UNSIGNED_ARITH(T, W, N)                             \
+#define SCR_NATIVE_UNSIGNED_OPS(T, W, N)                               \
   SCR_NATIVE_UNSIGNED_BIN(T, W, N, +, add)                            \
   SCR_NATIVE_UNSIGNED_BIN(T, W, N, -, sub)                            \
-  SCR_NATIVE_UNSIGNED_BIN(T, W, N, *, mul)
-#define SCR_NATIVE_SIGNED_ARITH(T, U, W, N)                            \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, *, mul)                            \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, &, and)                            \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, |, or)                             \
+  SCR_NATIVE_UNSIGNED_BIN(T, W, N, ^, xor)
+#define SCR_NATIVE_SIGNED_OPS(T, U, W, N)                              \
   SCR_NATIVE_SIGNED_BIN(T, U, W, N, +, add)                           \
   SCR_NATIVE_SIGNED_BIN(T, U, W, N, -, sub)                           \
-  SCR_NATIVE_SIGNED_BIN(T, U, W, N, *, mul)
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, *, mul)                           \
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, &, and)                           \
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, |, or)                            \
+  SCR_NATIVE_SIGNED_BIN(T, U, W, N, ^, xor)
 
-SCR_NATIVE_SIGNED_ARITH(int8_t, uint8_t, uint32_t, i8)
-SCR_NATIVE_UNSIGNED_ARITH(uint8_t, uint32_t, u8)
-SCR_NATIVE_SIGNED_ARITH(int16_t, uint16_t, uint32_t, i16)
-SCR_NATIVE_UNSIGNED_ARITH(uint16_t, uint32_t, u16)
-SCR_NATIVE_SIGNED_ARITH(int32_t, uint32_t, uint32_t, i32)
-SCR_NATIVE_UNSIGNED_ARITH(uint32_t, uint32_t, u32)
-SCR_NATIVE_SIGNED_ARITH(int64_t, uint64_t, uint64_t, i64)
-SCR_NATIVE_UNSIGNED_ARITH(uint64_t, uint64_t, u64)
-SCR_NATIVE_SIGNED_ARITH(intptr_t, uintptr_t, uintptr_t, isize)
-SCR_NATIVE_UNSIGNED_ARITH(uintptr_t, uintptr_t, usize)
+SCR_NATIVE_SIGNED_OPS(int8_t, uint8_t, uint32_t, i8)
+SCR_NATIVE_UNSIGNED_OPS(uint8_t, uint32_t, u8)
+SCR_NATIVE_SIGNED_OPS(int16_t, uint16_t, uint32_t, i16)
+SCR_NATIVE_UNSIGNED_OPS(uint16_t, uint32_t, u16)
+SCR_NATIVE_SIGNED_OPS(int32_t, uint32_t, uint32_t, i32)
+SCR_NATIVE_UNSIGNED_OPS(uint32_t, uint32_t, u32)
+SCR_NATIVE_SIGNED_OPS(int64_t, uint64_t, uint64_t, i64)
+SCR_NATIVE_UNSIGNED_OPS(uint64_t, uint64_t, u64)
+SCR_NATIVE_SIGNED_OPS(intptr_t, uintptr_t, uintptr_t, isize)
+SCR_NATIVE_UNSIGNED_OPS(uintptr_t, uintptr_t, usize)
 
-#undef SCR_NATIVE_SIGNED_ARITH
-#undef SCR_NATIVE_UNSIGNED_ARITH
+#undef SCR_NATIVE_SIGNED_OPS
+#undef SCR_NATIVE_UNSIGNED_OPS
 #undef SCR_NATIVE_SIGNED_BIN
 #undef SCR_NATIVE_UNSIGNED_BIN
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin

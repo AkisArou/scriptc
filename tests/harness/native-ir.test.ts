@@ -1613,6 +1613,25 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   expect(deserializeModule(json)).toEqual(mod);
 });
 
+test("Native IR rejects unknown exact integer operators", () => {
+  const mod = exactI32Module();
+  const statement = mod.functions[0]!.body[0]!;
+  if (statement.kind !== "exprStmt" || statement.expr.kind !== "nativeCall") {
+    throw new Error("test fixture lost its Native IR exit call");
+  }
+  statement.expr.args[0] = {
+    kind: "nativeIntegerBin",
+    op: "/" as "+",
+    left: { kind: "nativeScalarLit", value: "4", type: I32, loc },
+    right: { kind: "nativeScalarLit", value: "2", type: I32, loc },
+    type: I32,
+    loc,
+  };
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    'in __main: native integer operation has unsupported operator "/"',
+  );
+});
+
 test("Native IR rejects equality between different exact native scalar types", () => {
   const mod = exactF64EqualityModule();
   const statement = mod.functions[0]!.body[0]!;
@@ -2446,7 +2465,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(spawnSync(result.binaryPath).status).toBe(0);
   });
 
-  test("wraps every exact integer width without signed overflow", async () => {
+  test("preserves exact-width integer arithmetic and bitwise operations", async () => {
     const outDir = join(scratch, `arithmetic-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/arithmetic.ts"), {
       outDir,
@@ -2472,16 +2491,26 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     if (backend === "c") {
       for (const helper of [
         "scr_native_i8_add",
+        "scr_native_i8_or",
+        "scr_native_u8_and",
         "scr_native_u8_mul",
         "scr_native_i16_mul",
+        "scr_native_i16_xor",
+        "scr_native_u16_or",
         "scr_native_u16_sub",
         "scr_native_i32_add",
+        "scr_native_i32_and",
         "scr_native_i32_sub",
         "scr_native_i32_mul",
+        "scr_native_u32_xor",
         "scr_native_u32_mul",
+        "scr_native_i64_or",
         "scr_native_i64_mul",
+        "scr_native_u64_and",
         "scr_native_u64_sub",
+        "scr_native_isize_xor",
         "scr_native_isize_mul",
+        "scr_native_usize_or",
         "scr_native_usize_sub",
       ]) {
         expect(generated).toContain(helper);
@@ -2489,13 +2518,22 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     } else {
       expect(generated).toMatch(/= add i8/);
       expect(generated).toMatch(/= mul i8/);
+      expect(generated).toMatch(/= or i8/);
+      expect(generated).toMatch(/= and i8/);
       expect(generated).toMatch(/= mul i16/);
+      expect(generated).toMatch(/= xor i16/);
+      expect(generated).toMatch(/= or i16/);
       expect(generated).toMatch(/= sub i16/);
       expect(generated).toMatch(/= add i32/);
+      expect(generated).toMatch(/= and i32/);
       expect(generated).toMatch(/= sub i32/);
       expect(generated).toMatch(/= mul i32/);
+      expect(generated).toMatch(/= xor i32/);
+      expect(generated).toMatch(/= or i64/);
       expect(generated).toMatch(/= mul i64/);
+      expect(generated).toMatch(/= and i64/);
       expect(generated).toMatch(/= sub i64/);
+      expect(generated).toMatch(/= xor i64/);
     }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({

@@ -6,6 +6,7 @@ import type {
   IrNativeCallbackContract,
   IrNativeHandleDef,
   IrNativeHandleType,
+  IrNativeIntegerBinOp,
   IrNativeScalarType,
   IrNativeStructDef,
   IrNativeStructType,
@@ -684,13 +685,27 @@ export function lowerNativeScalarAssertion(
     target.scalar !== "f64" &&
     ts.isBinaryExpression(arithmeticExpression)
   ) {
-    const operation = arithmeticExpression.operatorToken.kind === ts.SyntaxKind.PlusToken
-      ? "+"
-      : arithmeticExpression.operatorToken.kind === ts.SyntaxKind.MinusToken
-        ? "-"
-        : arithmeticExpression.operatorToken.kind === ts.SyntaxKind.AsteriskToken
-          ? "*"
-          : null;
+    let operation: IrNativeIntegerBinOp | null = null;
+    switch (arithmeticExpression.operatorToken.kind) {
+      case ts.SyntaxKind.PlusToken:
+        operation = "+";
+        break;
+      case ts.SyntaxKind.MinusToken:
+        operation = "-";
+        break;
+      case ts.SyntaxKind.AsteriskToken:
+        operation = "*";
+        break;
+      case ts.SyntaxKind.AmpersandToken:
+        operation = "&";
+        break;
+      case ts.SyntaxKind.BarToken:
+        operation = "|";
+        break;
+      case ts.SyntaxKind.CaretToken:
+        operation = "^";
+        break;
+    }
     if (operation !== null) {
       const left = L.lowerExpr(arithmeticExpression.left);
       const right = L.lowerExpr(arithmeticExpression.right);
@@ -728,7 +743,7 @@ export function lowerNativeScalarAssertion(
           target.scalar === "usize" ||
           nativeIntegerInfo(target.scalar, pointerBits)?.bits === 64
           ? "the source is not a provably in-range decimal BigInt literal or the same exact type"
-          : "the source is not a provably in-range decimal number literal, same exact type, or same-type exact integer +, -, or * expression",
+          : "the source is not a provably in-range decimal number literal, same exact type, or same-type exact integer +, -, *, &, |, or ^ expression",
         locOf(expr),
       ),
     );

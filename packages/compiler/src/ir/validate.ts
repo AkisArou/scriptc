@@ -2910,6 +2910,9 @@ function validateFunction(
       case "nativeIntegerBin": {
         checkExpr(e.left);
         checkExpr(e.right);
+        if (!["+", "-", "*", "&", "|", "^"].includes(e.op)) {
+          err(`native integer operation has unsupported operator "${String(e.op)}"`, e.loc);
+        }
         if (nativeIntegerInfo(e.type.scalar, nativePointerBits) === null) {
           err(`native integer operation has unsupported type "${String(e.type.scalar)}"`, e.loc);
         }

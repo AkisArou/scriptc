@@ -5169,7 +5169,17 @@ class LlEmitter {
         const left = this.emitExpr(e.left);
         const right = this.emitExpr(e.right);
         const result = B.tmp();
-        const operation = e.op === "+" ? "add" : e.op === "-" ? "sub" : "mul";
+        const operation = e.op === "+"
+          ? "add"
+          : e.op === "-"
+            ? "sub"
+            : e.op === "*"
+              ? "mul"
+              : e.op === "&"
+                ? "and"
+                : e.op === "|"
+                  ? "or"
+                  : "xor";
         B.line(`${result} = ${operation} ${this.llType(e.type)} ${left.name}, ${right.name}`);
         return { name: result, type: e.type };
       }

@@ -552,7 +552,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "nativeIntegerBin": {
         const left = E.emitExpr(e.left);
         const right = E.emitExpr(e.right);
-        const operation = e.op === "+" ? "add" : e.op === "-" ? "sub" : "mul";
+        const operation = e.op === "+"
+          ? "add"
+          : e.op === "-"
+            ? "sub"
+            : e.op === "*"
+              ? "mul"
+              : e.op === "&"
+                ? "and"
+                : e.op === "|"
+                  ? "or"
+                  : "xor";
         return E.newTemp(
           e.type,
           `scr_native_${e.type.scalar}_${operation}(${left.name}, ${right.name})`,
