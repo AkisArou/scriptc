@@ -132,7 +132,9 @@ export type { NativeFrontendBinding, NativeFrontendExport, NativeFrontendInput, 
 export { resolveProvenanceSources } from "./frontend/provenance.js";
 export {
   emitExecutableCompilationPlan,
+  planExecutableExternalCBuild,
   type ExecutableCompilationPlan,
+  type ExecutableExternalBuildArtifacts,
   type ExecutableNativeBuildPlan,
 } from "./executable-plan.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";

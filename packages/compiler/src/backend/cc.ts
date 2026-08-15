@@ -3603,21 +3603,32 @@ export async function compileC(opts: CcOptions): Promise<void> {
       root = null;
     }
   }
-  const vendorBuildIdentity = await currentVendorCacheBuildIdentity(
-    driver,
-    `${toolchainEnv}\0${implicitToolchain ?? "<uncached>"}`,
-  );
+  const needsVendorPrerequisites =
+    dynamic ||
+    tls ||
+    (regex && !dynamic) ||
+    (((opts.zlib ?? false) || nativeFetch) && driver.target !== null) ||
+    (curlFetch && driver.target !== null);
+  const vendorBuildIdentity = needsVendorPrerequisites
+    ? await currentVendorCacheBuildIdentity(
+        driver,
+        `${toolchainEnv}\0${implicitToolchain ?? "<uncached>"}`,
+      )
+    : "unused";
   // Mutable include/SDK/config inputs can change behind a stable environment
   // spelling. The complete/runtime cache is disabled below; vendor objects
   // must follow the same rule instead of silently surviving in package-local
   // .cache. A private root gives this invocation the usual vendor build recipe
   // without publishing or reusing those prerequisites.
-  const transientVendorRoot = persistentDriverCache && implicitToolchain !== null
-    ? null
-    : join(
-        tmpdir(),
-        `scriptc-vendor-${process.pid}-${Math.random().toString(36).slice(2)}`,
-      );
+  const usePersistentVendorCache =
+    persistentDriverCache && implicitToolchain !== null;
+  const transientVendorRoot =
+    needsVendorPrerequisites && !usePersistentVendorCache
+      ? join(
+          tmpdir(),
+          `scriptc-vendor-${process.pid}-${Math.random().toString(36).slice(2)}`,
+        )
+      : null;
   const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot();
   // Every vendor output path is deterministic from pins, flags, driver, and
   // target. Build the command/key from those paths now, but do not materialize
@@ -3949,6 +3960,13 @@ export async function compileC(opts: CcOptions): Promise<void> {
   }
 
   if (root === null) {
+    // An external executor owns every input producer as well as the final
+    // invocation. In particular, merely asking for the command must never
+    // populate ScriptC's package-local vendor cache behind the build graph.
+    if (opts.commandExecutor !== undefined) {
+      await runClang(buildArgs((p) => p));
+      return;
+    }
     // The exact historical command line, byte for byte.
     try {
       await materializeVendorPrerequisites();

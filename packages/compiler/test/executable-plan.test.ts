@@ -6,6 +6,7 @@ import {
   compile,
   emitExecutableCompilationPlan,
   planExecutableCompilation,
+  planExecutableExternalCBuild,
   type CcOptions,
   type ExecutableCompilationPlan,
 } from "../src/index.js";
@@ -67,6 +68,31 @@ describe.each(["c", "llvm"] as const)(
       if (!relocated.ok) return;
       expect(relocated.plan).toEqual(planned.plan);
 
+      const external = await planExecutableExternalCBuild(planned.plan, {
+        program: "program/main",
+        runtime: "runtime/scriptc",
+        linkInputs: ["object/platform"],
+        output: "product/main",
+      });
+      expect(external.plan.inputs).toEqual([
+        "runtime/scriptc",
+        "program/main",
+        "object/platform",
+      ]);
+      expect(external.plan.arguments).toContainEqual({
+        kind: "input-path",
+        input: "object/platform",
+      });
+      expect(external.plan.arguments).toContainEqual({
+        kind: "literal",
+        value: "-lplatform",
+      });
+      expect(external.plan.arguments.at(-1)).toEqual({
+        kind: "output-path",
+        output: "product/main",
+      });
+      expect(JSON.stringify(external.plan)).not.toContain("__scriptc_external__");
+
       let directBuild: Readonly<CcOptions> | null = null;
       const direct = await compile(entryPath, {
         ...options,
@@ -112,4 +138,23 @@ test("emission rejects an unknown backend before reading IR", () => {
       nativeBuild: {},
     } as unknown as ExecutableCompilationPlan)
   ).toThrowError(/invalid backend/u);
+});
+
+test("external build planning requires every native link artifact", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "scriptc-external-plan-"));
+  temporaryDirectories.push(directory);
+  const entryPath = join(directory, "main.ts");
+  await writeFile(entryPath, "console.log(42);\n");
+  const planned = planExecutableCompilation(entryPath, {
+    backend: "c",
+    nativeLinkInputs: ["object/platform"],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+  await expect(planExecutableExternalCBuild(planned.plan, {
+    program: "program/main",
+    runtime: "runtime/scriptc",
+    linkInputs: [],
+    output: "product/main",
+  })).rejects.toThrowError(/declares 1 native link input/u);
 });

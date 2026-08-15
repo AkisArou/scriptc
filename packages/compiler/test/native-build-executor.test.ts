@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -99,5 +99,25 @@ describe("native build executor", () => {
         output: { id: "product/main", path: "/output/main" },
       },
     )).toThrowError(ExternalCcPlanError);
+  });
+
+  test("external command discovery does not materialize vendor prerequisites", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scriptc-external-vendor-"));
+    temporaryDirectories.push(directory);
+    let command: Readonly<CcCommand> | null = null;
+    await compileC({
+      cPath: join(directory, "program.c"),
+      outPath: join(directory, "program"),
+      dynamic: true,
+      commandExecutor: async (planned) => {
+        command = planned;
+      },
+    });
+    expect(command).not.toBeNull();
+    const engineArchive = command!.arguments.find((argument) =>
+      argument.endsWith("libqjs.a")
+    );
+    expect(engineArchive).toBeDefined();
+    await expect(access(engineArchive!)).rejects.toThrow();
   });
 });
