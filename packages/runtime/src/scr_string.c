@@ -83,6 +83,14 @@ ScrStr *scr_str_new(const char *bytes, size_t len) {
   return s;
 }
 
+const char *scr_str_c_data(ScrStr *s) {
+  if (memchr(s->data, '\0', s->len) == NULL) return s->data;
+  static const char message[] =
+      "Native C-string argument contains an embedded NUL byte";
+  scr_throw_error_msg(SCR_ERR_TYPE, message, sizeof message - 1);
+  return NULL;
+}
+
 /* One-slot free-block cache for append loops: `s += x` compiles to
  * concat + release-of-the-old-string every iteration, so the block freed
  * on iteration n is (with the geometric slack below) big enough for the

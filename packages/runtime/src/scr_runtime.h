@@ -550,6 +550,9 @@ typedef struct ScrStr {
 } ScrStr;
 
 ScrStr *scr_str_new(const char *bytes, size_t len); /* returns +1 */
+/* Borrow a C-compatible NUL-terminated view. Embedded NUL bytes set a
+ * pending TypeError and return NULL. */
+const char *scr_str_c_data(ScrStr *s);
 
 /* Internal allocators for buffer builders (scr_json.c): a +1 string with
  * UNINITIALIZED data (the builder fills bytes, then len and the NUL), and

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <string.h>
 
 typedef struct NtsPadded {
   uint8_t tag;
@@ -80,6 +81,16 @@ uint64_t nts_hash_utf8(const char *data, size_t length) {
     hash *= UINT64_C(1099511628211);
   }
   return hash;
+}
+
+void nts_c_string_observe(const char *data) {
+  static bool saw_native;
+  if (strcmp(data, "native") == 0) {
+    saw_native = true;
+    return;
+  }
+  if (saw_native && strcmp(data, "done") == 0) exit(42);
+  abort();
 }
 
 uint64_t nts_hash_bytes(const uint8_t *data, size_t length) {

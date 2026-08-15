@@ -6590,6 +6590,14 @@ class LlEmitter {
         binding.parameters.forEach((parameter, index) => {
           const arg = args[parameter.projection.argument]!;
           switch (parameter.projection.kind) {
+            case "utf8CString": {
+              const data = B.tmp();
+              this.declare("declare ptr @scr_str_c_data(ptr)");
+              B.line(`${data} = call ptr @scr_str_c_data(ptr ${arg.name})`);
+              this.emitPendingCheck();
+              callArgs.push(`${parameterTypes[index]} ${data}`);
+              break;
+            }
             case "utf8Data": {
               const data = B.tmp();
               B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 1`);

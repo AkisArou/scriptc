@@ -225,6 +225,7 @@ export type IrNativeArgumentType =
 
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
+  | { kind: "utf8CString"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
   | { kind: "bytesData"; argument: number }

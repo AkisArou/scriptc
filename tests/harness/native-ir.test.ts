@@ -223,6 +223,26 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" } },
     },
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#c_string_observe",
+      declaration: { module: nativePackage, name: "cStringObserve" },
+      entry: { kind: "c-symbol", symbol: "nts_c_string_observe" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "data", type: { kind: "string" } }],
+      parameters: [
+        {
+          name: "data",
+          type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "utf8CString", argument: 0 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" } },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
       declaration: { module: nativePackage, name: "hashBytes" },
       entry: { kind: "c-symbol", symbol: "nts_hash_bytes" },
@@ -1065,6 +1085,20 @@ function borrowedUtf8Module(): IrModule {
   return mod;
 }
 
+function borrowedCStringModule(): IrModule {
+  const mod = borrowedUtf8Module();
+  mod.nativeBindings![0]!.parameters = [
+    {
+      name: "data",
+      type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+      passMode: "pointer",
+      ownership: { kind: "borrowed", scope: "call" },
+      projection: { kind: "utf8CString", argument: 0 },
+    },
+  ];
+  return mod;
+}
+
 function exactScalarLiteralModule(
   scalar: IrNativeScalar,
   value: string,
@@ -1309,6 +1343,7 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
 
 test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
   expect(validateModule(borrowedUtf8Module())).toEqual([]);
+  expect(validateModule(borrowedCStringModule())).toEqual([]);
 
   const mutablePointer = borrowedUtf8Module();
   const dataType = mutablePointer.nativeBindings![0]!.parameters[0]!.type;
@@ -1328,6 +1363,14 @@ test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
   outOfRange.nativeBindings![0]!.parameters[1]!.projection.argument = 1;
   expect(validateModule(outOfRange).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" parameter "length" projects an invalid argument index',
+  );
+
+  const mixed = borrowedCStringModule();
+  mixed.nativeBindings![0]!.parameters.push(
+    borrowedUtf8Module().nativeBindings![0]!.parameters[1]!,
+  );
+  expect(validateModule(mixed).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" argument "data" has an incomplete or ambiguous ABI projection',
   );
 });
 
@@ -1849,6 +1892,48 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8, %s backend", (b
     } else {
       expect(generated).toContain("getelementptr inbounds %ScrStr");
     }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR checked UTF-8 C strings, %s backend", (backend) => {
+  test("passes the trailing NUL and rejects an embedded NUL before native entry", async () => {
+    const outDir = join(scratch, `utf8-c-string-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/utf8-c-string.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native UTF-8 C-string frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#c_string_observe",
+        arguments: [{ name: "data", type: { kind: "string" } }],
+        parameters: [
+          expect.objectContaining({ projection: { kind: "utf8CString", argument: 0 } }),
+        ],
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "utf8-c-string.c" : "utf8-c-string.ll"),
+      "utf8",
+    );
+    expect(generated).toContain("scr_str_c_data");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

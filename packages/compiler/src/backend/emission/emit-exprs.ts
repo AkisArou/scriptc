@@ -2307,6 +2307,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const nativeArgs = binding.parameters.map((parameter) => {
           const arg = args[parameter.projection.argument]!;
           switch (parameter.projection.kind) {
+            case "utf8CString": {
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(`const char *${raw} = scr_str_c_data(${arg.name});`);
+              E.emitPendingCheck();
+              return raw;
+            }
             case "utf8Data":
               return `(const void *)${arg.name}->data`;
             case "utf8ByteLength":

@@ -1543,6 +1543,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     const projectionsByArgument = binding.arguments.map(() => ({
       direct: 0,
+      utf8CString: 0,
       utf8Data: 0,
       utf8ByteLength: 0,
       bytesData: 0,
@@ -1630,6 +1631,22 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an inconsistent direct projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "utf8CString":
+          projectionCounts.utf8CString++;
+          if (
+            sourceArgument.type.kind !== "string" ||
+            parameter.type.kind !== "nativePointer" ||
+            !["i8", "u8"].includes(parameter.type.pointee) ||
+            parameter.type.const !== true ||
+            parameter.type.addressSpace !== 0 ||
+            parameter.ownership.kind !== "borrowed"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 C-string projection`,
               loc: moduleLoc,
             });
           }
@@ -1733,9 +1750,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const projections = projectionsByArgument[argumentIndex]!;
       const valid =
         argument.type.kind === "string"
-          ? projections.total === 2 &&
-            projections.utf8Data === 1 &&
-            projections.utf8ByteLength === 1
+          ? (projections.total === 1 && projections.utf8CString === 1) ||
+            (projections.total === 2 &&
+              projections.utf8Data === 1 &&
+              projections.utf8ByteLength === 1)
           : argument.type.kind === "bytes"
             ? projections.total === 2 &&
               projections.bytesData === 1 &&

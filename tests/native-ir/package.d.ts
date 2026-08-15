@@ -42,6 +42,7 @@ export declare function u64Identity(value: u64): u64;
 export declare function usizeIdentity(value: usize): usize;
 export declare function paddedRoundtrip(value: Padded): Padded;
 export declare function hashUtf8(value: string): u64;
+export declare function cStringObserve(value: string): void;
 export declare function hashBytes(value: Uint8Array): u64;
 export declare function callScoped(
   callback: (value: i32) => i32,
