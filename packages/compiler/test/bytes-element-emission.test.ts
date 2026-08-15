@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { emitModule } from "../src/backend/emission/emitter.js";
 import { emitLlvmModule } from "../src/backend/llvm/emitter.js";
-import { BOOL, F64, VOID, bytesOf, type IrBytesElem, type IrExpr, type IrLocal, type IrModule, type IrStmt } from "../src/ir/nodes.js";
+import { BOOL, F64, IR_VERSION, VOID, bytesOf, type IrBytesElem, type IrExpr, type IrLocal, type IrModule, type IrStmt } from "../src/ir/nodes.js";
 import { validateModule } from "../src/ir/validate.js";
 
 const loc = { file: "bytes-hot-loop.ts", start: 0, end: 0 };
@@ -66,7 +66,7 @@ function fixture(): IrModule {
   );
 
   return {
-    irVersion: 13,
+    irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{ name: "__main", params: [], returnType: VOID, locals, body, loc }],
@@ -136,7 +136,7 @@ function receiverReassignmentFixture(): IrModule {
   ];
 
   return {
-    irVersion: 13,
+    irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{ name: "__main", params: [], returnType: VOID, locals, body, loc }],
@@ -201,7 +201,7 @@ function integerLoopFixture(mutatesIndex = false): IrModule {
     { kind: "bytesSet", arr: bytesRef(), index: indexRef(), value: ref("sum"), loc },
   );
   return {
-    irVersion: 13,
+    irVersion: IR_VERSION,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{

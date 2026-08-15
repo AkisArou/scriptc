@@ -83,6 +83,10 @@ ScrStr *scr_str_new(const char *bytes, size_t len) {
   return s;
 }
 
+ScrStr *scr_str_from_c_data(const char *data) {
+  return data == NULL ? NULL : scr_str_new(data, strlen(data));
+}
+
 const char *scr_str_c_data(ScrStr *s) {
   if (memchr(s->data, '\0', s->len) == NULL) return s->data;
   static const char message[] =

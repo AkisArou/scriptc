@@ -550,6 +550,10 @@ typedef struct ScrStr {
 } ScrStr;
 
 ScrStr *scr_str_new(const char *bytes, size_t len); /* returns +1 */
+/* Copy one borrowed NUL-terminated C string into managed storage. NULL is
+ * preserved so the generated result projection can apply its declared
+ * nullable or contract-violation behavior. */
+ScrStr *scr_str_from_c_data(const char *data); /* returns +1 or NULL */
 /* Borrow a C-compatible NUL-terminated view. Embedded NUL bytes set a
  * pending TypeError and return NULL. */
 const char *scr_str_c_data(ScrStr *s);

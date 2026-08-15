@@ -21,6 +21,8 @@ export interface Padded {
 export interface Counter {
   readonly [nativeResource]: "Counter";
   add(delta: i32): i32;
+  label(): string | null;
+  requiredLabel(): string;
   value(): i32;
   dispose(): void;
 }

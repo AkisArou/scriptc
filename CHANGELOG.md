@@ -4,6 +4,8 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+- **Embedder Native IR can copy borrowed C-string results.** Native bindings now separate their physical result ABI from the logical TypeScript result with a mandatory projection. A checked `const char *` borrowed from a named handle receiver becomes an owned runtime UTF-8 string before that receiver is released, with explicit nullable results and catchable non-null contract violations in both C and LLVM. The breaking IR shape advances to version 16 rather than retaining a legacy fallback.
+
 <!-- release:start -->
 
 ## 0.0.31

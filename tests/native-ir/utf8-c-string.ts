@@ -1,10 +1,19 @@
-import { cStringObserve } from "@native-typescript/scabi-c-v1-fixture";
+import {
+  cStringObserve,
+  type i32,
+} from "@native-typescript/scabi-c-v1-fixture";
+import { exit } from "scriptc-native-test";
 
-cStringObserve("native");
+function run(): i32 {
+  cStringObserve("native");
 
-try {
-  cStringObserve("before\0after");
-} catch {
-  cStringObserve("done");
+  try {
+    cStringObserve("before\0after");
+  } catch {
+    cStringObserve("done");
+    return 42 as i32;
+  }
+  return 1 as i32;
 }
-process.exit(11);
+
+exit(run());

@@ -3,9 +3,9 @@
  * holds a JS number — NaN/Infinity literals cannot appear in source, but
  * a frontend bug producing one must not silently become `null` in JSON).
  */
-import type { IrModule } from "./nodes.js";
+import { IR_VERSION, type IrModule } from "./nodes.js";
 
-export const IR_VERSION = 15 as const;
+export { IR_VERSION } from "./nodes.js";
 
 export function serializeModule(mod: IrModule): string {
   return JSON.stringify(mod, (_key, value) => {

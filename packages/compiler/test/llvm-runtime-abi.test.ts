@@ -169,7 +169,12 @@ async function parseHeader(): Promise<{ protos: Map<string, CProto>; dataSyms: S
     // the name; anything that doesn't look like one (a parameter list we
     // matched inside, a typedef) is skipped.
     const before = src.slice(0, m.index);
-    const boundary = Math.max(before.lastIndexOf(";"), before.lastIndexOf("}"), before.lastIndexOf("{"));
+    const boundary = Math.max(
+      before.lastIndexOf(";"),
+      before.lastIndexOf("}"),
+      before.lastIndexOf("{"),
+      before.lastIndexOf("\n"),
+    );
     const retText = before.slice(boundary + 1).replace(/\s+/g, " ").trim();
     if (retText === "" || !/^[A-Za-z_][A-Za-z0-9_ *]*[ *]$/.test(`${retText} `)) continue;
     if (/\btypedef\b/.test(retText)) continue;

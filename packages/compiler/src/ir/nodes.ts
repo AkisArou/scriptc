@@ -233,6 +233,15 @@ export type IrNativeParameterProjection =
   | { kind: "callbackFunction"; argument: number }
   | { kind: "callbackContext"; argument: number };
 
+export type IrNativeResultProjection =
+  | { kind: "direct" }
+  | { kind: "utf8CString"; nullable: boolean };
+
+export type IrNativeResultAbiType =
+  | IrNativeValueType
+  | IrNativePointerType
+  | { kind: "void" };
+
 export type IrType =
   | IrNativeValueType
   | { kind: "f64" }
@@ -923,9 +932,12 @@ export function isRefCounted(t: IrType): boolean {
 
 /* ── module ────────────────────────────────────────────────────────────── */
 
+/** Current wire-format version for every producer and consumer of Native IR. */
+export const IR_VERSION = 16 as const;
+
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 15;
+  irVersion: typeof IR_VERSION;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -1048,11 +1060,13 @@ export interface IrNativeBinding {
     projection: IrNativeParameterProjection;
   }[];
   result: {
-    type: IrNativeValueType | { kind: "void" };
+    type: IrNativeResultAbiType;
     passMode: "value" | "pointer";
     ownership:
       | { kind: "value" }
+      | { kind: "borrowed"; scope: "receiver"; anchor: string }
       | { kind: "owned"; transfer: "to-runtime"; destructor: string };
+    projection: IrNativeResultProjection;
   };
 }
 

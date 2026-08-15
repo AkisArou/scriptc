@@ -45,7 +45,11 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
   );
   const errorNativeBindings = new Set(
     (mod.nativeBindings ?? [])
-      .filter((binding) => binding.error.kind !== "no-fail")
+      .filter((binding) =>
+        binding.error.kind !== "no-fail" ||
+        (binding.result.projection.kind === "utf8CString" &&
+          !binding.result.projection.nullable)
+      )
       .map((binding) => binding.id),
   );
   // Method name → every class's implementation of it (virtualCall callees).

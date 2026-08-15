@@ -243,6 +243,14 @@ int32_t nts_counter_add(NtsCounter *counter, int32_t delta) {
 
 int32_t nts_counter_value(NtsCounter *counter) { return counter->value; }
 
+const char *nts_counter_label(NtsCounter *counter) {
+  return counter->value == 42 ? "native \xE2\x9C\x93" : NULL;
+}
+
+const char *nts_counter_required_label(NtsCounter *counter) {
+  return nts_counter_label(counter);
+}
+
 void nts_counter_destroy(NtsCounter *counter) {
   nts_counter_destroyed++;
   free(counter);

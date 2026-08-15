@@ -16,6 +16,7 @@ import { nativeCallbackArgumentType, nativeScalarType } from "../../packages/com
 import { deserializeModule, IR_VERSION, serializeModule } from "../../packages/compiler/src/ir/serialize.js";
 import { validateModule } from "../../packages/compiler/src/ir/validate.js";
 import type { NativeFrontendInput } from "../../packages/compiler/src/frontend/native.js";
+import { materializeNativeBinding } from "../../packages/compiler/src/frontend/lowering/lower-native.js";
 import { analyze, compile, compileLibrary } from "../../packages/compiler/src/index.js";
 
 const repoRoot = join(import.meta.dirname, "../..");
@@ -119,6 +120,7 @@ const SUBSCRIPTION_DEFINITION = {
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
 const NO_NATIVE_ERROR = { kind: "no-fail" } as const;
+const DIRECT_RESULT = { kind: "direct" } as const;
 
 type DirectNativeParameter = {
   readonly name: string;
@@ -181,7 +183,7 @@ const localNativeInput: NativeFrontendInput = {
         sourceCall: { kind: "function" as const },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type, passMode: "value", ownership: { kind: "value" } }]),
-        result: { type, passMode: "value" as const, ownership: { kind: "value" as const } },
+        result: { type, passMode: "value" as const, ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       };
     }),
     {
@@ -193,7 +195,7 @@ const localNativeInput: NativeFrontendInput = {
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" } }]),
-      result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const } },
+      result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
@@ -220,7 +222,7 @@ const localNativeInput: NativeFrontendInput = {
           projection: { kind: "utf8ByteLength", argument: 0 },
         },
       ],
-      result: { type: U64, passMode: "value", ownership: { kind: "value" } },
+      result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#c_string_observe",
@@ -240,7 +242,7 @@ const localNativeInput: NativeFrontendInput = {
           projection: { kind: "utf8CString", argument: 0 },
         },
       ],
-      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" } },
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
@@ -267,7 +269,7 @@ const localNativeInput: NativeFrontendInput = {
           projection: { kind: "bytesByteLength", argument: 0 },
         },
       ],
-      result: { type: U64, passMode: "value", ownership: { kind: "value" } },
+      result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#call_scoped",
@@ -304,7 +306,7 @@ const localNativeInput: NativeFrontendInput = {
           projection: { kind: "argument", argument: 1 },
         },
       ],
-      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
@@ -317,7 +319,7 @@ const localNativeInput: NativeFrontendInput = {
       ...directSignature([
         { name: "error_number", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
-      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#subscription_create",
@@ -359,6 +361,7 @@ const localNativeInput: NativeFrontendInput = {
           destructor:
             "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
         },
+        projection: DIRECT_RESULT,
       },
     },
     {
@@ -381,6 +384,7 @@ const localNativeInput: NativeFrontendInput = {
         type: NATIVE_VOID,
         passMode: "value",
         ownership: { kind: "value" },
+        projection: DIRECT_RESULT,
       },
     },
     ...(["emit", "emitForeign"] as const).map((method) => ({
@@ -416,6 +420,7 @@ const localNativeInput: NativeFrontendInput = {
         type: I32,
         passMode: "value" as const,
         ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
       },
     })),
     {
@@ -430,7 +435,7 @@ const localNativeInput: NativeFrontendInput = {
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
         { name: "delta", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
-      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_create",
@@ -451,6 +456,7 @@ const localNativeInput: NativeFrontendInput = {
           transfer: "to-runtime",
           destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
         },
+        projection: DIRECT_RESULT,
       },
     },
     {
@@ -464,7 +470,7 @@ const localNativeInput: NativeFrontendInput = {
       ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
       ]),
-      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" } },
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_destroyed_count",
@@ -475,7 +481,7 @@ const localNativeInput: NativeFrontendInput = {
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([]),
-      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_value",
@@ -488,7 +494,43 @@ const localNativeInput: NativeFrontendInput = {
       ...directSignature([
         { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
       ]),
-      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_label",
+      declaration: { module: nativePackage, name: "Counter.label" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_label" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
+        projection: { kind: "utf8CString", nullable: true },
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_required_label",
+      declaration: { module: nativePackage, name: "Counter.requiredLabel" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_required_label" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
+        projection: { kind: "utf8CString", nullable: false },
+      },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_verify",
@@ -504,7 +546,7 @@ const localNativeInput: NativeFrontendInput = {
         { name: "expected_value", type: I32, passMode: "value", ownership: { kind: "value" } },
         { name: "expected_destroyed", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
-      result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
   ],
 };
@@ -536,7 +578,7 @@ function frontendNativeInput(): NativeFrontendInput {
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: ISIZE, passMode: "value", ownership: { kind: "value" } }]),
-        result: { type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: ISIZE, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#exit",
@@ -547,7 +589,7 @@ function frontendNativeInput(): NativeFrontendInput {
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
-        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#unused",
@@ -558,7 +600,7 @@ function frontendNativeInput(): NativeFrontendInput {
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#verify-exact-integers",
@@ -580,7 +622,7 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
         ]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#verify-padded",
@@ -596,7 +638,7 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "scalarValue", type: U64, passMode: "value", ownership: { kind: "value" as const } },
           { name: "ratio", type: NATIVE_F64, passMode: "value", ownership: { kind: "value" as const } },
         ]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#verify-utf8-hash",
@@ -609,7 +651,7 @@ function frontendNativeInput(): NativeFrontendInput {
         ...directSignature([
           { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
         ]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#verify-bytes-hash",
@@ -622,7 +664,7 @@ function frontendNativeInput(): NativeFrontendInput {
         ...directSignature([
           { name: "actual", type: U64, passMode: "value", ownership: { kind: "value" } },
         ]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#verify-call-scoped",
@@ -636,7 +678,7 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "forwarded", type: I32, passMode: "value", ownership: { kind: "value" } },
           { name: "captured", type: I32, passMode: "value", ownership: { kind: "value" } },
         ]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#callback-errno",
@@ -673,7 +715,7 @@ function frontendNativeInput(): NativeFrontendInput {
             projection: { kind: "argument", argument: 1 },
           },
         ],
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       },
       {
         id: "scriptc-test@1#nullable-counter",
@@ -694,6 +736,7 @@ function frontendNativeInput(): NativeFrontendInput {
             transfer: "to-runtime",
             destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
           },
+          projection: DIRECT_RESULT,
         },
       },
       {
@@ -739,6 +782,7 @@ function frontendNativeInput(): NativeFrontendInput {
             transfer: "to-runtime",
             destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
           },
+          projection: DIRECT_RESULT,
         },
       },
       ...([
@@ -770,6 +814,7 @@ function frontendNativeInput(): NativeFrontendInput {
           type: I32,
           passMode: "value" as const,
           ownership: { kind: "value" as const },
+          projection: DIRECT_RESULT,
         },
       })),
       {
@@ -791,6 +836,7 @@ function frontendNativeInput(): NativeFrontendInput {
           type: I32,
           passMode: "value",
           ownership: { kind: "value" },
+          projection: DIRECT_RESULT,
         },
       },
       {
@@ -812,6 +858,7 @@ function frontendNativeInput(): NativeFrontendInput {
           type: I32,
           passMode: "value",
           ownership: { kind: "value" },
+          projection: DIRECT_RESULT,
         },
       },
       {
@@ -838,6 +885,7 @@ function frontendNativeInput(): NativeFrontendInput {
           type: NATIVE_VOID,
           passMode: "value",
           ownership: { kind: "value" },
+          projection: DIRECT_RESULT,
         },
       },
       {
@@ -854,7 +902,7 @@ function frontendNativeInput(): NativeFrontendInput {
           { name: "activeAfter", type: I32, passMode: "value", ownership: { kind: "value" } },
           { name: "shutdown", type: I32, passMode: "value", ownership: { kind: "value" } },
         ]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       },
     ],
   };
@@ -1017,7 +1065,7 @@ function exactI32Module(value = "42"): IrModule {
         variadic: false,
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
-        result: { type: I32, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
       {
         id: "process.exit",
@@ -1027,7 +1075,7 @@ function exactI32Module(value = "42"): IrModule {
         variadic: false,
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
-        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
     ],
     functions: [
@@ -1151,7 +1199,7 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
           { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
           { name: "unsignedSize", type: USIZE, passMode: "value", ownership: { kind: "value" as const } },
         ]),
-        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const } },
+        result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       },
     ],
     functions: [
@@ -1337,7 +1385,43 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
   }
   exit.expr.type = I32;
   expect(validateModule(wrongResult).map((error) => error.message)).toContain(
-    "in __main: Native IR call process.exit type native:i32 != result void",
+    "in __main: Native IR call process.exit type native:i32 does not match its direct result",
+  );
+});
+
+test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
+  const native = structuredClone(localNativeInput);
+  const binding = native.bindings.find(
+    (candidate) => candidate.id === "native-typescript.fixture.c-v1@0.0.0#counter_label",
+  );
+  if (binding === undefined) throw new Error("test fixture lost its C-string-result binding");
+  const mod = exactI32Module();
+  mod.nativeTypes = native.types.map((definition) => structuredClone(definition));
+  mod.nativeBindings = [materializeNativeBinding(binding)];
+  mod.functions = [];
+  expect(validateModule(mod)).toEqual([]);
+
+  const missingProjection = structuredClone(mod);
+  Reflect.deleteProperty(missingProjection.nativeBindings![0]!.result, "projection");
+  expect(() => validateModule(missingProjection)).not.toThrow();
+  expect(validateModule(missingProjection).map((error) => error.message)).toContain(
+    'Native IR binding "native-typescript.fixture.c-v1@0.0.0#counter_label" has no valid result projection',
+  );
+
+  const missingAnchor = structuredClone(mod);
+  const ownership = missingAnchor.nativeBindings![0]!.result.ownership;
+  if (ownership.kind !== "borrowed") throw new Error("test fixture lost its borrowed result");
+  ownership.anchor = "missing";
+  expect(validateModule(missingAnchor).map((error) => error.message)).toContain(
+    'Native IR binding "native-typescript.fixture.c-v1@0.0.0#counter_label" has an invalid UTF-8 C-string result projection',
+  );
+
+  const mutablePointer = structuredClone(mod);
+  const resultType = mutablePointer.nativeBindings![0]!.result.type;
+  if (resultType.kind !== "nativePointer") throw new Error("test fixture lost its pointer result");
+  resultType.const = false;
+  expect(validateModule(mutablePointer).map((error) => error.message)).toContain(
+    'Native IR binding "native-typescript.fixture.c-v1@0.0.0#counter_label" has an invalid UTF-8 C-string result projection',
   );
 });
 
@@ -1943,6 +2027,50 @@ describe.each(["c", "llvm"] as const)("Native IR checked UTF-8 C strings, %s bac
   });
 });
 
+describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8 C-string results, %s backend", (backend) => {
+  test("copies before disposal and enforces nullable and non-null contracts", async () => {
+    const outDir = join(scratch, `c-string-result-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/c-string-result.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native C-string-result frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings).toContainEqual(
+      expect.objectContaining({
+        id: "native-typescript.fixture.c-v1@0.0.0#counter_label",
+        result: {
+          type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
+          projection: { kind: "utf8CString", nullable: true },
+        },
+      }),
+    );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "c-string-result.c" : "c-string-result.ll"),
+      "utf8",
+    );
+    expect(generated).toContain("scr_str_from_c_data");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
 describe.each(["c", "llvm"] as const)("Native IR borrowed bytes, %s backend", (backend) => {
   test.each([
     ["Uint8Array", "bytes.ts"],
@@ -2216,7 +2344,7 @@ describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (bac
       expect.objectContaining({
         id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
         error: { kind: "errno", failureValue: "-1" },
-        result: { type: I32, passMode: "value", ownership: { kind: "value" } },
+        result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       }),
     );
     const generated = readFileSync(

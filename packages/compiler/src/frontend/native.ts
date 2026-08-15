@@ -4,6 +4,8 @@ import type {
   IrNativeCallbackContract,
   IrNativeHandleDef,
   IrNativeParameterProjection,
+  IrNativeResultAbiType,
+  IrNativeResultProjection,
   IrNativeStructDef,
   IrNativeValueType,
 } from "../ir/nodes.js";
@@ -67,15 +69,21 @@ export interface NativeFrontendBinding {
     readonly projection: Readonly<IrNativeParameterProjection>;
   }[];
   readonly result: {
-    readonly type: Readonly<IrNativeValueType> | { readonly kind: "void" };
+    readonly type: Readonly<IrNativeResultAbiType>;
     readonly passMode: "value" | "pointer";
     readonly ownership:
       | { readonly kind: "value" }
+      | {
+          readonly kind: "borrowed";
+          readonly scope: "receiver";
+          readonly anchor: string;
+        }
       | {
           readonly kind: "owned";
           readonly transfer: "to-runtime";
           readonly destructor: string;
         };
+    readonly projection: Readonly<IrNativeResultProjection>;
   };
 }
 

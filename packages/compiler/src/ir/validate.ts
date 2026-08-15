@@ -12,6 +12,7 @@ import type {
   IrModule,
   IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
+  IrNativePointerType,
   IrNativeScalarType,
   IrRecordShape,
   IrRegexIntrinsicMethod,
@@ -1291,7 +1292,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     (type.kind === "nativeStruct" && nativeTypesById.get(type.typeId)?.kind === "struct") ||
     (type.kind === "nativeHandle" && nativeTypesById.get(type.typeId)?.kind === "handle");
   const validNativePointer = (
-    type: NonNullable<IrModule["nativeBindings"]>[number]["parameters"][number]["type"],
+    type: IrNativePointerType,
   ): boolean =>
     type.kind === "nativePointer" &&
     ["i8", "u8"].includes(type.pointee) &&
@@ -1770,26 +1771,59 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
     });
-    const handleResult = binding.result.type.kind === "nativeHandle";
-    if (binding.result.passMode !== (handleResult ? "pointer" : "value")) {
+    const resultProjection = binding.result.projection as
+      | { kind: "direct" }
+      | { kind: "utf8CString"; nullable?: unknown }
+      | undefined;
+    if (resultProjection?.kind === "direct") {
+      const handleResult = binding.result.type.kind === "nativeHandle";
+      if (binding.result.passMode !== (handleResult ? "pointer" : "value")) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" direct result has a pass mode inconsistent with its type`,
+          loc: moduleLoc,
+        });
+      }
+      if (
+        handleResult
+          ? binding.result.ownership.kind !== "owned"
+          : binding.result.ownership.kind !== "value"
+      ) {
+        errors.push({ message: `Native IR binding "${binding.id}" direct result has invalid ownership`, loc: moduleLoc });
+      }
+      if (
+        binding.result.type.kind === "nativePointer" ||
+        (binding.result.type.kind !== "void" && !validNativeValue(binding.result.type))
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" direct result has an unsupported exact type`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "utf8CString") {
+      const ownership = binding.result.ownership;
+      const anchor = binding.arguments.find(
+        (argument) =>
+          ownership.kind === "borrowed" && argument.name === ownership.anchor,
+      );
+      if (
+        binding.result.type.kind !== "nativePointer" ||
+        !validNativePointer(binding.result.type) ||
+        binding.result.type.const !== true ||
+        binding.result.passMode !== "pointer" ||
+        ownership.kind !== "borrowed" ||
+        ownership.scope !== "receiver" ||
+        anchor?.type.kind !== "nativeHandle" ||
+        binding.error.kind !== "no-fail" ||
+        typeof resultProjection.nullable !== "boolean"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid UTF-8 C-string result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else {
       errors.push({
-        message: `Native IR binding "${binding.id}" result has a pass mode inconsistent with its type`,
-        loc: moduleLoc,
-      });
-    }
-    if (
-      handleResult
-        ? binding.result.ownership.kind !== "owned"
-        : binding.result.ownership.kind !== "value"
-    ) {
-      errors.push({ message: `Native IR binding "${binding.id}" result has invalid ownership`, loc: moduleLoc });
-    }
-    if (
-      binding.result.type.kind !== "void" &&
-      !validNativeValue(binding.result.type)
-    ) {
-      errors.push({
-        message: `Native IR binding "${binding.id}" result has an unsupported exact type`,
+        message: `Native IR binding "${binding.id}" has no valid result projection`,
         loc: moduleLoc,
       });
     }
@@ -3527,11 +3561,41 @@ function validateFunction(
             expectType(arg, argument.type, `Native IR call ${e.binding} arg ${i}`);
           }
         });
-        if (!typeEquals(e.type, binding.result.type)) {
-          err(
-            `Native IR call ${e.binding} type ${typeKey(e.type)} != result ${typeKey(binding.result.type)}`,
-            e.loc,
-          );
+        const resultProjection = binding.result.projection as
+          | { kind: "direct" }
+          | { kind: "utf8CString"; nullable?: unknown }
+          | undefined;
+        if (resultProjection?.kind === "direct") {
+          if (
+            binding.result.type.kind === "nativePointer" ||
+            !typeEquals(e.type, binding.result.type)
+          ) {
+            err(
+              `Native IR call ${e.binding} type ${typeKey(e.type)} does not match its direct result`,
+              e.loc,
+            );
+          }
+        } else if (
+          resultProjection?.kind === "utf8CString" &&
+          resultProjection.nullable === true
+        ) {
+          const unionId = e.type.kind === "union" ? e.type.unionId : null;
+          const arms = unionId === null ? undefined : unions.get(unionId)?.arms;
+          if (
+            arms?.length !== 2 ||
+            !arms.some((arm) => arm.kind === "string") ||
+            !arms.some((arm) => arm.kind === "nullT")
+          ) {
+            err(`Native IR call ${e.binding} must project to string | null`, e.loc);
+          }
+        } else if (
+          resultProjection?.kind === "utf8CString" &&
+          resultProjection.nullable === false &&
+          e.type.kind !== "string"
+        ) {
+          err(`Native IR call ${e.binding} must project to string`, e.loc);
+        } else if (resultProjection?.kind !== "utf8CString") {
+          err(`Native IR call ${e.binding} has no valid result projection`, e.loc);
         }
         break;
       }

@@ -10,6 +10,7 @@ import type {
   IrNativeStructType,
   IrNativeTypeDef,
   IrNativeValueType,
+  IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
 import { nativeIntegerInfo, typeEquals } from "../../ir/nodes.js";
@@ -112,6 +113,23 @@ function failSignature(
   throw new PoisonError();
 }
 
+function matchesNativeResultSource(
+  L: Lowerer,
+  binding: NativeInputBinding,
+  mapped: IrType,
+): boolean {
+  if (binding.result.projection.kind === "direct") {
+    return binding.result.type.kind !== "nativePointer" &&
+      typeEquals(mapped, binding.result.type);
+  }
+  if (!binding.result.projection.nullable) return mapped.kind === "string";
+  if (mapped.kind !== "union") return false;
+  const arms = L.unions.get(mapped.unionId)?.arms;
+  return arms?.length === 2 &&
+    arms.some((arm) => arm.kind === "string") &&
+    arms.some((arm) => arm.kind === "nullT");
+}
+
 function validateDeclaration(
   L: Lowerer,
   binding: NativeInputBinding,
@@ -189,12 +207,12 @@ function validateDeclaration(
     return;
   }
   const mappedResult = L.mapTypeOf(sourceResult);
-  if (mappedResult === null || !typeEquals(mappedResult, binding.result.type)) {
+  if (mappedResult === null || !matchesNativeResultSource(L, binding, mappedResult)) {
     failSignature(
       L,
       binding,
       `the return maps to '${mappedResult === null ? L.checker.typeToString(sourceResult) : L.fmt(mappedResult)}', ` +
-        `not '${L.fmt(binding.result.type)}'`,
+        `not the '${binding.result.projection.kind}' native result projection`,
       loc,
     );
   }
@@ -264,11 +282,22 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
     L.usedNativeTypeIds.add(binding.result.type.typeId);
   }
+  const sourceResult = L.typeOf(expr);
+  const mappedResult = L.mapTypeOf(sourceResult);
+  const resultType: IrType = sourceResult.flags & ts.TypeFlags.Never
+    ? binding.error.kind !== "no-fail" &&
+        binding.result.projection.kind === "direct" &&
+        binding.result.type.kind !== "nativePointer"
+      ? { ...binding.result.type }
+      : failBinding(L, binding, "a non-failing native call cannot produce 'never'", loc)
+    : mappedResult !== null && matchesNativeResultSource(L, binding, mappedResult)
+      ? mappedResult
+      : failBinding(L, binding, "the validated declaration lost its source result type", loc);
   return {
     kind: "nativeCall",
     binding: binding.id,
     args,
-    type: { ...binding.result.type },
+    type: { ...resultType },
     loc,
   };
 }
@@ -504,6 +533,7 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
       type: { ...binding.result.type },
       passMode: binding.result.passMode,
       ownership: { ...binding.result.ownership },
+      projection: { ...binding.result.projection },
     },
   };
 }

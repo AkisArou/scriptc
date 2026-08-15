@@ -2344,6 +2344,43 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
+        if (binding.result.projection.kind === "utf8CString") {
+          const raw = `sc_t${E.tempCounter++}`;
+          const managed = `sc_t${E.tempCounter++}`;
+          E.line(`const char *${raw} = ${call};${E.srcComment(e.loc)}`);
+          E.line(`ScrStr *${managed} = scr_str_from_c_data(${raw});`);
+          if (binding.result.projection.nullable) {
+            if (e.type.kind !== "union") {
+              throw new Error(`emitter bug: nullable C-string result is not a union in ${binding.id}`);
+            }
+            const arms = E.unionsById.get(e.type.unionId)?.arms;
+            const stringTag = arms?.findIndex((arm) => typeEquals(arm, STRING)) ?? -1;
+            const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
+            if (stringTag < 0 || nullTag < 0) {
+              throw new Error(`emitter bug: nullable C-string result lacks string/null arms in ${binding.id}`);
+            }
+            const adapters = vAdapters(STRING);
+            const present =
+              `scr_union_new_ref(${stringTag}, ${managed}, ` +
+              `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(STRING)})`;
+            const absent = E.unitInstanceRef(e.type.unionId, nullTag);
+            const result = E.newTemp(
+              e.type,
+              `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
+            );
+            if (callbacksMayThrow) E.emitPendingCheck();
+            releaseArguments();
+            return result;
+          }
+          if (e.type.kind !== "string") {
+            throw new Error(`emitter bug: non-null C-string result is not a string in ${binding.id}`);
+          }
+          const result = E.newTemp(e.type, managed);
+          E.line(`if (${result.name} == NULL) scr_native_throw_null(${operation});`);
+          E.emitPendingCheck();
+          releaseArguments();
+          return result;
+        }
         if (binding.result.type.kind === "nativeHandle") {
           if (binding.result.ownership.kind !== "owned") {
             throw new Error(`emitter bug: native handle result without ownership in ${binding.id}`);

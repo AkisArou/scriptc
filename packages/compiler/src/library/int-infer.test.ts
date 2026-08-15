@@ -10,7 +10,7 @@
  * slots: `send(x)` is a call whose callee's first parameter the config
  * declares i64 (slot path Msg.count), `sendU64(x)` u64 (Msg.id). */
 import { describe, expect, test } from "vitest";
-import type { IrExpr, IrFunction, IrModule, IrNumBinOp, IrStmt } from "../ir/nodes.js";
+import { IR_VERSION, type IrExpr, type IrFunction, type IrModule, type IrNumBinOp, type IrStmt } from "../ir/nodes.js";
 import {
   checkLibraryIntegerSlots,
   type IntSlotConfig,
@@ -65,7 +65,7 @@ const sink = (name: string): IrFunction => ({
 /** A module holding the case function plus the two declared sinks. */
 function caseModule(params: string[], locals: string[], body: IrStmt[]): IrModule {
   return {
-    irVersion: 15,
+    irVersion: IR_VERSION,
     sourceFile: "corpus.ts",
     functions: [
       sink("send"),
@@ -136,7 +136,7 @@ const RECORD_CFG: IntSlotConfig = {
 
 function recordCase(body: IrStmt[], names = ["m"], extraFns: IrFunction[] = []): IrModule {
   return {
-    irVersion: 15,
+    irVersion: IR_VERSION,
     sourceFile: "fields.ts",
     functions: [
       ...extraFns,
@@ -177,7 +177,7 @@ const classCountRead = (): IrExpr => ({
 
 function onlyOrdinaryClass(body: IrStmt[]): IntVerdict {
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: IR_VERSION,
     sourceFile: "class-fields.ts",
     functions: [
       sink("send"),
@@ -391,7 +391,7 @@ describe("the domain's edges beyond the corpus", () => {
       loc,
     };
     const mod: IrModule = {
-      irVersion: 15,
+      irVersion: IR_VERSION,
       sourceFile: "optional.ts",
       functions: [{
         name: "normalize",

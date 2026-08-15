@@ -1331,7 +1331,7 @@ class LlEmitter {
    * boundaries. LLVM represents that contract with parameter/return
    * attributes rather than in the integer type itself. */
   private nativeReturnType(t: IrNativeBinding["result"]["type"]): string {
-    const type = this.llType(t);
+    const type = t.kind === "nativePointer" ? "ptr" : this.llType(t);
     if (t.kind !== "nativeScalar") return type;
     switch (t.scalar) {
       case "i8":
@@ -6562,8 +6562,11 @@ class LlEmitter {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        const aggregateResult = binding.result.type.kind === "nativeStruct"
-          ? this.nativeStructLayout(binding.result.type.typeId)
+        const aggregateType = binding.result.type.kind === "nativeStruct"
+          ? binding.result.type
+          : null;
+        const aggregateResult = aggregateType !== null
+          ? this.nativeStructLayout(aggregateType.typeId)
           : null;
         const returnType = aggregateResult === null ? this.nativeReturnType(binding.result.type) : "void";
         const parameterTypes = binding.parameters.map((parameter) =>
@@ -6574,10 +6577,10 @@ class LlEmitter {
         if (aggregateResult !== null) {
           resultSlot = B.tmp();
           B.entryAllocas.push(
-            `${resultSlot} = alloca ${this.llType(binding.result.type)}, align ${aggregateResult.definition.alignment}`,
+            `${resultSlot} = alloca ${this.llType(aggregateType!)}, align ${aggregateResult.definition.alignment}`,
           );
           declarationParameters.unshift(
-            `ptr sret(${this.llType(binding.result.type)}) align ${aggregateResult.definition.abi.alignment}`,
+            `ptr sret(${this.llType(aggregateType!)}) align ${aggregateResult.definition.abi.alignment}`,
           );
         }
         this.declare(
@@ -6671,7 +6674,7 @@ class LlEmitter {
           B.line(call);
           const result = B.tmp();
           B.line(
-            `${result} = load ${this.llType(binding.result.type)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
+            `${result} = load ${this.llType(aggregateType!)}, ptr ${resultSlot}, align ${aggregateResult.definition.alignment}`,
           );
           if (callbacksMayThrow) this.emitPendingCheck();
           releaseArguments();
@@ -6682,6 +6685,52 @@ class LlEmitter {
           if (callbacksMayThrow) this.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };
+        }
+        if (binding.result.projection.kind === "utf8CString") {
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          this.declare("declare ptr @scr_str_from_c_data(ptr)");
+          const managed = B.tmp();
+          B.line(`${managed} = call ptr @scr_str_from_c_data(ptr ${raw})`);
+          if (binding.result.projection.nullable) {
+            if (e.type.kind !== "union") {
+              throw new Error(`llvm emitter bug: nullable C-string result is not a union in ${binding.id}`);
+            }
+            const arms = this.unionsById.get(e.type.unionId)?.arms;
+            const stringTag = arms?.findIndex((arm) => typeEquals(arm, STRING)) ?? -1;
+            const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
+            if (stringTag < 0 || nullTag < 0) {
+              throw new Error(`llvm emitter bug: nullable C-string result lacks string/null arms in ${binding.id}`);
+            }
+            const value = this.wrapNullable(
+              raw,
+              managed,
+              STRING,
+              stringTag,
+              e.type,
+              nullTag,
+            );
+            if (callbacksMayThrow) this.emitPendingCheck();
+            releaseArguments();
+            return value;
+          }
+          if (e.type.kind !== "string") {
+            throw new Error(`llvm emitter bug: non-null C-string result is not a string in ${binding.id}`);
+          }
+          const value = this.own({ name: managed, type: e.type });
+          const isNull = B.tmp();
+          const throwBlock = B.newLabel("native.cstr.throw");
+          const continuation = B.newLabel("native.cstr.ok");
+          B.line(`${isNull} = icmp eq ptr ${managed}, null`);
+          B.condBr(isNull, throwBlock, continuation);
+          B.startBlock(throwBlock);
+          this.declare("declare void @scr_native_throw_null(ptr)");
+          B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+          B.br(continuation);
+          B.startBlock(continuation);
+          this.emitPendingCheck();
+          releaseArguments();
+          return value;
         }
         if (binding.result.type.kind === "nativeHandle") {
           if (binding.result.ownership.kind !== "owned") {
