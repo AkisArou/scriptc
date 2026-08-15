@@ -1204,6 +1204,15 @@ function frontendNativeInput(): NativeFrontendInput {
   };
 }
 
+/** A few compiler-focused cases intentionally extend the in-tree fixture
+ * with declarations and C symbols that an embedder-owned SCABI fixture does
+ * not promise. Keep those cases in the ordinary fork suite, but do not treat
+ * absent test-only symbols as failures of an externally supplied frontend
+ * program. */
+const localFixtureTest = process.env["SCRIPTC_NATIVE_FRONTEND_INPUT"] === undefined
+  ? test
+  : test.skip;
+
 function nativeExternalTypes(): Record<string, string> {
   const declarations =
     process.env["SCRIPTC_NATIVE_IR_DECLARATIONS"] ??
@@ -2254,7 +2263,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  test("lowers native class construction and static factories through a namespace import", async () => {
+  localFixtureTest("lowers native class construction and static factories through a namespace import", async () => {
     const destructor = "native-typescript.fixture.c-v1@0.0.0#counter_destroy";
     const resultType = {
       type: COUNTER,
@@ -2510,7 +2519,7 @@ describe.each(["c", "llvm"] as const)("Native IR aggregate ABI, %s backend", (ba
     });
   });
 
-  test("expands one logical struct into multiple physical ABI values", async () => {
+  localFixtureTest("expands one logical struct into multiple physical ABI values", async () => {
     const outDir = join(scratch, `aggregate-expanded-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/aggregate-expanded.ts"), {
       outDir,
