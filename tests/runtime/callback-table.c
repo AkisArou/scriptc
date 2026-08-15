@@ -21,6 +21,11 @@ static const char wrong_signature;
 static _Atomic size_t anchors_freed;
 static _Atomic size_t events_destroyed;
 
+_Noreturn void scr_trap(const char *message) {
+  fputs(message, stderr);
+  abort();
+}
+
 static void *retain_anchor(void *opaque) {
   TestAnchor *anchor = opaque;
   anchor->rc++;

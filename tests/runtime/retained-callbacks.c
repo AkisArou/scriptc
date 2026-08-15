@@ -26,6 +26,7 @@ typedef struct {
 static const char signature;
 static _Atomic size_t closures_freed;
 static _Atomic size_t invocations_destroyed;
+static _Atomic size_t source_owner_retains;
 static _Atomic size_t wakes;
 static ScrCallbackTable *attached_table;
 static ScrCallbackToken *attached_token;
@@ -45,6 +46,12 @@ _Noreturn void scr_trap(const char *message) {
 }
 
 bool scr_exc_pending(void) { return exception_pending; }
+
+ScrNativeHandle *scr_native_handle_retain_live(ScrNativeHandle *handle) {
+  assert(handle != NULL);
+  atomic_fetch_add_explicit(&source_owner_retains, 1, memory_order_relaxed);
+  return handle;
+}
 
 void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
                                         ScrCallbackTable *table,
@@ -147,9 +154,12 @@ int main(void) {
   assert(!scr_retained_callbacks_configure(wake_owner, &wakes));
 
   ScrClosure *closure = new_closure();
+  ScrNativeHandle *source_owner = (ScrNativeHandle *)(uintptr_t)1;
   ScrCallbackToken *token =
-      scr_retained_callbacks_register(closure, &signature);
+      scr_retained_callbacks_register(closure, &signature, source_owner);
   assert(token != NULL && closure->rc == 2);
+  assert(scr_retained_callbacks_retain_owner(token) == source_owner);
+  assert(atomic_load(&source_owner_retains) == 1);
   assert(scr_retained_callbacks_active() == 1);
 
   Producer producer = {.token = token, .first = 1, .count = 100};
@@ -182,7 +192,7 @@ int main(void) {
   /* Destruction is fenced while an owner delivery is still executing. */
   assert(scr_retained_callbacks_configure(wake_owner, &wakes));
   closure = new_closure();
-  token = scr_retained_callbacks_register(closure, &signature);
+  token = scr_retained_callbacks_register(closure, &signature, NULL);
   assert(token != NULL);
   assert(scr_callback_token_admit(
       token, &new_invocation(7, true, false)->invocation));
@@ -208,7 +218,7 @@ int main(void) {
    * during the attempted call are destroyed, never delivered later. */
   assert(scr_retained_callbacks_configure(wake_owner, &wakes));
   closure = new_closure();
-  token = scr_retained_callbacks_register(closure, &signature);
+  token = scr_retained_callbacks_register(closure, &signature, NULL);
   assert(token != NULL);
   assert(scr_callback_token_admit(
       token, &new_invocation(19, false, false)->invocation));
@@ -228,7 +238,7 @@ int main(void) {
    * the active exception cell for the target's sink and fences later events. */
   assert(scr_retained_callbacks_configure(wake_owner, &wakes));
   closure = new_closure();
-  token = scr_retained_callbacks_register(closure, &signature);
+  token = scr_retained_callbacks_register(closure, &signature, NULL);
   assert(token != NULL);
   assert(scr_callback_token_admit(
       token, &new_invocation(23, false, true)->invocation));

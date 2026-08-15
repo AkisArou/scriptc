@@ -119,6 +119,13 @@ ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle) {
   return handle;
 }
 
+ScrNativeHandle *scr_native_handle_retain_live(ScrNativeHandle *handle) {
+  if (handle == NULL || handle->state != SCR_NATIVE_HANDLE_LIVE) {
+    scr_trap("scriptc: retained callback source owner is not live\n");
+  }
+  return scr_native_handle_retain(handle);
+}
+
 static void scr_native_owner_unlink(ScrNativeOwnerEdge *edge) {
   ScrNativeHandle *owner = edge->owner;
   if (edge->previous != NULL) edge->previous->next = edge->next;

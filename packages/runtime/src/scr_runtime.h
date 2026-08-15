@@ -203,6 +203,13 @@ ScrCallbackToken *scr_callback_table_register(ScrCallbackTable *table,
 void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
                                  uint64_t generation,
                                  const void *signature);
+/* Optional weak owner-side context. It is never read by foreign producers;
+ * same-caller thunks may turn it into a per-invocation managed retain. */
+bool scr_callback_table_set_source_context(ScrCallbackTable *table,
+                                           ScrCallbackToken *token,
+                                           void *source_context);
+void *scr_callback_table_source_context(ScrCallbackTable *table,
+                                        ScrCallbackToken *token);
 bool scr_callback_table_begin_close(ScrCallbackTable *table,
                                     ScrCallbackToken *token);
 bool scr_callback_table_begin_discard(ScrCallbackTable *table,
@@ -2820,6 +2827,7 @@ ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
 void scr_native_handle_commit(ScrNativeHandle *handle, void *foreign);
 void scr_native_handle_abandon(ScrNativeHandle *handle);
 ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle);
+ScrNativeHandle *scr_native_handle_retain_live(ScrNativeHandle *handle);
 void scr_native_handle_release(ScrNativeHandle *handle);
 void *scr_native_handle_retain_v(void *handle);
 void scr_native_handle_release_v(void *handle);
@@ -2867,8 +2875,9 @@ typedef enum {
 bool scr_retained_callbacks_configure(ScrOwnerGatewayWakeFn wake,
                                       void *wake_context);
 bool scr_retained_callbacks_configured(void);
-ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
-                                                   const void *signature);
+ScrCallbackToken *scr_retained_callbacks_register(
+    ScrClosure *closure, const void *signature, ScrNativeHandle *source_owner);
+ScrNativeHandle *scr_retained_callbacks_retain_owner(ScrCallbackToken *token);
 void scr_retained_callbacks_prepare(ScrNativeHandle *handle,
                                     ScrCallbackToken *token);
 bool scr_retained_callbacks_pending(void);

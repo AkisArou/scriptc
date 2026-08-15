@@ -41,8 +41,8 @@ bool scr_retained_callbacks_configured(void) {
   return scr_retained_gateway != NULL && scr_retained_table != NULL;
 }
 
-ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
-                                                   const void *signature) {
+ScrCallbackToken *scr_retained_callbacks_register(
+    ScrClosure *closure, const void *signature, ScrNativeHandle *source_owner) {
   if (!scr_retained_accepting || scr_retained_table == NULL) {
     scr_trap("scriptc: retained callback service is not configured or is shutting down\n");
   }
@@ -58,7 +58,24 @@ ScrCallbackToken *scr_retained_callbacks_register(ScrClosure *closure,
     scr_closure_release(root);
     scr_trap("scriptc: out of memory registering retained callback\n");
   }
+  if (source_owner != NULL &&
+      !scr_callback_table_set_source_context(
+          scr_retained_table, token, source_owner)) {
+    scr_trap("scriptc: failed to associate retained callback source owner\n");
+  }
   return token;
+}
+
+ScrNativeHandle *scr_retained_callbacks_retain_owner(ScrCallbackToken *token) {
+  if (scr_retained_table == NULL || token == NULL) {
+    scr_trap("scriptc: retained callback source owner service is unavailable\n");
+  }
+  ScrNativeHandle *owner = scr_callback_table_source_context(
+      scr_retained_table, token);
+  if (owner == NULL) {
+    scr_trap("scriptc: retained callback has no source owner\n");
+  }
+  return scr_native_handle_retain_live(owner);
 }
 
 void scr_retained_callbacks_prepare(ScrNativeHandle *handle,

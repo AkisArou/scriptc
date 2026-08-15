@@ -22,7 +22,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeCallbackArgumentType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1372,7 +1372,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const result = candidate.ret;
     return candidate.kind === "func" &&
       Array.isArray(candidate.params) &&
-      candidate.params.every(validNativeScalar) &&
+      candidate.params.every((parameter) =>
+        validNativeScalar(parameter) ||
+        (typeof parameter === "object" && parameter !== null &&
+          parameter.kind === "nativeHandle" &&
+          nativeTypesById.get(parameter.typeId)?.kind === "handle")
+      ) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null && result.kind === "void"));
   };
@@ -1384,10 +1389,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (typeof contract !== "object" || contract === null) return false;
     const candidate = contract as Record<string, unknown>;
     const transports = candidate["transports"];
-    if (
-      !Array.isArray(transports) ||
-      transports.length !== type.params.length
-    ) {
+    const sourceArguments = candidate["sourceArguments"];
+    if (!Array.isArray(transports) || !Array.isArray(sourceArguments) ||
+      sourceArguments.length !== type.params.length) {
       return false;
     }
     const transportKinds = transports.map((transport) =>
@@ -1398,15 +1402,25 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     );
     const owner = candidate["registrationOwner"];
     const executors = candidate["allowedInvocationExecutors"];
+    const validSourceArguments = sourceArguments.every((argument) => {
+      if (typeof argument !== "object" || argument === null) return false;
+      const source = argument as Record<string, unknown>;
+      return (Object.keys(source).sort().join(",") === "kind,parameter" &&
+          source["kind"] === "callback-parameter" &&
+          Number.isSafeInteger(source["parameter"]) &&
+          Number(source["parameter"]) >= 0) ||
+        (Object.keys(source).length === 1 &&
+          source["kind"] === "registration-owner");
+    });
     if (
       typeof owner !== "object" || owner === null ||
-      !Array.isArray(executors)
+      !Array.isArray(executors) || !validSourceArguments
     ) {
       return false;
     }
     if (candidate["lifetime"] === "call") {
       return Object.keys(candidate).sort().join(",") ===
-          "allowedInvocationExecutors,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,synchronousReturn,transports" &&
+          "allowedInvocationExecutors,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
         Object.keys(owner).length === 1 &&
         (owner as { kind?: unknown }).kind === "native-call" &&
         executors.length === 1 && executors[0] === "same-as-caller" &&
@@ -1428,7 +1442,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           Number.isSafeInteger(ownerCandidate["argument"]) &&
           Number(ownerCandidate["argument"]) >= 0);
       return Object.keys(candidate).sort().join(",") ===
-          "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,synchronousReturn,transports" &&
+          "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
         validOwner &&
         typeof candidate["cancellationBinding"] === "string" &&
         candidate["cancellationBinding"] !== "" &&
@@ -1816,11 +1830,54 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           break;
         case "callbackFunction":
           projectionCounts.callbackFunction++;
+          const callbackContract = sourceArgument.callback;
+          const callbackSourceProjectionValid = (() => {
+            if (
+              sourceArgument.type.kind !== "func" ||
+              parameter.type.kind !== "nativeCallback" ||
+              callbackContract === undefined ||
+              callbackContract.transports.length !==
+                parameter.type.signature.parameters.length ||
+              callbackContract.sourceArguments.length !== sourceArgument.type.params.length
+            ) return false;
+            const projectedPhysical = new Set<number>();
+            let projectedOwner = false;
+            for (const [sourceIndex, projection] of
+              callbackContract.sourceArguments.entries()) {
+              let expected: IrType | undefined;
+              if (projection.kind === "callback-parameter") {
+                if (
+                  projection.parameter < 0 ||
+                  projection.parameter >= parameter.type.signature.parameters.length ||
+                  projectedPhysical.has(projection.parameter)
+                ) return false;
+                projectedPhysical.add(projection.parameter);
+                expected = parameter.type.signature.parameters[projection.parameter];
+              } else {
+                if (
+                  projectedOwner ||
+                  callbackContract.lifetime !== "until-cancelled" ||
+                  callbackContract.registrationOwner.kind !== "argument"
+                ) return false;
+                projectedOwner = true;
+                expected = binding.arguments[
+                  callbackContract.registrationOwner.argument
+                ]?.type;
+                if (expected?.kind !== "nativeHandle") return false;
+              }
+              if (
+                expected === undefined ||
+                !typeEquals(sourceArgument.type.params[sourceIndex]!, expected)
+              ) return false;
+            }
+            return projectedPhysical.size === parameter.type.signature.parameters.length &&
+              typeEquals(sourceArgument.type.ret, parameter.type.signature.result);
+          })();
           if (
             !validNativeCallbackArgument(sourceArgument.type) ||
             parameter.type.kind !== "nativeCallback" ||
             !validNativeCallback(parameter.type) ||
-            !typeEquals(sourceArgument.type, nativeCallbackArgumentType(parameter.type.signature)) ||
+            !callbackSourceProjectionValid ||
             parameter.ownership.kind !== "callback" ||
             parameter.ownership.lifetime !== sourceArgument.callback?.lifetime
           ) {

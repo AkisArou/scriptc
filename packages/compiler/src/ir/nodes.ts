@@ -170,9 +170,13 @@ export interface IrNativeContextType {
 
 export type IrNativeCallbackArgumentType = {
   kind: "func";
-  params: readonly IrNativeScalarType[];
+  params: readonly (IrNativeScalarType | IrNativeHandleType)[];
   ret: IrNativeScalarType | { kind: "void" };
 };
+
+export type IrNativeCallbackSourceArgument =
+  | { kind: "callback-parameter"; parameter: number }
+  | { kind: "registration-owner" };
 
 export type IrNativeCallbackContract =
   | {
@@ -182,6 +186,7 @@ export type IrNativeCallbackContract =
       deliveryExecutor: "same-as-caller";
       synchronousReturn: true;
       transports: readonly { kind: "borrow" }[];
+      sourceArguments: readonly IrNativeCallbackSourceArgument[];
       reentrancy: "required";
       postDisposal: "not-invoked";
       shutdown: "drain";
@@ -199,6 +204,7 @@ export type IrNativeCallbackContract =
       deliveryExecutor: "runtime-owner";
       synchronousReturn: false;
       transports: readonly { kind: "copy" }[];
+      sourceArguments: readonly IrNativeCallbackSourceArgument[];
       reentrancy: "allowed" | "required";
       postDisposal: "not-invoked";
       shutdown: "drain";

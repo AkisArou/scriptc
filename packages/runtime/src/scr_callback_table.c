@@ -12,6 +12,7 @@ typedef struct {
   uint64_t generation;
   const void *signature;
   void *anchor;
+  void *source_context;
   ScrCallbackToken *token;
   bool retired;
   bool owner_claimed;
@@ -118,6 +119,24 @@ static ScrCallbackTableEntry *scr_callback_table_entry(
   return entry;
 }
 
+bool scr_callback_table_set_source_context(ScrCallbackTable *table,
+                                           ScrCallbackToken *token,
+                                           void *source_context) {
+  ScrCallbackTableEntry *entry = scr_callback_table_entry(table, token);
+  if (entry == NULL || entry->source_context != NULL ||
+      source_context == NULL) {
+    return false;
+  }
+  entry->source_context = source_context;
+  return true;
+}
+
+void *scr_callback_table_source_context(ScrCallbackTable *table,
+                                        ScrCallbackToken *token) {
+  ScrCallbackTableEntry *entry = scr_callback_table_entry(table, token);
+  return entry == NULL ? NULL : entry->source_context;
+}
+
 bool scr_callback_table_begin_close(ScrCallbackTable *table,
                                     ScrCallbackToken *token) {
   if (scr_callback_table_entry(table, token) == NULL) return false;
@@ -209,6 +228,7 @@ size_t scr_callback_table_collect(ScrCallbackTable *table) {
     bool anchor_owned = entry->anchor_owned;
     entry->token = NULL;
     entry->anchor = NULL;
+    entry->source_context = NULL;
     entry->signature = NULL;
     entry->owner_claimed = false;
     entry->anchor_owned = false;

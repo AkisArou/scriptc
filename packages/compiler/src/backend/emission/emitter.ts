@@ -39,7 +39,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeCallbackArgumentType, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import {
@@ -1984,16 +1984,26 @@ export class CEmitter {
         const signatureId = `${adapter.symbol}_signature`;
         const invoke = `${adapter.symbol}_invoke`;
         const destroy = `${adapter.symbol}_destroy`;
-        const sourceType = nativeCallbackArgumentType(signature);
+        const sourceType = adapter.source;
+        const injectsOwner = adapter.contract.sourceArguments.some(
+          (argument) => argument.kind === "registration-owner",
+        );
         out.push(
           `static const unsigned char ${signatureId};`,
           `typedef struct {`,
           `  ScrCallbackInvocation base;`,
+          ...(injectsOwner ? [`  ScrNativeHandle *sc_owner;`] : []),
           ...signature.parameters.map((parameter, index) =>
             `  ${cType(parameter).trim()} sc_a${index};`
           ),
           `} ${invocation};`,
           `static void ${destroy}(ScrOwnerGatewayEvent *sc_event) {`,
+          ...(injectsOwner
+            ? [
+                `  ${invocation} *sc_invocation = (${invocation} *)sc_event;`,
+                `  scr_native_handle_release(sc_invocation->sc_owner);`,
+              ]
+            : []),
           `  free(sc_event);`,
           `}`,
           `static bool ${invoke}(ScrCallbackInvocation *sc_base, void *sc_owner, size_t sc_slot, uint64_t sc_generation) {`,
@@ -2006,8 +2016,10 @@ export class CEmitter {
           `    return false;`,
           `  }`,
         );
-        const args = signature.parameters.map((_parameter, index) =>
-          `sc_invocation->sc_a${index}`
+        const args = adapter.contract.sourceArguments.map((argument) =>
+          argument.kind === "callback-parameter"
+            ? `sc_invocation->sc_a${argument.parameter}`
+            : `scr_native_handle_retain(sc_invocation->sc_owner)`
         );
         const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         out.push(
@@ -2023,6 +2035,9 @@ export class CEmitter {
           `  sc_invocation->base.signature = &${signatureId};`,
           `  sc_invocation->base.invoke = &${invoke};`,
           `  sc_invocation->base.payload_destroy = &${destroy};`,
+          ...(injectsOwner
+            ? [`  sc_invocation->sc_owner = scr_retained_callbacks_retain_owner(sc_token);`]
+            : []),
           ...signature.parameters.map((_parameter, index) =>
             `  sc_invocation->sc_a${index} = sc_a${index};`
           ),
@@ -2038,8 +2053,13 @@ export class CEmitter {
         `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );
-      const sourceType = nativeCallbackArgumentType(signature);
-      const args = signature.parameters.map((_parameter, index) => `sc_a${index}`);
+      const sourceType = adapter.source;
+      const args = adapter.contract.sourceArguments.map((argument) => {
+        if (argument.kind !== "callback-parameter") {
+          throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
+        }
+        return `sc_a${argument.parameter}`;
+      });
       const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
       if (signature.result.kind === "void") {
         out.push(`  ${call};`, `}`, ``);

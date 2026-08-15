@@ -81,7 +81,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeCallbackArgumentType, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
@@ -1563,12 +1563,18 @@ class LlEmitter {
       const rawRet = this.llType(signature.result);
       const pendingResult = rawRet === "double" ? f64Lit(0) : "0";
       if (adapter.contract.lifetime === "until-cancelled") {
+        const injectsOwner = adapter.contract.sourceArguments.some(
+          (argument) => argument.kind === "registration-owner",
+        );
+        const ownerField = 7;
+        const physicalFieldBase = ownerField + (injectsOwner ? 1 : 0);
         const invocationType = `%${adapter.symbol}_invocation`;
         const signatureId = `@${adapter.symbol}_signature`;
         const invoke = `@${adapter.symbol}_invoke`;
         const destroy = `@${adapter.symbol}_destroy`;
         const fields = [
           ...Array.from({ length: 7 }, () => "ptr"),
+          ...(injectsOwner ? ["ptr"] : []),
           ...signature.parameters.map((parameter) => this.llType(parameter)),
         ];
         defs.push(
@@ -1576,6 +1582,13 @@ class LlEmitter {
           `${signatureId} = internal constant i8 0`,
           `define internal void ${destroy}(ptr %event) ${FN_ATTRS} {`,
           `entry:`,
+          ...(injectsOwner
+            ? [
+                `  %owner.ptr = getelementptr inbounds ${invocationType}, ptr %event, i64 0, i32 ${ownerField}`,
+                `  %owner = load ptr, ptr %owner.ptr`,
+                `  call void @scr_native_handle_release(ptr %owner)`,
+              ]
+            : []),
           `  call void @free(ptr %event)`,
           `  ret void`,
           `}`,
@@ -1596,12 +1609,23 @@ class LlEmitter {
           `  %fn = load ptr, ptr %fnp`,
         );
         const callArgs = ["ptr %cb"];
-        signature.parameters.forEach((parameter, index) => {
-          defs.push(
-            `  %a${index}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${7 + index}`,
-            `  %a${index} = load ${this.llType(parameter)}, ptr %a${index}.ptr`,
+        adapter.contract.sourceArguments.forEach((argument, sourceIndex) => {
+          const sourceType = adapter.source.params[sourceIndex]!;
+          if (argument.kind === "callback-parameter") {
+            defs.push(
+              `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${physicalFieldBase + argument.parameter}`,
+              `  %source${sourceIndex} = load ${this.llType(sourceType)}, ptr %source${sourceIndex}.ptr`,
+            );
+          } else {
+            defs.push(
+              `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${ownerField}`,
+              `  %source${sourceIndex} = load ptr, ptr %source${sourceIndex}.ptr`,
+              `  %source${sourceIndex}.retained = call ptr @scr_native_handle_retain(ptr %source${sourceIndex})`,
+            );
+          }
+          callArgs.push(
+            `${this.llType(sourceType)} %source${sourceIndex}${argument.kind === "registration-owner" ? ".retained" : ""}`,
           );
-          callArgs.push(`${this.llType(parameter)} %a${index}`);
         });
         defs.push(
           `  call void %fn(${callArgs.join(", ")})`,
@@ -1628,10 +1652,17 @@ class LlEmitter {
           `  store ptr ${invoke}, ptr %invoke.ptr`,
           `  %destroy.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 5`,
           `  store ptr ${destroy}, ptr %destroy.ptr`,
+          ...(injectsOwner
+            ? [
+                `  %owner = call ptr @scr_retained_callbacks_retain_owner(ptr %ctx)`,
+                `  %owner.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 ${ownerField}`,
+                `  store ptr %owner, ptr %owner.ptr`,
+              ]
+            : []),
         );
         signature.parameters.forEach((parameter, index) => {
           defs.push(
-            `  %copy${index}.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 ${7 + index}`,
+            `  %copy${index}.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 ${physicalFieldBase + index}`,
             `  store ${this.llType(parameter)} %a${index}, ptr %copy${index}.ptr`,
           );
         });
@@ -1648,6 +1679,11 @@ class LlEmitter {
         this.declare(`declare void @scr_closure_release(ptr)`);
         this.declare(`declare ptr @scr_callback_invocation_alloc(ptr, ${this.sizeType})`);
         this.declare(`declare zeroext i1 @scr_callback_token_admit(ptr, ptr)`);
+        if (injectsOwner) {
+          this.declare(`declare ptr @scr_retained_callbacks_retain_owner(ptr)`);
+          this.declare(`declare ptr @scr_native_handle_retain(ptr)`);
+          this.declare(`declare void @scr_native_handle_release(ptr)`);
+        }
         continue;
       }
       defs.push(
@@ -1667,12 +1703,15 @@ class LlEmitter {
         `  %fnp = getelementptr inbounds %ScrClosure, ptr %ctx, i64 0, i32 1`,
         `  %fn = load ptr, ptr %fnp`,
       );
-      const sourceType = nativeCallbackArgumentType(signature);
+      const sourceType = adapter.source;
       const callArgs = [
         "ptr %ctx",
-        ...signature.parameters.map((parameter, index) =>
-          `${this.llType(parameter)} %a${index}`
-        ),
+        ...adapter.contract.sourceArguments.map((argument, index) => {
+          if (argument.kind !== "callback-parameter") {
+            throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
+          }
+          return `${this.llType(sourceType.params[index]!)} %a${argument.parameter}`;
+        }),
       ].join(", ");
       if (sourceType.ret.kind === "void") {
         defs.push(`  call void %fn(${callArgs})`, `  ret void`, `}`, ``);
@@ -6557,12 +6596,18 @@ class LlEmitter {
           }
           const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
           this.declare(
-            `declare ptr @scr_retained_callbacks_register(ptr, ptr)`,
+            `declare ptr @scr_retained_callbacks_register(ptr, ptr, ptr)`,
           );
+          const sourceOwner = argument.callback.sourceArguments.some(
+              (source) => source.kind === "registration-owner") &&
+              argument.callback.registrationOwner.kind === "argument"
+            ? args[argument.callback.registrationOwner.argument]!.name
+            : "null";
           const token = B.tmp();
           B.line(
             `${token} = call ptr @scr_retained_callbacks_register(` +
-              `ptr ${args[argumentIndex]!.name}, ptr @${adapter.symbol}_signature)`,
+              `ptr ${args[argumentIndex]!.name}, ptr @${adapter.symbol}_signature, ` +
+              `ptr ${sourceOwner})`,
           );
           retainedTokens.set(argumentIndex, token);
           if (argument.callback.registrationOwner.kind === "argument") {

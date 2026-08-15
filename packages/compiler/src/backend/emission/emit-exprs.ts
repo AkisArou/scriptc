@@ -2279,9 +2279,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
           const token = `sc_t${E.tempCounter++}`;
+          const sourceOwner = argument.callback.sourceArguments.some(
+              (source) => source.kind === "registration-owner") &&
+              argument.callback.registrationOwner.kind === "argument"
+            ? args[argument.callback.registrationOwner.argument]!.name
+            : "NULL";
           E.line(
             `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
-              `${args[argumentIndex]!.name}, &${adapter.symbol}_signature);`,
+              `${args[argumentIndex]!.name}, &${adapter.symbol}_signature, ${sourceOwner});`,
           );
           retainedTokens.set(argumentIndex, token);
           if (argument.callback.registrationOwner.kind === "argument") {

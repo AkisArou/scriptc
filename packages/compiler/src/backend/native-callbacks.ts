@@ -1,6 +1,7 @@
 import type {
   IrFfiImport,
   IrNativeBinding,
+  IrNativeCallbackArgumentType,
   IrNativeCallbackContract,
   IrNativeCallbackType,
 } from "../ir/nodes.js";
@@ -10,6 +11,7 @@ export interface NativeCallbackAdapter {
   readonly bindingId: string;
   readonly argument: number;
   readonly callback: IrNativeCallbackType;
+  readonly source: IrNativeCallbackArgumentType;
   readonly contract: IrNativeCallbackContract;
 }
 
@@ -46,9 +48,15 @@ export function allocateNativeCallbackAdapters(
       reserved.add(symbol);
       const contract =
         binding.arguments[parameter.projection.argument]?.callback;
+      const source = binding.arguments[parameter.projection.argument]?.type;
       if (contract === undefined) {
         throw new Error(
           `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no contract`,
+        );
+      }
+      if (source?.kind !== "func") {
+        throw new Error(
+          `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no logical function type`,
         );
       }
       adapters.set(
@@ -58,6 +66,7 @@ export function allocateNativeCallbackAdapters(
           bindingId: binding.id,
           argument: parameter.projection.argument,
           callback: parameter.type,
+          source,
           contract,
         },
       );
