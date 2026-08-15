@@ -54,6 +54,7 @@ export declare function u64Identity(value: u64): u64;
 export declare function usizeIdentity(value: usize): usize;
 export declare function nativeFalse(): boolean;
 export declare function nativeInvalidBoolean(): boolean;
+export declare function nativeNot(value: boolean): boolean;
 export declare function nativeTrue(): boolean;
 export declare function paddedRoundtrip(value: Padded): Padded;
 export declare function hashUtf8(value: string): u64;

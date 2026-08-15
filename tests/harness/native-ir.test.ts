@@ -250,6 +250,34 @@ const localNativeInput: NativeFrontendInput = {
       },
     })),
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#nativeNot",
+      declaration: { module: nativePackage, name: "nativeNot" },
+      entry: { kind: "c-symbol", symbol: "nts_boolean_not" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "value", type: { kind: "bool" } }],
+      parameters: [{
+        name: "value",
+        type: I32,
+        passMode: "value",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "boolean",
+          argument: 0,
+          falseValue: "0",
+          trueValue: "1",
+        },
+      }],
+      result: {
+        type: I32,
+        passMode: "value",
+        ownership: { kind: "value" },
+        projection: { kind: "boolean", falseValue: "0", trueValue: "1" },
+      },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#padded_roundtrip",
       declaration: { module: nativePackage, name: "paddedRoundtrip" },
       entry: { kind: "c-symbol", symbol: "nts_padded_roundtrip" },
@@ -1366,6 +1394,26 @@ test("Native IR validates exact integer-backed boolean results", () => {
   );
 });
 
+test("Native IR validates exact integer-backed boolean parameters", () => {
+  const mod = exactI32Module();
+  const binding = structuredClone(localNativeInput.bindings.find(
+    ({ declaration }) => declaration.name === "nativeNot",
+  ));
+  if (binding === undefined) throw new Error("test fixture lost nativeNot");
+  mod.nativeBindings = [...mod.nativeBindings!, binding];
+  expect(validateModule(mod)).toEqual([]);
+  expect(deserializeModule(serializeModule(mod))).toEqual(mod);
+
+  const malformed = structuredClone(binding);
+  const projection = malformed.parameters[0]?.projection;
+  if (projection?.kind !== "boolean") throw new Error("test fixture lost boolean input");
+  projection.trueValue = projection.falseValue;
+  mod.nativeBindings = [mod.nativeBindings[0]!, malformed];
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    `Native IR binding "${binding.id}" parameter "value" has an invalid boolean projection`,
+  );
+});
+
 test("Native IR validates explicit identity handle upcast graphs", () => {
   const base = {
     ...COUNTER_DEFINITION,
@@ -2010,8 +2058,8 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
   });
 });
 
-describe.each(["c", "llvm"] as const)("Native IR boolean results, %s backend", (backend) => {
-  test("projects exact native storage into TypeScript boolean", async () => {
+describe.each(["c", "llvm"] as const)("Native IR boolean projections, %s backend", (backend) => {
+  test("projects TypeScript boolean parameters and exact native results", async () => {
     const outDir = join(scratch, `boolean-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/boolean-result.ts"), {
       outDir,

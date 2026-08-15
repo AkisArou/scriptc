@@ -2307,6 +2307,22 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const nativeArgs = binding.parameters.map((parameter) => {
           const arg = args[parameter.projection.argument]!;
           switch (parameter.projection.kind) {
+            case "boolean": {
+              if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "bool") {
+                throw new Error(`emitter bug: invalid boolean parameter projection in ${binding.id}`);
+              }
+              const trueValue = cNativeScalarLiteral(
+                parameter.type,
+                parameter.projection.trueValue,
+                E.mod.nativeTarget?.pointerBits,
+              );
+              const falseValue = cNativeScalarLiteral(
+                parameter.type,
+                parameter.projection.falseValue,
+                E.mod.nativeTarget?.pointerBits,
+              );
+              return `${arg.name} ? ${trueValue} : ${falseValue}`;
+            }
             case "utf8CString": {
               const raw = `sc_t${E.tempCounter++}`;
               E.line(`const char *${raw} = scr_str_c_data(${arg.name});`);

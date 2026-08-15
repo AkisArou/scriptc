@@ -6609,6 +6609,19 @@ class LlEmitter {
         binding.parameters.forEach((parameter, index) => {
           const arg = args[parameter.projection.argument]!;
           switch (parameter.projection.kind) {
+            case "boolean": {
+              if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "bool") {
+                throw new Error(`llvm emitter bug: invalid boolean parameter projection in ${binding.id}`);
+              }
+              const value = B.tmp();
+              B.line(
+                `${value} = select i1 ${arg.name}, ${parameterTypes[index]} ` +
+                  `${parameter.projection.trueValue}, ${parameterTypes[index]} ` +
+                  `${parameter.projection.falseValue}`,
+              );
+              callArgs.push(`${parameterTypes[index]} ${value}`);
+              break;
+            }
             case "utf8CString": {
               const data = B.tmp();
               this.declare("declare ptr @scr_str_c_data(ptr)");

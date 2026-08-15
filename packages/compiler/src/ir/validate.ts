@@ -1194,6 +1194,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   const nativeDeclarations = new Set<string>();
   const nativePointerBits = mod.nativeTarget?.pointerBits;
   const validNativeTarget = nativePointerBits === 32 || nativePointerBits === 64;
+  const parseCanonicalNativeInteger = (candidate: unknown): bigint | null =>
+    typeof candidate === "string" &&
+      /^-?(?:0|[1-9][0-9]*)$/.test(candidate) &&
+      candidate !== "-0"
+      ? BigInt(candidate)
+      : null;
   if (
     mod.nativeTarget !== undefined &&
     (!validNativeTarget || typeof mod.nativeTarget.abi !== "string" || mod.nativeTarget.abi.length === 0)
@@ -1507,14 +1513,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             validNativeTarget ? nativePointerBits : undefined,
           )
         : null;
-      let value: bigint | null = null;
-      if (
-        typeof failureValue === "string" &&
-        /^-?(?:0|[1-9][0-9]*)$/.test(failureValue) &&
-        failureValue !== "-0"
-      ) {
-        value = BigInt(failureValue);
-      }
+      const value = parseCanonicalNativeInteger(failureValue);
       if (
         Object.keys(error).sort().join(",") !== "failureValue,kind" ||
         info === null || value === null || value < info.min || value > info.max ||
@@ -1579,6 +1578,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
       argumentNames.add(argument.name);
       if (
+        argument.type.kind !== "bool" &&
         argument.type.kind !== "string" &&
         !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
         !validNativeCallbackArgument(argument.type) &&
@@ -1602,6 +1602,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     const projectionsByArgument = binding.arguments.map(() => ({
       direct: 0,
+      boolean: 0,
       utf8CString: 0,
       utf8Data: 0,
       utf8ByteLength: 0,
@@ -1694,6 +1695,37 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        case "boolean": {
+          projectionCounts.boolean++;
+          const info = parameter.type.kind === "nativeScalar"
+            ? nativeIntegerInfo(
+                parameter.type.scalar,
+                validNativeTarget ? nativePointerBits : undefined,
+              )
+            : null;
+          const falseValue = parseCanonicalNativeInteger(parameter.projection.falseValue);
+          const trueValue = parseCanonicalNativeInteger(parameter.projection.trueValue);
+          if (
+            Object.keys(parameter.projection).sort().join(",") !==
+              "argument,falseValue,kind,trueValue" ||
+            sourceArgument.type.kind !== "bool" ||
+            info === null ||
+            falseValue === null ||
+            trueValue === null ||
+            falseValue === trueValue ||
+            falseValue < info.min ||
+            falseValue > info.max ||
+            trueValue < info.min ||
+            trueValue > info.max ||
+            parameter.ownership.kind !== "value"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid boolean projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        }
         case "utf8CString":
           projectionCounts.utf8CString++;
           if (
@@ -1813,15 +1845,17 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             (projections.total === 2 &&
               projections.utf8Data === 1 &&
               projections.utf8ByteLength === 1)
-          : argument.type.kind === "bytes"
-            ? projections.total === 2 &&
-              projections.bytesData === 1 &&
-              projections.bytesByteLength === 1
-            : argument.type.kind === "func"
+          : argument.type.kind === "bool"
+            ? projections.total === 1 && projections.boolean === 1
+            : argument.type.kind === "bytes"
               ? projections.total === 2 &&
-                projections.callbackFunction === 1 &&
-                projections.callbackContext === 1
-            : projections.total === 1 && projections.direct === 1;
+                projections.bytesData === 1 &&
+                projections.bytesByteLength === 1
+              : argument.type.kind === "func"
+                ? projections.total === 2 &&
+                  projections.callbackFunction === 1 &&
+                  projections.callbackContext === 1
+                : projections.total === 1 && projections.direct === 1;
       if (!valid) {
         errors.push({
           message: `Native IR binding "${binding.id}" argument "${argument.name}" has an incomplete or ambiguous ABI projection`,
@@ -1866,14 +1900,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             validNativeTarget ? nativePointerBits : undefined,
           )
         : null;
-      const parseValue = (candidate: unknown): bigint | null =>
-        typeof candidate === "string" &&
-          /^-?(?:0|[1-9][0-9]*)$/.test(candidate) &&
-          candidate !== "-0"
-          ? BigInt(candidate)
-          : null;
-      const falseValue = parseValue(resultProjection.falseValue);
-      const trueValue = parseValue(resultProjection.trueValue);
+      const falseValue = parseCanonicalNativeInteger(resultProjection.falseValue);
+      const trueValue = parseCanonicalNativeInteger(resultProjection.trueValue);
       if (
         Object.keys(resultProjection).sort().join(",") !== "falseValue,kind,trueValue" ||
         info === null ||

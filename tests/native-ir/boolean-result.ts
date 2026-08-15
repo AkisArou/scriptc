@@ -1,6 +1,7 @@
 import {
   nativeFalse,
   nativeInvalidBoolean,
+  nativeNot,
   nativeTrue,
   type i32,
 } from "@native-typescript/scabi-c-v1-fixture";
@@ -17,7 +18,13 @@ try {
   invalidRejected = true;
 }
 
-if (nativeTrue() && !nativeFalse() && invalidRejected) {
+if (
+  nativeTrue() &&
+  !nativeFalse() &&
+  nativeNot(false) &&
+  !nativeNot(true) &&
+  invalidRejected
+) {
   exit(42 as i32);
 } else {
   exit(0 as i32);

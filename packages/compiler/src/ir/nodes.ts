@@ -219,12 +219,14 @@ export type IrNativeAbiType =
   | IrNativeContextType;
 export type IrNativeArgumentType =
   | IrNativeValueType
+  | { kind: "bool" }
   | { kind: "string" }
   | (IrBytesType & { elem: "u8" })
   | IrNativeCallbackArgumentType;
 
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
+  | { kind: "boolean"; argument: number; falseValue: string; trueValue: string }
   | { kind: "utf8CString"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
