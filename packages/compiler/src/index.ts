@@ -22,7 +22,7 @@ import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
 import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesRetainedCallbacks, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, nativeIntegerInfo, typeEquals, type IrFfiImport, type IrLibSection, type IrModule, type IrNativeScalarType, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
-import { serializeModule } from "./ir/serialize.js";
+import { deserializeModule, serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
 import { npmStaticIneligibleReason, npmStaticOffenders, npmStaticPackageOfPath } from "./frontend/npm-static.js";
@@ -33,6 +33,11 @@ import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lower
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
 import type { NativeFrontendExport, NativeFrontendInput } from "./frontend/native.js";
+import {
+  defineExecutableCompilationPlan,
+  type ExecutableCompilationPlan,
+  type ExecutableNativeBuildPlan,
+} from "./executable-plan.js";
 
 export const VERSION = "0.0.1";
 
@@ -125,6 +130,11 @@ export { ISLAND_SURFACE, type IslandFnEntry } from "./frontend/lowering/surfaces
 export { ambientDtsPath, isExactExternalTypeSpecifier, overridesDtsPath } from "./frontend/program.js";
 export type { NativeFrontendBinding, NativeFrontendExport, NativeFrontendInput, NativeHandleDefinition, NativeSourceType, NativeStructDefinition, NativeTypeDefinition } from "./frontend/native.js";
 export { resolveProvenanceSources } from "./frontend/provenance.js";
+export {
+  emitExecutableCompilationPlan,
+  type ExecutableCompilationPlan,
+  type ExecutableNativeBuildPlan,
+} from "./executable-plan.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
   setProvenanceSources,
@@ -207,6 +217,37 @@ export type CompileResult =
    * refusal's machine-readable kind tag ("stmt:...", "libCall:...", ...). */
   | { ok: true; binaryPath: string; cPath: string; irPath?: string; backend: "c" | "llvm"; llvmRefusal?: string }
   | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
+
+/** Planning requires an exact backend so every output artifact has one stable
+ * media type and file name before execution. The ordinary compile() API keeps
+ * its default LLVM-with-C-fallback behavior for direct CLI builds. */
+export type PlanExecutableCompilationOptions = Pick<
+  CompileOptions,
+  | "dynamic"
+  | "externalTypes"
+  | "native"
+  | "nativeLinkInputs"
+  | "nativeSystemLibraries"
+  | "npmStatic"
+  | "sanitize"
+> & {
+  readonly backend: "c" | "llvm";
+  /** Root used to canonicalize every reached IR source identity. Defaults to
+   * the entry module's directory. */
+  readonly sourceRoot?: string;
+};
+
+export type PlanExecutableCompilationResult =
+  | {
+      readonly ok: true;
+      readonly plan: ExecutableCompilationPlan;
+      readonly sourceTexts: ReadonlyMap<string, string>;
+    }
+  | {
+      readonly ok: false;
+      readonly diagnostics: readonly ScrDiagnostic[];
+      readonly sourceTexts: ReadonlyMap<string, string>;
+    };
 
 /** The LLVM backend's tier refusal as a diagnostic. SC3xxx = backend
  * coverage (the program is fine — this backend doesn't compile it yet);
@@ -938,8 +979,35 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
   }
 }
 
-/** The whole pipeline: load → preflight → lower → validate → emit C → clang. */
-export async function compile(entryPath: string, opts: CompileOptions): Promise<CompileResult> {
+type ExecutableLoweringOptions = Pick<
+  CompileOptions,
+  | "backend"
+  | "dynamic"
+  | "externalTypes"
+  | "ffiProfilePath"
+  | "native"
+  | "npmStatic"
+  | "sanitize"
+>;
+
+type PreparedExecutableCompilation =
+  | {
+      readonly ok: true;
+      readonly module: IrModule;
+      readonly entryText: string;
+      readonly sourceTexts: Map<string, string>;
+      readonly ffi: FfiProfile | null;
+      readonly buildPlatform: string;
+      readonly buildPointerBits: 32 | 64;
+    }
+  | Extract<CompileResult, { readonly ok: false }>;
+
+/** The semantic half shared by direct builds and artifact-graph planning. It
+ * performs no output writes and releases the frontend before returning. */
+function prepareExecutableCompilation(
+  entryPath: string,
+  opts: ExecutableLoweringOptions,
+): PreparedExecutableCompilation {
   let ffi: FfiProfile | null = null;
   if (opts.ffiProfilePath !== undefined) {
     const loaded = loadFfiProfile(opts.ffiProfilePath);
@@ -990,12 +1058,12 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   }
   const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes, opts.native);
   let lowered: LowerResult;
-  let entryText: string;
-  let sourceTexts: Map<string, string>;
   // The frontend (and its tsgo server) is released as soon as lowering
   // ends — clang and the link never hold it open.
   try {
-    const fail = (diagnostics: ScrDiagnostic[]): CompileResult => ({
+    const fail = (
+      diagnostics: ScrDiagnostic[],
+    ): Extract<CompileResult, { readonly ok: false }> => ({
       ok: false,
       diagnostics,
       sourceTexts: fe.sourceTexts(),
@@ -1052,11 +1120,208 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
         }
       }
     }
-    entryText = fe.entryText();
-    sourceTexts = fe.sourceTexts();
+    return {
+      ok: true,
+      module: lowered.module,
+      entryText: fe.entryText(),
+      sourceTexts: fe.sourceTexts(),
+      ffi,
+      buildPlatform,
+      buildPointerBits,
+    };
   } finally {
     fe.dispose();
   }
+}
+
+function executableNativeBuildPlan(
+  module: IrModule,
+  opts: Pick<
+    CompileOptions,
+    | "dynamic"
+    | "nativeLinkInputs"
+    | "nativeSystemLibraries"
+    | "sanitize"
+  >,
+  ffi: FfiProfile | null,
+): ExecutableNativeBuildPlan {
+  return Object.freeze({
+    cacheIdentity: "scriptc-generated-v1",
+    sanitize: opts.sanitize ?? false,
+    dynamic: opts.dynamic ?? false,
+    regex: moduleUsesRegex(module),
+    copying: moduleUsesCopying(module),
+    textDecoderLegacy: moduleUsesLegacyTextDecoder(module),
+    fileHandle: moduleUsesFileHandle(module),
+    nativeHandle: (module.nativeTypes ?? []).some(
+      (definition) => definition.kind === "handle",
+    ),
+    retainedCallbacks: moduleUsesRetainedCallbacks(module),
+    fetch: moduleUsesFetch(module),
+    netIsland:
+      moduleEmbedsBuiltin(module, "node:http") ||
+      moduleEmbedsBuiltin(module, "node:https") ||
+      moduleEmbedsBuiltin(module, "node:net") ||
+      moduleEmbedsBuiltin(module, "node:tls"),
+    zlib: moduleUsesZlib(module) || moduleEmbedsCompressedNpm(module),
+    assert: moduleUsesAssert(module),
+    inspect: moduleUsesInspect(module),
+    dynInvoke: moduleUsesDynInvoke(module),
+    dc: moduleUsesDc(module),
+    dynAsync: moduleUsesDynAsync(module),
+    events: moduleUsesProcessEvents(module),
+    emitter: moduleUsesEmitter(module),
+    symbol: moduleUsesSymbol(module),
+    searchParams: moduleUsesSearchParams(module),
+    qs: moduleUsesQs(module),
+    parseArgs: moduleUsesParseArgs(module),
+    stream: moduleUsesStream(module),
+    net: moduleUsesNet(module),
+    http: moduleUsesHttpServer(module),
+    http2: moduleUsesHttp2(module),
+    dgram: moduleUsesDgram(module),
+    watch: moduleUsesFsWatch(module),
+    nodeTest: moduleUsesNodeTest(module),
+    tls: moduleUsesTls(module),
+    tlsCa: moduleUsesTlsCa(module),
+    ...((ffi?.libraries.length ?? 0) + (opts.nativeLinkInputs?.length ?? 0) > 0
+      ? {
+          linkInputs: Object.freeze([
+            ...(ffi?.libraries ?? []),
+            ...(opts.nativeLinkInputs ?? []),
+          ]),
+        }
+      : {}),
+    ...((ffi?.systemLibraries.length ?? 0) +
+          (opts.nativeSystemLibraries?.length ?? 0) >
+        0
+      ? {
+          systemLibraries: Object.freeze([
+            ...(ffi?.systemLibraries ?? []),
+            ...(opts.nativeSystemLibraries ?? []),
+          ]),
+        }
+      : {}),
+  });
+}
+
+function canonicalExecutableModule(
+  module: IrModule,
+  sourceTexts: ReadonlyMap<string, string>,
+  sourceRoot: string,
+): IrModule {
+  const canonicalByPhysical = new Map<string, string>();
+  const physicalByCanonical = new Map<string, string>();
+  for (const file of sourceTexts.keys()) {
+    const canonical = canonicalPath(sourceRoot, file);
+    const previous = physicalByCanonical.get(canonical);
+    if (previous !== undefined && previous !== file) {
+      throw new Error(
+        `ScriptC source root maps both ${previous} and ${file} to ${canonical}`,
+      );
+    }
+    canonicalByPhysical.set(file, canonical);
+    physicalByCanonical.set(canonical, file);
+  }
+  const canonical = deserializeModule(serializeModule(module));
+  canonical.sourceFile = canonicalByPhysical.get(canonical.sourceFile) ??
+    canonicalPath(sourceRoot, canonical.sourceFile);
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (typeof value !== "object" || value === null) return;
+    const object = value as Record<string, unknown>;
+    if (
+      typeof object.file === "string" &&
+      typeof object.start === "number" &&
+      typeof object.end === "number"
+    ) {
+      const canonicalFile = canonicalByPhysical.get(object.file);
+      if (canonicalFile !== undefined) {
+        object.file = canonicalFile;
+      } else if (resolve(object.file) === object.file) {
+        throw new Error(
+          `ScriptC compilation plan cannot canonicalize source location ${object.file}`,
+        );
+      }
+    }
+    for (const child of Object.values(object)) visit(child);
+  };
+  visit(canonical);
+  if (canonical.embedded !== undefined) {
+    for (const embedded of canonical.embedded.modules) {
+      const key = canonicalByPhysical.get(embedded.key);
+      if (key === undefined && resolve(embedded.key) === embedded.key) {
+        throw new Error(
+          `ScriptC compilation plan cannot canonicalize embedded module ${embedded.key}`,
+        );
+      }
+      embedded.key = key ?? embedded.key;
+    }
+    for (const edge of canonical.embedded.edges) {
+      const from = canonicalByPhysical.get(edge.from);
+      const to = canonicalByPhysical.get(edge.to);
+      if (from === undefined && resolve(edge.from) === edge.from) {
+        throw new Error(
+          `ScriptC compilation plan cannot canonicalize embedded edge ${edge.from}`,
+        );
+      }
+      if (to === undefined && resolve(edge.to) === edge.to) {
+        throw new Error(
+          `ScriptC compilation plan cannot canonicalize embedded edge ${edge.to}`,
+        );
+      }
+      edge.from = from ?? edge.from;
+      edge.to = to ?? edge.to;
+    }
+  }
+  return canonical;
+}
+
+/** Lowers one executable into an immutable, serializable compiler plan without
+ * materializing either the generated translation unit or the native binary. */
+export function planExecutableCompilation(
+  entryPath: string,
+  opts: PlanExecutableCompilationOptions,
+): PlanExecutableCompilationResult {
+  const prepared = prepareExecutableCompilation(entryPath, opts);
+  if (!prepared.ok) return prepared;
+  const canonicalModule = canonicalExecutableModule(
+    prepared.module,
+    prepared.sourceTexts,
+    resolve(opts.sourceRoot ?? dirname(entryPath)),
+  );
+  return Object.freeze({
+    ok: true,
+    plan: defineExecutableCompilationPlan({
+      backend: opts.backend,
+      target: {
+        platform: prepared.buildPlatform,
+        pointerBits: prepared.buildPointerBits,
+        wasi: prepared.buildPlatform === "wasi",
+      },
+      ir: serializeModule(canonicalModule),
+      entrySource: prepared.entryText,
+      nativeBuild: executableNativeBuildPlan(prepared.module, opts, null),
+    }),
+    sourceTexts: prepared.sourceTexts,
+  });
+}
+
+/** The whole pipeline: load → preflight → lower → validate → emit C → clang. */
+export async function compile(entryPath: string, opts: CompileOptions): Promise<CompileResult> {
+  const prepared = prepareExecutableCompilation(entryPath, opts);
+  if (!prepared.ok) return prepared;
+  const {
+    module,
+    entryText,
+    sourceTexts,
+    ffi,
+    buildPlatform,
+    buildPointerBits,
+  } = prepared;
 
   await mkdir(opts.outDir, { recursive: true });
   const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
@@ -1070,7 +1335,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   let llvmRefusal: string | undefined;
   if (opts.backend !== "c") {
     try {
-      const ll = emitLlvmModule(lowered.module!, {
+      const ll = emitLlvmModule(module, {
         pointerBits: buildPointerBits,
         wasi: buildPlatform === "wasi",
       });
@@ -1088,7 +1353,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
   }
   if (backend === "c") {
-    await writeFile(cPath, emitModule(lowered.module!, entryText));
+    await writeFile(cPath, emitModule(module, entryText));
   }
   // Kept-TU honesty: outDir persists across builds (the CLI's .scriptc/),
   // so a lane change would leave the PREVIOUS lane's TU beside the fresh
@@ -1099,7 +1364,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   let irPath: string | undefined;
   if (opts.emitIr) {
     irPath = join(opts.outDir, `${stem}.ir.json`);
-    await writeFile(irPath, serializeModule(lowered.module));
+    await writeFile(irPath, serializeModule(module));
   }
 
   let binaryPath = opts.outPath;
@@ -1108,113 +1373,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     const nativeBuild: CcOptions = Object.freeze({
       cPath,
       outPath: opts.outPath,
-      // The emitted TU's non-system dependencies are the runtime/vendor tree,
-      // which cc.ts fingerprints separately. Low-level arbitrary C omits this
-      // opt-in so same-path header edits can never hit a stale artifact.
-      cacheIdentity: "scriptc-generated-v1",
-      sanitize: opts.sanitize ?? false,
-      dynamic: opts.dynamic ?? false,
-      // The link switch for scr_regex.c + libregexp: detected on the IR, so
-      // regex-free programs keep the historical (pinned) command line.
-      regex: moduleUsesRegex(lowered.module),
-      // Array copying methods and the typed-array bridges live in one
-      // optional TU, linked only when one of their IR intrinsics survives.
-      copying: moduleUsesCopying(lowered.module),
-      textDecoderLegacy: moduleUsesLegacyTextDecoder(lowered.module),
-      // FileHandle owns a native descriptor and its settled-promise adapters;
-      // keep that optional TU out of programs that never call fsp.open.
-      fileHandle: moduleUsesFileHandle(lowered.module),
-      nativeHandle: (lowered.module.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
-      retainedCallbacks: moduleUsesRetainedCallbacks(lowered.module),
-      // The link switch for scr_fetch.c (the native bridge over scr_net +
-      // scr_tls + scr_http's client parser + zlib — cc.ts implies those
-      // units into the link): embedded npm code that references fetch gets
-      // the bridge; everything else keeps its exact link line.
-      fetch: moduleUsesFetch(lowered.module),
-      // The island's node:http/https client bridge: embedded graphs that
-      // import those builtins pull scr_net_island.c + the socket units.
-      netIsland:
-        moduleEmbedsBuiltin(lowered.module, "node:http") ||
-        moduleEmbedsBuiltin(lowered.module, "node:https") ||
-        moduleEmbedsBuiltin(lowered.module, "node:net") ||
-        moduleEmbedsBuiltin(lowered.module, "node:tls"),
-      // The link switch for scr_zlib.c + libz: zlib.* libCalls on the IR,
-      // node:zlib in the embedded graph, or COMPRESSED embedded module text
-      // (emit-island.ts stores big npm sources as raw DEFLATE; the emitted
-      // main installs scr_zlib_inflate_exact on the same predicate).
-      zlib: moduleUsesZlib(lowered.module) || moduleEmbedsCompressedNpm(lowered.module),
-      // The link switch for scr_assert.c: assert.* libCalls on the IR (the
-      // regex switch also pulls it — scr_regex.c calls the assert helpers).
-      assert: moduleUsesAssert(lowered.module),
-      // The link switch for scr_inspect.c: insp.* libCalls on the IR.
-      inspect: moduleUsesInspect(lowered.module),
-      // The link switch for scr_dyn_invoke.c: dynInvoke nodes or
-      // dyn.defineProps libCalls on the IR.
-      dynInvoke: moduleUsesDynInvoke(lowered.module),
-      // The link switch for scr_dc.c: dc.* libCalls on the IR (the
-      // diagnostics_channel registry and pub/sub).
-      dc: moduleUsesDc(lowered.module),
-      // The link switch for scr_async_dyn.c: the checked-dynamic async
-      // surfaces (cc.ts also pulls it under the dynInvoke/dc gates).
-      dynAsync: moduleUsesDynAsync(lowered.module),
-      // The link switch for scr_events.c: process signal/exit listeners and
-      // the stdin event surface on the IR.
-      events: moduleUsesProcessEvents(lowered.module),
-      // The link switch for scr_events_emitter.c: the node:events
-      // EventEmitter surface on the IR (emitter.* libCalls or the
-      // %EventEmitter class def).
-      emitter: moduleUsesEmitter(lowered.module),
-      // The link switch for scr_symbol.c: sym.* libCalls or a symbol-kind
-      // type anywhere on the IR.
-      symbol: moduleUsesSymbol(lowered.module),
-      // The link switch for scr_url_params.c: sp.* libCalls, the
-      // url.searchParams getter, or a searchParams-kind type on the IR.
-      searchParams: moduleUsesSearchParams(lowered.module),
-      // The link switch for scr_qs.c: the qs.* libCalls that live there
-      // (parse/stringify/unescape; escape rides the always-linked encoder).
-      qs: moduleUsesQs(lowered.module),
-      // The static node:util parseArgs implementation (scr_util.c).
-      parseArgs: moduleUsesParseArgs(lowered.module),
-      // The link switch for scr_stream.c: the node:stream class surface on
-      // the IR (stream libCalls or the %Readable-family class defs).
-      stream: moduleUsesStream(lowered.module),
-      // The link switch for scr_net.c: net.* (or http.* — http rides on
-      // net) libCalls on the IR.
-      net: moduleUsesNet(lowered.module),
-      // The link switch for scr_http.c: http.* libCalls on the IR.
-      http: moduleUsesHttpServer(lowered.module),
-      http2: moduleUsesHttp2(lowered.module),
-      // The link switch for scr_dgram.c: dgram.* or dns.* libCalls on the IR.
-      dgram: moduleUsesDgram(lowered.module),
-      // The link switch for scr_watch.c: fs.watch/watcher.* libCalls on the IR.
-      watch: moduleUsesFsWatch(lowered.module),
-      // The link switch for scr_test.c: test.* libCalls on the IR.
-      nodeTest: moduleUsesNodeTest(lowered.module),
-      // The link switch for scr_tls.c + the vendored mbedTLS archive:
-      // tls.* or https.* libCalls on the IR.
-      tls: moduleUsesTls(lowered.module),
-      // The link switch for scr_tls_ca.c (the CA-store introspection unit
-      // — plain PEM bookkeeping, no mbedTLS): tlsca.* libCalls on the IR.
-      // cc.ts also compiles it under the tls gate (scr_tls.c consults the
-      // unit's default-set override for its trust anchors).
-      tlsCa: moduleUsesTlsCa(lowered.module),
-      ...((ffi?.libraries.length ?? 0) + (opts.nativeLinkInputs?.length ?? 0) > 0
-        ? {
-            linkInputs: Object.freeze([
-              ...(ffi?.libraries ?? []),
-              ...(opts.nativeLinkInputs ?? []),
-            ]),
-          }
-        : {}),
-      ...((ffi?.systemLibraries.length ?? 0) +
-          (opts.nativeSystemLibraries?.length ?? 0) > 0
-        ? {
-            systemLibraries: Object.freeze([
-              ...(ffi?.systemLibraries ?? []),
-              ...(opts.nativeSystemLibraries ?? []),
-            ]),
-          }
-        : {}),
+      ...executableNativeBuildPlan(module, opts, ffi),
     });
     if (opts.nativeBuildExecutor === undefined) {
       await compileC(nativeBuild);
@@ -1237,7 +1396,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
         sourceTexts,
       };
     }
-    if ((lowered.module?.nativeBindings?.length ?? 0) > 0 && err instanceof CcCompileError) {
+    if ((module.nativeBindings?.length ?? 0) > 0 && err instanceof CcCompileError) {
       return {
         ok: false,
         diagnostics: [nativeBuildDiag(ffiNativeBuildDetail(err), entryPath)],
