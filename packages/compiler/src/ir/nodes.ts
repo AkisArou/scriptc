@@ -1097,6 +1097,8 @@ export interface IrNativeHandleDef {
    * its own worker/callback threads without exposing the managed cell. */
   threadSafety: "confined" | "shared";
   identity: "none" | "pointer" | "binding" | "platform";
+  /** Direct representation-preserving nominal conversions. */
+  upcasts: { kind: "identity"; target: string }[];
 }
 
 export type IrNativeTypeDef = IrNativeStructDef | IrNativeHandleDef;

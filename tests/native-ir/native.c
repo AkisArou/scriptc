@@ -243,6 +243,8 @@ int32_t nts_counter_add(NtsCounter *counter, int32_t delta) {
 
 int32_t nts_counter_value(NtsCounter *counter) { return counter->value; }
 
+int32_t nts_counter_base_value(NtsCounter *counter) { return counter->value; }
+
 const char *nts_counter_label(NtsCounter *counter) {
   return counter->value == 42 ? "native \xE2\x9C\x93" : NULL;
 }

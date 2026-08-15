@@ -1339,9 +1339,35 @@ export class CEmitter {
       if (bits === 8 || bits === 16 || bits === 32) return bits / 8;
       throw new Error(`emitter bug: unsupported native scalar '${scalar}' in aggregate`);
     };
+    const handleDefinitions = (this.mod.nativeTypes ?? []).filter(
+      (definition) => definition.kind === "handle",
+    );
+    for (const definition of handleDefinitions) {
+      out.push(`static const ScrNativeHandleType ${mangleNativeHandleTag(definition.id)};`);
+    }
+    if (handleDefinitions.length > 0) out.push("");
     for (const definition of this.mod.nativeTypes ?? []) {
       if (definition.kind === "handle") {
-        out.push(`static const unsigned char ${mangleNativeHandleTag(definition.id)} = 0;`, "");
+        const tag = mangleNativeHandleTag(definition.id);
+        if (definition.upcasts.length > 0) {
+          out.push(
+            `static const ScrNativeHandleType *const ${tag}_upcasts[] = {`,
+            ...definition.upcasts.map((upcast) =>
+              `  &${mangleNativeHandleTag(upcast.target)},`
+            ),
+            `};`,
+            `static const ScrNativeHandleType ${tag} = {`,
+            `  ${tag}_upcasts,`,
+            `  ${definition.upcasts.length},`,
+            `};`,
+            "",
+          );
+        } else {
+          out.push(
+            `static const ScrNativeHandleType ${tag} = {NULL, 0};`,
+            "",
+          );
+        }
         continue;
       }
       const name = mangleNativeStruct(definition.id);

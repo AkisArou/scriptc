@@ -27,7 +27,11 @@ export type NativeStructDefinition = Readonly<
   }
 >;
 
-export type NativeHandleDefinition = Readonly<IrNativeHandleDef>;
+export type NativeHandleDefinition = Readonly<
+  Omit<IrNativeHandleDef, "upcasts"> & {
+    readonly upcasts: readonly Readonly<IrNativeHandleDef["upcasts"][number]>[];
+  }
+>;
 export type NativeTypeDefinition = NativeStructDefinition | NativeHandleDefinition;
 
 export interface NativeFrontendBinding {

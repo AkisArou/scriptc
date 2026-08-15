@@ -1999,10 +1999,26 @@ class LlEmitter {
       `%ScrDynPath = type { ptr, ptr, ${this.sizeType} }`,
       `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
+      `%ScrNativeHandleType = type { ptr, ${this.sizeType} }`,
     ];
     for (const definition of this.mod.nativeTypes ?? []) {
       if (definition.kind === "handle") {
-        out.push(`@${mangleNativeHandleTag(definition.id)} = internal constant i8 0`);
+        const tag = mangleNativeHandleTag(definition.id);
+        if (definition.upcasts.length > 0) {
+          out.push(
+            `@${tag}_upcasts = private constant [${definition.upcasts.length} x ptr] [` +
+              definition.upcasts.map((upcast) =>
+                `ptr @${mangleNativeHandleTag(upcast.target)}`
+              ).join(", ") +
+              `]`,
+            `@${tag} = internal constant %ScrNativeHandleType { ` +
+              `ptr @${tag}_upcasts, ${this.sizeType} ${definition.upcasts.length} }`,
+          );
+        } else {
+          out.push(
+            `@${tag} = internal constant %ScrNativeHandleType { ptr null, ${this.sizeType} 0 }`,
+          );
+        }
         continue;
       }
       const layout = this.nativeStructLayout(definition.id);

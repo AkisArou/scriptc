@@ -3596,6 +3596,19 @@ export class Lowerer {
         return { kind: "call", callee: adapter, args: [expr], type: expected, loc: expr.loc };
       }
     }
+    // A declared native-handle identity upcast changes only the nominal
+    // static type. The managed cell and its foreign pointer remain exactly
+    // the same value; adjusted/query casts require a different IR edge.
+    if (
+      expected.kind === "nativeHandle" &&
+      expr.type.kind === "nativeHandle" &&
+      expr.type.typeId !== expected.typeId &&
+      this.nativeHandleUpcastsTo(expr.type.typeId, expected.typeId)
+    ) {
+      this.useNativeType(expr.type.typeId);
+      this.useNativeType(expected.typeId);
+      return { kind: "upcast", value: expr, type: expected, loc: expr.loc };
+    }
     // Derived-into-base widening: a legal implicit upcast (prefix layout —
     // a pointer reinterpret). Exactness stays required in every other
     // direction; there is never an implicit DOWNcast.
@@ -6505,6 +6518,31 @@ export class Lowerer {
 
   isSubclassOf(sub: string, sup: string): boolean {
     return isSubclassOf(this, sub, sup);
+  }
+
+  nativeHandleUpcastsTo(source: string, target: string): boolean {
+    const pending = [source];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const id = pending.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      const definition = this.nativeTypeDefsById.get(id);
+      if (definition?.kind !== "handle") continue;
+      for (const upcast of definition.upcasts) {
+        if (upcast.target === target) return true;
+        pending.push(upcast.target);
+      }
+    }
+    return false;
+  }
+
+  useNativeType(typeId: string): void {
+    if (this.usedNativeTypeIds.has(typeId)) return;
+    this.usedNativeTypeIds.add(typeId);
+    const definition = this.nativeTypeDefsById.get(typeId);
+    if (definition?.kind !== "handle") return;
+    for (const upcast of definition.upcasts) this.useNativeType(upcast.target);
   }
 
   inHierarchy(info: ClassInfo): boolean {

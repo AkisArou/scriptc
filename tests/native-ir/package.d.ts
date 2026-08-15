@@ -1,5 +1,7 @@
 declare const nativeScalar: unique symbol;
-declare const nativeResource: unique symbol;
+declare const nativeCounterBaseResource: unique symbol;
+declare const nativeCounterMiddleResource: unique symbol;
+declare const nativeCounterResource: unique symbol;
 
 export type i8 = number & { readonly [nativeScalar]: "i8" };
 export type u8 = number & { readonly [nativeScalar]: "u8" };
@@ -18,8 +20,16 @@ export interface Padded {
   readonly ratio: f64;
 }
 
-export interface Counter {
-  readonly [nativeResource]: "Counter";
+export interface CounterBase {
+  readonly [nativeCounterBaseResource]: true;
+}
+
+export interface CounterMiddle extends CounterBase {
+  readonly [nativeCounterMiddleResource]: true;
+}
+
+export interface Counter extends CounterMiddle {
+  readonly [nativeCounterResource]: true;
   add(delta: i32): i32;
   label(): string | null;
   requiredLabel(): string;
@@ -52,6 +62,7 @@ export declare function callScoped(
 ): i32;
 export declare function failErrno(errorNumber: i32): never;
 export declare function createCounter(initialValue: i32): Counter;
+export declare function counterBaseValue(counter: CounterBase): i32;
 export declare function subscribe(
   callback: (value: i32) => void,
 ): Subscription;

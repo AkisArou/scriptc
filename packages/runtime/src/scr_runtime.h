@@ -2788,8 +2788,12 @@ void scr_file_handle_release_v(void *p);
  * result. Thus native resources cannot be stranded by runtime OOM. */
 typedef void (*ScrNativeDestructor)(void *foreign);
 typedef void (*ScrNativeLifecycleFn)(void *context);
+typedef struct ScrNativeHandleType {
+  const struct ScrNativeHandleType *const *identity_upcasts;
+  size_t identity_upcast_count;
+} ScrNativeHandleType;
 ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
-                                           const void *type_tag,
+                                           const ScrNativeHandleType *type,
                                            const char *type_name);
 void scr_native_handle_commit(ScrNativeHandle *handle, void *foreign);
 void scr_native_handle_abandon(ScrNativeHandle *handle);
@@ -2798,10 +2802,10 @@ void scr_native_handle_release(ScrNativeHandle *handle);
 void *scr_native_handle_retain_v(void *handle);
 void scr_native_handle_release_v(void *handle);
 void *scr_native_handle_require(ScrNativeHandle *handle,
-                                const void *type_tag,
+                                const ScrNativeHandleType *type,
                                 const char *operation);
 void scr_native_handle_dispose(ScrNativeHandle *handle,
-                               const void *type_tag,
+                               const ScrNativeHandleType *type,
                                const char *operation);
 /* A prepared lifecycle edge allocates before the native call. Commit adopts
  * it with the result; abandon rolls it back. For a live handle, all begin

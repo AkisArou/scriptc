@@ -78,6 +78,10 @@ const RETAINED_I32_CONTRACT = {
 } as const satisfies IrNativeCallbackContract;
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
+const COUNTER_BASE_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter_base";
+const COUNTER_BASE = { kind: "nativeHandle", typeId: COUNTER_BASE_ID } as const;
+const COUNTER_MIDDLE_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter_middle";
+const COUNTER_MIDDLE = { kind: "nativeHandle", typeId: COUNTER_MIDDLE_ID } as const;
 const COUNTER_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter";
 const COUNTER = { kind: "nativeHandle", typeId: COUNTER_ID } as const;
 const SUBSCRIPTION_ID =
@@ -109,6 +113,25 @@ const COUNTER_DEFINITION = {
   nativeName: "NtsCounter",
   threadSafety: "confined",
   identity: "pointer",
+  upcasts: [{ kind: "identity", target: COUNTER_MIDDLE_ID }],
+} as const satisfies NativeFrontendInput["types"][number];
+const COUNTER_MIDDLE_DEFINITION = {
+  kind: "handle",
+  id: COUNTER_MIDDLE_ID,
+  declaration: { module: nativePackage, name: "CounterMiddle" },
+  nativeName: "NtsCounterMiddle",
+  threadSafety: "confined",
+  identity: "pointer",
+  upcasts: [{ kind: "identity", target: COUNTER_BASE_ID }],
+} as const satisfies NativeFrontendInput["types"][number];
+const COUNTER_BASE_DEFINITION = {
+  kind: "handle",
+  id: COUNTER_BASE_ID,
+  declaration: { module: nativePackage, name: "CounterBase" },
+  nativeName: "NtsCounterBase",
+  threadSafety: "confined",
+  identity: "pointer",
+  upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
 const SUBSCRIPTION_DEFINITION = {
   kind: "handle",
@@ -117,6 +140,7 @@ const SUBSCRIPTION_DEFINITION = {
   nativeName: "NtsSubscription",
   threadSafety: "shared",
   identity: "pointer",
+  upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
 const NO_NATIVE_ERROR = { kind: "no-fail" } as const;
@@ -163,13 +187,21 @@ const localNativeInput: NativeFrontendInput = {
     })),
     { declaration: { module: nativePackage, name: "f64" }, type: NATIVE_F64 },
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
+    { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
+    { declaration: { module: nativePackage, name: "CounterMiddle" }, type: COUNTER_MIDDLE },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
     {
       declaration: { module: nativePackage, name: "Subscription" },
       type: SUBSCRIPTION,
     },
   ],
-  types: [PADDED_DEFINITION, COUNTER_DEFINITION, SUBSCRIPTION_DEFINITION],
+  types: [
+    PADDED_DEFINITION,
+    COUNTER_BASE_DEFINITION,
+    COUNTER_MIDDLE_DEFINITION,
+    COUNTER_DEFINITION,
+    SUBSCRIPTION_DEFINITION,
+  ],
   exports: [],
   bindings: [
     ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
@@ -423,6 +455,29 @@ const localNativeInput: NativeFrontendInput = {
         projection: DIRECT_RESULT,
       },
     })),
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_base_value",
+      declaration: { module: nativePackage, name: "counterBaseValue" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_base_value" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        {
+          name: "counter",
+          type: COUNTER_BASE,
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+        },
+      ]),
+      result: {
+        type: I32,
+        passMode: "value",
+        ownership: { kind: "value" },
+        projection: DIRECT_RESULT,
+      },
+    },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
@@ -1279,6 +1334,40 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   const json = serializeModule(mod);
   expect(json).toContain('"value": "-2147483648"');
   expect(deserializeModule(json)).toEqual(mod);
+});
+
+test("Native IR validates explicit identity handle upcast graphs", () => {
+  const base = {
+    ...COUNTER_DEFINITION,
+    id: `${COUNTER_ID}:base`,
+    declaration: { module: nativePackage, name: "CounterBase" },
+    nativeName: "NtsCounterBase",
+    upcasts: [],
+  };
+  const derived = {
+    ...COUNTER_DEFINITION,
+    upcasts: [{ kind: "identity" as const, target: base.id }],
+  };
+  const mod = exactI32Module();
+  mod.nativeTypes = [base, derived];
+  expect(validateModule(mod)).toEqual([]);
+  expect(deserializeModule(serializeModule(mod))).toEqual(mod);
+
+  const incompatible = structuredClone(mod);
+  const incompatibleBase = incompatible.nativeTypes![0]!;
+  if (incompatibleBase.kind !== "handle") throw new Error("test fixture lost its handle type");
+  incompatibleBase.identity = "platform";
+  expect(validateModule(incompatible).map(({ message }) => message)).toContain(
+    `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}"`,
+  );
+
+  const cyclic = structuredClone(mod);
+  const cyclicBase = cyclic.nativeTypes![0]!;
+  if (cyclicBase.kind !== "handle") throw new Error("test fixture lost its handle type");
+  cyclicBase.upcasts = [{ kind: "identity", target: COUNTER_ID }];
+  expect(validateModule(cyclic).map(({ message }) => message)).toContain(
+    `Native IR handle upcast graph contains a cycle through "${COUNTER_ID}"`,
+  );
 });
 
 test("Native IR requires explicit, range-checked error contracts", () => {
@@ -2419,6 +2508,7 @@ describe.each(["c", "llvm"] as const)("Native IR nullable handles, %s backend", 
 
 describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (backend) => {
   test.each([
+    ["identity upcasts preserve the managed cell and validate base calls", "handle-upcast.ts"],
     ["explicit disposal is alias-safe and idempotent", "handle-explicit.ts"],
     ["last-reference release runs the destructor", "handle-automatic.ts"],
     ["captured mutable aliases share ownership", "handle-captured.ts"],

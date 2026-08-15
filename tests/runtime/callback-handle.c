@@ -20,7 +20,7 @@ typedef struct {
 } TestForeign;
 
 static const char signature;
-static const char type_tag;
+static const ScrNativeHandleType handle_type = {NULL, 0};
 static _Atomic size_t anchors_freed;
 static _Atomic size_t events_destroyed;
 static _Atomic size_t foreign_destroyed;
@@ -106,7 +106,7 @@ int main(void) {
   assert(token != NULL);
 
   ScrNativeHandle *handle = scr_native_handle_prepare(
-      destroy_foreign, &type_tag, "TestSubscription");
+      destroy_foreign, &handle_type, "TestSubscription");
   assert(handle != NULL);
   scr_native_handle_prepare_callback(handle, table, token);
   TestForeign *foreign = malloc(sizeof *foreign);
@@ -116,13 +116,13 @@ int main(void) {
   assert(scr_callback_token_admit(
       token, &new_invocation(7)->invocation));
 
-  scr_native_handle_dispose(handle, &type_tag, "TestSubscription.dispose");
+  scr_native_handle_dispose(handle, &handle_type, "TestSubscription.dispose");
   assert(atomic_load(&foreign_destroyed) == 1);
   assert(scr_callback_token_state(token) == SCR_CALLBACK_TOKEN_CLOSING);
   assert(scr_callback_table_active(table) == 1);
   assert(anchor->rc == 1);
   /* Explicit disposal is alias-safe and cannot close the edge twice. */
-  scr_native_handle_dispose(handle, &type_tag, "TestSubscription.dispose");
+  scr_native_handle_dispose(handle, &handle_type, "TestSubscription.dispose");
 
   assert(scr_owner_gateway_drain(gateway, 0) == 1);
   assert(anchor->total == 7);
@@ -140,7 +140,7 @@ int main(void) {
   token = scr_callback_table_register(table, anchor, &signature);
   assert(token != NULL);
   handle = scr_native_handle_prepare(
-      destroy_foreign, &type_tag, "TestSubscription");
+      destroy_foreign, &handle_type, "TestSubscription");
   scr_native_handle_prepare_callback(handle, table, token);
   assert(scr_callback_token_admit(
       token, &new_invocation(41)->invocation));

@@ -276,11 +276,11 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   }
   for (const argument of binding.arguments) {
     if (argument.type.kind === "nativeStruct" || argument.type.kind === "nativeHandle") {
-      L.usedNativeTypeIds.add(argument.type.typeId);
+      L.useNativeType(argument.type.typeId);
     }
   }
   if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
-    L.usedNativeTypeIds.add(binding.result.type.typeId);
+    L.useNativeType(binding.result.type.typeId);
   }
   const sourceResult = L.typeOf(expr);
   const mappedResult = L.mapTypeOf(sourceResult);
@@ -481,7 +481,7 @@ export function lowerNativeStructAssertion(
     value: L.lowerExprExpecting(initializer, expectedFields.get(name)!.type),
   }));
   L.usesNativeTarget = true;
-  L.usedNativeTypeIds.add(target.typeId);
+  L.useNativeType(target.typeId);
   return { kind: "nativeStructLit", fields, type: { ...target }, loc: locOf(expr) };
 }
 
@@ -497,7 +497,7 @@ export function lowerNativeStructFieldRead(
     throw new Error(`TypeScript checker exposed unknown native struct field '${expr.name.text}'`);
   }
   L.usesNativeTarget = true;
-  L.usedNativeTypeIds.add(target.typeId);
+  L.useNativeType(target.typeId);
   return {
     kind: "nativeStructGet",
     value: L.lowerExpr(expr.expression),
@@ -564,6 +564,7 @@ export function materializeNativeType(
     const result: IrNativeHandleDef = {
       ...definition,
       declaration: { ...definition.declaration },
+      upcasts: definition.upcasts.map((upcast) => ({ ...upcast })),
     };
     return result;
   }

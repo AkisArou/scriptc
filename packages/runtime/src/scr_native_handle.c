@@ -30,7 +30,7 @@ struct ScrNativeHandle {
   size_t rc;
   void *foreign;
   ScrNativeDestructor destructor;
-  const void *type_tag;
+  const ScrNativeHandleType *type;
   const char *type_name;
   ScrNativeLifecycleEdge *lifecycle;
   ScrNativeHandleState state;
@@ -48,15 +48,15 @@ static void scr_native_handle_type_error(const ScrNativeHandle *handle,
 }
 
 ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
-                                           const void *type_tag,
+                                           const ScrNativeHandleType *type,
                                            const char *type_name) {
-  if (!destructor || !type_tag) scr_trap("scriptc: invalid native handle metadata\n");
+  if (!destructor || !type) scr_trap("scriptc: invalid native handle metadata\n");
   ScrNativeHandle *handle = malloc(sizeof *handle);
   if (!handle) scr_trap("scriptc: out of memory\n");
   handle->rc = 1;
   handle->foreign = NULL;
   handle->destructor = destructor;
-  handle->type_tag = type_tag;
+  handle->type = type;
   handle->type_name = type_name;
   handle->lifecycle = NULL;
   handle->state = SCR_NATIVE_HANDLE_PREPARED;
@@ -165,10 +165,23 @@ void scr_native_handle_release_v(void *handle) {
   scr_native_handle_release(handle);
 }
 
+static bool scr_native_handle_type_is(const ScrNativeHandleType *actual,
+                                      const ScrNativeHandleType *expected) {
+  if (actual == expected) return true;
+  if (actual == NULL) return false;
+  for (size_t index = 0; index < actual->identity_upcast_count; index++) {
+    if (scr_native_handle_type_is(actual->identity_upcasts[index], expected)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool scr_native_handle_valid_type(ScrNativeHandle *handle,
-                                         const void *type_tag,
+                                         const ScrNativeHandleType *type,
                                          const char *operation) {
-  if (!handle || handle->type_tag != type_tag) {
+  bool valid = handle != NULL && scr_native_handle_type_is(handle->type, type);
+  if (!valid) {
     scr_native_handle_type_error(handle, operation, "the handle has the wrong nominal type");
     return false;
   }
@@ -176,9 +189,9 @@ static bool scr_native_handle_valid_type(ScrNativeHandle *handle,
 }
 
 void *scr_native_handle_require(ScrNativeHandle *handle,
-                                const void *type_tag,
+                                const ScrNativeHandleType *type,
                                 const char *operation) {
-  if (!scr_native_handle_valid_type(handle, type_tag, operation)) return NULL;
+  if (!scr_native_handle_valid_type(handle, type, operation)) return NULL;
   if (handle->state != SCR_NATIVE_HANDLE_LIVE) {
     scr_native_handle_type_error(handle, operation, "the handle is already disposed");
     return NULL;
@@ -187,8 +200,8 @@ void *scr_native_handle_require(ScrNativeHandle *handle,
 }
 
 void scr_native_handle_dispose(ScrNativeHandle *handle,
-                               const void *type_tag,
+                               const ScrNativeHandleType *type,
                                const char *operation) {
-  if (!scr_native_handle_valid_type(handle, type_tag, operation)) return;
+  if (!scr_native_handle_valid_type(handle, type, operation)) return;
   scr_native_handle_destroy_foreign(handle);
 }

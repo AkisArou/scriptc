@@ -1240,7 +1240,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         definition.declaration.module === "" || definition.declaration.name === "" ||
         definition.nativeName === "" ||
         !["confined", "shared"].includes(definition.threadSafety) ||
-        !["none", "pointer", "binding", "platform"].includes(definition.identity)
+        !["none", "pointer", "binding", "platform"].includes(definition.identity) ||
+        !Array.isArray(definition.upcasts)
       ) {
         errors.push({ message: `Native IR handle type "${definition.id}" has invalid metadata`, loc: moduleLoc });
       }
@@ -1287,6 +1288,63 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     nativeTypesById.set(definition.id, definition);
   }
+  for (const definition of nativeTypesById.values()) {
+    if (definition.kind !== "handle" || !Array.isArray(definition.upcasts)) continue;
+    const targets = new Set<string>();
+    let previous = "";
+    for (const upcast of definition.upcasts) {
+      const validShape =
+        typeof upcast === "object" && upcast !== null &&
+        Object.keys(upcast).sort().join(",") === "kind,target" &&
+        upcast.kind === "identity" &&
+        typeof upcast.target === "string" &&
+        nativeId.test(upcast.target);
+      if (!validShape) {
+        errors.push({
+          message: `Native IR handle type "${definition.id}" has an invalid upcast edge`,
+          loc: moduleLoc,
+        });
+        continue;
+      }
+      const target = nativeTypesById.get(upcast.target);
+      if (
+        targets.has(upcast.target) || previous >= upcast.target ||
+        upcast.target === definition.id || target?.kind !== "handle" ||
+        target.threadSafety !== definition.threadSafety ||
+        target.identity !== definition.identity
+      ) {
+        errors.push({
+          message: `Native IR handle type "${definition.id}" has an invalid identity upcast to "${upcast.target}"`,
+          loc: moduleLoc,
+        });
+      }
+      targets.add(upcast.target);
+      previous = upcast.target;
+    }
+  }
+  const nativeHandleState = new Map<string, "active" | "complete">();
+  const validateNativeHandleAcyclic = (id: string): void => {
+    const definition = nativeTypesById.get(id);
+    if (
+      definition?.kind !== "handle" ||
+      !Array.isArray(definition.upcasts) ||
+      nativeHandleState.get(id) === "complete"
+    ) return;
+    nativeHandleState.set(id, "active");
+    for (const upcast of definition.upcasts) {
+      if (upcast.kind !== "identity" || typeof upcast.target !== "string") continue;
+      if (nativeHandleState.get(upcast.target) === "active") {
+        errors.push({
+          message: `Native IR handle upcast graph contains a cycle through "${upcast.target}"`,
+          loc: moduleLoc,
+        });
+      } else {
+        validateNativeHandleAcyclic(upcast.target);
+      }
+    }
+    nativeHandleState.set(id, "complete");
+  };
+  for (const id of [...nativeTypesById.keys()].sort()) validateNativeHandleAcyclic(id);
   const validNativeValue = (type: IrType): boolean =>
     validNativeScalar(type) ||
     (type.kind === "nativeStruct" && nativeTypesById.get(type.typeId)?.kind === "struct") ||
@@ -2348,6 +2406,28 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     );
   }
   return errors;
+}
+
+function nativeHandleUpcastsTo(
+  nativeTypesById: Map<string, NonNullable<IrModule["nativeTypes"]>[number]>,
+  source: string,
+  target: string,
+): boolean {
+  const pending = [source];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const definition = nativeTypesById.get(id);
+    if (definition?.kind !== "handle" || !Array.isArray(definition.upcasts)) continue;
+    for (const upcast of definition.upcasts) {
+      if (upcast.kind !== "identity" || typeof upcast.target !== "string") continue;
+      if (upcast.target === target) return true;
+      pending.push(upcast.target);
+    }
+  }
+  return false;
 }
 
 function validateFunction(
@@ -3739,6 +3819,23 @@ function validateFunction(
         // exactly when D strictly descends from C AND the two completed
         // constructor ABIs agree (what newValue completion rests on).
         checkExpr(e.value);
+        if (
+          e.kind === "upcast" &&
+          e.type.kind === "nativeHandle" &&
+          e.value.type.kind === "nativeHandle"
+        ) {
+          if (!nativeHandleUpcastsTo(
+            nativeTypesById,
+            e.value.type.typeId,
+            e.type.typeId,
+          )) {
+            err(
+              `native handle upcast: "${e.value.type.typeId}" cannot identity-upcast to "${e.type.typeId}"`,
+              e.loc,
+            );
+          }
+          break;
+        }
         if (e.kind === "upcast" && e.type.kind === "classval" && e.value.type.kind === "classval") {
           const [sub, sup] = [e.value.type.className, e.type.className];
           if (!isStrictSubclass(sub, sup)) {
