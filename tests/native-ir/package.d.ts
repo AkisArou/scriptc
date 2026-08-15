@@ -16,6 +16,7 @@ export type f64 = number & { readonly [nativeScalar]: "f64" };
 
 export declare namespace FixtureValue {
   const answer: i32;
+  function combine(first: i32, ...rest: readonly i32[]): i32;
 }
 
 export interface Padded {

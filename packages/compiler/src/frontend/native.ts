@@ -32,6 +32,20 @@ export interface NativeFrontendConstant {
   readonly value: string;
 }
 
+/** One source-level exact integer operation supplied by the embedder. It has
+ * no native symbol or runtime module value: the frontend resolves the checked
+ * declaration identity and lowers reached calls directly to Native IR. */
+export interface NativeFrontendOperation {
+  readonly id: string;
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly kind: "integer-reduce";
+  readonly operator: "&" | "|" | "^";
+  readonly type: Readonly<IrNativeScalarType>;
+}
+
 export type NativeStructDefinition = Readonly<
   Omit<IrNativeStructDef, "fields"> & {
     readonly fields: readonly Readonly<IrNativeStructDef["fields"][number]>[];
@@ -157,6 +171,7 @@ export interface NativeFrontendInput {
   };
   readonly sourceTypes: readonly NativeSourceType[];
   readonly constants: readonly NativeFrontendConstant[];
+  readonly operations: readonly NativeFrontendOperation[];
   readonly types: readonly NativeTypeDefinition[];
   readonly bindings: readonly NativeFrontendBinding[];
   readonly exports: readonly NativeFrontendExport[];
@@ -178,6 +193,11 @@ export function nativeRuntimeMembers(
     const members = mutable.get(constant.declaration.module) ?? new Set<string>();
     members.add(constant.declaration.name.split(".", 1)[0]!);
     mutable.set(constant.declaration.module, members);
+  }
+  for (const operation of input?.operations ?? []) {
+    const members = mutable.get(operation.declaration.module) ?? new Set<string>();
+    members.add(operation.declaration.name.split(".", 1)[0]!);
+    mutable.set(operation.declaration.module, members);
   }
   return mutable;
 }

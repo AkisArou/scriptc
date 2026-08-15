@@ -352,6 +352,13 @@ const localNativeInput: NativeFrontendInput = {
     type: I32,
     value: "42",
   }],
+  operations: [{
+    id: "native-typescript.fixture.c-v1@0.0.0#fixture_value_combine",
+    declaration: { module: nativePackage, name: "FixtureValue.combine" },
+    kind: "integer-reduce",
+    operator: "|",
+    type: I32,
+  }],
   types: [
     PADDED_DEFINITION,
     PAIR32_DEFINITION,
@@ -861,6 +868,7 @@ function frontendNativeInput(): NativeFrontendInput {
       },
     ],
     constants: translated.constants,
+    operations: translated.operations,
     types: translated.types,
     exports: translated.exports,
     bindings: [
@@ -2345,6 +2353,39 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(validateModule(mod)).toEqual([]);
     expect(serializeModule(mod)).toContain('"op": "==="');
     expect(serializeModule(mod)).toContain('"op": "!=="');
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("folds a declaration-backed exact integer reduction without a runtime symbol", async () => {
+    const outDir = join(scratch, `native-integer-reduce-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/native-integer-reduce.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native integer reduction frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(mod.nativeBindings?.some(
+      ({ id }) => id === "native-typescript.fixture.c-v1@0.0.0#fixture_value_combine",
+    )).toBe(false);
+    expect(serializeModule(mod).match(/"kind": "nativeIntegerBin"/gu)).toHaveLength(2);
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

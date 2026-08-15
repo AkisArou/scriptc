@@ -24,6 +24,7 @@ import { PoisonError, type Lowerer } from "./lowerer.js";
 
 export type NativeInputBinding = NativeFrontendInput["bindings"][number];
 export type NativeInputConstant = NativeFrontendInput["constants"][number];
+export type NativeInputOperation = NativeFrontendInput["operations"][number];
 
 export interface ResolvedNativeFrontend {
   readonly typesBySymbol: ReadonlyMap<ts.Symbol, IrNativeValueType>;
@@ -31,6 +32,7 @@ export interface ResolvedNativeFrontend {
   readonly bindingsBySymbol: ReadonlyMap<ts.Symbol, readonly NativeInputBinding[]>;
   readonly bindingsByDeclaration: ReadonlyMap<ts.Node, readonly NativeInputBinding[]>;
   readonly constantsBySymbol: ReadonlyMap<ts.Symbol, NativeInputConstant>;
+  readonly operationsBySymbol: ReadonlyMap<ts.Symbol, NativeInputOperation>;
 }
 
 function declarationSymbol(
@@ -74,6 +76,7 @@ export function resolveNativeFrontend(
   const typeDefsById = new Map((input?.types ?? []).map((type) => [type.id, type]));
   const mutableBindingsBySymbol = new Map<ts.Symbol, NativeInputBinding[]>();
   const constantsBySymbol = new Map<ts.Symbol, NativeInputConstant>();
+  const operationsBySymbol = new Map<ts.Symbol, NativeInputOperation>();
   for (const sourceType of input?.sourceTypes ?? []) {
     const symbol = declarationSymbol(L, sourceType.declaration);
     if (symbol !== null) {
@@ -101,6 +104,10 @@ export function resolveNativeFrontend(
     const symbol = declarationSymbol(L, constant.declaration, "value");
     if (symbol !== null) constantsBySymbol.set(symbol, constant);
   }
+  for (const operation of input?.operations ?? []) {
+    const symbol = declarationSymbol(L, operation.declaration, "value");
+    if (symbol !== null) operationsBySymbol.set(symbol, operation);
+  }
   const bindingsBySymbol = new Map(
     [...mutableBindingsBySymbol].map(([symbol, bindings]) => [
       symbol,
@@ -119,6 +126,7 @@ export function resolveNativeFrontend(
     bindingsBySymbol,
     bindingsByDeclaration,
     constantsBySymbol,
+    operationsBySymbol,
   };
 }
 
@@ -498,6 +506,51 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   const callee = expr.expression;
   const symbol = nativeExpressionSymbol(L, callee);
   if (symbol === null) return null;
+  const operation = L.nativeOperationsBySymbol.get(symbol);
+  if (operation !== undefined) {
+    const loc = locOf(expr);
+    const fail = (detail: string): never => {
+      L.pushDiag(nativeSignatureDiag(operation.id, detail, loc));
+      throw new PoisonError();
+    };
+    if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
+      fail("only direct, non-generic operation calls are supported");
+    }
+    if (expr.arguments.some(ts.isSpreadElement)) {
+      fail("spread arguments are unnecessary for a variadic exact operation");
+    }
+    if (expr.arguments.length === 0) {
+      fail("an exact integer reduction requires at least one argument");
+    }
+    if (operation.type.scalar === "f64") {
+      fail("an integer reduction cannot use native f64 storage");
+    }
+    const sourceResult = L.mapTypeOf(L.typeOf(expr));
+    if (sourceResult === null || !typeEquals(sourceResult, operation.type)) {
+      fail("the declaration result does not preserve the configured exact integer type");
+    }
+    const values = expr.arguments.map((argument, index) => {
+      const value = L.lowerExpr(argument);
+      if (!typeEquals(value.type, operation.type)) {
+        fail(`argument ${index + 1} does not have the configured exact integer type`);
+      }
+      return value;
+    });
+    if (operation.type.scalar === "isize" || operation.type.scalar === "usize") {
+      L.usesNativeTarget = true;
+    }
+    return values.slice(1).reduce<IrExpr>(
+      (left, right) => ({
+        kind: "nativeIntegerBin",
+        op: operation.operator,
+        left,
+        right,
+        type: { ...operation.type },
+        loc,
+      }),
+      values[0]!,
+    );
+  }
   const binding = nativeBindingByKind(
     L,
     symbol,
