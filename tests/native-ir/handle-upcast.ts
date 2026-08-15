@@ -1,5 +1,4 @@
 import {
-  counterBaseValue,
   counterDestroyedCount,
   counterVerify,
   createCounter,
@@ -9,7 +8,7 @@ import { exit } from "scriptc-native-test";
 
 function run(): i32 {
   const counter = createCounter(42 as i32);
-  const value = counterBaseValue(counter);
+  const value = counter.value();
   counter.dispose();
   return counterVerify(value, counterDestroyedCount(), 42 as i32, 1 as i32);
 }

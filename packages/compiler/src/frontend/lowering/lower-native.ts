@@ -122,6 +122,7 @@ function matchesNativeResultSource(
     return binding.result.type.kind !== "nativePointer" &&
       typeEquals(mapped, binding.result.type);
   }
+  if (binding.result.projection.kind === "boolean") return mapped.kind === "bool";
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;

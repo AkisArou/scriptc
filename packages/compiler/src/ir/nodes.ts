@@ -235,6 +235,7 @@ export type IrNativeParameterProjection =
 
 export type IrNativeResultProjection =
   | { kind: "direct" }
+  | { kind: "boolean"; falseValue: string; trueValue: string }
   | { kind: "utf8CString"; nullable: boolean };
 
 export type IrNativeResultAbiType =

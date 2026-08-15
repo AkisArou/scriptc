@@ -70,6 +70,12 @@ size_t nts_usize_identity(size_t value) {
   return value;
 }
 
+int32_t nts_boolean_false(void) { return 0; }
+
+int32_t nts_boolean_invalid(void) { return 2; }
+
+int32_t nts_boolean_true(void) { return 1; }
+
 NtsPadded nts_padded_roundtrip(NtsPadded value) {
   return value;
 }
@@ -242,8 +248,6 @@ int32_t nts_counter_add(NtsCounter *counter, int32_t delta) {
 }
 
 int32_t nts_counter_value(NtsCounter *counter) { return counter->value; }
-
-int32_t nts_counter_base_value(NtsCounter *counter) { return counter->value; }
 
 const char *nts_counter_label(NtsCounter *counter) {
   return counter->value == 42 ? "native \xE2\x9C\x93" : NULL;

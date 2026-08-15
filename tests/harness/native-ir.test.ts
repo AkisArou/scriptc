@@ -218,6 +218,37 @@ const localNativeInput: NativeFrontendInput = {
         result: { type, passMode: "value" as const, ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
       };
     }),
+    ...([
+      ["nativeFalse", "nts_boolean_false"],
+      ["nativeTrue", "nts_boolean_true"],
+      ["nativeInvalidBoolean", "nts_boolean_invalid"],
+    ] as const).map(([declaration, symbol]) => ({
+      id: `native-typescript.fixture.c-v1@0.0.0#${declaration}`,
+      declaration: {
+        module: nativePackage,
+        name: declaration,
+      },
+      entry: {
+        kind: "c-symbol" as const,
+        symbol,
+      },
+      callingConvention: "c" as const,
+      variadic: false as const,
+      sourceCall: { kind: "function" as const },
+      error: NO_NATIVE_ERROR,
+      arguments: [],
+      parameters: [],
+      result: {
+        type: I32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: {
+          kind: "boolean" as const,
+          falseValue: "0",
+          trueValue: "1",
+        },
+      },
+    })),
     {
       id: "native-typescript.fixture.c-v1@0.0.0#padded_roundtrip",
       declaration: { module: nativePackage, name: "paddedRoundtrip" },
@@ -456,29 +487,6 @@ const localNativeInput: NativeFrontendInput = {
       },
     })),
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_base_value",
-      declaration: { module: nativePackage, name: "counterBaseValue" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_base_value" },
-      callingConvention: "c",
-      variadic: false,
-      sourceCall: { kind: "function" },
-      error: NO_NATIVE_ERROR,
-      ...directSignature([
-        {
-          name: "counter",
-          type: COUNTER_BASE,
-          passMode: "pointer",
-          ownership: { kind: "borrowed", scope: "call" },
-        },
-      ]),
-      result: {
-        type: I32,
-        passMode: "value",
-        ownership: { kind: "value" },
-        projection: DIRECT_RESULT,
-      },
-    },
-    {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
       entry: { kind: "c-symbol", symbol: "nts_counter_add" },
@@ -540,14 +548,14 @@ const localNativeInput: NativeFrontendInput = {
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_value",
-      declaration: { module: nativePackage, name: "Counter.value" },
+      declaration: { module: nativePackage, name: "CounterBase.value" },
       entry: { kind: "c-symbol", symbol: "nts_counter_value" },
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
-        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "counter", type: COUNTER_BASE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
       ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
@@ -1336,6 +1344,28 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   expect(deserializeModule(json)).toEqual(mod);
 });
 
+test("Native IR validates exact integer-backed boolean results", () => {
+  const mod = exactI32Module();
+  const binding = structuredClone(localNativeInput.bindings.find(
+    ({ declaration }) => declaration.name === "nativeTrue",
+  ));
+  if (binding === undefined) throw new Error("test fixture lost nativeTrue");
+  mod.nativeBindings = [...mod.nativeBindings!, binding];
+  expect(validateModule(mod)).toEqual([]);
+  expect(deserializeModule(serializeModule(mod))).toEqual(mod);
+
+  const malformed = structuredClone(binding);
+  malformed.result.projection = {
+    kind: "boolean",
+    falseValue: "1",
+    trueValue: "1",
+  };
+  mod.nativeBindings = [mod.nativeBindings[0]!, malformed];
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    `Native IR binding "${binding.id}" has an invalid boolean result projection`,
+  );
+});
+
 test("Native IR validates explicit identity handle upcast graphs", () => {
   const base = {
     ...COUNTER_DEFINITION,
@@ -1971,6 +2001,35 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
       expect(generated).toMatch(/= mul i64/);
       expect(generated).toMatch(/= sub i64/);
     }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR boolean results, %s backend", (backend) => {
+  test("projects exact native storage into TypeScript boolean", async () => {
+    const outDir = join(scratch, `boolean-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/boolean-result.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native boolean frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(serializeModule(mod)).toContain('"kind": "boolean"');
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

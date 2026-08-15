@@ -1831,6 +1831,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     });
     const resultProjection = binding.result.projection as
       | { kind: "direct" }
+      | { kind: "boolean"; falseValue?: unknown; trueValue?: unknown }
       | { kind: "utf8CString"; nullable?: unknown }
       | undefined;
     if (resultProjection?.kind === "direct") {
@@ -1854,6 +1855,41 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" direct result has an unsupported exact type`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "boolean") {
+      const resultType = binding.result.type;
+      const info = resultType.kind === "nativeScalar"
+        ? nativeIntegerInfo(
+            resultType.scalar,
+            validNativeTarget ? nativePointerBits : undefined,
+          )
+        : null;
+      const parseValue = (candidate: unknown): bigint | null =>
+        typeof candidate === "string" &&
+          /^-?(?:0|[1-9][0-9]*)$/.test(candidate) &&
+          candidate !== "-0"
+          ? BigInt(candidate)
+          : null;
+      const falseValue = parseValue(resultProjection.falseValue);
+      const trueValue = parseValue(resultProjection.trueValue);
+      if (
+        Object.keys(resultProjection).sort().join(",") !== "falseValue,kind,trueValue" ||
+        info === null ||
+        falseValue === null ||
+        trueValue === null ||
+        falseValue === trueValue ||
+        falseValue < info.min ||
+        falseValue > info.max ||
+        trueValue < info.min ||
+        trueValue > info.max ||
+        binding.result.passMode !== "value" ||
+        binding.result.ownership.kind !== "value" ||
+        binding.error.kind !== "no-fail"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid boolean result projection`,
           loc: moduleLoc,
         });
       }
@@ -3643,6 +3679,7 @@ function validateFunction(
         });
         const resultProjection = binding.result.projection as
           | { kind: "direct" }
+          | { kind: "boolean" }
           | { kind: "utf8CString"; nullable?: unknown }
           | undefined;
         if (resultProjection?.kind === "direct") {
@@ -3654,6 +3691,10 @@ function validateFunction(
               `Native IR call ${e.binding} type ${typeKey(e.type)} does not match its direct result`,
               e.loc,
             );
+          }
+        } else if (resultProjection?.kind === "boolean") {
+          if (e.type.kind !== "bool") {
+            err(`Native IR call ${e.binding} must project to boolean`, e.loc);
           }
         } else if (
           resultProjection?.kind === "utf8CString" &&

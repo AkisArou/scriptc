@@ -43,10 +43,11 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
       )
       .map((binding) => binding.id),
   );
-  const errorNativeBindings = new Set(
+  const throwingNativeBindings = new Set(
     (mod.nativeBindings ?? [])
       .filter((binding) =>
         binding.error.kind !== "no-fail" ||
+        binding.result.projection.kind === "boolean" ||
         (binding.result.projection.kind === "utf8CString" &&
           !binding.result.projection.nullable)
       )
@@ -198,7 +199,7 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           // synchronous native call returns.
           if (
             callbackNativeBindings.has(rec["binding"] as string) ||
-            errorNativeBindings.has(rec["binding"] as string)
+            throwingNativeBindings.has(rec["binding"] as string)
           ) f.throws = true;
           break;
         case "bytesNew": {

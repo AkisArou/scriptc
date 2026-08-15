@@ -2381,6 +2381,30 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
+        if (binding.result.projection.kind === "boolean") {
+          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "bool") {
+            throw new Error(`emitter bug: invalid boolean result projection in ${binding.id}`);
+          }
+          const raw = E.newTemp(binding.result.type, call);
+          const trueValue = cNativeScalarLiteral(
+            binding.result.type,
+            binding.result.projection.trueValue,
+            E.mod.nativeTarget?.pointerBits,
+          );
+          const falseValue = cNativeScalarLiteral(
+            binding.result.type,
+            binding.result.projection.falseValue,
+            E.mod.nativeTarget?.pointerBits,
+          );
+          E.line(
+            `if (${raw.name} != ${falseValue} && ${raw.name} != ${trueValue} && ` +
+              `!scr_exc_pending()) scr_native_throw_boolean(${operation});`,
+          );
+          const result = E.newTemp(e.type, `${raw.name} == ${trueValue}`);
+          E.emitPendingCheck();
+          releaseArguments();
+          return result;
+        }
         if (binding.result.type.kind === "nativeHandle") {
           if (binding.result.ownership.kind !== "owned") {
             throw new Error(`emitter bug: native handle result without ownership in ${binding.id}`);

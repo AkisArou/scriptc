@@ -6748,6 +6748,42 @@ class LlEmitter {
           releaseArguments();
           return value;
         }
+        if (binding.result.projection.kind === "boolean") {
+          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "bool") {
+            throw new Error(`llvm emitter bug: invalid boolean result projection in ${binding.id}`);
+          }
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          const value = B.tmp();
+          const isFalse = B.tmp();
+          const valid = B.tmp();
+          const invalidBlock = B.newLabel("native.boolean.invalid");
+          const throwBlock = B.newLabel("native.boolean.throw");
+          const continuation = B.newLabel("native.boolean.ok");
+          B.line(
+            `${value} = icmp eq ${this.llType(binding.result.type)} ${raw}, ` +
+              `${binding.result.projection.trueValue}`,
+          );
+          B.line(
+            `${isFalse} = icmp eq ${this.llType(binding.result.type)} ${raw}, ` +
+              `${binding.result.projection.falseValue}`,
+          );
+          B.line(`${valid} = or i1 ${value}, ${isFalse}`);
+          B.condBr(valid, continuation, invalidBlock);
+          B.startBlock(invalidBlock);
+          this.declare("declare zeroext i1 @scr_exc_pending()");
+          const pending = B.tmp();
+          B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+          B.condBr(pending, continuation, throwBlock);
+          B.startBlock(throwBlock);
+          this.declare("declare void @scr_native_throw_boolean(ptr)");
+          B.line(`call void @scr_native_throw_boolean(ptr ${operation})`);
+          B.br(continuation);
+          B.startBlock(continuation);
+          this.emitPendingCheck();
+          releaseArguments();
+          return { name: value, type: e.type };
+        }
         if (binding.result.type.kind === "nativeHandle") {
           if (binding.result.ownership.kind !== "owned") {
             throw new Error(`llvm emitter bug: native handle result without ownership in ${binding.id}`);

@@ -22,6 +22,7 @@ export interface Padded {
 
 export interface CounterBase {
   readonly [nativeCounterBaseResource]: true;
+  value(): i32;
 }
 
 export interface CounterMiddle extends CounterBase {
@@ -33,7 +34,6 @@ export interface Counter extends CounterMiddle {
   add(delta: i32): i32;
   label(): string | null;
   requiredLabel(): string;
-  value(): i32;
   dispose(): void;
 }
 
@@ -52,6 +52,9 @@ export declare function u32Identity(value: u32): u32;
 export declare function i64Identity(value: i64): i64;
 export declare function u64Identity(value: u64): u64;
 export declare function usizeIdentity(value: usize): usize;
+export declare function nativeFalse(): boolean;
+export declare function nativeInvalidBoolean(): boolean;
+export declare function nativeTrue(): boolean;
 export declare function paddedRoundtrip(value: Padded): Padded;
 export declare function hashUtf8(value: string): u64;
 export declare function cStringObserve(value: string): void;
@@ -62,7 +65,6 @@ export declare function callScoped(
 ): i32;
 export declare function failErrno(errorNumber: i32): never;
 export declare function createCounter(initialValue: i32): Counter;
-export declare function counterBaseValue(counter: CounterBase): i32;
 export declare function subscribe(
   callback: (value: i32) => void,
 ): Subscription;
