@@ -2361,7 +2361,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  test("folds a declaration-backed exact integer reduction without a runtime symbol", async () => {
+  localFixtureTest("folds a declaration-backed exact integer reduction without a runtime symbol", async () => {
     const outDir = join(scratch, `native-integer-reduce-${backend}`);
     const result = await compile(
       join(repoRoot, "tests/native-ir/native-integer-reduce.ts"),
