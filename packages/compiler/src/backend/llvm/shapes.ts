@@ -38,6 +38,7 @@ export interface ShapeHost {
   readonly tracedShapes: Set<string>;
   readonly tracedUnions: Set<string>;
   readonly recordsById: Map<string, IrRecordShape>;
+  isNativeHandleTraceable(typeId: string): boolean;
 }
 
 /** Every emitted function/helper carries #0 = { sanitize_address } — see
@@ -103,6 +104,12 @@ export function computeTraced(mod: IrModule): { shapes: Set<string>; unions: Set
       case "func":
       case "promise":
         return true;
+      case "nativeHandle":
+        return mod.nativeTypes?.some(
+          (definition) => definition.kind === "handle" &&
+            definition.id === t.typeId &&
+            definition.cycleCollection === "traceable",
+        ) ?? false;
       case "object":
         return tracedShapes.has(`object:${t.className}`);
       case "record":
@@ -438,6 +445,10 @@ export function releaseSym(host: ShapeHost, t: IrType): string {
  * their RC rows refuse first). */
 export function traceAdapter(host: ShapeHost, t: IrType): string | null {
   switch (t.kind) {
+    case "nativeHandle":
+      if (!host.isNativeHandleTraceable(t.typeId)) return null;
+      host.declare(`declare void @scr_native_handle_trace_v(ptr, ptr, ptr)`);
+      return "@scr_native_handle_trace_v";
     case "func":
       host.declare(`declare void @scr_closure_trace_v(ptr, ptr, ptr)`);
       return "@scr_closure_trace_v";

@@ -1247,6 +1247,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         definition.nativeName === "" ||
         !["confined", "shared"].includes(definition.threadSafety) ||
         !["none", "pointer", "binding", "platform"].includes(definition.identity) ||
+        !["none", "traceable"].includes(definition.cycleCollection) ||
         !Array.isArray(definition.upcasts)
       ) {
         errors.push({ message: `Native IR handle type "${definition.id}" has invalid metadata`, loc: moduleLoc });
@@ -1317,7 +1318,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         targets.has(upcast.target) || previous >= upcast.target ||
         upcast.target === definition.id || target?.kind !== "handle" ||
         target.threadSafety !== definition.threadSafety ||
-        target.identity !== definition.identity
+        target.identity !== definition.identity ||
+        target.cycleCollection !== definition.cycleCollection
       ) {
         errors.push({
           message: `Native IR handle type "${definition.id}" has an invalid identity upcast to "${upcast.target}"`,
@@ -1398,7 +1400,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const executors = candidate["allowedInvocationExecutors"];
     if (
       typeof owner !== "object" || owner === null ||
-      Object.keys(owner).length !== 1 ||
       !Array.isArray(executors)
     ) {
       return false;
@@ -1406,6 +1407,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (candidate["lifetime"] === "call") {
       return Object.keys(candidate).sort().join(",") ===
           "allowedInvocationExecutors,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,synchronousReturn,transports" &&
+        Object.keys(owner).length === 1 &&
         (owner as { kind?: unknown }).kind === "native-call" &&
         executors.length === 1 && executors[0] === "same-as-caller" &&
         candidate["deliveryExecutor"] === "same-as-caller" &&
@@ -1417,9 +1419,17 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     if (candidate["lifetime"] === "until-cancelled") {
       const allowed = new Set(["same-as-caller", "any-attached-thread"]);
+      const ownerCandidate = owner as Record<string, unknown>;
+      const validOwner =
+        (Object.keys(ownerCandidate).length === 1 &&
+          ownerCandidate["kind"] === "result") ||
+        (Object.keys(ownerCandidate).sort().join(",") === "argument,kind" &&
+          ownerCandidate["kind"] === "argument" &&
+          Number.isSafeInteger(ownerCandidate["argument"]) &&
+          Number(ownerCandidate["argument"]) >= 0);
       return Object.keys(candidate).sort().join(",") ===
           "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,synchronousReturn,transports" &&
-        (owner as { kind?: unknown }).kind === "result" &&
+        validOwner &&
         typeof candidate["cancellationBinding"] === "string" &&
         candidate["cancellationBinding"] !== "" &&
         executors.length > 0 &&
@@ -1964,6 +1974,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     nativeDeclarations.add(declarationKey);
   }
   for (const binding of mod.nativeBindings ?? []) {
+    let retainedOwnerArgument: number | undefined;
     for (const argument of binding.arguments) {
       const contract = argument.callback;
       if (argument.type.kind !== "func" || contract?.lifetime !== "until-cancelled") {
@@ -1978,6 +1989,37 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           message: `Native IR binding "${binding.id}" retained callback "${argument.name}" must be owned and cancelled by its result handle destructor`,
           loc: moduleLoc,
         });
+      }
+      if (contract.registrationOwner.kind === "argument") {
+        if (
+          retainedOwnerArgument !== undefined &&
+          retainedOwnerArgument !== contract.registrationOwner.argument
+        ) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" retained callbacks have conflicting receiver owners`,
+            loc: moduleLoc,
+          });
+        }
+        retainedOwnerArgument = contract.registrationOwner.argument;
+        const owner = binding.arguments[contract.registrationOwner.argument];
+        const ownerDefinition = owner?.type.kind === "nativeHandle"
+          ? nativeTypesById.get(owner.type.typeId)
+          : undefined;
+        const resultDefinition = binding.result.type.kind === "nativeHandle"
+          ? nativeTypesById.get(binding.result.type.typeId)
+          : undefined;
+        if (
+          owner?.type.kind !== "nativeHandle" ||
+          ownerDefinition?.kind !== "handle" ||
+          ownerDefinition.cycleCollection !== "traceable" ||
+          resultDefinition?.kind !== "handle" ||
+          resultDefinition.cycleCollection !== "traceable"
+        ) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" retained callback "${argument.name}" has an invalid collector-visible receiver owner`,
+            loc: moduleLoc,
+          });
+        }
       }
       if (!nativeById.has(contract.cancellationBinding)) {
         errors.push({

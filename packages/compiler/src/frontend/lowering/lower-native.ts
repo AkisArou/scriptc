@@ -628,7 +628,7 @@ function materializeNativeCallbackContract(
   }
   return {
     ...contract,
-    registrationOwner: { kind: "result" },
+    registrationOwner: { ...contract.registrationOwner },
     allowedInvocationExecutors: [...contract.allowedInvocationExecutors],
     transports: contract.transports.map(() => ({ kind: "copy" })),
   };

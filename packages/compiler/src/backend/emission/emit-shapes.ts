@@ -677,6 +677,13 @@ export interface ClassMeta {
    * the type cannot participate in a cycle (see the constructor fixpoint). */
   export function traceAdapterC(E: CEmitter, t: IrType): string | null {
     switch (t.kind) {
+      case "nativeHandle": {
+        const definition = E.nativeTypesById.get(t.typeId);
+        return definition?.kind === "handle" &&
+            definition.cycleCollection === "traceable"
+          ? "scr_native_handle_trace_v"
+          : null;
+      }
       case "func":
         return "scr_closure_trace_v";
       case "union":

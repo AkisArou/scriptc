@@ -134,9 +134,14 @@ bool scr_callback_token_begin_close(ScrCallbackToken *token) {
   }
 }
 
-bool scr_callback_token_abandon(ScrCallbackToken *token) {
+bool scr_callback_token_begin_discard(ScrCallbackToken *token) {
   if (!scr_callback_token_begin_close(token)) return false;
   token->deliver_admitted = false;
+  return true;
+}
+
+bool scr_callback_token_abandon(ScrCallbackToken *token) {
+  if (!scr_callback_token_begin_discard(token)) return false;
   return scr_callback_token_cancellation_complete(token);
 }
 

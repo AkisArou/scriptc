@@ -113,6 +113,7 @@ const COUNTER_DEFINITION = {
   nativeName: "NtsCounter",
   threadSafety: "confined",
   identity: "pointer",
+  cycleCollection: "none",
   upcasts: [{ kind: "identity", target: COUNTER_MIDDLE_ID }],
 } as const satisfies NativeFrontendInput["types"][number];
 const COUNTER_MIDDLE_DEFINITION = {
@@ -122,6 +123,7 @@ const COUNTER_MIDDLE_DEFINITION = {
   nativeName: "NtsCounterMiddle",
   threadSafety: "confined",
   identity: "pointer",
+  cycleCollection: "none",
   upcasts: [{ kind: "identity", target: COUNTER_BASE_ID }],
 } as const satisfies NativeFrontendInput["types"][number];
 const COUNTER_BASE_DEFINITION = {
@@ -131,6 +133,7 @@ const COUNTER_BASE_DEFINITION = {
   nativeName: "NtsCounterBase",
   threadSafety: "confined",
   identity: "pointer",
+  cycleCollection: "none",
   upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
 const SUBSCRIPTION_DEFINITION = {
@@ -140,6 +143,7 @@ const SUBSCRIPTION_DEFINITION = {
   nativeName: "NtsSubscription",
   threadSafety: "shared",
   identity: "pointer",
+  cycleCollection: "none",
   upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
@@ -1436,6 +1440,14 @@ test("Native IR validates explicit identity handle upcast graphs", () => {
   if (incompatibleBase.kind !== "handle") throw new Error("test fixture lost its handle type");
   incompatibleBase.identity = "platform";
   expect(validateModule(incompatible).map(({ message }) => message)).toContain(
+    `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}"`,
+  );
+
+  const incompatibleCollection = structuredClone(mod);
+  const collectionBase = incompatibleCollection.nativeTypes![0]!;
+  if (collectionBase.kind !== "handle") throw new Error("test fixture lost its handle type");
+  collectionBase.cycleCollection = "traceable";
+  expect(validateModule(incompatibleCollection).map(({ message }) => message)).toContain(
     `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}"`,
   );
 

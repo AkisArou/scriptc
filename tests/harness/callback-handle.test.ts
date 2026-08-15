@@ -12,12 +12,12 @@ const scratch = mkdtempSync(join(tmpdir(), "scriptc-callback-handle-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe.each(["none", "address", "thread"] as const)(
-  "retained callback result owner, sanitizer=%s",
+  "retained callback native owners, sanitizer=%s",
   (sanitizer) => {
     const unsupported =
       process.platform === "win32" || (sanitizer === "thread" && process.platform !== "linux");
     test.skipIf(unsupported)(
-      "closes admission around native destruction and preserves admitted leases",
+      "preserves explicit-cancel leases and collects receiver-owned cycles",
       () => {
         const binary = join(scratch, `handle-${sanitizer}`);
         execFileSync("clang", [
@@ -42,6 +42,7 @@ describe.each(["none", "address", "thread"] as const)(
           join(runtime, "scr_callback_table.c"),
           join(runtime, "scr_callback_handle.c"),
           join(runtime, "scr_native_handle.c"),
+          join(runtime, "scr_cycle.c"),
           fixture,
           "-o",
           binary,

@@ -188,7 +188,9 @@ export type IrNativeCallbackContract =
     }
   | {
       lifetime: "until-cancelled";
-      registrationOwner: { kind: "result" };
+      registrationOwner:
+        | { kind: "result" }
+        | { kind: "argument"; argument: number };
       cancellationBinding: string;
       allowedInvocationExecutors: readonly (
         | "same-as-caller"
@@ -1100,6 +1102,9 @@ export interface IrNativeHandleDef {
    * its own worker/callback threads without exposing the managed cell. */
   threadSafety: "confined" | "shared";
   identity: "none" | "pointer" | "binding" | "platform";
+  /** Whether values of this nominal type carry a cycle-collector header.
+   * Identity-upcast-connected types must agree because they share a cell. */
+  cycleCollection: "none" | "traceable";
   /** Direct representation-preserving nominal conversions. */
   upcasts: { kind: "identity"; target: string }[];
 }

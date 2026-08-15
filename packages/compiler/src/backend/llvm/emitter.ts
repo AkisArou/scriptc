@@ -1247,6 +1247,12 @@ class LlEmitter {
     return this.sizeType === "i32" ? wasm32 : native64;
   }
 
+  isNativeHandleTraceable(typeId: string): boolean {
+    const definition = this.nativeTypesById.get(typeId);
+    return definition?.kind === "handle" &&
+      definition.cycleCollection === "traceable";
+  }
+
   // ── types ───────────────────────────────────────────────────────────────
 
   private llType(t: IrType): string {
@@ -1999,7 +2005,7 @@ class LlEmitter {
       `%ScrDynPath = type { ptr, ptr, ${this.sizeType} }`,
       `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
-      `%ScrNativeHandleType = type { ptr, ${this.sizeType} }`,
+      `%ScrNativeHandleType = type { ptr, ${this.sizeType}, i1 }`,
     ];
     for (const definition of this.mod.nativeTypes ?? []) {
       if (definition.kind === "handle") {
@@ -2011,12 +2017,14 @@ class LlEmitter {
                 `ptr @${mangleNativeHandleTag(upcast.target)}`
               ).join(", ") +
               `]`,
-            `@${tag} = internal constant %ScrNativeHandleType { ` +
-              `ptr @${tag}_upcasts, ${this.sizeType} ${definition.upcasts.length} }`,
+              `@${tag} = internal constant %ScrNativeHandleType { ` +
+              `ptr @${tag}_upcasts, ${this.sizeType} ${definition.upcasts.length}, ` +
+              `i1 ${definition.cycleCollection === "traceable" ? "true" : "false"} }`,
           );
         } else {
           out.push(
-            `@${tag} = internal constant %ScrNativeHandleType { ptr null, ${this.sizeType} 0 }`,
+            `@${tag} = internal constant %ScrNativeHandleType { ptr null, ${this.sizeType} 0, ` +
+              `i1 ${definition.cycleCollection === "traceable" ? "true" : "false"} }`,
           );
         }
         continue;
@@ -6539,6 +6547,7 @@ class LlEmitter {
             argument.callback?.lifetime === "call",
         );
         const retainedTokens = new Map<number, string>();
+        const retainedOwnerArguments = new Set<number>();
         binding.arguments.forEach((argument, argumentIndex) => {
           if (
             argument.type.kind !== "func" ||
@@ -6556,6 +6565,11 @@ class LlEmitter {
               `ptr ${args[argumentIndex]!.name}, ptr @${adapter.symbol}_signature)`,
           );
           retainedTokens.set(argumentIndex, token);
+          if (argument.callback.registrationOwner.kind === "argument") {
+            retainedOwnerArguments.add(
+              argument.callback.registrationOwner.argument,
+            );
+          }
         });
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
@@ -6816,6 +6830,17 @@ class LlEmitter {
               `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
               `ptr ${this.cstr(definition.nativeName)})`,
           );
+          if (retainedOwnerArguments.size > 1) {
+            throw new Error(`llvm emitter bug: conflicting retained callback owners in ${binding.id}`);
+          }
+          const retainedOwnerArgument = retainedOwnerArguments.values().next().value;
+          if (retainedOwnerArgument !== undefined) {
+            this.declare(`declare void @scr_native_handle_prepare_owner(ptr, ptr)`);
+            B.line(
+              `call void @scr_native_handle_prepare_owner(` +
+                `ptr ${prepared}, ptr ${args[retainedOwnerArgument]!.name})`,
+            );
+          }
           if (retainedTokens.size > 0) {
             this.declare(`declare void @scr_retained_callbacks_prepare(ptr, ptr)`);
             for (const token of retainedTokens.values()) {

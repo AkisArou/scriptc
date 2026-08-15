@@ -163,6 +163,9 @@ void *scr_callback_invocation_alloc(ScrCallbackToken *token, size_t size);
 /* Owner-only. The transition linearizes against admission: every admission
  * that won before CLOSING remains deliverable and owns a lease. */
 bool scr_callback_token_begin_close(ScrCallbackToken *token);
+/* Collector-only close: suppress delivery of admitted work because its
+ * managed closure may be reclaimed in the same white set. */
+bool scr_callback_token_begin_discard(ScrCallbackToken *token);
 /* Failed staged registration: close admission and suppress delivery of work
  * already queued for an owner that never came into existence. */
 bool scr_callback_token_abandon(ScrCallbackToken *token);
@@ -179,9 +182,9 @@ size_t scr_callback_token_slot(ScrCallbackToken *token);
 uint64_t scr_callback_token_generation(ScrCallbackToken *token);
 
 /* ── retained-callback owner table (scr_callback_table.c) ────────────────
- * An active native registration is an explicit external root. The table
- * strongly owns its owner-only anchor until native cancellation completes
- * and all transport leases finish; foreign threads see only the token above.
+ * The table owns its anchor during staging and closing-lease drain. An
+ * associated native lifecycle owns it while active, so traceable handle edges
+ * can participate in cycle collection; foreign threads see only the token.
  * Hooks keep the transport/lifecycle core independent from one closure ABI. */
 typedef struct ScrCallbackTable ScrCallbackTable;
 typedef void *(*ScrCallbackAnchorRetainFn)(void *anchor);
@@ -202,6 +205,8 @@ void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
                                  const void *signature);
 bool scr_callback_table_begin_close(ScrCallbackTable *table,
                                     ScrCallbackToken *token);
+bool scr_callback_table_begin_discard(ScrCallbackTable *table,
+                                      ScrCallbackToken *token);
 bool scr_callback_table_abandon(ScrCallbackTable *table,
                                 ScrCallbackToken *token);
 bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
@@ -209,6 +214,16 @@ bool scr_callback_table_cancellation_complete(ScrCallbackTable *table,
 /* Claims the single result/native owner edge for a staged registration. */
 bool scr_callback_table_claim_owner(ScrCallbackTable *table,
                                     ScrCallbackToken *token);
+/* Move the anchor's existing +1 between the staging table and a managed
+ * lifecycle edge. The table keeps a weak lookup pointer while active. */
+void *scr_callback_table_transfer_anchor(ScrCallbackTable *table,
+                                         ScrCallbackToken *token);
+bool scr_callback_table_adopt_anchor(ScrCallbackTable *table,
+                                     ScrCallbackToken *token, void *anchor);
+bool scr_callback_table_clear_anchor(ScrCallbackTable *table,
+                                     ScrCallbackToken *token, void *anchor);
+void scr_callback_table_release_transferred_anchor(ScrCallbackTable *table,
+                                                   void *anchor);
 /* Owner-only reap after gateway drains/discards. Returns entries disposed. */
 size_t scr_callback_table_collect(ScrCallbackTable *table);
 size_t scr_callback_table_active(ScrCallbackTable *table);
@@ -2789,9 +2804,15 @@ void scr_file_handle_release_v(void *p);
  * result. Thus native resources cannot be stranded by runtime OOM. */
 typedef void (*ScrNativeDestructor)(void *foreign);
 typedef void (*ScrNativeLifecycleFn)(void *context);
+typedef void (*ScrNativeLifecycleTraceFn)(void *context, ScrTraceVisit visit,
+                                          void *visit_context);
 typedef struct ScrNativeHandleType {
   const struct ScrNativeHandleType *const *identity_upcasts;
   size_t identity_upcast_count;
+  /* True only when managed ownership edges can make this handle part of a
+   * reference cycle. Lean foreign handles keep the allocation/refcount path
+   * they had before receiver-owned registrations existed. */
+  bool cycle_collected;
 } ScrNativeHandleType;
 ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
                                            const ScrNativeHandleType *type,
@@ -2802,6 +2823,8 @@ ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle);
 void scr_native_handle_release(ScrNativeHandle *handle);
 void *scr_native_handle_retain_v(void *handle);
 void scr_native_handle_release_v(void *handle);
+void scr_native_handle_trace_v(void *handle, ScrTraceVisit visit,
+                               void *visit_context);
 void *scr_native_handle_require(ScrNativeHandle *handle,
                                 const ScrNativeHandleType *type,
                                 const char *operation);
@@ -2814,8 +2837,16 @@ void scr_native_handle_dispose(ScrNativeHandle *handle,
 void scr_native_handle_prepare_lifecycle(
     ScrNativeHandle *handle, void *context, ScrNativeLifecycleFn commit,
     ScrNativeLifecycleFn abandon, ScrNativeLifecycleFn begin,
-    ScrNativeLifecycleFn complete, ScrNativeLifecycleFn destroy_context);
-/* Result-owned retained callback association (scr_callback_handle.c). */
+    ScrNativeLifecycleFn complete, ScrNativeLifecycleTraceFn trace,
+    ScrNativeLifecycleFn collect_begin,
+    ScrNativeLifecycleFn collect_complete,
+    ScrNativeLifecycleFn destroy_context);
+/* Preallocates a receiver -> result ownership edge. Commit of `child` adopts
+ * it without allocation; abandonment rolls it back. Both handle types must
+ * be cycle-collected so the edge is visible to trial deletion. */
+void scr_native_handle_prepare_owner(ScrNativeHandle *child,
+                                     ScrNativeHandle *owner);
+/* Native-handle retained callback association (scr_callback_handle.c). */
 void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
                                         ScrCallbackTable *table,
                                         ScrCallbackToken *token);

@@ -583,6 +583,11 @@ export class CEmitter {
         case "func":
         case "promise":
           return true;
+        case "nativeHandle": {
+          const definition = this.nativeTypesById.get(t.typeId);
+          return definition?.kind === "handle" &&
+            definition.cycleCollection === "traceable";
+        }
         case "object":
           return this.tracedShapes.has(`object:${t.className}`);
         case "record":
@@ -1359,12 +1364,13 @@ export class CEmitter {
             `static const ScrNativeHandleType ${tag} = {`,
             `  ${tag}_upcasts,`,
             `  ${definition.upcasts.length},`,
+            `  ${definition.cycleCollection === "traceable" ? "true" : "false"},`,
             `};`,
             "",
           );
         } else {
           out.push(
-            `static const ScrNativeHandleType ${tag} = {NULL, 0};`,
+            `static const ScrNativeHandleType ${tag} = {NULL, 0, ${definition.cycleCollection === "traceable" ? "true" : "false"}};`,
             "",
           );
         }

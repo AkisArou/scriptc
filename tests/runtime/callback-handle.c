@@ -8,6 +8,8 @@
 typedef struct {
   size_t rc;
   int64_t total;
+  ScrNativeHandle *captured;
+  bool traced;
 } TestAnchor;
 
 typedef struct {
@@ -20,11 +22,13 @@ typedef struct {
 } TestForeign;
 
 static const char signature;
-static const ScrNativeHandleType handle_type = {NULL, 0};
+static const ScrNativeHandleType handle_type = {NULL, 0, false};
+static const ScrNativeHandleType traced_handle_type = {NULL, 0, true};
 static _Atomic size_t anchors_freed;
 static _Atomic size_t events_destroyed;
 static _Atomic size_t foreign_destroyed;
 static _Atomic size_t handles_allocated;
+static _Atomic size_t receivers_destroyed;
 
 _Noreturn void scr_trap(const char *message) {
   fputs(message, stderr);
@@ -43,6 +47,7 @@ void scr_obj_free_note(void) { atomic_fetch_sub(&handles_allocated, 1); }
 
 static void *retain_anchor(void *opaque) {
   TestAnchor *anchor = opaque;
+  if (anchor->traced) scr_cyc_mark_live(anchor);
   anchor->rc++;
   return anchor;
 }
@@ -50,9 +55,31 @@ static void *retain_anchor(void *opaque) {
 static void release_anchor(void *opaque) {
   TestAnchor *anchor = opaque;
   assert(anchor->rc != 0);
-  if (--anchor->rc != 0) return;
+  if (--anchor->rc != 0) {
+    if (anchor->traced) scr_cyc_on_release(anchor);
+    return;
+  }
+  if (anchor->traced) {
+    scr_cyc_on_dead(anchor);
+    ScrNativeHandle *captured = anchor->captured;
+    anchor->captured = NULL;
+    scr_native_handle_release(captured);
+  }
   atomic_fetch_add(&anchors_freed, 1);
-  free(anchor);
+  if (anchor->traced) scr_cyc_free(anchor);
+  else free(anchor);
+}
+
+static void trace_anchor(void *opaque, ScrTraceVisit visit, void *context) {
+  TestAnchor *anchor = opaque;
+  visit(anchor->captured, context);
+}
+
+static void collect_anchor(void *opaque) {
+  TestAnchor *anchor = opaque;
+  /* captured is a traced edge already accounted by trial deletion. */
+  atomic_fetch_add(&anchors_freed, 1);
+  scr_cyc_free(anchor);
 }
 
 static bool invoke_callback(ScrCallbackInvocation *base, void *owner_context,
@@ -88,6 +115,11 @@ static void destroy_foreign(void *opaque) {
       foreign->token, &new_invocation(99)->invocation));
   atomic_fetch_add(&foreign_destroyed, 1);
   free(foreign);
+}
+
+static void destroy_receiver(void *opaque) {
+  atomic_fetch_add(&receivers_destroyed, 1);
+  free(opaque);
 }
 
 static void wake_owner(void *context) { (void)context; }
@@ -146,11 +178,45 @@ int main(void) {
       token, &new_invocation(41)->invocation));
   scr_native_handle_abandon(handle);
   assert(atomic_load(&handles_allocated) == 0);
-  assert(scr_owner_gateway_drain(gateway, 0) == 1);
-  assert(anchor->total == 0);
-  assert(scr_callback_table_collect(table) == 1);
   assert(atomic_load(&anchors_freed) == 2);
+  assert(scr_owner_gateway_drain(gateway, 0) == 1);
+  assert(scr_callback_table_collect(table) == 1);
   assert(atomic_load(&events_destroyed) == 3);
+
+  /* Receiver ownership is a collector-visible graph, not an external root:
+   * receiver -> subscription -> closure -> receiver is reclaimed together. */
+  ScrNativeHandle *receiver = scr_native_handle_prepare(
+      destroy_receiver, &traced_handle_type, "TestReceiver");
+  int *receiver_foreign = malloc(sizeof *receiver_foreign);
+  assert(receiver_foreign != NULL);
+  *receiver_foreign = 1;
+  scr_native_handle_commit(receiver, receiver_foreign);
+
+  anchor = scr_cyc_alloc(sizeof *anchor, trace_anchor, collect_anchor);
+  anchor->rc = 1;
+  anchor->captured = scr_native_handle_retain(receiver);
+  anchor->traced = true;
+  token = scr_callback_table_register(table, anchor, &signature);
+  assert(token != NULL);
+
+  handle = scr_native_handle_prepare(
+      destroy_foreign, &traced_handle_type, "TestSubscription");
+  scr_native_handle_prepare_callback(handle, table, token);
+  scr_native_handle_prepare_owner(handle, receiver);
+  foreign = malloc(sizeof *foreign);
+  assert(foreign != NULL);
+  foreign->token = token;
+  scr_native_handle_commit(handle, foreign);
+
+  scr_native_handle_release(handle);
+  scr_native_handle_release(receiver);
+  assert(scr_callback_table_active(table) == 1);
+  scr_collect_cycles();
+  assert(scr_callback_table_active(table) == 0);
+  assert(atomic_load(&anchors_freed) == 3);
+  assert(atomic_load(&foreign_destroyed) == 2);
+  assert(atomic_load(&receivers_destroyed) == 1);
+  assert(atomic_load(&handles_allocated) == 0);
 
   scr_owner_gateway_stop_accepting(gateway);
   assert(scr_callback_table_destroy(table));

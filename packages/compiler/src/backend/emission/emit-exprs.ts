@@ -2269,6 +2269,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             argument.callback?.lifetime === "call",
         );
         const retainedTokens = new Map<number, string>();
+        const retainedOwnerArguments = new Set<number>();
         binding.arguments.forEach((argument, argumentIndex) => {
           if (
             argument.type.kind !== "func" ||
@@ -2283,6 +2284,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `${args[argumentIndex]!.name}, &${adapter.symbol}_signature);`,
           );
           retainedTokens.set(argumentIndex, token);
+          if (argument.callback.registrationOwner.kind === "argument") {
+            retainedOwnerArguments.add(
+              argument.callback.registrationOwner.argument,
+            );
+          }
         });
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
@@ -2437,6 +2443,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `&${destructor.entry.symbol}, &${mangleNativeHandleTag(definition.id)}, ` +
               `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
           );
+          if (retainedOwnerArguments.size > 1) {
+            throw new Error(`emitter bug: conflicting retained callback owners in ${binding.id}`);
+          }
+          const retainedOwnerArgument = retainedOwnerArguments.values().next().value;
+          if (retainedOwnerArgument !== undefined) {
+            E.line(
+              `scr_native_handle_prepare_owner(${prepared}, ` +
+                `${args[retainedOwnerArgument]!.name});`,
+            );
+          }
           for (const token of retainedTokens.values()) {
             E.line(`scr_retained_callbacks_prepare(${prepared}, ${token});`);
           }

@@ -1,8 +1,9 @@
 /* Owner-side retained callback table.
  *
- * The table is an explicit root set for active native registrations. Its
- * entries are owner-only; transport tokens carry immutable slot/generation
- * identity to foreign callbacks and never expose an anchor pointer. */
+ * Entries are owner-only; transport tokens carry immutable slot/generation
+ * identity to foreign callbacks and never expose an anchor pointer. The table
+ * owns an anchor while staging and while closing leases drain. An associated
+ * native lifecycle owns it otherwise, leaving only a checked weak lookup here. */
 #include "scr_runtime.h"
 
 #include <stdlib.h>
@@ -14,6 +15,7 @@ typedef struct {
   ScrCallbackToken *token;
   bool retired;
   bool owner_claimed;
+  bool anchor_owned;
 } ScrCallbackTableEntry;
 
 struct ScrCallbackTable {
@@ -83,6 +85,7 @@ ScrCallbackToken *scr_callback_table_register(ScrCallbackTable *table,
   entry->signature = signature;
   entry->anchor = anchor;
   entry->token = token;
+  entry->anchor_owned = true;
   table->active++;
   return token;
 }
@@ -93,7 +96,7 @@ void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
   if (table == NULL || slot >= table->length) return NULL;
   ScrCallbackTableEntry *entry = &table->entries[slot];
   if (entry->token == NULL || entry->generation != generation ||
-      entry->signature != signature) {
+      entry->signature != signature || entry->anchor == NULL) {
     return NULL;
   }
   return table->retain_anchor(entry->anchor);
@@ -121,6 +124,12 @@ bool scr_callback_table_begin_close(ScrCallbackTable *table,
   return scr_callback_token_begin_close(token);
 }
 
+bool scr_callback_table_begin_discard(ScrCallbackTable *table,
+                                      ScrCallbackToken *token) {
+  if (scr_callback_table_entry(table, token) == NULL) return false;
+  return scr_callback_token_begin_discard(token);
+}
+
 bool scr_callback_table_abandon(ScrCallbackTable *table,
                                 ScrCallbackToken *token) {
   if (scr_callback_table_entry(table, token) == NULL) return false;
@@ -144,6 +153,47 @@ bool scr_callback_table_claim_owner(ScrCallbackTable *table,
   return true;
 }
 
+void *scr_callback_table_transfer_anchor(ScrCallbackTable *table,
+                                         ScrCallbackToken *token) {
+  ScrCallbackTableEntry *entry = scr_callback_table_entry(table, token);
+  if (entry == NULL || entry->owner_claimed || !entry->anchor_owned ||
+      entry->anchor == NULL) {
+    return NULL;
+  }
+  entry->anchor_owned = false;
+  return entry->anchor;
+}
+
+bool scr_callback_table_adopt_anchor(ScrCallbackTable *table,
+                                     ScrCallbackToken *token, void *anchor) {
+  ScrCallbackTableEntry *entry = scr_callback_table_entry(table, token);
+  if (entry == NULL || entry->anchor_owned || entry->anchor != anchor ||
+      anchor == NULL) {
+    return false;
+  }
+  entry->anchor_owned = true;
+  return true;
+}
+
+bool scr_callback_table_clear_anchor(ScrCallbackTable *table,
+                                     ScrCallbackToken *token, void *anchor) {
+  ScrCallbackTableEntry *entry = scr_callback_table_entry(table, token);
+  if (entry == NULL || entry->anchor_owned || entry->anchor != anchor ||
+      anchor == NULL) {
+    return false;
+  }
+  entry->anchor = NULL;
+  return true;
+}
+
+void scr_callback_table_release_transferred_anchor(ScrCallbackTable *table,
+                                                   void *anchor) {
+  if (table == NULL || anchor == NULL) {
+    scr_trap("scriptc: invalid transferred callback anchor release\n");
+  }
+  table->release_anchor(anchor);
+}
+
 size_t scr_callback_table_collect(ScrCallbackTable *table) {
   if (table == NULL || table->collecting) return 0;
   table->collecting = true;
@@ -156,15 +206,17 @@ size_t scr_callback_table_collect(ScrCallbackTable *table) {
     }
     /* Unlink before releasing: anchor teardown may re-enter registration. */
     void *anchor = entry->anchor;
+    bool anchor_owned = entry->anchor_owned;
     entry->token = NULL;
     entry->anchor = NULL;
     entry->signature = NULL;
     entry->owner_claimed = false;
+    entry->anchor_owned = false;
     if (entry->generation == UINT64_MAX) entry->retired = true;
     else entry->generation++;
     table->active--;
     collected++;
-    table->release_anchor(anchor);
+    if (anchor_owned) table->release_anchor(anchor);
   }
   while (table->length != 0 &&
          table->entries[table->length - 1].token == NULL &&
