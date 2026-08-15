@@ -31,6 +31,7 @@ export interface ResolvedNativeFrontend {
 function declarationSymbol(
   L: Lowerer,
   declaration: { readonly module: string; readonly name: string },
+  memberSpace: "instance" | "value" = "instance",
 ): ts.Symbol | null {
   const declarationPath = L.externalTypes.get(declaration.module);
   if (declarationPath === undefined) return null;
@@ -44,9 +45,12 @@ function declarationSymbol(
   let symbol = moduleSymbol?.getExports().get(root as ts.__String);
   if (symbol === undefined) return null;
   if (symbol.flags & ts.SymbolFlags.Alias) symbol = L.checker.getAliasedSymbol(symbol);
-  for (const member of members) {
+  for (const [index, member] of members.entries()) {
+    const ownerType: ts.Type = index === 0 && memberSpace === "value"
+      ? L.checker.getTypeOfSymbol(symbol)
+      : L.checker.getDeclaredTypeOfSymbol(symbol);
     symbol = L.checker
-      .getPropertiesOfType(L.checker.getDeclaredTypeOfSymbol(symbol))
+      .getPropertiesOfType(ownerType)
       .find((property) => String(property.name) === member);
     if (symbol === undefined) return null;
     if (symbol.flags & ts.SymbolFlags.Alias) symbol = L.checker.getAliasedSymbol(symbol);
@@ -72,7 +76,11 @@ export function resolveNativeFrontend(
     }
   }
   for (const binding of input?.bindings ?? []) {
-    const symbol = declarationSymbol(L, binding.declaration);
+    const symbol = declarationSymbol(
+      L,
+      binding.declaration,
+      binding.sourceCall.kind === "method" ? "instance" : "value",
+    );
     if (symbol !== null) bindingsBySymbol.set(symbol, binding);
   }
   return { typesBySymbol, typeDefsById, bindingsBySymbol };
@@ -138,12 +146,21 @@ function validateDeclaration(
   loc: SrcLoc,
 ): void {
   const declarations = L.checker.declarationsOf(symbol);
-  const declarationGuard = (
-    declaration: ts.Node,
-  ): declaration is ts.FunctionDeclaration | ts.MethodSignature =>
-    binding.sourceCall.kind === "function"
-      ? ts.isFunctionDeclaration(declaration)
-      : declaration.kind === ts.SyntaxKind.MethodSignature;
+  const hasStaticModifier = (declaration: ts.Node): boolean =>
+    ts.getModifiers(declaration)?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword,
+    ) === true;
+  const declarationGuard = (declaration: ts.Node): boolean => {
+    if (binding.sourceCall.kind === "constructor") {
+      return ts.isClassDeclaration(declaration) && declaration.getSourceFile().isDeclarationFile;
+    }
+    if (binding.sourceCall.kind === "function") {
+      return ts.isFunctionDeclaration(declaration) ||
+        (ts.isMethodDeclaration(declaration) && hasStaticModifier(declaration));
+    }
+    return declaration.kind === ts.SyntaxKind.MethodSignature ||
+      (ts.isMethodDeclaration(declaration) && !hasStaticModifier(declaration));
+  };
   const callDeclarations = declarations.filter(declarationGuard);
   if (
     callDeclarations.length === 0 ||
@@ -157,10 +174,20 @@ function validateDeclaration(
       loc,
     );
   }
-  if (callDeclarations.some((declaration) => (declaration.typeParameters?.length ?? 0) > 0)) {
+  if (callDeclarations.some((declaration) => {
+    const callable = declaration as
+      | ts.ClassDeclaration
+      | ts.FunctionDeclaration
+      | ts.MethodDeclaration
+      | ts.MethodSignature;
+    return (callable.typeParameters?.length ?? 0) > 0;
+  })) {
     failSignature(L, binding, "generic declarations cannot describe one fixed native ABI", loc);
   }
-  const signatures = L.checker.getCallSignatures(L.checker.getTypeOfSymbol(symbol));
+  const declarationType = L.checker.getTypeOfSymbol(symbol);
+  const signatures = binding.sourceCall.kind === "constructor"
+    ? L.checker.getConstructSignatures(declarationType)
+    : L.checker.getCallSignatures(declarationType);
   if (signatures.length !== 1) {
     failSignature(
       L,
@@ -219,53 +246,48 @@ function validateDeclaration(
   }
 }
 
-/** Lower one direct call of an exact checker-owned native declaration. */
-export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
-  const callee = expr.expression;
-  const symbol = ts.isIdentifier(callee)
-    ? L.resolveValueSymbol(callee)
-    : ts.isPropertyAccessExpression(callee)
-      ? L.checker.getSymbolAtLocation(callee.name) ?? null
+function nativeExpressionSymbol(L: Lowerer, expression: ts.Expression): ts.Symbol | null {
+  const symbol = ts.isIdentifier(expression)
+    ? L.resolveValueSymbol(expression)
+    : ts.isPropertyAccessExpression(expression)
+      ? L.checker.getSymbolAtLocation(expression.name) ?? null
       : null;
-  if (symbol === null) return null;
-  const binding = L.nativeBindingsBySymbol.get(symbol);
-  if (binding === undefined) return null;
-  const loc = locOf(expr);
+  if (symbol === null || !(symbol.flags & ts.SymbolFlags.Alias)) return symbol;
+  return L.checker.getAliasedSymbol(symbol);
+}
+
+function lowerNativeInvocation(
+  L: Lowerer,
+  binding: NativeInputBinding,
+  symbol: ts.Symbol,
+  explicitArguments: readonly ts.Expression[],
+  receiver: ts.Expression | null,
+  sourceResult: ts.Type,
+  loc: SrcLoc,
+): IrExpr {
   if (!L.validatedNativeBindingSymbols.has(symbol)) {
     validateDeclaration(L, binding, symbol, loc);
     L.validatedNativeBindingSymbols.add(symbol);
   }
-  if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
-    failSignature(L, binding, "only direct, non-generic calls are supported", loc);
-  }
-  if (expr.arguments.some(ts.isSpreadElement)) {
-    failSignature(L, binding, "spread arguments do not have a fixed native ABI", loc);
-  }
-  if (
-    (binding.sourceCall.kind === "function" && !ts.isIdentifier(callee)) ||
-    (binding.sourceCall.kind === "method" && !ts.isPropertyAccessExpression(callee))
-  ) {
-    failBinding(L, binding, `the source call is not a ${binding.sourceCall.kind}`, loc);
-  }
-  const sourceParameterCount = binding.arguments.length -
-    (binding.sourceCall.kind === "method" ? 1 : 0);
-  if (expr.arguments.length !== sourceParameterCount) {
+  const sourceParameterCount = binding.arguments.length - (receiver === null ? 0 : 1);
+  if (explicitArguments.length !== sourceParameterCount) {
     failSignature(
       L,
       binding,
-      `this call passes ${expr.arguments.length} explicit argument(s), but Native IR requires exactly ${sourceParameterCount}`,
+      `this call passes ${explicitArguments.length} explicit argument(s), but Native IR requires exactly ${sourceParameterCount}`,
       loc,
     );
   }
-  const argumentNodes = [...expr.arguments];
-  if (binding.sourceCall.kind === "method") {
+  const argumentNodes = [...explicitArguments];
+  if (receiver !== null) {
     if (
+      binding.sourceCall.kind !== "method" ||
       binding.sourceCall.receiverArgument < 0 ||
       binding.sourceCall.receiverArgument >= binding.arguments.length
     ) {
       failBinding(L, binding, "the method receiver argument index is outside the logical argument list", loc);
     }
-    argumentNodes.splice(binding.sourceCall.receiverArgument, 0, (callee as ts.PropertyAccessExpression).expression);
+    argumentNodes.splice(binding.sourceCall.receiverArgument, 0, receiver);
   }
   const args = argumentNodes.map((argument, index) =>
     L.lowerExprExpecting(argument, binding.arguments[index]!.type)
@@ -283,7 +305,6 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
   if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
     L.useNativeType(binding.result.type.typeId);
   }
-  const sourceResult = L.typeOf(expr);
   const mappedResult = L.mapTypeOf(sourceResult);
   const resultType: IrType = sourceResult.flags & ts.TypeFlags.Never
     ? binding.error.kind !== "no-fail" &&
@@ -301,6 +322,61 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
     type: { ...resultType },
     loc,
   };
+}
+
+/** Lower one direct call of an exact checker-owned native declaration. */
+export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
+  const callee = expr.expression;
+  const symbol = nativeExpressionSymbol(L, callee);
+  if (symbol === null) return null;
+  const binding = L.nativeBindingsBySymbol.get(symbol);
+  if (binding === undefined) return null;
+  const loc = locOf(expr);
+  if (binding.sourceCall.kind === "constructor") {
+    failBinding(L, binding, "a native constructor must be invoked with 'new'", loc);
+  }
+  if (expr.questionDotToken !== undefined || expr.typeArguments !== undefined) {
+    failSignature(L, binding, "only direct, non-generic calls are supported", loc);
+  }
+  if (expr.arguments.some(ts.isSpreadElement)) {
+    failSignature(L, binding, "spread arguments do not have a fixed native ABI", loc);
+  }
+  if (
+    (binding.sourceCall.kind === "method" && !ts.isPropertyAccessExpression(callee))
+  ) {
+    failBinding(L, binding, `the source call is not a ${binding.sourceCall.kind}`, loc);
+  }
+  return lowerNativeInvocation(
+    L,
+    binding,
+    symbol,
+    expr.arguments,
+    binding.sourceCall.kind === "method"
+      ? (callee as ts.PropertyAccessExpression).expression
+      : null,
+    L.typeOf(expr),
+    loc,
+  );
+}
+
+/** Lower `new C(...)` for one exact external native class declaration. */
+export function lowerNativeConstruct(L: Lowerer, expr: ts.NewExpression): IrExpr | null {
+  const symbol = nativeExpressionSymbol(L, expr.expression);
+  if (symbol === null) return null;
+  const binding = L.nativeBindingsBySymbol.get(symbol);
+  if (binding === undefined) return null;
+  const loc = locOf(expr);
+  if (binding.sourceCall.kind !== "constructor") {
+    failBinding(L, binding, "this native declaration is callable but not constructable", loc);
+  }
+  if (expr.typeArguments !== undefined) {
+    failSignature(L, binding, "generic construction is unsupported", loc);
+  }
+  const args = expr.arguments ?? [];
+  if (args.some(ts.isSpreadElement)) {
+    failSignature(L, binding, "spread arguments do not have a fixed native ABI", loc);
+  }
+  return lowerNativeInvocation(L, binding, symbol, args, null, L.typeOf(expr), loc);
 }
 
 function exactIntegerLiteral(

@@ -1998,6 +1998,93 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
+  test("lowers native class construction and static factories through a namespace import", async () => {
+    const destructor = "native-typescript.fixture.c-v1@0.0.0#counter_destroy";
+    const resultType = {
+      type: COUNTER,
+      passMode: "pointer" as const,
+      ownership: {
+        kind: "owned" as const,
+        transfer: "to-runtime" as const,
+        destructor,
+      },
+      projection: DIRECT_RESULT,
+    };
+    const native = frontendNativeInput();
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/class-construction.ts"),
+      {
+        outDir: join(scratch, `class-construction-${backend}`),
+        outPath: join(scratch, `class-construction-${backend}`, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: {
+          ...native,
+          sourceTypes: [
+            ...native.sourceTypes,
+            {
+              declaration: { module: nativePackage, name: "NativeCounter" },
+              type: COUNTER,
+            },
+          ],
+          bindings: [
+            ...native.bindings,
+            {
+              id: "native-typescript.fixture.c-v1@0.0.0#counter_construct",
+              declaration: { module: nativePackage, name: "NativeCounter" },
+              entry: {
+                kind: "c-symbol",
+                symbol: "nts_counter_create_with_initial_value",
+              },
+              callingConvention: "c",
+              variadic: false,
+              sourceCall: { kind: "constructor" },
+              error: NO_NATIVE_ERROR,
+              ...directSignature([{
+                name: "initial_value",
+                type: I32,
+                passMode: "value",
+                ownership: { kind: "value" },
+              }]),
+              result: resultType,
+            },
+            {
+              id: "native-typescript.fixture.c-v1@0.0.0#counter_with_initial_value",
+              declaration: {
+                module: nativePackage,
+                name: "NativeCounter.withInitialValue",
+              },
+              entry: { kind: "c-symbol", symbol: "nts_counter_create_static" },
+              callingConvention: "c",
+              variadic: false,
+              sourceCall: { kind: "function" },
+              error: NO_NATIVE_ERROR,
+              ...directSignature([{
+                name: "initial_value",
+                type: I32,
+                passMode: "value",
+                ownership: { kind: "value" },
+              }]),
+              result: resultType,
+            },
+          ],
+        },
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) return;
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(mod.nativeBindings?.map((binding) => binding.id).sort()).toEqual([
+      "native-typescript.fixture.c-v1@0.0.0#counter_construct",
+      "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+      "native-typescript.fixture.c-v1@0.0.0#counter_with_initial_value",
+    ]);
+    expect(spawnSync(result.binaryPath).status).toBe(0);
+  });
+
   test("wraps every exact integer width without signed overflow", async () => {
     const outDir = join(scratch, `arithmetic-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/arithmetic.ts"), {

@@ -52,6 +52,7 @@ export interface NativeFrontendBinding {
     | { readonly kind: "nullable" };
   readonly sourceCall:
     | { readonly kind: "function" }
+    | { readonly kind: "constructor" }
     | { readonly kind: "method"; readonly receiverArgument: number };
   readonly arguments: readonly {
     readonly name: string;
@@ -152,7 +153,7 @@ export function nativeRuntimeMembers(
   const mutable = new Map<string, Set<string>>();
   for (const binding of input?.bindings ?? []) {
     const members = mutable.get(binding.declaration.module) ?? new Set<string>();
-    members.add(binding.declaration.name);
+    members.add(binding.declaration.name.split(".", 1)[0]!);
     mutable.set(binding.declaration.module, members);
   }
   return mutable;

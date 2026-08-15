@@ -43,6 +43,11 @@ export interface Subscription {
   dispose(): void;
 }
 
+export declare class NativeCounter {
+  constructor(initialValue: i32);
+  static withInitialValue(initialValue: i32): NativeCounter;
+}
+
 export declare function i8Identity(value: i8): i8;
 export declare function u8Identity(value: u8): u8;
 export declare function i16Identity(value: i16): i16;

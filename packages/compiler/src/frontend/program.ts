@@ -260,6 +260,9 @@ function nativeImportClaimed7(
   if (members === undefined || declaration.importClause === undefined) return false;
   const clause = declaration.importClause;
   if (clause.name !== undefined) return false;
+  if (clause.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
+    return members.size > 0;
+  }
   if (clause.namedBindings === undefined || !ts.isNamedImports(clause.namedBindings)) return false;
   let runtimeMember = false;
   for (const element of clause.namedBindings.elements) {

@@ -247,6 +247,14 @@ NtsCounter *nts_counter_create(int32_t initial_value) {
   return counter;
 }
 
+NtsCounter *nts_counter_create_with_initial_value(int32_t initial_value) {
+  return nts_counter_create(initial_value);
+}
+
+NtsCounter *nts_counter_create_static(int32_t initial_value) {
+  return nts_counter_create(initial_value);
+}
+
 int32_t nts_counter_add(NtsCounter *counter, int32_t delta) {
   counter->value += delta;
   return counter->value;
