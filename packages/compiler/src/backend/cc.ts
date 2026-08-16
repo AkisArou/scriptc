@@ -382,6 +382,15 @@ export interface CcOptions {
    * Supplying an executor disables ScriptC's native artifact caches; the
    * executor owns materialization and may place the logical output elsewhere. */
   commandExecutor?: (command: Readonly<CcCommand>) => Promise<void>;
+  /** Logical directory for per-source runtime objects, external planning only.
+   *
+   * Without it the runtime and the program compile in one command, which is
+   * one cache entry for two things that change at different rates: an
+   * application edit invalidates the runtime too. With it the executor
+   * receives one compile command per runtime source and then a link that
+   * substitutes the objects, so an embedder can cache each at its own
+   * boundary. */
+  externalRuntimeObjectDir?: string;
 }
 
 export interface CcCommand {
@@ -905,10 +914,17 @@ export function planExternalCCommand(
     }
     return { kind: "literal", value: argument };
   });
+  /* What the command references, not what the caller could have offered. A
+   * fixed list made every command depend on the program, so a runtime object
+   * compiled without ever naming it was still invalidated by an application
+   * edit — the exact reuse that compiling the runtime separately exists to
+   * get. The runtime tree stays declared regardless: its headers are read
+   * through -I whether or not a source from it appears. */
   const inputs = [
     artifacts.runtime.id,
-    artifacts.program.id,
-    ...artifacts.linkInputs.map(({ id }) => id),
+    ...arguments_.flatMap((argument) =>
+      argument.kind === "input-path" ? [argument.input] : []
+    ),
   ];
   const plan: ExternalCcPlan = Object.freeze({
     schema: "scriptc.external-cc-plan",
@@ -3990,6 +4006,25 @@ export async function compileC(opts: CcOptions): Promise<void> {
     // invocation. In particular, merely asking for the command must never
     // populate ScriptC's package-local vendor cache behind the build graph.
     if (opts.commandExecutor !== undefined) {
+      const objectDir = opts.externalRuntimeObjectDir;
+      if (objectDir !== undefined) {
+        /* The same recording trick the cached path uses to learn which runtime
+         * sources a build actually compiles: the conditionals live in
+         * buildArgs, so asking it is the only way to stay in step with them. */
+        const sources: string[] = [];
+        buildArgs((p) => {
+          sources.push(p);
+          return p;
+        });
+        const objectBySource = new Map<string, string>();
+        for (const source of sources) {
+          const object = `${objectDir}/${basename(source).replace(/\.c$/u, ".o")}`;
+          objectBySource.set(source, object);
+          await runClang([...cflags, "-c", source, "-o", object]);
+        }
+        await runClang(buildArgs((p) => objectBySource.get(p) ?? p));
+        return;
+      }
       await runClang(buildArgs((p) => p));
       return;
     }

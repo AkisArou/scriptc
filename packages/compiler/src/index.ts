@@ -134,7 +134,9 @@ export {
   emitExecutableCompilationPlan,
   planExecutableExternalCBuild,
   type ExecutableCompilationPlan,
+  type ExecutableExternalBuild,
   type ExecutableExternalBuildArtifacts,
+  type ExternalRuntimeObject,
   type ExecutableNativeBuildPlan,
 } from "./executable-plan.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
