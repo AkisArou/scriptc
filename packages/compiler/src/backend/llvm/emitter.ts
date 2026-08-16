@@ -1290,6 +1290,8 @@ class LlEmitter {
           case "isize":
           case "usize":
             return this.sizeType;
+          case "f32":
+            return "float";
           case "f64":
             return "double";
         }
@@ -1369,6 +1371,7 @@ class LlEmitter {
       case "isize":
       case "usize":
         return type;
+      case "f32":
       case "f64":
         return type;
     }
@@ -1407,6 +1410,7 @@ class LlEmitter {
       case "isize":
       case "usize":
         return type;
+      case "f32":
       case "f64":
         return type;
     }
@@ -1859,8 +1863,11 @@ class LlEmitter {
             );
             if (widensNumber) {
               const signedScalars = new Set(["i8", "i16", "i32"]);
+              const widen = physical.scalar === "f32"
+                ? "fpext"
+                : signedScalars.has(physical.scalar) ? "sitofp" : "uitofp";
               defs.push(
-                `  %source${sourceIndex}.wide = ${signedScalars.has(physical.scalar) ? "sitofp" : "uitofp"} ` +
+                `  %source${sourceIndex}.wide = ${widen} ` +
                   `${this.llType(physical)} %source${sourceIndex} to double`,
               );
             }
@@ -2043,8 +2050,11 @@ class LlEmitter {
             physical.scalar !== "f64"
           ) {
             const signedScalars = new Set(["i8", "i16", "i32"]);
+            const widen = physical.scalar === "f32"
+              ? "fpext"
+              : signedScalars.has(physical.scalar) ? "sitofp" : "uitofp";
             widenLines.push(
-              `  %a${argument.parameter}.wide = ${signedScalars.has(physical.scalar) ? "sitofp" : "uitofp"} ` +
+              `  %a${argument.parameter}.wide = ${widen} ` +
                 `${this.llType(physical)} %a${argument.parameter} to double`,
             );
             return `double %a${argument.parameter}.wide`;
@@ -5503,6 +5513,14 @@ class LlEmitter {
         }
         const scalar = e.value.type.scalar;
         if (scalar === "f64") return { name: value.name, type: e.type };
+        if (scalar === "f32") {
+          /* Unreachable through the frontend — an f32 has no source type to
+           * convert from — but the node admits any exact scalar, and every
+           * float is a double. */
+          const widened = B.tmp();
+          B.line(`${widened} = fpext float ${value.name} to double`);
+          return { name: widened, type: e.type };
+        }
         const widens = scalar === "i8" || scalar === "u8" || scalar === "i16" ||
           scalar === "u16" || scalar === "i32" || scalar === "u32";
         const result = B.tmp();
@@ -5561,6 +5579,14 @@ class LlEmitter {
         B.line(`${result} = extractvalue ${this.llType(e.value.type)} ${value.name}, ${index}`);
         /* A number-projected field extracts at its physical type and widens;
          * typing the extract by the widened f64 would be an ill-typed module. */
+        if (
+          e.type.kind === "f64" && field !== undefined &&
+          field.type.kind === "nativeScalar" && field.type.scalar === "f32"
+        ) {
+          const widened = B.tmp();
+          B.line(`${widened} = fpext float ${result} to double`);
+          return { name: widened, type: e.type };
+        }
         if (
           e.type.kind === "f64" && field !== undefined &&
           field.type.kind === "nativeScalar" && field.type.scalar !== "f64"
@@ -7167,9 +7193,24 @@ class LlEmitter {
                 throw new Error(`llvm emitter bug: invalid number parameter projection in ${binding.id}`);
               }
               /* A double slot converts nothing: the source value is already
-               * the representation the ABI wants. */
+               * the representation the ABI wants. A float slot rounds to
+               * nearest float — the one crossing in this family that is not
+               * exact, and the only thing storing a double in 32 bits can
+               * mean. */
               if (parameter.type.scalar === "f64") {
                 callArgs.push(`${parameterType} ${arg.name}`);
+                break;
+              }
+              if (parameter.type.scalar === "f32") {
+                /* The runtime rounds, so both backends agree on what an
+                 * out-of-range value becomes; `fptrunc` alone would leave
+                 * that to the instruction's overflow behavior. */
+                this.declare("declare float @scr_native_f32_from_number(double)");
+                const rounded = B.tmp();
+                B.line(
+                  `${rounded} = call float @scr_native_f32_from_number(double ${arg.name})`,
+                );
+                callArgs.push(`${parameterType} ${rounded}`);
                 break;
               }
               /* A literal argument the emitter can re-prove in place needs no
@@ -7600,6 +7641,15 @@ class LlEmitter {
             if (callbacksMayThrow) this.emitPendingCheck();
             releaseArguments();
             return { name: raw, type: e.type };
+          }
+          /* Every float is a double, so egress from a 32-bit slot is exact
+           * even though the matching ingress rounds. */
+          if (binding.result.type.scalar === "f32") {
+            const widened = B.tmp();
+            B.line(`${widened} = fpext float ${raw} to double`);
+            if (callbacksMayThrow) this.emitPendingCheck();
+            releaseArguments();
+            return { name: widened, type: e.type };
           }
           const value = B.tmp();
           B.line(

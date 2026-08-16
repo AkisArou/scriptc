@@ -844,10 +844,7 @@ function refuseUnprovableNumberLiterals(
   for (const parameter of binding.parameters) {
     if (
       parameter.projection.kind !== "number" ||
-      parameter.type.kind !== "nativeScalar" ||
-      /* A double holds every literal a caller can write, NaN and the
-       * infinities included, so there is nothing here to disprove. */
-      parameter.type.scalar === "f64"
+      parameter.type.kind !== "nativeScalar"
     ) {
       continue;
     }
@@ -859,6 +856,10 @@ function refuseUnprovableNumberLiterals(
     if (pointerBits !== 32 && pointerBits !== 64) {
       throw new Error("native frontend input has no valid target pointer width");
     }
+    /* Only an integer slot can disprove a literal. A float slot holds every
+     * number a caller can write — NaN and the infinities included, and the
+     * rest by rounding — so there is nothing here to refuse. */
+    if (nativeIntegerInfo(parameter.type.scalar, pointerBits) === null) continue;
     if (provenNumberLiteral(value, parameter.type.scalar, pointerBits) !== null) continue;
     failSignature(
       L,

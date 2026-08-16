@@ -71,7 +71,15 @@ export function provenNumberLiteral(
   if (exact < info.min || exact > info.max) return null;
   return exact.toString();
 }
-export type IrNativeScalar = IrNativeIntegerScalar | "f64";
+/** `f32` is an ABI carrier and nothing else. A 32-bit float has no exact
+ * source form here — no literal, no arithmetic, no branded type — because
+ * ScriptC's float slice is binary64 and admitting a second precision to the
+ * language would mean specifying rounding at every operation. What it does
+ * have is a slot in a foreign signature, and a plain number crossing into one
+ * rounds to nearest float, which is what storing a double in a float means in
+ * any language. The validator enforces the restriction: an f32 slot is
+ * reachable only through the number projection. */
+export type IrNativeScalar = IrNativeIntegerScalar | "f32" | "f64";
 /** The wrapping operations, which answer for every pair of operands, and the
  * trapping ones, which have pairs no value of the type can answer for: a zero
  * divisor, a signed minimum over -1, a shift count outside the width. The

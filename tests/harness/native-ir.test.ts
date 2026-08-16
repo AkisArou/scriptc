@@ -442,8 +442,11 @@ const localNativeInput: NativeFrontendInput = {
       ["i16", "numberI16Identity", "nts_i16_identity"],
       ["i64", "numberI64Identity", "nts_i64_identity"],
       /* The double flavor: the slot IS the source representation, so the
-       * projection converts nothing and can fail at nothing. */
+       * projection converts nothing and can fail at nothing. The float
+       * flavor is the one crossing that is not exact — ingress rounds to
+       * nearest float, egress is exact because every float is a double. */
       ["f64", "numberF64Identity", "nts_f64_identity"],
+      ["f32", "numberF32Identity", "nts_f32_identity"],
     ] as const).map(([scalar, declaration, symbol]) => ({
       id: `native-typescript.fixture.c-v1@0.0.0#number_${scalar}_identity`,
       declaration: { module: nativePackage, name: declaration },
@@ -1905,6 +1908,19 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   const json = serializeModule(mod);
   expect(json).toContain('"value": "-2147483648"');
   expect(deserializeModule(json)).toEqual(mod);
+});
+
+test("Native IR rejects an f32 slot outside the number projection", () => {
+  /* A 32-bit float has no source form — no literal, no arithmetic, no
+   * declared type — so a direct projection would have nothing to hand over.
+   * The number projection is the only door, and this pins that it is. */
+  const mod = exactI32Module();
+  const binding = mod.nativeBindings![0]!;
+  const parameter = binding.parameters[0]!;
+  (parameter as { type: unknown }).type = nativeScalarType("f32");
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    `Native IR binding "${binding.id}" parameter "${parameter.name}" is an f32 slot without the number projection`,
+  );
 });
 
 test("Native IR rejects unknown exact integer operators", () => {

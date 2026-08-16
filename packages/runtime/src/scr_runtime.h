@@ -914,6 +914,13 @@ SCR_NATIVE_TRAPPING_DECLS(uintptr_t, usize)
 
 #undef SCR_NATIVE_TRAPPING_DECLS
 
+/* Rounding a plain number into a 32-bit float slot. C leaves a finite double
+ * outside float's range undefined, while IEEE rounding says it becomes an
+ * infinity — so this says that instead of inheriting the undefinedness. NaN
+ * and the infinities pass through the cast unchanged. Out of line so both
+ * backends round identically. */
+float scr_native_f32_from_number(double value);
+
 double scr_native_i64_to_number(int64_t value);
 double scr_native_u64_to_number(uint64_t value);
 double scr_native_isize_to_number(intptr_t value);

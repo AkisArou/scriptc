@@ -540,9 +540,9 @@ const NATIVE_INTEGER_HELPERS: Record<string, string> = {
 
 /** The scalars whose whole range is a double, so egress is a cast. */
 function nativeScalarWidensToNumber(scalar: string): boolean {
-  return scalar === "f64" || scalar === "i8" || scalar === "u8" ||
-    scalar === "i16" || scalar === "u16" || scalar === "i32" ||
-    scalar === "u32";
+  return scalar === "f32" || scalar === "f64" || scalar === "i8" ||
+    scalar === "u8" || scalar === "i16" || scalar === "u16" ||
+    scalar === "i32" || scalar === "u32";
 }
 
 export function emitBytesReceiver(E: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
@@ -2406,8 +2406,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               }
               /* A double slot converts nothing: the source value is already
                * the representation the ABI wants, so the projection is a
-               * change of source view and nothing else. */
+               * change of source view and nothing else. A float slot rounds
+               * to nearest float, which is the only thing storing a double
+               * in 32 bits can mean — the one crossing in this family that
+               * is not exact, and the reason the declaration has to say the
+               * slot is a float. */
               if (parameter.type.scalar === "f64") return arg.name;
+              if (parameter.type.scalar === "f32") {
+                return `scr_native_f32_from_number(${arg.name})`;
+              }
               /* A literal argument the emitter can re-prove in place needs no
                * runtime check: the constant IS the converted value, which is
                * exactly what a branded exact construction would have emitted. */
@@ -2642,8 +2649,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "f64") {
             throw new Error(`emitter bug: invalid number result projection in ${binding.id}`);
           }
-          /* Exact widening: every value of an at-most-32-bit integer is a
-           * representable f64, so the cast is the whole conversion. */
+          /* Exact widening: every value of an at-most-32-bit integer, and
+           * every float, is a representable f64, so the cast is the whole
+           * conversion. Egress is exact even where the matching ingress
+           * rounds. */
           const raw = E.newTemp(binding.result.type, call);
           const result = E.newTemp(e.type, `(double)${raw.name}`);
           if (callbacksMayThrow) E.emitPendingCheck();

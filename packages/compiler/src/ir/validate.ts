@@ -1232,11 +1232,19 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const candidate = type as Partial<IrNativeScalarType>;
     return candidate.kind === "nativeScalar" &&
       candidate.scalar !== undefined &&
-      (candidate.scalar === "f64" ||
+      (candidate.scalar === "f64" || candidate.scalar === "f32" ||
         nativeIntegerInfo(candidate.scalar, validNativeTarget ? nativePointerBits : undefined) !== null);
   };
+  /* An f32 is an ABI carrier with no source form, so every position holding
+   * one must declare the number projection: there is no exact f32 value for a
+   * direct projection to hand over. */
+  const abiOnlyScalar = (type: unknown): boolean =>
+    typeof type === "object" && type !== null &&
+    (type as { kind?: unknown }).kind === "nativeScalar" &&
+    (type as { scalar?: unknown }).scalar === "f32";
   const nativeScalarSize = (scalar: string): number | null => {
     if (scalar === "f64") return 8;
+    if (scalar === "f32") return 4;
     const info = nativeIntegerInfo(scalar, validNativeTarget ? nativePointerBits : undefined);
     return info === null ? null : info.bits / 8;
   };
@@ -1338,13 +1346,18 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     nativeTypesById.set(definition.id, definition);
   }
-  /* The scalars a plain JavaScript number carries exactly, in both
-   * directions. `f64` is the identity: the slot IS a double, so the
-   * crossing converts nothing and can fail at nothing. The integer widths
-   * are the ones an f64 carries injectively, so widening is lossless and
+  /* The scalars a plain JavaScript number can carry, and the three things
+   * that crossing can mean. `f64` is the identity: the slot IS a double, so
+   * nothing converts and nothing can fail. The integer widths up to 32 bits
+   * are the ones an f64 carries injectively, so egress is lossless and
    * checked ingress has exactly-representable bounds; pointer widths are
-   * excluded so the rule cannot change meaning across targets. */
-  const widenableScalars = new Set(["f64", "i8", "u8", "i16", "u16", "i32", "u32"]);
+   * excluded so the rule cannot change meaning across targets. `f32` is the
+   * one lossy member: egress is exact, because every float is a double, but
+   * ingress rounds to nearest float — which is what storing a double in a
+   * float means, and the only thing a 32-bit slot can mean. It is admitted
+   * here and nowhere else: an f32 has no literal, no arithmetic, and no
+   * source type, so the number projection is its only door. */
+  const widenableScalars = new Set(["f32", "f64", "i8", "u8", "i16", "u16", "i32", "u32"]);
   const widenableScalarType = (type: unknown): boolean =>
     typeof type === "object" && type !== null &&
     (type as { kind?: unknown }).kind === "nativeScalar" &&
@@ -1377,7 +1390,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
            * On any other field it would promise a conversion the backends
            * refuse to invent. */
           (field.projection !== undefined &&
-            (field.projection !== "number" || !widenableScalarType(field.type)))
+            (field.projection !== "number" || !widenableScalarType(field.type))) ||
+          (abiOnlyScalar(field.type) && field.projection !== "number")
         ) {
           errors.push({ message: `Native IR type "${definition.id}" has an invalid field "${field.name}"`, loc: moduleLoc });
         } else if (
@@ -1846,6 +1860,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
+      if (abiOnlyScalar(parameter.type) && parameter.projection.kind !== "number") {
+        errors.push({
+          message: `Native IR binding "${binding.id}" parameter "${parameter.name}" is an f32 slot without the number projection`,
+          loc: moduleLoc,
+        });
+      }
       const validParameterType = parameter.type.kind === "nativePointer"
         ? validNativePointer(parameter.type)
         : parameter.type.kind === "nativeCallback"
@@ -2100,6 +2120,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 if (!widenableScalarType(expected)) return false;
                 continue;
               }
+              /* An f32 payload has no source form of its own, so an f64
+               * source is the only thing that can receive it. */
+              if (abiOnlyScalar(expected)) return false;
               if (!typeEquals(source, expected)) return false;
             }
             return projectedPhysical.size === parameter.type.signature.parameters.length &&
@@ -2172,6 +2195,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
       | undefined;
+    if (abiOnlyScalar(binding.result.type) && resultProjection?.kind !== "number") {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has an f32 result without the number projection`,
+        loc: moduleLoc,
+      });
+    }
     if (resultProjection?.kind === "direct") {
       const handleResult = binding.result.type.kind === "nativeHandle";
       if (binding.result.passMode !== (handleResult ? "pointer" : "value")) {
@@ -3068,6 +3097,14 @@ function validateFunction(
         }
         break;
       case "nativeScalarLit": {
+        /* A 32-bit float has no literal form: writing one would mean writing
+         * a decimal the compiler rounds, which is the silent conversion the
+         * profile refuses. An f32 slot is reachable only as an ABI position
+         * under the number projection. */
+        if (e.type.scalar === "f32") {
+          err("native f32 has no literal form; it is an ABI carrier only", e.loc);
+          break;
+        }
         if (e.type.scalar === "f64") {
           const value = Number(e.value);
           const canonical = Object.is(value, -0) ? "-0" : String(value);
@@ -3216,9 +3253,12 @@ function validateFunction(
            * the width and signedness decide the answer, so the two operands
            * must be the same scalar. Ordering admits the same shapes
            * equality does — including f64, whose ordering is the ordinary
-           * floating compare over a branded carrier. */
+           * floating compare over a branded carrier, and excluding f32,
+           * which has no source-visible value to compare. */
           if (!typeEquals(e.left.type, e.right.type)) {
             err(`bin ${e.op} on native scalars: operand types differ`, e.loc);
+          } else if (e.left.type.scalar === "f32") {
+            err(`bin ${e.op} on native f32: an ABI carrier has no source value`, e.loc);
           }
         } else if (isEq && e.left.type.kind === "bool") {
           // bool === bool: a plain value compare.

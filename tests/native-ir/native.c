@@ -91,6 +91,10 @@ double nts_f64_identity(double value) {
   return value;
 }
 
+float nts_f32_identity(float value) {
+  return value;
+}
+
 int32_t nts_boolean_false(void) { return 0; }
 
 int32_t nts_boolean_invalid(void) { return 2; }

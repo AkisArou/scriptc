@@ -1744,6 +1744,12 @@ SCR_NATIVE_TO_NUMBER_UNSIGNED(uintptr_t, usize, 18446744073709551616.0)
 #undef SCR_NATIVE_TO_NUMBER_UNSIGNED
 
 
+float scr_native_f32_from_number(double value) {
+  if (value > (double)FLT_MAX) return (float)INFINITY;
+  if (value < -(double)FLT_MAX) return -(float)INFINITY;
+  return (float)value;
+}
+
 void scr_native_throw_arithmetic(const char *operation, const char *reason) {
   /* A RangeError rather than a TypeError: the operands have the type the
    * operation asked for, and it is their VALUES that leave it no answer —

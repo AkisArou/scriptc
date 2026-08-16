@@ -39,6 +39,8 @@ export function cType(t: IrType): string {
           return "intptr_t";
         case "usize":
           return "uintptr_t";
+        case "f32":
+          return "float";
         case "f64":
           return "double";
       }

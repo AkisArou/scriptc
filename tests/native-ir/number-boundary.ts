@@ -5,6 +5,7 @@
  * ordering work on what comes back. */
 import {
   type NumberPair32,
+  numberF32Identity,
   numberF64Identity,
   numberI16Identity,
   numberI32Identity,
@@ -83,6 +84,23 @@ check(numberF64Identity(0.5) === 0.5);
 check(numberF64Identity(one / zero) === Infinity);
 check(numberF64Identity(-1.5) + 1.5 === 0);
 check(numberF64Identity(zero / zero) !== numberF64Identity(zero / zero));
+
+/* A 32-bit float slot is the one crossing in this family that is not exact.
+ * Ingress rounds to nearest float, so a decimal that is not a float comes
+ * back changed — visibly and by exactly the amount binary32 allows — while
+ * egress is exact, because every float is a double. Values that ARE floats
+ * round-trip untouched, and a magnitude past the float range rounds to an
+ * infinity, which is what IEEE says and not what C's undefined conversion
+ * would have left to the target. */
+check(numberF32Identity(0.5) === 0.5);
+check(numberF32Identity(-0.25) === -0.25);
+check(numberF32Identity(16777216) === 16777216);
+const rounded = numberF32Identity(0.1);
+check(rounded !== 0.1);
+check(rounded > 0.09999999 && rounded < 0.10000001);
+check(numberF32Identity(one * 1e39) === Infinity);
+check(numberF32Identity(-one * 1e39) === -Infinity);
+check(numberF32Identity(zero / zero) !== numberF32Identity(zero / zero));
 
 /* A struct with number-projected fields constructs from plain literals and
  * reads back as plain numbers. */
