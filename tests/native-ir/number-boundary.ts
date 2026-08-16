@@ -5,6 +5,7 @@
  * ordering work on what comes back. */
 import {
   type NumberPair32,
+  numberF64Identity,
   numberI16Identity,
   numberI32Identity,
   numberPair32Transform,
@@ -74,6 +75,14 @@ check(rejects(() => {
 check(rejects(() => {
   numberU8Identity(one * 256);
 }));
+
+/* A double slot is the same projection with nothing to convert: the source
+ * value is already the representation the ABI wants, so every number
+ * crosses — fractions and the infinities included. */
+check(numberF64Identity(0.5) === 0.5);
+check(numberF64Identity(one / zero) === Infinity);
+check(numberF64Identity(-1.5) + 1.5 === 0);
+check(numberF64Identity(zero / zero) !== numberF64Identity(zero / zero));
 
 /* A struct with number-projected fields constructs from plain literals and
  * reads back as plain numbers. */

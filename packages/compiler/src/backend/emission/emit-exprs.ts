@@ -2359,6 +2359,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               ) {
                 throw new Error(`emitter bug: invalid number parameter projection in ${binding.id}`);
               }
+              /* A double slot converts nothing: the source value is already
+               * the representation the ABI wants, so the projection is a
+               * change of source view and nothing else. */
+              if (parameter.type.scalar === "f64") return arg.name;
               /* A literal argument the emitter can re-prove in place needs no
                * runtime check: the constant IS the converted value, which is
                * exactly what a branded exact construction would have emitted. */

@@ -1338,10 +1338,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     nativeTypesById.set(definition.id, definition);
   }
-  /* The integer widths an f64 carries injectively, so widening to number is
-   * lossless and checked ingress has exactly-representable bounds. Pointer
-   * widths are excluded so the rule cannot change meaning across targets. */
-  const widenableScalars = new Set(["i8", "u8", "i16", "u16", "i32", "u32"]);
+  /* The scalars a plain JavaScript number carries exactly, in both
+   * directions. `f64` is the identity: the slot IS a double, so the
+   * crossing converts nothing and can fail at nothing. The integer widths
+   * are the ones an f64 carries injectively, so widening is lossless and
+   * checked ingress has exactly-representable bounds; pointer widths are
+   * excluded so the rule cannot change meaning across targets. */
+  const widenableScalars = new Set(["f64", "i8", "u8", "i16", "u16", "i32", "u32"]);
   const widenableScalarType = (type: unknown): boolean =>
     typeof type === "object" && type !== null &&
     (type as { kind?: unknown }).kind === "nativeScalar" &&
@@ -1369,9 +1372,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             : null;
         if (
           field.name === "" || names.has(field.name) || fieldLayout === null ||
-          /* The number marker only means something where widening is
-           * lossless; on any other field it would promise a conversion the
-           * backends refuse to invent. */
+          /* The number marker only means something where the source view is
+           * exact — a double as itself, an at-most-32-bit integer widened.
+           * On any other field it would promise a conversion the backends
+           * refuse to invent. */
           (field.projection !== undefined &&
             (field.projection !== "number" || !widenableScalarType(field.type)))
         ) {
@@ -1933,10 +1937,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         }
         case "number":
           projectionCounts.number++;
-          /* The checked crossing has a defined answer only where the slot's
-           * whole range is exactly representable in f64: every width up to
-           * 32 bits. Wider or pointer-sized slots must use their exact
-           * carriers instead. */
+          /* The crossing has a defined answer only where the slot's whole
+           * range is exactly representable in f64: the double itself, and
+           * every integer width up to 32 bits. Wider or pointer-sized slots
+           * must use their exact carriers instead. */
           if (
             Object.keys(parameter.projection).sort().join(",") !==
               "argument,kind" ||
@@ -2086,7 +2090,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 ) return false;
                 continue;
               }
-              /* An f64 source over an at-most-32-bit integer slot is the exact
+              /* An f64 source over a double slot is that slot read as it
+               * stands; over an at-most-32-bit integer slot it is the exact
                * widening the delivery performs when it reads the queued value.
                * The width fence is load-bearing: widening a 64-bit payload
                * would silently lose precision, so f64 over anything wider is
@@ -2221,9 +2226,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
     } else if (resultProjection?.kind === "number") {
-      /* Widening is lossless for every value of an at-most-32-bit integer, so
-       * a failure contract would have nothing to detect: the raw scalar the
-       * sentinel would compare is the value the source never sees. */
+      /* Widening is lossless for every value of a double or an at-most-
+       * 32-bit integer, so a failure contract would have nothing to detect:
+       * the raw scalar the sentinel would compare is the value the source
+       * never sees. */
       if (
         Object.keys(resultProjection).length !== 1 ||
         !widenableScalarType(binding.result.type) ||
@@ -3202,7 +3208,15 @@ function validateFunction(
           if (!typeEquals(e.left.type, e.right.type)) {
             err(`bin ${e.op} on references: operand types differ`, e.loc);
           }
-        } else if (isEq && e.left.type.kind === "nativeScalar") {
+        } else if (
+          (isEq || e.op === "<" || e.op === "<=" || e.op === ">" || e.op === ">=") &&
+          e.left.type.kind === "nativeScalar"
+        ) {
+          /* Comparison over an exact scalar reads its own representation:
+           * the width and signedness decide the answer, so the two operands
+           * must be the same scalar. Ordering admits the same shapes
+           * equality does — including f64, whose ordering is the ordinary
+           * floating compare over a branded carrier. */
           if (!typeEquals(e.left.type, e.right.type)) {
             err(`bin ${e.op} on native scalars: operand types differ`, e.loc);
           }

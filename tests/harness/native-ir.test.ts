@@ -414,6 +414,9 @@ const localNativeInput: NativeFrontendInput = {
       ["u8", "numberU8Identity", "nts_u8_identity"],
       ["i16", "numberI16Identity", "nts_i16_identity"],
       ["i64", "numberI64Identity", "nts_i64_identity"],
+      /* The double flavor: the slot IS the source representation, so the
+       * projection converts nothing and can fail at nothing. */
+      ["f64", "numberF64Identity", "nts_f64_identity"],
     ] as const).map(([scalar, declaration, symbol]) => ({
       id: `native-typescript.fixture.c-v1@0.0.0#number_${scalar}_identity`,
       declaration: { module: nativePackage, name: declaration },
@@ -2611,6 +2614,48 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(serializeModule(mod)).toMatch(
       /"kind": "nativeScalarLit",\s+"value": "42"/,
     );
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("orders exact native scalars at their declared width and signedness", async () => {
+    const outDir = join(scratch, `native-scalar-ordering-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/native-scalar-ordering.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native scalar ordering frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "native-scalar-ordering.c" : "native-scalar-ordering.ll"),
+      "utf8",
+    );
+    if (backend === "llvm") {
+      /* Signedness is the whole point: the unsigned comparisons must not
+       * reach for a signed predicate, and neither may reach for a floating
+       * one, which would be the JavaScript-number answer. */
+      expect(generated).toContain("icmp slt i32");
+      expect(generated).toContain("icmp ult i32");
+      expect(generated).toContain("icmp ult i64");
+      expect(generated).not.toContain("fcmp olt");
+    }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

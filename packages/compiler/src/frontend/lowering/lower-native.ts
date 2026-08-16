@@ -800,7 +800,13 @@ function refuseUnprovableNumberLiterals(
   argumentNodes: readonly ts.Expression[],
 ): void {
   for (const parameter of binding.parameters) {
-    if (parameter.projection.kind !== "number" || parameter.type.kind !== "nativeScalar") {
+    if (
+      parameter.projection.kind !== "number" ||
+      parameter.type.kind !== "nativeScalar" ||
+      /* A double holds every literal a caller can write, NaN and the
+       * infinities included, so there is nothing here to disprove. */
+      parameter.type.scalar === "f64"
+    ) {
       continue;
     }
     const node = argumentNodes[parameter.projection.argument];
@@ -1017,6 +1023,15 @@ export function lowerNativeStructAssertion(
      * it. Construction still writes the exact field, so the initializer must
      * be a provably in-range decimal literal — the same rule an exact scalar
      * construction applies. */
+    /* A double field's source view is its own representation, so an
+     * ordinary f64 expression constructs it — no literal proof to discharge
+     * and nothing to check. */
+    if (
+      field.projection === "number" && field.type.kind === "nativeScalar" &&
+      field.type.scalar === "f64"
+    ) {
+      return { name, value: L.lowerExprExpecting(initializer, { kind: "f64" }) };
+    }
     if (field.projection === "number" && field.type.kind === "nativeScalar") {
       const pointerBits = L.nativeInput?.target.pointerBits;
       if (pointerBits !== 32 && pointerBits !== 64) {

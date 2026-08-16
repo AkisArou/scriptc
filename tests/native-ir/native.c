@@ -87,6 +87,10 @@ size_t nts_usize_identity(size_t value) {
   return value;
 }
 
+double nts_f64_identity(double value) {
+  return value;
+}
+
 int32_t nts_boolean_false(void) { return 0; }
 
 int32_t nts_boolean_invalid(void) { return 2; }

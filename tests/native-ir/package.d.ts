@@ -120,6 +120,7 @@ export declare function numberU32Identity(value: number): number;
 export declare function numberU8Identity(value: number): number;
 export declare function numberI16Identity(value: number): number;
 export declare function numberI64Identity(value: number): number;
+export declare function numberF64Identity(value: number): number;
 export interface NumberPair32 {
   readonly first: number;
   readonly second: number;

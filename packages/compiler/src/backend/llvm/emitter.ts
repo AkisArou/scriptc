@@ -1780,8 +1780,10 @@ class LlEmitter {
              * the physical type; typing it by the widened f64 source would be
              * a wrong-typed load, not merely a missing cast. */
             const physical = signature.parameters[argument.parameter];
+            /* A double slot needs no widening: the stored value is already
+             * the double the handler receives. */
             const widensNumber = sourceType.kind === "f64" &&
-              physical?.kind === "nativeScalar";
+              physical?.kind === "nativeScalar" && physical.scalar !== "f64";
             const loadType = owned !== undefined
               ? "ptr"
               : widensNumber
@@ -1972,7 +1974,10 @@ class LlEmitter {
           const physical = signature.parameters[argument.parameter];
           /* Same widening as the queued path, without the queue: %a{n} is
            * physically typed, so an f64 source widens it before the call. */
-          if (sourceParam.kind === "f64" && physical?.kind === "nativeScalar") {
+          if (
+            sourceParam.kind === "f64" && physical?.kind === "nativeScalar" &&
+            physical.scalar !== "f64"
+          ) {
             const signedScalars = new Set(["i8", "i16", "i32"]);
             widenLines.push(
               `  %a${argument.parameter}.wide = ${signedScalars.has(physical.scalar) ? "sitofp" : "uitofp"} ` +
@@ -5445,7 +5450,10 @@ class LlEmitter {
         B.line(`${result} = extractvalue ${this.llType(e.value.type)} ${value.name}, ${index}`);
         /* A number-projected field extracts at its physical type and widens;
          * typing the extract by the widened f64 would be an ill-typed module. */
-        if (e.type.kind === "f64" && field !== undefined && field.type.kind === "nativeScalar") {
+        if (
+          e.type.kind === "f64" && field !== undefined &&
+          field.type.kind === "nativeScalar" && field.type.scalar !== "f64"
+        ) {
           const signedScalars = new Set(["i8", "i16", "i32"]);
           const widened = B.tmp();
           B.line(
@@ -5510,13 +5518,24 @@ class LlEmitter {
           ">>>": "scr_bit_ushr",
         };
         if (
-          (e.op === "===" || e.op === "!==") &&
+          (e.op === "===" || e.op === "!==" || cmp[e.op] !== undefined) &&
           e.left.type.kind === "nativeScalar"
         ) {
           if (e.left.type.scalar === "f64") {
-            B.line(`${t} = fcmp ${e.op === "===" ? "oeq" : "une"} double ${l.name}, ${r.name}`);
+            B.line(`${t} = fcmp ${cmp[e.op]!} double ${l.name}, ${r.name}`);
           } else {
-            B.line(`${t} = icmp ${e.op === "===" ? "eq" : "ne"} ${this.llType(e.left.type)} ${l.name}, ${r.name}`);
+            /* An exact integer's ordering follows its declared signedness —
+             * the one thing a width alone does not say, and the difference
+             * between `-1 < 0` and `4294967295 < 0`. */
+            const signed = e.left.type.scalar.startsWith("i");
+            const predicate: Record<string, string> = e.op === "===" || e.op === "!=="
+              ? { "===": "eq", "!==": "ne" }
+              : signed
+                ? { "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge" }
+                : { "<": "ult", "<=": "ule", ">": "ugt", ">=": "uge" };
+            B.line(
+              `${t} = icmp ${predicate[e.op]!} ${this.llType(e.left.type)} ${l.name}, ${r.name}`,
+            );
           }
         } else if ((e.op === "===" || e.op === "!==") && e.left.type.kind === "bool") {
           B.line(`${t} = icmp ${e.op === "===" ? "eq" : "ne"} i1 ${l.name}, ${r.name}`);
@@ -7036,6 +7055,12 @@ class LlEmitter {
               if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "f64") {
                 throw new Error(`llvm emitter bug: invalid number parameter projection in ${binding.id}`);
               }
+              /* A double slot converts nothing: the source value is already
+               * the representation the ABI wants. */
+              if (parameter.type.scalar === "f64") {
+                callArgs.push(`${parameterType} ${arg.name}`);
+                break;
+              }
               /* A literal argument the emitter can re-prove in place needs no
                * runtime check: the constant IS the converted value, which is
                * exactly what a branded exact construction would have emitted.
@@ -7505,10 +7530,16 @@ class LlEmitter {
             throw new Error(`llvm emitter bug: invalid number result projection in ${binding.id}`);
           }
           /* Exact widening: every value of an at-most-32-bit integer is a
-           * representable f64, so one conversion is the whole projection. */
+           * representable f64, so one conversion is the whole projection —
+           * and a double slot needs not even that. */
           const signedScalars = new Set(["i8", "i16", "i32"]);
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
+          if (binding.result.type.scalar === "f64") {
+            if (callbacksMayThrow) this.emitPendingCheck();
+            releaseArguments();
+            return { name: raw, type: e.type };
+          }
           const value = B.tmp();
           B.line(
             `${value} = ${signedScalars.has(binding.result.type.scalar) ? "sitofp" : "uitofp"} ` +

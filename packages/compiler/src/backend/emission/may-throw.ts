@@ -53,9 +53,12 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
         /* A checked-number ingress throws before the call when the value is
          * not an integral number in the slot's range. It is the one
          * parameter projection that throws, so a caller needs the pending
-         * check even when the binding itself cannot fail. */
+         * check even when the binding itself cannot fail. A double slot
+         * converts nothing and therefore cannot fail. */
         binding.parameters.some((parameter) =>
-          parameter.projection.kind === "number"
+          parameter.projection.kind === "number" &&
+          parameter.type.kind === "nativeScalar" &&
+          parameter.type.scalar !== "f64"
         )
       )
       .map((binding) => binding.id),

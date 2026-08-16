@@ -7950,11 +7950,11 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
             "write the operation inside its exact type, as in " +
             `\`(a + b) as ${scalar}\`, which lowers to exact wrapping ` +
             "arithmetic)"
-          : `ordering exact native integers ('${scalar}' keeps the exact ` +
-            "width a foreign ABI declared, and comparison over that width is " +
-            "a future slice of the language profile: +, -, *, &, |, and ^ are " +
-            "implemented, <, <=, >, and >= are not, and there is no exact-to-" +
-            "number conversion to fall back on yet)",
+          : `ordering exact native integers of different types ('${scalar}' ` +
+            "keeps the exact width and signedness a foreign ABI declared, so " +
+            "an ordering is only meaningful between two operands of one " +
+            "type — convert one side explicitly rather than letting the " +
+            "comparison pick a width)",
       );
     };
 
@@ -8145,6 +8145,17 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           : op === ts.SyntaxKind.GreaterThanToken ? ">" : ">=";
         if (bothNum) return { kind: "bin", op: cmpOp, left, right, type: BOOL, loc };
         if (bothStr) return { kind: "strCmp", op: cmpOp, left, right, type: BOOL, loc };
+        /* Exact native scalars order in their own representation, the way
+         * they already compare for equality: the declared width and
+         * signedness decide the answer, and no JavaScript-number conversion
+         * appears anywhere in the lowering. */
+        if (
+          left.type.kind === "nativeScalar" &&
+          right.type.kind === "nativeScalar" &&
+          typeEquals(left.type, right.type)
+        ) {
+          return { kind: "bin", op: cmpOp, left, right, type: BOOL, loc };
+        }
         if (exactInteger !== undefined) refuseExactInteger("ordering");
         L.unsupported("SC1043", expr);
         break;
