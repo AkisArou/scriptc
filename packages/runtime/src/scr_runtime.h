@@ -2835,7 +2835,20 @@ typedef struct ScrNativeHandleType {
    * reference cycle. Lean foreign handles keep the allocation/refcount path
    * they had before receiver-owned registrations existed. */
   bool cycle_collected;
+  /* True when the binding declares that a foreign pointer names one object for
+   * as long as it is held — GObject, not a C struct whose address may be
+   * reused after free. Such handles are interned: projecting the same pointer
+   * twice yields the same managed cell, so equality answers about the object
+   * rather than about which call produced the reference. A type that does not
+   * declare it keeps exactly the path it had. */
+  bool interned;
 } ScrNativeHandleType;
+
+/* The live cell for this pointer, retained, or NULL if there is none. Only
+ * meaningful for an interned type; the caller commits a new cell when this
+ * answers NULL. */
+ScrNativeHandle *scr_native_handle_interned(const ScrNativeHandleType *type,
+                                            void *foreign);
 ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
                                            const ScrNativeHandleType *type,
                                            const char *type_name);

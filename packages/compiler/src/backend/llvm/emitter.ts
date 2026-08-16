@@ -2180,7 +2180,7 @@ class LlEmitter {
       `%ScrDynPath = type { ptr, ptr, ${this.sizeType} }`,
       `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
-      `%ScrNativeHandleType = type { ptr, ${this.sizeType}, i1 }`,
+      `%ScrNativeHandleType = type { ptr, ${this.sizeType}, i1, i1 }`,
     ];
     for (const definition of this.mod.nativeTypes ?? []) {
       if (definition.kind === "handle") {
@@ -2194,12 +2194,14 @@ class LlEmitter {
               `]`,
               `@${tag} = internal constant %ScrNativeHandleType { ` +
               `ptr @${tag}_upcasts, ${this.sizeType} ${definition.upcasts.length}, ` +
-              `i1 ${definition.cycleCollection === "traceable" ? "true" : "false"} }`,
+              `i1 ${definition.cycleCollection === "traceable" ? "true" : "false"}, ` +
+              `i1 ${definition.identity === "pointer" ? "true" : "false"} }`,
           );
         } else {
           out.push(
             `@${tag} = internal constant %ScrNativeHandleType { ptr null, ${this.sizeType} 0, ` +
-              `i1 ${definition.cycleCollection === "traceable" ? "true" : "false"} }`,
+              `i1 ${definition.cycleCollection === "traceable" ? "true" : "false"}, ` +
+              `i1 ${definition.identity === "pointer" ? "true" : "false"} }`,
           );
         }
         continue;
@@ -7334,7 +7336,69 @@ class LlEmitter {
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
           let result: string;
-          if (binding.error.kind === "nullable") {
+          /* An interned type answers about the object rather than about which
+           * call produced the reference, so an existing cell wins and the
+           * reference the callee handed over is released. */
+          const interns = definition.identity === "pointer";
+          if (interns) {
+            const resultSlot = B.slot();
+            B.entryAllocas.push(`${resultSlot} = alloca ptr ; interned native handle result`);
+            B.line(`store ptr null, ptr ${resultSlot}`);
+            this.declare("declare ptr @scr_native_handle_interned(ptr, ptr)");
+            const existing = B.tmp();
+            B.line(
+              `${existing} = call ptr @scr_native_handle_interned(ptr @${
+                mangleNativeHandleTag(definition.id)
+              }, ptr ${raw})`,
+            );
+            const hasExisting = B.tmp();
+            const reuseBlock = B.newLabel("native.intern.reuse");
+            const freshBlock = B.newLabel("native.intern.fresh");
+            const nullBlock = B.newLabel("native.intern.null");
+            const wrapBlock = B.newLabel("native.intern.wrap");
+            const continuation = B.newLabel("native.intern.done");
+            B.line(`${hasExisting} = icmp ne ptr ${existing}, null`);
+            B.condBr(hasExisting, reuseBlock, freshBlock);
+            B.startBlock(reuseBlock);
+            B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
+            this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
+            B.line(`call void @${destructor.entry.symbol}(ptr ${raw})`);
+            B.line(`store ptr ${existing}, ptr ${resultSlot}`);
+            B.br(continuation);
+            B.startBlock(freshBlock);
+            const isNull = B.tmp();
+            B.line(`${isNull} = icmp eq ptr ${raw}, null`);
+            B.condBr(isNull, nullBlock, wrapBlock);
+            B.startBlock(nullBlock);
+            B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
+            if (binding.error.kind === "nullable") {
+              this.declare("declare zeroext i1 @scr_exc_pending()");
+              const pending = B.tmp();
+              B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+              const throwBlock = B.newLabel("native.intern.throw");
+              B.condBr(pending, continuation, throwBlock);
+              B.startBlock(throwBlock);
+              this.declare("declare void @scr_native_throw_null(ptr)");
+              B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+              B.br(continuation);
+            } else {
+              this.declare("declare void @scr_trap(ptr)");
+              const message = this.cstr(
+                "scriptc: non-failing native call produced NULL\n",
+              );
+              B.line(`call void @scr_trap(ptr ${message})`);
+              B.line("unreachable");
+              B.startBlock(B.newLabel("native.intern.trapped"));
+              B.br(continuation);
+            }
+            B.startBlock(wrapBlock);
+            B.line(`call void @scr_native_handle_commit(ptr ${prepared}, ptr ${raw})`);
+            B.line(`store ptr ${prepared}, ptr ${resultSlot}`);
+            B.br(continuation);
+            B.startBlock(continuation);
+            result = B.tmp();
+            B.line(`${result} = load ptr, ptr ${resultSlot}`);
+          } else if (binding.error.kind === "nullable") {
             const resultSlot = B.slot();
             B.entryAllocas.push(`${resultSlot} = alloca ptr ; nullable native handle result`);
             B.line(`store ptr null, ptr ${resultSlot}`);

@@ -2569,13 +2569,39 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`scr_retained_callbacks_prepare(${prepared}, ${token});`);
           }
           E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
-          let result: Temp;
-          if (binding.error.kind === "nullable") {
-            result = E.newTemp(e.type, "NULL");
-            E.line(`if (${raw} == NULL) {`);
+          /* An interned type answers about the object, not about which call
+           * produced the reference. When the pointer already has a live cell
+           * that cell is the answer, and the reference the callee handed over
+           * is surplus — releasing it is what stops a second projection from
+           * outliving the object it names. */
+          const interns = definition.identity === "pointer";
+          const result = E.newTemp(e.type, "NULL");
+          if (interns) {
+            const existing = `sc_t${E.tempCounter++}`;
+            E.line(
+              `ScrNativeHandle *${existing} = scr_native_handle_interned(` +
+                `&${mangleNativeHandleTag(definition.id)}, ${raw});`,
+            );
+            E.line(`if (${existing} != NULL) {`);
             E.indent++;
             E.line(`scr_native_handle_abandon(${prepared});`);
-            E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
+            E.line(`${destructor.entry.symbol}(${raw});`);
+            E.line(`${result.name} = ${existing};`);
+            E.indent--;
+            E.line(`} else if (${raw} == NULL) {`);
+          } else if (binding.error.kind === "nullable") {
+            E.line(`if (${raw} == NULL) {`);
+          }
+          if (interns || binding.error.kind === "nullable") {
+            E.indent++;
+            E.line(`scr_native_handle_abandon(${prepared});`);
+            if (binding.error.kind === "nullable") {
+              E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
+            } else {
+              E.line(
+                `scr_trap("scriptc: non-failing native call produced NULL\\n");`,
+              );
+            }
             E.indent--;
             E.line("} else {");
             E.indent++;
@@ -2585,7 +2611,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line("}");
           } else {
             E.line(`scr_native_handle_commit(${prepared}, ${raw});`);
-            result = E.newTemp(e.type, prepared);
+            E.line(`${result.name} = ${prepared};`);
           }
           E.emitPendingCheck();
           releaseArguments();

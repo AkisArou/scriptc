@@ -53,6 +53,81 @@ struct ScrNativeHandle {
   ScrNativeHandleState state;
 };
 
+/* Identity map for interned handle types.
+ *
+ * Chained buckets keyed by the pointer and its type. The entry does not own the
+ * handle: an owning entry would keep every projected object alive forever. It
+ * is removed the moment the cell stops being live, which is the single place a
+ * foreign pointer is dropped, so a disposed cell is never handed back.
+ *
+ * Unsynchronised on purpose. A native handle is owner-confined, so every
+ * projection of one runs on the thread that owns it. */
+#define SCR_NATIVE_IDENTITY_BUCKETS 64u
+
+typedef struct ScrNativeIdentityEntry {
+  const ScrNativeHandleType *type;
+  void *foreign;
+  ScrNativeHandle *handle;
+  struct ScrNativeIdentityEntry *next;
+} ScrNativeIdentityEntry;
+
+static ScrNativeIdentityEntry
+    *scr_native_identity[SCR_NATIVE_IDENTITY_BUCKETS];
+
+static size_t scr_native_identity_bucket(const ScrNativeHandleType *type,
+                                         const void *foreign) {
+  uintptr_t mixed = (uintptr_t)foreign ^ ((uintptr_t)type << 1);
+  return (size_t)((mixed >> 4) % SCR_NATIVE_IDENTITY_BUCKETS);
+}
+
+ScrNativeHandle *scr_native_handle_interned(const ScrNativeHandleType *type,
+                                            void *foreign) {
+  if (type == NULL || !type->interned || foreign == NULL) return NULL;
+  size_t bucket = scr_native_identity_bucket(type, foreign);
+  for (ScrNativeIdentityEntry *entry = scr_native_identity[bucket];
+       entry != NULL; entry = entry->next) {
+    if (entry->type == type && entry->foreign == foreign) {
+      return scr_native_handle_retain(entry->handle);
+    }
+  }
+  return NULL;
+}
+
+static void scr_native_identity_insert(ScrNativeHandle *handle) {
+  size_t bucket =
+      scr_native_identity_bucket(handle->type, handle->foreign);
+  for (ScrNativeIdentityEntry *entry = scr_native_identity[bucket];
+       entry != NULL; entry = entry->next) {
+    if (entry->type == handle->type && entry->foreign == handle->foreign) {
+      /* Two live cells for one object is the state interning exists to
+       * prevent, and continuing would leave equality answering by luck. */
+      scr_trap("scriptc: native handle interned twice for one object\n");
+    }
+  }
+  ScrNativeIdentityEntry *entry = calloc(1, sizeof *entry);
+  if (entry == NULL) scr_trap("scriptc: out of memory interning a native handle\n");
+  entry->type = handle->type;
+  entry->foreign = handle->foreign;
+  entry->handle = handle;
+  entry->next = scr_native_identity[bucket];
+  scr_native_identity[bucket] = entry;
+}
+
+static void scr_native_identity_remove(const ScrNativeHandleType *type,
+                                       const void *foreign) {
+  size_t bucket = scr_native_identity_bucket(type, foreign);
+  ScrNativeIdentityEntry **link = &scr_native_identity[bucket];
+  while (*link != NULL) {
+    ScrNativeIdentityEntry *entry = *link;
+    if (entry->type == type && entry->foreign == foreign) {
+      *link = entry->next;
+      free(entry);
+      return;
+    }
+    link = &entry->next;
+  }
+}
+
 static bool scr_native_handle_traced(const ScrNativeHandle *handle) {
   return handle->type->cycle_collected;
 }
@@ -196,6 +271,11 @@ static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle,
   void *foreign = handle->foreign;
   handle->foreign = NULL;
   handle->state = SCR_NATIVE_HANDLE_DISPOSING;
+  /* Before the destructor runs, so a reentrant projection during teardown
+   * cannot be handed a cell that is on its way out. */
+  if (handle->type->interned) {
+    scr_native_identity_remove(handle->type, foreign);
+  }
 
   for (ScrNativeLifecycleEdge *edge = lifecycle; edge != NULL;
        edge = edge->next) {
@@ -267,6 +347,7 @@ void scr_native_handle_commit(ScrNativeHandle *handle, void *foreign) {
   }
   handle->foreign = foreign;
   handle->state = SCR_NATIVE_HANDLE_LIVE;
+  if (handle->type->interned) scr_native_identity_insert(handle);
   if (handle->owner_edge != NULL) {
     ScrNativeOwnerEdge *edge = handle->owner_edge;
     ScrNativeHandle *owner = edge->owner;

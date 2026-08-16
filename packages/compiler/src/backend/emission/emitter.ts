@@ -1410,12 +1410,15 @@ export class CEmitter {
           `  ${tag}_upcasts,`,
           `  ${definition.upcasts.length},`,
           `  ${definition.cycleCollection === "traceable" ? "true" : "false"},`,
+          `  ${definition.identity === "pointer" ? "true" : "false"},`,
           `};`,
           "",
         );
       } else {
         out.push(
-          `static const ScrNativeHandleType ${tag} = {NULL, 0, ${definition.cycleCollection === "traceable" ? "true" : "false"}};`,
+          `static const ScrNativeHandleType ${tag} = {NULL, 0, ${
+            definition.cycleCollection === "traceable" ? "true" : "false"
+          }, ${definition.identity === "pointer" ? "true" : "false"}};`,
           "",
         );
       }
