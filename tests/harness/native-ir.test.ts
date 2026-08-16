@@ -1845,6 +1845,39 @@ test("Native IR requires explicit, range-checked error contracts", () => {
   );
 });
 
+test("Native IR pairs an optional handle argument with its own handle", () => {
+  // The direct projection admits differing argument and parameter types only
+  // for an optional handle, and only when the identities agree. Without the
+  // identity check it would silently accept an unrelated handle.
+  const mismatched = exactI32Module();
+  const binding = mismatched.nativeBindings![0]!;
+  binding.arguments = [
+    { name: "value", type: { kind: "nullableNativeHandle", typeId: "fixture#type:a" } },
+  ];
+  binding.parameters = [
+    {
+      name: "value",
+      type: { kind: "nativeHandle", typeId: "fixture#type:b" },
+      passMode: "pointer",
+      ownership: { kind: "borrowed", scope: "call" },
+      projection: { kind: "argument", argument: 0 },
+    },
+  ];
+  expect(validateModule(mismatched).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "value" has an inconsistent direct projection',
+  );
+
+  // A required parameter never accepts an optional argument.
+  const required = exactI32Module();
+  const requiredBinding = required.nativeBindings![0]!;
+  requiredBinding.arguments = [
+    { name: "value", type: { kind: "nullableNativeHandle", typeId: "fixture#type:a" } },
+  ];
+  expect(validateModule(required).map((error) => error.message)).toContain(
+    'Native IR binding "fixture.i32_identity" parameter "value" has an inconsistent direct projection',
+  );
+});
+
 test("Native IR validates every exact integer's signed bounds", () => {
   const cases: readonly [IrNativeScalar, string, string][] = [
     ["i8", "-128", "127"],
