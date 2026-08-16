@@ -554,10 +554,24 @@ export function cFnPtrCast(ft: IrType & { kind: "func" }): string {
  * CEmitter.arrNewC, which overrides this for traced-array elements. */
 export function elemKindC(elem: IrType): string {
   switch (elem.kind) {
+    /* Not a bug: an array slot is 64 bits and would hold either of these, but
+     * an array has to do more than hold. Joining, sorting, comparing and
+     * serialising all need the element's width and signedness, and the array
+     * header records neither — so the feature is the whole Array surface, not
+     * the slot. Saying "emitter bug" of ordinary code sends the reader looking
+     * for a defect that is not there. */
     case "nativeScalar":
-      throw new Error("emitter bug: exact native scalar arrays are not implemented");
+      throw new Error(
+        "an array of exact native scalars is not implemented: keep the values " +
+          "in separate bindings. Holding plain numbers instead does not help — " +
+          "an exact scalar is constructed from a literal, so an element read " +
+          "cannot become one",
+      );
     case "nativeStruct":
-      throw new Error("emitter bug: native struct arrays are not implemented");
+      throw new Error(
+        "an array of native structs is not implemented: the runtime cannot lay " +
+          "out a foreign record in an array slot",
+      );
     case "nativeHandle":
       return "SCR_ELEM_REF";
     case "f64":
