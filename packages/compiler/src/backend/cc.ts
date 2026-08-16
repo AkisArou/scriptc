@@ -1639,6 +1639,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...driver.targetArgs,
     ...(sanitize ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"] : ["-O2"]),
     "-fno-math-errno",
+    "-ffp-contract=off", // per-operation f64 must match JS — see compileC's buildArgs
     "-fno-strict-aliasing", // the emitted object model type-puns — see compileC's buildArgs
     "-Wno-deprecated-declarations",
     "-DSCR_LIB",
@@ -3736,6 +3737,13 @@ export async function compileC(opts: CcOptions): Promise<void> {
       : ["-O2"]),
     ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-fno-math-errno",
+    // Clang's C default is -ffp-contract=on, which may fuse a separate
+    // multiply and add into one FMA with a single rounding. The emitted
+    // program is per-operation f64 arithmetic whose results must match a
+    // JavaScript engine's bit for bit, so contraction is disabled. Mirrored
+    // in the cache-miss cflags below and compileLibArchive — lockstep, like
+    // -fno-strict-aliasing.
+    "-ffp-contract=off",
     // The emitted object model is deliberately type-punned C: a hierarchy
     // upcast is a raw pointer cast, so one object's header (rc, vt) and
     // fields are read and written through BOTH the base and derived struct
@@ -3931,6 +3939,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       : ["-O2"]),
     ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-fno-math-errno",
+    "-ffp-contract=off", // per-operation f64 must match JS — see buildArgs
     "-fno-strict-aliasing", // the emitted object model type-puns — see buildArgs
     "-Wno-deprecated-declarations",
     "-I", rtDir,

@@ -15,6 +15,15 @@
 #include <string.h>    /* memcpy in the inline slot accessors */
 #include <sys/types.h> /* ssize_t in the transport ops table */
 
+#include <float.h>
+/* The compiled program's f64 arithmetic must match a JavaScript engine's
+ * IEEE-754 binary64 results exactly. That is a property of the target's
+ * `double`, not of the emitted code, so a target where `double` is anything
+ * else must fail here rather than produce subtly different numbers. */
+_Static_assert(sizeof(double) == 8, "scriptc requires a 64-bit double");
+_Static_assert(FLT_RADIX == 2, "scriptc requires binary floating point");
+_Static_assert(DBL_MANT_DIG == 53, "scriptc requires IEEE-754 binary64 double");
+
 /* ── libc shims ─────────────────────────────────────────────────────────
  * Win32's missing POSIX/BSD functions live in scr_win.c. Zig's musl sysroot
  * additionally lacks arc4random_buf; scr_musl.c supplies it from Linux's
