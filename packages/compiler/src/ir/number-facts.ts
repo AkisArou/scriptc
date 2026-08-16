@@ -1,7 +1,19 @@
-/* Ask 4: the integer-boundary inference — a flow-sensitive forward abstract
- * interpretation over the lowered IR that PROVES wholeness and range for
- * every value reaching a profile-declared i64/u64 boundary slot, or REFUSES
- * with the failed obligation, the observed evidence, and the author's fix.
+/* The number facts: a flow-sensitive forward abstract interpretation over
+ * the lowered IR that PROVES wholeness and range for every value reaching
+ * a boundary slot, or REFUSES with the failed obligation, the observed
+ * evidence, and the author's fix.
+ *
+ * It has two consumers, and they ask the same question of the same domain.
+ * The library lane asks it of a profile-declared i64/u64 slot, where a
+ * failed proof is an error because the slot has no run-time check. The
+ * native lane asks it of a checked-number parameter projection, where a
+ * failed proof is merely the ordinary answer — the check stays — and a
+ * successful one deletes the check. The domain lives here, in the IR layer,
+ * because neither consumer owns it.
+ *
+ * The rest of this header describes the library obligation, which is the
+ * older and stricter of the two; the native boundary is documented at the
+ * bottom of the file.
  *
  * The two-layer model (the ask-4 reference package): Layer 1 —
  * representing provably-integer numbers as machine integers inside
@@ -69,17 +81,22 @@
  * boundaries stay TOP — the obligations are the contract; the strategy
  * is free.
  *
- * Runs ONLY for library builds whose profile declares at least one
- * integer slot; the executable lane never calls it. */
+ * The library obligation runs only for library builds whose profile
+ * declares at least one integer slot. The native boundary runs only for
+ * modules that declare a number parameter projection. A program with
+ * neither pays for neither. */
 import type {
   IrExpr,
   IrFunction,
   IrModule,
+  IrNativeBinding,
+  IrNativeStructDef,
   IrNumBinOp,
   IrStmt,
   IrType,
   SrcLoc,
-} from "../ir/nodes.js";
+} from "./nodes.js";
+import { isFfiCallbackParam, moduleUsesRetainedCallbacks } from "./nodes.js";
 
 /* ── the abstract domain ────────────────────────────────────────────────── */
 
@@ -771,17 +788,21 @@ class FnAnalyzer {
     private readonly cfg: IntSlotConfig,
     private readonly effects: GlobalEffects,
     private readonly verdicts: IntVerdict[],
+    private readonly native: NativeBoundaryContext | null = null,
   ) {}
 
   analyze(fn: IrFunction): void {
     const env: Env = new Map();
     const slots = this.cfg.fns.get(fn.name);
+    const nativeSeeds = this.native?.callbackSeeds.get(fn.name);
     fn.params.forEach((p, i) => {
       if (!this.bindingCarriesNumber(p.localId)) return;
       const declared = slots?.params[i] ?? null;
       const seed = slots?.paramSeeds[i] ?? null;
+      const nativeSeed = nativeSeeds?.[i] ?? null;
       if (declared !== null) env.set(p.localId, classSeed(declared));
       else if (seed !== null) env.set(p.localId, { ...seed });
+      else if (nativeSeed !== null) env.set(p.localId, { ...nativeSeed });
       else env.set(p.localId, { ...TOP });
     });
     this.collect = true;
@@ -1611,13 +1632,17 @@ class FnAnalyzer {
         this.havocAllGlobals(env);
         return { ...TOP };
       }
-      case "ffiCall":
       case "nativeCall":
+        return this.evalNativeCall(e, env);
+      case "ffiCall":
       case "yieldExpr":
       case "awaitExpr":
       case "awaitUnionExpr": {
         for (const v of childExprs(e)) this.evalExpr(v, env);
-        clearPathFacts(env);
+        /* Each of these can run other code before the value comes back: an
+         * FFI callback, or whatever the scheduler resumes at a suspension.
+         * A global written there is not the one this environment holds. */
+        this.havocAllGlobals(env);
         return { ...TOP };
       }
       case "recordLit": {
@@ -1651,14 +1676,119 @@ class FnAnalyzer {
         const key = this.pathKey(e, null);
         return key === null ? { ...TOP } : envGet(env, key);
       }
+      case "nativeStructGet": {
+        this.evalExpr(e.value, env);
+        /* Reading a number-projected field widens an exact slot, so the
+         * value it yields is whole and inside that slot's interval — the
+         * same fact a widened result carries, and what lets a field read
+         * flow back into a boundary without a second check. */
+        if (e.type.kind !== "f64" || this.native === null) return { ...TOP };
+        const owner = e.value.type.kind === "nativeStruct"
+          ? this.native.structs.get(e.value.type.typeId)
+          : undefined;
+        const field = owner?.fields.find((entry) => entry.name === e.field);
+        const slot = field?.type.kind === "nativeScalar"
+          ? nativeSlot(field.type.scalar)
+          : null;
+        return slot === null ? { ...TOP } : slotSeed(slot);
+      }
       default: {
         for (const v of childExprs(e)) this.evalExpr(v, env);
         // Unmodeled expressions do not participate in the cheap
-        // straight-line proof. Some can invoke runtime/user machinery;
-        // refusing to carry a field fact through them is the safe verdict.
-        clearPathFacts(env);
+        // straight-line proof. Some can invoke runtime/user machinery —
+        // an array intrinsic taking a callback, a generator resumption, a
+        // promise executor — so the safe verdict drops the global facts
+        // too, not only the field ones. The polarity is deliberate: a kind
+        // added later is conservative here until it is modeled.
+        this.havocAllGlobals(env);
         return { ...TOP };
       }
+    }
+  }
+
+  /* ── the native checked-number boundary ───────────────────────────────
+   * A native call is an opaque transfer of control: it may run a
+   * call-scoped callback, dispatch a queued one, or re-enter the program
+   * some other way, so every global fact dies here. What it gives back is
+   * narrower than TOP when the result widens out of an exact slot — the
+   * fact that makes a round trip through the boundary free. */
+  private evalNativeCall(
+    e: Extract<IrExpr, { kind: "nativeCall" }>,
+    env: Env,
+  ): AbsVal {
+    const values = e.args.map((argument) => this.evalExpr(argument, env));
+    const native = this.native;
+    const binding = native?.bindings.get(e.binding);
+    /* Only a call that can re-enter the program forgets what the globals
+     * hold: one carrying a callback of its own, or any call at all once the
+     * module has registered a callback the native side may dispatch on its
+     * own schedule. A plain call into C cannot reach a ScriptC binding, and
+     * pretending otherwise would forget the value of the very line above. */
+    if (
+      native === null || native === undefined || binding === undefined ||
+      native.reentrant ||
+      binding.arguments.some((argument) => argument.callback !== undefined)
+    ) {
+      this.havocAllGlobals(env);
+    } else {
+      clearPathFacts(env);
+    }
+    if (native !== null && native !== undefined && binding !== undefined) {
+      binding.parameters.forEach((parameter, index) => {
+        if (parameter.projection.kind !== "number") return;
+        const slot = parameter.type.kind === "nativeScalar"
+          ? nativeSlot(parameter.type.scalar)
+          : null;
+        const value = values[parameter.projection.argument];
+        if (slot === null || value === undefined) return;
+        this.recordCrossing(native, e, index, slot, value, binding.id);
+      });
+      if (binding.result.projection.kind === "number") {
+        const slot = binding.result.type.kind === "nativeScalar"
+          ? nativeSlot(binding.result.type.scalar)
+          : null;
+        if (slot !== null) return slotSeed(slot);
+      }
+    }
+    return { ...TOP };
+  }
+
+  /** Record one crossing's verdict. A site visited more than once — the
+   * same expression under two enclosing collect passes — keeps its check
+   * unless every visit certified it. */
+  private recordCrossing(
+    native: NativeBoundaryContext,
+    call: IrExpr,
+    parameter: number,
+    slot: NativeSlot,
+    value: AbsVal,
+    bindingId: string,
+  ): void {
+    if (!this.collect) return;
+    const verdict = certifyNumberCrossing(value, slot);
+    if (verdict === "certified") {
+      let set = native.certified.get(call);
+      if (set === undefined) {
+        set = new Set();
+        native.certified.set(call, set);
+      }
+      set.add(parameter);
+      return;
+    }
+    let unproven = native.unproven.get(call);
+    if (unproven === undefined) {
+      unproven = new Set();
+      native.unproven.set(call, unproven);
+    }
+    unproven.add(parameter);
+    if (verdict === "refused") {
+      native.refusals.push({
+        binding: bindingId,
+        parameter,
+        scalar: slot.scalar,
+        detail: describeRefusedCrossing(value),
+        loc: call.loc,
+      });
     }
   }
 
@@ -1737,4 +1867,297 @@ export function checkLibraryIntegerSlots(mod: IrModule, cfg: IntSlotConfig): Int
     analyzer.analyze(fn);
   }
   return verdicts;
+}
+
+/* ── the native checked-number boundary ──────────────────────────────────
+ * The second consumer of the domain above. A `number` parameter projection
+ * converts a plain JavaScript number into an exact slot at most 32 bits
+ * wide, and the conversion is checked at run time because in general
+ * nothing knows what the value is. Where this analysis does know — the
+ * value is whole and its whole interval fits the slot — the check is dead
+ * code, and eliding it is what makes the plain-number carrier cost nothing
+ * on the paths that matter: a widened result fed straight back, a payload
+ * a handler passes on, a loop induction used as an index.
+ *
+ * The polarity is the point. A site is certified only by a proof, and
+ * everything unmodeled reaches TOP and keeps its check. A site whose every
+ * admitted value is outside the slot is refused at compile time instead —
+ * the judgment the frontend already makes for a literal, reached here by
+ * inference. */
+
+/** A crossing that cannot succeed for any value the analysis admits. */
+export interface NumberBoundaryRefusal {
+  readonly binding: string;
+  readonly parameter: number;
+  readonly scalar: string;
+  readonly detail: string;
+  readonly loc: SrcLoc;
+}
+
+export interface NumberBoundaryFacts {
+  /** Native call expression → the physical parameter indices whose checked
+   * ingress is proven unnecessary. Keyed by IR node identity: the facts are
+   * a pure function of the module, so every consumer holding the module
+   * holds the same keys. */
+  readonly certified: ReadonlyMap<IrExpr, ReadonlySet<number>>;
+  readonly refusals: readonly NumberBoundaryRefusal[];
+}
+
+interface NativeSlot {
+  readonly min: number;
+  readonly max: number;
+  readonly scalar: string;
+}
+
+interface NativeBoundaryContext {
+  readonly bindings: ReadonlyMap<string, IrNativeBinding>;
+  /** The module registered a callback the native side holds past the call
+   * that passed it, so any later native call may dispatch it. */
+  readonly reentrant: boolean;
+  readonly structs: ReadonlyMap<string, IrNativeStructDef>;
+  readonly callbackSeeds: ReadonlyMap<string, readonly (AbsVal | null)[]>;
+  readonly certified: Map<IrExpr, Set<number>>;
+  /** Sites a visit failed to certify. A site is elided only when no visit
+   * left it unproven, so a second, weaker visit cannot be overruled by an
+   * earlier stronger one. */
+  readonly unproven: Map<IrExpr, Set<number>>;
+  readonly refusals: NumberBoundaryRefusal[];
+}
+
+const EMPTY_BOUNDARY_FACTS: NumberBoundaryFacts = Object.freeze({
+  certified: new Map<IrExpr, ReadonlySet<number>>(),
+  refusals: Object.freeze([]) as readonly NumberBoundaryRefusal[],
+});
+
+const boundaryFactsByModule = new WeakMap<IrModule, NumberBoundaryFacts>();
+
+/** The boundary facts for one module, computed once. Both backends and the
+ * driver ask independently; the module is frozen, so one analysis answers
+ * all of them and every consumer sees the same verdicts. */
+export function numberBoundaryFacts(mod: IrModule): NumberBoundaryFacts {
+  const cached = boundaryFactsByModule.get(mod);
+  if (cached !== undefined) return cached;
+  const facts = computeNumberBoundaryFacts(mod);
+  boundaryFactsByModule.set(mod, facts);
+  return facts;
+}
+
+/** The exact interval of a widenable slot, as f64 bounds. Every value of an
+ * integer at most 32 bits wide is an exact double, so these bounds are
+ * exact and the comparisons below are not approximations. */
+function nativeSlot(scalar: string): NativeSlot | null {
+  switch (scalar) {
+    case "i8": return { min: -128, max: 127, scalar };
+    case "u8": return { min: 0, max: 255, scalar };
+    case "i16": return { min: -32768, max: 32767, scalar };
+    case "u16": return { min: 0, max: 65535, scalar };
+    case "i32": return { min: -(2 ** 31), max: 2 ** 31 - 1, scalar };
+    case "u32": return { min: 0, max: 2 ** 32 - 1, scalar };
+    default: return null;
+  }
+}
+
+function slotSeed(slot: NativeSlot): AbsVal {
+  return absVal(slot.min, slot.max, true, false);
+}
+
+export type NumberCrossingVerdict = "certified" | "refused" | "unknown";
+
+/** Decide one crossing. Certifying requires the whole abstract set to be
+ * integral and inside the slot, NaN excluded — NaN lives outside the
+ * interval and converts to nothing. Refusing requires the opposite proof:
+ * a non-empty set of values none of which can convert. An empty set is
+ * unreachable code, which needs neither a check nor a diagnostic. */
+export function certifyNumberCrossing(v: AbsVal, slot: NativeSlot): NumberCrossingVerdict {
+  if (isBottom(v)) return "certified";
+  if (v.lo > v.hi) return v.maybeNaN ? "refused" : "certified";
+  if (v.maybeNaN) return "unknown";
+  if (v.whole && v.lo >= slot.min && v.hi <= slot.max) return "certified";
+  if (v.hi < slot.min || v.lo > slot.max) return "refused";
+  return "unknown";
+}
+
+function describeRefusedCrossing(v: AbsVal): string {
+  if (v.lo > v.hi) return "the value is always NaN";
+  if (isSingleton(v)) return `the value is always ${v.lo}`;
+  return `the value is always in [${v.lo}, ${v.hi}]`;
+}
+
+/** Every function name the module can reach other than through the native
+ * callback closures collected beside it. A parameter seed is an assumption
+ * about how a function is entered, so it is admissible only when the
+ * callback arguments are the only way in. */
+function referencesOutsideCallbacks(
+  mod: IrModule,
+  candidates: ReadonlySet<string>,
+  callbackUses: ReadonlyMap<string, number>,
+): ReadonlySet<string> {
+  if (candidates.size === 0) return new Set();
+  /* Embedded npm sources are program text, not IR, and cannot name an IR
+   * function; excluding them keeps this scan proportional to the code the
+   * compiler actually lowered. */
+  const { embedded: _embedded, ...structure } = mod;
+  const serialized = JSON.stringify(structure);
+  const excluded = new Set<string>();
+  for (const name of candidates) {
+    const needle = JSON.stringify(name);
+    let count = 0;
+    let at = serialized.indexOf(needle);
+    while (at !== -1) {
+      count++;
+      at = serialized.indexOf(needle, at + needle.length);
+    }
+    /* One occurrence is the definition itself; the rest must be exactly
+     * the callback closures that justified the seed. */
+    if (count !== 1 + (callbackUses.get(name) ?? 0)) excluded.add(name);
+  }
+  return excluded;
+}
+
+/** Walk every node of the module's function bodies. Deliberately
+ * reflective: this pre-pass only looks for one expression kind, and an IR
+ * node shape it has never heard of must not hide one. */
+function walkBodyNodes(node: unknown, visit: (node: { kind: string }) => void): void {
+  if (Array.isArray(node)) {
+    for (const item of node) walkBodyNodes(item, visit);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const kind = (node as { kind?: unknown }).kind;
+  if (typeof kind === "string") visit(node as { kind: string });
+  for (const [key, value] of Object.entries(node)) {
+    // Types carry their own `kind` and hold no expressions.
+    if (key === "type" || key === "loc") continue;
+    walkBodyNodes(value, visit);
+  }
+}
+
+/** The seeds a native callback's handler may assume for its parameters: a
+ * source parameter the delivery widens arrives already inside the physical
+ * slot it was read from. */
+function callbackParameterSeeds(
+  mod: IrModule,
+  bindings: ReadonlyMap<string, IrNativeBinding>,
+): ReadonlyMap<string, readonly (AbsVal | null)[]> {
+  const seeds = new Map<string, (AbsVal | null)[]>();
+  const callbackUses = new Map<string, number>();
+  const disagreed = new Set<string>();
+
+  walkBodyNodes(mod.functions, (node) => {
+    if (node.kind !== "nativeCall") return;
+    const call = node as Extract<IrExpr, { kind: "nativeCall" }>;
+    const binding = bindings.get(call.binding);
+    if (binding === undefined) return;
+    binding.arguments.forEach((argument, index) => {
+      if (argument.type.kind !== "func") return;
+      const value = call.args[index];
+      if (value?.kind !== "closure") return;
+      const physical = physicalCallbackSlots(binding, index);
+      const vector = argument.type.params.map((parameter, position) =>
+        parameter.kind === "f64" ? physical[position] ?? null : null
+      );
+      callbackUses.set(value.fnName, (callbackUses.get(value.fnName) ?? 0) + 1);
+      const previous = seeds.get(value.fnName);
+      if (previous === undefined) {
+        seeds.set(value.fnName, vector);
+        return;
+      }
+      /* Two registrations of one handler must agree, or neither seed is
+       * an assumption every entry satisfies. */
+      if (
+        previous.length !== vector.length ||
+        previous.some((entry, position) => {
+          const next = vector[position] ?? null;
+          return entry === null
+            ? next !== null
+            : next === null || !sameVal(entry, next);
+        })
+      ) {
+        disagreed.add(value.fnName);
+      }
+    });
+  });
+
+  for (const name of disagreed) seeds.delete(name);
+  for (const name of referencesOutsideCallbacks(mod, new Set(seeds.keys()), callbackUses)) {
+    seeds.delete(name);
+  }
+  return seeds;
+}
+
+/** The physical slot behind each source parameter of one callback
+ * argument, indexed by source position. A widened source parameter reads
+ * the exact scalar the trampoline stored, so that scalar's interval is the
+ * seed; every other position contributes nothing. */
+function physicalCallbackSlots(
+  binding: IrNativeBinding,
+  argument: number,
+): readonly (AbsVal | null)[] {
+  const carrier = binding.parameters.find(
+    (parameter) =>
+      parameter.projection.kind === "callbackFunction" &&
+      parameter.projection.argument === argument,
+  );
+  const contract = binding.arguments[argument]?.callback;
+  if (carrier?.type.kind !== "nativeCallback" || contract === undefined) return [];
+  const physical = carrier.type.signature.parameters;
+  return contract.sourceArguments.map((source) => {
+    if (source.kind !== "callback-parameter") return null;
+    const slotType = physical[source.parameter];
+    const slot = slotType?.kind === "nativeScalar" ? nativeSlot(slotType.scalar) : null;
+    return slot === null ? null : slotSeed(slot);
+  });
+}
+
+function computeNumberBoundaryFacts(mod: IrModule): NumberBoundaryFacts {
+  const bindings = new Map(
+    (mod.nativeBindings ?? []).map((binding) => [binding.id, binding] as const),
+  );
+  const projects = [...bindings.values()].some((binding) =>
+    binding.parameters.some((parameter) => parameter.projection.kind === "number")
+  );
+  if (!projects) return EMPTY_BOUNDARY_FACTS;
+
+  const structs = new Map<string, IrNativeStructDef>();
+  for (const definition of mod.nativeTypes ?? []) {
+    if (definition.kind === "struct") structs.set(definition.id, definition);
+  }
+  const native: NativeBoundaryContext = {
+    bindings,
+    /* An FFI import taking a function pointer is the same hazard: the C
+     * side may keep it and call it back during an unrelated call. */
+    reentrant: moduleUsesRetainedCallbacks(mod) ||
+      (mod.ffiImports ?? []).some((entry) =>
+        entry.params.some((parameter) => isFfiCallbackParam(parameter))
+      ),
+    structs,
+    callbackSeeds: callbackParameterSeeds(mod, bindings),
+    certified: new Map(),
+    unproven: new Map(),
+    refusals: [],
+  };
+  const effects = globalEffectsOf(mod);
+  const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
+  for (const fn of mod.functions) {
+    const analyzer = new FnAnalyzer(mod, cfg, effects, [], native);
+    analyzer.seedBindings(fn, mod);
+    analyzer.analyze(fn);
+  }
+
+  const certified = new Map<IrExpr, ReadonlySet<number>>();
+  for (const [call, parameters] of native.certified) {
+    const unproven = native.unproven.get(call);
+    const proven = unproven === undefined
+      ? parameters
+      : new Set([...parameters].filter((parameter) => !unproven.has(parameter)));
+    if (proven.size > 0) certified.set(call, proven);
+  }
+  const seen = new Set<string>();
+  const refusals = native.refusals.filter((refusal) => {
+    const key = `${refusal.binding}#${refusal.parameter}@${refusal.loc.file}:${refusal.loc.start}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return Object.freeze({ certified, refusals: Object.freeze(refusals) });
 }

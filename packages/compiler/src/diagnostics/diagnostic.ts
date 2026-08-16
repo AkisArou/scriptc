@@ -50,8 +50,9 @@
  *            declared native ABI classes (SC5003), and native toolchain
  *            failures while applying a valid profile (SC5004); generic
  *            Native IR target mismatch (SC5101), declaration resolution/
- *            signature/exact-conversion failures (SC5102-SC5104), and
- *            native link failures (SC5105)
+ *            signature/exact-conversion failures (SC5102-SC5104),
+ *            native link failures (SC5105), and impossible checked-number
+ *            crossings (SC5106)
  *   SC9xxx  internal compiler errors (still source-anchored)
  */
 import type { SrcLoc } from "../ir/nodes.js";
@@ -173,6 +174,24 @@ export function nativeConversionDiag(type: string, detail: string, loc: SrcLoc):
     loc,
     hint:
       "use a supported literal representation constructor or an operation that already returns the same exact native type",
+  };
+}
+
+/** SC5106 — every value that can reach a checked-number boundary is one
+ * the native slot cannot hold, so the call could only ever throw. Proven by
+ * the number facts rather than by the value's spelling, which is the only
+ * difference between this and the frontend's literal refusal. */
+export function nativeCrossingDiag(
+  binding: string,
+  detail: string,
+  loc: SrcLoc,
+): ScrDiagnostic {
+  return {
+    code: "SC5106",
+    message: `Native IR binding '${binding}' can never receive this value: ${detail}`,
+    loc,
+    hint:
+      "the boundary converts a plain number into an exact native slot; give it a value the slot can represent, or narrow the value before the call",
   };
 }
 

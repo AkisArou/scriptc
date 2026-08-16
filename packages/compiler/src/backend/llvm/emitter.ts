@@ -85,6 +85,7 @@ import type {
 } from "../../ir/nodes.js";
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
+import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, type NativeCallbackAdapter } from "../native-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
@@ -193,6 +194,11 @@ export interface LlvmTargetOptions {
   pointerBits?: 32 | 64;
   /** Select the WASI libc entry-point convention. */
   wasi?: boolean;
+  /** Whether a checked-number ingress the number facts proved unnecessary
+   * is actually elided. The sanitized lane keeps every check, so a wrong
+   * proof throws there instead of silently converting a value the slot
+   * cannot hold. */
+  checkedNumbers?: "elide-proven" | "always";
 }
 
 export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
@@ -1156,7 +1162,14 @@ class LlEmitter {
   private readonly chainSlots = new Map<string, LlValue>();
   private logArgSlots = 0;
 
+  /** Native call sites whose checked-number ingress is proven unnecessary,
+   * empty when this emission keeps every check. */
+  private readonly provenNumberCrossings: ReadonlyMap<IrExpr, ReadonlySet<number>>;
+
   constructor(private readonly mod: IrModule, options: LlvmTargetOptions) {
+    this.provenNumberCrossings = options.checkedNumbers === "always"
+      ? new Map()
+      : numberBoundaryFacts(mod).certified;
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.wasi = options.wasi === true;
     // ScrCycHdr is { ptr trace; ptr free; i32 color; i16 buffered;
@@ -7011,6 +7024,7 @@ class LlEmitter {
         if (aggregateResult !== null && returnStorage !== null) {
           callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
         }
+        const provenCrossings = this.provenNumberCrossings.get(e);
         binding.parameters.forEach((parameter, index) => {
           const arg = args[parameter.projection.argument]!;
           const parameterType = parameterTypes[index]?.[0];
@@ -7036,6 +7050,20 @@ class LlEmitter {
                 : null;
               if (proven !== null) {
                 callArgs.push(`${parameterType} ${proven}`);
+                break;
+              }
+              /* The number facts proved this value whole and inside the slot
+               * on every path that reaches here, so the conversion cannot see
+               * an out-of-range double and cannot produce poison. Kept in
+               * lockstep with the C backend's cast. */
+              if (provenCrossings?.has(index) === true) {
+                const bare = this.llType(parameter.type);
+                const signedSlot = parameter.type.scalar.startsWith("i");
+                const value = B.tmp();
+                B.line(
+                  `${value} = ${signedSlot ? "fptosi" : "fptoui"} double ${arg.name} to ${bare}`,
+                );
+                callArgs.push(`${parameterType} ${value}`);
                 break;
               }
               const bounds: Record<string, readonly [number, number, boolean]> = {

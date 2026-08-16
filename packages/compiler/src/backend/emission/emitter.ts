@@ -41,6 +41,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
+import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
@@ -69,8 +70,21 @@ import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-isla
 import { emitFunction, emitBlock, emitStmts, emitStmt, emitTryCatch, emitSwitch, mergeBrace, emitBranchInto, emitCondition } from "./emit-stmts.js";
 import { emitExpr } from "./emit-exprs.js";
 
-export function emitModule(mod: IrModule, sourceText?: string): string {
-  return new CEmitter(mod, sourceText).emit();
+/** Emission choices that are not properties of the IR. `checkedNumbers`
+ * decides whether a checked-number ingress the number facts proved
+ * unnecessary is actually elided: the sanitized lane keeps every check, so
+ * a wrong proof throws there instead of silently converting a value the
+ * slot cannot hold. */
+export interface CEmitOptions {
+  readonly checkedNumbers?: "elide-proven" | "always";
+}
+
+export function emitModule(
+  mod: IrModule,
+  sourceText?: string,
+  options: CEmitOptions = {},
+): string {
+  return new CEmitter(mod, sourceText, options).emit();
 }
 
 // Box construction moved onto CEmitter (boxNewC method): obj-kind boxes now
@@ -426,10 +440,18 @@ export class CEmitter {
    * call sc_f_* bodies): dedupe key "implClass.method". */
   readonly vtAdapters = new Map<string, { impl: ClassMeta; slot: VtSlot }>();
 
+  /** Native call sites whose checked-number ingress is proven unnecessary,
+   * empty when this emission keeps every check. */
+  readonly provenNumberCrossings: ReadonlyMap<IrExpr, ReadonlySet<number>>;
+
   constructor(
     readonly mod: IrModule,
     sourceText?: string,
+    options: CEmitOptions = {},
   ) {
+    this.provenNumberCrossings = options.checkedNumbers === "always"
+      ? new Map()
+      : numberBoundaryFacts(mod).certified;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.nativeCallbackAdapters = allocateNativeCallbackAdapters(
       mod.nativeBindings ?? [],

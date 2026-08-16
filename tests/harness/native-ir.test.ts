@@ -2984,6 +2984,42 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
     });
   });
 
+  localFixtureTest("elides the boundary check the number facts prove", async () => {
+    const outDir = join(scratch, `number-proven-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-proven.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "number-proven.c" : "number-proven.ll"),
+      "utf8",
+    );
+    const checkMarker = backend === "c" ? "_from_number(" : "@llvm.trunc.f64";
+    /* Every crossing in the fixture is proven, so an ordinary build emits
+     * no conversion machinery at all. The sanitized build keeps every
+     * check: a proof that was wrong throws there instead of quietly
+     * converting a value the slot cannot hold, which is what makes the
+     * same fixture a soundness test rather than only a codegen one. */
+    if (sanitize) {
+      expect(generated).toContain(checkMarker);
+    } else {
+      expect(generated).not.toContain(checkMarker);
+      expect(generated).not.toContain("scr_native_throw_number");
+    }
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
   localFixtureTest("refuses a literal argument no native value can hold", async () => {
     const outDir = join(scratch, `number-literal-refused-${backend}`);
     const result = await compile(join(repoRoot, "tests/native-ir/number-literal-refused.ts"), {

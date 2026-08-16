@@ -2332,7 +2332,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        const nativeArgs = binding.parameters.map((parameter) => {
+        const provenCrossings = E.provenNumberCrossings.get(e);
+        const nativeArgs = binding.parameters.map((parameter, parameterIndex) => {
           const arg = args[parameter.projection.argument]!;
           switch (parameter.projection.kind) {
             case "boolean": {
@@ -2375,6 +2376,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                   proven,
                   E.mod.nativeTarget?.pointerBits,
                 );
+              }
+              /* The number facts proved this value whole and inside the
+               * slot on every path that reaches here, so the conversion is
+               * the cast alone. The checks are dominated by nothing and
+               * would compute the same result. */
+              if (provenCrossings?.has(parameterIndex) === true) {
+                return `(${cType(parameter.type)})${arg.name}`;
               }
               /* The helper throws a catchable TypeError and yields 0 on an
                * unconvertible value; the pending check unwinds before the

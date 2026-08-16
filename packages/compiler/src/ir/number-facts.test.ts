@@ -10,14 +10,15 @@
  * slots: `send(x)` is a call whose callee's first parameter the config
  * declares i64 (slot path Msg.count), `sendU64(x)` u64 (Msg.id). */
 import { describe, expect, test } from "vitest";
-import { IR_VERSION, type IrExpr, type IrFunction, type IrModule, type IrNumBinOp, type IrStmt } from "../ir/nodes.js";
+import { IR_VERSION, type IrExpr, type IrFunction, type IrModule, type IrNativeBinding, type IrNumBinOp, type IrStmt } from "./nodes.js";
 import {
   checkLibraryIntegerSlots,
   type IntSlotConfig,
+  numberBoundaryFacts,
   type IntVerdict,
   SAFE_MAX,
   SAFE_MIN,
-} from "./int-infer.js";
+} from "./number-facts.js";
 
 const loc = { file: "corpus.ts", start: 0, end: 0 };
 const F64 = { kind: "f64" } as const;
@@ -828,5 +829,177 @@ describe("straight-line declared-field refinement", () => {
     ], ["m"], [noopFn("touch", true)]);
     expect(v.outcome).toBe("refuse");
     expect(v.obligation).toBe("range");
+  });
+});
+
+/* ── the native checked-number boundary ─────────────────────────────────── */
+
+const I32 = { kind: "nativeScalar", scalar: "i32" } as const;
+const U8 = { kind: "nativeScalar", scalar: "u8" } as const;
+
+/** One binding taking a plain number into an exact slot and widening the
+ * same slot back out — the identity shape every case below crosses. */
+function numberBinding(id: string, scalar: "i32" | "u8"): IrNativeBinding {
+  const type = { kind: "nativeScalar", scalar } as const;
+  return {
+    id,
+    declaration: { module: "fixture", name: id },
+    sourceAccess: "call",
+    entry: { kind: "c-symbol", symbol: `nts_${id}` },
+    callingConvention: "c",
+    variadic: false,
+    error: { kind: "no-fail" },
+    arguments: [{ name: "value", type: { kind: "f64" } }],
+    parameters: [{
+      name: "value",
+      type,
+      passMode: "value",
+      ownership: { kind: "value" },
+      projection: { kind: "number", argument: 0 },
+    }],
+    result: {
+      type,
+      passMode: "value",
+      ownership: { kind: "value" },
+      projection: { kind: "number" },
+    },
+  };
+}
+
+const nativeCall = (binding: string, value: IrExpr): IrExpr => ({
+  kind: "nativeCall",
+  binding,
+  args: [value],
+  type: F64,
+  loc,
+});
+
+/** A module whose single function runs `body`; every native call in it is
+ * a crossing the facts must judge. */
+function nativeCase(locals: string[], body: IrStmt[]): IrModule {
+  return {
+    irVersion: IR_VERSION,
+    sourceFile: "native.ts",
+    functions: [{
+      name: "case",
+      params: [],
+      returnType: VOID,
+      locals: locals.map((p) => ({ id: `${p}.0`, name: p, type: F64, mutable: true })),
+      body,
+      loc,
+    }],
+    entry: "case",
+    nativeTarget: { pointerBits: 64, abi: "sysv-amd64" },
+    nativeBindings: [numberBinding("i32_identity", "i32"), numberBinding("u8_identity", "u8")],
+  } as IrModule;
+}
+
+/** Every crossing of `mod`, in source order, as "certified" or "checked". */
+function crossings(mod: IrModule): string[] {
+  const facts = numberBoundaryFacts(mod);
+  const out: string[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    if ((node as { kind?: unknown }).kind === "nativeCall") {
+      out.push(facts.certified.get(node as IrExpr)?.has(0) === true ? "certified" : "checked");
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "type" || key === "loc") continue;
+      walk(value);
+    }
+  };
+  walk(mod.functions);
+  return out;
+}
+
+describe("the native checked-number boundary", () => {
+  test("a literal inside the slot is certified and one outside is refused", () => {
+    expect(crossings(nativeCase([], [
+      { kind: "exprStmt", expr: nativeCall("i32_identity", num(7)), loc },
+    ]))).toEqual(["certified"]);
+
+    const outside = nativeCase([], [
+      { kind: "exprStmt", expr: nativeCall("u8_identity", num(256)), loc },
+    ]);
+    const refusals = numberBoundaryFacts(outside).refusals;
+    expect(refusals.map(({ scalar, detail }) => `${scalar}:${detail}`)).toEqual([
+      "u8:the value is always 256",
+    ]);
+  });
+
+  test("an unknown value keeps its check", () => {
+    /* The parameter of an ordinary function is TOP: nothing here knows what
+     * a caller passes, and a checked crossing is exactly the right answer. */
+    const mod = nativeCase([], [
+      { kind: "exprStmt", expr: nativeCall("i32_identity", math("random")), loc },
+    ]);
+    expect(crossings(mod)).toEqual(["checked"]);
+    expect(numberBoundaryFacts(mod).refusals).toEqual([]);
+  });
+
+  test("a widened result feeds the same slot back for free", () => {
+    expect(crossings(nativeCase(["v"], [
+      decl("v.0", nativeCall("i32_identity", math("random"))),
+      { kind: "exprStmt", expr: nativeCall("i32_identity", ref("v.0")), loc },
+    ]))).toEqual(["checked", "certified"]);
+  });
+
+  test("a wider slot's value is not certified for a narrower one", () => {
+    /* i32 does not fit u8, so the second crossing keeps its check — and is
+     * not refused either, because some i32 values do fit. */
+    expect(crossings(nativeCase(["v"], [
+      decl("v.0", nativeCall("i32_identity", math("random"))),
+      { kind: "exprStmt", expr: nativeCall("u8_identity", ref("v.0")), loc },
+    ]))).toEqual(["checked", "checked"]);
+  });
+
+  test("a guard narrows a widened value into a narrower slot", () => {
+    expect(crossings(nativeCase(["v"], [
+      decl("v.0", nativeCall("i32_identity", math("random"))),
+      iff(and(bin(">=", ref("v.0"), num(0)), bin("<=", ref("v.0"), num(255))), [
+        { kind: "exprStmt", expr: nativeCall("u8_identity", ref("v.0")), loc },
+      ]),
+    ]))).toEqual(["checked", "certified"]);
+  });
+
+  test("a loop induction crosses on its own bound", () => {
+    expect(crossings(nativeCase(["i"], [
+      forLoop(
+        decl("i.0", num(0)),
+        bin("<", ref("i.0"), num(10)),
+        assign("i.0", bin("+", ref("i.0"), num(1))),
+        [{ kind: "exprStmt", expr: nativeCall("u8_identity", ref("i.0")), loc }],
+      ),
+    ]))).toEqual(["certified"]);
+  });
+
+  test("arithmetic that can leave the slot keeps its check", () => {
+    expect(crossings(nativeCase(["v"], [
+      decl("v.0", nativeCall("i32_identity", math("random"))),
+      { kind: "exprStmt", expr: nativeCall("i32_identity", bin("+", ref("v.0"), num(1))), loc },
+    ]))).toEqual(["checked", "checked"]);
+  });
+
+  test("a fractional value keeps its check rather than being refused", () => {
+    /* Wholeness cannot be disproven from an interval that still contains
+     * integers, so this is the ordinary checked answer. */
+    expect(crossings(nativeCase(["v"], [
+      decl("v.0", bin("/", num(1), num(2))),
+      { kind: "exprStmt", expr: nativeCall("i32_identity", ref("v.0")), loc },
+    ]))).toEqual(["checked"]);
+  });
+
+  test("a module with no number projection computes nothing", () => {
+    const plain: IrModule = {
+      irVersion: IR_VERSION,
+      sourceFile: "plain.ts",
+      functions: [{ name: "case", params: [], returnType: VOID, locals: [], body: [], loc }],
+      entry: "case",
+    };
+    expect(numberBoundaryFacts(plain).certified.size).toBe(0);
   });
 });

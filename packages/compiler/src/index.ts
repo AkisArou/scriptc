@@ -3,8 +3,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
-import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
-import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
+import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeCrossingDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
+import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberBoundaryFacts, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./ir/number-facts.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
@@ -1116,6 +1116,20 @@ function prepareExecutableCompilation(
     if (validation.length > 0) {
       return fail(validation.map((v) => iceDiag(v.message, v.loc)));
     }
+    /* The number facts run once here, on validated IR, and are cached for
+     * the backends. A crossing the analysis proved impossible is a defect
+     * the caller can fix, so it is reported rather than compiled into a
+     * call that can only throw. */
+    const crossings = numberBoundaryFacts(lowered.module).refusals;
+    if (crossings.length > 0) {
+      return fail(crossings.map((refusal) =>
+        nativeCrossingDiag(
+          refusal.binding,
+          `parameter ${refusal.parameter + 1} converts to '${refusal.scalar}', but ${refusal.detail}`,
+          refusal.loc,
+        )
+      ));
+    }
     if (buildPlatform === "wasi") {
       const entryLoc: SrcLoc = { file: entryPath, start: 0, end: 0 };
       if (opts.sanitize) {
@@ -1360,6 +1374,10 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       const ll = emitLlvmModule(module, {
         pointerBits: buildPointerBits,
         wasi: buildPlatform === "wasi",
+        /* The sanitized lane keeps every checked-number ingress: a proof
+         * that was wrong throws there instead of quietly converting a
+         * value the slot cannot hold. */
+        ...(opts.sanitize === true ? { checkedNumbers: "always" as const } : {}),
       });
       cPath = join(opts.outDir, `${stem}.ll`);
       await writeFile(cPath, ll);
@@ -1375,7 +1393,14 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
   }
   if (backend === "c") {
-    await writeFile(cPath, emitModule(module, entryText));
+    await writeFile(
+      cPath,
+      emitModule(
+        module,
+        entryText,
+        opts.sanitize === true ? { checkedNumbers: "always" } : {},
+      ),
+    );
   }
   // Kept-TU honesty: outDir persists across builds (the CLI's .scriptc/),
   // so a lane change would leave the PREVIOUS lane's TU beside the fresh
