@@ -393,28 +393,9 @@ const localNativeInput: NativeFrontendInput = {
       operator: "|",
       type: I32,
     },
-    /* The named operations an operator expression cannot reach. Declared per
-     * exact type, exactly as an embedder would synthesize them. */
-    ...([
-      ["i32", I32, ["/", "%", "<<", ">>"]],
-      ["u32", nativeScalarType("u32"), ["/", ">>"]],
-      ["i64", I64, ["/", "%", "<<"]],
-    ] as const).flatMap(([name, type, operators]) =>
-      operators.map((operator) => ({
-        id: `native-typescript.fixture.c-v1@0.0.0#${name}_${
-          operator === "/" ? "div" : operator === "%" ? "rem" : operator === "<<" ? "shl" : "shr"
-        }`,
-        declaration: {
-          module: nativePackage,
-          name: `${name}.${
-            operator === "/" ? "div" : operator === "%" ? "rem" : operator === "<<" ? "shl" : "shr"
-          }`,
-        },
-        kind: "integer-binary" as const,
-        operator,
-        type,
-      }))
-    ),
+    /* The conversions, declared per exact type exactly as an embedder
+     * synthesizes them. Arithmetic needs no entry here: it is an operator
+     * expression inside a construction. */
     ...([
       ["i32", I32, true],
       ["u32", nativeScalarType("u32"), false],
@@ -2671,7 +2652,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  test("names the operations an operator expression cannot carry", async () => {
+  test("divides, shifts, and converts an exact integer", async () => {
     const outDir = join(scratch, `native-scalar-operations-${backend}`);
     const result = await compile(
       join(repoRoot, "tests/native-ir/native-scalar-operations.ts"),
@@ -2693,6 +2674,8 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
     expect(validateModule(mod)).toEqual([]);
     const ir = serializeModule(mod);
+    /* The trapping four are the same IR node the wrapping six use, reached
+     * by the same construction form rather than by a declared operation. */
     for (const marker of ['"op": "/"', '"op": "%"', '"op": "<<"', '"op": ">>"']) {
       expect(ir).toContain(marker);
     }

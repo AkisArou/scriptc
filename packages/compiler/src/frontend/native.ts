@@ -38,11 +38,12 @@ export interface NativeFrontendConstant {
  * Native IR.
  *
  * `integer-reduce` folds a variadic argument list with one wrapping operator
- * (a flags `combine`). `integer-binary` is one trapping operation on two
- * operands of the type — the division, remainder, and shifts an operator
- * expression cannot reach, because TypeScript types arithmetic over a branded
- * number as a plain number. `to-number` and `from-number` are the named
- * conversions: exact or a throw, never a silent rounding. */
+ * (a flags `combine`). `to-number` and `from-number` are the conversions
+ * between an exact scalar and an ordinary number; they are operations rather
+ * than operators because no syntax names a direction, and named rather than
+ * spelled `Number(v)` because JavaScript's conversion rounds silently where
+ * this one refuses. Every arithmetic operation is an operator expression
+ * inside a construction instead. */
 export type NativeFrontendOperation =
   | {
       readonly id: string;
@@ -52,16 +53,6 @@ export type NativeFrontendOperation =
       };
       readonly kind: "integer-reduce";
       readonly operator: "&" | "|" | "^";
-      readonly type: Readonly<IrNativeScalarType>;
-    }
-  | {
-      readonly id: string;
-      readonly declaration: {
-        readonly module: string;
-        readonly name: string;
-      };
-      readonly kind: "integer-binary";
-      readonly operator: "/" | "%" | "<<" | ">>";
       readonly type: Readonly<IrNativeScalarType>;
     }
   | {

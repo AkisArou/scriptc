@@ -685,22 +685,6 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
       }
       return value;
     });
-    /* A trapping operation is binary by nature: folding one over a list would
-     * make the intermediate values — and the traps they can reach — invisible
-     * at the call site. */
-    if (operation.kind === "integer-binary") {
-      if (values.length !== 2) {
-        fail("an exact integer division, remainder, or shift takes exactly two arguments");
-      }
-      return {
-        kind: "nativeIntegerBin",
-        op: operation.operator,
-        left: values[0]!,
-        right: values[1]!,
-        type: { ...operation.type },
-        loc,
-      };
-    }
     const reduceOperator = operation.operator;
     const reduceType = { ...operation.type };
     return values.slice(1).reduce<IrExpr>(
@@ -980,6 +964,23 @@ export function lowerNativeScalarAssertion(
       case ts.SyntaxKind.CaretToken:
         operation = "^";
         break;
+      /* The trapping four ride the same construction form as the wrapping
+       * six. They are operators because JavaScript spells them as operators
+       * on a BigInt, and the cast is here for the reason it is there: the
+       * checker types arithmetic over a branded number as a plain one, so
+       * the assertion is what names the exact result. */
+      case ts.SyntaxKind.SlashToken:
+        operation = "/";
+        break;
+      case ts.SyntaxKind.PercentToken:
+        operation = "%";
+        break;
+      case ts.SyntaxKind.LessThanLessThanToken:
+        operation = "<<";
+        break;
+      case ts.SyntaxKind.GreaterThanGreaterThanToken:
+        operation = ">>";
+        break;
     }
     if (operation !== null) {
       const left = L.lowerExpr(arithmeticExpression.left);
@@ -1018,7 +1019,7 @@ export function lowerNativeScalarAssertion(
           target.scalar === "usize" ||
           nativeIntegerInfo(target.scalar, pointerBits)?.bits === 64
           ? "the source is not a provably in-range decimal BigInt literal or the same exact type"
-          : "the source is not a provably in-range decimal number literal, same exact type, or same-type exact integer +, -, *, &, |, or ^ expression",
+          : "the source is not a provably in-range decimal number literal, same exact type, or same-type exact integer +, -, *, /, %, <<, >>, &, |, or ^ expression",
         locOf(expr),
       ),
     );

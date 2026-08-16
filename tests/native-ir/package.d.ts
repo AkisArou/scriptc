@@ -19,36 +19,32 @@ export declare namespace FixtureValue {
   function combine(first: i32, ...rest: readonly i32[]): i32;
 }
 
-/* The named operations on an exact scalar. Division, remainder, and the two
- * shifts are functions rather than operators because TypeScript types
- * arithmetic over a branded number as a plain number, so an operator
- * expression could never carry the exact type; the conversions are functions
- * because there is no syntax that could name their direction. */
+/* The conversions between an exact scalar and an ordinary number. They are
+ * functions because no syntax names a direction, and they are named rather
+ * than spelled `Number(v)` and `BigInt(n)` because JavaScript's conversions
+ * mean something else: `Number` rounds silently where this one refuses, and
+ * `BigInt` is arbitrary precision where this slot is 64 bits wide.
+ *
+ * Arithmetic needs no declaration: `(a / b) as i64` is an ordinary operator
+ * expression inside the construction that names its exact type. */
 export declare namespace i32 {
-  function div(a: i32, b: i32): i32;
-  function rem(a: i32, b: i32): i32;
-  function shl(a: i32, b: i32): i32;
-  function shr(a: i32, b: i32): i32;
   function toNumber(value: i32): number;
   function fromNumber(value: number): i32;
 }
 
 export declare namespace u32 {
-  function div(a: u32, b: u32): u32;
-  function shr(a: u32, b: u32): u32;
   function toNumber(value: u32): number;
+  function fromNumber(value: number): u32;
 }
 
 export declare namespace i64 {
-  function div(a: i64, b: i64): i64;
-  function rem(a: i64, b: i64): i64;
-  function shl(a: i64, b: i64): i64;
   function toNumber(value: i64): number;
   function fromNumber(value: number): i64;
 }
 
 export declare namespace u64 {
   function toNumber(value: u64): number;
+  function fromNumber(value: number): u64;
 }
 
 export declare namespace f64 {
