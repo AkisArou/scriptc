@@ -7923,6 +7923,30 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     }
     const bothNum = left.type.kind === "f64" && right.type.kind === "f64";
     const bothStr = left.type.kind === "string" && right.type.kind === "string";
+    /* An exact native integer is a number in the checker's eyes and not one
+     * here: it is the value a foreign ABI declared, kept at its own width so
+     * it can cross unchanged. The language's arithmetic is f64, and there is
+     * no conversion between the two, so `width < 100` on a gint reaches this
+     * switch and would otherwise be refused as "non-number" — which reads as
+     * nonsense against a declaration that says number. Naming the real
+     * situation costs one branch and saves the reader the whole hunt. */
+    const exactInteger = [left, right].find((operand) =>
+      operand.type.kind === "nativeScalar" && operand.type.scalar !== "f64"
+    );
+    const refuseExactInteger = (): never => {
+      const scalar = exactInteger?.type.kind === "nativeScalar"
+        ? exactInteger.type.scalar
+        : "";
+      L.unsupported(
+        "SC1043",
+        expr,
+        `arithmetic and ordering on exact native integers ('${scalar}' keeps ` +
+          "the exact width a foreign ABI declared, which the language's f64 " +
+          "arithmetic does not share, and no conversion between them exists " +
+          "yet — such a value can be passed, stored, and compared with === " +
+          "or !==)",
+      );
+    };
 
     switch (op) {
       case ts.SyntaxKind.PlusToken:
@@ -7935,6 +7959,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
             type: STRING, loc,
           };
         }
+        if (exactInteger !== undefined) refuseExactInteger();
         L.unsupported("SC1043", expr);
         break;
       case ts.SyntaxKind.MinusToken:
@@ -7942,6 +7967,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       case ts.SyntaxKind.SlashToken:
       case ts.SyntaxKind.PercentToken:
       case ts.SyntaxKind.AsteriskAsteriskToken: {
+        if (!bothNum && exactInteger !== undefined) refuseExactInteger();
         if (!bothNum) L.unsupported("SC1043", expr);
         const binOp = op === ts.SyntaxKind.MinusToken ? "-"
           : op === ts.SyntaxKind.AsteriskToken ? "*"
@@ -8109,6 +8135,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           : op === ts.SyntaxKind.GreaterThanToken ? ">" : ">=";
         if (bothNum) return { kind: "bin", op: cmpOp, left, right, type: BOOL, loc };
         if (bothStr) return { kind: "strCmp", op: cmpOp, left, right, type: BOOL, loc };
+        if (exactInteger !== undefined) refuseExactInteger();
         L.unsupported("SC1043", expr);
         break;
       }
