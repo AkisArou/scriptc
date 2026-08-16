@@ -152,8 +152,14 @@ export interface IrNativePointerType {
 export interface IrNativeCallbackSignature {
   callingConvention: "c";
   /** A pointer appears where the payload is a borrowed string: the physical
-   * slot carries the pointer, and the source sees the copy made from it. */
-  parameters: readonly (IrNativeScalarType | IrNativePointerType)[];
+   * slot carries the pointer, and the source sees the copy made from it. A
+   * handle appears where the payload is an object the emitter referenced; the
+   * slot is an opaque pointer and the source sees the managed cell. */
+  parameters: readonly (
+    | IrNativeScalarType
+    | IrNativePointerType
+    | IrNativeHandleType
+  )[];
   result: IrNativeScalarType | { kind: "void" };
   context: { placement: "last" };
 }
@@ -183,7 +189,14 @@ export type IrNativeCallbackArgumentType = {
 };
 
 export type IrNativeCallbackSourceArgument =
-  | { kind: "callback-parameter"; parameter: number }
+  | {
+      kind: "callback-parameter";
+      parameter: number;
+      /** Present when the payload is an owned handle. The emitter took a
+       * reference before queueing, so the invocation owns one and this gives
+       * it back — whether the delivery runs or is dropped at shutdown. */
+      destructor?: string;
+    }
   | { kind: "registration-owner" };
 
 export type IrNativeCallbackContract =

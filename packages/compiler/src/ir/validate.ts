@@ -1492,15 +1492,30 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     );
     const owner = candidate["registrationOwner"];
     const executors = candidate["allowedInvocationExecutors"];
-    const validSourceArguments = sourceArguments.every((argument) => {
+    const validSourceArguments = sourceArguments.every((argument, index) => {
       if (typeof argument !== "object" || argument === null) return false;
       const source = argument as Record<string, unknown>;
-      return (Object.keys(source).sort().join(",") === "kind,parameter" &&
-          source["kind"] === "callback-parameter" &&
-          Number.isSafeInteger(source["parameter"]) &&
-          Number(source["parameter"]) >= 0) ||
-        (Object.keys(source).length === 1 &&
-          source["kind"] === "registration-owner");
+      if (Object.keys(source).length === 1) {
+        return source["kind"] === "registration-owner";
+      }
+      const keys = Object.keys(source).sort().join(",");
+      if (
+        (keys !== "kind,parameter" && keys !== "destructor,kind,parameter") ||
+        source["kind"] !== "callback-parameter" ||
+        !Number.isSafeInteger(source["parameter"]) ||
+        Number(source["parameter"]) < 0
+      ) {
+        return false;
+      }
+      /* A destructor turns the queued copy into something the runtime owns.
+       * Only a handle can be owned that way — a scalar has nothing to release,
+       * and a copied string is freed by the runtime's own allocator — so the
+       * key is meaningful on exactly one source shape and must be absent
+       * everywhere else rather than ignored. */
+      const destructor = source["destructor"];
+      if (destructor === undefined) return type.params[index]?.kind !== "nativeHandle";
+      return type.params[index]?.kind === "nativeHandle" &&
+        typeof destructor === "string" && destructor !== "";
     });
     if (
       typeof owner !== "object" || owner === null ||
@@ -1564,9 +1579,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       signature.parameters.every((parameter) =>
         validNativeScalar(parameter) ||
         (typeof parameter === "object" && parameter !== null &&
-          parameter.kind === "nativePointer" &&
-          (parameter.pointee === "i8" || parameter.pointee === "u8") &&
-          parameter.addressSpace === 0)
+          ((parameter.kind === "nativePointer" &&
+            (parameter.pointee === "i8" || parameter.pointee === "u8") &&
+            parameter.addressSpace === 0) ||
+            /* A handle arrives as the pointer the caller passed. It stays a
+             * handle rather than collapsing to a byte pointer because the
+             * trampoline has to know which type tag to intern it under. */
+            (parameter.kind === "nativeHandle" &&
+              nativeTypesById.get(parameter.typeId)?.kind === "handle")))
       ) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null && result.kind === "void")) &&

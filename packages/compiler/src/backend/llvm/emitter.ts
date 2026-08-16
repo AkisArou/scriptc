@@ -1669,11 +1669,31 @@ class LlEmitter {
               : []
           ),
         );
+        /* Owned handle payloads, and the binding that gives each reference
+         * back. The pointer arrives already retained by the emitter, so the
+         * invocation owns one and the dropped path has to release it. */
+        const ownedHandles = new Map<number, { typeId: string; free: string }>();
+        adapter.contract.sourceArguments.forEach((argument, sourceIndex) => {
+          if (argument.kind !== "callback-parameter") return;
+          const sourceParam = adapter.source.params[sourceIndex];
+          if (argument.destructor === undefined || sourceParam?.kind !== "nativeHandle") {
+            return;
+          }
+          const free = this.nativeById.get(argument.destructor);
+          if (free === undefined) {
+            throw new Error(`llvm emitter bug: unknown payload destructor ${argument.destructor}`);
+          }
+          ownedHandles.set(argument.parameter, {
+            typeId: sourceParam.typeId,
+            free: free.entry.symbol,
+          });
+        });
         const fields = [
           ...Array.from({ length: 7 }, () => "ptr"),
           ...(injectsOwner ? ["ptr"] : []),
           ...signature.parameters.map((parameter, index) =>
-            copiedStrings.has(index) || parameter.kind === "nativePointer"
+            copiedStrings.has(index) || ownedHandles.has(index) ||
+              parameter.kind === "nativePointer"
               ? "ptr"
               : this.llType(parameter)
           ),
@@ -1697,6 +1717,24 @@ class LlEmitter {
               `  call void @scr_str_release(ptr %str${index})`,
             ],
           ),
+          /* A delivery that never ran still holds the reference the emitter
+           * took, and a delivery that ran moved it into a cell and cleared the
+           * slot. The null check is what tells those apart. */
+          ...[...ownedHandles.keys()].sort((left, right) => left - right).flatMap(
+            (index) => {
+              const free = ownedHandles.get(index)!.free;
+              return [
+                `  %own${index}.ptr = getelementptr inbounds ${invocationType}, ptr %event, i64 0, i32 ${physicalFieldBase + index}`,
+                `  %own${index} = load ptr, ptr %own${index}.ptr`,
+                `  %own${index}.absent = icmp eq ptr %own${index}, null`,
+                `  br i1 %own${index}.absent, label %own${index}.done, label %own${index}.release`,
+                `own${index}.release:`,
+                `  call void @${free}(ptr %own${index})`,
+                `  br label %own${index}.done`,
+                `own${index}.done:`,
+              ];
+            },
+          ),
           `  call void @free(ptr %event)`,
           `  ret void`,
           `}`,
@@ -1717,13 +1755,51 @@ class LlEmitter {
           `  %fn = load ptr, ptr %fnp`,
         );
         const callArgs = ["ptr %cb"];
+        /* Interning a payload needs a branch, so the straight-line invoke body
+         * becomes a chain of blocks. The block the call ends up in is the one
+         * the release phi has to name as its predecessor. */
+        let invokeBlock = "invoke";
         adapter.contract.sourceArguments.forEach((argument, sourceIndex) => {
           const sourceType = adapter.source.params[sourceIndex]!;
           if (argument.kind === "callback-parameter") {
+            const owned = ownedHandles.get(argument.parameter);
             defs.push(
               `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${physicalFieldBase + argument.parameter}`,
-              `  %source${sourceIndex} = load ${this.llType(sourceType)}, ptr %source${sourceIndex}.ptr`,
+              `  %source${sourceIndex} = load ${owned === undefined ? this.llType(sourceType) : "ptr"}, ptr %source${sourceIndex}.ptr`,
             );
+            if (owned !== undefined) {
+              const definition = this.nativeTypesById.get(owned.typeId);
+              if (definition?.kind !== "handle") {
+                throw new Error(`llvm emitter bug: unknown payload handle ${owned.typeId}`);
+              }
+              const tag = mangleNativeHandleTag(owned.typeId);
+              const reuse = `cell${sourceIndex}.reuse`;
+              const fresh = `cell${sourceIndex}.fresh`;
+              const done = `cell${sourceIndex}.done`;
+              defs.push(
+                `  %existing${sourceIndex} = call ptr @scr_native_handle_interned(ptr @${tag}, ptr %source${sourceIndex})`,
+                `  %existing${sourceIndex}.found = icmp ne ptr %existing${sourceIndex}, null`,
+                `  br i1 %existing${sourceIndex}.found, label %${reuse}, label %${fresh}`,
+                `${reuse}:`,
+                /* The object already has a cell, so the reference the emitter
+                 * took is surplus and goes back immediately. */
+                `  call void @${owned.free}(ptr %source${sourceIndex})`,
+                `  br label %${done}`,
+                `${fresh}:`,
+                `  %prepared${sourceIndex} = call ptr @scr_native_handle_prepare(` +
+                  `ptr @${owned.free}, ptr @${tag}, ptr ${this.cstr(definition.nativeName)})`,
+                `  call void @scr_native_handle_commit(ptr %prepared${sourceIndex}, ptr %source${sourceIndex})`,
+                `  br label %${done}`,
+                `${done}:`,
+                `  %cell${sourceIndex} = phi ptr [ %existing${sourceIndex}, %${reuse} ], [ %prepared${sourceIndex}, %${fresh} ]`,
+                /* The reference now belongs to the cell, so destroy must not
+                 * release it a second time. */
+                `  store ptr null, ptr %source${sourceIndex}.ptr`,
+              );
+              invokeBlock = done;
+              callArgs.push(`ptr %cell${sourceIndex}`);
+              return;
+            }
             if (copiedStrings.has(argument.parameter)) {
               /* The callee owns the reference it receives, exactly as the
                * registration owner does. */
@@ -1755,7 +1831,7 @@ class LlEmitter {
           `skip:`,
           `  br label %release`,
           `release:`,
-          `  %keep = phi i1 [ %continue, %invoke ], [ false, %skip ]`,
+          `  %keep = phi i1 [ %continue, %${invokeBlock} ], [ false, %skip ]`,
           `  call void @scr_closure_release(ptr %cb)`,
           `  ret i1 %keep`,
           `}`,
@@ -1792,7 +1868,9 @@ class LlEmitter {
           } else {
             defs.push(
               `  store ${
-                parameter.kind === "nativePointer" ? "ptr" : this.llType(parameter)
+                parameter.kind === "nativePointer" || ownedHandles.has(index)
+                  ? "ptr"
+                  : this.llType(parameter)
               } %a${index}, ptr %copy${index}.ptr`,
             );
           }
@@ -1819,6 +1897,14 @@ class LlEmitter {
           this.declare(`declare ptr @scr_str_from_c_data(ptr)`);
           this.declare(`declare ptr @scr_str_retain_v(ptr)`);
           this.declare(`declare void @scr_str_release(ptr)`);
+        }
+        if (ownedHandles.size > 0) {
+          this.declare(`declare ptr @scr_native_handle_interned(ptr, ptr)`);
+          this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
+          this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
+          for (const { free } of ownedHandles.values()) {
+            this.declare(`declare void @${free}(ptr)`);
+          }
         }
         continue;
       }

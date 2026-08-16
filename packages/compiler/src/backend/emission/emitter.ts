@@ -135,9 +135,12 @@ function ffiCallbackDummyC(callback: IrFfiCallbackParam["callback"]): string {
 function nativeCallbackParameterTypeC(
   parameter: IrNativeCallbackSignature["parameters"][number],
 ): string {
-  return parameter.kind === "nativePointer"
-    ? `${parameter.const ? "const " : ""}char *`
-    : cType(parameter).trim();
+  if (parameter.kind === "nativePointer") {
+    return `${parameter.const ? "const " : ""}char *`;
+  }
+  /* An object payload crosses as an opaque pointer: the emitter has already
+   * referenced it, and what its type means is the managed cell's business. */
+  return parameter.kind === "nativeHandle" ? "void *" : cType(parameter).trim();
 }
 
 function nativeCallbackPointerTypeC(
@@ -2037,6 +2040,25 @@ export class CEmitter {
             : []
         ),
       );
+      /* Owned handle payloads, and the binding that gives each reference back.
+       * The pointer arrives already retained by the emitter, so the invocation
+       * owns one and the dropped path has to release it. */
+      const ownedHandles = new Map<number, { typeId: string; free: string }>();
+      for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
+        if (argument.kind !== "callback-parameter") continue;
+        const sourceParam = adapter.source.params[sourceIndex];
+        if (argument.destructor === undefined || sourceParam?.kind !== "nativeHandle") {
+          continue;
+        }
+        const free = this.nativeById.get(argument.destructor);
+        if (free === undefined) {
+          throw new Error(`emitter bug: unknown payload destructor ${argument.destructor}`);
+        }
+        ownedHandles.set(argument.parameter, {
+          typeId: sourceParam.typeId,
+          free: free.entry.symbol,
+        });
+      }
       const ret = cType(signature.result).trim();
       if (adapter.contract.lifetime === "until-cancelled") {
         const invocation = `${adapter.symbol}_invocation`;
@@ -2055,11 +2077,13 @@ export class CEmitter {
           ...signature.parameters.map((parameter, index) =>
             copiedStrings.has(index)
               ? `  ScrStr *sc_a${index};`
-              : `  ${nativeCallbackParameterTypeC(parameter)} sc_a${index};`
+              : ownedHandles.has(index)
+                ? `  void *sc_a${index};`
+                : `  ${nativeCallbackParameterTypeC(parameter)} sc_a${index};`
           ),
           `} ${invocation};`,
           `static void ${destroy}(ScrOwnerGatewayEvent *sc_event) {`,
-          ...(injectsOwner || copiedStrings.size > 0
+          ...(injectsOwner || copiedStrings.size > 0 || ownedHandles.size > 0
             ? [`  ${invocation} *sc_invocation = (${invocation} *)sc_event;`]
             : []),
           ...(injectsOwner
@@ -2067,6 +2091,11 @@ export class CEmitter {
             : []),
           ...[...copiedStrings].sort((left, right) => left - right).map(
             (index) => `  scr_str_release(sc_invocation->sc_a${index});`,
+          ),
+          ...[...ownedHandles.keys()].sort((left, right) => left - right).map(
+            (index) =>
+              `  if (sc_invocation->sc_a${index} != NULL) ` +
+              `${ownedHandles.get(index)!.free}(sc_invocation->sc_a${index});`,
           ),
           `  free(sc_event);`,
           `}`,
@@ -2080,15 +2109,41 @@ export class CEmitter {
           `    return false;`,
           `  }`,
         );
-        const args = adapter.contract.sourceArguments.map((argument) =>
-          argument.kind !== "callback-parameter"
-            ? `scr_native_handle_retain(sc_invocation->sc_owner)`
-            : copiedStrings.has(argument.parameter)
-              ? `scr_str_retain(sc_invocation->sc_a${argument.parameter})`
-              : `sc_invocation->sc_a${argument.parameter}`
-        );
+        const handleCells: string[] = [];
+        const args = adapter.contract.sourceArguments.map((argument) => {
+          if (argument.kind !== "callback-parameter") {
+            return `scr_native_handle_retain(sc_invocation->sc_owner)`;
+          }
+          const index = argument.parameter;
+          if (copiedStrings.has(index)) {
+            return `scr_str_retain(sc_invocation->sc_a${index})`;
+          }
+          const owned = ownedHandles.get(index);
+          if (owned === undefined) return `sc_invocation->sc_a${index}`;
+          /* The reference the invocation holds moves into the cell, so destroy
+           * must not release it again: the slot is cleared once it has. */
+          const cell = `sc_cell${index}`;
+          const tag = mangleNativeHandleTag(owned.typeId);
+          const definition = this.nativeTypesById.get(owned.typeId);
+          if (definition?.kind !== "handle") {
+            throw new Error(`emitter bug: unknown payload handle ${owned.typeId}`);
+          }
+          handleCells.push(
+            `  ScrNativeHandle *${cell} = scr_native_handle_interned(&${tag}, sc_invocation->sc_a${index});`,
+            `  if (${cell} != NULL) {`,
+            `    ${owned.free}(sc_invocation->sc_a${index});`,
+            `  } else {`,
+            `    ${cell} = scr_native_handle_prepare(&${owned.free}, &${tag}, ` +
+              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
+            `    scr_native_handle_commit(${cell}, sc_invocation->sc_a${index});`,
+            `  }`,
+            `  sc_invocation->sc_a${index} = NULL;`,
+          );
+          return cell;
+        });
         const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         out.push(
+          ...handleCells,
           `  ${call};`,
           `  bool sc_continue = !scr_exc_pending();`,
           `  scr_closure_release(sc_cb);`,
