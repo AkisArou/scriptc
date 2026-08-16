@@ -2993,6 +2993,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         }
         if (arm.kind === "f64") return E.newTemp(e.type, `scr_union_new_f64(${e.tag}, ${v.name})`);
         if (arm.kind === "bool") return E.newTemp(e.type, `scr_union_new_bool(${e.tag}, ${v.name})`);
+        if (arm.kind === "nativeScalar") {
+          /* A branded double is still a double: converting it to an integer
+           * would round it, so it takes the f64 arm. Every other exact scalar
+           * rides the slot as bits and is read back through its own C type. */
+          return E.newTemp(
+            e.type,
+            arm.scalar === "f64"
+              ? `scr_union_new_f64(${e.tag}, ${v.name})`
+              : `scr_union_new_bits(${e.tag}, (uint64_t)${v.name})`,
+          );
+        }
         throw new Error(`emitter bug: unionWrap of ${arm.kind}`);
       }
       case "unionNarrow": {
@@ -3006,6 +3017,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         if (isUnitType(arm)) throw new Error(`emitter bug: unionNarrow to unit arm ${arm.kind}`);
         if (arm.kind === "f64") return E.newTemp(arm, `scr_union_get_f64(${u.name})`);
         if (arm.kind === "bool") return E.newTemp(arm, `scr_union_get_bool(${u.name})`);
+        if (arm.kind === "nativeScalar") {
+          return E.newTemp(
+            arm,
+            arm.scalar === "f64"
+              ? `scr_union_get_f64(${u.name})`
+              : `(${cType(arm).trim()})scr_union_get_bits(${u.name})`,
+          );
+        }
         const payload = `(${cType(arm).trim()})scr_union_peek(${u.name})`;
         return E.newTemp(arm, retainCallC(arm, payload));
       }

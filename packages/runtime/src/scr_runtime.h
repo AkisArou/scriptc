@@ -1596,6 +1596,9 @@ typedef struct ScrUnion {
 
 ScrUnion *scr_union_new_f64(uint32_t tag, double v);  /* returns +1 */
 ScrUnion *scr_union_new_bool(uint32_t tag, bool v);   /* returns +1 */
+/* Exact native scalar arms: the payload is raw bits, read back through the
+ * arm's own C type. */
+ScrUnion *scr_union_new_bits(uint32_t tag, uint64_t v); /* returns +1 */
 /* Takes ownership of v (+1 moves in); retain/release must be non-NULL;
  * trace is non-NULL iff the arm type carries a cycle header. */
 ScrUnion *scr_union_new_ref(uint32_t tag, void *v,
@@ -1615,6 +1618,7 @@ void scr_union_release(ScrUnion *u); /* releases a ref payload; NULL-tolerant */
 
 double scr_union_get_f64(ScrUnion *u);
 bool scr_union_get_bool(ScrUnion *u);
+uint64_t scr_union_get_bits(ScrUnion *u);
 
 /* BORROWED payload pointer of a ref arm (no ownership change). */
 static inline void *scr_union_peek(const ScrUnion *u) {

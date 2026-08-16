@@ -3754,6 +3754,20 @@ class LlEmitter {
     B.terminate(`unreachable`);
   }
 
+  /** Widens an exact integer scalar to the union slot's width. Signed types
+   * sign-extend so a negative value survives the round trip; unsigned ones
+   * zero-extend so a wide read cannot invent set bits. */
+  private widenScalarToSlot(v: LlValue): string {
+    const B = this.B;
+    const from = this.llType(v.type);
+    if (from === "i64") return v.name;
+    const t = B.tmp();
+    const signed = v.type.kind === "nativeScalar" &&
+      (v.type.scalar.startsWith("i") || v.type.scalar === "isize");
+    B.line(`${t} = ${signed ? "sext" : "zext"} ${from} ${v.name} to i64`);
+    return t;
+  }
+
   /** The +1 extraction of a union's single narrowed arm (unionNarrow /
    * the nullish-family reads): scalars via the runtime getters, ref arms
    * a retained peek. */
@@ -3769,6 +3783,22 @@ class LlEmitter {
       const t = B.tmp();
       this.declare(`declare zeroext i1 @scr_union_get_bool(ptr)`);
       B.line(`${t} = call zeroext i1 @scr_union_get_bool(ptr ${uName})`);
+      return t;
+    }
+    if (arm.kind === "nativeScalar") {
+      if (arm.scalar === "f64") {
+        const t = B.tmp();
+        this.declare(`declare double @scr_union_get_f64(ptr)`);
+        B.line(`${t} = call double @scr_union_get_f64(ptr ${uName})`);
+        return t;
+      }
+      const bits = B.tmp();
+      this.declare(`declare i64 @scr_union_get_bits(ptr)`);
+      B.line(`${bits} = call i64 @scr_union_get_bits(ptr ${uName})`);
+      const narrow = this.llType(arm);
+      if (narrow === "i64") return bits;
+      const t = B.tmp();
+      B.line(`${t} = trunc i64 ${bits} to ${narrow}`);
       return t;
     }
     return this.retainValue(this.unionPeek(uName), arm);
@@ -3788,6 +3818,20 @@ class LlEmitter {
     if (v.type.kind === "bool") {
       this.declare(`declare ptr @scr_union_new_bool(i32, i1 zeroext)`);
       B.line(`${t} = call ptr @scr_union_new_bool(i32 ${tag}, i1 ${v.name})`);
+      return t;
+    }
+    if (v.type.kind === "nativeScalar") {
+      /* A branded double is still a double; every other exact scalar rides
+       * the slot as bits, widened to the slot's width without losing its
+       * sign. */
+      if (v.type.scalar === "f64") {
+        this.declare(`declare ptr @scr_union_new_f64(i32, double)`);
+        B.line(`${t} = call ptr @scr_union_new_f64(i32 ${tag}, double ${v.name})`);
+        return t;
+      }
+      const bits = this.widenScalarToSlot(v);
+      this.declare(`declare ptr @scr_union_new_bits(i32, i64)`);
+      B.line(`${t} = call ptr @scr_union_new_bits(i32 ${tag}, i64 ${bits})`);
       return t;
     }
     const rc = vAdapters(this, v.type);

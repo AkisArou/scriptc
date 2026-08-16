@@ -51,6 +51,17 @@ ScrUnion *scr_union_new_f64(uint32_t tag, double v) {
   return u;
 }
 
+/* An exact native scalar rides the slot as raw bits. The arm's own C type
+ * decides how they are read back, so a 64-bit integer keeps every bit and a
+ * signed one keeps its sign under two's complement. A branded double does not
+ * come through here: converting it to an integer would round it, so it uses
+ * the f64 arm like any other double. */
+ScrUnion *scr_union_new_bits(uint32_t tag, uint64_t v) {
+  ScrUnion *u = scr_union_alloc(tag);
+  u->slot = v;
+  return u;
+}
+
 ScrUnion *scr_union_new_bool(uint32_t tag, bool v) {
   ScrUnion *u = scr_union_alloc(tag);
   u->slot = v ? 1 : 0;
@@ -88,6 +99,8 @@ double scr_union_get_f64(ScrUnion *u) {
 }
 
 bool scr_union_get_bool(ScrUnion *u) { return u->slot != 0; }
+
+uint64_t scr_union_get_bits(ScrUnion *u) { return u->slot; }
 
 /* ── void*-signature RC adapters (stored in ScrUnion / ScrBox) ─────────── */
 
