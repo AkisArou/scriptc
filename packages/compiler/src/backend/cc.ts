@@ -358,11 +358,11 @@ export interface CcOptions {
   tls?: boolean;
   /** The program uses the CA-store introspection surface (moduleUsesTlsCa
    * on the IR — getCACertificates / rootCertificates /
-   * setDefaultCACertificates): compiles scr_tls_ca.c, plain PEM-block
-   * bookkeeping with NO mbedTLS dependency, so an introspection-only
-   * binary never builds the archive. The unit also compiles whenever
-   * `tls` does — scr_tls.c consults its default-set override for the
-   * client trust anchors. */
+   * setDefaultCACertificates): compiles scr_tls_ca.c, PEM-block bookkeeping
+   * plus the platform certificate-store reader on Windows, with NO mbedTLS
+   * dependency, so an introspection-only binary never builds the archive.
+   * The unit also compiles whenever `tls` does — scr_tls.c consults its
+   * default-set override and shared Windows-certificate enumerator. */
   tlsCa?: boolean;
 }
 
@@ -446,8 +446,10 @@ export function runtimeSrcDir(): string {
  * have no gates left: events, net/http, fetch, watch, zlib, dgram/dns,
  * tls, and the engine archive (--dynamic) all build per target through
  * their win32 arms (mbedTLS compiles unchanged for the triple — its own _WIN32
- * port covers entropy and timing; the archive link adds -lbcrypt for
- * BCryptGenRandom there). They additionally compile
+ * port covers entropy and timing; the TLS link adds bcrypt for
+ * BCryptGenRandom, while the CA-store unit adds crypt32 for the Windows
+ * system certificate stores).
+ * They additionally compile
  * scr_win.c, the win32 libc shim TU (stpcpy, arc4random_buf — see the
  * _WIN32 block in scr_runtime.h), linking -ladvapi32 for its CSPRNG
  * (RtlGenRandom) and GetUserNameA. Native zigcc builds (no SCRIPTC_TARGET)
@@ -3380,6 +3382,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const net = (opts.net ?? false) || nativeFetch || netIsland;
   const http = (opts.http ?? false) || nativeFetch || netIsland;
   const tls = (opts.tls ?? false) || nativeFetch || netIsland;
+  const tlsCa = (opts.tlsCa ?? false) || tls;
   const driver = resolveCc();
   // Mobile triples produce library archives, never standalone executables:
   // the executable-lane runtime (event loop, sockets, child processes) is
@@ -3636,19 +3639,23 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(opts.nodeTest ? [rt(join(rtDir, "scr_test.c"))] : []),
     // The CA-store unit rides its own gate OR the tls one: scr_tls.c
     // references its default-set override unconditionally.
-    ...(opts.tlsCa || tls ? [rt(join(rtDir, "scr_tls_ca.c"))] : []),
+    ...(tlsCa ? [rt(join(rtDir, "scr_tls_ca.c"))] : []),
     ...(tlsArchive
       ? [
           "-I", join(vendorTlsDir(), "include"),
           rt(join(rtDir, "scr_tls.c")),
           tlsArchive,
-          // mbedTLS's win32 entropy poll is BCryptGenRandom (bcrypt.h) —
-          // an import the unconditional win32 libs above don't carry.
+          // mbedTLS's win32 entropy poll is BCryptGenRandom (bcrypt.h).
+          // The unconditional win32 libs above do not carry it.
           // Never present on the default path, so the historical TLS
           // link line cannot change.
           ...(targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
         ]
         : []),
+    // scr_tls_ca.c enumerates and PEM-encodes Windows system-store entries.
+    // This is independent of the mbedTLS archive: getCACertificates-only
+    // programs need crypt32 too, while TLS programs imply the CA unit.
+    ...(tlsCa && targetPlatform(driver) === "win32" ? ["-lcrypt32"] : []),
     // Static fetch is the engine-free half of scr_fetch.c. Dynamic builds
     // compile the same source beside scr_island.c below, where its
     // SCR_DYNAMIC half installs the full web surface.
@@ -3860,6 +3867,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       ? ["-ladvapi32", "-liphlpapi", "-lws2_32"]
       : []),
     ...(tls && targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
+    ...(tlsCa && targetPlatform(driver) === "win32" ? ["-lcrypt32"] : []),
     ...(curlFetch && driver.target === null ? ["-lcurl"] : []),
     ...(dynamic && !driver.linkArgs.includes("-lm") ? ["-lm"] : []),
     ...(((opts.zlib ?? false) || nativeFetch) && driver.target === null ? ["-lz"] : []),
@@ -3874,6 +3882,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       ? ["-ladvapi32", "-liphlpapi", "-lws2_32"]
       : []),
     ...(tls && targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
+    ...(tlsCa && targetPlatform(driver) === "win32" ? ["-lcrypt32"] : []),
     ...(curlStubDir !== null ? [`-L${curlStubDir}`] : []),
     ...(curlFetch && driver.target === null ? ["-lcurl"] : []),
     ...(dynamic && !driver.linkArgs.includes("-lm") ? ["-lm"] : []),
