@@ -92,6 +92,14 @@ const CALL_NUMBER_SOURCE = {
   params: [{ kind: "f64" }],
   ret: nativeScalarType("i32"),
 } as const;
+/* The same shape over a 32-bit float slot: the payload is stored as a float
+ * and the handler receives the double it widens to. */
+const CALL_F32_CALLBACK = {
+  callingConvention: "c",
+  parameters: [nativeScalarType("f32")],
+  result: I32,
+  context: { placement: "last" },
+} as const;
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
 const PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair32";
@@ -562,6 +570,50 @@ const localNativeInput: NativeFrontendInput = {
         {
           name: "value",
           type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "number", argument: 1 },
+        },
+      ],
+      result: {
+        type: I32,
+        passMode: "value",
+        ownership: { kind: "value" },
+        projection: { kind: "number" },
+      },
+    },
+    {
+      /* The float flavor of the same shape: the payload slot is 32 bits and
+       * the handler receives the double it widens to. */
+      id: "native-typescript.fixture.c-v1@0.0.0#call_scoped_f32",
+      declaration: { module: nativePackage, name: "callScopedFloat" },
+      entry: { kind: "c-symbol", symbol: "nts_call_scoped_f32" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: CALL_NUMBER_SOURCE, callback: CALL_I32_CONTRACT },
+        { name: "value", type: { kind: "f64" } },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: CALL_F32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "call" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "call" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+        {
+          name: "value",
+          type: nativeScalarType("f32"),
           passMode: "value",
           ownership: { kind: "value" },
           projection: { kind: "number", argument: 1 },

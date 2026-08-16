@@ -144,6 +144,10 @@ export declare function subscribe(
 export declare function subscribeNumber(
   callback: (value: number) => void,
 ): Subscription;
+export declare function callScopedFloat(
+  callback: (value: number) => i32,
+  value: number,
+): number;
 export declare function callScopedNumber(
   callback: (value: number) => i32,
   value: number,

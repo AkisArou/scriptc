@@ -3,6 +3,7 @@
  * reads the value back. The call-scoped flavor widens the same way without a
  * queue. Both handlers receive ordinary numbers and do ordinary arithmetic. */
 import {
+  callScopedFloat,
   callScopedNumber,
   subscribeNumber,
   type i32,
@@ -48,5 +49,15 @@ const answer = callScopedNumber((value): i32 => {
 }, 21);
 check(answer === 42);
 check(answer / 2 === 21);
+
+/* A 32-bit float payload widens the same way, and every float is a double,
+ * so the handler sees exactly what the caller stored. The value passed in is
+ * rounded on the way to the slot — 0.25 survives that untouched. */
+const floated = callScopedFloat((value): i32 => {
+  check(value === 0.25);
+  check(value * 4 === 1);
+  return 7 as i32;
+}, 0.25);
+check(floated === 7);
 
 exit(failures === 0 ? (42 as i32) : (1 as i32));

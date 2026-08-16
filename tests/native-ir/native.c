@@ -182,6 +182,18 @@ int32_t nts_call_scoped(
   return callback(value, context);
 }
 
+/* A call-scoped callback whose payload is a 32-bit float: the trampoline
+ * widens it to a double on the way in, and every float is a double, so the
+ * handler sees the value the caller stored exactly. */
+typedef int32_t (*NtsCallFloatCallback)(float value, void *context);
+
+int32_t nts_call_scoped_f32(
+    NtsCallFloatCallback callback,
+    void *context,
+    float value) {
+  return callback(value, context);
+}
+
 int32_t nts_fail_errno(int32_t error_number) {
   errno = error_number;
   return -1;
