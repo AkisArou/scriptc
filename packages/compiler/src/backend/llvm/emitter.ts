@@ -1658,10 +1658,25 @@ class LlEmitter {
         const signatureId = `@${adapter.symbol}_signature`;
         const invoke = `@${adapter.symbol}_invoke`;
         const destroy = `@${adapter.symbol}_destroy`;
+        /* Physical slots whose source value is a string. The pointer the
+         * emitter passes must not be stored: a queued delivery outlives it, so
+         * the copy is made when the callback fires and the record holds that. */
+        const copiedStrings = new Set<number>(
+          adapter.contract.sourceArguments.flatMap((argument, sourceIndex) =>
+            argument.kind === "callback-parameter" &&
+              adapter.source.params[sourceIndex]?.kind === "string"
+              ? [argument.parameter]
+              : []
+          ),
+        );
         const fields = [
           ...Array.from({ length: 7 }, () => "ptr"),
           ...(injectsOwner ? ["ptr"] : []),
-          ...signature.parameters.map((parameter) => this.llType(parameter)),
+          ...signature.parameters.map((parameter, index) =>
+            copiedStrings.has(index) || parameter.kind === "nativePointer"
+              ? "ptr"
+              : this.llType(parameter)
+          ),
         ];
         defs.push(
           `${invocationType} = type { ${fields.join(", ")} }`,
@@ -1675,6 +1690,13 @@ class LlEmitter {
                 `  call void @scr_native_handle_release(ptr %owner)`,
               ]
             : []),
+          ...[...copiedStrings].sort((left, right) => left - right).flatMap(
+            (index) => [
+              `  %str${index}.ptr = getelementptr inbounds ${invocationType}, ptr %event, i64 0, i32 ${physicalFieldBase + index}`,
+              `  %str${index} = load ptr, ptr %str${index}.ptr`,
+              `  call void @scr_str_release(ptr %str${index})`,
+            ],
+          ),
           `  call void @free(ptr %event)`,
           `  ret void`,
           `}`,
@@ -1702,6 +1724,15 @@ class LlEmitter {
               `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${physicalFieldBase + argument.parameter}`,
               `  %source${sourceIndex} = load ${this.llType(sourceType)}, ptr %source${sourceIndex}.ptr`,
             );
+            if (copiedStrings.has(argument.parameter)) {
+              /* The callee owns the reference it receives, exactly as the
+               * registration owner does. */
+              defs.push(
+                /* scr_str_retain is static inline, so LLVM calls the exported
+                 * variant rather than a symbol that does not exist. */
+                `  %source${sourceIndex}.retained = call ptr @scr_str_retain_v(ptr %source${sourceIndex})`,
+              );
+            }
           } else {
             defs.push(
               `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${ownerField}`,
@@ -1709,8 +1740,11 @@ class LlEmitter {
               `  %source${sourceIndex}.retained = call ptr @scr_native_handle_retain(ptr %source${sourceIndex})`,
             );
           }
+          const retained = argument.kind === "registration-owner" ||
+            (argument.kind === "callback-parameter" &&
+              copiedStrings.has(argument.parameter));
           callArgs.push(
-            `${this.llType(sourceType)} %source${sourceIndex}${argument.kind === "registration-owner" ? ".retained" : ""}`,
+            `${this.llType(sourceType)} %source${sourceIndex}${retained ? ".retained" : ""}`,
           );
         });
         defs.push(
@@ -1749,8 +1783,19 @@ class LlEmitter {
         signature.parameters.forEach((parameter, index) => {
           defs.push(
             `  %copy${index}.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 ${physicalFieldBase + index}`,
-            `  store ${this.llType(parameter)} %a${index}, ptr %copy${index}.ptr`,
           );
+          if (copiedStrings.has(index)) {
+            defs.push(
+              `  %copy${index}.str = call ptr @scr_str_from_c_data(ptr %a${index})`,
+              `  store ptr %copy${index}.str, ptr %copy${index}.ptr`,
+            );
+          } else {
+            defs.push(
+              `  store ${
+                parameter.kind === "nativePointer" ? "ptr" : this.llType(parameter)
+              } %a${index}, ptr %copy${index}.ptr`,
+            );
+          }
         });
         defs.push(
           `  %admitted = call zeroext i1 @scr_callback_token_admit(ptr %ctx, ptr %record)`,
@@ -1769,6 +1814,11 @@ class LlEmitter {
           this.declare(`declare ptr @scr_retained_callbacks_retain_owner(ptr)`);
           this.declare(`declare ptr @scr_native_handle_retain(ptr)`);
           this.declare(`declare void @scr_native_handle_release(ptr)`);
+        }
+        if (copiedStrings.size > 0) {
+          this.declare(`declare ptr @scr_str_from_c_data(ptr)`);
+          this.declare(`declare ptr @scr_str_retain_v(ptr)`);
+          this.declare(`declare void @scr_str_release(ptr)`);
         }
         continue;
       }

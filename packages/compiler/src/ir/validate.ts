@@ -1464,8 +1464,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       candidate.params.every((parameter) =>
         validNativeScalar(parameter) ||
         (typeof parameter === "object" && parameter !== null &&
-          parameter.kind === "nativeHandle" &&
-          nativeTypesById.get(parameter.typeId)?.kind === "handle")
+          ((parameter.kind === "nativeHandle" &&
+            nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
+            parameter.kind === "string"))
       ) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null && result.kind === "void"));
@@ -1560,7 +1561,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const context = signature.context;
     return signature.callingConvention === "c" &&
       Array.isArray(signature.parameters) &&
-      signature.parameters.every(validNativeScalar) &&
+      signature.parameters.every((parameter) =>
+        validNativeScalar(parameter) ||
+        (typeof parameter === "object" && parameter !== null &&
+          parameter.kind === "nativePointer" &&
+          (parameter.pointee === "i8" || parameter.pointee === "u8") &&
+          parameter.addressSpace === 0)
+      ) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null && result.kind === "void")) &&
       typeof context === "object" && context !== null && context.placement === "last";
@@ -1983,7 +1990,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             let projectedOwner = false;
             for (const [sourceIndex, projection] of
               callbackContract.sourceArguments.entries()) {
-              let expected: IrType | undefined;
+              let expected:
+                | IrType
+                | IrNativeCallbackSignature["parameters"][number]
+                | undefined;
               if (projection.kind === "callback-parameter") {
                 if (
                   projection.parameter < 0 ||
@@ -2005,10 +2015,21 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 if (ownerType?.kind !== "nativeHandle") return false;
                 expected = ownerType;
               }
-              if (
-                expected === undefined ||
-                !typeEquals(sourceArgument.type.params[sourceIndex]!, expected)
-              ) return false;
+              const source = sourceArgument.type.params[sourceIndex]!;
+              if (expected === undefined) return false;
+              /* A string source over a const byte pointer is the copy the
+               * runtime makes when the callback is queued. Everything else
+               * must be the physical type itself. */
+              if (expected.kind === "nativePointer" || source.kind === "string") {
+                if (
+                  source.kind !== "string" ||
+                  expected.kind !== "nativePointer" ||
+                  !expected.const ||
+                  expected.addressSpace !== 0
+                ) return false;
+                continue;
+              }
+              if (!typeEquals(source, expected)) return false;
             }
             return projectedPhysical.size === parameter.type.signature.parameters.length &&
               typeEquals(sourceArgument.type.ret, parameter.type.signature.result);

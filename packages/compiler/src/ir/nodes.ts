@@ -151,7 +151,9 @@ export interface IrNativePointerType {
 
 export interface IrNativeCallbackSignature {
   callingConvention: "c";
-  parameters: readonly IrNativeScalarType[];
+  /** A pointer appears where the payload is a borrowed string: the physical
+   * slot carries the pointer, and the source sees the copy made from it. */
+  parameters: readonly (IrNativeScalarType | IrNativePointerType)[];
   result: IrNativeScalarType | { kind: "void" };
   context: { placement: "last" };
 }
@@ -170,7 +172,13 @@ export interface IrNativeContextType {
 
 export type IrNativeCallbackArgumentType = {
   kind: "func";
-  params: readonly (IrNativeScalarType | IrNativeHandleType)[];
+  /** What the source callback receives, in order. A string arrives already
+   * copied: a queued delivery outlives the pointer the emitter handed over. */
+  params: readonly (
+    | IrNativeScalarType
+    | IrNativeHandleType
+    | { kind: "string" }
+  )[];
   ret: IrNativeScalarType | { kind: "void" };
 };
 
@@ -210,12 +218,27 @@ export type IrNativeCallbackContract =
       shutdown: "drain";
     };
 
+/**
+ * The default source projection of a physical callback signature: every
+ * parameter crosses as itself.
+ *
+ * A pointer slot has no default. What it becomes on the source side — a copied
+ * string, or something else — is the contract's decision, so a signature
+ * carrying one has to state it rather than inherit a guess.
+ */
 export function nativeCallbackArgumentType(
   signature: IrNativeCallbackSignature,
 ): IrNativeCallbackArgumentType {
   return {
     kind: "func",
-    params: signature.parameters.map((parameter) => ({ ...parameter })),
+    params: signature.parameters.map((parameter) => {
+      if (parameter.kind === "nativePointer") {
+        throw new Error(
+          "native callback pointer parameters require an explicit source projection",
+        );
+      }
+      return { ...parameter };
+    }),
     ret: { ...signature.result },
   };
 }

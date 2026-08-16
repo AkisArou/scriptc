@@ -34,6 +34,7 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeCallbackSignature,
   IrNativeStructDef,
   IrStmt,
   IrType,
@@ -128,12 +129,23 @@ function ffiCallbackDummyC(callback: IrFfiCallbackParam["callback"]): string {
   return callback.returns === "void" ? "" : "0";
 }
 
+/** The C spelling of one physical callback parameter. A pointer slot carries a
+ * borrowed string the emitter owns; the runtime copies it before the source
+ * ever sees it. */
+function nativeCallbackParameterTypeC(
+  parameter: IrNativeCallbackSignature["parameters"][number],
+): string {
+  return parameter.kind === "nativePointer"
+    ? `${parameter.const ? "const " : ""}char *`
+    : cType(parameter).trim();
+}
+
 function nativeCallbackPointerTypeC(
   callback: Extract<IrNativeBinding["parameters"][number]["type"], { kind: "nativeCallback" }>,
 ): string {
   const signature = callback.signature;
   const params = [
-    ...signature.parameters.map((parameter) => cType(parameter).trim()),
+    ...signature.parameters.map(nativeCallbackParameterTypeC),
     "void *",
   ];
   return `${cType(signature.result).trim()} (*)(${params.join(", ")})`;
@@ -2007,10 +2019,21 @@ export class CEmitter {
       const signature = adapter.callback.signature;
       const nativeParams = [
         ...signature.parameters.map((parameter, index) =>
-          `${cType(parameter).trim()} sc_a${index}`
+          `${nativeCallbackParameterTypeC(parameter)} sc_a${index}`
         ),
         "void *sc_ctx",
       ];
+      /* Physical slots whose source value is a string. Their pointer must not
+       * be stored: a queued delivery outlives whatever the emitter owned, so
+       * the copy is made when the signal fires. */
+      const copiedStrings = new Set<number>(
+        adapter.contract.sourceArguments.flatMap((argument, sourceIndex) =>
+          argument.kind === "callback-parameter" &&
+            adapter.source.params[sourceIndex]?.kind === "string"
+            ? [argument.parameter]
+            : []
+        ),
+      );
       const ret = cType(signature.result).trim();
       if (adapter.contract.lifetime === "until-cancelled") {
         const invocation = `${adapter.symbol}_invocation`;
@@ -2027,16 +2050,21 @@ export class CEmitter {
           `  ScrCallbackInvocation base;`,
           ...(injectsOwner ? [`  ScrNativeHandle *sc_owner;`] : []),
           ...signature.parameters.map((parameter, index) =>
-            `  ${cType(parameter).trim()} sc_a${index};`
+            copiedStrings.has(index)
+              ? `  ScrStr *sc_a${index};`
+              : `  ${nativeCallbackParameterTypeC(parameter)} sc_a${index};`
           ),
           `} ${invocation};`,
           `static void ${destroy}(ScrOwnerGatewayEvent *sc_event) {`,
-          ...(injectsOwner
-            ? [
-                `  ${invocation} *sc_invocation = (${invocation} *)sc_event;`,
-                `  scr_native_handle_release(sc_invocation->sc_owner);`,
-              ]
+          ...(injectsOwner || copiedStrings.size > 0
+            ? [`  ${invocation} *sc_invocation = (${invocation} *)sc_event;`]
             : []),
+          ...(injectsOwner
+            ? [`  scr_native_handle_release(sc_invocation->sc_owner);`]
+            : []),
+          ...[...copiedStrings].sort((left, right) => left - right).map(
+            (index) => `  scr_str_release(sc_invocation->sc_a${index});`,
+          ),
           `  free(sc_event);`,
           `}`,
           `static bool ${invoke}(ScrCallbackInvocation *sc_base, void *sc_owner, size_t sc_slot, uint64_t sc_generation) {`,
@@ -2050,9 +2078,11 @@ export class CEmitter {
           `  }`,
         );
         const args = adapter.contract.sourceArguments.map((argument) =>
-          argument.kind === "callback-parameter"
-            ? `sc_invocation->sc_a${argument.parameter}`
-            : `scr_native_handle_retain(sc_invocation->sc_owner)`
+          argument.kind !== "callback-parameter"
+            ? `scr_native_handle_retain(sc_invocation->sc_owner)`
+            : copiedStrings.has(argument.parameter)
+              ? `scr_str_retain(sc_invocation->sc_a${argument.parameter})`
+              : `sc_invocation->sc_a${argument.parameter}`
         );
         const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         out.push(
@@ -2072,7 +2102,9 @@ export class CEmitter {
             ? [`  sc_invocation->sc_owner = scr_retained_callbacks_retain_owner(sc_token);`]
             : []),
           ...signature.parameters.map((_parameter, index) =>
-            `  sc_invocation->sc_a${index} = sc_a${index};`
+            copiedStrings.has(index)
+              ? `  sc_invocation->sc_a${index} = scr_str_from_c_data(sc_a${index});`
+              : `  sc_invocation->sc_a${index} = sc_a${index};`
           ),
           `  (void)scr_callback_token_admit(sc_token, &sc_invocation->base);`,
           `}`,
