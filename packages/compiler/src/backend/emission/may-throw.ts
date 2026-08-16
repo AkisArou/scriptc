@@ -1,7 +1,7 @@
 /* Cheap whole-module may-throw analysis (see computeMayThrow). Pure function
  * of the IR module; the emitter consults the result to place unwind checks. */
 import type { IrArrIntrinsicMethod, IrBytesIntrinsicMethod, IrLibFn, IrModule } from "../../ir/nodes.js";
-import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS } from "../../ir/nodes.js";
+import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS, nativeIntegerOpTraps } from "../../ir/nodes.js";
 
 /** Cheap may-throw analysis (cost discipline: functions that transitively
  * CANNOT throw pay for no pending-exception checks). A function may throw
@@ -140,6 +140,32 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
         case "awaitUnionExpr":
           // Awaiting a rejected promise re-throws into the awaiter.
           f.throws = true;
+          break;
+        case "nativeIntegerBin":
+          // Division, remainder, and the shifts throw a catchable RangeError
+          // on the operand pairs their width cannot answer for; the wrapping
+          // six answer for every pair.
+          if (nativeIntegerOpTraps(String(rec["op"]))) f.throws = true;
+          break;
+        case "nativeScalarToNumber": {
+          // Widening is total up to 32 bits and checked past it, where not
+          // every value of the slot is a double.
+          const scalar = (rec["value"] as { type?: { scalar?: unknown } } | undefined)
+            ?.type?.scalar;
+          if (
+            scalar === "i64" || scalar === "u64" ||
+            scalar === "isize" || scalar === "usize"
+          ) {
+            f.throws = true;
+          }
+          break;
+        }
+        case "nativeScalarFromNumber":
+          // Checked ingress throws on anything the slot cannot hold; a double
+          // slot holds every number and converts nothing.
+          if ((rec["type"] as { scalar?: unknown } | undefined)?.scalar !== "f64") {
+            f.throws = true;
+          }
           break;
         case "intrinsic":
           // Module dependency evaluation has await's rejection behavior,

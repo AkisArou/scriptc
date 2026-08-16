@@ -3097,7 +3097,7 @@ function validateFunction(
       case "nativeIntegerBin": {
         checkExpr(e.left);
         checkExpr(e.right);
-        if (!["+", "-", "*", "&", "|", "^"].includes(e.op)) {
+        if (!["+", "-", "*", "&", "|", "^", "/", "%", "<<", ">>"].includes(e.op)) {
           err(`native integer operation has unsupported operator "${String(e.op)}"`, e.loc);
         }
         if (nativeIntegerInfo(e.type.scalar, nativePointerBits) === null) {
@@ -6560,6 +6560,35 @@ function validateFunction(
             !(e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"))
         ) {
           err("jsBridgePromise must be a promise of jsval, void, or jsval-element array", e.loc);
+        }
+        break;
+      }
+      case "nativeScalarToNumber": {
+        checkExpr(e.value);
+        /* Every exact scalar can name this operation, including f64, whose
+         * conversion is the identity — a branded double's escape into
+         * ordinary arithmetic. */
+        if (e.value.type.kind !== "nativeScalar") {
+          err("native scalar to-number conversion requires an exact scalar operand", e.loc);
+        }
+        if (e.type.kind !== "f64") {
+          err("native scalar to-number conversion must produce f64", e.loc);
+        }
+        break;
+      }
+      case "nativeScalarFromNumber": {
+        checkExpr(e.value);
+        if (e.value.type.kind !== "f64") {
+          err("native scalar from-number conversion requires an f64 operand", e.loc);
+        }
+        if (
+          e.type.scalar !== "f64" &&
+          nativeIntegerInfo(e.type.scalar, nativePointerBits) === null
+        ) {
+          err(
+            `native scalar from-number conversion has unsupported type "${String(e.type.scalar)}"`,
+            e.loc,
+          );
         }
         break;
       }

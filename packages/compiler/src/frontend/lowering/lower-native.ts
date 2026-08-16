@@ -625,11 +625,54 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
     if (expr.arguments.some(ts.isSpreadElement)) {
       fail("spread arguments are unnecessary for a variadic exact operation");
     }
+    if (operation.type.scalar === "isize" || operation.type.scalar === "usize") {
+      L.usesNativeTarget = true;
+    }
+    /* The two conversions are the named crossings between an exact scalar and
+     * an ordinary number. They are operations rather than operators because
+     * TypeScript has no syntax that could carry the direction, and named
+     * rather than implicit because the language profile requires a conversion
+     * to say what it does. */
+    if (operation.kind === "to-number" || operation.kind === "from-number") {
+      if (expr.arguments.length !== 1) {
+        fail("a conversion takes exactly one argument");
+      }
+      const argument = expr.arguments[0]!;
+      const sourceResult = L.mapTypeOf(L.typeOf(expr));
+      if (operation.kind === "to-number") {
+        const value = L.lowerExpr(argument);
+        if (!typeEquals(value.type, operation.type)) {
+          fail("the argument does not have the configured exact type");
+        }
+        if (sourceResult === null || sourceResult.kind !== "f64") {
+          fail("a to-number conversion must be declared to return number");
+        }
+        return {
+          kind: "nativeScalarToNumber",
+          value,
+          type: { kind: "f64" },
+          loc,
+        };
+      }
+      const value = L.lowerExprExpecting(argument, { kind: "f64" });
+      if (value.type.kind !== "f64") {
+        fail("a from-number conversion takes an ordinary number");
+      }
+      if (sourceResult === null || !typeEquals(sourceResult, operation.type)) {
+        fail("a from-number conversion must be declared to return its exact type");
+      }
+      return {
+        kind: "nativeScalarFromNumber",
+        value,
+        type: { ...operation.type },
+        loc,
+      };
+    }
     if (expr.arguments.length === 0) {
       fail("an exact integer reduction requires at least one argument");
     }
     if (operation.type.scalar === "f64") {
-      fail("an integer reduction cannot use native f64 storage");
+      fail("an exact integer operation cannot use native f64 storage");
     }
     const sourceResult = L.mapTypeOf(L.typeOf(expr));
     if (sourceResult === null || !typeEquals(sourceResult, operation.type)) {
@@ -642,16 +685,31 @@ export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | n
       }
       return value;
     });
-    if (operation.type.scalar === "isize" || operation.type.scalar === "usize") {
-      L.usesNativeTarget = true;
+    /* A trapping operation is binary by nature: folding one over a list would
+     * make the intermediate values — and the traps they can reach — invisible
+     * at the call site. */
+    if (operation.kind === "integer-binary") {
+      if (values.length !== 2) {
+        fail("an exact integer division, remainder, or shift takes exactly two arguments");
+      }
+      return {
+        kind: "nativeIntegerBin",
+        op: operation.operator,
+        left: values[0]!,
+        right: values[1]!,
+        type: { ...operation.type },
+        loc,
+      };
     }
+    const reduceOperator = operation.operator;
+    const reduceType = { ...operation.type };
     return values.slice(1).reduce<IrExpr>(
       (left, right) => ({
         kind: "nativeIntegerBin",
-        op: operation.operator,
+        op: reduceOperator,
         left,
         right,
-        type: { ...operation.type },
+        type: { ...reduceType },
         loc,
       }),
       values[0]!,

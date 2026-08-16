@@ -8,6 +8,7 @@
 #ifndef SCR_RUNTIME_H
 #define SCR_RUNTIME_H
 
+#include <limits.h>  /* CHAR_BIT in the exact-integer shift guards */
 #include <stdarg.h>  /* va_list in the emitter listener adapters */
 #include <stdbool.h>
 #include <stddef.h>
@@ -794,6 +795,9 @@ void scr_native_throw_errno(int error_number, const char *operation);
 void scr_native_throw_null(const char *operation);
 void scr_native_throw_boolean(const char *operation);
 void scr_native_throw_number(double value, const char *operation);
+void scr_native_throw_arithmetic(const char *operation, const char *reason);
+void scr_native_throw_exact_signed(const char *operation, long long value);
+void scr_native_throw_exact_unsigned(const char *operation, unsigned long long value);
 void scr_native_throw_native_error(const char *message, const char *operation);
 
 /* Exact Native IR integer arithmetic and bitwise operations. Work exclusively
@@ -872,6 +876,71 @@ SCR_NATIVE_FROM_NUMBER(int32_t, i32, -2147483648.0, 2147483647.0)
 SCR_NATIVE_FROM_NUMBER(uint32_t, u32, 0.0, 4294967295.0)
 
 #undef SCR_NATIVE_FROM_NUMBER
+
+/* Exact division, remainder, shifts, and 64-bit egress to a plain number.
+ * Unlike the wrapping family above these are out of line, in scr_lib.c: each
+ * has cases C leaves undefined that the language profile requires to throw
+ * instead, so one definition serves both backends and the two cannot drift.
+ * Each leaves 0 behind on the throwing path, so a caller consults
+ * scr_exc_pending before using the value, exactly as after a throwing native
+ * call.
+ *
+ * A zero divisor has no quotient; a signed minimum divided by -1 has one that
+ * does not fit the width; a shift count outside [0, width) has no defined
+ * meaning and is never silently masked. Remainder is the one exception to the
+ * pair rule: the signed minimum remainder -1 is mathematically 0 and 0 fits,
+ * so only C's undefinedness has to be avoided.
+ *
+ * Egress up to 32 bits is a cast and needs no helper. At 64 bits and pointer
+ * width the checked form answers only when the double denotes the same
+ * integer — the round trip rather than a 2^53 bound, because 2^60 IS exactly
+ * a double and refusing it would be refusing an exact answer. */
+#define SCR_NATIVE_TRAPPING_DECLS(T, N)                                 \
+  T scr_native_##N##_div(T a, T b);                                     \
+  T scr_native_##N##_rem(T a, T b);                                     \
+  T scr_native_##N##_shl(T a, T b);                                     \
+  T scr_native_##N##_shr(T a, T b);
+
+SCR_NATIVE_TRAPPING_DECLS(int8_t, i8)
+SCR_NATIVE_TRAPPING_DECLS(uint8_t, u8)
+SCR_NATIVE_TRAPPING_DECLS(int16_t, i16)
+SCR_NATIVE_TRAPPING_DECLS(uint16_t, u16)
+SCR_NATIVE_TRAPPING_DECLS(int32_t, i32)
+SCR_NATIVE_TRAPPING_DECLS(uint32_t, u32)
+SCR_NATIVE_TRAPPING_DECLS(int64_t, i64)
+SCR_NATIVE_TRAPPING_DECLS(uint64_t, u64)
+SCR_NATIVE_TRAPPING_DECLS(intptr_t, isize)
+SCR_NATIVE_TRAPPING_DECLS(uintptr_t, usize)
+
+#undef SCR_NATIVE_TRAPPING_DECLS
+
+double scr_native_i64_to_number(int64_t value);
+double scr_native_u64_to_number(uint64_t value);
+double scr_native_isize_to_number(intptr_t value);
+double scr_native_usize_to_number(uintptr_t value);
+
+/* Checked ingress at the widths the ≤32-bit family's helper cannot serve.
+ * The bounds are the exact powers of two that bracket the range, because the
+ * largest value of a 64-bit type is not itself a double: the upper test is
+ * strict against 2^63 / 2^64 rather than inclusive against a bound the
+ * compiler would have to round. */
+#define SCR_NATIVE_FROM_NUMBER_WIDE(T, N, MIN_D, LIMIT_D)               \
+  static inline T scr_native_##N##_from_number(double value,            \
+                                               const char *operation) { \
+    if (!(value >= (MIN_D) && value < (LIMIT_D)) ||                     \
+        __builtin_trunc(value) != value) {                              \
+      scr_native_throw_number(value, operation);                        \
+      return 0;                                                         \
+    }                                                                   \
+    return (T)value;                                                    \
+  }
+
+SCR_NATIVE_FROM_NUMBER_WIDE(int64_t, i64, -9223372036854775808.0, 9223372036854775808.0)
+SCR_NATIVE_FROM_NUMBER_WIDE(uint64_t, u64, 0.0, 18446744073709551616.0)
+SCR_NATIVE_FROM_NUMBER_WIDE(intptr_t, isize, -9223372036854775808.0, 9223372036854775808.0)
+SCR_NATIVE_FROM_NUMBER_WIDE(uintptr_t, usize, 0.0, 18446744073709551616.0)
+
+#undef SCR_NATIVE_FROM_NUMBER_WIDE
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
 void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);

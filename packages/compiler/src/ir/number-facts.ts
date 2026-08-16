@@ -1676,6 +1676,22 @@ class FnAnalyzer {
         const key = this.pathKey(e, null);
         return key === null ? { ...TOP } : envGet(env, key);
       }
+      case "nativeScalarToNumber": {
+        this.evalExpr(e.value, env);
+        /* A widened exact integer is whole and inside its own slot — the
+         * same fact a widened result carries, reached through the named
+         * conversion instead of a boundary. A branded double says nothing. */
+        if (e.value.type.kind !== "nativeScalar") return { ...TOP };
+        const slot = nativeSlot(e.value.type.scalar);
+        return slot === null ? { ...TOP } : slotSeed(slot);
+      }
+      case "nativeScalarFromNumber": {
+        /* The value it yields is exact, not an f64, so nothing in this domain
+         * describes it; what matters is that the operand is evaluated and no
+         * global fact is disturbed by a conversion. */
+        this.evalExpr(e.value, env);
+        return { ...TOP };
+      }
       case "nativeStructGet": {
         this.evalExpr(e.value, env);
         /* Reading a number-projected field widens an exact slot, so the

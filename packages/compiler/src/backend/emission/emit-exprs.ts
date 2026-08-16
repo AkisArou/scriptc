@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -524,6 +524,27 @@ export function isStableBytesOperand(e: IrExpr, receiverLocalId: string): boolea
  * binding and all later operands are stable. The binding's scope/global
  * owner then keeps the value alive, avoiding retain/release traffic around
  * every indexed access. Any uncertain shape falls back to an owned temp. */
+/** The runtime helper suffix for each exact integer operation. */
+const NATIVE_INTEGER_HELPERS: Record<string, string> = {
+  "+": "add",
+  "-": "sub",
+  "*": "mul",
+  "&": "and",
+  "|": "or",
+  "^": "xor",
+  "/": "div",
+  "%": "rem",
+  "<<": "shl",
+  ">>": "shr",
+};
+
+/** The scalars whose whole range is a double, so egress is a cast. */
+function nativeScalarWidensToNumber(scalar: string): boolean {
+  return scalar === "f64" || scalar === "i8" || scalar === "u8" ||
+    scalar === "i16" || scalar === "u16" || scalar === "i32" ||
+    scalar === "u32";
+}
+
 export function emitBytesReceiver(E: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
   if (
     receiver.kind === "varRef" &&
@@ -552,21 +573,45 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "nativeIntegerBin": {
         const left = E.emitExpr(e.left);
         const right = E.emitExpr(e.right);
-        const operation = e.op === "+"
-          ? "add"
-          : e.op === "-"
-            ? "sub"
-            : e.op === "*"
-              ? "mul"
-              : e.op === "&"
-                ? "and"
-                : e.op === "|"
-                  ? "or"
-                  : "xor";
-        return E.newTemp(
+        const operation = NATIVE_INTEGER_HELPERS[e.op];
+        const result = E.newTemp(
           e.type,
           `scr_native_${e.type.scalar}_${operation}(${left.name}, ${right.name})`,
         );
+        /* A trapping operation leaves a pending exception behind rather than
+         * a value, so the unwind has to happen before the placeholder is
+         * used — the same discipline a throwing native call follows. */
+        if (nativeIntegerOpTraps(e.op)) E.emitPendingCheck();
+        return result;
+      }
+      case "nativeScalarToNumber": {
+        const value = E.emitExpr(e.value);
+        if (e.value.type.kind !== "nativeScalar") {
+          throw new Error("emitter bug: to-number conversion of a non-scalar");
+        }
+        /* Up to 32 bits every value is a double, so the cast is the whole
+         * conversion and it cannot fail; f64 is the identity. Wider slots go
+         * through the checked helper. */
+        if (nativeScalarWidensToNumber(e.value.type.scalar)) {
+          return E.newTemp(e.type, `(double)${value.name}`);
+        }
+        const result = E.newTemp(
+          e.type,
+          `scr_native_${e.value.type.scalar}_to_number(${value.name})`,
+        );
+        E.emitPendingCheck();
+        return result;
+      }
+      case "nativeScalarFromNumber": {
+        const value = E.emitExpr(e.value);
+        if (e.type.scalar === "f64") return E.newTemp(e.type, value.name);
+        const result = E.newTemp(
+          e.type,
+          `scr_native_${e.type.scalar}_from_number(${value.name}, ` +
+            `${cStringLiteral(Buffer.from(`an exact ${e.type.scalar}`, "utf8"))})`,
+        );
+        E.emitPendingCheck();
+        return result;
       }
       case "nativeStructLit": {
         const definition = E.nativeTypesById.get(e.type.typeId);

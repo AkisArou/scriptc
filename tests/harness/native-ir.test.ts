@@ -385,13 +385,59 @@ const localNativeInput: NativeFrontendInput = {
     type: I32,
     value: "42",
   }],
-  operations: [{
-    id: "native-typescript.fixture.c-v1@0.0.0#fixture_value_combine",
-    declaration: { module: nativePackage, name: "FixtureValue.combine" },
-    kind: "integer-reduce",
-    operator: "|",
-    type: I32,
-  }],
+  operations: [
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#fixture_value_combine",
+      declaration: { module: nativePackage, name: "FixtureValue.combine" },
+      kind: "integer-reduce",
+      operator: "|",
+      type: I32,
+    },
+    /* The named operations an operator expression cannot reach. Declared per
+     * exact type, exactly as an embedder would synthesize them. */
+    ...([
+      ["i32", I32, ["/", "%", "<<", ">>"]],
+      ["u32", nativeScalarType("u32"), ["/", ">>"]],
+      ["i64", I64, ["/", "%", "<<"]],
+    ] as const).flatMap(([name, type, operators]) =>
+      operators.map((operator) => ({
+        id: `native-typescript.fixture.c-v1@0.0.0#${name}_${
+          operator === "/" ? "div" : operator === "%" ? "rem" : operator === "<<" ? "shl" : "shr"
+        }`,
+        declaration: {
+          module: nativePackage,
+          name: `${name}.${
+            operator === "/" ? "div" : operator === "%" ? "rem" : operator === "<<" ? "shl" : "shr"
+          }`,
+        },
+        kind: "integer-binary" as const,
+        operator,
+        type,
+      }))
+    ),
+    ...([
+      ["i32", I32, true],
+      ["u32", nativeScalarType("u32"), false],
+      ["i64", I64, true],
+      ["u64", nativeScalarType("u64"), false],
+      ["f64", nativeScalarType("f64"), true],
+    ] as const).flatMap(([name, type, both]) => [
+      {
+        id: `native-typescript.fixture.c-v1@0.0.0#${name}_to_number`,
+        declaration: { module: nativePackage, name: `${name}.toNumber` },
+        kind: "to-number" as const,
+        type,
+      },
+      ...(both
+        ? [{
+            id: `native-typescript.fixture.c-v1@0.0.0#${name}_from_number`,
+            declaration: { module: nativePackage, name: `${name}.fromNumber` },
+            kind: "from-number" as const,
+            type,
+          }]
+        : []),
+    ]),
+  ],
   types: [
     PADDED_DEFINITION,
     PAIR32_DEFINITION,
@@ -1886,16 +1932,19 @@ test("Native IR rejects unknown exact integer operators", () => {
   if (statement.kind !== "exprStmt" || statement.expr.kind !== "nativeCall") {
     throw new Error("test fixture lost its Native IR exit call");
   }
+  /* `>>>` is JavaScript's unsigned shift, whose whole content is a ToUint32
+   * reinterpretation — an exact integer already has a signedness, so the
+   * operator has nothing left to mean at this width. */
   statement.expr.args[0] = {
     kind: "nativeIntegerBin",
-    op: "/" as "+",
+    op: ">>>" as "+",
     left: { kind: "nativeScalarLit", value: "4", type: I32, loc },
     right: { kind: "nativeScalarLit", value: "2", type: I32, loc },
     type: I32,
     loc,
   };
   expect(validateModule(mod).map(({ message }) => message)).toContain(
-    'in __main: native integer operation has unsupported operator "/"',
+    'in __main: native integer operation has unsupported operator ">>>"',
   );
 });
 
@@ -2614,6 +2663,51 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(serializeModule(mod)).toMatch(
       /"kind": "nativeScalarLit",\s+"value": "42"/,
     );
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("names the operations an operator expression cannot carry", async () => {
+    const outDir = join(scratch, `native-scalar-operations-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/native-scalar-operations.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("native scalar operations frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    const ir = serializeModule(mod);
+    for (const marker of ['"op": "/"', '"op": "%"', '"op": "<<"', '"op": ">>"']) {
+      expect(ir).toContain(marker);
+    }
+    expect(ir).toContain('"kind": "nativeScalarToNumber"');
+    expect(ir).toContain('"kind": "nativeScalarFromNumber"');
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "native-scalar-operations.c" : "native-scalar-operations.ll"),
+      "utf8",
+    );
+    /* Both backends reach one out-of-line definition of the trapping
+     * semantics, so the two cannot drift on which cases throw. */
+    expect(generated).toContain("scr_native_i32_div");
+    expect(generated).toContain("scr_native_i64_to_number");
+    /* Widening up to 32 bits is a conversion instruction, not a call. */
+    expect(generated).not.toContain("scr_native_i32_to_number");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

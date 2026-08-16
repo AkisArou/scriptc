@@ -76,6 +76,7 @@ import type {
   IrNativeBinding,
   IrNativePhysicalAbiType,
   IrNativePhysicalAbiValue,
+  IrNativeScalarType,
   IrNativeStructDef,
   IrRecordShape,
   IrStmt,
@@ -83,7 +84,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeIntegerInfo, nativeIntegerOpTraps, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
@@ -1481,6 +1482,69 @@ class LlEmitter {
 
   private nativeStructSourceParameters(definition: IrNativeStructDef): readonly IrNativePhysicalAbiValue[] {
     return definition.abi.parameters.slice(this.nativeStructReturnStorage(definition) === null ? 0 : 1);
+  }
+
+
+  /** The checked conversion of a plain number into an exact integer slot,
+   * inline. The two ordered comparisons reject NaN and both infinities along
+   * with out-of-range values, and the trunc equality rejects fractions; the
+   * conversion is dominated by them, so fptosi/fptoui never sees an
+   * out-of-range value and never produces poison. The upper bound is the
+   * exclusive power of two above the range rather than the maximum itself,
+   * because at 64 bits the maximum is not a double and the compiler would
+   * have to round it. On the throw path the caller's pending check unwinds
+   * before the value is used.
+   *
+   * Kept in one place because two call sites reach it: the checked-number
+   * parameter projection, and the named `fromNumber` operation. */
+  private checkedNumberIngress(
+    source: string,
+    target: IrNativeScalarType,
+    operation: string,
+  ): string {
+    const B = this.B;
+    const info = nativeIntegerInfo(
+      target.scalar,
+      this.sizeType === "i32" ? 32 : 64,
+    );
+    if (info === null) {
+      throw new Error(`llvm emitter bug: number ingress into ${target.scalar}`);
+    }
+    this.declare("declare double @llvm.trunc.f64(double)");
+    this.declare("declare void @scr_native_throw_number(double, ptr)");
+    const ge = B.tmp();
+    const lt = B.tmp();
+    const inRange = B.tmp();
+    const truncated = B.tmp();
+    const integral = B.tmp();
+    const ok = B.tmp();
+    B.line(`${ge} = fcmp oge double ${source}, ${f64Lit(Number(info.min))}`);
+    B.line(`${lt} = fcmp olt double ${source}, ${f64Lit(Number(info.max + 1n))}`);
+    B.line(`${inRange} = and i1 ${ge}, ${lt}`);
+    B.line(`${truncated} = call double @llvm.trunc.f64(double ${source})`);
+    B.line(`${integral} = fcmp oeq double ${truncated}, ${source}`);
+    B.line(`${ok} = and i1 ${inRange}, ${integral}`);
+    const convert = B.newLabel("native.number.convert");
+    const invalid = B.newLabel("native.number.invalid");
+    const done = B.newLabel("native.number.done");
+    B.condBr(ok, convert, invalid);
+    B.startBlock(invalid);
+    B.line(`call void @scr_native_throw_number(double ${source}, ptr ${operation})`);
+    B.br(done);
+    B.startBlock(convert);
+    const converted = B.tmp();
+    /* A call-argument spelling may carry a sign-extension attribute
+     * (`i8 zeroext`); a conversion target and a phi type must be the bare
+     * integer type. */
+    const bare = this.llType(target);
+    B.line(
+      `${converted} = ${info.signed ? "fptosi" : "fptoui"} double ${source} to ${bare}`,
+    );
+    B.br(done);
+    B.startBlock(done);
+    const value = B.tmp();
+    B.line(`${value} = phi ${bare} [ ${converted}, %${convert} ], [ 0, %${invalid} ]`);
+    return value;
   }
 
   private nativeStructLayout(typeId: string): {
@@ -5405,6 +5469,19 @@ class LlEmitter {
         const left = this.emitExpr(e.left);
         const right = this.emitExpr(e.right);
         const result = B.tmp();
+        /* A trapping operation is a call into the runtime rather than an
+         * instruction: its undefined cases have to answer by throwing, and
+         * one out-of-line definition is what keeps the two backends from
+         * drifting on which cases those are. */
+        if (nativeIntegerOpTraps(e.op)) {
+          const helper = e.op === "/" ? "div" : e.op === "%" ? "rem" : e.op === "<<" ? "shl" : "shr";
+          const symbol = `scr_native_${e.type.scalar}_${helper}`;
+          const type = this.llType(e.type);
+          this.declare(`declare ${type} @${symbol}(${type}, ${type})`);
+          B.line(`${result} = call ${type} @${symbol}(${type} ${left.name}, ${type} ${right.name})`);
+          this.emitPendingCheck();
+          return { name: result, type: e.type };
+        }
         const operation = e.op === "+"
           ? "add"
           : e.op === "-"
@@ -5418,6 +5495,40 @@ class LlEmitter {
                   : "xor";
         B.line(`${result} = ${operation} ${this.llType(e.type)} ${left.name}, ${right.name}`);
         return { name: result, type: e.type };
+      }
+      case "nativeScalarToNumber": {
+        const value = this.emitExpr(e.value);
+        if (e.value.type.kind !== "nativeScalar") {
+          throw new Error("llvm emitter bug: to-number conversion of a non-scalar");
+        }
+        const scalar = e.value.type.scalar;
+        if (scalar === "f64") return { name: value.name, type: e.type };
+        const widens = scalar === "i8" || scalar === "u8" || scalar === "i16" ||
+          scalar === "u16" || scalar === "i32" || scalar === "u32";
+        const result = B.tmp();
+        if (widens) {
+          const signed = scalar.startsWith("i");
+          B.line(
+            `${result} = ${signed ? "sitofp" : "uitofp"} ${this.llType(e.value.type)} ${value.name} to double`,
+          );
+          return { name: result, type: e.type };
+        }
+        /* A 64-bit value is not always a double, so the checked helper both
+         * converts and decides — the same one the C backend calls. */
+        const symbol = `scr_native_${scalar}_to_number`;
+        const type = this.llType(e.value.type);
+        this.declare(`declare double @${symbol}(${type})`);
+        B.line(`${result} = call double @${symbol}(${type} ${value.name})`);
+        this.emitPendingCheck();
+        return { name: result, type: e.type };
+      }
+      case "nativeScalarFromNumber": {
+        const value = this.emitExpr(e.value);
+        if (e.type.scalar === "f64") return { name: value.name, type: e.type };
+        const operation = this.cstr(`an exact ${e.type.scalar}`);
+        const converted = this.checkedNumberIngress(value.name, e.type, operation);
+        this.emitPendingCheck();
+        return { name: converted, type: e.type };
       }
       case "nativeStructLit": {
         const layout = this.nativeStructLayout(e.type.typeId);
@@ -7091,60 +7202,10 @@ class LlEmitter {
                 callArgs.push(`${parameterType} ${value}`);
                 break;
               }
-              const bounds: Record<string, readonly [number, number, boolean]> = {
-                i8: [-128, 127, true],
-                u8: [0, 255, false],
-                i16: [-32768, 32767, true],
-                u16: [0, 65535, false],
-                i32: [-2147483648, 2147483647, true],
-                u32: [0, 4294967295, false],
-              };
-              const bound = bounds[parameter.type.scalar];
-              if (bound === undefined) {
-                throw new Error(`llvm emitter bug: number projection over ${parameter.type.scalar} in ${binding.id}`);
-              }
-              const [min, max, signed] = bound;
-              /* The two ordered comparisons reject NaN and both infinities
-               * along with out-of-range values; the trunc equality rejects
-               * fractions. The conversion is dominated by the checks, so
-               * fptosi/fptoui never sees an out-of-range value and never
-               * produces poison. On the throw path the pending check unwinds
-               * before the native call. */
-              this.declare("declare double @llvm.trunc.f64(double)");
-              this.declare("declare void @scr_native_throw_number(double, ptr)");
-              const ge = B.tmp();
-              const le = B.tmp();
-              const inRange = B.tmp();
-              const truncated = B.tmp();
-              const integral = B.tmp();
-              const ok = B.tmp();
-              B.line(`${ge} = fcmp oge double ${arg.name}, ${f64Lit(min)}`);
-              B.line(`${le} = fcmp ole double ${arg.name}, ${f64Lit(max)}`);
-              B.line(`${inRange} = and i1 ${ge}, ${le}`);
-              B.line(`${truncated} = call double @llvm.trunc.f64(double ${arg.name})`);
-              B.line(`${integral} = fcmp oeq double ${truncated}, ${arg.name}`);
-              B.line(`${ok} = and i1 ${inRange}, ${integral}`);
-              const convert = B.newLabel("native.number.convert");
-              const invalid = B.newLabel("native.number.invalid");
-              const done = B.newLabel("native.number.done");
-              B.condBr(ok, convert, invalid);
-              B.startBlock(invalid);
-              B.line(`call void @scr_native_throw_number(double ${arg.name}, ptr ${operation})`);
-              B.br(done);
-              B.startBlock(convert);
-              const converted = B.tmp();
-              /* The call-argument spelling may carry a sign-extension
-               * attribute (`i8 zeroext`); a conversion target and a phi type
-               * must be the bare integer type. */
-              const bare = this.llType(parameter.type);
-              B.line(
-                `${converted} = ${signed ? "fptosi" : "fptoui"} double ${arg.name} to ${bare}`,
-              );
-              B.br(done);
-              B.startBlock(done);
-              const value = B.tmp();
-              B.line(
-                `${value} = phi ${bare} [ ${converted}, %${convert} ], [ 0, %${invalid} ]`,
+              const value = this.checkedNumberIngress(
+                arg.name,
+                parameter.type,
+                operation,
               );
               this.emitPendingCheck();
               callArgs.push(`${parameterType} ${value}`);

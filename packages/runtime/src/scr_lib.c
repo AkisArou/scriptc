@@ -1585,6 +1585,202 @@ void scr_native_throw_boolean(const char *operation) {
   free(msg);
 }
 
+/* Exact division, remainder, and shifts. Each has a case C leaves undefined
+ * and the language profile requires to answer instead — by throwing, since
+ * every one of them is a value the operands can hold and the result cannot.
+ * A zero divisor has no quotient; a signed minimum divided by -1 has one
+ * that does not fit the width; a shift count outside [0, width) has no
+ * defined meaning at all, and masking it silently is what the profile
+ * forbids. The throws are catchable RangeErrors and leave 0 behind, so a
+ * caller consults scr_exc_pending before using the value, exactly as it does
+ * after any throwing native operation.
+ *
+ * Remainder is the one exception to the pair rule: the signed minimum
+ * remainder -1 is mathematically 0 and 0 fits the width, so only C's
+ * undefinedness has to be avoided, not the caller's expectation. */
+#define SCR_NATIVE_UNSIGNED_DIVREM(T, N)                                \
+  T scr_native_##N##_div(T a, T b) {                      \
+    if (b == 0) {                                                       \
+      scr_native_throw_arithmetic("exact " #N " division",              \
+                                  "divides by zero");                   \
+      return 0;                                                         \
+    }                                                                   \
+    return (T)(a / b);                                                  \
+  }                                                                     \
+  T scr_native_##N##_rem(T a, T b) {                      \
+    if (b == 0) {                                                       \
+      scr_native_throw_arithmetic("exact " #N " remainder",             \
+                                  "divides by zero");                   \
+      return 0;                                                         \
+    }                                                                   \
+    return (T)(a % b);                                                  \
+  }
+#define SCR_NATIVE_SIGNED_DIVREM(T, N, MIN)                             \
+  T scr_native_##N##_div(T a, T b) {                      \
+    if (b == 0) {                                                       \
+      scr_native_throw_arithmetic("exact " #N " division",              \
+                                  "divides by zero");                   \
+      return 0;                                                         \
+    }                                                                   \
+    if (a == (MIN) && b == (T)-1) {                                     \
+      scr_native_throw_arithmetic("exact " #N " division",              \
+                                  "has no quotient at this width");     \
+      return 0;                                                         \
+    }                                                                   \
+    return (T)(a / b);                                                  \
+  }                                                                     \
+  T scr_native_##N##_rem(T a, T b) {                      \
+    if (b == 0) {                                                       \
+      scr_native_throw_arithmetic("exact " #N " remainder",             \
+                                  "divides by zero");                   \
+      return 0;                                                         \
+    }                                                                   \
+    if (a == (MIN) && b == (T)-1) return 0;                             \
+    return (T)(a % b);                                                  \
+  }
+
+/* Shifts. The count is neither masked nor reinterpreted: it is a value of
+ * the same exact type, and a count outside [0, width) throws. A signed left
+ * shift computes in the unsigned representation and copies the bits back, so
+ * it never invokes overflow UB; a signed right shift on a negative value
+ * uses the portable arithmetic form, because C leaves the sign fill
+ * implementation-defined. */
+#define SCR_NATIVE_UNSIGNED_SHIFT(T, W, N)                              \
+  T scr_native_##N##_shl(T a, T b) {                      \
+    if ((unsigned long long)b >= sizeof(T) * CHAR_BIT) {                \
+      scr_native_throw_arithmetic("exact " #N " left shift",            \
+                                  "shifts by its width or more");       \
+      return 0;                                                         \
+    }                                                                   \
+    return (T)((W)a << (unsigned)b);                                    \
+  }                                                                     \
+  T scr_native_##N##_shr(T a, T b) {                      \
+    if ((unsigned long long)b >= sizeof(T) * CHAR_BIT) {                \
+      scr_native_throw_arithmetic("exact " #N " right shift",           \
+                                  "shifts by its width or more");       \
+      return 0;                                                         \
+    }                                                                   \
+    return (T)(a >> (unsigned)b);                                       \
+  }
+#define SCR_NATIVE_SIGNED_SHIFT(T, U, W, N)                             \
+  T scr_native_##N##_shl(T a, T b) {                      \
+    if (b < 0 || (unsigned long long)b >= sizeof(T) * CHAR_BIT) {       \
+      scr_native_throw_arithmetic("exact " #N " left shift",            \
+                                  "shifts by a count outside its width"); \
+      return 0;                                                         \
+    }                                                                   \
+    U bits = (U)((W)(U)a << (unsigned)b);                               \
+    T result;                                                           \
+    memcpy(&result, &bits, sizeof result);                              \
+    return result;                                                      \
+  }                                                                     \
+  T scr_native_##N##_shr(T a, T b) {                      \
+    if (b < 0 || (unsigned long long)b >= sizeof(T) * CHAR_BIT) {       \
+      scr_native_throw_arithmetic("exact " #N " right shift",           \
+                                  "shifts by a count outside its width"); \
+      return 0;                                                         \
+    }                                                                   \
+    return a < 0 ? (T)~(~a >> (unsigned)b) : (T)(a >> (unsigned)b);     \
+  }
+
+#define SCR_NATIVE_UNSIGNED_TRAPPING(T, W, N)                           \
+  SCR_NATIVE_UNSIGNED_DIVREM(T, N)                                      \
+  SCR_NATIVE_UNSIGNED_SHIFT(T, W, N)
+#define SCR_NATIVE_SIGNED_TRAPPING(T, U, W, N, MIN)                     \
+  SCR_NATIVE_SIGNED_DIVREM(T, N, MIN)                                   \
+  SCR_NATIVE_SIGNED_SHIFT(T, U, W, N)
+
+SCR_NATIVE_SIGNED_TRAPPING(int8_t, uint8_t, uint32_t, i8, INT8_MIN)
+SCR_NATIVE_UNSIGNED_TRAPPING(uint8_t, uint32_t, u8)
+SCR_NATIVE_SIGNED_TRAPPING(int16_t, uint16_t, uint32_t, i16, INT16_MIN)
+SCR_NATIVE_UNSIGNED_TRAPPING(uint16_t, uint32_t, u16)
+SCR_NATIVE_SIGNED_TRAPPING(int32_t, uint32_t, uint32_t, i32, INT32_MIN)
+SCR_NATIVE_UNSIGNED_TRAPPING(uint32_t, uint32_t, u32)
+SCR_NATIVE_SIGNED_TRAPPING(int64_t, uint64_t, uint64_t, i64, INT64_MIN)
+SCR_NATIVE_UNSIGNED_TRAPPING(uint64_t, uint64_t, u64)
+SCR_NATIVE_SIGNED_TRAPPING(intptr_t, uintptr_t, uintptr_t, isize, INTPTR_MIN)
+SCR_NATIVE_UNSIGNED_TRAPPING(uintptr_t, uintptr_t, usize)
+
+#undef SCR_NATIVE_UNSIGNED_TRAPPING
+#undef SCR_NATIVE_SIGNED_TRAPPING
+#undef SCR_NATIVE_UNSIGNED_DIVREM
+#undef SCR_NATIVE_SIGNED_DIVREM
+#undef SCR_NATIVE_UNSIGNED_SHIFT
+#undef SCR_NATIVE_SIGNED_SHIFT
+
+/* Exact egress to a plain number. Up to 32 bits every value is a double, so
+ * the conversion is total and needs no helper; at 64 bits and pointer width
+ * it is not, and the checked form answers only when the double denotes the
+ * same integer. The test is the round trip rather than a 2^53 bound: 2^60 IS
+ * exactly a double, and refusing it would be refusing an exact answer. The
+ * upper-edge guard comes first because the one double an int64_t can produce
+ * that no int64_t can hold is 2^63. */
+#define SCR_NATIVE_TO_NUMBER_SIGNED(T, N, LIMIT_D)                       \
+  double scr_native_##N##_to_number(T value) {             \
+    double converted = (double)value;                                    \
+    if (converted >= (LIMIT_D) || (T)converted != value) {               \
+      scr_native_throw_exact_signed("a plain number", (long long)value); \
+      return 0.0;                                                        \
+    }                                                                    \
+    return converted;                                                    \
+  }
+#define SCR_NATIVE_TO_NUMBER_UNSIGNED(T, N, LIMIT_D)                    \
+  double scr_native_##N##_to_number(T value) {            \
+    double converted = (double)value;                                   \
+    if (converted >= (LIMIT_D) || (T)converted != value) {              \
+      scr_native_throw_exact_unsigned("a plain number",                 \
+                                      (unsigned long long)value);       \
+      return 0.0;                                                       \
+    }                                                                   \
+    return converted;                                                   \
+  }
+
+SCR_NATIVE_TO_NUMBER_SIGNED(int64_t, i64, 9223372036854775808.0)
+SCR_NATIVE_TO_NUMBER_UNSIGNED(uint64_t, u64, 18446744073709551616.0)
+SCR_NATIVE_TO_NUMBER_SIGNED(intptr_t, isize, 9223372036854775808.0)
+SCR_NATIVE_TO_NUMBER_UNSIGNED(uintptr_t, usize, 18446744073709551616.0)
+
+#undef SCR_NATIVE_TO_NUMBER_SIGNED
+#undef SCR_NATIVE_TO_NUMBER_UNSIGNED
+
+
+void scr_native_throw_arithmetic(const char *operation, const char *reason) {
+  /* A RangeError rather than a TypeError: the operands have the type the
+   * operation asked for, and it is their VALUES that leave it no answer —
+   * which is what JavaScript itself reports for BigInt division by zero. */
+  static const char joiner[] = " ";
+  size_t cap = strlen(operation) + strlen(reason) + sizeof joiner;
+  char *msg = malloc(cap);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  int len = snprintf(msg, cap, "%s%s%s", operation, joiner, reason);
+  scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)len);
+  free(msg);
+}
+
+/* A widening that cannot keep the value exact. The value rides in the
+ * message: an exactness failure is about one number, and naming it turns a
+ * hunt into a fix. The two carriers are separate entry points because a
+ * 64-bit value has no common integer type to pass them through. */
+void scr_native_throw_exact_signed(const char *operation, long long value) {
+  static const char suffix[] = " cannot represent ";
+  size_t cap = strlen(operation) + sizeof suffix + 24;
+  char *msg = malloc(cap);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  int len = snprintf(msg, cap, "%s%s%lld", operation, suffix, value);
+  scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)len);
+  free(msg);
+}
+
+void scr_native_throw_exact_unsigned(const char *operation, unsigned long long value) {
+  static const char suffix[] = " cannot represent ";
+  size_t cap = strlen(operation) + sizeof suffix + 24;
+  char *msg = malloc(cap);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  int len = snprintf(msg, cap, "%s%s%llu", operation, suffix, value);
+  scr_throw_error_msg(SCR_ERR_RANGE, msg, (size_t)len);
+  free(msg);
+}
+
 void scr_native_throw_number(double value, const char *operation) {
   /* The value rides in the message so a runtime failure is a fix rather than
    * a hunt. %.17g round-trips every double exactly. */

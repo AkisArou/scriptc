@@ -19,6 +19,43 @@ export declare namespace FixtureValue {
   function combine(first: i32, ...rest: readonly i32[]): i32;
 }
 
+/* The named operations on an exact scalar. Division, remainder, and the two
+ * shifts are functions rather than operators because TypeScript types
+ * arithmetic over a branded number as a plain number, so an operator
+ * expression could never carry the exact type; the conversions are functions
+ * because there is no syntax that could name their direction. */
+export declare namespace i32 {
+  function div(a: i32, b: i32): i32;
+  function rem(a: i32, b: i32): i32;
+  function shl(a: i32, b: i32): i32;
+  function shr(a: i32, b: i32): i32;
+  function toNumber(value: i32): number;
+  function fromNumber(value: number): i32;
+}
+
+export declare namespace u32 {
+  function div(a: u32, b: u32): u32;
+  function shr(a: u32, b: u32): u32;
+  function toNumber(value: u32): number;
+}
+
+export declare namespace i64 {
+  function div(a: i64, b: i64): i64;
+  function rem(a: i64, b: i64): i64;
+  function shl(a: i64, b: i64): i64;
+  function toNumber(value: i64): number;
+  function fromNumber(value: number): i64;
+}
+
+export declare namespace u64 {
+  function toNumber(value: u64): number;
+}
+
+export declare namespace f64 {
+  function toNumber(value: f64): number;
+  function fromNumber(value: number): f64;
+}
+
 export interface Padded {
   readonly tag: u8;
   readonly value: u64;

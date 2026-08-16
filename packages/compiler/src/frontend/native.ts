@@ -32,19 +32,56 @@ export interface NativeFrontendConstant {
   readonly value: string;
 }
 
-/** One source-level exact integer operation supplied by the embedder. It has
- * no native symbol or runtime module value: the frontend resolves the checked
- * declaration identity and lowers reached calls directly to Native IR. */
-export interface NativeFrontendOperation {
-  readonly id: string;
-  readonly declaration: {
-    readonly module: string;
-    readonly name: string;
-  };
-  readonly kind: "integer-reduce";
-  readonly operator: "&" | "|" | "^";
-  readonly type: Readonly<IrNativeScalarType>;
-}
+/** One source-level operation on an exact scalar, supplied by the embedder.
+ * None has a native symbol or a runtime module value: the frontend resolves
+ * the checked declaration identity and lowers reached calls directly to
+ * Native IR.
+ *
+ * `integer-reduce` folds a variadic argument list with one wrapping operator
+ * (a flags `combine`). `integer-binary` is one trapping operation on two
+ * operands of the type — the division, remainder, and shifts an operator
+ * expression cannot reach, because TypeScript types arithmetic over a branded
+ * number as a plain number. `to-number` and `from-number` are the named
+ * conversions: exact or a throw, never a silent rounding. */
+export type NativeFrontendOperation =
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "integer-reduce";
+      readonly operator: "&" | "|" | "^";
+      readonly type: Readonly<IrNativeScalarType>;
+    }
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "integer-binary";
+      readonly operator: "/" | "%" | "<<" | ">>";
+      readonly type: Readonly<IrNativeScalarType>;
+    }
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "to-number";
+      readonly type: Readonly<IrNativeScalarType>;
+    }
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "from-number";
+      readonly type: Readonly<IrNativeScalarType>;
+    };
 
 export type NativeStructDefinition = Readonly<
   Omit<IrNativeStructDef, "fields"> & {

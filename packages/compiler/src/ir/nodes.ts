@@ -72,7 +72,22 @@ export function provenNumberLiteral(
   return exact.toString();
 }
 export type IrNativeScalar = IrNativeIntegerScalar | "f64";
-export type IrNativeIntegerBinOp = "+" | "-" | "*" | "&" | "|" | "^";
+/** The wrapping operations, which answer for every pair of operands, and the
+ * trapping ones, which have pairs no value of the type can answer for: a zero
+ * divisor, a signed minimum over -1, a shift count outside the width. The
+ * split matters to more than the emitters — a trapping operation can throw,
+ * so a caller needs the pending check a wrapping one never does. */
+export type IrNativeIntegerWrappingOp = "+" | "-" | "*" | "&" | "|" | "^";
+export type IrNativeIntegerTrappingOp = "/" | "%" | "<<" | ">>";
+export type IrNativeIntegerBinOp =
+  | IrNativeIntegerWrappingOp
+  | IrNativeIntegerTrappingOp;
+
+const NATIVE_INTEGER_TRAPPING_OPS = new Set<string>(["/", "%", "<<", ">>"]);
+
+export function nativeIntegerOpTraps(op: string): boolean {
+  return NATIVE_INTEGER_TRAPPING_OPS.has(op);
+}
 
 export interface IrNativeIntegerInfo {
   readonly bits: 8 | 16 | 32 | 64;
@@ -1034,7 +1049,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 19 as const;
+export const IR_VERSION = 20 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -4681,7 +4696,12 @@ export type IrExpr =
    * the result carry the same exact native integer type. Arithmetic wraps
    * modulo that type's width; signed values are interpreted from the resulting
    * bits as two's complement, so no backend may introduce signed C overflow or
-   * a JavaScript ToInt32 conversion. */
+   * a JavaScript ToInt32 conversion.
+   *
+   * Division, remainder, and the two shifts are the same node with a trapping
+   * operator: every case C leaves undefined is a case the operands can reach
+   * and the type cannot answer, so it throws a catchable RangeError instead —
+   * including a shift count outside the width, which is never masked. */
   | {
       kind: "nativeIntegerBin";
       op: IrNativeIntegerBinOp;
@@ -4706,6 +4726,26 @@ export type IrExpr =
       /** The field's exact type, or f64 when the field carries the number
        * projection and the read widens. */
       type: IrNativeScalarType | IrNativeStructType | { kind: "f64" };
+      loc: SrcLoc;
+    }
+  /** Exact egress to a plain JavaScript number, named at the source level
+   * rather than implied. Total for every scalar a double holds injectively;
+   * at 64 bits and pointer width it answers only when the double denotes the
+   * same integer and throws a catchable RangeError otherwise. */
+  | {
+      kind: "nativeScalarToNumber";
+      value: IrExpr;
+      type: { kind: "f64" };
+      loc: SrcLoc;
+    }
+  /** Checked ingress from a plain JavaScript number: finite, integral, and in
+   * the scalar's range, or a catchable TypeError. The same conversion a
+   * checked-number parameter projection performs, reached as a named
+   * operation instead of at a call boundary. */
+  | {
+      kind: "nativeScalarFromNumber";
+      value: IrExpr;
+      type: IrNativeScalarType;
       loc: SrcLoc;
     }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
