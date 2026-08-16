@@ -6937,10 +6937,59 @@ class LlEmitter {
                 }
               } else if (parameter.type.kind === "nativeHandle") {
                 this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
+                const tag = mangleNativeHandleTag(parameter.type.typeId);
+                const sourceType =
+                  binding.arguments[parameter.projection.argument]!.type;
+                if (
+                  sourceType.kind === "nullableNativeHandle" &&
+                  arg.type.kind === "nullT"
+                ) {
+                  callArgs.push(`${parameterType} null`);
+                  break;
+                }
+                if (
+                  sourceType.kind === "nullableNativeHandle" &&
+                  arg.type.kind === "union"
+                ) {
+                  // The null arm passes null without consulting the handle
+                  // table; a present handle is validated as a required one is.
+                  const arms = this.unionsById.get(arg.type.unionId)?.arms;
+                  const handleTag = arms?.findIndex(
+                    (arm) => arm.kind === "nativeHandle",
+                  ) ?? -1;
+                  if (handleTag < 0) {
+                    throw new Error(`llvm emitter bug: nullable handle argument lacks a handle arm in ${binding.id}`);
+                  }
+                  const tagValue = this.unionTag(arg.name);
+                  const isHandle = B.tmp();
+                  const present = B.newLabel("native.handle.present");
+                  const absent = B.newLabel("native.handle.absent");
+                  const joined = B.newLabel("native.handle.join");
+                  B.line(`${isHandle} = icmp eq i32 ${tagValue}, ${handleTag}`);
+                  B.condBr(isHandle, present, absent);
+                  B.startBlock(present);
+                  const peeked = this.unionPeek(arg.name);
+                  const required = B.tmp();
+                  B.line(
+                    `${required} = call ptr @scr_native_handle_require(ptr ${peeked}, ` +
+                      `ptr @${tag}, ptr ${operation})`,
+                  );
+                  B.br(joined);
+                  B.startBlock(absent);
+                  B.br(joined);
+                  B.startBlock(joined);
+                  const selected = B.tmp();
+                  B.line(
+                    `${selected} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
+                  );
+                  this.emitPendingCheck();
+                  callArgs.push(`${parameterType} ${selected}`);
+                  break;
+                }
                 const raw = B.tmp();
                 B.line(
                   `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
-                    `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
+                    `ptr @${tag}, ptr ${operation})`,
                 );
                 this.emitPendingCheck();
                 callArgs.push(`${parameterType} ${raw}`);

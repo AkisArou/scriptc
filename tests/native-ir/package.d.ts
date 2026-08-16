@@ -58,6 +58,9 @@ export interface Counter extends CounterMiddle {
   dispose(): void;
 }
 
+/* Accepts an optional counter: null is a valid argument, not a failure. */
+export declare function counterValueOr(counter: Counter | null, fallback: i32): i32;
+
 export interface Subscription {
   emit(value: i32): i32;
   emitForeign(value: i32): i32;

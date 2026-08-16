@@ -1726,6 +1726,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         argument.type.kind !== "bool" &&
         argument.type.kind !== "string" &&
         argument.type.kind !== "nullableString" &&
+        argument.type.kind !== "nullableNativeHandle" &&
         !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
         !validNativeCallbackArgument(argument.type) &&
         !validNativeValue(argument.type)
@@ -1824,17 +1825,28 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const projectionCounts = projectionsByArgument[parameter.projection.argument]!;
       projectionCounts.total++;
       switch (parameter.projection.kind) {
-        case "argument":
+        case "argument": {
           projectionCounts.direct++;
+          // An optional handle keeps the direct projection: the ABI slot is
+          // still one pointer, and only the source side gains a null arm. Its
+          // parameter therefore names the handle the argument may carry.
+          const optionalHandle =
+            sourceArgument.type.kind === "nullableNativeHandle" &&
+            parameter.type.kind === "nativeHandle" &&
+            parameter.type.typeId === sourceArgument.type.typeId;
           if (
+            !optionalHandle && (
             parameter.type.kind === "nativePointer" ||
             parameter.type.kind === "nativeCallback" ||
             parameter.type.kind === "nativeContext" ||
             sourceArgument.type.kind === "string" ||
             sourceArgument.type.kind === "nullableString" ||
+            // Any optional handle that reaches here disagreed with its
+            // parameter, since the agreeing case short-circuited above.
+            sourceArgument.type.kind === "nullableNativeHandle" ||
             sourceArgument.type.kind === "bytes" ||
             sourceArgument.type.kind === "func" ||
-            !typeEquals(parameter.type, sourceArgument.type)
+            !typeEquals(parameter.type, sourceArgument.type))
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an inconsistent direct projection`,
@@ -1842,6 +1854,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        }
         case "boolean": {
           projectionCounts.boolean++;
           const info = parameter.type.kind === "nativeScalar"
@@ -3990,6 +4003,26 @@ function validateFunction(
                   arms.some((arm) => arm.kind === "nullT"))
               ) {
                 err(`Native IR call ${e.binding} arg ${i} must be string | null`, arg.loc);
+              }
+            } else if (argument.type.kind === "nullableNativeHandle") {
+              const handle = {
+                kind: "nativeHandle",
+                typeId: argument.type.typeId,
+              } as const;
+              const arms = arg.type.kind === "union"
+                ? unions.get(arg.type.unionId)?.arms
+                : undefined;
+              if (
+                arg.type.kind !== "nullT" &&
+                !typeEquals(arg.type, handle) &&
+                !(arms?.length === 2 &&
+                  arms.some((arm) => typeEquals(arm, handle)) &&
+                  arms.some((arm) => arm.kind === "nullT"))
+              ) {
+                err(
+                  `Native IR call ${e.binding} arg ${i} must be a nullable ${argument.type.typeId} handle`,
+                  arg.loc,
+                );
               }
             } else {
               expectType(arg, argument.type, `Native IR call ${e.binding} arg ${i}`);

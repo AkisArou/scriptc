@@ -839,6 +839,39 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_value_or",
+      declaration: { module: nativePackage, name: "counterValueOr" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_value_or" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      // The source argument is optional while the ABI slot stays one pointer,
+      // so arguments and parameters differ here and directSignature does not
+      // apply.
+      arguments: [
+        { name: "counter", type: { kind: "nullableNativeHandle", typeId: COUNTER_ID } },
+        { name: "fallback", type: I32 },
+      ],
+      parameters: [
+        {
+          name: "counter",
+          type: COUNTER,
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "fallback",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 1 },
+        },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_value",
       declaration: { module: nativePackage, name: "CounterBase.value" },
       entry: { kind: "c-symbol", symbol: "nts_counter_value" },
@@ -3298,6 +3331,37 @@ describe.each(["c", "llvm"] as const)(
       expect(generated).toContain("nts_fixture_error_free");
       // 42 only if the success path did not throw, the failure path threw the
       // object's message, and the outstanding count returned to zero.
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR nullable handle arguments, %s backend",
+  (backend) => {
+    test("passes null without consulting the handle table", async () => {
+      const outDir = join(scratch, `nullable-handle-arg-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/nullable-handle-argument.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) throw new Error("nullable handle compile failed");
+      // 42 only if a present handle borrowed, a literal null passed NULL, and
+      // a union carrying either arm did the right thing at one call site.
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,

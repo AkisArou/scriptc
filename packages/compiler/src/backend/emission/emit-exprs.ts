@@ -2387,10 +2387,35 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `(void *)${retainedTokens.get(parameter.projection.argument) ?? arg.name}`;
             case "argument": {
               if (parameter.type.kind !== "nativeHandle") return arg.name;
+              const sourceType = binding.arguments[parameter.projection.argument]!.type;
+              const tag = mangleNativeHandleTag(parameter.type.typeId);
+              if (sourceType.kind === "nullableNativeHandle") {
+                // The null arm passes NULL without consulting the handle
+                // table; a present handle is validated exactly as a required
+                // one is.
+                if (arg.type.kind === "nullT") return "NULL";
+                if (arg.type.kind === "union") {
+                  const arms = E.unionsById.get(arg.type.unionId)?.arms;
+                  const handleTag = arms?.findIndex(
+                    (arm) => arm.kind === "nativeHandle",
+                  ) ?? -1;
+                  if (handleTag < 0) {
+                    throw new Error(`emitter bug: nullable handle argument lacks a handle arm in ${binding.id}`);
+                  }
+                  const raw = `sc_t${E.tempCounter++}`;
+                  E.line(
+                    `void *${raw} = ${arg.name}->tag == ${handleTag} ` +
+                      `? scr_native_handle_require(scr_union_peek(${arg.name}), &${tag}, ${operation}) ` +
+                      ": NULL;",
+                  );
+                  E.emitPendingCheck();
+                  return raw;
+                }
+              }
               const raw = `sc_t${E.tempCounter++}`;
               E.line(
                 `void *${raw} = scr_native_handle_require(${arg.name}, ` +
-                  `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});`,
+                  `&${tag}, ${operation});`,
               );
               E.emitPendingCheck();
               return raw;

@@ -371,3 +371,8 @@ int32_t nts_counter_verify(int32_t actual_value, int32_t actual_destroyed,
   return actual_value == expected_value && actual_destroyed == expected_destroyed
       ? 42 : 1;
 }
+
+/* Accepts an optional counter: null is a valid argument, not a failure. */
+int32_t nts_counter_value_or(NtsCounter *counter, int32_t fallback) {
+  return counter == NULL ? fallback : nts_counter_value(counter);
+}

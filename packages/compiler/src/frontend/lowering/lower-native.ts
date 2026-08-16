@@ -209,6 +209,15 @@ function matchesNativeArgumentSource(
   expected: NativeInputBinding["arguments"][number]["type"],
   mapped: IrType,
 ): boolean {
+  if (expected.kind === "nullableNativeHandle") {
+    const handle = { kind: "nativeHandle", typeId: expected.typeId } as const;
+    if (mapped.kind === "nullT" || typeEquals(mapped, handle)) return true;
+    if (mapped.kind !== "union") return false;
+    const handleArms = L.unions.get(mapped.unionId)?.arms;
+    return handleArms?.length === 2 &&
+      handleArms.some((arm) => typeEquals(arm, handle)) &&
+      handleArms.some((arm) => arm.kind === "nullT");
+  }
   if (expected.kind !== "nullableString") return typeEquals(mapped, expected);
   if (mapped.kind === "string" || mapped.kind === "nullT") return true;
   if (mapped.kind !== "union") return false;
@@ -222,7 +231,11 @@ function formatNativeArgumentType(
   L: Lowerer,
   type: NativeInputBinding["arguments"][number]["type"],
 ): string {
-  return type.kind === "nullableString" ? "string | null" : L.fmt(type);
+  if (type.kind === "nullableString") return "string | null";
+  if (type.kind === "nullableNativeHandle") {
+    return `${L.fmt({ kind: "nativeHandle", typeId: type.typeId })} | null`;
+  }
+  return L.fmt(type);
 }
 
 function validateDeclaration(
@@ -484,7 +497,10 @@ function lowerNativeInvocation(
   }
   const args = argumentNodes.map((argument, index) => {
     const expected = binding.arguments[index]!.type;
-    if (expected.kind !== "nullableString") {
+    if (
+      expected.kind !== "nullableString" &&
+      expected.kind !== "nullableNativeHandle"
+    ) {
       return L.lowerExprExpecting(argument, expected);
     }
     const mapped = L.mapTypeOf(

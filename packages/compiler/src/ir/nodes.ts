@@ -230,6 +230,10 @@ export type IrNativeArgumentType =
   | { kind: "bool" }
   | { kind: "string" }
   | { kind: "nullableString" }
+  /** A managed handle the source may omit. The null arm passes NULL without
+   * consulting the handle table; a present handle is validated exactly as a
+   * required one is. */
+  | { kind: "nullableNativeHandle"; typeId: string }
   | (IrBytesType & { elem: "u8" })
   | IrNativeCallbackArgumentType;
 
