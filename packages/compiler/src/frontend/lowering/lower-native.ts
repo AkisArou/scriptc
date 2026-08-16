@@ -204,6 +204,45 @@ function matchesNativeResultSource(
     arms.some((arm) => arm.kind === "nullT");
 }
 
+/**
+ * Why a native call's result did not match its declaration.
+ *
+ * Control-flow narrowing is the common cause and the least obvious one. After
+ * `window.title = "Ready"`, TypeScript narrows every later read of
+ * `window.title` to that literal, but the native getter still returns whatever
+ * its declaration allows — the setter may normalise the value, and a nullable
+ * getter may return null. Accepting the narrowed type would put a value the
+ * callee can still produce into a slot that cannot hold it, so the call is
+ * refused; saying so is the difference between a one-line fix and a hunt for a
+ * compiler bug.
+ *
+ * The fix is at whatever narrowed the read, not at the read: a type annotation
+ * on the destination does not widen the expression back.
+ */
+function nativeResultMismatchReason(
+  L: Lowerer,
+  binding: NativeInputBinding,
+  mapped: IrType | null,
+): string {
+  if (mapped === null) return "the validated declaration lost its source result type";
+  if (
+    binding.result.projection.kind === "utf8CString" &&
+    binding.result.projection.nullable &&
+    (mapped.kind === "string" || mapped.kind === "nullT")
+  ) {
+    return (
+      "its result is declared 'string | null' but reads as " +
+      `'${mapped.kind === "string" ? "string" : "null"}' here, because ` +
+      "something narrowed it — assigning a literal to the same property is " +
+      "the usual cause. A native call cannot rely on narrowing: the callee " +
+      "still returns what its declaration allows. Widen whatever narrowed it, " +
+      "which is not the read itself"
+    );
+  }
+  void L;
+  return "the validated declaration lost its source result type";
+}
+
 function matchesNativeArgumentSource(
   L: Lowerer,
   expected: NativeInputBinding["arguments"][number]["type"],
@@ -542,7 +581,7 @@ function lowerNativeInvocation(
       : failBinding(L, binding, "a non-failing native call cannot produce 'never'", loc)
     : mappedResult !== null && matchesNativeResultSource(L, binding, mappedResult)
       ? mappedResult
-      : failBinding(L, binding, "the validated declaration lost its source result type", loc);
+      : failBinding(L, binding, nativeResultMismatchReason(L, binding, mappedResult), loc);
   return {
     kind: "nativeCall",
     binding: binding.id,

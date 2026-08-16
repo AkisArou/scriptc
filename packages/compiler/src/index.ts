@@ -192,6 +192,15 @@ export interface CompileOptions {
   native?: NativeFrontendInput;
   /** Target-compatible objects/archives that define reached native symbols. */
   nativeLinkInputs?: readonly string[];
+  /** Runtime services the embedder's own link inputs call.
+   *
+   * ScriptC includes a runtime service when the compiled program reaches it.
+   * An embedder's native objects are outside that reachability: a target
+   * runtime that calls scr_retained_callbacks_* needs the service even when
+   * the program itself retains no callback. Without this the link fails on
+   * undefined symbols, which says nothing about the requirement that was
+   * never declared. */
+  nativeRuntimeRequires?: readonly ScrNativeRuntimeService[];
   /** Driver-neutral system library names required by reached Native IR
    * bindings. Emitted as -l<name> after nativeLinkInputs. */
   nativeSystemLibraries?: readonly string[];
@@ -223,12 +232,16 @@ export type CompileResult =
 /** Planning requires an exact backend so every output artifact has one stable
  * media type and file name before execution. The ordinary compile() API keeps
  * its default LLVM-with-C-fallback behavior for direct CLI builds. */
+/** Runtime services an embedder can require independently of the program. */
+export type ScrNativeRuntimeService = "retained-callbacks" | "native-handle";
+
 export type PlanExecutableCompilationOptions = Pick<
   CompileOptions,
   | "dynamic"
   | "externalTypes"
   | "native"
   | "nativeLinkInputs"
+  | "nativeRuntimeRequires"
   | "nativeSystemLibraries"
   | "npmStatic"
   | "sanitize"
@@ -1142,11 +1155,13 @@ function executableNativeBuildPlan(
     CompileOptions,
     | "dynamic"
     | "nativeLinkInputs"
+    | "nativeRuntimeRequires"
     | "nativeSystemLibraries"
     | "sanitize"
   >,
   ffi: FfiProfile | null,
 ): ExecutableNativeBuildPlan {
+  const required = new Set(opts.nativeRuntimeRequires ?? []);
   return Object.freeze({
     cacheIdentity: "scriptc-generated-v1",
     sanitize: opts.sanitize ?? false,
@@ -1155,10 +1170,13 @@ function executableNativeBuildPlan(
     copying: moduleUsesCopying(module),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(module),
     fileHandle: moduleUsesFileHandle(module),
-    nativeHandle: (module.nativeTypes ?? []).some(
-      (definition) => definition.kind === "handle",
-    ),
-    retainedCallbacks: moduleUsesRetainedCallbacks(module),
+    nativeHandle:
+      required.has("native-handle") ||
+      (module.nativeTypes ?? []).some(
+        (definition) => definition.kind === "handle",
+      ),
+    retainedCallbacks:
+      required.has("retained-callbacks") || moduleUsesRetainedCallbacks(module),
     fetch: moduleUsesFetch(module),
     netIsland:
       moduleEmbedsBuiltin(module, "node:http") ||
