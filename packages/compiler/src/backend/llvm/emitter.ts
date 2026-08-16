@@ -7029,6 +7029,45 @@ class LlEmitter {
           releaseArguments();
           return { name: "", type: e.type };
         }
+        if (binding.result.projection.kind === "errorChannel") {
+          if (binding.error.kind !== "errorHandle") {
+            throw new Error(`llvm emitter bug: error channel without an error handle in ${binding.id}`);
+          }
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          this.declare(`declare ptr @${binding.error.messageSymbol}(ptr)`);
+          this.declare(`declare void @${binding.error.releaseSymbol}(ptr)`);
+          this.declare("declare zeroext i1 @scr_exc_pending()");
+          this.declare("declare void @scr_native_throw_native_error(ptr, ptr)");
+          const failed = B.tmp();
+          const failureBlock = B.newLabel("native.error");
+          const throwBlock = B.newLabel("native.error.throw");
+          const releaseBlock = B.newLabel("native.error.release");
+          const continuation = B.newLabel("native.error.ok");
+          B.line(`${failed} = icmp ne ptr ${raw}, null`);
+          B.condBr(failed, failureBlock, continuation);
+          B.startBlock(failureBlock);
+          const message = B.tmp();
+          const pending = B.tmp();
+          B.line(`${message} = call ptr @${binding.error.messageSymbol}(ptr ${raw})`);
+          B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+          // A callback may already have thrown, and that exception wins. Both
+          // paths reach the release, so a pending exception cannot strand the
+          // error object.
+          B.condBr(pending, releaseBlock, throwBlock);
+          B.startBlock(throwBlock);
+          B.line(
+            `call void @scr_native_throw_native_error(ptr ${message}, ptr ${operation})`,
+          );
+          B.br(releaseBlock);
+          B.startBlock(releaseBlock);
+          B.line(`call void @${binding.error.releaseSymbol}(ptr ${raw})`);
+          B.br(continuation);
+          B.startBlock(continuation);
+          this.emitPendingCheck();
+          releaseArguments();
+          return { name: "", type: e.type };
+        }
         if (binding.result.projection.kind === "utf8CString") {
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);

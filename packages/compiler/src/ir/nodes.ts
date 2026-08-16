@@ -247,7 +247,12 @@ export type IrNativeParameterProjection =
 export type IrNativeResultProjection =
   | { kind: "direct" }
   | { kind: "boolean"; falseValue: string; trueValue: string }
-  | { kind: "utf8CString"; nullable: boolean };
+  | { kind: "utf8CString"; nullable: boolean }
+  /** The physical result is the operation's error channel and yields no
+   * source value. It is not a discarded result: the `errorHandle` contract
+   * reads it for a message and releases it. Paired with that contract, which
+   * validation requires, so a pointer never becomes a source value. */
+  | { kind: "errorChannel" };
 
 export type IrNativeResultAbiType =
   | IrNativeValueType
@@ -1051,7 +1056,17 @@ export interface IrNativeBinding {
   error:
     | { kind: "no-fail" }
     | { kind: "errno"; failureValue: string }
-    | { kind: "nullable" };
+    | { kind: "nullable" }
+    /** The operation returns an owned error object, or null on success. The
+     * message is read through `messageSymbol` and copied into the thrown
+     * Error, then the object is released through `releaseSymbol` — including
+     * when a callback has already left an exception pending, so the object is
+     * never stranded. */
+    | {
+        kind: "errorHandle";
+        messageSymbol: string;
+        releaseSymbol: string;
+      };
   /** Logical values evaluated by nativeCall, once and in source order. */
   arguments: {
     name: string;

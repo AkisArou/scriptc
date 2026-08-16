@@ -1562,6 +1562,19 @@ void scr_native_throw_null(const char *operation) {
   free(msg);
 }
 
+/* A native operation that reports failure by returning an error object rather
+ * than a code. The message belongs to that object, so it is copied into the
+ * thrown Error before the caller releases it. */
+void scr_native_throw_native_error(const char *message, const char *operation) {
+  static const char separator[] = ": ";
+  size_t cap = strlen(operation) + sizeof separator + strlen(message);
+  char *msg = malloc(cap);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  int len = snprintf(msg, cap, "%s%s%s", operation, separator, message);
+  scr_throw_error_msg(SCR_ERR_ERROR, msg, (size_t)len);
+  free(msg);
+}
+
 void scr_native_throw_boolean(const char *operation) {
   static const char suffix[] = " returned an invalid native boolean";
   size_t cap = strlen(operation) + sizeof suffix;

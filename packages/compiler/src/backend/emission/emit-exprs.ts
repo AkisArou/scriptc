@@ -2428,6 +2428,31 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
+        if (binding.result.projection.kind === "errorChannel") {
+          if (binding.error.kind !== "errorHandle") {
+            throw new Error(`emitter bug: error channel without an error handle in ${binding.id}`);
+          }
+          const raw = `sc_t${E.tempCounter++}`;
+          const message = `sc_t${E.tempCounter++}`;
+          E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
+          E.line(`if (${raw} != NULL) {`);
+          E.indent++;
+          E.line(
+            `const char *${message} = ${binding.error.messageSymbol}(${raw});`,
+          );
+          // A callback may already have thrown during the call, and that
+          // exception wins. The object is released either way, so a pending
+          // exception cannot strand it.
+          E.line(
+            `if (!scr_exc_pending()) scr_native_throw_native_error(${message}, ${operation});`,
+          );
+          E.line(`${binding.error.releaseSymbol}(${raw});`);
+          E.indent--;
+          E.line("}");
+          E.emitPendingCheck();
+          releaseArguments();
+          return { name: "", type: e.type };
+        }
         if (binding.result.projection.kind === "utf8CString") {
           const raw = `sc_t${E.tempCounter++}`;
           const managed = `sc_t${E.tempCounter++}`;

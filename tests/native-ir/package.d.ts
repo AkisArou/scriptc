@@ -69,6 +69,11 @@ export declare class NativeCounter {
   static withInitialValue(initialValue: i32): NativeCounter;
 }
 
+/* Reports failure by returning an owned error object rather than a code, the
+ * shape GLib's GError takes once an adapter has absorbed its out-parameter. */
+export declare function errorHandleFail(code: i32): void;
+export declare function fixtureErrorsOutstanding(): i32;
+
 export declare function i8Identity(value: i8): i8;
 export declare function u8Identity(value: u8): u8;
 export declare function i16Identity(value: i16): i16;

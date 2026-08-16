@@ -798,6 +798,14 @@ export class CEmitter {
         `extern ${nativeAbiType(binding.result.type)} ${binding.entry.symbol}(` +
           `${params.length > 0 ? params.join(", ") : "void"});`,
       );
+      if (binding.error.kind === "errorHandle") {
+        // The accessor and release entries the error contract names are
+        // foreign symbols too, and their shapes are fixed by the contract.
+        out.push(
+          `extern const char *${binding.error.messageSymbol}(void *);`,
+          `extern void ${binding.error.releaseSymbol}(void *);`,
+        );
+      }
     }
     if ((this.mod.nativeBindings?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");

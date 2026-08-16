@@ -784,6 +784,7 @@ int scr_native_errno_snapshot(void);
 void scr_native_throw_errno(int error_number, const char *operation);
 void scr_native_throw_null(const char *operation);
 void scr_native_throw_boolean(const char *operation);
+void scr_native_throw_native_error(const char *message, const char *operation);
 
 /* Exact Native IR integer arithmetic and bitwise operations. Work exclusively
  * in the matching unsigned representation, then copy wrapped signed bits

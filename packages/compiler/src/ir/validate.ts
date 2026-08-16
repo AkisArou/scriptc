@@ -1656,6 +1656,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
+    } else if (error.kind === "errorHandle") {
+      // The two foreign entries are named here so no emitter derives them from
+      // the operation's own symbol. The result pairing is checked beside the
+      // error-channel projection.
+      const messageSymbol = "messageSymbol" in error ? error.messageSymbol : null;
+      const releaseSymbol = "releaseSymbol" in error ? error.releaseSymbol : null;
+      const projection = binding.result.projection as { kind?: unknown } | undefined;
+      if (
+        Object.keys(error).sort().join(",") !== "kind,messageSymbol,releaseSymbol" ||
+        typeof messageSymbol !== "string" ||
+        messageSymbol.length === 0 ||
+        typeof releaseSymbol !== "string" ||
+        releaseSymbol.length === 0 ||
+        messageSymbol === releaseSymbol ||
+        projection?.kind !== "errorChannel"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid error-handle failure contract`,
+          loc: moduleLoc,
+        });
+      }
     } else {
       errors.push({
         message: `Native IR binding "${binding.id}" has unsupported error contract "${String(error.kind)}"`,
@@ -2040,6 +2061,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "direct" }
       | { kind: "boolean"; falseValue?: unknown; trueValue?: unknown }
       | { kind: "utf8CString"; nullable?: unknown }
+      | { kind: "errorChannel" }
       | undefined;
     if (resultProjection?.kind === "direct") {
       const handleResult = binding.result.type.kind === "nativeHandle";
@@ -2113,6 +2135,24 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid UTF-8 C-string result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "errorChannel") {
+      // The physical result carries the error object and nothing reaches the
+      // source, so it must be an unowned pointer paired with the contract that
+      // reads and releases it. Any other pairing would either strand the
+      // object or let a foreign pointer become a source value.
+      const error = binding.error as { kind: string };
+      if (
+        binding.result.type.kind !== "nativePointer" ||
+        !validNativePointer(binding.result.type) ||
+        binding.result.passMode !== "pointer" ||
+        binding.result.ownership.kind !== "value" ||
+        error.kind !== "errorHandle"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid error-channel result projection`,
           loc: moduleLoc,
         });
       }
@@ -3960,6 +4000,7 @@ function validateFunction(
           | { kind: "direct" }
           | { kind: "boolean" }
           | { kind: "utf8CString"; nullable?: unknown }
+          | { kind: "errorChannel" }
           | undefined;
         if (resultProjection?.kind === "direct") {
           if (
@@ -3994,6 +4035,14 @@ function validateFunction(
           e.type.kind !== "string"
         ) {
           err(`Native IR call ${e.binding} must project to string`, e.loc);
+        } else if (resultProjection?.kind === "errorChannel") {
+          // The error object never reaches the source, so the call is void.
+          if (e.type.kind !== "void") {
+            err(
+              `Native IR call ${e.binding} projects an error channel and must be void`,
+              e.loc,
+            );
+          }
         } else if (resultProjection?.kind !== "utf8CString") {
           err(`Native IR call ${e.binding} has no valid result projection`, e.loc);
         }

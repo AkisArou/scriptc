@@ -74,7 +74,12 @@ export interface NativeFrontendBinding {
   readonly error:
     | { readonly kind: "no-fail" }
     | { readonly kind: "errno"; readonly failureValue: string }
-    | { readonly kind: "nullable" };
+    | { readonly kind: "nullable" }
+    | {
+        readonly kind: "errorHandle";
+        readonly messageSymbol: string;
+        readonly releaseSymbol: string;
+      };
   readonly sourceCall:
     | { readonly kind: "function" }
     | { readonly kind: "constructor" }

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef struct NtsPadded {
@@ -176,6 +177,43 @@ int32_t nts_call_scoped(
 int32_t nts_fail_errno(int32_t error_number) {
   errno = error_number;
   return -1;
+}
+
+/* An opaque error object returned instead of raised, the shape GLib's GError
+ * takes once a generated adapter has absorbed its out-parameter. NULL is
+ * success. The live counter proves the runtime releases it exactly once,
+ * including when an exception is already pending. */
+typedef struct NtsFixtureError {
+  char *message;
+} NtsFixtureError;
+
+static int32_t nts_fixture_errors_live;
+
+NtsFixtureError *nts_error_handle_fail(int32_t code) {
+  if (code == 0) return NULL;
+  NtsFixtureError *error = malloc(sizeof *error);
+  if (error == NULL) abort();
+  static const char prefix[] = "fixture failure ";
+  size_t capacity = sizeof prefix + 16;
+  error->message = malloc(capacity);
+  if (error->message == NULL) abort();
+  snprintf(error->message, capacity, "%s%d", prefix, (int)code);
+  nts_fixture_errors_live += 1;
+  return error;
+}
+
+const char *nts_fixture_error_message(NtsFixtureError *error) {
+  return error->message;
+}
+
+void nts_fixture_error_free(NtsFixtureError *error) {
+  nts_fixture_errors_live -= 1;
+  free(error->message);
+  free(error);
+}
+
+int32_t nts_fixture_errors_outstanding(void) {
+  return nts_fixture_errors_live;
 }
 
 NtsSubscription *nts_subscription_create(

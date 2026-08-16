@@ -631,6 +631,39 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      id: "native-typescript.fixture.c-v1@0.0.0#error_handle_fail",
+      declaration: { module: nativePackage, name: "errorHandleFail" },
+      entry: { kind: "c-symbol", symbol: "nts_error_handle_fail" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: {
+        kind: "errorHandle",
+        messageSymbol: "nts_fixture_error_message",
+        releaseSymbol: "nts_fixture_error_free",
+      },
+      ...directSignature([
+        { name: "code", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: { kind: "errorChannel" },
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#fixture_errors_outstanding",
+      declaration: { module: nativePackage, name: "fixtureErrorsOutstanding" },
+      entry: { kind: "c-symbol", symbol: "nts_fixture_errors_outstanding" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "no-fail" },
+      ...directSignature([]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
       declaration: { module: nativePackage, name: "failErrno" },
       entry: { kind: "c-symbol", symbol: "nts_fail_errno" },
@@ -3219,6 +3252,58 @@ describe.each(["c", "llvm"] as const)(
         signal: run.signal,
         stderr: run.stderr.toString(),
       }).toEqual({ status: 94, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR error-object failures, %s backend",
+  (backend) => {
+    test("throws the object's message and releases it exactly once", async () => {
+      const outDir = join(scratch, `error-handle-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/error-handle.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("native error-handle frontend compile did not emit IR");
+      }
+      const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+      expect(validateModule(mod)).toEqual([]);
+      expect(mod.nativeBindings).toContainEqual(
+        expect.objectContaining({
+          id: "native-typescript.fixture.c-v1@0.0.0#error_handle_fail",
+          error: {
+            kind: "errorHandle",
+            messageSymbol: "nts_fixture_error_message",
+            releaseSymbol: "nts_fixture_error_free",
+          },
+        }),
+      );
+      const generated = readFileSync(
+        join(outDir, backend === "c" ? "error-handle.c" : "error-handle.ll"),
+        "utf8",
+      );
+      expect(generated).toContain("scr_native_throw_native_error");
+      expect(generated).toContain("nts_fixture_error_free");
+      // 42 only if the success path did not throw, the failure path threw the
+      // object's message, and the outstanding count returned to zero.
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
     });
   },
 );
