@@ -7925,26 +7925,36 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     const bothStr = left.type.kind === "string" && right.type.kind === "string";
     /* An exact native integer is a number in the checker's eyes and not one
      * here: it is the value a foreign ABI declared, kept at its own width so
-     * it can cross unchanged. The language's arithmetic is f64, and there is
-     * no conversion between the two, so `width < 100` on a gint reaches this
-     * switch and would otherwise be refused as "non-number" — which reads as
-     * nonsense against a declaration that says number. Naming the real
-     * situation costs one branch and saves the reader the whole hunt. */
+     * it can cross unchanged. This path is the JavaScript-number one, so an
+     * exact operand reaching it would otherwise be refused as "non-number",
+     * which reads as nonsense against a declaration that says number. What is
+     * actually true depends on the operator, and the two answers are
+     * different enough that one message for both would mislead. */
     const exactInteger = [left, right].find((operand) =>
       operand.type.kind === "nativeScalar" && operand.type.scalar !== "f64"
     );
-    const refuseExactInteger = (): never => {
+    const refuseExactInteger = (what: "arithmetic" | "ordering"): never => {
       const scalar = exactInteger?.type.kind === "nativeScalar"
         ? exactInteger.type.scalar
         : "";
       L.unsupported(
         "SC1043",
         expr,
-        `arithmetic and ordering on exact native integers ('${scalar}' keeps ` +
-          "the exact width a foreign ABI declared, which the language's f64 " +
-          "arithmetic does not share, and no conversion between them exists " +
-          "yet — such a value can be passed, stored, and compared with === " +
-          "or !==)",
+        what === "arithmetic"
+          /* +, -, *, &, |, ^ on two same-type exact integers are implemented;
+           * the frontend just reaches them only from a construction, which is
+           * what names the exact result type. Saying so turns a dead end into
+           * an edit. */
+          ? `bare arithmetic on exact native integers ('${scalar}' is not the ` +
+            "language's f64, so this is not the JavaScript-number operator — " +
+            "write the operation inside its exact type, as in " +
+            `\`(a + b) as ${scalar}\`, which lowers to exact wrapping ` +
+            "arithmetic)"
+          : `ordering exact native integers ('${scalar}' keeps the exact ` +
+            "width a foreign ABI declared, and comparison over that width is " +
+            "a future slice of the language profile: +, -, *, &, |, and ^ are " +
+            "implemented, <, <=, >, and >= are not, and there is no exact-to-" +
+            "number conversion to fall back on yet)",
       );
     };
 
@@ -7959,7 +7969,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
             type: STRING, loc,
           };
         }
-        if (exactInteger !== undefined) refuseExactInteger();
+        if (exactInteger !== undefined) refuseExactInteger("arithmetic");
         L.unsupported("SC1043", expr);
         break;
       case ts.SyntaxKind.MinusToken:
@@ -7967,7 +7977,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       case ts.SyntaxKind.SlashToken:
       case ts.SyntaxKind.PercentToken:
       case ts.SyntaxKind.AsteriskAsteriskToken: {
-        if (!bothNum && exactInteger !== undefined) refuseExactInteger();
+        if (!bothNum && exactInteger !== undefined) refuseExactInteger("arithmetic");
         if (!bothNum) L.unsupported("SC1043", expr);
         const binOp = op === ts.SyntaxKind.MinusToken ? "-"
           : op === ts.SyntaxKind.AsteriskToken ? "*"
@@ -8135,7 +8145,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           : op === ts.SyntaxKind.GreaterThanToken ? ">" : ">=";
         if (bothNum) return { kind: "bin", op: cmpOp, left, right, type: BOOL, loc };
         if (bothStr) return { kind: "strCmp", op: cmpOp, left, right, type: BOOL, loc };
-        if (exactInteger !== undefined) refuseExactInteger();
+        if (exactInteger !== undefined) refuseExactInteger("ordering");
         L.unsupported("SC1043", expr);
         break;
       }
