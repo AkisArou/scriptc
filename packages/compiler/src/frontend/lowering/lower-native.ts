@@ -207,17 +207,17 @@ function matchesNativeResultSource(
 /**
  * Why a native call's result did not match its declaration.
  *
- * Control-flow narrowing is the common cause and the least obvious one. After
- * `window.title = "Ready"`, TypeScript narrows every later read of
- * `window.title` to that literal, but the native getter still returns whatever
- * its declaration allows — the setter may normalise the value, and a nullable
- * getter may return null. Accepting the narrowed type would put a value the
- * callee can still produce into a slot that cannot hold it, so the call is
- * refused; saying so is the difference between a one-line fix and a hunt for a
- * compiler bug.
+ * Control-flow narrowing is the common cause and the least obvious one. A
+ * native getter returns whatever its declaration allows on every call — the
+ * setter may normalise the value, and a nullable getter may still return null
+ * — so a narrowed read would put a value the callee can produce into a slot
+ * that cannot hold it.
  *
- * The fix is at whatever narrowed the read, not at the read: a type annotation
- * on the destination does not widen the expression back.
+ * Two different things narrow a property read, and they need different fixes,
+ * so the message names both. A guard narrows the reads after it, and the fix
+ * is to read once into a local and test that. An assignment narrows every
+ * later read to what was assigned, and no local helps because the read itself
+ * is already narrowed — the value being assigned has to be widened instead.
  */
 function nativeResultMismatchReason(
   L: Lowerer,
@@ -232,11 +232,12 @@ function nativeResultMismatchReason(
   ) {
     return (
       "its result is declared 'string | null' but reads as " +
-      `'${mapped.kind === "string" ? "string" : "null"}' here, because ` +
-      "something narrowed it — assigning a literal to the same property is " +
-      "the usual cause. A native call cannot rely on narrowing: the callee " +
-      "still returns what its declaration allows. Widen whatever narrowed it, " +
-      "which is not the read itself"
+      `'${mapped.kind === "string" ? "string" : "null"}' here. A native call ` +
+      "cannot rely on control-flow narrowing: the callee returns what its " +
+      "declaration allows on every call. If a check narrowed it, read it once " +
+      "into a local and test that instead. If assigning to the same property " +
+      "narrowed it, widen the assigned value — no local helps there, because " +
+      "the read is already narrowed"
     );
   }
   void L;
