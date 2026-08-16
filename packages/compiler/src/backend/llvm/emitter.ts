@@ -7295,6 +7295,91 @@ class LlEmitter {
           releaseArguments();
           return { name: value, type: e.type };
         }
+        if (binding.result.projection.kind === "nullableHandle") {
+          /* Absence is a value: NULL becomes the union's null arm rather than
+           * a throw. A present object still goes through the identity map. */
+          if (
+            binding.result.type.kind !== "nativeHandle" ||
+            binding.result.ownership.kind !== "owned" ||
+            e.type.kind !== "union"
+          ) {
+            throw new Error(`llvm emitter bug: invalid nullable handle result in ${binding.id}`);
+          }
+          const destructor = this.nativeById.get(binding.result.ownership.destructor);
+          const definition = this.nativeTypesById.get(binding.result.type.typeId);
+          if (!destructor || definition?.kind !== "handle") {
+            throw new Error(`llvm emitter bug: incomplete nullable handle metadata in ${binding.id}`);
+          }
+          const handleType = { kind: "nativeHandle", typeId: definition.id } as const;
+          const arms = this.unionsById.get(e.type.unionId)?.arms;
+          const handleTag = arms?.findIndex((arm) =>
+            arm.kind === "nativeHandle" && arm.typeId === definition.id
+          ) ?? -1;
+          const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
+          if (handleTag < 0 || nullTag < 0) {
+            throw new Error(`llvm emitter bug: nullable handle result lacks handle/null arms in ${binding.id}`);
+          }
+          this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
+          this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
+          this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
+          this.declare(`declare void @scr_native_handle_abandon(ptr)`);
+          this.declare(`declare ptr @scr_native_handle_interned(ptr, ptr)`);
+          const prepared = B.tmp();
+          B.line(
+            `${prepared} = call ptr @scr_native_handle_prepare(` +
+              `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+              `ptr ${this.cstr(definition.nativeName)})`,
+          );
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          const cellSlot = B.slot();
+          B.entryAllocas.push(`${cellSlot} = alloca ptr ; nullable native handle cell`);
+          B.line(`store ptr null, ptr ${cellSlot}`);
+          const absentBlock = B.newLabel("native.handle.absent");
+          const presentBlock = B.newLabel("native.handle.present");
+          const reuseBlock = B.newLabel("native.handle.reuse");
+          const freshBlock = B.newLabel("native.handle.fresh");
+          const continuation = B.newLabel("native.handle.done");
+          const rawNull = B.tmp();
+          B.line(`${rawNull} = icmp eq ptr ${raw}, null`);
+          B.condBr(rawNull, absentBlock, presentBlock);
+          B.startBlock(absentBlock);
+          B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
+          B.br(continuation);
+          B.startBlock(presentBlock);
+          const existing = B.tmp();
+          B.line(
+            `${existing} = call ptr @scr_native_handle_interned(ptr @${
+              mangleNativeHandleTag(definition.id)
+            }, ptr ${raw})`,
+          );
+          const hasExisting = B.tmp();
+          B.line(`${hasExisting} = icmp ne ptr ${existing}, null`);
+          B.condBr(hasExisting, reuseBlock, freshBlock);
+          B.startBlock(reuseBlock);
+          B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
+          B.line(`call void @${destructor.entry.symbol}(ptr ${raw})`);
+          B.line(`store ptr ${existing}, ptr ${cellSlot}`);
+          B.br(continuation);
+          B.startBlock(freshBlock);
+          B.line(`call void @scr_native_handle_commit(ptr ${prepared}, ptr ${raw})`);
+          B.line(`store ptr ${prepared}, ptr ${cellSlot}`);
+          B.br(continuation);
+          B.startBlock(continuation);
+          const cell = B.tmp();
+          B.line(`${cell} = load ptr, ptr ${cellSlot}`);
+          const value = this.wrapNullable(
+            cell,
+            cell,
+            handleType,
+            handleTag,
+            e.type,
+            nullTag,
+          );
+          this.emitPendingCheck();
+          releaseArguments();
+          return value;
+        }
         if (binding.result.type.kind === "nativeHandle") {
           if (binding.result.ownership.kind !== "owned") {
             throw new Error(`llvm emitter bug: native handle result without ownership in ${binding.id}`);

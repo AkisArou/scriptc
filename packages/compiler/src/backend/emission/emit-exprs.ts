@@ -2539,6 +2539,71 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
+        if (binding.result.projection.kind === "nullableHandle") {
+          /* Absence is a value: NULL becomes the union's null arm rather than
+           * a throw, so a container with no child has answered rather than
+           * failed. A present object still goes through the identity map, so
+           * two reads of one object name one cell. */
+          if (
+            binding.result.type.kind !== "nativeHandle" ||
+            e.type.kind !== "union"
+          ) {
+            throw new Error(`emitter bug: nullable handle result is not a union in ${binding.id}`);
+          }
+          const definition = E.nativeTypesById.get(binding.result.type.typeId);
+          const destructor = binding.result.ownership.kind === "owned"
+            ? E.nativeById.get(binding.result.ownership.destructor)
+            : undefined;
+          if (definition?.kind !== "handle" || destructor === undefined) {
+            throw new Error(`emitter bug: incomplete nullable handle metadata in ${binding.id}`);
+          }
+          const arms = E.unionsById.get(e.type.unionId)?.arms;
+          const handleTag = arms?.findIndex((arm) =>
+            arm.kind === "nativeHandle" && arm.typeId === definition.id
+          ) ?? -1;
+          const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
+          if (handleTag < 0 || nullTag < 0) {
+            throw new Error(`emitter bug: nullable handle result lacks handle/null arms in ${binding.id}`);
+          }
+          const handleType = { kind: "nativeHandle", typeId: definition.id } as const;
+          const raw = `sc_t${E.tempCounter++}`;
+          const cell = `sc_t${E.tempCounter++}`;
+          const prepared = `sc_t${E.tempCounter++}`;
+          E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
+          E.line(`ScrNativeHandle *${cell} = NULL;`);
+          E.line(`if (${raw} != NULL) {`);
+          E.indent++;
+          E.line(`${cell} = scr_native_handle_interned(&${mangleNativeHandleTag(definition.id)}, ${raw});`);
+          E.line(`if (${cell} != NULL) {`);
+          E.indent++;
+          E.line(`${destructor.entry.symbol}(${raw});`);
+          E.indent--;
+          E.line("} else {");
+          E.indent++;
+          E.line(
+            `ScrNativeHandle *${prepared} = scr_native_handle_prepare(` +
+              `&${destructor.entry.symbol}, &${mangleNativeHandleTag(definition.id)}, ` +
+              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
+          );
+          E.line(`scr_native_handle_commit(${prepared}, ${raw});`);
+          E.line(`${cell} = ${prepared};`);
+          E.indent--;
+          E.line("}");
+          E.indent--;
+          E.line("}");
+          const adapters = vAdapters(handleType);
+          const present =
+            `scr_union_new_ref(${handleTag}, ${cell}, ` +
+            `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(handleType)})`;
+          const absent = E.unitInstanceRef(e.type.unionId, nullTag);
+          const result = E.newTemp(
+            e.type,
+            `${cell} != NULL ? ${present} : scr_union_retain(${absent})`,
+          );
+          E.emitPendingCheck();
+          releaseArguments();
+          return result;
+        }
         if (binding.result.type.kind === "nativeHandle") {
           if (binding.result.ownership.kind !== "owned") {
             throw new Error(`emitter bug: native handle result without ownership in ${binding.id}`);

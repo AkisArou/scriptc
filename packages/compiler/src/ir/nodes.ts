@@ -275,6 +275,9 @@ export type IrNativeResultProjection =
   | { kind: "direct" }
   | { kind: "boolean"; falseValue: string; trueValue: string }
   | { kind: "utf8CString"; nullable: boolean }
+  /** An owned handle the callee may report as absent, projected as a union of
+   * the handle and null. Absence is a value, not a failure. */
+  | { kind: "nullableHandle" }
   /** The physical result is the operation's error channel and yields no
    * source value. It is not a discarded result: the `errorHandle` contract
    * reads it for a message and releases it. Paired with that contract, which

@@ -2095,6 +2095,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "direct" }
       | { kind: "boolean"; falseValue?: unknown; trueValue?: unknown }
       | { kind: "utf8CString"; nullable?: unknown }
+      | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
       | undefined;
     if (resultProjection?.kind === "direct") {
@@ -2169,6 +2170,23 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid UTF-8 C-string result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "nullableHandle") {
+      /* An owned handle the callee may report as absent. Absence is a value,
+       * so the binding must not also claim NULL is a failure: the two contracts
+       * would disagree about the same pointer. */
+      const error = binding.error as { kind: string };
+      if (
+        binding.result.type.kind !== "nativeHandle" ||
+        binding.result.passMode !== "pointer" ||
+        binding.result.ownership.kind !== "owned" ||
+        binding.result.ownership.transfer !== "to-runtime" ||
+        error.kind !== "no-fail"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid nullable handle result projection`,
           loc: moduleLoc,
         });
       }
@@ -4054,6 +4072,7 @@ function validateFunction(
           | { kind: "direct" }
           | { kind: "boolean" }
           | { kind: "utf8CString"; nullable?: unknown }
+          | { kind: "nullableHandle" }
           | { kind: "errorChannel" }
           | undefined;
         if (resultProjection?.kind === "direct") {
@@ -4089,6 +4108,20 @@ function validateFunction(
           e.type.kind !== "string"
         ) {
           err(`Native IR call ${e.binding} must project to string`, e.loc);
+        } else if (resultProjection?.kind === "nullableHandle") {
+          /* Absence is a value, so the call answers with the handle or null. */
+          const unionId = e.type.kind === "union" ? e.type.unionId : null;
+          const arms = unionId === null ? undefined : unions.get(unionId)?.arms;
+          if (
+            arms?.length !== 2 ||
+            !arms.some((arm) => arm.kind === "nativeHandle") ||
+            !arms.some((arm) => arm.kind === "nullT")
+          ) {
+            err(
+              `Native IR call ${e.binding} must project to a handle or null`,
+              e.loc,
+            );
+          }
         } else if (resultProjection?.kind === "errorChannel") {
           // The error object never reaches the source, so the call is void.
           if (e.type.kind !== "void") {

@@ -196,6 +196,18 @@ function matchesNativeResultSource(
   if (binding.result.projection.kind === "errorChannel") {
     return mapped.kind === "void";
   }
+  /* An absent handle is a value, so the declaration is a union of the handle
+   * and null — the same shape a nullable string result takes. */
+  if (binding.result.projection.kind === "nullableHandle") {
+    const handle = binding.result.type;
+    if (handle.kind !== "nativeHandle" || mapped.kind !== "union") return false;
+    const handleArms = L.unions.get(mapped.unionId)?.arms;
+    return handleArms?.length === 2 &&
+      handleArms.some((arm) =>
+        arm.kind === "nativeHandle" && arm.typeId === handle.typeId
+      ) &&
+      handleArms.some((arm) => arm.kind === "nullT");
+  }
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;
