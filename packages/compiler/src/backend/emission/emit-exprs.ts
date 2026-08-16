@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -581,7 +581,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       }
       case "nativeStructGet": {
         const value = E.emitExpr(e.value);
-        return E.newTemp(e.type, `${value.name}.${mangleNativeField(e.field)}`);
+        /* A number-projected field reads as f64. C would widen implicitly,
+         * but the cast is the conversion the IR named, so it is written. */
+        const access = `${value.name}.${mangleNativeField(e.field)}`;
+        return E.newTemp(
+          e.type,
+          e.type.kind === "f64" ? `(double)${access}` : access,
+        );
       }
       case "boolLit":
         return E.newTemp(e.type, e.value ? "true" : "false");
@@ -2345,6 +2351,42 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               );
               return `${arg.name} ? ${trueValue} : ${falseValue}`;
             }
+            case "number": {
+              if (
+                parameter.type.kind !== "nativeScalar" ||
+                arg.type.kind !== "f64"
+              ) {
+                throw new Error(`emitter bug: invalid number parameter projection in ${binding.id}`);
+              }
+              /* A literal argument the emitter can re-prove in place needs no
+               * runtime check: the constant IS the converted value, which is
+               * exactly what a branded exact construction would have emitted. */
+              const source = e.args[parameter.projection.argument];
+              const proven = source?.kind === "numLit"
+                ? provenNumberLiteral(
+                    source.value,
+                    parameter.type.scalar,
+                    E.mod.nativeTarget?.pointerBits,
+                  )
+                : null;
+              if (proven !== null) {
+                return cNativeScalarLiteral(
+                  parameter.type,
+                  proven,
+                  E.mod.nativeTarget?.pointerBits,
+                );
+              }
+              /* The helper throws a catchable TypeError and yields 0 on an
+               * unconvertible value; the pending check unwinds before the
+               * native call can observe the placeholder. */
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(
+                `${cType(parameter.type)} ${raw} = ` +
+                  `scr_native_${parameter.type.scalar}_from_number(${arg.name}, ${operation});`,
+              );
+              E.emitPendingCheck();
+              return raw;
+            }
             case "utf8CString": {
               const sourceType = binding.arguments[parameter.projection.argument]!.type;
               if (sourceType.kind === "nullableString") {
@@ -2536,6 +2578,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           );
           const result = E.newTemp(e.type, `${raw.name} == ${trueValue}`);
           E.emitPendingCheck();
+          releaseArguments();
+          return result;
+        }
+        if (binding.result.projection.kind === "number") {
+          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "f64") {
+            throw new Error(`emitter bug: invalid number result projection in ${binding.id}`);
+          }
+          /* Exact widening: every value of an at-most-32-bit integer is a
+           * representable f64, so the cast is the whole conversion. */
+          const raw = E.newTemp(binding.result.type, call);
+          const result = E.newTemp(e.type, `(double)${raw.name}`);
+          if (callbacksMayThrow) E.emitPendingCheck();
           releaseArguments();
           return result;
         }

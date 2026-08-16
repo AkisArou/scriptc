@@ -51,6 +51,26 @@ export const IR_NATIVE_INTEGER_SCALARS = [
 ] as const;
 
 export type IrNativeIntegerScalar = (typeof IR_NATIVE_INTEGER_SCALARS)[number];
+
+/** The canonical decimal text of an f64 that provably inhabits `scalar`, or
+ * null when it does not (non-finite, fractional, or out of range) or cannot
+ * be judged. The emitters use a proven literal to elide the checked-number
+ * ingress entirely — the constant IS the converted value — and the frontend
+ * uses the same judgement to refuse a provably-invalid literal at compile
+ * time instead of deferring a certain failure to runtime. -0 proves as 0,
+ * the only integer zero a native slot has. */
+export function provenNumberLiteral(
+  value: number,
+  scalar: string,
+  pointerBits?: 32 | 64,
+): string | null {
+  const info = nativeIntegerInfo(scalar, pointerBits);
+  if (info === null) return null;
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
+  const exact = BigInt(value);
+  if (exact < info.min || exact > info.max) return null;
+  return exact.toString();
+}
 export type IrNativeScalar = IrNativeIntegerScalar | "f64";
 export type IrNativeIntegerBinOp = "+" | "-" | "*" | "&" | "|" | "^";
 
@@ -184,6 +204,10 @@ export type IrNativeCallbackArgumentType = {
     | IrNativeScalarType
     | IrNativeHandleType
     | { kind: "string" }
+    /** Exact widening of an at-most-32-bit integer payload slot into the
+     * source f64. The queued invocation stores the physical exact value; the
+     * widening happens when the delivery reads it back. */
+    | { kind: "f64" }
   )[];
   ret: IrNativeScalarType | { kind: "void" };
 };
@@ -263,6 +287,11 @@ export type IrNativeAbiType =
   | IrNativeContextType;
 export type IrNativeArgumentType =
   | IrNativeValueType
+  /** A plain JavaScript number crossing into a checked exact-integer slot.
+   * The physical parameter stays the exact scalar; the boundary conversion
+   * (finite, integral, in range — else a catchable TypeError) is the
+   * `number` parameter projection's contract. */
+  | { kind: "f64" }
   | { kind: "bool" }
   | { kind: "string" }
   | { kind: "nullableString" }
@@ -276,6 +305,14 @@ export type IrNativeArgumentType =
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
   | { kind: "boolean"; argument: number; falseValue: string; trueValue: string }
+  /** Checked JavaScript-number ingress into an exact integer slot of at most
+   * 32 bits. The source argument is f64; crossing requires finite, integral
+   * (trunc(v) == v), and in the slot's range, else a catchable TypeError at
+   * the boundary — the native boolean projection's mechanism. -0 crosses as
+   * integer zero. 64-bit and pointer-width slots are excluded: their range
+   * exceeds what an f64 carries injectively, which is what BigInt carriers
+   * are for. */
+  | { kind: "number"; argument: number }
   | { kind: "utf8CString"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
@@ -287,6 +324,10 @@ export type IrNativeParameterProjection =
 export type IrNativeResultProjection =
   | { kind: "direct" }
   | { kind: "boolean"; falseValue: string; trueValue: string }
+  /** Exact widening of an at-most-32-bit integer result into the source f64.
+   * Lossless for every representable value, so there is no failure path and
+   * validation requires the no-fail error contract. */
+  | { kind: "number" }
   | { kind: "utf8CString"; nullable: boolean }
   /** An owned handle the callee may report as absent, projected as a union of
    * the handle and null. Absence is a value, not a failure. */
@@ -993,7 +1034,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 18 as const;
+export const IR_VERSION = 19 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1160,6 +1201,11 @@ export interface IrNativeStructDef {
     name: string;
     type: IrNativeScalarType | IrNativeStructType;
     offset: number;
+    /** Source reads this at-most-32-bit integer field as a plain f64 number,
+     * widened exactly. Physical layout and construction are unchanged: a
+     * struct literal still supplies the exact field type, so nothing here
+     * loosens what may be written. */
+    projection?: "number";
   }[];
 }
 
@@ -4657,7 +4703,9 @@ export type IrExpr =
       kind: "nativeStructGet";
       value: IrExpr;
       field: string;
-      type: IrNativeScalarType | IrNativeStructType;
+      /** The field's exact type, or f64 when the field carries the number
+       * projection and the read widens. */
+      type: IrNativeScalarType | IrNativeStructType | { kind: "f64" };
       loc: SrcLoc;
     }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }

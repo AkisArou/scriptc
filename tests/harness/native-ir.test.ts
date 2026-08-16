@@ -79,6 +79,19 @@ const RETAINED_I32_CONTRACT = {
   postDisposal: "not-invoked",
   shutdown: "drain",
 } as const satisfies IrNativeCallbackContract;
+/* The checked-number surface: source sees plain f64 numbers; the physical
+ * slots stay the exact scalars, so every binding below reuses an existing C
+ * symbol. */
+const RETAINED_NUMBER_SOURCE = {
+  kind: "func",
+  params: [{ kind: "f64" }],
+  ret: { kind: "void" },
+} as const;
+const CALL_NUMBER_SOURCE = {
+  kind: "func",
+  params: [{ kind: "f64" }],
+  ret: nativeScalarType("i32"),
+} as const;
 const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
 const PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair32";
@@ -270,6 +283,25 @@ const COUNTER_MIDDLE_DEFINITION = {
   cycleCollection: "none",
   upcasts: [{ kind: "identity", target: COUNTER_BASE_ID }],
 } as const satisfies NativeFrontendInput["types"][number];
+const NUMBER_PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:number-pair32";
+const NUMBER_PAIR32 = { kind: "nativeStruct", typeId: NUMBER_PAIR32_ID } as const;
+/* Same physical layout and ABI as Pair32 under a distinct identity: the
+ * marker changes how source reads the fields, never what the bytes are. */
+const NUMBER_PAIR32_DEFINITION = {
+  kind: "struct",
+  id: NUMBER_PAIR32_ID,
+  declaration: { module: nativePackage, name: "NumberPair32" },
+  size: 8,
+  alignment: 4,
+  packing: "default",
+  triviallyCopyable: true,
+  destruction: "trivial",
+  abi: DIRECT_I64_AGGREGATE_ABI,
+  fields: [
+    { name: "first", type: I32, offset: 0, projection: "number" },
+    { name: "second", type: I32, offset: 4, projection: "number" },
+  ],
+} as const satisfies NativeFrontendInput["types"][number];
 const COUNTER_BASE_DEFINITION = {
   kind: "handle",
   id: COUNTER_BASE_ID,
@@ -336,6 +368,7 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "f64" }, type: NATIVE_F64 },
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
     { declaration: { module: nativePackage, name: "Pair32" }, type: PAIR32 },
+    { declaration: { module: nativePackage, name: "NumberPair32" }, type: NUMBER_PAIR32 },
     { declaration: { module: nativePackage, name: "PairF64" }, type: PAIR_F64 },
     { declaration: { module: nativePackage, name: "NestedPair32" }, type: NESTED_PAIR32 },
     { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
@@ -362,6 +395,7 @@ const localNativeInput: NativeFrontendInput = {
   types: [
     PADDED_DEFINITION,
     PAIR32_DEFINITION,
+    NUMBER_PAIR32_DEFINITION,
     PAIR_F64_DEFINITION,
     NESTED_PAIR32_DEFINITION,
     COUNTER_BASE_DEFINITION,
@@ -371,6 +405,142 @@ const localNativeInput: NativeFrontendInput = {
   ],
   exports: [],
   bindings: [
+    /* Checked-number flavors over the same identity symbols: source argument
+     * f64, physical slot exact, both directions projected. The i64 flavor is
+     * deliberately invalid — a fixture reaches it to pin the width fence. */
+    ...([
+      ["i32", "numberI32Identity", "nts_i32_identity"],
+      ["u32", "numberU32Identity", "nts_u32_identity"],
+      ["u8", "numberU8Identity", "nts_u8_identity"],
+      ["i16", "numberI16Identity", "nts_i16_identity"],
+      ["i64", "numberI64Identity", "nts_i64_identity"],
+    ] as const).map(([scalar, declaration, symbol]) => ({
+      id: `native-typescript.fixture.c-v1@0.0.0#number_${scalar}_identity`,
+      declaration: { module: nativePackage, name: declaration },
+      entry: { kind: "c-symbol" as const, symbol },
+      callingConvention: "c" as const,
+      variadic: false as const,
+      sourceCall: { kind: "function" as const },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "value", type: { kind: "f64" as const } }],
+      parameters: [{
+        name: "value",
+        type: nativeScalarType(scalar),
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: { kind: "number" as const, argument: 0 },
+      }],
+      result: {
+        type: nativeScalarType(scalar),
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: { kind: "number" as const },
+      },
+    })),
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#number_pair32_transform",
+      declaration: { module: nativePackage, name: "numberPair32Transform" },
+      entry: { kind: "c-symbol", symbol: "nts_pair32_transform" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([{
+        name: "value",
+        type: NUMBER_PAIR32,
+        passMode: "value",
+        ownership: { kind: "value" },
+      }]),
+      result: {
+        type: NUMBER_PAIR32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#subscribe_number",
+      declaration: { module: nativePackage, name: "subscribeNumber" },
+      entry: { kind: "c-symbol", symbol: "nts_subscription_create" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "nullable" },
+      arguments: [{
+        name: "callback",
+        type: RETAINED_NUMBER_SOURCE,
+        callback: RETAINED_I32_CONTRACT,
+      }],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: RETAINED_I32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: SUBSCRIPTION,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor:
+            "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#call_scoped_number",
+      declaration: { module: nativePackage, name: "callScopedNumber" },
+      entry: { kind: "c-symbol", symbol: "nts_call_scoped" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: CALL_NUMBER_SOURCE, callback: CALL_I32_CONTRACT },
+        { name: "value", type: { kind: "f64" } },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "call" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "call" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+        {
+          name: "value",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "number", argument: 1 },
+        },
+      ],
+      result: {
+        type: I32,
+        passMode: "value",
+        ownership: { kind: "value" },
+        projection: { kind: "number" },
+      },
+    },
     ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
       const type = nativeScalarType(scalar);
       return {
@@ -2730,6 +2900,128 @@ describe.each(["c", "llvm"] as const)("Native IR boolean projections, %s backend
       signal: null,
       stderr: "",
     });
+  });
+});
+
+describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s backend", (backend) => {
+  localFixtureTest("converts plain numbers at the boundary and widens results", async () => {
+    const outDir = join(scratch, `number-boundary-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-boundary.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("checked-number frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    expect(serializeModule(mod)).toContain('"kind": "number"');
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("widens number-projected callback payloads in both trampolines", async () => {
+    const outDir = join(scratch, `number-callback-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-callback.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      emitIr: true,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("elides the boundary check for proven literal arguments", async () => {
+    const outDir = join(scratch, `number-literal-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-literal.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "number-literal.c" : "number-literal.ll"),
+      "utf8",
+    );
+    /* Every call in the fixture passes a proven literal, so no conversion
+     * machinery may survive anywhere in the translation unit. */
+    if (backend === "c") {
+      expect(generated).not.toContain("_from_number(");
+    } else {
+      expect(generated).not.toContain("@llvm.trunc.f64");
+    }
+    expect(generated).not.toContain("scr_native_throw_number");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("refuses a literal argument no native value can hold", async () => {
+    const outDir = join(scratch, `number-literal-refused-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-literal-refused.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("an unrepresentable literal must not compile");
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        diagnostic.message.includes("which no 'u8' value represents")
+      ),
+    ).toBe(true);
+  });
+
+  localFixtureTest("refuses a number projection over a 64-bit slot", async () => {
+    const outDir = join(scratch, `number-fence-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-width-fence.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("the 64-bit number projection must not compile");
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        diagnostic.message.includes("invalid number projection")
+      ),
+    ).toBe(true);
   });
 });
 

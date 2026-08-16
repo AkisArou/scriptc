@@ -1338,6 +1338,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     nativeTypesById.set(definition.id, definition);
   }
+  /* The integer widths an f64 carries injectively, so widening to number is
+   * lossless and checked ingress has exactly-representable bounds. Pointer
+   * widths are excluded so the rule cannot change meaning across targets. */
+  const widenableScalars = new Set(["i8", "u8", "i16", "u16", "i32", "u32"]);
+  const widenableScalarType = (type: unknown): boolean =>
+    typeof type === "object" && type !== null &&
+    (type as { kind?: unknown }).kind === "nativeScalar" &&
+    widenableScalars.has(String((type as { scalar?: unknown }).scalar));
   const nativeStructLayout = (
     definition: IrNativeStructDef,
     active: Set<string>,
@@ -1359,7 +1367,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           : nested?.kind === "struct"
             ? nativeStructLayout(nested, active)
             : null;
-        if (field.name === "" || names.has(field.name) || fieldLayout === null) {
+        if (
+          field.name === "" || names.has(field.name) || fieldLayout === null ||
+          /* The number marker only means something where widening is
+           * lossless; on any other field it would promise a conversion the
+           * backends refuse to invent. */
+          (field.projection !== undefined &&
+            (field.projection !== "number" || !widenableScalarType(field.type)))
+        ) {
           errors.push({ message: `Native IR type "${definition.id}" has an invalid field "${field.name}"`, loc: moduleLoc });
         } else if (
           definition.alignment < fieldLayout.alignment ||
@@ -1466,7 +1481,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         (typeof parameter === "object" && parameter !== null &&
           ((parameter.kind === "nativeHandle" &&
             nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
-            parameter.kind === "string"))
+            parameter.kind === "string" ||
+            parameter.kind === "f64"))
       ) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null && result.kind === "void"));
@@ -1751,6 +1767,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       argumentNames.add(argument.name);
       if (
         argument.type.kind !== "bool" &&
+        argument.type.kind !== "f64" &&
         argument.type.kind !== "string" &&
         argument.type.kind !== "nullableString" &&
         argument.type.kind !== "nullableNativeHandle" &&
@@ -1777,6 +1794,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const projectionsByArgument = binding.arguments.map(() => ({
       direct: 0,
       boolean: 0,
+      number: 0,
       utf8CString: 0,
       utf8Data: 0,
       utf8ByteLength: 0,
@@ -1913,6 +1931,25 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           }
           break;
         }
+        case "number":
+          projectionCounts.number++;
+          /* The checked crossing has a defined answer only where the slot's
+           * whole range is exactly representable in f64: every width up to
+           * 32 bits. Wider or pointer-sized slots must use their exact
+           * carriers instead. */
+          if (
+            Object.keys(parameter.projection).sort().join(",") !==
+              "argument,kind" ||
+            sourceArgument.type.kind !== "f64" ||
+            !widenableScalarType(parameter.type) ||
+            parameter.ownership.kind !== "value"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid number projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
         case "utf8CString":
           projectionCounts.utf8CString++;
           if (
@@ -2049,6 +2086,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 ) return false;
                 continue;
               }
+              /* An f64 source over an at-most-32-bit integer slot is the exact
+               * widening the delivery performs when it reads the queued value.
+               * The width fence is load-bearing: widening a 64-bit payload
+               * would silently lose precision, so f64 over anything wider is
+               * structurally invalid rather than a lossy conversion. */
+              if (source.kind === "f64") {
+                if (!widenableScalarType(expected)) return false;
+                continue;
+              }
               if (!typeEquals(source, expected)) return false;
             }
             return projectedPhysical.size === parameter.type.signature.parameters.length &&
@@ -2095,6 +2141,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               projections.utf8ByteLength === 1)
           : argument.type.kind === "bool"
             ? projections.total === 1 && projections.boolean === 1
+            : argument.type.kind === "f64"
+              ? projections.total === 1 && projections.number === 1
             : argument.type.kind === "bytes"
               ? projections.total === 2 &&
                 projections.bytesData === 1 &&
@@ -2114,6 +2162,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const resultProjection = binding.result.projection as
       | { kind: "direct" }
       | { kind: "boolean"; falseValue?: unknown; trueValue?: unknown }
+      | { kind: "number" }
       | { kind: "utf8CString"; nullable?: unknown }
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
@@ -2168,6 +2217,22 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid boolean result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "number") {
+      /* Widening is lossless for every value of an at-most-32-bit integer, so
+       * a failure contract would have nothing to detect: the raw scalar the
+       * sentinel would compare is the value the source never sees. */
+      if (
+        Object.keys(resultProjection).length !== 1 ||
+        !widenableScalarType(binding.result.type) ||
+        binding.result.passMode !== "value" ||
+        binding.result.ownership.kind !== "value" ||
+        binding.error.kind !== "no-fail"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid number result projection`,
           loc: moduleLoc,
         });
       }
@@ -3073,7 +3138,12 @@ function validateFunction(
           : undefined;
         if (definition?.kind !== "struct") err(`nativeStructGet names undeclared type "${e.value.type.typeId}"`, e.loc);
         else if (field === undefined) err(`native struct ${definition.id} has no field "${e.field}"`, e.loc);
-        else if (!typeEquals(e.type, field.type)) err(`nativeStructGet ${definition.id}.${e.field} type mismatch`, e.loc);
+        else if (
+          !typeEquals(e.type, field.type) &&
+          /* A marked field reads as plain f64: the exact value widens when
+           * the read happens, so the expression type is the widened one. */
+          !(field.projection === "number" && e.type.kind === "f64")
+        ) err(`nativeStructGet ${definition.id}.${e.field} type mismatch`, e.loc);
         break;
       }
       case "strLit":
@@ -4091,6 +4161,7 @@ function validateFunction(
         const resultProjection = binding.result.projection as
           | { kind: "direct" }
           | { kind: "boolean" }
+          | { kind: "number" }
           | { kind: "utf8CString"; nullable?: unknown }
           | { kind: "nullableHandle" }
           | { kind: "errorChannel" }
@@ -4108,6 +4179,10 @@ function validateFunction(
         } else if (resultProjection?.kind === "boolean") {
           if (e.type.kind !== "bool") {
             err(`Native IR call ${e.binding} must project to boolean`, e.loc);
+          }
+        } else if (resultProjection?.kind === "number") {
+          if (e.type.kind !== "f64") {
+            err(`Native IR call ${e.binding} must project to a plain number`, e.loc);
           }
         } else if (
           resultProjection?.kind === "utf8CString" &&

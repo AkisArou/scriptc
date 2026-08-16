@@ -49,7 +49,14 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
         binding.error.kind !== "no-fail" ||
         binding.result.projection.kind === "boolean" ||
         (binding.result.projection.kind === "utf8CString" &&
-          !binding.result.projection.nullable)
+          !binding.result.projection.nullable) ||
+        /* A checked-number ingress throws before the call when the value is
+         * not an integral number in the slot's range. It is the one
+         * parameter projection that throws, so a caller needs the pending
+         * check even when the binding itself cannot fail. */
+        binding.parameters.some((parameter) =>
+          parameter.projection.kind === "number"
+        )
       )
       .map((binding) => binding.id),
   );

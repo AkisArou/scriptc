@@ -2110,13 +2110,18 @@ export class CEmitter {
           `  }`,
         );
         const handleCells: string[] = [];
-        const args = adapter.contract.sourceArguments.map((argument) => {
+        const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
           if (argument.kind !== "callback-parameter") {
             return `scr_native_handle_retain(sc_invocation->sc_owner)`;
           }
           const index = argument.parameter;
           if (copiedStrings.has(index)) {
             return `scr_str_retain(sc_invocation->sc_a${index})`;
+          }
+          /* A number-projected payload is stored exact and widens when the
+           * delivery reads it, so the queued value is lossless either way. */
+          if (adapter.source.params[sourceIndex]?.kind === "f64") {
+            return `(double)sc_invocation->sc_a${index}`;
           }
           const owned = ownedHandles.get(index);
           if (owned === undefined) return `sc_invocation->sc_a${index}`;
@@ -2177,11 +2182,14 @@ export class CEmitter {
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );
       const sourceType = adapter.source;
-      const args = adapter.contract.sourceArguments.map((argument) => {
+      const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
         if (argument.kind !== "callback-parameter") {
           throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
         }
-        return `sc_a${argument.parameter}`;
+        /* Same widening as the queued path, without the queue. */
+        return adapter.source.params[sourceIndex]?.kind === "f64"
+          ? `(double)sc_a${argument.parameter}`
+          : `sc_a${argument.parameter}`;
       });
       const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
       if (signature.result.kind === "void") {

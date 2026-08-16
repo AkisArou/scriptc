@@ -15,7 +15,7 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nativeIntegerInfo, typeEquals } from "../../ir/nodes.js";
+import { nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -192,6 +192,8 @@ function matchesNativeResultSource(
       typeEquals(mapped, binding.result.type);
   }
   if (binding.result.projection.kind === "boolean") return mapped.kind === "bool";
+  /* A widened result reads as an ordinary number. */
+  if (binding.result.projection.kind === "number") return mapped.kind === "f64";
   // An error channel yields no source value, so the declaration must be void.
   if (binding.result.projection.kind === "errorChannel") {
     return mapped.kind === "void";
@@ -547,6 +549,7 @@ function lowerNativeInvocation(
     }
     argumentNodes.splice(binding.sourceCall.receiverArgument, 0, receiver);
   }
+  refuseUnprovableNumberLiterals(L, binding, argumentNodes);
   const args = argumentNodes.map((argument, index) => {
     const expected = binding.arguments[index]!.type;
     if (
@@ -767,6 +770,58 @@ export function lowerNativeConstruct(L: Lowerer, expr: ts.NewExpression): IrExpr
   return lowerNativeInvocation(L, binding, symbol, args, null, L.typeOf(expr), loc);
 }
 
+/* The value of a numeric literal argument, seen through the parentheses and
+ * unary sign a caller may spell it with. Every literal spelling — decimal,
+ * hex, exponent, separator — reaches the emitter as the same folded double,
+ * so the frontend reads the folded value rather than the source text. */
+function numericLiteralValue(node: ts.Expression): number | null {
+  let expression = node;
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  let sign = 1;
+  if (
+    ts.isPrefixUnaryExpression(expression) &&
+    (expression.operator === ts.SyntaxKind.MinusToken || expression.operator === ts.SyntaxKind.PlusToken)
+  ) {
+    sign = expression.operator === ts.SyntaxKind.MinusToken ? -1 : 1;
+    expression = expression.operand;
+  }
+  if (!ts.isNumericLiteral(expression)) return null;
+  return sign * Number(expression.text);
+}
+
+/* A checked-number parameter converts at run time, but a literal argument is
+ * decided at compile time: either the emitters prove it and drop the check
+ * entirely, or no value of the native type can hold it and the call could
+ * only ever throw. A guaranteed throw is a program defect, so it is reported
+ * where the caller can fix it instead of being deferred to a TypeError. */
+function refuseUnprovableNumberLiterals(
+  L: Lowerer,
+  binding: NativeInputBinding,
+  argumentNodes: readonly ts.Expression[],
+): void {
+  for (const parameter of binding.parameters) {
+    if (parameter.projection.kind !== "number" || parameter.type.kind !== "nativeScalar") {
+      continue;
+    }
+    const node = argumentNodes[parameter.projection.argument];
+    if (node === undefined) continue;
+    const value = numericLiteralValue(node);
+    if (value === null) continue;
+    const pointerBits = L.nativeInput?.target.pointerBits;
+    if (pointerBits !== 32 && pointerBits !== 64) {
+      throw new Error("native frontend input has no valid target pointer width");
+    }
+    if (provenNumberLiteral(value, parameter.type.scalar, pointerBits) !== null) continue;
+    failSignature(
+      L,
+      binding,
+      `argument ${parameter.projection.argument + 1} is the literal ${String(value)}, ` +
+        `which no '${parameter.type.scalar}' value represents, so this call could only throw`,
+      locOf(node),
+    );
+  }
+}
+
 function exactIntegerLiteral(
   node: ts.Expression,
   target: IrNativeScalarType,
@@ -955,10 +1010,43 @@ export function lowerNativeStructAssertion(
   // Preserve JavaScript object-literal evaluation order. Backends may place
   // the resulting temporaries in physical-layout order only after every
   // initializer has been evaluated in source order.
-  const fields = [...initializers].map(([name, initializer]) => ({
-    name,
-    value: L.lowerExprExpecting(initializer, expectedFields.get(name)!.type),
-  }));
+  const fields = [...initializers].map(([name, initializer]) => {
+    const field = expectedFields.get(name)!;
+    /* A number-projected field is declared as plain `number`, so its
+     * initializer arrives as f64 and the exact expecting-path would refuse
+     * it. Construction still writes the exact field, so the initializer must
+     * be a provably in-range decimal literal — the same rule an exact scalar
+     * construction applies. */
+    if (field.projection === "number" && field.type.kind === "nativeScalar") {
+      const pointerBits = L.nativeInput?.target.pointerBits;
+      if (pointerBits !== 32 && pointerBits !== 64) {
+        throw new Error("native frontend input has no valid target pointer width");
+      }
+      const value = exactIntegerLiteral(initializer, field.type, pointerBits);
+      if (value === null) {
+        L.pushDiag(nativeConversionDiag(
+          target.typeId,
+          `field "${name}" reads as a plain number but is stored exactly, so ` +
+            "its initializer must be a provably in-range decimal number literal",
+          locOf(initializer),
+        ));
+        throw new PoisonError();
+      }
+      return {
+        name,
+        value: {
+          kind: "nativeScalarLit" as const,
+          value,
+          type: { ...field.type },
+          loc: locOf(initializer),
+        },
+      };
+    }
+    return {
+      name,
+      value: L.lowerExprExpecting(initializer, field.type),
+    };
+  });
   L.usesNativeTarget = true;
   L.useNativeType(target.typeId);
   return { kind: "nativeStructLit", fields, type: { ...target }, loc: locOf(expr) };
@@ -981,7 +1069,9 @@ export function lowerNativeStructFieldRead(
     kind: "nativeStructGet",
     value: L.lowerExpr(expr.expression),
     field: field.name,
-    type: { ...field.type },
+    /* A marked field reads as an ordinary number: the exact value widens at
+     * the read, so everything downstream is plain f64 arithmetic. */
+    type: field.projection === "number" ? { kind: "f64" } : { ...field.type },
     loc: locOf(expr),
   };
 }

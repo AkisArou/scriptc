@@ -1585,6 +1585,18 @@ void scr_native_throw_boolean(const char *operation) {
   free(msg);
 }
 
+void scr_native_throw_number(double value, const char *operation) {
+  /* The value rides in the message so a runtime failure is a fix rather than
+   * a hunt. %.17g round-trips every double exactly. */
+  static const char suffix[] = " requires an integral number in its native range, received ";
+  size_t cap = strlen(operation) + sizeof suffix + 32;
+  char *msg = malloc(cap);
+  if (!msg) scr_trap("scriptc: out of memory\n");
+  int len = snprintf(msg, cap, "%s%s%.17g", operation, suffix, value);
+  scr_throw_error_msg(SCR_ERR_TYPE, msg, (size_t)len);
+  free(msg);
+}
+
 /* Node on WINDOWS reports fs error paths ABSOLUTIZED and backslashed
  * (its fs binding hands the Windows API namespaced absolute paths and the
  * error keeps that spelling): open("no.bin") fails with "... open

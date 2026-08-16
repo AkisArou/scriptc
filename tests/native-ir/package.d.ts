@@ -108,6 +108,23 @@ export declare function createCounter(initialValue: i32): Counter;
 export declare function subscribe(
   callback: (value: i32) => void,
 ): Subscription;
+export declare function subscribeNumber(
+  callback: (value: number) => void,
+): Subscription;
+export declare function callScopedNumber(
+  callback: (value: number) => i32,
+  value: number,
+): number;
+export declare function numberI32Identity(value: number): number;
+export declare function numberU32Identity(value: number): number;
+export declare function numberU8Identity(value: number): number;
+export declare function numberI16Identity(value: number): number;
+export declare function numberI64Identity(value: number): number;
+export interface NumberPair32 {
+  readonly first: number;
+  readonly second: number;
+}
+export declare function numberPair32Transform(value: NumberPair32): NumberPair32;
 export declare function counterDestroyedCount(): i32;
 export declare function counterVerify(
   actualValue: i32,

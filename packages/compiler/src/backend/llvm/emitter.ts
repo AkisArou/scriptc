@@ -83,7 +83,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, type NativeCallbackAdapter } from "../native-callbacks.js";
@@ -1763,10 +1763,28 @@ class LlEmitter {
           const sourceType = adapter.source.params[sourceIndex]!;
           if (argument.kind === "callback-parameter") {
             const owned = ownedHandles.get(argument.parameter);
+            /* A number-projected payload is stored exact, so the load is at
+             * the physical type; typing it by the widened f64 source would be
+             * a wrong-typed load, not merely a missing cast. */
+            const physical = signature.parameters[argument.parameter];
+            const widensNumber = sourceType.kind === "f64" &&
+              physical?.kind === "nativeScalar";
+            const loadType = owned !== undefined
+              ? "ptr"
+              : widensNumber
+                ? this.llType(physical)
+                : this.llType(sourceType);
             defs.push(
               `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${physicalFieldBase + argument.parameter}`,
-              `  %source${sourceIndex} = load ${owned === undefined ? this.llType(sourceType) : "ptr"}, ptr %source${sourceIndex}.ptr`,
+              `  %source${sourceIndex} = load ${loadType}, ptr %source${sourceIndex}.ptr`,
             );
+            if (widensNumber) {
+              const signedScalars = new Set(["i8", "i16", "i32"]);
+              defs.push(
+                `  %source${sourceIndex}.wide = ${signedScalars.has(physical.scalar) ? "sitofp" : "uitofp"} ` +
+                  `${this.llType(physical)} %source${sourceIndex} to double`,
+              );
+            }
             if (owned !== undefined) {
               const definition = this.nativeTypesById.get(owned.typeId);
               if (definition?.kind !== "handle") {
@@ -1819,8 +1837,12 @@ class LlEmitter {
           const retained = argument.kind === "registration-owner" ||
             (argument.kind === "callback-parameter" &&
               copiedStrings.has(argument.parameter));
+          const widened = argument.kind === "callback-parameter" &&
+            sourceType.kind === "f64";
           callArgs.push(
-            `${this.llType(sourceType)} %source${sourceIndex}${retained ? ".retained" : ""}`,
+            `${this.llType(sourceType)} %source${sourceIndex}${
+              retained ? ".retained" : widened ? ".wide" : ""
+            }`,
           );
         });
         defs.push(
@@ -1926,15 +1948,29 @@ class LlEmitter {
         `  %fn = load ptr, ptr %fnp`,
       );
       const sourceType = adapter.source;
+      const widenLines: string[] = [];
       const callArgs = [
         "ptr %ctx",
         ...adapter.contract.sourceArguments.map((argument, index) => {
           if (argument.kind !== "callback-parameter") {
             throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
           }
-          return `${this.llType(sourceType.params[index]!)} %a${argument.parameter}`;
+          const sourceParam = sourceType.params[index]!;
+          const physical = signature.parameters[argument.parameter];
+          /* Same widening as the queued path, without the queue: %a{n} is
+           * physically typed, so an f64 source widens it before the call. */
+          if (sourceParam.kind === "f64" && physical?.kind === "nativeScalar") {
+            const signedScalars = new Set(["i8", "i16", "i32"]);
+            widenLines.push(
+              `  %a${argument.parameter}.wide = ${signedScalars.has(physical.scalar) ? "sitofp" : "uitofp"} ` +
+                `${this.llType(physical)} %a${argument.parameter} to double`,
+            );
+            return `double %a${argument.parameter}.wide`;
+          }
+          return `${this.llType(sourceParam)} %a${argument.parameter}`;
         }),
       ].join(", ");
+      defs.push(...widenLines);
       if (sourceType.ret.kind === "void") {
         defs.push(`  call void %fn(${callArgs})`, `  ret void`, `}`, ``);
       } else {
@@ -5390,9 +5426,21 @@ class LlEmitter {
         const layout = this.nativeStructLayout(e.value.type.typeId);
         const index = layout.fieldIndices.get(e.field);
         if (index === undefined) throw new Error(`llvm emitter bug: unknown native field ${e.field}`);
+        const field = layout.definition.fields.find((candidate) => candidate.name === e.field);
         const value = this.emitExpr(e.value);
         const result = B.tmp();
         B.line(`${result} = extractvalue ${this.llType(e.value.type)} ${value.name}, ${index}`);
+        /* A number-projected field extracts at its physical type and widens;
+         * typing the extract by the widened f64 would be an ill-typed module. */
+        if (e.type.kind === "f64" && field !== undefined && field.type.kind === "nativeScalar") {
+          const signedScalars = new Set(["i8", "i16", "i32"]);
+          const widened = B.tmp();
+          B.line(
+            `${widened} = ${signedScalars.has(field.type.scalar) ? "sitofp" : "uitofp"} ` +
+              `${this.llType(field.type)} ${result} to double`,
+          );
+          return { name: widened, type: e.type };
+        }
         return { name: result, type: e.type };
       }
       case "boolLit":
@@ -6970,6 +7018,85 @@ class LlEmitter {
             throw new Error(`llvm emitter bug: missing physical parameter in ${binding.id}`);
           }
           switch (parameter.projection.kind) {
+            case "number": {
+              if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "f64") {
+                throw new Error(`llvm emitter bug: invalid number parameter projection in ${binding.id}`);
+              }
+              /* A literal argument the emitter can re-prove in place needs no
+               * runtime check: the constant IS the converted value, which is
+               * exactly what a branded exact construction would have emitted.
+               * Kept in lockstep with the C backend's peephole. */
+              const source = e.args[parameter.projection.argument];
+              const proven = source?.kind === "numLit"
+                ? provenNumberLiteral(
+                    source.value,
+                    parameter.type.scalar,
+                    this.mod.nativeTarget?.pointerBits,
+                  )
+                : null;
+              if (proven !== null) {
+                callArgs.push(`${parameterType} ${proven}`);
+                break;
+              }
+              const bounds: Record<string, readonly [number, number, boolean]> = {
+                i8: [-128, 127, true],
+                u8: [0, 255, false],
+                i16: [-32768, 32767, true],
+                u16: [0, 65535, false],
+                i32: [-2147483648, 2147483647, true],
+                u32: [0, 4294967295, false],
+              };
+              const bound = bounds[parameter.type.scalar];
+              if (bound === undefined) {
+                throw new Error(`llvm emitter bug: number projection over ${parameter.type.scalar} in ${binding.id}`);
+              }
+              const [min, max, signed] = bound;
+              /* The two ordered comparisons reject NaN and both infinities
+               * along with out-of-range values; the trunc equality rejects
+               * fractions. The conversion is dominated by the checks, so
+               * fptosi/fptoui never sees an out-of-range value and never
+               * produces poison. On the throw path the pending check unwinds
+               * before the native call. */
+              this.declare("declare double @llvm.trunc.f64(double)");
+              this.declare("declare void @scr_native_throw_number(double, ptr)");
+              const ge = B.tmp();
+              const le = B.tmp();
+              const inRange = B.tmp();
+              const truncated = B.tmp();
+              const integral = B.tmp();
+              const ok = B.tmp();
+              B.line(`${ge} = fcmp oge double ${arg.name}, ${f64Lit(min)}`);
+              B.line(`${le} = fcmp ole double ${arg.name}, ${f64Lit(max)}`);
+              B.line(`${inRange} = and i1 ${ge}, ${le}`);
+              B.line(`${truncated} = call double @llvm.trunc.f64(double ${arg.name})`);
+              B.line(`${integral} = fcmp oeq double ${truncated}, ${arg.name}`);
+              B.line(`${ok} = and i1 ${inRange}, ${integral}`);
+              const convert = B.newLabel("native.number.convert");
+              const invalid = B.newLabel("native.number.invalid");
+              const done = B.newLabel("native.number.done");
+              B.condBr(ok, convert, invalid);
+              B.startBlock(invalid);
+              B.line(`call void @scr_native_throw_number(double ${arg.name}, ptr ${operation})`);
+              B.br(done);
+              B.startBlock(convert);
+              const converted = B.tmp();
+              /* The call-argument spelling may carry a sign-extension
+               * attribute (`i8 zeroext`); a conversion target and a phi type
+               * must be the bare integer type. */
+              const bare = this.llType(parameter.type);
+              B.line(
+                `${converted} = ${signed ? "fptosi" : "fptoui"} double ${arg.name} to ${bare}`,
+              );
+              B.br(done);
+              B.startBlock(done);
+              const value = B.tmp();
+              B.line(
+                `${value} = phi ${bare} [ ${converted}, %${convert} ], [ 0, %${invalid} ]`,
+              );
+              this.emitPendingCheck();
+              callArgs.push(`${parameterType} ${value}`);
+              break;
+            }
             case "boolean": {
               if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "bool") {
                 throw new Error(`llvm emitter bug: invalid boolean parameter projection in ${binding.id}`);
@@ -7344,6 +7471,24 @@ class LlEmitter {
           this.emitPendingCheck();
           releaseArguments();
           return value;
+        }
+        if (binding.result.projection.kind === "number") {
+          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "f64") {
+            throw new Error(`llvm emitter bug: invalid number result projection in ${binding.id}`);
+          }
+          /* Exact widening: every value of an at-most-32-bit integer is a
+           * representable f64, so one conversion is the whole projection. */
+          const signedScalars = new Set(["i8", "i16", "i32"]);
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          const value = B.tmp();
+          B.line(
+            `${value} = ${signedScalars.has(binding.result.type.scalar) ? "sitofp" : "uitofp"} ` +
+              `${this.llType(binding.result.type)} ${raw} to double`,
+          );
+          if (callbacksMayThrow) this.emitPendingCheck();
+          releaseArguments();
+          return { name: value, type: e.type };
         }
         if (binding.result.projection.kind === "boolean") {
           if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "bool") {

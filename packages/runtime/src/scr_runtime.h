@@ -793,6 +793,7 @@ int scr_native_errno_snapshot(void);
 void scr_native_throw_errno(int error_number, const char *operation);
 void scr_native_throw_null(const char *operation);
 void scr_native_throw_boolean(const char *operation);
+void scr_native_throw_number(double value, const char *operation);
 void scr_native_throw_native_error(const char *message, const char *operation);
 
 /* Exact Native IR integer arithmetic and bitwise operations. Work exclusively
@@ -841,6 +842,36 @@ SCR_NATIVE_UNSIGNED_OPS(uintptr_t, uintptr_t, usize)
 #undef SCR_NATIVE_UNSIGNED_OPS
 #undef SCR_NATIVE_SIGNED_BIN
 #undef SCR_NATIVE_UNSIGNED_BIN
+
+/* Checked JavaScript-number ingress into an exact integer slot. Only widths
+ * whose whole range is exactly representable in f64 get one, so the bounds
+ * below are exact doubles and the two ordered comparisons reject NaN and
+ * both infinities along with out-of-range values; the trunc equality rejects
+ * fractions. -0 passes — it is integral, in range, and converts to +0, which
+ * is the only integer zero a native slot has. The cast runs only after the
+ * checks, so it is never out of range and never UB. On failure the pending
+ * exception is set (a catchable TypeError) and 0 is returned; the caller must
+ * consult scr_exc_pending before using the value, exactly as it does after a
+ * throwing native call. */
+#define SCR_NATIVE_FROM_NUMBER(T, N, MIN_D, MAX_D)                     \
+  static inline T scr_native_##N##_from_number(double value,           \
+                                               const char *operation) {\
+    if (!(value >= MIN_D && value <= MAX_D) ||                         \
+        __builtin_trunc(value) != value) {                             \
+      scr_native_throw_number(value, operation);                       \
+      return (T)0;                                                     \
+    }                                                                  \
+    return (T)value;                                                   \
+  }
+
+SCR_NATIVE_FROM_NUMBER(int8_t, i8, -128.0, 127.0)
+SCR_NATIVE_FROM_NUMBER(uint8_t, u8, 0.0, 255.0)
+SCR_NATIVE_FROM_NUMBER(int16_t, i16, -32768.0, 32767.0)
+SCR_NATIVE_FROM_NUMBER(uint16_t, u16, 0.0, 65535.0)
+SCR_NATIVE_FROM_NUMBER(int32_t, i32, -2147483648.0, 2147483647.0)
+SCR_NATIVE_FROM_NUMBER(uint32_t, u32, 0.0, 4294967295.0)
+
+#undef SCR_NATIVE_FROM_NUMBER
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
 void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
