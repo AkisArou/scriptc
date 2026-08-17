@@ -28,6 +28,7 @@ import type {
   IrFfiCallbackParamClass,
   IrFfiCallbackParam,
   IrFfiImport,
+  IrFfiReleaseParam,
   IrFfiReturnClass,
   IrFfiValueParamClass,
   IrFunction,
@@ -38,8 +39,8 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
-import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
+import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { allocateFfiCallbackAdapters, hasRetainedFfiCallback, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -106,7 +107,10 @@ export function ffiNativeTypeC(
   }
 }
 
-function ffiCallbackNativeParamsC(callback: IrFfiCallbackParam["callback"], named: boolean): string[] {
+function ffiCallbackNativeParamsC(
+  callback: IrFfiCallbackParam["callback"] | IrFfiReleaseParam["callback"],
+  named: boolean,
+): string[] {
   return callback.params.flatMap((param, i): string[] => {
     if (isFfiContextParam(param)) return [`void *${named ? "sc_ctx" : ""}`.trim()];
     if (param === "string" || param === "bytes") {
@@ -119,7 +123,9 @@ function ffiCallbackNativeParamsC(callback: IrFfiCallbackParam["callback"], name
   });
 }
 
-function ffiCallbackPointerTypeC(callback: IrFfiCallbackParam["callback"]): string {
+function ffiCallbackPointerTypeC(
+  callback: IrFfiCallbackParam["callback"] | IrFfiReleaseParam["callback"],
+): string {
   const ret = ffiNativeTypeC(callback.returns);
   const params = ffiCallbackNativeParamsC(callback, false);
   return `${ret} (*)(${params.length > 0 ? params.join(", ") : "void"})`;
@@ -236,6 +242,11 @@ export class CEmitter {
    * pointers additionally get a distinct TLS context slot, so two
    * callbacks with the same signature never alias each other's closure. */
   readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
+  /** Module-level constant consulted per ffiCall: with a retained
+   * descriptor anywhere in the manifest, every native call is a
+   * pending-exception checkpoint (may-throw derives the same fact from
+   * the same helper). */
+  readonly ffiHasRetainedCallback: boolean;
   readonly globalsById = new Map<string, IrGlobal>();
   readonly unionsById = new Map<string, IrUnionDef>();
   /** Active optional-chain bind temps, by chain id (chainRecv reads). */
@@ -401,6 +412,7 @@ export class CEmitter {
     sourceText?: string,
   ) {
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
+    this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
@@ -719,7 +731,9 @@ export class CEmitter {
     );
     for (const entry of directFfiImports) {
       const params = entry.params.flatMap((param): string[] => {
-        if (isFfiCallbackParam(param)) return [ffiCallbackPointerTypeC(param.callback)];
+        if (isFfiCallbackParam(param) || isFfiReleaseParam(param)) {
+          return [ffiCallbackPointerTypeC(param.callback)];
+        }
         if (isFfiContextParam(param)) return ["void *"];
         switch (param) {
           case "f64":
@@ -847,20 +861,29 @@ export class CEmitter {
     // main freed them (observed use-after-free). scr_run_exit_listeners
     // is idempotent (scr_exit_ran), so the atexit becomes a no-op; the
     // code argument is the hint the failure reporters maintain — exactly
-    // what the atexit path would have passed.
+    // what the atexit path would have passed. With a retained FFI
+    // descriptor the inline call is required even with nothing to
+    // release: listeners must beat the atexit FFI ledger sweep (a
+    // listener may legitimately release or pump a registration), and
+    // only the inline call orders ahead of every atexit handler. Plain
+    // event programs with neither keep the atexit path, so their
+    // listener timing is unchanged.
     const needsRelease = refGlobals.length > 0 || fnValueProps.length > 0;
     const runExitListeners =
-      moduleUsesProcessEvents(this.mod) && needsRelease
+      moduleUsesProcessEvents(this.mod) && (needsRelease || this.ffiHasRetainedCallback)
         ? "scr_run_exit_listeners((double)scr_exit_code_hint_get()); "
         : "";
+    const exitCleanup = `${runExitListeners}${needsRelease ? "sc_release_globals(); " : ""}`;
     const releaseGlobals = needsRelease
       ? `  ${runExitListeners}sc_release_globals();`
-      : `  /* no refcounted globals */`;
+      : runExitListeners !== ""
+        ? `  ${runExitListeners.trim()}`
+        : `  /* no refcounted globals */`;
     const uncaught = (indent: string, releaseTop = false) => [
       `${indent}if (scr_exc_pending()) {`,
       `${indent}  scr_exc_print_uncaught();`,
       `${indent}  ${releaseTop ? "scr_promise_release(sc_top); " : ""}` +
-        `${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+        `${exitCleanup}return 1;`,
       `${indent}}`,
     ];
     out.push(
@@ -965,7 +988,7 @@ export class CEmitter {
             `  if (sc_loop_rejection) {`,
             `    scr_discard_unhandled_rejections();`,
             ...(asyncEntry ? [`    scr_promise_release(sc_top);`] : []),
-            `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+            `    ${exitCleanup}return 1;`,
             `  }`,
             ...(asyncEntry
               ? [
@@ -978,13 +1001,13 @@ export class CEmitter {
                   `    scr_promise_rethrow_top_level(sc_top);`,
                   `    scr_promise_release(sc_top);`,
                   `    scr_exc_print_uncaught();`,
-                  `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+                  `    ${exitCleanup}return 1;`,
                   `  }`,
                   `  scr_promise_release(sc_top);`,
                 ]
               : []),
             `  if (scr_report_unhandled_rejections()) {`,
-            `    ${needsRelease ? `${runExitListeners}sc_release_globals(); ` : ""}return 1;`,
+            `    ${exitCleanup}return 1;`,
             `  }`,
             ...(asyncEntry
               ? [
@@ -1740,12 +1763,12 @@ export class CEmitter {
     return adapter;
   }
 
-  /** C-callable trampolines for format-2/3 callbacks. The external callback
+  /** C-callable trampolines for format-2/3/4 callbacks. The external callback
    * ABI is scalar C, format-3 copy-in string/byte slots, plus an optional
    * exact-position context pointer; the internal side is scriptc's
    * (ScrClosure *env, params...) convention. A raw callback borrows its
    * closure through a distinct TLS slot for the dynamic extent of the outer
-   * call. */
+   * call, or a process-global slot for retained replace semantics. */
   emitFfiCallbackDefs(out: string[]): void {
     if (this.ffiCallbackAdapters.size === 0) return;
     for (const adapter of this.ffiCallbackAdapters.values()) {
@@ -1753,13 +1776,19 @@ export class CEmitter {
       if (adapter.tls !== null) {
         out.push(`static _Thread_local ScrClosure *${adapter.tls};`);
       }
+      if (adapter.global !== null) {
+        out.push(`static ScrClosure *${adapter.global};`);
+      }
+      if (adapter.table !== null) {
+        out.push(`static ScrFfiTable ${adapter.table};`);
+      }
       const nativeParams = ffiCallbackNativeParamsC(cb, true);
       const ret = ffiNativeTypeC(cb.returns);
       const contextParam = cb.params.findIndex(isFfiContextParam);
       out.push(
         `static ${ret} ${adapter.symbol}(${nativeParams.length > 0 ? nativeParams.join(", ") : "void"}) {`,
-        `  ScrClosure *sc_cb = ${contextParam >= 0 ? `(ScrClosure *)sc_ctx` : adapter.tls};`,
-        `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
+        `  ScrClosure *sc_cb = ${contextParam >= 0 ? `(ScrClosure *)sc_ctx` : adapter.tls ?? adapter.global};`,
+        `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its ${adapter.callback.lifetime === "call" ? "call-scoped" : "retained"} lifetime\\n");`,
       );
       const dummy = ffiCallbackDummyC(cb);
       out.push(`  if (scr_exc_pending()) ${cb.returns === "void" ? "return;" : `return ${dummy};`}`);
@@ -1816,11 +1845,24 @@ export class CEmitter {
         }
       });
       const call = `(${cFnPtrCast(ft)}sc_cb->fn)(sc_cb${scriptArgs.length ? `, ${scriptArgs.join(", ")}` : ""})`;
+      if (cb.lifetime === "retained") {
+        // The callback may unregister or replace its own descriptor. Hold
+        // one invocation reference so that dropping the table's last pin
+        // cannot free the executing closure or its captures mid-call.
+        out.push(`  scr_closure_retain(sc_cb);`);
+      }
       if (cb.returns === "void") {
-        out.push(`  ${call};`, `  return;`, `}`, ``);
+        out.push(
+          `  ${call};`,
+          ...(cb.lifetime === "retained" ? [`  scr_closure_release(sc_cb);`] : []),
+          `  return;`,
+          `}`,
+          ``,
+        );
         continue;
       }
       out.push(`  ${cDecl(ft.ret, "sc_result")} = ${call};`);
+      if (cb.lifetime === "retained") out.push(`  scr_closure_release(sc_cb);`);
       switch (cb.returns) {
         case "f64":
           out.push(`  return sc_result;`);

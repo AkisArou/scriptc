@@ -2,11 +2,12 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
+import { collectFfiRetainedOps, parseFfiCallbackKey } from "../ffi-callbacks.js";
 import { genResultThunkFor } from "./emit-async.js";
 
 function streamTypedRefCommitAdapter(
@@ -2131,7 +2132,32 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const arg = args[sourceIndex++]!;
           sourceArgs.set(abiIndex, arg);
           if (isFfiCallbackParam(param)) callbackArgs.set(param.callback.id, arg);
+          if (isFfiReleaseParam(param)) callbackArgs.set(param.callback.release, arg);
         });
+
+        const { registrations: retainedRegistrations, releases: retainedReleases } =
+          collectFfiRetainedOps<Temp>(entry, callbackArgs, (binding, id) => E.ffiCallbackAdapter(binding, id));
+
+        // Pin before registration. Raw retained descriptors are native
+        // singletons: the incoming closure is pinned (and an EMPTY slot
+        // armed) before the native set call, but a replaced registration
+        // stays live and dispatching until the call returns — a native
+        // setter may flush the outgoing callback one last time mid-replace.
+        // scr_ffi_commit_slot below repoints the slot and retires the
+        // superseded pins after the call.
+        for (const registration of retainedRegistrations) {
+          if (registration.global !== null) {
+            E.line(`scr_ffi_retain_slot(&${registration.table}, &${registration.global}, ${registration.callback.name});`);
+          } else {
+            E.line(`scr_ffi_retain(&${registration.table}, ${registration.callback.name});`);
+          }
+        }
+        // Validate releases BEFORE the native removal call runs: a bogus
+        // release traps without native code observing any side effect. The
+        // registration itself is unpinned only after the call returns.
+        for (const release of retainedReleases) {
+          E.line(`scr_ffi_require(&${release.table}, ${release.callback.name});`);
+        }
 
         // Raw C callback pointers carry no userdata. For the documented
         // call-scoped/same-thread policy, lend each one a distinct TLS
@@ -2151,6 +2177,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         entry.params.forEach((param, i) => {
           if (isFfiCallbackParam(param)) {
             const adapter = E.ffiCallbackAdapter(entry.name, param.callback.id);
+            nativeArgs.push(`&${adapter.symbol}`);
+            return;
+          }
+          if (isFfiReleaseParam(param)) {
+            const { binding, id } = parseFfiCallbackKey(param.callback.release);
+            const adapter = E.ffiCallbackAdapter(binding, id);
             nativeArgs.push(`&${adapter.symbol}`);
             return;
           }
@@ -2192,22 +2224,38 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`${saved.tls} = ${saved.previous.name};`);
           }
         };
-        const callbacksMayThrow = callbackArgs.size > 0;
+        const finishRetainedReleases = (): void => {
+          // Commit raw replacements first (repoint the slot, retire the
+          // superseded pins), then unpin explicit releases — the runtime
+          // disarms the slot itself when the released closure holds it.
+          for (const registration of retainedRegistrations) {
+            if (registration.global !== null) {
+              E.line(`scr_ffi_commit_slot(&${registration.table}, ${registration.callback.name});`);
+            }
+          }
+          for (const release of retainedReleases) {
+            E.line(`scr_ffi_release(&${release.table}, ${release.callback.name});`);
+          }
+        };
+        const callbacksMayThrow = callbackArgs.size > 0 || E.ffiHasRetainedCallback;
         switch (entry.returns) {
           case "void":
             E.line(`${call};${E.srcComment(e.loc)}`);
             restoreRawContexts();
+            finishRetainedReleases();
             if (callbacksMayThrow) E.emitPendingCheck();
             return { name: "", type: e.type };
           case "f64": {
             const result = E.newTemp(e.type, call);
             restoreRawContexts();
+            finishRetainedReleases();
             if (callbacksMayThrow) E.emitPendingCheck();
             return result;
           }
           case "bool": {
             const result = E.newTemp(e.type, `(${call} != 0)`);
             restoreRawContexts();
+            finishRetainedReleases();
             if (callbacksMayThrow) E.emitPendingCheck();
             return result;
           }
@@ -2216,6 +2264,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "i32": {
             const result = E.newTemp(e.type, `(double)${call}`);
             restoreRawContexts();
+            finishRetainedReleases();
             if (callbacksMayThrow) E.emitPendingCheck();
             return result;
           }
