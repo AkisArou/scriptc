@@ -469,3 +469,9 @@ int32_t nts_counter_verify(int32_t actual_value, int32_t actual_destroyed,
 int32_t nts_counter_value_or(NtsCounter *counter, int32_t fallback) {
   return counter == NULL ? fallback : nts_counter_value(counter);
 }
+
+/* The same, declared over the base of the handle hierarchy: an argument two
+ * identity upcasts below it has to widen on its way into the optional slot. */
+int32_t nts_counter_base_value_or(NtsCounter *counter, int32_t fallback) {
+  return counter == NULL ? fallback : nts_counter_value(counter);
+}

@@ -3732,6 +3732,24 @@ export class Lowerer {
           }
         }
       }
+      // A derived NATIVE HANDLE against a union with an ancestor arm
+      // (`Widget | null` receiving a Label): the declared identity upcast
+      // changes only the nominal type — the managed cell and its foreign
+      // pointer are the same value — so the handle widens into the nearest
+      // arm it upcasts to and wraps like any arm value. Nullable handle
+      // inputs are the reason this exists: without it a foreign API that
+      // accepts absence rejects every derived argument, which is most of
+      // them.
+      if (expr.type.kind === "nativeHandle") {
+        const armTag = this.nearestNativeHandleArm(expr.type.typeId, expected.unionId);
+        if (armTag !== null) {
+          const arm = this.unions.get(expected.unionId)!.arms[armTag]!;
+          this.useNativeType(expr.type.typeId);
+          if (arm.kind === "nativeHandle") this.useNativeType(arm.typeId);
+          const widened: IrExpr = { kind: "upcast", value: expr, type: arm, loc: expr.loc };
+          return { kind: "unionWrap", unionId: expected.unionId, tag: armTag, value: widened, type: expected, loc: expr.loc };
+        }
+      }
       // A width-coercible value against a union: coerce into the SINGLE
       // width-liftable arm, then wrap like any arm value (widthLiftPlan's
       // liftWrap — several candidate arms are ambiguous and decline).
@@ -6541,6 +6559,44 @@ export class Lowerer {
       }
     }
     return false;
+  }
+
+  /** The arm of `unionId` a handle of `typeId` widens into, or null.
+   *
+   * Nearest wins, measured in upcast edges, so `Label` entering
+   * `Widget | Label | null` takes the Label arm. Two arms the same distance
+   * away are ambiguous — the upcast graph is a DAG, so a handle can reach
+   * two unrelated ancestors in one step — and ambiguity declines rather than
+   * picking, leaving the union fence to say the flow was refused. */
+  nearestNativeHandleArm(typeId: string, unionId: string): number | null {
+    const def = this.unions.get(unionId);
+    if (!def) return null;
+    const armByTypeId = new Map<string, number>();
+    for (const [index, arm] of def.arms.entries()) {
+      if (arm.kind === "nativeHandle") armByTypeId.set(arm.typeId, index);
+    }
+    if (armByTypeId.size === 0) return null;
+    const visited = new Set<string>([typeId]);
+    let frontier = [typeId];
+    while (frontier.length > 0) {
+      const matched = frontier
+        .map((id) => armByTypeId.get(id))
+        .filter((index): index is number => index !== undefined);
+      if (matched.length === 1) return matched[0]!;
+      if (matched.length > 1) return null;
+      const next: string[] = [];
+      for (const id of frontier) {
+        const definition = this.nativeTypeDefsById.get(id);
+        if (definition?.kind !== "handle") continue;
+        for (const upcast of definition.upcasts) {
+          if (visited.has(upcast.target)) continue;
+          visited.add(upcast.target);
+          next.push(upcast.target);
+        }
+      }
+      frontier = next;
+    }
+    return null;
   }
 
   useNativeType(typeId: string): void {

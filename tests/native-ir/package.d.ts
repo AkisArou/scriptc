@@ -94,6 +94,13 @@ export interface Counter extends CounterMiddle {
 /* Accepts an optional counter: null is a valid argument, not a failure. */
 export declare function counterValueOr(counter: Counter | null, fallback: i32): i32;
 
+/* The same over the base of the hierarchy, so a derived handle widens into
+ * the optional slot rather than being refused by it. */
+export declare function counterBaseValueOr(
+  counter: CounterBase | null,
+  fallback: i32,
+): i32;
+
 export interface Subscription {
   emit(value: i32): i32;
   emitForeign(value: i32): i32;

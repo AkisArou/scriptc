@@ -1,6 +1,8 @@
 import {
+  counterBaseValueOr,
   counterValueOr,
   type Counter,
+  type CounterBase,
   type i32,
 } from "@native-typescript/scabi-c-v1-fixture";
 import { createNullableCounter, exit } from "scriptc-native-test";
@@ -18,6 +20,19 @@ function run(): i32 {
   const optional: Counter | null =
     counter.value() !== (0 as i32) ? counter : null;
   if (counterValueOr(optional, 99 as i32) !== direct) return 3 as i32;
+
+  /* The optional slot declared over the base of the hierarchy. A Counter is
+   * two identity upcasts below it, and an upcast changes only the nominal
+   * type — the managed cell and its pointer are the same value — so the
+   * argument widens into the arm rather than being refused by it. Without
+   * this every foreign API that accepts absence would reject every derived
+   * argument, which is most of them. */
+  if (counterBaseValueOr(counter, 99 as i32) !== direct) return 4 as i32;
+  if (counterBaseValueOr(null, 99 as i32) !== (99 as i32)) return 5 as i32;
+
+  // The widened value is the same cell: one call reads it through the base.
+  const base: CounterBase = counter;
+  if (base.value() !== direct) return 6 as i32;
 
   counter.dispose();
   return 42 as i32;

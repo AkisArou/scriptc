@@ -1417,6 +1417,39 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      /* The same optional slot declared over the base of the hierarchy: a
+       * Counter argument is two identity upcasts below the arm it has to
+       * take, which is the shape every nullable GObject input has. */
+      id: "native-typescript.fixture.c-v1@0.0.0#counter_base_value_or",
+      declaration: { module: nativePackage, name: "counterBaseValueOr" },
+      entry: { kind: "c-symbol", symbol: "nts_counter_base_value_or" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "counter", type: { kind: "nullableNativeHandle", typeId: COUNTER_BASE_ID } },
+        { name: "fallback", type: I32 },
+      ],
+      parameters: [
+        {
+          name: "counter",
+          type: COUNTER_BASE,
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "fallback",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 1 },
+        },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "native-typescript.fixture.c-v1@0.0.0#counter_value",
       declaration: { module: nativePackage, name: "CounterBase.value" },
       entry: { kind: "c-symbol", symbol: "nts_counter_value" },
