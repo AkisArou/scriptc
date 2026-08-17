@@ -59,7 +59,14 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           parameter.projection.kind === "number" &&
           parameter.type.kind === "nativeScalar" &&
           parameter.type.scalar !== "f64"
-        )
+        ) ||
+        /* Every handle argument is validated before the call: a disposed
+         * cell throws rather than letting a stale pointer cross. That makes
+         * any binding taking one a throwing call, which matters where the
+         * throw has to be noticed rather than where it happens — a handler
+         * that calls one inside a closure needs its caller to check, or the
+         * exception walks out past the `try` that meant to catch it. */
+        binding.parameters.some((parameter) => parameter.type.kind === "nativeHandle")
       )
       .map((binding) => binding.id),
   );
