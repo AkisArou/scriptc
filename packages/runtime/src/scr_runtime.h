@@ -582,6 +582,46 @@ typedef struct ScrStr {
 } ScrStr;
 
 ScrStr *scr_str_new(const char *bytes, size_t len); /* returns +1 */
+
+/* ── arbitrary-precision integers ───────────────────────────────────
+ * JavaScript's `bigint`: sign and magnitude, base 2^32, little-endian, and
+ * always normalized — no leading zero limb, and zero is the unique value
+ * with no limbs and no sign. Normalization is what makes equality
+ * structural. Values are immutable; every operation returns a new one at
+ * +1. See scr_bigint.c.
+ */
+typedef struct ScrBigInt {
+  size_t rc;
+  size_t len;
+  bool negative;
+  uint32_t limbs[];
+} ScrBigInt;
+
+ScrBigInt *scr_bigint_from_i64(int64_t value);              /* returns +1 */
+ScrBigInt *scr_bigint_from_u64(uint64_t magnitude, bool negative); /* +1 */
+/* `digits` is ASCII 0-9 with no sign and no separators — the shape a decimal
+ * literal has after the frontend has validated it. */
+ScrBigInt *scr_bigint_from_decimal(
+    const char *digits, size_t len, bool negative);         /* returns +1 */
+ScrBigInt *scr_bigint_retain(ScrBigInt *value);
+void scr_bigint_release(ScrBigInt *value);
+ScrBigInt *scr_bigint_add(const ScrBigInt *a, const ScrBigInt *b); /* +1 */
+ScrBigInt *scr_bigint_sub(const ScrBigInt *a, const ScrBigInt *b); /* +1 */
+ScrBigInt *scr_bigint_mul(const ScrBigInt *a, const ScrBigInt *b); /* +1 */
+ScrBigInt *scr_bigint_negate(const ScrBigInt *value);              /* +1 */
+int scr_bigint_compare(const ScrBigInt *a, const ScrBigInt *b);
+bool scr_bigint_equals(const ScrBigInt *a, const ScrBigInt *b);
+bool scr_bigint_is_zero(const ScrBigInt *value);
+/* The decimal form, written into a caller's buffer so the integers do not
+ * depend on the string type. `scr_bigint_format_capacity` is an upper bound
+ * on the bytes needed, sign included; `scr_bigint_format` returns the length
+ * written, or 0 when the buffer is smaller than that bound. */
+size_t scr_bigint_format_capacity(const ScrBigInt *value);
+size_t scr_bigint_format(const ScrBigInt *value, char *buffer, size_t capacity);
+double scr_bigint_to_double(const ScrBigInt *value);
+#ifdef SCR_RC_AUDIT
+long scr_bigint_live_count(void);
+#endif
 /* Copy one borrowed NUL-terminated C string into managed storage. NULL is
  * preserved so the generated result projection can apply its declared
  * nullable or contract-violation behavior. */
