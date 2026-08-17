@@ -4633,8 +4633,9 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // take the ordinary typed paths, but there is no static home for an
     // any-elemented array). Typed receivers keep their own lowerings.
     const recvTs = L.typeOf(access.expression);
+    const arrayReceiver = L.checker.isArrayType(recvTs);
     const anyArray =
-      L.checker.isArrayType(recvTs) &&
+      arrayReceiver &&
       ((L.checker.getTypeArguments(recvTs as ts.TypeReference)[0]?.flags ?? 0) &
         (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
     let recv: IrExpr;
@@ -4708,21 +4709,8 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // unimplemented methods throw a LOUD not-supported Error; names the
     // kind's prototype lacks throw Node's "x.y is not a function"; OBJ
     // receivers call the own member.
-    if (DYN_DISPATCH_METHODS.has(access.name.text) && !call.questionDotToken && !access.questionDotToken) {
-      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        L.unsupported("SC1090", call, "spread arguments in calls through 'unknown' values");
-      }
-      const args = call.arguments.map((a) => L.lowerExprExpecting(a, DYN));
-      return {
-        kind: "dynInvoke",
-        recv,
-        method: access.name.text,
-        calleeName: access.getText(),
-        args,
-        type: DYN,
-        loc: locOf(call),
-      };
-    }
+    const dispatched = lowerDynDispatchMethodCall(L, call, access, recv, arrayReceiver);
+    if (dispatched) return dispatched;
     // Names NO dyn-representable prototype declares: the member can only
     // be an OWN property, so "read the member, call it" IS Node's
     // semantics for every possible dyn value — `handlers.onDone(x)` on a
@@ -4833,6 +4821,42 @@ export const DYN_DISPATCH_METHODS = new Set([
   "request", "sendTrailers", "priority", "settings", "goaway", "ping",
   "additionalHeaders", "altsvc", "origin",
 ]);
+
+export function lowerDynDispatchMethodCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+  recv: IrExpr,
+  arrayReceiver: boolean,
+): IrExpr | null {
+  const method = access.name.text;
+  if (!DYN_DISPATCH_METHODS.has(method) || call.questionDotToken || access.questionDotToken) return null;
+  if (call.arguments.some((arg) => ts.isSpreadElement(arg))) {
+    L.unsupported("SC1090", call, "spread arguments in calls through 'unknown' values");
+  }
+  const predicate = method === "filter" && call.arguments[0]
+    ? L.lowerExpr(call.arguments[0])
+    : null;
+  if (arrayReceiver && predicate?.type.kind === "func" && predicate.type.ret.kind === "void") {
+    L.unsupported(
+      "SC1090",
+      call.arguments[0]!,
+      "'.filter()' with a void-returning predicate (the callback return value is erased before its truthiness can be tested)",
+    );
+  }
+  const args = call.arguments.map((arg, i) =>
+    i === 0 && predicate ? L.coerceInto(arg, predicate, DYN) : L.lowerExprExpecting(arg, DYN),
+  );
+  return {
+    kind: "dynInvoke",
+    recv,
+    method,
+    calleeName: access.getText(),
+    args,
+    type: DYN,
+    loc: locOf(call),
+  };
+}
 
 /** STR_METHODS ∪ the regex-form names, MINUS everything Array (or any
  * other dyn kind's prototype) also declares. */
