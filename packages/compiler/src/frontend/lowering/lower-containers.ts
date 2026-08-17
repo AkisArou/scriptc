@@ -9,7 +9,7 @@ import { ARRAY_METHODS, MAP_METHODS, SET_COMBINE_METHODS, SET_METHODS, STR_METHO
 import { droppableStatic, isRequireMainFilename, lowerDynObjectLiteral, probeLower, pureReemittable } from "./lower-exprs.js";
 import { forOfVarTarget, lowerDestructuringAssign } from "./lower-stmts.js";
 import { isJsSourceFile, locOf } from "../program.js";
-import { DYN_DISPATCH_METHODS, islandPrimitiveExit } from "./lower-calls.js";
+import { islandPrimitiveExit, lowerDynDispatchMethodCall } from "./lower-calls.js";
 import { typeKey } from "../types.js";
 import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
 
@@ -176,31 +176,8 @@ function lowerSplitLimitArg(L: Lowerer, node: ts.Expression | undefined, loc: Sr
       // ICE). Consumers validate the dyn result where a static type is
       // required (dynCheck — the member-read discipline).
       if (receiver.type.kind === "dyn") {
-        if (DYN_DISPATCH_METHODS.has(name) && !call.questionDotToken && !access.questionDotToken) {
-          if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-            L.unsupported("SC1090", call, "spread arguments in calls through 'unknown' values");
-          }
-          const predicate = name === "filter" ? L.lowerExpr(call.arguments[0]!) : null;
-          if (predicate?.type.kind === "func" && predicate.type.ret.kind === "void") {
-            L.unsupported(
-              "SC1090",
-              call.arguments[0]!,
-              "'.filter()' with a void-returning predicate (the callback return value is erased before its truthiness can be tested)",
-            );
-          }
-          const args = call.arguments.map((arg, i) =>
-            i === 0 && predicate ? L.coerceInto(arg, predicate, DYN) : L.lowerExprExpecting(arg, DYN),
-          );
-          return {
-            kind: "dynInvoke",
-            recv: receiver,
-            method: name,
-            calleeName: access.getText(),
-            args,
-            type: DYN,
-            loc,
-          };
-        }
+        const dispatched = lowerDynDispatchMethodCall(L, call, access, receiver, true);
+        if (dispatched) return dispatched;
         L.noLowering(
           `.${name} on an array value held in a checked-dynamic binding`,
           call,

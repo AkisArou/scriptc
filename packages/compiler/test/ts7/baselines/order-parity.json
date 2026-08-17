@@ -5586,6 +5586,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2684-filter-no-predicate-dyn.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2684-filter-no-predicate-dyn.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2684-fs-rename-abort.ts": {
    "order": [
     "<repo>/tests/corpus/2684-fs-rename-abort.ts"
