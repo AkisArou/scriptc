@@ -1596,6 +1596,17 @@ export function validateModule(mod: IrModule): IrValidationError[] {
        * and having two ways to spell one delivery would be worse than either.
        * Payloads are borrowed, because nothing outlives the answer. */
       if (candidate["synchronousReturn"] === true) {
+        /* Only values live for the call. A copied string or an interned
+         * handle payload belongs to the queued delivery that has to outlive
+         * the emission; here nothing does, and pretending otherwise would
+         * hand a handler a pointer the toolkit still owns. */
+        if (
+          !type.params.every((parameter) =>
+            parameter.kind === "f64" || validNativeScalar(parameter)
+          )
+        ) {
+          return false;
+        }
         return Object.keys(candidate).sort().join(",") ===
             "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
           validOwner &&
