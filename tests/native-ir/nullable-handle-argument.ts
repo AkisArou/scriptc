@@ -34,6 +34,14 @@ function run(): i32 {
   const base: CounterBase = counter;
   if (base.value() !== direct) return 6 as i32;
 
+  /* A whole union crossing into another: `Counter | null` re-tags into
+   * `CounterBase | null`, its handle arm widening as it goes. This is the
+   * shape a ternary has, so it is what an ordinary optional argument looks
+   * like once the value is computed rather than written at the call. */
+  if (counterBaseValueOr(optional, 99 as i32) !== direct) return 7 as i32;
+  const absent: Counter | null = counter.value() === (0 as i32) ? counter : null;
+  if (counterBaseValueOr(absent, 99 as i32) !== (99 as i32)) return 8 as i32;
+
   counter.dispose();
   return 42 as i32;
 }

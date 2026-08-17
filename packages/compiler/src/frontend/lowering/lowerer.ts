@@ -5211,7 +5211,13 @@ export class Lowerer {
     this.widthPlanning.add(key);
     try {
       const toT: IrType = { kind: "union", unionId: toId };
-      return from.arms.every((arm) => isUnitType(arm) || this.widthLiftPlan(arm, toT) !== null);
+      return from.arms.every((arm) =>
+        isUnitType(arm) || this.widthLiftPlan(arm, toT) !== null ||
+        // The handle-upcast route unionRetagHelper takes, so a probe and the
+        // helper it guards answer the same question.
+        (arm.kind === "nativeHandle" &&
+          this.nearestNativeHandleArm(arm.typeId, toId) !== null)
+      );
     } finally {
       this.widthPlanning.delete(key);
     }
@@ -5399,15 +5405,34 @@ export class Lowerer {
       const lp = this.widthLiftPlan(arm, toT);
       if (lp && lp.how === "liftWrap") lifts.set(i, lp);
     });
+    // Per-arm HANDLE UPCASTS: a native-handle arm with no identical
+    // destination arm takes the arm it identity-upcasts to (`Label | null`
+    // returning as `Widget | null`). Unlike a width lift this copies
+    // nothing — the upcast changes only the nominal type, so the managed
+    // cell and its foreign pointer cross unchanged — and ambiguity declines
+    // for the same reason it does there (nearestNativeHandleArm).
+    const upcasts = new Map<number, number>();
+    from.arms.forEach((arm, i) => {
+      if (
+        arm.kind !== "nativeHandle" || this.armTag(toId, arm) >= 0 ||
+        (trappable?.has(i) ?? false) || lifts.has(i)
+      ) {
+        return;
+      }
+      const tag = this.nearestNativeHandleArm(arm.typeId, toId);
+      if (tag !== null) upcasts.set(i, tag);
+    });
     // `trappable` extends the unit-arm rule to arms the CHECKER proved
     // away at the coercion site (narrowedRetagHelper): those may trap too.
     const ok = from.arms.every(
-      (arm, i) => this.armTag(toId, arm) >= 0 || isUnitType(arm) || (trappable?.has(i) ?? false) || lifts.has(i),
+      (arm, i) =>
+        this.armTag(toId, arm) >= 0 || isUnitType(arm) ||
+        (trappable?.has(i) ?? false) || lifts.has(i) || upcasts.has(i),
     );
     if (!ok) return null;
     const mapping = from.arms.map((arm, i) => {
       const identity = this.armTag(toId, arm);
-      return identity >= 0 ? identity : (lifts.get(i)?.tag ?? -1);
+      return identity >= 0 ? identity : (lifts.get(i)?.tag ?? upcasts.get(i) ?? -1);
     });
     const stranded = mapping.flatMap((t, i) => (t < 0 ? [i] : []));
     // Lifts are a pure function of the (from, to) pair, so the historic
@@ -5457,9 +5482,17 @@ export class Lowerer {
         // destination arm and wraps (applyWidthLift — planned above, so
         // the interns cannot fail here); identity arms re-wrap the same
         // payload pointer.
+        const upcastArm = upcasts.has(i) ? to.arms[tag]! : null;
+        if (upcastArm !== null && arm.kind === "nativeHandle" && upcastArm.kind === "nativeHandle") {
+          this.useNativeType(arm.typeId);
+          this.useNativeType(upcastArm.typeId);
+        }
+        const widened: IrExpr = upcastArm === null
+          ? value
+          : { kind: "upcast", value, type: upcastArm, loc };
         const wrapped: IrExpr = lift
           ? this.applyWidthLift(lift, value, toT, loc)
-          : { kind: "unionWrap", unionId: toId, tag, value, type: toT, loc };
+          : { kind: "unionWrap", unionId: toId, tag, value: widened, type: toT, loc };
         then = [{ kind: "return", value: wrapped, loc }];
       }
       body.push({ kind: "if", cond, then, else_: null, loc });
