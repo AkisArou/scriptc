@@ -232,7 +232,15 @@ export type IrNativeCallbackArgumentType = {
      * widening happens when the delivery reads it back. */
     | { kind: "f64" }
   )[];
-  ret: IrNativeScalarType | { kind: "void" };
+  /** A handler's answer. An exact scalar answers with its own
+   * representation; `bool` answers with an ordinary TypeScript boolean over
+   * an ABI boolean's storage, carrying the two values that storage means, so
+   * a handler can say `return true` where a toolkit asks whether an event was
+   * consumed. */
+  ret:
+    | IrNativeScalarType
+    | { kind: "void" }
+    | { kind: "bool"; falseValue: string; trueValue: string };
 };
 
 export type IrNativeCallbackSourceArgument =

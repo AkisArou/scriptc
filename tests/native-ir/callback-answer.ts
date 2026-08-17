@@ -7,7 +7,11 @@
  * Nothing here is queued: the assertions after each ask see the answer and
  * the handler's writes immediately, which is the whole difference from the
  * delivered flavor. */
-import { askFor, type i32 } from "@native-typescript/scabi-c-v1-fixture";
+import {
+  answerWith,
+  askFor,
+  type i32,
+} from "@native-typescript/scabi-c-v1-fixture";
 import {
   callbacksConfigure,
   callbacksShutdown,
@@ -41,7 +45,19 @@ function runAnswers(): void {
   asker.dispose();
 }
 
+/* A handler can answer with an ordinary boolean, which is what a toolkit
+ * asking "did you consume this?" wants to hear. The emitter reads the exact
+ * storage value each answer means — 1 for true, 0 for false here. */
+function runBooleanAnswers(): void {
+  const answerer = answerWith((value): boolean => value > (0 as i32));
+  check(answerer.ask(3 as i32) === (1 as i32));
+  check(answerer.ask(-3 as i32) === (0 as i32));
+  check(answerer.asked() === (2 as i32));
+  answerer.dispose();
+}
+
 runAnswers();
+runBooleanAnswers();
 check(callbacksShutdown() === (1 as i32));
 
 exit(failures === (0 as i32) ? (42 as i32) : (1 as i32));

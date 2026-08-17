@@ -146,6 +146,8 @@ export interface Asker {
   dispose(): void;
 }
 export declare function askFor(callback: (value: i32) => i32): Asker;
+/* The same question answered with an ordinary boolean. */
+export declare function answerWith(callback: (value: i32) => boolean): Asker;
 
 export declare function subscribe(
   callback: (value: i32) => void,

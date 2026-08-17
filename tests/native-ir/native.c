@@ -228,6 +228,17 @@ void nts_asker_destroy(NtsAsker *asker) {
   free(asker);
 }
 
+/* The same registration reached through its own entry points, because two
+ * bindings cannot share one C symbol and the boolean flavor is a second
+ * binding over the same storage. */
+NtsAsker *nts_answerer_create(NtsAskCallback callback, void *context) {
+  return nts_asker_create(callback, context);
+}
+
+void nts_answerer_destroy(NtsAsker *asker) {
+  nts_asker_destroy(asker);
+}
+
 int32_t nts_fail_errno(int32_t error_number) {
   errno = error_number;
   return -1;

@@ -345,6 +345,17 @@ const ASK_I32_CONTRACT = {
   postDisposal: "not-invoked",
   shutdown: "drain",
 } as const satisfies IrNativeCallbackContract;
+/* The same question answered with an ordinary TypeScript boolean over the
+ * fixture's exact i32 storage — the shape a gboolean-returning signal takes,
+ * where a handler says whether it consumed an event. */
+const ASK_BOOL_SOURCE = {
+  ...ASK_I32_SOURCE,
+  ret: { kind: "bool", falseValue: "0", trueValue: "1" },
+} as const;
+const ASK_BOOL_CONTRACT = {
+  ...ASK_I32_CONTRACT,
+  cancellationBinding: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
+} as const satisfies IrNativeCallbackContract;
 const ASKER_DEFINITION = {
   kind: "handle",
   id: ASKER_ID,
@@ -1007,6 +1018,65 @@ const localNativeInput: NativeFrontendInput = {
         },
         projection: DIRECT_RESULT,
       },
+    },
+    {
+      /* The boolean flavor of the same registration, over the same C
+       * symbols: the handler answers true or false and the emitter reads the
+       * exact storage value each one means. */
+      id: "native-typescript.fixture.c-v1@0.0.0#answerer_create",
+      declaration: { module: nativePackage, name: "answerWith" },
+      entry: { kind: "c-symbol", symbol: "nts_answerer_create" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "nullable" },
+      arguments: [
+        { name: "callback", type: ASK_BOOL_SOURCE, callback: ASK_BOOL_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: ASK_I32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: ASKER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
+      declaration: { module: nativePackage, name: "Answerer.dispose" },
+      entry: { kind: "c-symbol", symbol: "nts_answerer_destroy" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        {
+          name: "asker",
+          type: ASKER,
+          passMode: "pointer",
+          ownership: { kind: "owned", transfer: "to-native" },
+        },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#asker_ask",

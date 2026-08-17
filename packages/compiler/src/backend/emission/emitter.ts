@@ -34,6 +34,7 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeScalarType,
   IrNativeCallbackSignature,
   IrNativeStructDef,
   IrStmt,
@@ -61,7 +62,7 @@ import {
   mangleVtSlot,
   mangleWrapper,
 } from "../mangle.js";
-import { cFnPtrCast, cType, releaseCallC, cStringLiteral, cDecl } from "./emit-types.js";
+import { cFnPtrCast, cNativeScalarLiteral, cType, releaseCallC, cStringLiteral, cDecl } from "./emit-types.js";
 import { computeMayThrow } from "./may-throw.js";
 import { dynDesc, unionTruthyHelper, unionEqHelper, unionToStrHelper, unionJoinHelper, jsonWriteHelper, jsonIndentHelper, dynMatchHelper, dynCheckHelper, dynFuncBoxHelper, dynToStrHelper, caughtToDynHelper, toDynHelper, recordKeyGetHelper, recordKeySetHelper } from "./emit-walkers.js";
 import { VtSlot, ClassMeta, emitStructDefs, vtEntriesFor, vtSlotParams, emitVtableDecls, emitVtableInstances, emitVtAdapterDefs, emitHierarchyClassHelpers, emitClassObjs, emitCtorThunkDefs, errorVtStampLines, emitterVtStampLines, streamVtStampLines, traceAdapterC, traceArgC, boxNewC, arrNewC } from "./emit-shapes.js";
@@ -2106,6 +2107,14 @@ export class CEmitter {
         });
         const call =
           `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+        /* A boolean answer is written into the physical result's own
+         * representation: the handler says yes or no, and the contract says
+         * which value each one is. */
+        const answer = sourceType.ret;
+        const answerType = answer.kind === "bool" ? "bool" : ret;
+        const answered = answer.kind === "bool"
+          ? `sc_answer ? ${cNativeScalarLiteral(signature.result as IrNativeScalarType, answer.trueValue, this.mod.nativeTarget?.pointerBits)} : ${cNativeScalarLiteral(signature.result as IrNativeScalarType, answer.falseValue, this.mod.nativeTarget?.pointerBits)}`
+          : "sc_answer";
         out.push(
           `static const unsigned char ${signatureId};`,
           `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
@@ -2120,13 +2129,13 @@ export class CEmitter {
           `      scr_callback_token_slot(sc_token),`,
           `      scr_callback_token_generation(sc_token), &${signatureId});`,
           `  if (sc_cb == NULL) return 0;`,
-          `  ${ret} sc_answer = ${call};`,
+          `  ${answerType} sc_answer = ${call};`,
           `  scr_closure_release(sc_cb);`,
           /* An exception stays pending and the toolkit gets the ABI zero: it
            * has no frame to unwind through, and the next runtime turn is
            * what reports an uncaught error either way. */
           `  if (scr_exc_pending()) return 0;`,
-          `  return sc_answer;`,
+          `  return ${answered};`,
           `}`,
           ``,
         );

@@ -1503,7 +1503,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             parameter.kind === "f64"))
       ) &&
       (validNativeScalar(result) ||
-        (typeof result === "object" && result !== null && result.kind === "void"));
+        (typeof result === "object" && result !== null &&
+          (result.kind === "void" ||
+            /* A boolean answer carries the two storage values it means, so
+             * the trampoline converts without consulting anything else. */
+            (result.kind === "bool" &&
+              Object.keys(result).sort().join(",") === "falseValue,kind,trueValue" &&
+              typeof result.falseValue === "string" &&
+              typeof result.trueValue === "string" &&
+              result.falseValue !== result.trueValue))));
   };
   const validNativeCallbackContract = (
     contract: unknown,
@@ -2146,8 +2154,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               if (abiOnlyScalar(expected)) return false;
               if (!typeEquals(source, expected)) return false;
             }
-            return projectedPhysical.size === parameter.type.signature.parameters.length &&
-              typeEquals(sourceArgument.type.ret, parameter.type.signature.result);
+            const answer = sourceArgument.type.ret;
+            /* A boolean answer is written into the physical result's own
+             * representation, so the two storage values must be exactly
+             * representable there — the same rule a boolean parameter
+             * projection follows on the way in. */
+            if (answer.kind === "bool") {
+              const storage = parameter.type.signature.result;
+              if (storage.kind !== "nativeScalar" || storage.scalar === "f64") {
+                return false;
+              }
+              const info = nativeIntegerInfo(storage.scalar, nativePointerBits);
+              if (info === null) return false;
+              for (const value of [answer.falseValue, answer.trueValue]) {
+                if (!/^-?(?:0|[1-9][0-9]*)$/.test(value) || value === "-0") return false;
+                const exact = BigInt(value);
+                if (exact < info.min || exact > info.max) return false;
+              }
+            } else if (!typeEquals(answer, parameter.type.signature.result)) {
+              return false;
+            }
+            return projectedPhysical.size === parameter.type.signature.parameters.length;
           })();
           if (
             !validNativeCallbackArgument(sourceArgument.type) ||

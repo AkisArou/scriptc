@@ -1796,9 +1796,14 @@ class LlEmitter {
             return `${this.llType(sourceParam)} %a${argument.parameter}`;
           }),
         ].join(", ");
+        /* A boolean answer is written into the physical result's own
+         * representation: the handler says yes or no, and the contract says
+         * which value each one is. */
+        const answer = sourceType.ret;
+        const answerType = answer.kind === "bool" ? "i1" : this.llType(answer);
         defs.push(
           ...widenLines,
-          `  %answer = call ${this.llType(sourceType.ret)} %fn(${callArgs})`,
+          `  %answer = call ${answerType} %fn(${callArgs})`,
           `  call void @scr_closure_release(ptr %cb)`,
           /* An exception stays pending and the toolkit gets the ABI zero: it
            * has no frame to unwind through, and the next runtime turn reports
@@ -1806,7 +1811,12 @@ class LlEmitter {
           `  %threw = call zeroext i1 @scr_exc_pending()`,
           `  br i1 %threw, label %skip, label %answered`,
           `answered:`,
-          `  ret ${rawRet} %answer`,
+          ...(answer.kind === "bool"
+            ? [
+                `  %answer.value = select i1 %answer, ${rawRet} ${answer.trueValue}, ${rawRet} ${answer.falseValue}`,
+                `  ret ${rawRet} %answer.value`,
+              ]
+            : [`  ret ${rawRet} %answer`]),
           `}`,
           ``,
         );
