@@ -79,6 +79,13 @@ int64_t nts_i64_identity(int64_t value) {
   return value;
 }
 
+/* The same identity under a second symbol. One C symbol carries one binding,
+ * so reading a 64-bit slot as a number while another binding reads it exactly
+ * needs an entry point of its own. */
+int64_t nts_i64_passthrough(int64_t value) {
+  return value;
+}
+
 uint64_t nts_u64_identity(uint64_t value) {
   return value;
 }

@@ -80,6 +80,23 @@ export function provenNumberLiteral(
  * any language. The validator enforces the restriction: an f32 slot is
  * reachable only through the number projection. */
 export type IrNativeScalar = IrNativeIntegerScalar | "f32" | "f64";
+
+/**
+ * Whether a double holds every value of `scalar`.
+ *
+ * This is the line the number projection turns on, in both directions. Up to
+ * 32 bits — and for either float — every value of the slot is a double, so
+ * egress is a cast that cannot fail. At 64 bits and pointer width there are
+ * values no double denotes, so egress is a checked conversion that throws
+ * where the round trip does not hold. Ingress is checked at every width and
+ * does not split: a double that is integral and in range converts exactly
+ * however wide the slot is.
+ */
+export function nativeScalarWidensToNumber(scalar: IrNativeScalar): boolean {
+  return scalar === "f32" || scalar === "f64" || scalar === "i8" ||
+    scalar === "u8" || scalar === "i16" || scalar === "u16" ||
+    scalar === "i32" || scalar === "u32";
+}
 /** The wrapping operations, which answer for every pair of operands, and the
  * trapping ones, which have pairs no value of the type can answer for: a zero
  * divisor, a signed minimum over -1, a shift count outside the width. The

@@ -84,7 +84,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
@@ -7765,6 +7765,20 @@ class LlEmitter {
             if (callbacksMayThrow) this.emitPendingCheck();
             releaseArguments();
             return { name: widened, type: e.type };
+          }
+          /* A 64-bit or pointer-width integer has values no double denotes,
+           * so the conversion is the runtime's checked one and throws where
+           * the round trip does not hold — the same helper the declared
+           * `toNumber` operation calls, so one definition answers for both. */
+          if (!nativeScalarWidensToNumber(binding.result.type.scalar)) {
+            const symbol = `scr_native_${binding.result.type.scalar}_to_number`;
+            const scalarType = this.llType(binding.result.type);
+            this.declare(`declare double @${symbol}(${scalarType})`);
+            const checked = B.tmp();
+            B.line(`${checked} = call double @${symbol}(${scalarType} ${raw})`);
+            this.emitPendingCheck();
+            releaseArguments();
+            return { name: checked, type: e.type };
           }
           const value = B.tmp();
           B.line(

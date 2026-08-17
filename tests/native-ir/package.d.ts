@@ -185,6 +185,11 @@ export declare function numberU32Identity(value: number): number;
 export declare function numberU8Identity(value: number): number;
 export declare function numberI16Identity(value: number): number;
 export declare function numberI64Identity(value: number): number;
+export declare function numberUsizeIdentity(value: number): number;
+
+/* Exact in, number out: reading a 64-bit slot as a number answers only when
+ * the double denotes the same integer, and throws otherwise. */
+export declare function wideToNumber(value: i64): number;
 export declare function numberF64Identity(value: number): number;
 export declare function numberF32Identity(value: number): number;
 export interface NumberPair32 {

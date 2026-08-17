@@ -1,7 +1,7 @@
 /* Cheap whole-module may-throw analysis (see computeMayThrow). Pure function
  * of the IR module; the emitter consults the result to place unwind checks. */
 import type { IrArrIntrinsicMethod, IrBytesIntrinsicMethod, IrLibFn, IrModule } from "../../ir/nodes.js";
-import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS, nativeIntegerOpTraps } from "../../ir/nodes.js";
+import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber } from "../../ir/nodes.js";
 
 /** Cheap may-throw analysis (cost discipline: functions that transitively
  * CANNOT throw pay for no pending-exception checks). A function may throw
@@ -60,6 +60,12 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           parameter.type.kind === "nativeScalar" &&
           parameter.type.scalar !== "f64"
         ) ||
+        /* A checked-number egress throws after the call when the value is one
+         * no double denotes. Only the widths that have such values check;
+         * anything a double holds exactly widens and cannot fail. */
+        (binding.result.projection.kind === "number" &&
+          binding.result.type.kind === "nativeScalar" &&
+          !nativeScalarWidensToNumber(binding.result.type.scalar)) ||
         /* Every handle argument is validated before the call: a disposed
          * cell throws rather than letting a stale pointer cross. That makes
          * any binding taking one a throwing call, which matters where the

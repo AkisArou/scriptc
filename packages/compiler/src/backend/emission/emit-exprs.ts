@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -537,13 +537,6 @@ const NATIVE_INTEGER_HELPERS: Record<string, string> = {
   "<<": "shl",
   ">>": "shr",
 };
-
-/** The scalars whose whole range is a double, so egress is a cast. */
-function nativeScalarWidensToNumber(scalar: string): boolean {
-  return scalar === "f32" || scalar === "f64" || scalar === "i8" ||
-    scalar === "u8" || scalar === "i16" || scalar === "u16" ||
-    scalar === "i32" || scalar === "u32";
-}
 
 export function emitBytesReceiver(E: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
   if (
@@ -2674,8 +2667,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           /* Exact widening: every value of an at-most-32-bit integer, and
            * every float, is a representable f64, so the cast is the whole
            * conversion. Egress is exact even where the matching ingress
-           * rounds. */
+           * rounds. Wider integers have values no double denotes, so they go
+           * through the checked helper and can throw where the round trip
+           * does not hold. */
           const raw = E.newTemp(binding.result.type, call);
+          if (!nativeScalarWidensToNumber(binding.result.type.scalar)) {
+            const checked = E.newTemp(
+              e.type,
+              `scr_native_${binding.result.type.scalar}_to_number(${raw.name})`,
+            );
+            E.emitPendingCheck();
+            releaseArguments();
+            return checked;
+          }
           const result = E.newTemp(e.type, `(double)${raw.name}`);
           if (callbacksMayThrow) E.emitPendingCheck();
           releaseArguments();

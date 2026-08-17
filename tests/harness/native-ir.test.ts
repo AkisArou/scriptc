@@ -503,14 +503,16 @@ const localNativeInput: NativeFrontendInput = {
   exports: [],
   bindings: [
     /* Checked-number flavors over the same identity symbols: source argument
-     * f64, physical slot exact, both directions projected. The i64 flavor is
-     * deliberately invalid — a fixture reaches it to pin the width fence. */
+     * f64, physical slot exact, both directions projected. The 64-bit and
+     * pointer-width flavors are the ones whose egress can fail — a double
+     * denotes every value of the narrower slots and only some of theirs. */
     ...([
       ["i32", "numberI32Identity", "nts_i32_identity"],
       ["u32", "numberU32Identity", "nts_u32_identity"],
       ["u8", "numberU8Identity", "nts_u8_identity"],
       ["i16", "numberI16Identity", "nts_i16_identity"],
       ["i64", "numberI64Identity", "nts_i64_identity"],
+      ["usize", "numberUsizeIdentity", "nts_usize_identity"],
       /* The double flavor: the slot IS the source representation, so the
        * projection converts nothing and can fail at nothing. The float
        * flavor is the one crossing that is not exact — ingress rounds to
@@ -540,6 +542,27 @@ const localNativeInput: NativeFrontendInput = {
         projection: { kind: "number" as const },
       },
     })),
+    {
+      /* Exact in, number out: the only way to hand the checked egress a value
+       * no double denotes, since a number ingress can only deliver ones that
+       * round-trip. */
+      id: "native-typescript.fixture.c-v1@0.0.0#wide_to_number",
+      declaration: { module: nativePackage, name: "wideToNumber" },
+      entry: { kind: "c-symbol", symbol: "nts_i64_passthrough" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "value", type: I64, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: I64,
+        passMode: "value",
+        ownership: { kind: "value" },
+        projection: { kind: "number" },
+      },
+    },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#number_pair32_transform",
       declaration: { module: nativePackage, name: "numberPair32Transform" },
@@ -3673,9 +3696,12 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
     ).toBe(true);
   });
 
-  localFixtureTest("refuses a number projection over a 64-bit slot", async () => {
-    const outDir = join(scratch, `number-fence-${backend}`);
-    const result = await compile(join(repoRoot, "tests/native-ir/number-width-fence.ts"), {
+  /* Local-only, like every other number-projection case: the parent's fixture
+   * manifest deliberately keeps its scalars exact, so the number flavors of
+   * these symbols exist only in this harness. */
+  localFixtureTest("carries a number over a 64-bit slot, checked in both directions", async () => {
+    const outDir = join(scratch, `number-wide-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/number-wide.ts"), {
       outDir,
       outPath: join(outDir, "program"),
       backend,
@@ -3684,13 +3710,15 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
       native: frontendNativeInput(),
       nativeLinkInputs: [fixtureObject(), supportObject()],
     });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("the 64-bit number projection must not compile");
-    expect(
-      result.diagnostics.some((diagnostic) =>
-        diagnostic.message.includes("invalid number projection")
-      ),
-    ).toBe(true);
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("the wide number projection failed to compile");
+    // 42 only if every ingress, egress, and refusal above answered.
+    const run = spawnSync(join(outDir, "program"));
+    expect({
+      status: run.status,
+      signal: run.signal,
+      stderr: run.stderr.toString(),
+    }).toEqual({ status: 42, signal: null, stderr: "" });
   });
 });
 

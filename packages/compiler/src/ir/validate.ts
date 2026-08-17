@@ -1358,10 +1358,28 @@ export function validateModule(mod: IrModule): IrValidationError[] {
    * here and nowhere else: an f32 has no literal, no arithmetic, and no
    * source type, so the number projection is its only door. */
   const widenableScalars = new Set(["f32", "f64", "i8", "u8", "i16", "u16", "i32", "u32"]);
-  const widenableScalarType = (type: unknown): boolean =>
+  /* Wider integers carry a number too, but not for free. Every value of a
+   * double or an at-most-32-bit integer IS a double, so those crossings are
+   * total; a 64-bit or pointer-width integer has values no double denotes, so
+   * its egress answers only when the round trip holds and throws otherwise.
+   * Ingress is checked at every width and needs no such split — a double that
+   * is integral and in range converts exactly however wide the slot is. */
+  const checkedWidenableScalars = new Set(["i64", "u64", "isize", "usize"]);
+  const scalarNameOf = (type: unknown): string | null =>
     typeof type === "object" && type !== null &&
-    (type as { kind?: unknown }).kind === "nativeScalar" &&
-    widenableScalars.has(String((type as { scalar?: unknown }).scalar));
+      (type as { kind?: unknown }).kind === "nativeScalar"
+      ? String((type as { scalar?: unknown }).scalar)
+      : null;
+  const widenableScalarType = (type: unknown): boolean => {
+    const scalar = scalarNameOf(type);
+    return scalar !== null && widenableScalars.has(scalar);
+  };
+  /** Every scalar a number position may name, whether its egress can fail. */
+  const numberCarryingScalarType = (type: unknown): boolean => {
+    const scalar = scalarNameOf(type);
+    return scalar !== null &&
+      (widenableScalars.has(scalar) || checkedWidenableScalars.has(scalar));
+  };
   const nativeStructLayout = (
     definition: IrNativeStructDef,
     active: Set<string>,
@@ -2005,7 +2023,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             Object.keys(parameter.projection).sort().join(",") !==
               "argument,kind" ||
             sourceArgument.type.kind !== "f64" ||
-            !widenableScalarType(parameter.type) ||
+            !numberCarryingScalarType(parameter.type) ||
             parameter.ownership.kind !== "value"
           ) {
             errors.push({
@@ -2314,13 +2332,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
     } else if (resultProjection?.kind === "number") {
-      /* Widening is lossless for every value of a double or an at-most-
-       * 32-bit integer, so a failure contract would have nothing to detect:
-       * the raw scalar the sentinel would compare is the value the source
-       * never sees. */
+      /* A failure contract would have nothing to detect either way: the raw
+       * scalar a sentinel would compare is the value the source never sees.
+       * What differs by width is whether the conversion itself can fail — at
+       * 64 bits and pointer width it throws where no double denotes the
+       * value — and that is a throw after the call rather than a failure of
+       * it. */
       if (
         Object.keys(resultProjection).length !== 1 ||
-        !widenableScalarType(binding.result.type) ||
+        !numberCarryingScalarType(binding.result.type) ||
         binding.result.passMode !== "value" ||
         binding.result.ownership.kind !== "value" ||
         binding.error.kind !== "no-fail"
