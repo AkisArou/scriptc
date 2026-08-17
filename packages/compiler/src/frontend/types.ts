@@ -1,6 +1,6 @@
 import * as ts from "./ts7/adapter.js";
 import type { IrRecordShape, IrType, IrUnionDef } from "../ir/nodes.js";
-import { arrayOf, BOOL, bytesOf, canConvertToDyn, CHILD_T, DATE_T, DYN, F64, funcOf, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/nodes.js";
+import { arrayOf, BIGINT, BOOL, bytesOf, canConvertToDyn, CHILD_T, DATE_T, DYN, F64, funcOf, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/nodes.js";
 
 import { isJsSourceFile, isNodeTypesPath } from "./program.js";
 import { accessorSlotProp } from "../ir/nodes.js";
@@ -415,6 +415,8 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
       return "Readable";
     case "procStream":
       return "WriteStream";
+    case "bigint":
+      return "bigint";
     case "promise":
       return `Promise<${formatIrType(t.inner, shapes, unions, seen)}>`;
     case "generator":
@@ -768,6 +770,12 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
 
   if (flags & ts.TypeFlags.Number) return F64;
   if (flags & ts.TypeFlags.String) return STRING;
+  /* `bigint` is its own value kind, never a native scalar: an exact `i64`
+   * is a fixed-width machine integer that wraps and a bigint is a
+   * mathematical one that does not. The exact carriers keep their branded
+   * declarations, which are `bigint & {…}` — an intersection, so they never
+   * reach this widened primitive test. */
+  if (flags & (ts.TypeFlags.BigInt | ts.TypeFlags.BigIntLiteral)) return BIGINT;
   if (flags & ts.TypeFlags.Boolean || flags & ts.TypeFlags.BooleanLiteral) return BOOL;
   // node:util.parseArgs config/results are declaration-heavy conditional
   // and discriminated-union types over a value that is naturally a checked-

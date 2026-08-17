@@ -633,6 +633,33 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const sym = E.internLiteral(e.value);
         return E.newTemp(e.type, retainCallC(e.type, `(ScrStr *)&${sym}`));
       }
+      case "bigIntLit": {
+        /* Built from its digits at each evaluation. A literal in a loop
+         * therefore allocates each time round, which interning would fix and
+         * correctness does not require — the value is immutable, so an
+         * interned one would be shared safely whenever that is worth doing. */
+        const digits = cStringLiteral(Buffer.from(e.digits, "utf8"));
+        return E.newTemp(
+          e.type,
+          `scr_bigint_from_decimal(${digits}, ${e.digits.length}, ` +
+            `${e.negative ? "true" : "false"})`,
+        );
+      }
+      case "bigIntToString": {
+        const value = E.emitExpr(e.value);
+        return E.newTemp(e.type, `scr_bigint_to_string(${value.name})`);
+      }
+      case "bigIntCompare": {
+        const left = E.emitExpr(e.left);
+        const right = E.emitExpr(e.right);
+        /* One comparison answers all six: the sign of the result is the
+         * ordering, and equality is that ordering being zero. */
+        const ordering = e.op === "===" ? "==" : e.op === "!==" ? "!=" : e.op;
+        return E.newTemp(
+          e.type,
+          `(scr_bigint_compare(${left.name}, ${right.name}) ${ordering} 0)`,
+        );
+      }
       case "unitLit":
         // unitLits are consumed inline by the unionWrap case (a unit arm is
         // tag-only); one reaching the generic dispatch escaped its wrap.
@@ -4115,6 +4142,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_parse_float(${arg(0)})`);
           case "num.fromString":
             return finish(`scr_string_to_number(${arg(0)})`);
+          // The number/bigint conversions (scr_bigint.c, throwing wrappers
+          // in scr_lib.c). Borrow; the bigint results are +1; the two
+          // BigInt() directions are in the may-throw seed set.
+          case "big.fromNumber":
+            return finish(`scr_bigint_from_number(${arg(0)})`);
+          case "big.fromString":
+            return finish(`scr_bigint_from_str(${arg(0)})`);
+          case "big.toNumber":
+            return finish(`scr_bigint_to_double(${arg(0)})`);
           case "num.isNaN":
             return finish(`(bool)isnan(${arg(0)})`);
           // The URI codecs (scr_string.c). Borrow; results +1. decode

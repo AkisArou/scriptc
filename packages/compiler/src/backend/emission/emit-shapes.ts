@@ -742,6 +742,9 @@ export interface ClassMeta {
       elem.kind === "child" || // spawned child handles: scr_child_* adapters, no trace
       elem.kind === "netServer" || // server handles: scr_net_server_* adapters, no trace
       elem.kind === "symbol" || // symbol identities: scr_sym_* adapters, no trace
+      // Bigints: scr_bigint_* adapters, no trace — an arbitrary-precision
+      // integer holds only limbs, so it can never be part of a cycle.
+      elem.kind === "bigint" ||
       elem.kind === "classval" || // class objects: no-op adapters, no trace (immortal statics)
       // Closures: scr_closure_* adapters + scr_closure_trace_v (always
       // cycle-headered — captures can reach back through boxes).
@@ -749,8 +752,16 @@ export interface ClassMeta {
       (elem.kind === "array" && E.traceAdapterC(elem) !== null);
     if (!useRef) return `scr_arr_new(${elemKindC(elem)}, ${capExpr})`;
     const v = vAdapters(elem);
-    return `scr_arr_new_ref(&${v.retain}, &${v.release}, ${E.traceArgC(elem)}, ${capExpr})`;
+    return `scr_arr_new_ref(&${v.retain}, &${v.release}, ${E.traceArgC(elem)}, ${elemEqArgC(elem)}, ${capExpr})`;
   }
+
+/** The element-equality predicate an array installs, or NULL for the
+ * pointer identity every OBJECT element compares by. A bigint element is a
+ * primitive that lives on the heap, so indexOf/includes must read its
+ * value — the one element type whose === is not its address. */
+export function elemEqArgC(elem: IrType): string {
+  return elem.kind === "bigint" ? "&scr_bigint_eq_v" : "NULL";
+}
 
 /** Box construction expression — object/record/union/promise boxes carry
    * their RC entry points (and the payload's trace) as function pointers
@@ -783,6 +794,8 @@ export interface ClassMeta {
       // Island handles: the box carries scr_jsval_retain_v/release_v and
       // no trace — the same stance as jsval array elements.
       t.kind === "jsval" ||
+      // Bigints: scr_bigint_retain_v/release_v, no trace (limbs only).
+      t.kind === "bigint" ||
       // Checked-dynamic captures (the mustCall wrapper closing over its
       // implicit-any `fn` param): the box carries scr_dyn_retain_v/
       // release_v and NO trace — a dyn tree is pure data except the

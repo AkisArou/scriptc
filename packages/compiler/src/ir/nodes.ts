@@ -435,6 +435,13 @@ export type IrType =
    * refcounted despite being truthy like every JS object. */
   | { kind: "date" }
   | { kind: "string" } // heap, refcounted, UTF-8
+  /** ES `bigint` — heap, refcounted, IMMUTABLE arbitrary-precision integer
+   * (ScrBigInt). It is a separate kind from every native scalar on purpose:
+   * an exact `i64` is a fixed-width machine value that wraps, and a bigint is
+   * a mathematical integer that does not, so the two can never be one type
+   * however alike their literals look. Mixing with `number` is a TypeError in
+   * JavaScript and a compile fence here. */
+  | { kind: "bigint" }
   | { kind: "bool" }
   | { kind: "array"; elem: IrType } // heap, refcounted, monomorphic elements
   /** ES `Map<K, V>` — heap, refcounted, insertion-ordered hash map with ONE
@@ -738,6 +745,7 @@ export function nativeHandleType(typeId: string): IrNativeHandleType {
 export const DATE_T: IrType = { kind: "date" };
 export const BYTES_U8: IrType = { kind: "bytes", elem: "u8" };
 export const STRING: IrType = { kind: "string" };
+export const BIGINT: IrType = { kind: "bigint" };
 export const BOOL: IrType = { kind: "bool" };
 export const REGEX: IrType = { kind: "regex" };
 export const URL_T: IrType = { kind: "url" };
@@ -929,6 +937,7 @@ export function typeKey(t: IrType): string {
     case "f64":
     case "date":
     case "string":
+    case "bigint":
     case "bool":
     case "regex":
     case "url":
@@ -1059,6 +1068,9 @@ export function isRefCounted(t: IrType): boolean {
     // Symbols are the same story: immutable identity values holding at
     // most two strings.
     t.kind === "symbol" ||
+    // Bigints likewise: immutable heap values holding only their own limbs,
+    // so they can never point back at anything and never form a cycle.
+    t.kind === "bigint" ||
     t.kind === "stats" ||
     t.kind === "fileHandle" ||
     t.kind === "spawnRes" ||
@@ -2579,6 +2591,18 @@ export type IrLibFn =
    * strings, and util.format %d over strings lower here. Borrows; never
    * throws. */
   | "num.fromString"
+  /** BigInt(x) and Number(b) — the two conversions across the number/bigint
+   * line, which JavaScript never performs implicitly because neither
+   * direction is total. `big.fromNumber` throws V8's RangeError on a
+   * fraction, a NaN, or an infinity; `big.fromString` throws V8's
+   * SyntaxError outside the StringToBigInt grammar (an empty or
+   * all-whitespace string is 0n, not an error). `big.toNumber` is total and
+   * round-to-nearest-even against the exact value — it is the direction that
+   * loses precision silently, exactly as Number(b) does in JavaScript.
+   * Borrow; refcounted results come back +1. */
+  | "big.fromNumber"
+  | "big.fromString"
+  | "big.toNumber"
   /** The static URI component codecs (scr_string.c), ECMA-262 Encode/
    * Decode with the component sets over the runtime's UTF-8 strings.
    * str.encodeUriComponent percent-encodes every byte outside the
@@ -4816,6 +4840,31 @@ export type IrExpr =
       loc: SrcLoc;
     }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
+  /** A `bigint` literal. `digits` is the magnitude in canonical decimal —
+   * ASCII 0-9, no sign, no separators, no leading zero — and `negative`
+   * carries the sign the source spelled, so the pair is one value with one
+   * spelling however the literal was written. */
+  | {
+      kind: "bigIntLit";
+      digits: string;
+      negative: boolean;
+      type: IrType;
+      loc: SrcLoc;
+    }
+  /** The decimal text of a bigint: what `String(x)`, a template hole, and
+   * `x.toString()` all produce. */
+  | { kind: "bigIntToString"; value: IrExpr; type: IrType; loc: SrcLoc }
+  /** Comparison between two bigints. `===`/`!==` compare values rather than
+   * addresses, which for a normalized representation is the same test the
+   * orderings use. */
+  | {
+      kind: "bigIntCompare";
+      op: "===" | "!==" | "<" | "<=" | ">" | ">=";
+      left: IrExpr;
+      right: IrExpr;
+      type: IrType;
+      loc: SrcLoc;
+    }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.
    * Valid ONLY as the immediate value of a `unionWrap` (the frontend's slot
@@ -6018,6 +6067,10 @@ function isJsonSafeAt(
     // validate (a JSON null matches exactly the nullT arm).
     case "nullT":
       return true;
+    /* `JSON.stringify(1n)` throws in JavaScript rather than producing a
+     * number or a string, and no JSON text can validate as one. */
+    case "bigint":
+      return false;
     default: {
       const _exhaustive: never = t;
       void _exhaustive;
@@ -7531,6 +7584,8 @@ export function moduleLibNondeterministicSurface(mod: IrModule): string | null {
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "big.fromNumber",
+  "big.fromString",
   "fetch.responseNew",
   "fetch.abortTimeout",
   "fetch.abortAny",

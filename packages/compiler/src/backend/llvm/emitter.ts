@@ -265,6 +265,11 @@ const LIB_FN_SYMS: Record<string, string> = {
   "num.parseInt": "scr_parse_int",
   "num.parseFloat": "scr_parse_float",
   "num.fromString": "scr_string_to_number",
+  // The BigInt()/Number() crossings: the two throwing directions are listed
+  // (the generic path runs the pending check for them).
+  "big.fromNumber": "scr_bigint_from_number",
+  "big.fromString": "scr_bigint_from_str",
+  "big.toNumber": "scr_bigint_to_double",
   "math.round": "scr_math_round",
   // decodeUriComponent is NOT here: it throws (MAY_THROW_LIB_FNS), so it
   // refuses by name like the rest of the throwing tier.
@@ -1308,6 +1313,7 @@ class LlEmitter {
       case "bool":
         return "i1";
       case "string":
+      case "bigint":
       case "array":
       case "record":
       case "union":
@@ -2454,10 +2460,11 @@ class LlEmitter {
       `%ScrClosure = type { ${this.sizeType}, ptr, ${this.sizeType}, ptr }`,
       `%ScrRegex = type { ${this.sizeType}, ptr, ptr, ptr }`,
       // ScrArr mirror { rc, len, cap, elem(i32+pad), elem_retain,
-      // elem_release, elem_trace, data } — the immortal tagged-template
-      // strings objects lay out through it (nothing GEPs into live heap
-      // arrays; those stay behind the runtime's own entry points).
-      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr }`,
+      // elem_release, elem_trace, elem_eq, data } — the immortal
+      // tagged-template strings objects lay out through it (nothing GEPs
+      // into live heap arrays; those stay behind the runtime's own entry
+      // points).
+      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr }`,
       // The runtime error prefix { rc, vt, name, message, code } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
       // builtin errors and classval loads GEP through these.
@@ -2573,7 +2580,7 @@ class LlEmitter {
       const n = inst.slots.length;
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data }`,
+        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr null, ptr @${inst.sym}_data }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
@@ -3883,6 +3890,15 @@ class LlEmitter {
         B.line(`${lenp} = getelementptr inbounds %ScrStr, ptr ${v.name}, i64 0, i32 1`);
         B.line(`${len} = load ${this.sizeType}, ptr ${lenp}`);
         B.line(`${t} = icmp ne ${this.sizeType} ${len}, 0`);
+        return t;
+      }
+      case "bigint": {
+        // 0n is the only falsy bigint — no NaN, no -0.
+        const zero = B.tmp();
+        const t = B.tmp();
+        this.declare("declare i1 @scr_bigint_is_zero(ptr)");
+        B.line(`${zero} = call i1 @scr_bigint_is_zero(ptr ${v.name})`);
+        B.line(`${t} = xor i1 ${zero}, true`);
         return t;
       }
       case "date":
@@ -5702,6 +5718,41 @@ class LlEmitter {
       case "strLit": {
         const sym = this.internLiteral(e.value);
         return this.own({ name: this.retainValue(sym, e.type), type: e.type });
+      }
+      case "bigIntLit": {
+        /* Built from its digits at each evaluation, as in the C backend: the
+         * value is immutable, so interning is an optimization rather than a
+         * correctness requirement. */
+        const digits = this.cstr(e.digits);
+        const result = this.B.tmp();
+        this.declare("declare ptr @scr_bigint_from_decimal(ptr, i64, i1)");
+        this.B.line(
+          `${result} = call ptr @scr_bigint_from_decimal(ptr ${digits}, ` +
+            `i64 ${e.digits.length}, i1 ${e.negative ? 1 : 0})`,
+        );
+        return this.own({ name: result, type: e.type });
+      }
+      case "bigIntToString": {
+        const value = this.emitExpr(e.value);
+        const result = this.B.tmp();
+        this.declare("declare ptr @scr_bigint_to_string(ptr)");
+        this.B.line(`${result} = call ptr @scr_bigint_to_string(ptr ${value.name})`);
+        return this.own({ name: result, type: e.type });
+      }
+      case "bigIntCompare": {
+        const left = this.emitExpr(e.left);
+        const right = this.emitExpr(e.right);
+        const ordering = this.B.tmp();
+        this.declare("declare i32 @scr_bigint_compare(ptr, ptr)");
+        this.B.line(
+          `${ordering} = call i32 @scr_bigint_compare(ptr ${left.name}, ptr ${right.name})`,
+        );
+        /* One comparison answers all six: the sign of the result is the
+         * ordering, and equality is that ordering being zero. */
+        const predicate = { "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge" }[e.op];
+        const result = this.B.tmp();
+        this.B.line(`${result} = icmp ${predicate} i32 ${ordering}, 0`);
+        return { name: result, type: e.type };
       }
       case "unitLit":
         // unitLits are consumed inline by the unionWrap case (a unit arm is
@@ -13424,8 +13475,8 @@ class LlEmitter {
         `  %next_cap = load ${this.sizeType}, ptr %next_cap_ptr`,
         `  store ${this.sizeType} %next_cap, ptr %target_cap_ptr`,
         `  store ${this.sizeType} %target_cap, ptr %next_cap_ptr`,
-        `  %target_data_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 7`,
-        `  %next_data_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 7`,
+        `  %target_data_ptr = getelementptr inbounds %ScrArr, ptr %target, i64 0, i32 8`,
+        `  %next_data_ptr = getelementptr inbounds %ScrArr, ptr %next, i64 0, i32 8`,
         `  %target_data = load ptr, ptr %target_data_ptr`,
         `  %next_data = load ptr, ptr %next_data_ptr`,
         `  store ptr %next_data, ptr %target_data_ptr`,

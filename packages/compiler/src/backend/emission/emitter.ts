@@ -2430,6 +2430,10 @@ export class CEmitter {
         // every kind; borrowed, never throws): `v || dflt` and condition
         // descent on checked-dynamic values.
         return `scr_dyn_truthy(${t.name})`;
+      case "bigint":
+        // ToBoolean on a bigint is `x !== 0n`, which is the one bit the
+        // normalized representation already carries.
+        return `(!scr_bigint_is_zero(${t.name}))`;
       case "undefinedT":
       case "nullT":
       case "caught":

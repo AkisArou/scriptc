@@ -173,6 +173,12 @@ export function vAdapters(host: ShapeHost, t: IrType): { retain: string; release
       host.declare(`declare ptr @scr_str_retain_v(ptr)`);
       host.declare(`declare void @scr_str_release_v(ptr)`);
       return { retain: "@scr_str_retain_v", release: "@scr_str_release_v" };
+    /* The bigint entry points are exported functions rather than static
+     * inlines, so they serve directly and need no `_v` shim. */
+    case "bigint":
+      host.declare(`declare ptr @scr_bigint_retain(ptr)`);
+      host.declare(`declare void @scr_bigint_release(ptr)`);
+      return { retain: "@scr_bigint_retain", release: "@scr_bigint_release" };
     case "array":
       host.declare(`declare ptr @scr_arr_retain_v(ptr)`);
       host.declare(`declare void @scr_arr_release_v(ptr)`);
@@ -346,6 +352,9 @@ export function releaseSym(host: ShapeHost, t: IrType): string {
     case "string":
       host.declare(`declare void @scr_str_release(ptr)`);
       return "@scr_str_release";
+    case "bigint":
+      host.declare(`declare void @scr_bigint_release(ptr)`);
+      return "@scr_bigint_release";
     case "array":
       host.declare(`declare void @scr_arr_release(ptr)`);
       return "@scr_arr_release";
@@ -535,6 +544,9 @@ export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): stri
     elem.kind === "record" || elem.kind === "object" || elem.kind === "union" || elem.kind === "func" ||
     elem.kind === "nativeHandle" ||
     elem.kind === "symbol" || // symbol identities: scr_sym_* adapters, no trace
+    // Bigints: scr_bigint_* adapters, no trace (limbs only), and a VALUE
+    // equality predicate — the one ref element whose === is not its address.
+    elem.kind === "bigint" ||
     elem.kind === "classval" || // class objects: no-op adapters, no trace (immortal statics)
     elem.kind === "promise" || // promise entries (Promise.all inputs): full REF story
     elem.kind === "child" || // spawned child handles: scr_child_* adapters, no trace
@@ -547,8 +559,10 @@ export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): stri
     return `call ptr @scr_arr_new(i32 ${elemKindNum(elem)}, ${host.sizeType} ${capText})`;
   }
   const v = vAdapters(host, elem);
-  host.declare(`declare ptr @scr_arr_new_ref(ptr, ptr, ptr, ${host.sizeType})`);
-  return `call ptr @scr_arr_new_ref(ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(host, elem)}, ${host.sizeType} ${capText})`;
+  const eq = elem.kind === "bigint" ? "@scr_bigint_eq_v" : "null";
+  if (elem.kind === "bigint") host.declare(`declare i1 @scr_bigint_eq_v(ptr, ptr)`);
+  host.declare(`declare ptr @scr_arr_new_ref(ptr, ptr, ptr, ptr, ${host.sizeType})`);
+  return `call ptr @scr_arr_new_ref(ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(host, elem)}, ptr ${eq}, ${host.sizeType} ${capText})`;
 }
 
 /* ── capture boxes ────────────────────────────────────────────────────── */

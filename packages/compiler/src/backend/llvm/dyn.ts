@@ -664,7 +664,7 @@ export class LlDyn {
             : [
                 { index: 1, type: host.sizeType, name: "length" },
                 { index: 2, type: host.sizeType, name: "capacity" },
-                { index: 7, type: "ptr" as const, name: "data" },
+                { index: 8, type: "ptr" as const, name: "data" },
               ];
           members.forEach((member) => {
             const cachedPtr = B.tmp();

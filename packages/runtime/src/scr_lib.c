@@ -5145,10 +5145,69 @@ ScrArr *scr_set_to_arr_ref(const ScrMap *s) {
   size_t n = (size_t)scr_map_iter_count(s);
   /* The elements' adapters ride from the set (no trace: handle elements
    * are acyclic by the set's own construction rule). */
-  ScrArr *out = scr_arr_new_ref(s->key_retain, s->key_release, NULL, (size_t)scr_map_size(s));
+  ScrArr *out = scr_arr_new_ref(s->key_retain, s->key_release, NULL, NULL, (size_t)scr_map_size(s));
   for (size_t i = 0; i < n; i++) {
     if (!scr_map_iter_live(s, (double)i)) continue;
     scr_arr_push_ref(out, scr_map_iter_key_ref(s, (double)i));
   }
   return out;
+}
+
+/* The decimal form as a runtime string. The integers themselves depend on
+ * nothing else in the runtime, so the bridge to the string type lives here
+ * rather than there — one place that knows both, instead of a layering the
+ * arithmetic has to carry. */
+ScrStr *scr_bigint_to_string(const ScrBigInt *value) {
+  /* Twenty digits covers every value a 64-bit slot can produce, which is the
+   * overwhelming majority; anything wider takes the heap for the moment it
+   * needs it. */
+  char inline_buffer[24];
+  size_t capacity = scr_bigint_format_capacity(value);
+  char *buffer = capacity <= sizeof inline_buffer
+      ? inline_buffer
+      : malloc(capacity);
+  if (!buffer) scr_trap("scriptc: out of memory\n");
+  size_t len = scr_bigint_format(value, buffer, capacity);
+  ScrStr *text = scr_str_new(buffer, len);
+  if (buffer != inline_buffer) free(buffer);
+  return text;
+}
+
+ScrBigInt *scr_bigint_from_number(double value) {
+  ScrBigInt *result = scr_bigint_from_double(value);
+  if (result) return result;
+  /* V8's wording, verbatim: the number is named with its own ToString so
+   * the message reads the way it does in Node. */
+  char digits[40];
+  size_t digits_len = scr_f64_to_str(value, digits);
+  static const char prefix[] = "The number ";
+  static const char suffix[] =
+      " cannot be converted to a BigInt because it is not an integer";
+  size_t len = sizeof prefix - 1 + digits_len + sizeof suffix - 1;
+  char *message = malloc(len + 1);
+  if (!message) scr_trap("scriptc: out of memory\n");
+  memcpy(message, prefix, sizeof prefix - 1);
+  memcpy(message + sizeof prefix - 1, digits, digits_len);
+  memcpy(message + sizeof prefix - 1 + digits_len, suffix, sizeof suffix - 1);
+  message[len] = '\0';
+  scr_throw_error_msg(SCR_ERR_RANGE, message, len);
+  free(message);
+  return NULL;
+}
+
+ScrBigInt *scr_bigint_from_str(const ScrStr *text) {
+  ScrBigInt *result = scr_bigint_parse(text->data, text->len);
+  if (result) return result;
+  static const char prefix[] = "Cannot convert ";
+  static const char suffix[] = " to a BigInt";
+  size_t len = sizeof prefix - 1 + text->len + sizeof suffix - 1;
+  char *message = malloc(len + 1);
+  if (!message) scr_trap("scriptc: out of memory\n");
+  memcpy(message, prefix, sizeof prefix - 1);
+  memcpy(message + sizeof prefix - 1, text->data, text->len);
+  memcpy(message + sizeof prefix - 1 + text->len, suffix, sizeof suffix - 1);
+  message[len] = '\0';
+  scr_throw_error_msg(SCR_ERR_SYNTAX, message, len);
+  free(message);
+  return NULL;
 }

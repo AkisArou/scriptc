@@ -125,6 +125,7 @@ function inspectSupport(L: Lowerer, t: IrType, visiting: Set<string>, out: { rec
   switch (t.kind) {
     case "f64":
     case "string":
+    case "bigint":
     case "bool":
     case "undefinedT":
     case "nullT":
@@ -261,6 +262,10 @@ function inspectExpr(
       return { kind: "libCall", fn: "insp.f64", args: [value], type: STRING, loc };
     case "string":
       return { kind: "libCall", fn: "insp.str", args: [value], type: STRING, loc };
+    case "bigint":
+      // Node's inspect keeps the literal's `n` suffix, which String() drops
+      // — the marker is what distinguishes 1n from 1 on a console line.
+      return { kind: "strConcat", left: { kind: "bigIntToString", value, type: STRING, loc }, right: str("n", loc), type: STRING, loc };
     case "bool":
       return { kind: "toString", operand: value, type: STRING, loc };
     case "undefinedT":

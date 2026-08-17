@@ -703,7 +703,7 @@ ScrArr *scr_emitter_event_names(ScrEmitter *em) {
  * divergence). */
 ScrArr *scr_emitter_listeners(ScrEmitter *em, ScrStr *name) {
   ScrArr *out = scr_arr_new_ref(&scr_closure_retain_v, &scr_closure_release_v,
-                                 &scr_closure_trace_v, 0);
+                                 &scr_closure_trace_v, NULL, 0);
   ScrEeBucket *b = em->reg ? scr_ee_bucket_find(em->reg, name->data, name->len) : NULL;
   if (b) {
     for (size_t i = 0; i < b->n; i++) {

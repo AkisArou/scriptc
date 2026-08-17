@@ -18,6 +18,7 @@
  */
 #include "scr_runtime.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -59,6 +60,15 @@ static ScrBigInt *scr_bigint_normalize(ScrBigInt *value) {
 ScrBigInt *scr_bigint_retain(ScrBigInt *value) {
   if (value) value->rc += 1;
   return value;
+}
+
+/* The void*-signature RC entry points every generic container needs: an
+ * array of bigints, a bigint capture box, and a bigint union arm all store
+ * the value behind a pointer whose struct the container cannot know. */
+void *scr_bigint_retain_v(void *p) { return scr_bigint_retain((ScrBigInt *)p); }
+void scr_bigint_release_v(void *p) { scr_bigint_release((ScrBigInt *)p); }
+bool scr_bigint_eq_v(const void *a, const void *b) {
+  return scr_bigint_equals((const ScrBigInt *)a, (const ScrBigInt *)b);
 }
 
 void scr_bigint_release(ScrBigInt *value) {
@@ -275,13 +285,204 @@ ScrBigInt *scr_bigint_from_decimal(
 }
 
 double scr_bigint_to_double(const ScrBigInt *value) {
-  /* Accumulating from the most significant limb down rounds once per step
-   * rather than once at the end, which is what a caller reading an
-   * approximate magnitude expects; an exact answer is the conversion's
-   * caller's business, not this function's. */
-  double result = 0.0;
-  for (size_t index = value->len; index > 0; index -= 1) {
-    result = result * 4294967296.0 + (double)value->limbs[index - 1];
+  /* ToNumber(bigint) is round-to-nearest-even against the exact value, so
+   * the conversion reads the top 54 bits at once — the 53 of the mantissa
+   * plus the guard — together with a sticky bit for everything below them.
+   * Accumulating limb by limb would round at every step and compound the
+   * error, which is how a naive conversion lands an ulp away from V8. */
+  if (value->len == 0) return 0.0;
+
+  uint32_t top = value->limbs[value->len - 1];
+  size_t top_bits = 0;
+  while (top != 0) {
+    top_bits += 1;
+    top >>= 1;
   }
-  return value->negative ? -result : result;
+  size_t bits = (value->len - 1) * 32 + top_bits;
+
+  double magnitude;
+  if (bits <= 53) {
+    uint64_t exact = 0;
+    for (size_t index = value->len; index > 0; index -= 1) {
+      exact = (exact << 32) | value->limbs[index - 1];
+    }
+    magnitude = (double)exact;
+  } else {
+    size_t drop = bits - 54;
+    uint64_t head = 0;
+    bool sticky = false;
+    for (size_t index = value->len; index > 0; index -= 1) {
+      uint64_t limb = value->limbs[index - 1];
+      size_t low = (index - 1) * 32; /* bit position of this limb's bit 0 */
+      if (low >= drop) {
+        head = (head << 32) | limb;
+      } else if (low + 32 <= drop) {
+        if (limb != 0) sticky = true;
+      } else {
+        size_t split = drop - low;
+        head = (head << (32 - split)) | (limb >> split);
+        if ((limb & ((((uint32_t)1) << split) - 1)) != 0) sticky = true;
+      }
+    }
+    uint64_t mantissa = head >> 1;
+    bool guard = (head & 1) != 0;
+    /* Ties go to even, which is why the sticky bit had to be carried: a
+     * tie is a guard bit with nothing under it. */
+    if (guard && (sticky || (mantissa & 1) != 0)) mantissa += 1;
+    magnitude = ldexp((double)mantissa, (int)(drop + 1));
+  }
+  return value->negative ? -magnitude : magnitude;
+}
+
+/* Multiplying by a power of two is a limb-and-bit move, not a general
+ * multiply: the double conversion below needs it and nothing else does. */
+static ScrBigInt *scr_bigint_shift_left(const ScrBigInt *value, size_t bits) {
+  if (value->len == 0) return scr_bigint_alloc(0);
+  size_t limb_shift = bits / 32;
+  size_t bit_shift = bits % 32;
+  size_t len = value->len + limb_shift + 1;
+  ScrBigInt *result = scr_bigint_alloc(len);
+  memset(result->limbs, 0, len * sizeof(uint32_t));
+  for (size_t index = 0; index < value->len; index += 1) {
+    uint64_t chunk = (uint64_t)value->limbs[index] << bit_shift;
+    result->limbs[index + limb_shift] |= (uint32_t)chunk;
+    result->limbs[index + limb_shift + 1] |= (uint32_t)(chunk >> 32);
+  }
+  result->negative = value->negative;
+  return scr_bigint_normalize(result);
+}
+
+ScrBigInt *scr_bigint_from_double(double value) {
+  /* BigInt(x) is exact or it is an error: a fraction, a NaN, and an
+   * infinity all have no integer to name, so they report failure to the
+   * caller that owns the throw rather than rounding silently. */
+  if (!isfinite(value) || value != floor(value)) return NULL;
+  bool negative = value < 0.0;
+  if (negative) value = -value;
+  if (value == 0.0) return scr_bigint_alloc(0);
+
+  int exponent = 0;
+  double fraction = frexp(value, &exponent); /* value == fraction * 2^exponent */
+  uint64_t mantissa = (uint64_t)ldexp(fraction, 53);
+  exponent -= 53;
+  /* An integral double divides by every power of two the negative exponent
+   * names, so shifting the mantissa down loses nothing. */
+  while (exponent < 0) {
+    mantissa >>= 1;
+    exponent += 1;
+  }
+
+  ScrBigInt *base = scr_bigint_from_u64(mantissa, false);
+  ScrBigInt *result = base;
+  if (exponent > 0) {
+    result = scr_bigint_shift_left(base, (size_t)exponent);
+    scr_bigint_release(base);
+  }
+  result->negative = negative && result->len != 0;
+  return result;
+}
+
+/* The non-decimal radixes the BigInt(string) grammar admits. Decimal keeps
+ * its own chunked path: a long decimal string is the common case and nine
+ * digits per multiply is worth the separate loop. */
+static ScrBigInt *scr_bigint_from_radix(
+    const char *digits, size_t len, uint32_t radix, bool negative) {
+  ScrBigInt *value = scr_bigint_alloc(0);
+  ScrBigInt *multiplier = scr_bigint_from_u64(radix, false);
+  for (size_t index = 0; index < len; index += 1) {
+    char c = digits[index];
+    uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0')
+        : c >= 'a' && c <= 'f' ? (uint32_t)(c - 'a') + 10
+        : (uint32_t)(c - 'A') + 10;
+    ScrBigInt *shifted = scr_bigint_mul(value, multiplier);
+    ScrBigInt *addend = scr_bigint_from_u64(digit, false);
+    ScrBigInt *sum = scr_bigint_add(shifted, addend);
+    scr_bigint_release(shifted);
+    scr_bigint_release(addend);
+    scr_bigint_release(value);
+    value = sum;
+  }
+  scr_bigint_release(multiplier);
+  value->negative = negative && value->len != 0;
+  return value;
+}
+
+/* The byte length of a JS WhiteSpace or LineTerminator code point at `p`, or
+ * zero. StringToBigInt trims the full Unicode set, not the ASCII five, so a
+ * non-breaking space in front of the digits parses the way it does in a
+ * browser rather than reporting a syntax error. */
+static size_t scr_bigint_space_len(const char *p, size_t remaining) {
+  unsigned char b0 = (unsigned char)p[0];
+  if (b0 == 0x20 || (b0 >= 0x09 && b0 <= 0x0D)) return 1;
+  if (remaining >= 2 && b0 == 0xC2 && (unsigned char)p[1] == 0xA0) return 2; /* U+00A0 */
+  if (remaining < 3) return 0;
+  unsigned char b1 = (unsigned char)p[1];
+  unsigned char b2 = (unsigned char)p[2];
+  if (b0 == 0xE1 && b1 == 0x9A && b2 == 0x80) return 3;                      /* U+1680 */
+  if (b0 == 0xE2 && b1 == 0x80 && b2 >= 0x80 && b2 <= 0x8A) return 3;        /* U+2000..U+200A */
+  if (b0 == 0xE2 && b1 == 0x80 && (b2 == 0xA8 || b2 == 0xA9 || b2 == 0xAF)) return 3;
+  if (b0 == 0xE2 && b1 == 0x81 && b2 == 0x9F) return 3;                      /* U+205F */
+  if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x80) return 3;                      /* U+3000 */
+  if (b0 == 0xEF && b1 == 0xBB && b2 == 0xBF) return 3;                      /* U+FEFF */
+  return 0;
+}
+
+static bool scr_bigint_digits_valid(
+    const char *digits, size_t len, uint32_t radix) {
+  if (len == 0) return false;
+  for (size_t index = 0; index < len; index += 1) {
+    char c = digits[index];
+    uint32_t digit;
+    if (c >= '0' && c <= '9') digit = (uint32_t)(c - '0');
+    else if (c >= 'a' && c <= 'z') digit = (uint32_t)(c - 'a') + 10;
+    else if (c >= 'A' && c <= 'Z') digit = (uint32_t)(c - 'A') + 10;
+    else return false;
+    if (digit >= radix) return false;
+  }
+  return true;
+}
+
+ScrBigInt *scr_bigint_parse(const char *text, size_t len) {
+  size_t start = 0;
+  size_t end = len;
+  for (;;) {
+    size_t width = start < end ? scr_bigint_space_len(text + start, end - start) : 0;
+    if (width == 0) break;
+    start += width;
+  }
+  while (end > start) {
+    size_t width = 0;
+    for (size_t candidate = 1; candidate <= 3 && candidate <= end - start; candidate += 1) {
+      if (scr_bigint_space_len(text + end - candidate, candidate) == candidate) {
+        width = candidate;
+      }
+    }
+    if (width == 0) break;
+    end -= width;
+  }
+  /* An empty string is 0n, not a syntax error — the one corner of the
+   * grammar that surprises everyone who meets it. */
+  if (start == end) return scr_bigint_alloc(0);
+
+  if (end - start >= 2 && text[start] == '0') {
+    char marker = text[start + 1];
+    uint32_t radix = marker == 'x' || marker == 'X' ? 16
+        : marker == 'o' || marker == 'O' ? 8
+        : marker == 'b' || marker == 'B' ? 2 : 0;
+    if (radix != 0) {
+      /* A radix prefix admits no sign: "-0x1f" is a syntax error in JS. */
+      const char *digits = text + start + 2;
+      size_t digit_len = end - start - 2;
+      if (!scr_bigint_digits_valid(digits, digit_len, radix)) return NULL;
+      return scr_bigint_from_radix(digits, digit_len, radix, false);
+    }
+  }
+
+  bool negative = false;
+  if (text[start] == '+' || text[start] == '-') {
+    negative = text[start] == '-';
+    start += 1;
+  }
+  if (!scr_bigint_digits_valid(text + start, end - start, 10)) return NULL;
+  return scr_bigint_from_decimal(text + start, end - start, negative);
 }

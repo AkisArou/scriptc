@@ -8,7 +8,7 @@ import * as ts from "../ts7/adapter.js";
 import { dirname, posix } from "node:path";
 import type { Lowerer } from "./lowerer.js";
 import { wasiGuestPath } from "../../wasi-paths.js";
-import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
+import { BIGINT, BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
@@ -200,6 +200,24 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         return { kind: "numLit", value: Number(spelled), spelling: spelled, type: F64, loc };
       }
       return { kind: "numLit", value, type: F64, loc };
+    }
+    if (ts.isBigIntLiteral(expr)) {
+      /* The scanner keeps the trailing `n` and any separators; the IR wants
+       * the magnitude alone, canonical, so two spellings of one value are
+       * one literal. A negative bigint is a unary minus over this, which
+       * lowers as its own expression. */
+      /* Every radix the grammar allows (0x/0o/0b as well as decimal) is
+       * parsed by the host's own BigInt, which is exact at any width — the
+       * IR stores one canonical decimal spelling so two writings of a value
+       * are one literal. */
+      const canonical = BigInt(expr.text.replace(/_/g, "").replace(/n$/, "")).toString(10);
+      return {
+        kind: "bigIntLit",
+        digits: canonical,
+        negative: false,
+        type: BIGINT,
+        loc,
+      };
     }
     if (expr.kind === ts.SyntaxKind.TrueKeyword) {
       return { kind: "boolLit", value: true, type: BOOL, loc };
@@ -722,6 +740,12 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         // (null answers "object", boxed closures "function" — JS-exact
         // for every dyn kind; "bigint"/"symbol" have no producers).
         return { kind: "libCall", fn: "dyn.typeof", args: [operand], type: STRING, loc };
+      }
+      /* A bigint's answer is fixed by its type, so a pure read folds to the
+       * constant. An effectful operand would have to be evaluated and
+       * discarded, which is the hoist `void` already asks for. */
+      if (operand.type.kind === "bigint" && pureReemittable(operand)) {
+        return { kind: "strLit", value: "bigint", type: STRING, loc };
       }
       L.unsupported("SC1090", expr, "typeof expressions on statically-typed values");
     }
@@ -3317,6 +3341,11 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     if (e.type.kind === "f64" || e.type.kind === "string") {
       return { kind: "toBool", operand: e, type: BOOL, loc: e.loc };
     }
+    // ToBoolean of a bigint: 0n alone is falsy — there is no NaN and no -0
+    // to complicate it, so the test is a magnitude check.
+    if (e.type.kind === "bigint") {
+      return { kind: "toBool", operand: e, type: BOOL, loc: e.loc };
+    }
     if (e.type.kind === "dyn") {
       // ToBoolean over the checked-dynamic tree (`if (pkg)` on a JSON.parse result): every
       // dyn kind has a JS-exact answer — the truthy dynTest reads the kind
@@ -4777,6 +4806,22 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             if (arm) mapped = arm;
           }
         }
+      }
+    }
+    /* A PURE index-signature context is adopted for overflow capture alone:
+     * it declares no fields, so nothing downstream reads a name the
+     * literal's own shape lacks. When its VALUE slot carries a type with no
+     * checked-dynamic representation (@types/node's ParsedUrlQueryInput
+     * admits a bigint), a consumer that crosses the record to dyn must
+     * refuse the adopted shape, while the literal's own shape crosses and
+     * holds exactly the same values — so the own shape wins. A context with
+     * DECLARED fields is adopted for those fields' types, which drive every
+     * property's coercion, and keeps the context regardless. */
+    if (mapped?.kind === "record" && !L.dynConvertible(mapped)) {
+      const ctxShape = L.shapes.get(mapped.shapeId);
+      if (ctxShape && ctxShape.indexValue && ctxShape.fields.length === 0 && !ctxShape.tuple) {
+        const own = L.mapTypeOf(L.typeOf(expr));
+        if (own?.kind === "record" && L.dynConvertible(own)) mapped = own;
       }
     }
     // The CJS EXPORT-TABLE literal in VALUE position (JS): importers reach
@@ -6947,6 +6992,12 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
 
 export function ensureString(L: Lowerer, e: IrExpr, node: ts.Node): IrExpr {
     if (e.type.kind === "string") return e;
+    if (e.type.kind === "bigint") {
+      // String(b) / `${b}` — the decimal digits with no trailing "n", which
+      // is JS's BigInt.prototype.toString (the "n" belongs to the literal
+      // syntax and to console.log's inspection, not to the conversion).
+      return { kind: "bigIntToString", value: e, type: STRING, loc: e.loc };
+    }
     if (e.type.kind === "dyn") {
       // String(u) / `${u}`: a runtime dispatch over the dyn kind — Node's
       // String() exactly (undefined/null texts, JS number formatting,
@@ -7262,6 +7313,24 @@ export function lowerPrefixUnary(L: Lowerer, expr: ts.PrefixUnaryExpression): Ir
         const operand = L.lowerExpr(expr.operand);
         if (operand.type.kind === "jsval") {
           return { kind: "jsOp", op: "neg", args: [operand], type: JSVAL, loc };
+        }
+        /* `-42n` is a unary minus over a literal in the grammar but a
+         * negative literal to every reader, so it folds. Negating a
+         * computed bigint is arithmetic and waits for the arithmetic
+         * operators. */
+        if (operand.kind === "bigIntLit") {
+          // `-0n` is 0n: zero has one representation, so the sign folds away
+          // rather than producing a value the IR has no encoding for.
+          const negated = operand.digits !== "0" && !operand.negative;
+          return { ...operand, negative: negated, loc };
+        }
+        if (operand.type.kind === "bigint") {
+          L.unsupported(
+            "SC1043",
+            expr,
+            "negating a bigint value (a bigint literal's own sign folds; " +
+              "the arithmetic operators are not implemented yet)",
+          );
         }
         if (operand.type.kind !== "f64") L.unsupported("SC1043", expr);
         if (operand.kind === "numLit") return { ...operand, value: -operand.value, loc };
@@ -7923,6 +7992,31 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     }
     const bothNum = left.type.kind === "f64" && right.type.kind === "f64";
     const bothStr = left.type.kind === "string" && right.type.kind === "string";
+    const bothBig = left.type.kind === "bigint" && right.type.kind === "bigint";
+    /* JavaScript refuses to mix the two number kinds in an operator rather
+     * than converting either way, because every conversion it could pick
+     * would be wrong for some value. The same refusal, at compile time. */
+    const mixedBig = !bothBig &&
+      (left.type.kind === "bigint" || right.type.kind === "bigint");
+    const refuseMixedBig = (): never =>
+      L.unsupported(
+        "SC1043",
+        expr,
+        "mixing bigint and number in an operator (JavaScript throws a " +
+          "TypeError here rather than converting, because no conversion is " +
+          "right for every value — convert explicitly with BigInt(x) or " +
+          "Number(x), whichever loses what you can afford to lose)",
+      );
+    /* Arithmetic over two bigints is a later slice: the values exist and
+     * compare, and the operators arrive with the runtime entry points they
+     * need. Saying which it is turns a dead end into a wait. */
+    const refuseBigArithmetic = (): never =>
+      L.unsupported(
+        "SC1043",
+        expr,
+        "bigint arithmetic (bigint values, comparison, and conversion are " +
+          "implemented; the arithmetic operators are not yet)",
+      );
     /* An exact native integer is a number in the checker's eyes and not one
      * here: it is the value a foreign ABI declared, kept at its own width so
      * it can cross unchanged. This path is the JavaScript-number one, so an
@@ -7969,6 +8063,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
             type: STRING, loc,
           };
         }
+        if (mixedBig) refuseMixedBig();
+        if (bothBig) refuseBigArithmetic();
         if (exactInteger !== undefined) refuseExactInteger("arithmetic");
         L.unsupported("SC1043", expr);
         break;
@@ -7977,6 +8073,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       case ts.SyntaxKind.SlashToken:
       case ts.SyntaxKind.PercentToken:
       case ts.SyntaxKind.AsteriskAsteriskToken: {
+        if (mixedBig) refuseMixedBig();
+        if (bothBig) refuseBigArithmetic();
         if (!bothNum && exactInteger !== undefined) refuseExactInteger("arithmetic");
         if (!bothNum) L.unsupported("SC1043", expr);
         const binOp = op === ts.SyntaxKind.MinusToken ? "-"
@@ -8008,6 +8106,21 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         const negated = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
         if (bothNum) return { kind: "bin", op: negated ? "!==" : "===", left, right, type: BOOL, loc };
         if (bothStr) return { kind: "strEq", negated, left, right, type: BOOL, loc };
+        /* `1n === 1` is false in JavaScript rather than an error, because
+         * strict equality compares kinds before values — so a mixed
+         * comparison is answerable where a mixed operator is not. TypeScript
+         * rejects the comparison as non-overlapping before it reaches here,
+         * which is the same answer sooner. */
+        if (bothBig) {
+          return {
+            kind: "bigIntCompare",
+            op: negated ? "!==" : "===",
+            left,
+            right,
+            type: BOOL,
+            loc,
+          };
+        }
         // Exact native scalars compare in their physical representation.
         // TypeScript has already checked source-level nominal compatibility;
         // Native IR additionally requires the same scalar width/signedness so
@@ -8145,6 +8258,13 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           : op === ts.SyntaxKind.GreaterThanToken ? ">" : ">=";
         if (bothNum) return { kind: "bin", op: cmpOp, left, right, type: BOOL, loc };
         if (bothStr) return { kind: "strCmp", op: cmpOp, left, right, type: BOOL, loc };
+        /* Ordering two bigints is exact at any magnitude, which is the whole
+         * reason the type exists. Mixing with a number is refused rather than
+         * converted, for the reason an operator over the two is. */
+        if (mixedBig) refuseMixedBig();
+        if (bothBig) {
+          return { kind: "bigIntCompare", op: cmpOp, left, right, type: BOOL, loc };
+        }
         /* Exact native scalars order in their own representation, the way
          * they already compare for equality: the declared width and
          * signedness decide the answer, and no JavaScript-number conversion
@@ -8342,6 +8462,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     switch (arm.kind) {
       case "f64": return "number";
       case "string": return "string";
+      case "bigint": return "bigint";
       case "bool": return "boolean";
       case "undefinedT": return "undefined";
       case "func": return "function";

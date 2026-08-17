@@ -5,7 +5,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
-import { BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import { BIGINT, BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import type { IrFfiCallbackParam, IrFfiCallbackParamClass, IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
@@ -3325,6 +3325,40 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // Provenance-checked like setTimeout; zero-arg forms are the JS
     // constants ("", false, 0). `new String(...)` (wrapper objects) stays
     // on the SC2020 fence.
+    /* BigInt(x): the explicit crossing INTO bigint, which JavaScript never
+     * performs implicitly because neither source type converts totally — a
+     * fraction has no integer and a malformed string has no value. Both
+     * failures throw at runtime with V8's own text rather than rounding or
+     * answering zero. */
+    if (
+      ts.isIdentifier(expr.expression) &&
+      expr.expression.text === "BigInt" &&
+      L.isStdlibSymbol(L.resolveValueSymbol(expr.expression) ?? undefined)
+    ) {
+      if (expr.arguments.length !== 1) {
+        L.noLowering(`BigInt with ${expr.arguments.length} arguments`, expr);
+      }
+      const argNode = expr.arguments[0]!;
+      const arg = L.lowerExpr(argNode);
+      if (arg.type.kind === "bigint") return arg;
+      if (arg.type.kind === "f64") {
+        return { kind: "libCall", fn: "big.fromNumber", args: [arg], type: BIGINT, loc };
+      }
+      if (arg.type.kind === "string") {
+        return { kind: "libCall", fn: "big.fromString", args: [arg], type: BIGINT, loc };
+      }
+      if (arg.type.kind === "bool") {
+        return {
+          kind: "ternary",
+          cond: arg,
+          then: { kind: "bigIntLit", digits: "1", negative: false, type: BIGINT, loc },
+          else_: { kind: "bigIntLit", digits: "0", negative: false, type: BIGINT, loc },
+          type: BIGINT,
+          loc,
+        };
+      }
+      L.noLowering(`BigInt of ${L.fmt(arg.type)} values`, argNode);
+    }
     if (
       ts.isIdentifier(expr.expression) &&
       (expr.expression.text === "String" ||
@@ -3370,6 +3404,12 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       }
       if (arg.type.kind === "string") {
         return { kind: "libCall", fn: "num.fromString", args: [arg], type: F64, loc };
+      }
+      if (arg.type.kind === "bigint") {
+        // Number(b) rounds to nearest, ties to even, against the EXACT
+        // value — the lossy direction, and the only one JS performs without
+        // complaint.
+        return { kind: "libCall", fn: "big.toNumber", args: [arg], type: F64, loc };
       }
       L.noLowering(
         `Number of ${L.fmt(arg.type)} values`,
@@ -5080,11 +5120,18 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (call.questionDotToken) return null;
     if (!L.isStdlibSymbol(memberSym)) return null;
     const recvKind = L.mapTypeOf(L.typeOf(recv))?.kind;
-    if (recvKind !== "f64" && recvKind !== "bool" && recvKind !== "string") return null;
+    if (recvKind !== "f64" && recvKind !== "bool" && recvKind !== "string" &&
+        recvKind !== "bigint") return null;
     const loc = locOf(call);
     if (name === "toString" && call.arguments.length === 0) {
       const operand = L.lowerExpr(recv);
       if (operand.type.kind === "string") return operand; // identity
+      // b.toString() drops the literal's `n` — the suffix is syntax and
+      // console inspection, never the conversion. A radix argument would
+      // need a general base conversion and keeps its fence.
+      if (operand.type.kind === "bigint") {
+        return { kind: "bigIntToString", value: operand, type: STRING, loc };
+      }
       if (operand.type.kind !== "f64" && operand.type.kind !== "bool") return null;
       return { kind: "toString", operand, type: STRING, loc };
     }

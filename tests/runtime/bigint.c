@@ -76,8 +76,62 @@ int main(void) {
   assert(scr_bigint_to_double(one) == 1.0);
   assert(scr_bigint_to_double(minus) == -42.0);
 
+  /* ToNumber(bigint) rounds to nearest, ties to even, against the EXACT
+   * value. 2^53+1 is the smallest integer a double cannot hold: it is a
+   * tie, and the even neighbour wins. A limb-by-limb accumulation gets
+   * the wide cases an ulp wrong, which is what these pin. */
+  ScrBigInt *tie = decimal("9007199254740993");
+  assert(scr_bigint_to_double(tie) == 9007199254740992.0);
+  ScrBigInt *wide_value = decimal("123456789012345678901234567890");
+  assert(scr_bigint_to_double(wide_value) == 1.2345678901234568e+29);
+  ScrBigInt *wide_negative = decimal("-123456789012345678901234567890");
+  assert(scr_bigint_to_double(wide_negative) == -1.2345678901234568e+29);
+
+  /* The reverse crossing is exact or it refuses: an integral double has an
+   * integer, a fraction does not. */
+  ScrBigInt *from_int = scr_bigint_from_double(9007199254740992.0);
+  expect(from_int, "9007199254740992");
+  ScrBigInt *from_huge = scr_bigint_from_double(1e30);
+  expect(from_huge, "1000000000000000019884624838656");
+  ScrBigInt *from_neg = scr_bigint_from_double(-7.0);
+  expect(from_neg, "-7");
+  ScrBigInt *from_zero = scr_bigint_from_double(0.0);
+  expect(from_zero, "0");
+  assert(scr_bigint_from_double(1.5) == NULL);
+  assert(scr_bigint_from_double(0.0 / 0.0) == NULL);
+  assert(scr_bigint_from_double(1.0 / 0.0) == NULL);
+
+  /* StringToBigInt: every radix, the sign rules, the Unicode trim, and the
+   * empty string that is 0n rather than an error. */
+  ScrBigInt *parsed_dec = scr_bigint_parse("  -1234  ", 9);
+  expect(parsed_dec, "-1234");
+  ScrBigInt *parsed_hex = scr_bigint_parse("0x1f", 4);
+  expect(parsed_hex, "31");
+  ScrBigInt *parsed_oct = scr_bigint_parse("0O17", 4);
+  expect(parsed_oct, "15");
+  ScrBigInt *parsed_bin = scr_bigint_parse("0b1011", 6);
+  expect(parsed_bin, "11");
+  ScrBigInt *parsed_plus = scr_bigint_parse("+5", 2);
+  expect(parsed_plus, "5");
+  ScrBigInt *parsed_empty = scr_bigint_parse("", 0);
+  expect(parsed_empty, "0");
+  ScrBigInt *parsed_blank = scr_bigint_parse("\xc2\xa0\t\n", 4); /* U+00A0 + ASCII */
+  expect(parsed_blank, "0");
+  ScrBigInt *parsed_nbsp = scr_bigint_parse("\xc2\xa0" "12" "\xef\xbb\xbf", 7); /* NBSP 12 BOM */
+  expect(parsed_nbsp, "12");
+  assert(scr_bigint_parse("abc", 3) == NULL);
+  assert(scr_bigint_parse("-0x1f", 5) == NULL);   /* a radix prefix takes no sign */
+  assert(scr_bigint_parse("1_0", 3) == NULL);     /* separators are literal syntax */
+  assert(scr_bigint_parse("0x", 2) == NULL);      /* a prefix needs digits */
+  assert(scr_bigint_parse("-", 1) == NULL);
+  assert(scr_bigint_parse("0b2", 3) == NULL);     /* digit outside the radix */
+
   ScrBigInt *all[] = {zero, one, minus, min64, big, sum, product,
-                      difference, mixed, crossed, negated, zeros};
+                      difference, mixed, crossed, negated, zeros,
+                      tie, wide_value, wide_negative,
+                      from_int, from_huge, from_neg, from_zero,
+                      parsed_dec, parsed_hex, parsed_oct, parsed_bin,
+                      parsed_plus, parsed_empty, parsed_blank, parsed_nbsp};
   for (size_t index = 0; index < sizeof all / sizeof *all; index += 1) {
     scr_bigint_release(all[index]);
   }

@@ -25,7 +25,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -226,6 +226,9 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "num.parseInt": { argTypes: [STRING, F64], result: F64 },
   "num.parseFloat": { argTypes: [STRING], result: F64 },
   "num.fromString": { argTypes: [STRING], result: F64 },
+  "big.fromNumber": { argTypes: [F64], result: BIGINT },
+  "big.fromString": { argTypes: [STRING], result: BIGINT },
+  "big.toNumber": { argTypes: [BIGINT], result: F64 },
   "num.isNaN": { argTypes: [F64], result: BOOL },
   "str.encodeUriComponent": { argTypes: [STRING], result: STRING },
   // The base64 globals: the argument is a dyn value (WebIDL ToString
@@ -3288,6 +3291,34 @@ function validateFunction(
       case "strLit":
         if (e.type.kind !== "string") err("strLit must be string", e.loc);
         break;
+      case "bigIntLit":
+        if (e.type.kind !== "bigint") err("bigIntLit must be bigint", e.loc);
+        /* Canonical or nothing: the frontend has already decided what the
+         * literal means, and two spellings of one value reaching the backends
+         * would make identical bigints compare unequal by address in any
+         * future interning. */
+        if (!/^(0|[1-9][0-9]*)$/.test(e.digits)) {
+          err("bigIntLit digits must be canonical decimal", e.loc);
+        }
+        if (e.negative && e.digits === "0") {
+          err("bigIntLit zero is never negative", e.loc);
+        }
+        break;
+      case "bigIntToString":
+        checkExpr(e.value);
+        if (e.value.type.kind !== "bigint") {
+          err("bigIntToString takes a bigint", e.loc);
+        }
+        if (e.type.kind !== "string") err("bigIntToString yields a string", e.loc);
+        break;
+      case "bigIntCompare":
+        checkExpr(e.left);
+        checkExpr(e.right);
+        if (e.left.type.kind !== "bigint" || e.right.type.kind !== "bigint") {
+          err("bigIntCompare takes two bigints", e.loc);
+        }
+        if (e.type.kind !== "bool") err("bigIntCompare yields a bool", e.loc);
+        break;
       case "boolLit":
         if (e.type.kind !== "bool") err("boolLit must be bool", e.loc);
         break;
@@ -3471,11 +3502,12 @@ function validateFunction(
         if (
           e.operand.type.kind !== "f64" &&
           e.operand.type.kind !== "string" &&
+          e.operand.type.kind !== "bigint" &&
           e.operand.type.kind !== "union" &&
           e.operand.type.kind !== "nativeStruct" &&
           !REF_TRUTHY_KINDS.has(e.operand.type.kind)
         ) {
-          err(`toBool operand must be f64|string|union|nativeStruct|ref, got ${e.operand.type.kind}`, e.loc);
+          err(`toBool operand must be f64|string|bigint|union|nativeStruct|ref, got ${e.operand.type.kind}`, e.loc);
         }
         if (e.operand.type.kind === "union") checkTruthyUnion(e.operand.type.unionId, e.loc);
         if (e.type.kind !== "bool") err("toBool must be bool", e.loc);

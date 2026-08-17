@@ -368,14 +368,16 @@ static void scr_library_audit_zero(void) {
        maps = scr_map_live_count(), boxes = scr_box_live_count(),
        closures = scr_closure_live_count(), objects = scr_obj_live_count(),
        unions = scr_union_live_count(), dyns = scr_dyn_live_count(),
-       bytes = scr_bytes_live_count();
+       bytes = scr_bytes_live_count(), bigints = scr_bigint_live_count();
   if (strings != 0 || arrays != 0 || maps != 0 || boxes != 0 || closures != 0 ||
-      objects != 0 || unions != 0 || dyns != 0 || bytes != 0) {
+      objects != 0 || unions != 0 || dyns != 0 || bytes != 0 || bigints != 0) {
     scr_trap_fmt(
         "scriptc LIBRARY RC AUDIT FAILED: %ld heap string(s), %ld array(s), "
         "%ld map(s), %ld box(es), %ld closure(s), %ld object(s), "
-        "%ld union(s), %ld dyn value(s), %ld bytes value(s) live across re-init\n",
-        strings, arrays, maps, boxes, closures, objects, unions, dyns, bytes);
+        "%ld union(s), %ld dyn value(s), %ld bytes value(s), %ld bigint(s) "
+        "live across re-init\n",
+        strings, arrays, maps, boxes, closures, objects, unions, dyns, bytes,
+        bigints);
   }
 }
 #endif /* SCR_RC_AUDIT */

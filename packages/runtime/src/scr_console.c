@@ -47,21 +47,23 @@ static void scr_rc_audit_at_exit(void) {
   long unions = scr_union_live_count();
   long dyns = scr_dyn_live_count();
   long bytes = scr_bytes_live_count();
+  long bigints = scr_bigint_live_count();
 #ifdef SCR_DYNAMIC
   long jsvals = scr_jsval_live_count();
 #else
   long jsvals = 0;
 #endif
   if (strings != 0 || arrays != 0 || maps != 0 || boxes != 0 || closures != 0 ||
-      objects != 0 || unions != 0 || dyns != 0 || bytes != 0 || jsvals != 0) {
+      objects != 0 || unions != 0 || dyns != 0 || bytes != 0 || jsvals != 0 ||
+      bigints != 0) {
     fflush(stdout);
     fprintf(stderr,
             "scriptc RC AUDIT FAILED: %ld heap string(s), %ld array(s), "
             "%ld map(s), %ld box(es), %ld closure(s), %ld object(s), "
             "%ld union(s), %ld dyn value(s), %ld bytes value(s), "
-            "%ld island value(s) live at exit\n",
+            "%ld island value(s), %ld bigint(s) live at exit\n",
             strings, arrays, maps, boxes, closures, objects, unions, dyns,
-            bytes, jsvals);
+            bytes, jsvals, bigints);
     _Exit(99);
   }
 }

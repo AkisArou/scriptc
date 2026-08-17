@@ -103,6 +103,7 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
   a->elem_retain = NULL;
   a->elem_release = NULL;
   a->elem_trace = NULL;
+  a->elem_eq = NULL;
   a->data = NULL;
   if (initial_cap > 0) scr_arr_grow(a, initial_cap);
 #ifdef SCR_RC_AUDIT
@@ -131,7 +132,9 @@ static void scr_arr_gc_free(void *a0) {
 
 ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
                          void (*elem_release)(void *),
-                         ScrTraceFn elem_trace, size_t initial_cap) {
+                         ScrTraceFn elem_trace,
+                         bool (*elem_eq)(const void *, const void *),
+                         size_t initial_cap) {
   ScrArr *a;
   if (elem_trace) {
     a = scr_cyc_alloc(sizeof(ScrArr), &scr_arr_trace_v, &scr_arr_gc_free);
@@ -146,6 +149,7 @@ ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
   a->elem_retain = elem_retain;
   a->elem_release = elem_release;
   a->elem_trace = elem_trace;
+  a->elem_eq = elem_eq;
   a->data = NULL;
   if (initial_cap > 0) scr_arr_grow(a, initial_cap);
 #ifdef SCR_RC_AUDIT
@@ -376,7 +380,8 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
   size_t n = d0 <= 0 ? 0 : d0 >= avail ? (size_t)avail : (size_t)d0;
   ScrArr *out =
       a->elem == SCR_ELEM_REF
-          ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace, n ? n : 1)
+          ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace,
+                            a->elem_eq, n ? n : 1)
           : scr_arr_new(a->elem, n ? n : 1);
   if (n > 0) {
     memcpy(out->data, a->data + from, n * sizeof(uint64_t));
@@ -397,6 +402,7 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
 static bool scr_arr_ref_eq(const ScrArr *a, uint64_t slot, void *v) {
   void *p = scr_slot_to_ptr(slot);
   if (a->elem == SCR_ELEM_STR) return scr_str_eq((ScrStr *)p, (ScrStr *)v);
+  if (a->elem_eq) return a->elem_eq(p, v);
   return p == v;
 }
 
@@ -473,7 +479,8 @@ ScrArr *scr_arr_slice(ScrArr *a, double start, double end) {
   size_t n = to > from ? to - from : 0;
   ScrArr *out =
       a->elem == SCR_ELEM_REF
-          ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace, n ? n : 1)
+          ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace,
+                            a->elem_eq, n ? n : 1)
           : scr_arr_new(a->elem, n ? n : 1);
   for (size_t i = 0; i < n; i++) {
     uint64_t slot = a->data[from + i];

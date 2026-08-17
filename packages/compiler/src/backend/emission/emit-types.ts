@@ -142,6 +142,8 @@ export function cType(t: IrType): string {
       return "ScrPromise *";
     case "generator":
       return "ScrGen *";
+    case "bigint":
+      return "ScrBigInt *";
     case "void":
       return "void";
     case "undefinedT":
@@ -204,6 +206,8 @@ export function retainCallC(type: IrType, expr: string): string {
       return `scr_native_handle_retain(${expr})`;
     case "string":
       return `scr_str_retain(${expr})`;
+    case "bigint":
+      return `scr_bigint_retain(${expr})`;
     case "array":
       return `scr_arr_retain(${expr})`;
     case "map":
@@ -287,6 +291,8 @@ export function releaseCallC(type: IrType, expr: string): string {
       return `scr_native_handle_release(${expr})`;
     case "string":
       return `scr_str_release(${expr})`;
+    case "bigint":
+      return `scr_bigint_release(${expr})`;
     case "array":
       return `scr_arr_release(${expr})`;
     case "map":
@@ -425,6 +431,10 @@ export function boxKindC(t: IrType): string {
       // generators ride obj-boxes too (boxNewC — vAdapters carries the
       // ScrGen RC entry points; no trace, like child).
       throw new Error("emitter bug: generator boxes go through boxNewC");
+    case "bigint":
+      // Bigints ride the obj-box (boxNewC carries the RC entry points and
+      // the no-trace decision), never a plain kind box.
+      throw new Error("emitter bug: bigint boxes go through boxNewC");
     case "undefinedT":
     case "nullT":
     case "caught":
@@ -468,6 +478,8 @@ export function vAdapters(t: IrType): { retain: string; release: string } {
       return { retain: "scr_sp_retain_v", release: "scr_sp_release_v" };
     case "symbol":
       return { retain: "scr_sym_retain_v", release: "scr_sym_release_v" };
+    case "bigint":
+      return { retain: "scr_bigint_retain_v", release: "scr_bigint_release_v" };
     case "stats":
       return { retain: "scr_stats_retain_v", release: "scr_stats_release_v" };
     case "fileHandle":
@@ -604,6 +616,10 @@ export function elemKindC(elem: IrType): string {
     // Symbols (symbol[] — heterogeneous sentinel lists): refcounted
     // identity pointers holding only strings — no trace, no cycles ever.
     case "symbol":
+    // Bigints (bigint[]): refcounted limb blocks — no trace, no cycles ever.
+    // Unlike every other REF element they compare by VALUE, which the array
+    // carries as its elem_eq predicate (elemEqArgC) rather than as a kind.
+    case "bigint":
     // Class objects ((typeof Shape)[] — the registry idiom): immortal
     // statics behind no-op RC adapters — no trace, no cycles ever;
     // indexOf/includes/=== are the REF kind's pointer identity, exactly

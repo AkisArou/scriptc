@@ -605,6 +605,11 @@ ScrBigInt *scr_bigint_from_decimal(
     const char *digits, size_t len, bool negative);         /* returns +1 */
 ScrBigInt *scr_bigint_retain(ScrBigInt *value);
 void scr_bigint_release(ScrBigInt *value);
+void *scr_bigint_retain_v(void *p);
+void scr_bigint_release_v(void *p);
+/* The value-equality predicate an array of bigints installs: two bigints are
+ * === when their signs and limbs are, never when their pointers are. */
+bool scr_bigint_eq_v(const void *a, const void *b);
 ScrBigInt *scr_bigint_add(const ScrBigInt *a, const ScrBigInt *b); /* +1 */
 ScrBigInt *scr_bigint_sub(const ScrBigInt *a, const ScrBigInt *b); /* +1 */
 ScrBigInt *scr_bigint_mul(const ScrBigInt *a, const ScrBigInt *b); /* +1 */
@@ -618,7 +623,20 @@ bool scr_bigint_is_zero(const ScrBigInt *value);
  * written, or 0 when the buffer is smaller than that bound. */
 size_t scr_bigint_format_capacity(const ScrBigInt *value);
 size_t scr_bigint_format(const ScrBigInt *value, char *buffer, size_t capacity);
+/* The same decimal form as a runtime string (scr_lib.c: the one place that
+ * knows both types, so the arithmetic depends on neither). Returns +1. */
+ScrStr *scr_bigint_to_string(const ScrBigInt *value);
 double scr_bigint_to_double(const ScrBigInt *value);
+/* BigInt(x) over a number and over a string. Both report failure by
+ * returning NULL — a fraction/NaN/infinity for the first, a string outside
+ * the StringToBigInt grammar for the second — and the throwing wrappers in
+ * scr_lib.c turn that into V8's RangeError and SyntaxError with V8's text.
+ * Keeping the throw out of scr_bigint.c is what lets the bignum link (and
+ * unit-test) as one translation unit with no runtime dependencies. */
+ScrBigInt *scr_bigint_from_double(double value);         /* +1, NULL on fail */
+ScrBigInt *scr_bigint_parse(const char *text, size_t len); /* +1, NULL on fail */
+ScrBigInt *scr_bigint_from_number(double value);         /* +1, may throw */
+ScrBigInt *scr_bigint_from_str(const ScrStr *text);      /* +1, may throw */
 #ifdef SCR_RC_AUDIT
 long scr_bigint_live_count(void);
 #endif
@@ -1268,6 +1286,14 @@ typedef struct ScrArr {
   void *(*elem_retain)(void *);
   void (*elem_release)(void *);
   ScrTraceFn elem_trace;
+  /* SCR_ELEM_REF only; NULL means pointer identity, which is what JS ===
+   * means for every ref element that is an OBJECT. A ref element that is a
+   * PRIMITIVE compares by value instead — bigint is the one such element,
+   * since 1n === 1n regardless of which allocation each side came from —
+   * and supplies its own predicate here. The array cannot derive this from
+   * the element kind for the same reason it cannot derive the RC entry
+   * points: SCR_ELEM_REF is one tag over many element types. */
+  bool (*elem_eq)(const void *, const void *);
   uint64_t *data;
 } ScrArr;
 
@@ -1279,7 +1305,9 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap); /* returns +1 */
  * collector header — see the struct comment). Returns +1. */
 ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
                          void (*elem_release)(void *),
-                         ScrTraceFn elem_trace, size_t initial_cap);
+                         ScrTraceFn elem_trace,
+                         bool (*elem_eq)(const void *, const void *),
+                         size_t initial_cap);
 
 static inline ScrArr *scr_arr_retain(ScrArr *a) {
   if (a->rc != SIZE_MAX) {

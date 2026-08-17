@@ -31,6 +31,8 @@ describe.each([false, true])("runtime bigint, sanitize=%s", (sanitize) => {
         fixture,
         "-o",
         binary,
+        // ldexp/frexp/floor for the double crossings.
+        "-lm",
       ]);
       expect(execFileSync(binary, { encoding: "utf8" })).toBe("bigint: ok\n");
     },
