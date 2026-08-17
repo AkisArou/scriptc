@@ -2393,13 +2393,22 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
-    const ownedParameters = binding.parameters.filter((parameter) => parameter.ownership.kind === "owned");
+    /* A parameter the callee takes ownership of hands over the reference the
+     * cell held. Whatever else the call does, the handle it consumes is a
+     * handle, and the source value it comes from is one argument — a null arm
+     * would leave nothing to hand over. */
+    const ownedParameters = binding.parameters.filter(
+      (parameter) => parameter.ownership.kind === "owned",
+    );
     if (
-      ownedParameters.length > 0 &&
-      (ownedParameters.length !== 1 || binding.parameters.length !== 1 || binding.arguments.length !== 1 || binding.result.type.kind !== "void")
+      ownedParameters.some((parameter) =>
+        parameter.type.kind !== "nativeHandle" ||
+        parameter.projection.kind !== "argument" ||
+        binding.arguments[parameter.projection.argument]?.type.kind !== "nativeHandle"
+      )
     ) {
       errors.push({
-        message: `Native IR binding "${binding.id}" has an unsupported ownership-transfer signature`,
+        message: `Native IR binding "${binding.id}" transfers ownership of something that is not a required handle argument`,
         loc: moduleLoc,
       });
     }
@@ -2514,12 +2523,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
   }
   for (const binding of mod.nativeBindings ?? []) {
+    /* A destructor is the one consuming binding the runtime performs rather
+     * than calls: the cell holds its symbol and knows the order its teardown
+     * has to happen in, so the call site asks for a disposal and the binding's
+     * own parameter list has to be exactly the one a disposal has. Every other
+     * consumer is an ordinary call that happens to take the reference. */
+    if (!nativeDestructorIds.has(binding.id)) continue;
     if (
-      binding.parameters.some((parameter) => parameter.ownership.kind === "owned") &&
-      !nativeDestructorIds.has(binding.id)
+      binding.parameters.length !== 1 ||
+      binding.arguments.length !== 1 ||
+      binding.parameters[0]?.ownership.kind !== "owned" ||
+      binding.result.type.kind !== "void"
     ) {
       errors.push({
-        message: `Native IR binding "${binding.id}" is an unsupported general ownership consumer`,
+        message: `Native IR binding "${binding.id}" is named as a destructor but does not consume exactly one handle and return void`,
         loc: moduleLoc,
       });
     }

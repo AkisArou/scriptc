@@ -424,6 +424,34 @@ const char *nts_counter_required_label(NtsCounter *counter) {
   return nts_counter_label(counter);
 }
 
+void nts_counter_destroy(NtsCounter *counter);
+
+/* A vault that takes ownership of the counter handed to it, the shape
+ * `gtk_widget_add_controller` has: the argument's reference moves to the
+ * callee, which frees it in its own time. The counter stays readable through
+ * the vault, so a test can prove the object survived the transfer. */
+typedef struct NtsVault {
+  NtsCounter *counter;
+} NtsVault;
+
+NtsVault *nts_vault_create(void) {
+  return calloc(1, sizeof(NtsVault));
+}
+
+void nts_vault_adopt(NtsVault *vault, NtsCounter *counter) {
+  if (vault->counter != NULL) nts_counter_destroy(vault->counter);
+  vault->counter = counter;
+}
+
+int32_t nts_vault_value(NtsVault *vault) {
+  return vault->counter == NULL ? -1 : vault->counter->value;
+}
+
+void nts_vault_destroy(NtsVault *vault) {
+  if (vault->counter != NULL) nts_counter_destroy(vault->counter);
+  free(vault);
+}
+
 void nts_counter_destroy(NtsCounter *counter) {
   nts_counter_destroyed++;
   free(counter);

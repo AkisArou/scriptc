@@ -2983,6 +2983,13 @@ void *scr_native_handle_require(ScrNativeHandle *handle,
 void scr_native_handle_dispose(ScrNativeHandle *handle,
                                const ScrNativeHandleType *type,
                                const char *operation);
+/* A foreign function that takes the reference: the same teardown as an
+ * explicit disposal, minus the one part a transfer moves elsewhere — freeing
+ * the object. Answers the pointer to hand over, or NULL with a pending
+ * exception when the handle is already disposed. */
+void *scr_native_handle_surrender(ScrNativeHandle *handle,
+                                  const ScrNativeHandleType *type,
+                                  const char *operation);
 /* A prepared lifecycle edge allocates before the native call. Commit adopts
  * it with the result; abandon rolls it back. For a live handle, all begin
  * hooks run before the foreign destructor and all complete hooks after it. */

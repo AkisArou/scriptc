@@ -2360,9 +2360,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
         );
-        const ownedParameter = binding.parameters.findIndex(
-          (parameter) => parameter.ownership.kind === "owned",
-        );
+        /* A destructor is asked of the runtime rather than called: the cell
+         * knows the order its teardown has to happen in, and the binding's
+         * own symbol is the destructor the cell already holds. Any other
+         * binding that takes an owned handle is an ordinary call that happens
+         * to consume one, and it is emitted as one. */
+        const ownedParameter = E.nativeDestructorBindings.has(binding.id)
+          ? binding.parameters.findIndex(
+            (parameter) => parameter.ownership.kind === "owned",
+          )
+          : -1;
         if (ownedParameter >= 0) {
           const parameter = binding.parameters[ownedParameter]!;
           if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
@@ -2495,6 +2502,21 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               if (parameter.type.kind !== "nativeHandle") return arg.name;
               const sourceType = binding.arguments[parameter.projection.argument]!.type;
               const tag = mangleNativeHandleTag(parameter.type.typeId);
+              /* The callee takes the reference, so the cell gives it up here
+               * rather than holding one nobody owns. Everything an explicit
+               * disposal does happens, except freeing the object: that is the
+               * callee's now, and using the handle afterwards is a
+               * use-after-dispose for the same reason it is after
+               * `dispose()`. */
+              if (parameter.ownership.kind === "owned") {
+                const moved = `sc_t${E.tempCounter++}`;
+                E.line(
+                  `void *${moved} = scr_native_handle_surrender(${arg.name}, ` +
+                    `&${tag}, ${operation});`,
+                );
+                E.emitPendingCheck();
+                return moved;
+              }
               if (sourceType.kind === "nullableNativeHandle") {
                 // The null arm passes NULL without consulting the handle
                 // table; a present handle is validated exactly as a required

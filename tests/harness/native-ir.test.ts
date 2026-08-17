@@ -320,6 +320,8 @@ const COUNTER_BASE_DEFINITION = {
   cycleCollection: "none",
   upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
+const VAULT_ID = "native-typescript.fixture.c-v1@0.0.0#type:vault";
+const VAULT = { kind: "nativeHandle", typeId: VAULT_ID } as const;
 const ASKER_ID = "native-typescript.fixture.c-v1@0.0.0#type:asker";
 const ASKER = { kind: "nativeHandle", typeId: ASKER_ID } as const;
 /* A retained callback the emitter asks for an answer: registered once,
@@ -356,6 +358,16 @@ const ASK_BOOL_CONTRACT = {
   ...ASK_I32_CONTRACT,
   cancellationBinding: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
 } as const satisfies IrNativeCallbackContract;
+const VAULT_DEFINITION = {
+  kind: "handle",
+  id: VAULT_ID,
+  declaration: { module: nativePackage, name: "Vault" },
+  nativeName: "NtsVault",
+  threadSafety: "confined",
+  identity: "pointer",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
 const ASKER_DEFINITION = {
   kind: "handle",
   id: ASKER_ID,
@@ -433,6 +445,7 @@ const localNativeInput: NativeFrontendInput = {
       type: SUBSCRIPTION,
     },
     { declaration: { module: nativePackage, name: "Asker" }, type: ASKER },
+    { declaration: { module: nativePackage, name: "Vault" }, type: VAULT },
   ],
   constants: [{
     id: "native-typescript.fixture.c-v1@0.0.0#fixture_answer",
@@ -485,6 +498,7 @@ const localNativeInput: NativeFrontendInput = {
     COUNTER_DEFINITION,
     SUBSCRIPTION_DEFINITION,
     ASKER_DEFINITION,
+    VAULT_DEFINITION,
   ],
   exports: [],
   bindings: [
@@ -978,6 +992,90 @@ const localNativeInput: NativeFrontendInput = {
         { name: "error_number", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* A callee that takes ownership of a handle argument: the reference
+       * moves at the call and the handle is spent afterwards, which is the
+       * shape `gtk_widget_add_controller` has. */
+      id: "native-typescript.fixture.c-v1@0.0.0#vault_create",
+      declaration: { module: nativePackage, name: "createVault" },
+      entry: { kind: "c-symbol", symbol: "nts_vault_create" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "nullable" },
+      ...directSignature([]),
+      result: {
+        type: VAULT,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "native-typescript.fixture.c-v1@0.0.0#vault_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#vault_adopt",
+      declaration: { module: nativePackage, name: "Vault.adopt" },
+      entry: { kind: "c-symbol", symbol: "nts_vault_adopt" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "vault", type: VAULT },
+        { name: "counter", type: COUNTER },
+      ],
+      parameters: [
+        {
+          name: "vault",
+          type: VAULT,
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "counter",
+          type: COUNTER,
+          passMode: "pointer",
+          ownership: { kind: "owned", transfer: "to-native" },
+          projection: { kind: "argument", argument: 1 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#vault_value",
+      declaration: { module: nativePackage, name: "Vault.value" },
+      entry: { kind: "c-symbol", symbol: "nts_vault_value" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "vault", type: VAULT, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#vault_destroy",
+      declaration: { module: nativePackage, name: "Vault.dispose" },
+      entry: { kind: "c-symbol", symbol: "nts_vault_destroy" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        {
+          name: "vault",
+          type: VAULT,
+          passMode: "pointer",
+          ownership: { kind: "owned", transfer: "to-native" },
+        },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       /* Registration for a callback the emitter asks. The handle it returns
@@ -3004,6 +3102,43 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
 
   /* The registration and its C symbols are fork-local: an embedder-owned
    * SCABI fixture does not promise them. */
+  localFixtureTest("moves a handle's reference into the callee", async () => {
+    const outDir = join(scratch, `handle-transfer-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/handle-transfer.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("handle transfer frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "handle-transfer.c" : "handle-transfer.ll"),
+      "utf8",
+    );
+    /* The consuming call surrenders the reference and then calls the
+     * function; only a destructor is performed by the runtime instead. */
+    expect(generated).toContain("scr_native_handle_surrender");
+    expect(generated).toContain("nts_vault_adopt");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
   localFixtureTest("answers a native question from a retained callback", async () => {
     const outDir = join(scratch, `callback-answer-${backend}`);
     const result = await compile(

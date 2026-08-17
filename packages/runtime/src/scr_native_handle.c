@@ -144,14 +144,15 @@ void scr_native_handle_trace_v(void *opaque, ScrTraceVisit visit,
 }
 
 static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle,
-                                              bool collecting);
+                                              bool collecting,
+                                              bool run_destructor);
 
 static void scr_native_handle_gc_free(void *opaque) {
   ScrNativeHandle *handle = opaque;
   if (handle->state == SCR_NATIVE_HANDLE_PREPARED) {
     scr_trap("scriptc: collector reached an unpublished native handle\n");
   }
-  scr_native_handle_destroy_foreign(handle, true);
+  scr_native_handle_destroy_foreign(handle, true, true);
   scr_obj_free_note();
   scr_cyc_free(handle);
 }
@@ -254,15 +255,25 @@ static void scr_native_handle_destroy_children(ScrNativeHandle *handle,
     free(edge);
     if (!child_doomed) {
       /* A collector survivor is still disconnected with ordinary teardown;
-       * only the already trial-deleted owner -> child +1 is omitted. */
-      scr_native_handle_destroy_foreign(child, false);
+       * only the already trial-deleted owner -> child +1 is omitted. A child
+       * owns its own object, so its destructor runs whatever became of the
+       * parent's reference. */
+      scr_native_handle_destroy_foreign(child, false, true);
     }
     if (!collecting) scr_native_handle_release(child);
   }
 }
 
+/* The teardown of a live cell. `run_destructor` is false for exactly one
+ * caller: a foreign function that takes the reference from us. Everything
+ * else about the teardown is the same, because everything else is about this
+ * side of the boundary — the identity entry stops naming a pointer we no
+ * longer hold, the owner edge and children go, and the lifecycle hooks run in
+ * the order they would for any disposal. What differs is only who frees the
+ * object, and after a transfer that is not us. */
 static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle,
-                                              bool collecting) {
+                                              bool collecting,
+                                              bool run_destructor) {
   if (handle->state != SCR_NATIVE_HANDLE_LIVE) return;
   ScrNativeLifecycleEdge *lifecycle = handle->lifecycle;
   handle->lifecycle = NULL;
@@ -280,7 +291,7 @@ static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle,
     (collecting ? edge->collect_begin : edge->begin)(edge->context);
   }
   scr_native_handle_destroy_children(handle, collecting);
-  handle->destructor(foreign);
+  if (run_destructor) handle->destructor(foreign);
   handle->state = SCR_NATIVE_HANDLE_DISPOSED;
   while (lifecycle != NULL) {
     ScrNativeLifecycleEdge *next = lifecycle->next;
@@ -384,7 +395,7 @@ void scr_native_handle_release(ScrNativeHandle *handle) {
   if (handle->state == SCR_NATIVE_HANDLE_PREPARED) {
     scr_native_handle_destroy_prepared(handle);
   } else {
-    scr_native_handle_destroy_foreign(handle, false);
+    scr_native_handle_destroy_foreign(handle, false, true);
   }
   scr_obj_free_note();
   if (scr_native_handle_traced(handle)) scr_cyc_free(handle);
@@ -487,6 +498,26 @@ void scr_native_handle_dispose(ScrNativeHandle *handle,
    * guard is an external root across that operation and callback teardown. */
   (void)scr_native_handle_retain(handle);
   scr_native_handle_detach_owner(handle, true);
-  scr_native_handle_destroy_foreign(handle, false);
+  scr_native_handle_destroy_foreign(handle, false, true);
   scr_native_handle_release(handle);
+}
+
+/* A foreign function that takes the reference. The cell gives up the pointer
+ * and everything it owned around it, exactly as an explicit disposal does,
+ * and the one thing it does not do is free the object: the callee owns it
+ * now. Using the handle afterwards is a use-after-dispose for the same reason
+ * it is after `dispose()` — this side no longer holds a reference, and the
+ * error says so rather than letting a stale pointer cross the boundary. */
+void *scr_native_handle_surrender(ScrNativeHandle *handle,
+                                  const ScrNativeHandleType *type,
+                                  const char *operation) {
+  void *foreign = scr_native_handle_require(handle, type, operation);
+  if (foreign == NULL) return NULL;
+  /* Detaching can release the receiver's +1 and trigger a collection. The
+   * guard is an external root across that operation and callback teardown. */
+  (void)scr_native_handle_retain(handle);
+  scr_native_handle_detach_owner(handle, true);
+  scr_native_handle_destroy_foreign(handle, false, false);
+  scr_native_handle_release(handle);
+  return foreign;
 }

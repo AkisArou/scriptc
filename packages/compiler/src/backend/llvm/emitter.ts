@@ -84,7 +84,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeIntegerInfo, nativeIntegerOpTraps, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
@@ -1166,11 +1166,14 @@ class LlEmitter {
   /** Native call sites whose checked-number ingress is proven unnecessary,
    * empty when this emission keeps every check. */
   private readonly provenNumberCrossings: ReadonlyMap<IrExpr, ReadonlySet<number>>;
+  /** Bindings a native ownership contract names as a destructor. */
+  private readonly nativeDestructorBindings: ReadonlySet<string>;
 
   constructor(private readonly mod: IrModule, options: LlvmTargetOptions) {
     this.provenNumberCrossings = options.checkedNumbers === "always"
       ? new Map()
       : numberBoundaryFacts(mod).certified;
+    this.nativeDestructorBindings = nativeDestructorBindingIds(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.wasi = options.wasi === true;
     // ScrCycHdr is { ptr trace; ptr free; i32 color; i16 buffered;
@@ -7216,9 +7219,16 @@ class LlEmitter {
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
         );
-        const ownedParameter = binding.parameters.findIndex(
-          (parameter) => parameter.ownership.kind === "owned",
-        );
+        /* A destructor is asked of the runtime rather than called: the cell
+         * knows the order its teardown has to happen in, and the binding's
+         * own symbol is the destructor the cell already holds. Any other
+         * binding that takes an owned handle is an ordinary call that happens
+         * to consume one. Kept in lockstep with the C backend. */
+        const ownedParameter = this.nativeDestructorBindings.has(binding.id)
+          ? binding.parameters.findIndex(
+            (parameter) => parameter.ownership.kind === "owned",
+          )
+          : -1;
         if (ownedParameter >= 0) {
           const parameter = binding.parameters[ownedParameter]!;
           if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
@@ -7544,10 +7554,22 @@ class LlEmitter {
                   break;
                 }
                 const raw = B.tmp();
-                B.line(
-                  `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
-                    `ptr @${tag}, ptr ${operation})`,
-                );
+                /* The callee takes the reference, so the cell gives it up
+                 * here rather than holding one nobody owns: the disposal's
+                 * teardown minus freeing the object, which is the callee's
+                 * now. */
+                if (parameter.ownership.kind === "owned") {
+                  this.declare(`declare ptr @scr_native_handle_surrender(ptr, ptr, ptr)`);
+                  B.line(
+                    `${raw} = call ptr @scr_native_handle_surrender(ptr ${arg.name}, ` +
+                      `ptr @${tag}, ptr ${operation})`,
+                  );
+                } else {
+                  B.line(
+                    `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
+                      `ptr @${tag}, ptr ${operation})`,
+                  );
+                }
                 this.emitPendingCheck();
                 callArgs.push(`${parameterType} ${raw}`);
               } else {

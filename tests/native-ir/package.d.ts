@@ -146,6 +146,16 @@ export interface Asker {
   dispose(): void;
 }
 export declare function askFor(callback: (value: i32) => i32): Asker;
+
+/* A callee that takes ownership of a handle argument. `adopt` consumes the
+ * counter: the reference moves to the vault, and the handle is spent. */
+export interface Vault {
+  adopt(counter: Counter): void;
+  value(): i32;
+  dispose(): void;
+}
+export declare function createVault(): Vault;
+
 /* The same question answered with an ordinary boolean. */
 export declare function answerWith(callback: (value: i32) => boolean): Asker;
 

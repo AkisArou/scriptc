@@ -7241,6 +7241,31 @@ export function moduleUsesTlsCa(mod: IrModule): boolean {
 /** A retained native callback keeps an attached target executable alive even
  * when the source contains no ScriptC async function or timer. The target
  * configures the concrete owner-loop source during top-level initialization. */
+/** Every binding a native type's ownership contract names as a destructor.
+ * A call to one is a disposal the runtime performs, in the order the cell
+ * requires; a call to anything else that takes an owned handle is an
+ * ordinary call that consumes the reference. Derived rather than declared,
+ * because the contracts already say it. */
+export function nativeDestructorBindingIds(mod: IrModule): ReadonlySet<string> {
+  const destructors = new Set<string>();
+  for (const binding of mod.nativeBindings ?? []) {
+    if (
+      binding.result.ownership.kind === "owned" &&
+      binding.result.ownership.transfer === "to-runtime"
+    ) {
+      destructors.add(binding.result.ownership.destructor);
+    }
+    for (const argument of binding.arguments) {
+      for (const source of argument.callback?.sourceArguments ?? []) {
+        if (source.kind === "callback-parameter" && source.destructor !== undefined) {
+          destructors.add(source.destructor);
+        }
+      }
+    }
+  }
+  return destructors;
+}
+
 export function moduleUsesRetainedCallbacks(mod: IrModule): boolean {
   return (mod.nativeBindings ?? []).some((binding) =>
     binding.arguments.some(

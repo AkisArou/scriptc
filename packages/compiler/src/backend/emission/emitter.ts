@@ -43,6 +43,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
+import { nativeDestructorBindingIds } from "../../ir/nodes.js";
 import { ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
@@ -444,6 +445,8 @@ export class CEmitter {
   /** Native call sites whose checked-number ingress is proven unnecessary,
    * empty when this emission keeps every check. */
   readonly provenNumberCrossings: ReadonlyMap<IrExpr, ReadonlySet<number>>;
+  /** Bindings a native ownership contract names as a destructor. */
+  readonly nativeDestructorBindings: ReadonlySet<string>;
 
   constructor(
     readonly mod: IrModule,
@@ -453,6 +456,7 @@ export class CEmitter {
     this.provenNumberCrossings = options.checkedNumbers === "always"
       ? new Map()
       : numberBoundaryFacts(mod).certified;
+    this.nativeDestructorBindings = nativeDestructorBindingIds(mod);
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.nativeCallbackAdapters = allocateNativeCallbackAdapters(
       mod.nativeBindings ?? [],
