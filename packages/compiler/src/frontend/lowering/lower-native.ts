@@ -320,10 +320,22 @@ function validateDeclaration(
     return declaration.kind === ts.SyntaxKind.MethodSignature ||
       (ts.isMethodDeclaration(declaration) && !hasStaticModifier(declaration));
   };
+  /* A declaration may be MERGED with ambient interface declarations — how a
+   * .d.ts says a class also has another type's members
+   * (`export interface Box extends Orientable {}`, the shape a GObject class
+   * implementing an interface projects as). Such a declaration contributes
+   * signature members whose own bindings resolve on their own, adds no
+   * construction and no body, so it neither supplies a call declaration nor
+   * disqualifies the ones that do. */
+  const mergedTypeDeclaration = (declaration: ts.Node): boolean =>
+    ts.isInterfaceDeclaration(declaration) &&
+    declaration.getSourceFile().isDeclarationFile;
   const callDeclarations = declarations.filter(declarationGuard);
   if (
     callDeclarations.length === 0 ||
-    declarations.some((declaration) => !declarationGuard(declaration)) ||
+    declarations.some((declaration) =>
+      !declarationGuard(declaration) && !mergedTypeDeclaration(declaration)
+    ) ||
     callDeclarations.some((declaration) => "body" in declaration && declaration.body !== undefined)
   ) {
     failBinding(
