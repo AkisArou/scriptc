@@ -1729,6 +1729,89 @@ class LlEmitter {
       const externalRet = this.nativeReturnType(signature.result);
       const rawRet = this.llType(signature.result);
       const pendingResult = rawRet === "double" ? f64Lit(0) : "0";
+      /* A retained callback the native side asks for an answer: the closure
+       * is read and called now, on the caller's thread, because the answer
+       * has to exist before the emitting call returns. Kept in lockstep with
+       * the C backend's trampoline. */
+      if (
+        adapter.contract.lifetime === "until-cancelled" &&
+        adapter.contract.synchronousReturn
+      ) {
+        const signatureId = `@${adapter.symbol}_signature`;
+        const sourceType = adapter.source;
+        this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
+        this.declare(`declare void @scr_closure_release(ptr)`);
+        this.declare(`declare i32 @scr_callback_token_state(ptr)`);
+        this.declare(`declare ptr @scr_callback_token_owner_context(ptr)`);
+        this.declare(`declare ${this.sizeType} @scr_callback_token_slot(ptr)`);
+        this.declare(`declare i64 @scr_callback_token_generation(ptr)`);
+        defs.push(
+          `${signatureId} = internal constant i8 0`,
+          `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
+          `entry:`,
+          `  %state = call i32 @scr_callback_token_state(ptr %ctx)`,
+          `  %disposed = icmp ne i32 %state, 0`,
+          `  br i1 %disposed, label %skip, label %live`,
+          `skip:`,
+          `  ret ${rawRet} ${pendingResult}`,
+          `live:`,
+          `  %pending = call zeroext i1 @scr_exc_pending()`,
+          `  br i1 %pending, label %skip, label %acquire`,
+          `acquire:`,
+          `  %table = call ptr @scr_callback_token_owner_context(ptr %ctx)`,
+          `  %slot = call ${this.sizeType} @scr_callback_token_slot(ptr %ctx)`,
+          `  %generation = call i64 @scr_callback_token_generation(ptr %ctx)`,
+          `  %cb = call ptr @scr_callback_table_acquire(ptr %table, ${this.sizeType} %slot, i64 %generation, ptr ${signatureId})`,
+          `  %gone = icmp eq ptr %cb, null`,
+          `  br i1 %gone, label %skip, label %invoke`,
+          `invoke:`,
+          `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+          `  %fn = load ptr, ptr %fnp`,
+        );
+        const widenLines: string[] = [];
+        const callArgs = [
+          "ptr %cb",
+          ...adapter.contract.sourceArguments.map((argument, index) => {
+            if (argument.kind !== "callback-parameter") {
+              throw new Error(
+                "backend bug: a synchronously answered callback cannot inject a registration owner",
+              );
+            }
+            const sourceParam = sourceType.params[index]!;
+            const physical = signature.parameters[argument.parameter];
+            if (
+              sourceParam.kind === "f64" && physical?.kind === "nativeScalar" &&
+              physical.scalar !== "f64"
+            ) {
+              const signedScalars = new Set(["i8", "i16", "i32"]);
+              const widen = physical.scalar === "f32"
+                ? "fpext"
+                : signedScalars.has(physical.scalar) ? "sitofp" : "uitofp";
+              widenLines.push(
+                `  %a${argument.parameter}.wide = ${widen} ` +
+                  `${this.llType(physical)} %a${argument.parameter} to double`,
+              );
+              return `double %a${argument.parameter}.wide`;
+            }
+            return `${this.llType(sourceParam)} %a${argument.parameter}`;
+          }),
+        ].join(", ");
+        defs.push(
+          ...widenLines,
+          `  %answer = call ${this.llType(sourceType.ret)} %fn(${callArgs})`,
+          `  call void @scr_closure_release(ptr %cb)`,
+          /* An exception stays pending and the toolkit gets the ABI zero: it
+           * has no frame to unwind through, and the next runtime turn reports
+           * an uncaught error either way. */
+          `  %threw = call zeroext i1 @scr_exc_pending()`,
+          `  br i1 %threw, label %skip, label %answered`,
+          `answered:`,
+          `  ret ${rawRet} %answer`,
+          `}`,
+          ``,
+        );
+        continue;
+      }
       if (adapter.contract.lifetime === "until-cancelled") {
         const injectsOwner = adapter.contract.sourceArguments.some(
           (argument) => argument.kind === "registration-owner",

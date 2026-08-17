@@ -138,6 +138,15 @@ export declare function callScoped(
 ): i32;
 export declare function failErrno(errorNumber: i32): never;
 export declare function createCounter(initialValue: i32): Counter;
+/* A callback the native side asks rather than tells: it runs during the
+ * emitting call and the value it answers with is that call's result. */
+export interface Asker {
+  ask(value: i32): i32;
+  asked(): i32;
+  dispose(): void;
+}
+export declare function askFor(callback: (value: i32) => i32): Asker;
+
 export declare function subscribe(
   callback: (value: i32) => void,
 ): Subscription;

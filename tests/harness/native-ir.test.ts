@@ -320,6 +320,41 @@ const COUNTER_BASE_DEFINITION = {
   cycleCollection: "none",
   upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
+const ASKER_ID = "native-typescript.fixture.c-v1@0.0.0#type:asker";
+const ASKER = { kind: "nativeHandle", typeId: ASKER_ID } as const;
+/* A retained callback the emitter asks for an answer: registered once,
+ * invoked on the caller's thread, and its result is the emitting call's
+ * result. Same shape as every gboolean-returning toolkit signal. */
+const ASK_I32_CALLBACK = {
+  callingConvention: "c",
+  parameters: [I32],
+  result: I32,
+  context: { placement: "last" },
+} as const;
+const ASK_I32_SOURCE = nativeCallbackArgumentType(ASK_I32_CALLBACK);
+const ASK_I32_CONTRACT = {
+  lifetime: "until-cancelled",
+  registrationOwner: { kind: "result" },
+  cancellationBinding: "native-typescript.fixture.c-v1@0.0.0#asker_destroy",
+  allowedInvocationExecutors: ["same-as-caller"],
+  deliveryExecutor: "same-as-caller",
+  synchronousReturn: true,
+  transports: [{ kind: "borrow" }],
+  sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
+  reentrancy: "required",
+  postDisposal: "not-invoked",
+  shutdown: "drain",
+} as const satisfies IrNativeCallbackContract;
+const ASKER_DEFINITION = {
+  kind: "handle",
+  id: ASKER_ID,
+  declaration: { module: nativePackage, name: "Asker" },
+  nativeName: "NtsAsker",
+  threadSafety: "confined",
+  identity: "pointer",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
 const SUBSCRIPTION_DEFINITION = {
   kind: "handle",
   id: SUBSCRIPTION_ID,
@@ -386,6 +421,7 @@ const localNativeInput: NativeFrontendInput = {
       declaration: { module: nativePackage, name: "Subscription" },
       type: SUBSCRIPTION,
     },
+    { declaration: { module: nativePackage, name: "Asker" }, type: ASKER },
   ],
   constants: [{
     id: "native-typescript.fixture.c-v1@0.0.0#fixture_answer",
@@ -437,6 +473,7 @@ const localNativeInput: NativeFrontendInput = {
     COUNTER_MIDDLE_DEFINITION,
     COUNTER_DEFINITION,
     SUBSCRIPTION_DEFINITION,
+    ASKER_DEFINITION,
   ],
   exports: [],
   bindings: [
@@ -930,6 +967,91 @@ const localNativeInput: NativeFrontendInput = {
         { name: "error_number", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* Registration for a callback the emitter asks. The handle it returns
+       * owns the registration, and disposing it is the cancellation. */
+      id: "native-typescript.fixture.c-v1@0.0.0#asker_create",
+      declaration: { module: nativePackage, name: "askFor" },
+      entry: { kind: "c-symbol", symbol: "nts_asker_create" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "function" },
+      error: { kind: "nullable" },
+      arguments: [
+        { name: "callback", type: ASK_I32_SOURCE, callback: ASK_I32_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: ASK_I32_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: ASKER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "native-typescript.fixture.c-v1@0.0.0#asker_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#asker_ask",
+      declaration: { module: nativePackage, name: "Asker.ask" },
+      entry: { kind: "c-symbol", symbol: "nts_asker_ask" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "asker", type: ASKER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "value", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#asker_asked",
+      declaration: { module: nativePackage, name: "Asker.asked" },
+      entry: { kind: "c-symbol", symbol: "nts_asker_asked" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "asker", type: ASKER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "native-typescript.fixture.c-v1@0.0.0#asker_destroy",
+      declaration: { module: nativePackage, name: "Asker.dispose" },
+      entry: { kind: "c-symbol", symbol: "nts_asker_destroy" },
+      callingConvention: "c",
+      variadic: false,
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        {
+          name: "asker",
+          type: ASKER,
+          passMode: "pointer",
+          ownership: { kind: "owned", transfer: "to-native" },
+        },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "native-typescript.fixture.c-v1@0.0.0#subscription_create",
@@ -1962,6 +2084,49 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   expect(deserializeModule(json)).toEqual(mod);
 });
 
+test("Native IR rejects a synchronously answered callback with no answer", () => {
+  /* A void answer is the queued contract's business. Admitting it here would
+   * give one delivery two spellings, and the choice between them would be
+   * invisible at the call site. */
+  const mod = exactI32Module();
+  const binding = mod.nativeBindings![0]!;
+  (binding as { arguments: unknown }).arguments = [{
+    name: "callback",
+    type: { kind: "func", params: [], ret: { kind: "void" } },
+    callback: {
+      lifetime: "until-cancelled",
+      registrationOwner: { kind: "result" },
+      cancellationBinding: binding.id,
+      allowedInvocationExecutors: ["same-as-caller"],
+      deliveryExecutor: "same-as-caller",
+      synchronousReturn: true,
+      transports: [],
+      sourceArguments: [],
+      reentrancy: "required",
+      postDisposal: "not-invoked",
+      shutdown: "drain",
+    },
+  }];
+  (binding as { parameters: unknown }).parameters = [{
+    name: "callback",
+    type: {
+      kind: "nativeCallback",
+      signature: {
+        callingConvention: "c",
+        parameters: [],
+        result: { kind: "void" },
+        context: { placement: "last" },
+      },
+    },
+    passMode: "pointer",
+    ownership: { kind: "callback", lifetime: "until-cancelled" },
+    projection: { kind: "callbackFunction", argument: 0 },
+  }];
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    `Native IR binding "${binding.id}" argument "callback" has an invalid callback contract`,
+  );
+});
+
 test("Native IR rejects an f32 slot outside the number projection", () => {
   /* A 32-bit float has no source form — no literal, no arithmetic, no
    * declared type — so a direct projection would have nothing to hand over.
@@ -2759,6 +2924,44 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     expect(generated).toContain("scr_native_i64_to_number");
     /* Widening up to 32 bits is a conversion instruction, not a call. */
     expect(generated).not.toContain("scr_native_i32_to_number");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  test("answers a native question from a retained callback", async () => {
+    const outDir = join(scratch, `callback-answer-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/callback-answer.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("synchronous callback frontend compile did not emit IR");
+    }
+    const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
+    expect(validateModule(mod)).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "callback-answer.c" : "callback-answer.ll"),
+      "utf8",
+    );
+    /* The answer has to exist before the emitting call returns, so the
+     * trampoline reads the closure and calls it rather than queueing an
+     * invocation for a later turn. */
+    expect(generated).toContain("scr_callback_table_acquire");
+    expect(generated).not.toContain("scr_callback_token_admit");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

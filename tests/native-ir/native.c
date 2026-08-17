@@ -194,6 +194,40 @@ int32_t nts_call_scoped_f32(
   return callback(value, context);
 }
 
+/* A retained callback the emitter ASKS rather than tells. It is registered
+ * once, invoked on the caller's thread, and the value it answers with is the
+ * value the emitter returns — the shape every gboolean-returning GTK signal
+ * has, where the handler says whether it consumed the event. Nothing here is
+ * queued: the answer has to exist before the emitting call returns. */
+typedef int32_t (*NtsAskCallback)(int32_t value, void *context);
+
+typedef struct NtsAsker {
+  NtsAskCallback callback;
+  void *context;
+  int32_t asked;
+} NtsAsker;
+
+NtsAsker *nts_asker_create(NtsAskCallback callback, void *context) {
+  NtsAsker *asker = calloc(1, sizeof *asker);
+  if (asker == NULL) return NULL;
+  asker->callback = callback;
+  asker->context = context;
+  return asker;
+}
+
+int32_t nts_asker_ask(NtsAsker *asker, int32_t value) {
+  asker->asked++;
+  return asker->callback(value, asker->context);
+}
+
+int32_t nts_asker_asked(NtsAsker *asker) {
+  return asker->asked;
+}
+
+void nts_asker_destroy(NtsAsker *asker) {
+  free(asker);
+}
+
 int32_t nts_fail_errno(int32_t error_number) {
   errno = error_number;
   return -1;

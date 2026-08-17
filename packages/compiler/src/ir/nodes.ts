@@ -276,6 +276,40 @@ export type IrNativeCallbackContract =
       reentrancy: "allowed" | "required";
       postDisposal: "not-invoked";
       shutdown: "drain";
+    }
+  /**
+   * A retained callback the native side ASKS rather than tells: it is
+   * registered once and its answer is the value the emitting call returns.
+   * Every gboolean-returning toolkit signal has this shape — a handler that
+   * says whether it consumed an event cannot say so after the event is gone.
+   *
+   * So delivery is synchronous, which is admissible for exactly one reason:
+   * the invocation is same-as-caller, on the thread that owns the runtime. A
+   * foreign producer may not ask, because answering means reading a closure,
+   * and a foreign thread may never read one. The payloads are borrowed rather
+   * than copied for the same reason a call-scoped payload is: they live only
+   * as long as the call that carries them.
+   *
+   * An exception the handler leaves pending is not thrown into the toolkit's
+   * frame. It stays pending, the trampoline answers with the ABI zero, and
+   * the next runtime turn reports it — the discipline a call-scoped callback
+   * already follows, with the difference that here the turn rather than an
+   * outer native call is what observes it.
+   */
+  | {
+      lifetime: "until-cancelled";
+      registrationOwner:
+        | { kind: "result" }
+        | { kind: "argument"; argument: number };
+      cancellationBinding: string;
+      allowedInvocationExecutors: readonly ["same-as-caller"];
+      deliveryExecutor: "same-as-caller";
+      synchronousReturn: true;
+      transports: readonly { kind: "borrow" }[];
+      sourceArguments: readonly IrNativeCallbackSourceArgument[];
+      reentrancy: "required";
+      postDisposal: "not-invoked";
+      shutdown: "drain";
     };
 
 /**

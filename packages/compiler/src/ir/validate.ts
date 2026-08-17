@@ -1580,6 +1580,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ownerCandidate["kind"] === "argument" &&
           Number.isSafeInteger(ownerCandidate["argument"]) &&
           Number(ownerCandidate["argument"]) >= 0);
+      /* A retained callback the native side asks for an answer. Synchronous
+       * delivery is admissible only because the invocation is same-as-caller
+       * on the owner's thread: answering means reading a closure, and a
+       * foreign producer may never read one. The result must be a value the
+       * handler can supply — a void answer is the queued contract's business,
+       * and having two ways to spell one delivery would be worse than either.
+       * Payloads are borrowed, because nothing outlives the answer. */
+      if (candidate["synchronousReturn"] === true) {
+        return Object.keys(candidate).sort().join(",") ===
+            "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
+          validOwner &&
+          typeof candidate["cancellationBinding"] === "string" &&
+          candidate["cancellationBinding"] !== "" &&
+          executors.length === 1 && executors[0] === "same-as-caller" &&
+          candidate["deliveryExecutor"] === "same-as-caller" &&
+          transportKinds.every((kind) => kind === "borrow") &&
+          candidate["reentrancy"] === "required" &&
+          candidate["postDisposal"] === "not-invoked" &&
+          candidate["shutdown"] === "drain" &&
+          type.ret.kind !== "void";
+      }
       return Object.keys(candidate).sort().join(",") ===
           "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
         validOwner &&

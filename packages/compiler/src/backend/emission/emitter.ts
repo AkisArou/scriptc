@@ -2082,6 +2082,56 @@ export class CEmitter {
         });
       }
       const ret = cType(signature.result).trim();
+      /* A retained callback the native side asks for an answer runs now, on
+       * the caller's thread, because the answer has to exist before the
+       * emitting call returns. Reading the closure is legal for exactly that
+       * reason: the contract admits no foreign producer, and the owner-side
+       * table lookup is the same one a queued delivery performs — just
+       * without the queue between the question and the answer. */
+      if (
+        adapter.contract.lifetime === "until-cancelled" &&
+        adapter.contract.synchronousReturn
+      ) {
+        const signatureId = `${adapter.symbol}_signature`;
+        const sourceType = adapter.source;
+        const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
+          if (argument.kind !== "callback-parameter") {
+            throw new Error(
+              "backend bug: a synchronously answered callback cannot inject a registration owner",
+            );
+          }
+          return sourceType.params[sourceIndex]?.kind === "f64"
+            ? `(double)sc_a${argument.parameter}`
+            : `sc_a${argument.parameter}`;
+        });
+        const call =
+          `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+        out.push(
+          `static const unsigned char ${signatureId};`,
+          `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
+          `  ScrCallbackToken *sc_token = (ScrCallbackToken *)sc_ctx;`,
+          /* A disposed registration answers with the ABI zero rather than
+           * reading a closure that is gone; so does an already-unwinding
+           * turn, which must not start another handler. */
+          `  if (scr_callback_token_state(sc_token) != SCR_CALLBACK_TOKEN_ACTIVE) return 0;`,
+          `  if (scr_exc_pending()) return 0;`,
+          `  ScrClosure *sc_cb = (ScrClosure *)scr_callback_table_acquire(`,
+          `      (ScrCallbackTable *)scr_callback_token_owner_context(sc_token),`,
+          `      scr_callback_token_slot(sc_token),`,
+          `      scr_callback_token_generation(sc_token), &${signatureId});`,
+          `  if (sc_cb == NULL) return 0;`,
+          `  ${ret} sc_answer = ${call};`,
+          `  scr_closure_release(sc_cb);`,
+          /* An exception stays pending and the toolkit gets the ABI zero: it
+           * has no frame to unwind through, and the next runtime turn is
+           * what reports an uncaught error either way. */
+          `  if (scr_exc_pending()) return 0;`,
+          `  return sc_answer;`,
+          `}`,
+          ``,
+        );
+        continue;
+      }
       if (adapter.contract.lifetime === "until-cancelled") {
         const invocation = `${adapter.symbol}_invocation`;
         const signatureId = `${adapter.symbol}_signature`;

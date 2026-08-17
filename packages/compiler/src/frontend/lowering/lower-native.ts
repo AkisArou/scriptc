@@ -1199,6 +1199,18 @@ function materializeNativeCallbackContract(
       sourceArguments: contract.sourceArguments.map((argument) => ({ ...argument })),
     };
   }
+  /* A retained callback the native side asks synchronously borrows its
+   * payloads for the call, exactly as a call-scoped one does: nothing
+   * outlives the answer, so nothing is copied. */
+  if (contract.synchronousReturn) {
+    return {
+      ...contract,
+      registrationOwner: { ...contract.registrationOwner },
+      allowedInvocationExecutors: ["same-as-caller"],
+      transports: contract.transports.map(() => ({ kind: "borrow" })),
+      sourceArguments: contract.sourceArguments.map((argument) => ({ ...argument })),
+    };
+  }
   return {
     ...contract,
     registrationOwner: { ...contract.registrationOwner },
