@@ -3002,7 +3002,9 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  test("answers a native question from a retained callback", async () => {
+  /* The registration and its C symbols are fork-local: an embedder-owned
+   * SCABI fixture does not promise them. */
+  localFixtureTest("answers a native question from a retained callback", async () => {
     const outDir = join(scratch, `callback-answer-${backend}`);
     const result = await compile(
       join(repoRoot, "tests/native-ir/callback-answer.ts"),
