@@ -693,7 +693,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 4;
+  irVersion: 5;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -786,6 +786,7 @@ export interface IrFfiCallbackParam {
     params: (IrFfiCallbackParamClass | IrFfiContextParam)[];
     returns: IrFfiReturnClass;
     lifetime: "call" | "retained";
+    invoke: "script-thread" | "foreign";
   };
 }
 
