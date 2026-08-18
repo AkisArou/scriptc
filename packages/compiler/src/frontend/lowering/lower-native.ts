@@ -15,7 +15,7 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nativeCallbackIsRetained, nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
+import { nativeArgumentScriptType, nativeCallbackIsRetained, nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -272,7 +272,9 @@ function matchesNativeArgumentSource(
       handleArms.some((arm) => typeEquals(arm, handle)) &&
       handleArms.some((arm) => arm.kind === "nullT");
   }
-  if (expected.kind !== "nullableString") return typeEquals(mapped, expected);
+  if (expected.kind !== "nullableString") {
+    return typeEquals(mapped, nativeArgumentScriptType(expected));
+  }
   if (mapped.kind === "string" || mapped.kind === "nullT") return true;
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;
@@ -289,7 +291,7 @@ function formatNativeArgumentType(
   if (type.kind === "nullableNativeHandle") {
     return `${L.fmt({ kind: "nativeHandle", typeId: type.typeId })} | null`;
   }
-  return L.fmt(type);
+  return L.fmt(nativeArgumentScriptType(type));
 }
 
 function validateDeclaration(
@@ -568,7 +570,7 @@ function lowerNativeInvocation(
       expected.kind !== "nullableString" &&
       expected.kind !== "nullableNativeHandle"
     ) {
-      return L.lowerExprExpecting(argument, expected);
+      return L.lowerExprExpecting(argument, nativeArgumentScriptType(expected));
     }
     const mapped = L.mapTypeOf(
       L.checker.getContextualType(argument) ?? L.typeOf(argument),

@@ -25,7 +25,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsRetained, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsRetained, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackSourcePayloadCopies, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1540,7 +1540,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         (typeof parameter === "object" && parameter !== null &&
           ((parameter.kind === "nativeHandle" &&
             nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
-            parameter.kind === "string" ||
+            parameter.kind === "cstring" ||
             parameter.kind === "f64" ||
             /* An integer payload read as a boolean, carrying the two
              * storage values it means — the mirror of the answer below. */
@@ -1625,7 +1625,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         Object.keys(owner).length === 1 &&
         executors.length === 1 && executors[0] === "same-as-caller" &&
         candidate["synchronousReturn"] === true &&
-        transportKinds.every((kind) => kind === "borrow");
+        /* A pointer-derived payload is copied, everything else is borrowed.
+         * The transport is not a free choice: reading a `const char *` means
+         * building a script string, and that string outlives the pointer. */
+        transportKinds.every((kind, index) =>
+          kind === (nativeCallbackSourcePayloadCopies(type.params[index]) ? "copy" : "borrow")
+        );
     }
     if (ownerKind === "result" || ownerKind === "argument") {
       const allowed = new Set(["same-as-caller", "any-attached-thread"]);
@@ -2228,12 +2233,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               /* A source argument may never project the context slot: it
                * carries the closure, not a value the handler receives. */
               if (expected.kind === "nativeContext") return false;
-              /* A string source over a const byte pointer is the copy the
-               * runtime makes when the callback is queued. Everything else
+              /* A C-string source over a const byte pointer is the copy the
+               * runtime makes when it decodes the payload. Everything else
                * must be the physical type itself. */
-              if (expected.kind === "nativePointer" || source.kind === "string") {
+              if (expected.kind === "nativePointer" || source.kind === "cstring") {
                 if (
-                  source.kind !== "string" ||
+                  source.kind !== "cstring" ||
                   expected.kind !== "nativePointer" ||
                   !expected.const ||
                   expected.addressSpace !== 0
@@ -4534,9 +4539,22 @@ function validateFunction(
                   arg.loc,
                 );
               }
-            } else {
-              expectType(arg, argument.type, `Native IR call ${e.binding} arg ${i}`);
+            } else if (
+              argument.type.kind !== "func" ||
+              (Array.isArray(argument.type.params) &&
+                typeof argument.type.ret === "object" && argument.type.ret !== null)
+            ) {
+              expectType(
+                arg,
+                nativeArgumentScriptType(argument.type),
+                `Native IR call ${e.binding} arg ${i}`,
+              );
             }
+            /* A malformed callback declaration has no script signature to
+             * compare the argument against, and it already earned its own
+             * diagnostic where it was declared. Deriving one from the parts
+             * that happen to be present would report the damage twice and
+             * describe it worse the second time. */
           }
         });
         const resultProjection = binding.result.projection as

@@ -86,7 +86,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, collectFfiRetainedOps, hasForeignFfiCallback, hasRetainedFfiCallback, parseFfiCallbackKey } from "../ffi-callbacks.js";
@@ -2041,7 +2041,7 @@ class LlEmitter {
               );
               return `double %a${argument.parameter}.wide`;
             }
-            return `${this.llType(sourceParam)} %a${argument.parameter}`;
+            return `${this.llType(nativeCallbackSourceScriptType(sourceParam))} %a${argument.parameter}`;
           }),
         ].join(", ");
         /* A boolean answer is written into the physical result's own
@@ -2086,7 +2086,7 @@ class LlEmitter {
         const copiedStrings = new Set<number>(
           adapter.contract.sourceArguments.flatMap((argument, sourceIndex) =>
             argument.kind === "callback-parameter" &&
-              adapter.source.params[sourceIndex]?.kind === "string"
+              adapter.source.params[sourceIndex]?.kind === "cstring"
               ? [argument.parameter]
               : []
           ),
@@ -2198,7 +2198,7 @@ class LlEmitter {
               ? "ptr"
               : widensNumber
                 ? this.llType(physical)
-                : this.llType(sourceType);
+                : this.llType(nativeCallbackSourceScriptType(sourceType));
             defs.push(
               `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${physicalFieldBase + argument.parameter}`,
               `  %source${sourceIndex} = load ${loadType}, ptr %source${sourceIndex}.ptr`,
@@ -2268,7 +2268,7 @@ class LlEmitter {
           const widened = argument.kind === "callback-parameter" &&
             sourceType.kind === "f64";
           callArgs.push(
-            `${this.llType(sourceType)} %source${sourceIndex}${
+            `${this.llType(nativeCallbackSourceScriptType(sourceType))} %source${sourceIndex}${
               retained ? ".retained" : widened ? ".wide" : ""
             }`,
           );
@@ -2288,6 +2288,16 @@ class LlEmitter {
           ``,
           `define internal void @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
           `entry:`,
+          /* Rejected before the record exists, so the trap path cannot
+           * strand a half-built invocation. */
+          ...[...copiedStrings].sort((left, right) => left - right).flatMap((slot) => [
+            `  %null${slot} = icmp eq ptr %a${slot}, null`,
+            `  br i1 %null${slot}, label %invalid_param${slot}, label %param_ok${slot}`,
+            `invalid_param${slot}:`,
+            `  call void @scr_trap(ptr ${this.cstr("scriptc: native callback passed a NULL cstring\n")})`,
+            `  unreachable`,
+            `param_ok${slot}:`,
+          ]),
           `  %record = call ptr @scr_callback_invocation_alloc(ptr %ctx, ${this.sizeType} ptrtoint (ptr getelementptr (${invocationType}, ptr null, i32 1) to ${this.sizeType}))`,
           `  %allocation.failed = icmp eq ptr %record, null`,
           `  br i1 %allocation.failed, label %return, label %initialize`,
@@ -2316,7 +2326,9 @@ class LlEmitter {
           );
           if (copiedStrings.has(index)) {
             defs.push(
-              `  %copy${index}.str = call ptr @scr_str_from_c_data(ptr %a${index})`,
+              `  %copy${index}.len = call ${this.sizeType} @strlen(ptr %a${index})`,
+              `  %copy${index}.str = call ptr @scr_str_from_utf8_lossy(` +
+                `ptr %a${index}, ${this.sizeType} %copy${index}.len)`,
               `  store ptr %copy${index}.str, ptr %copy${index}.ptr`,
             );
           } else {
@@ -2348,7 +2360,8 @@ class LlEmitter {
           this.declare(`declare void @scr_native_handle_release(ptr)`);
         }
         if (copiedStrings.size > 0) {
-          this.declare(`declare ptr @scr_str_from_c_data(ptr)`);
+          this.declare(`declare ${this.sizeType} @strlen(ptr)`);
+          this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
           this.declare(`declare ptr @scr_str_retain_v(ptr)`);
           this.declare(`declare void @scr_str_release(ptr)`);
         }
@@ -2380,6 +2393,23 @@ class LlEmitter {
         `  %fn = load ptr, ptr %fnp`,
       );
       const sourceType = adapter.source;
+      /* Every payload pointer is rejected before any script value is built,
+       * so a later bad slot cannot strand an earlier decode. */
+      for (const [index, argument] of adapter.contract.sourceArguments.entries()) {
+        if (
+          argument.kind !== "callback-parameter" ||
+          sourceType.params[index]?.kind !== "cstring"
+        ) continue;
+        const slot = argument.parameter;
+        defs.push(
+          `  %null${slot} = icmp eq ptr %a${slot}, null`,
+          `  br i1 %null${slot}, label %invalid_param${slot}, label %param_ok${slot}`,
+          `invalid_param${slot}:`,
+          `  call void @scr_trap(ptr ${this.cstr("scriptc: native callback passed a NULL cstring\n")})`,
+          `  unreachable`,
+          `param_ok${slot}:`,
+        );
+      }
       const widenLines: string[] = [];
       const callArgs = [
         "ptr %ctx",
@@ -2388,6 +2418,18 @@ class LlEmitter {
             throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
           }
           const sourceParam = sourceType.params[index]!;
+          /* A borrowed pointer decoded into a script string the handler may
+           * keep. The reference produced moves into the call. */
+          if (sourceParam.kind === "cstring") {
+            this.declare(`declare ${this.sizeType} @strlen(ptr)`);
+            this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
+            widenLines.push(
+              `  %len${argument.parameter} = call ${this.sizeType} @strlen(ptr %a${argument.parameter})`,
+              `  %s${argument.parameter} = call ptr @scr_str_from_utf8_lossy(` +
+                `ptr %a${argument.parameter}, ${this.sizeType} %len${argument.parameter})`,
+            );
+            return `ptr %s${argument.parameter}`;
+          }
           const physical = signature.parameters[argument.parameter];
           /* Same widening as the queued path, without the queue: %a{n} is
            * physically typed, so an f64 source widens it before the call. */
@@ -2415,7 +2457,7 @@ class LlEmitter {
             );
             return `i1 %a${argument.parameter}.bool`;
           }
-          return `${this.llType(sourceParam)} %a${argument.parameter}`;
+          return `${this.llType(nativeCallbackSourceScriptType(sourceParam))} %a${argument.parameter}`;
         }),
       ].join(", ");
       defs.push(...widenLines);

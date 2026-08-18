@@ -252,7 +252,13 @@ export type IrNativeCallbackArgumentType = {
   params: readonly (
     | IrNativeScalarType
     | IrNativeHandleType
-    | { kind: "string" }
+    /** A NUL-terminated `const char *` payload, decoded into a script string
+     * the way every other foreign byte sequence is — maximal-subpart U+FFFD
+     * replacement. It is named for the C shape rather than for `string`
+     * because the shape is the part that varies: a pointer-and-length span
+     * is a different physical arrangement of the same script value, and the
+     * two cannot share one tag. */
+    | { kind: "cstring" }
     /** Exact widening of an at-most-32-bit integer payload slot into the
      * source f64. The queued invocation stores the physical exact value; the
      * widening happens when the delivery reads it back. */
@@ -316,7 +322,12 @@ export type IrNativeCallbackContract =
       owner: { kind: "call" };
       allowedInvocationExecutors: readonly ["same-as-caller"];
       synchronousReturn: true;
-      transports: readonly { kind: "borrow" }[];
+      /* Per payload, and derivable rather than free: a value slot is read
+       * where it stands, and a pointer slot is copied because the script
+       * value built from it may outlive the call that borrowed the pointer.
+       * The validator holds it to exactly that, so the field records the
+       * decision without being able to contradict the payload. */
+      transports: readonly ({ kind: "borrow" } | { kind: "copy" })[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     }
   | {
@@ -378,6 +389,68 @@ export function nativeCallbackIsRetained(
   contract: IrNativeCallbackContract,
 ): contract is IrNativeRetainedCallbackContract {
   return contract.owner.kind !== "call";
+}
+
+/**
+ * The script-facing signature a source projection describes: the prototype
+ * the handler closure itself was compiled with, as opposed to the one the
+ * library calls.
+ *
+ * The two coincided as long as every source form happened to spell an IrType,
+ * and the backends read the projection as if it were one. It stopped being
+ * true the moment a form named its physical shape — `cstring` is a script
+ * string however it arrives — so the translation is written down rather than
+ * left to structural accident.
+ */
+export function nativeCallbackSourceSignature(
+  source: IrNativeCallbackArgumentType,
+): IrType & { kind: "func" } {
+  return {
+    kind: "func",
+    params: source.params.map(nativeCallbackSourceScriptType),
+    ret: source.ret.kind === "bool" ? BOOL : source.ret,
+  };
+}
+
+/** The script type a whole argument declaration describes — for a callback
+ * argument, the handler's own signature. Every other form already spells its
+ * script type, which is why this was long left implicit; a callback argument
+ * never did, and now says so.
+ *
+ * The nullable forms are excluded rather than handled: what they admit is a
+ * two-arm union whose identity lives in the module's union table, so the
+ * answer is not a type this function could name. Every caller matches them
+ * against that table first, and the signature says so instead of returning
+ * something almost right. */
+export function nativeArgumentScriptType(
+  argument: Exclude<
+    IrNativeArgumentType,
+    { kind: "nullableString" } | { kind: "nullableNativeHandle" }
+  >,
+): IrType {
+  return argument.kind === "func" ? nativeCallbackSourceSignature(argument) : argument;
+}
+
+/** Whether reading this payload copies. True exactly for the forms whose
+ * physical arrangement is a pointer the caller still owns: the script value
+ * built from one may outlive the call that borrowed it, so the bytes cannot
+ * be aliased. */
+export function nativeCallbackSourcePayloadCopies(
+  parameter: IrNativeCallbackArgumentType["params"][number] | undefined,
+): boolean {
+  return parameter?.kind === "cstring";
+}
+
+/** One payload's script type: what the handler's parameter actually is, once
+ * the physical arrangement the source form names has been read. */
+export function nativeCallbackSourceScriptType(
+  parameter: IrNativeCallbackArgumentType["params"][number],
+): IrType {
+  return parameter.kind === "cstring"
+    ? STRING
+    : parameter.kind === "bool"
+      ? BOOL
+      : parameter;
 }
 
 /**
@@ -1194,7 +1267,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 23 as const;
+export const IR_VERSION = 24 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

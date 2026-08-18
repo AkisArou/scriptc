@@ -27,7 +27,7 @@ import type {
   IrNativeCallbackSignature,
   IrNativeScalarType,
 } from "../ir/nodes.js";
-import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "../ir/nodes.js";
+import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, nativeCallbackSourcePayloadCopies } from "../ir/nodes.js";
 
 /** The exact scalar a profile class occupies. The profile names a C type by
  * class rather than by width, so these are fixed rather than probed. */
@@ -58,12 +58,15 @@ export function ffiBindingId(name: string): string {
  * declaration in the program's own source, which has no package. */
 const FFI_DECLARATION_MODULE = "\u0000ffi";
 
-/** Payload classes a call-scoped callback can carry today. `cstring` needs a
- * copy transport the call arm does not admit, and the span classes need a
- * source argument built from two physical slots; both are measured additions
- * with named consumers rather than guesses, so a descriptor using them keeps
- * the profile's own path for now. */
-const DESUGARABLE_PAYLOADS = new Set(["f64", "bool", "u8", "u32", "i32"]);
+/** Payload classes a call-scoped callback can carry today. The span classes
+ * (`string`, `bytes`) still need a source argument built from two physical
+ * slots, which is a measured addition with a named consumer rather than a
+ * guess, so a descriptor using one keeps the profile's own path for now. */
+const DESUGARABLE_PAYLOADS = new Set(["f64", "bool", "u8", "u32", "i32", "cstring"]);
+
+/** Answer classes. A C string is a payload only: answering one would need the
+ * ownership and allocator contract the profile deliberately omits. */
+const DESUGARABLE_ANSWERS = new Set(["f64", "bool", "u8", "u32", "i32"]);
 
 /** The one callback a binding may carry, with its context slot, or null when
  * the descriptor needs vocabulary the native path does not have yet. */
@@ -89,7 +92,7 @@ function desugarCallback(entry: IrFfiImport): {
   /* A contextless callback binds its closure through a thread-local slot,
    * which the native trampoline family does not have. */
   if (payloads.length === callback.params.length) return null;
-  if (callback.returns !== "void" && !DESUGARABLE_PAYLOADS.has(callback.returns)) return null;
+  if (callback.returns !== "void" && !DESUGARABLE_ANSWERS.has(callback.returns)) return null;
 
   const contexts = entry.params.flatMap((candidate, index) =>
     isFfiContextParam(candidate) && candidate.context === callback.id ? [index] : [],
@@ -100,7 +103,15 @@ function desugarCallback(entry: IrFfiImport): {
     parameters: callback.params.map((slot) =>
       isFfiContextParam(slot)
         ? { kind: "nativeContext", addressSpace: 0 } as const
-        : scalarOf(slot as "f64" | "bool" | "u8" | "u32" | "i32"),
+        /* The library hands over a pointer it still owns, which is what
+         * `const` records — the trampoline reads through it and never writes
+         * or frees. The element is `char`, spelled `i8` here because the
+         * profile states no signedness and nothing reads the tag for a
+         * payload pointer: both backends emit `const char *` and let the
+         * platform mean what it means. */
+        : slot === "cstring"
+          ? { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 } as const
+          : scalarOf(slot as "f64" | "bool" | "u8" | "u32" | "i32"),
     ),
     result: callback.returns === "void"
       ? { kind: "void" }
@@ -110,14 +121,16 @@ function desugarCallback(entry: IrFfiImport): {
     slot.kind === "nativeContext" ? [] : [index],
   );
   /* Each payload reaches the handler as the ordinary JavaScript value its
-   * class names: a boolean for `bool`, a number for the rest. Nothing
-   * outlives the call, so nothing is copied. */
+   * class names: a boolean for `bool`, a string for `cstring`, a number for
+   * the rest. */
   const source: IrNativeCallbackArgumentType = {
     kind: "func",
     params: payloads.map((cls) =>
       cls === "bool"
         ? { kind: "bool" as const, falseValue: "0", trueValue: "1" }
-        : { kind: "f64" as const },
+        : cls === "cstring"
+          ? { kind: "cstring" as const }
+          : { kind: "f64" as const },
     ),
     ret: callback.returns === "void"
       ? { kind: "void" }
@@ -130,7 +143,9 @@ function desugarCallback(entry: IrFfiImport): {
     owner: { kind: "call" },
     allowedInvocationExecutors: ["same-as-caller"],
     synchronousReturn: true,
-    transports: payloadSlots.map(() => ({ kind: "borrow" })),
+    transports: source.params.map((parameter) =>
+      nativeCallbackSourcePayloadCopies(parameter) ? { kind: "copy" } : { kind: "borrow" }
+    ),
     sourceArguments: payloadSlots.map((parameter) => ({
       kind: "callback-parameter",
       parameter,

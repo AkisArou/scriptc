@@ -45,7 +45,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { nativeIntegerInfo, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { nativeIntegerInfo, nativeCallbackSourceSignature, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, hasForeignFfiCallback, hasRetainedFfiCallback } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import {
@@ -175,6 +175,21 @@ function nativeCallbackParameterTypeC(
     return "void *";
   }
   return cType(parameter).trim();
+}
+
+/** A NUL-terminated payload becoming a script string. Decoding is the same
+ * maximal-subpart U+FFFD replacement every other foreign byte sequence gets:
+ * a script string is well-formed by construction, and a native API that
+ * hands over bytes makes no promise about their encoding. */
+function cstringDecodeC(index: number): string {
+  return `scr_str_from_utf8_lossy((const uint8_t *)sc_a${index}, strlen(sc_a${index}))`;
+}
+
+/** The precise trap a NULL C-string payload earns. There is no script value
+ * for "no string" in a slot the declaration says holds one, and decoding NULL
+ * would read address zero. */
+function cstringNullTrapC(index: number): string {
+  return `  if (sc_a${index} == NULL) scr_trap("scriptc: native callback passed a NULL cstring\\n");`;
 }
 
 /** A handler's answer, written into the physical result's representation.
@@ -2260,13 +2275,13 @@ export class CEmitter {
           ? "void *sc_ctx"
           : `${nativeCallbackParameterTypeC(parameter)} sc_a${index}`
       );
-      /* Physical slots whose source value is a string. Their pointer must not
-       * be stored: a queued delivery outlives whatever the emitter owned, so
-       * the copy is made when the signal fires. */
+      /* Physical slots whose source value is a C string. Their pointer must
+       * not be stored: a queued delivery outlives whatever the emitter owned,
+       * so the decode is done when the signal fires. */
       const copiedStrings = new Set<number>(
         adapter.contract.sourceArguments.flatMap((argument, sourceIndex) =>
           argument.kind === "callback-parameter" &&
-            adapter.source.params[sourceIndex]?.kind === "string"
+            adapter.source.params[sourceIndex]?.kind === "cstring"
             ? [argument.parameter]
             : []
         ),
@@ -2314,7 +2329,7 @@ export class CEmitter {
             : `sc_a${argument.parameter}`;
         });
         const call =
-          `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+          `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         /* A boolean answer is written into the physical result's own
          * representation: the handler says yes or no, and the contract says
          * which value each one is. */
@@ -2441,7 +2456,7 @@ export class CEmitter {
           );
           return cell;
         });
-        const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+        const call = `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         out.push(
           ...handleCells,
           `  ${call};`,
@@ -2450,6 +2465,9 @@ export class CEmitter {
           `  return sc_continue;`,
           `}`,
           `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
+          /* Every invalid payload pointer is rejected before the invocation
+           * is allocated, so the trap path cannot strand a half-built one. */
+          ...[...copiedStrings].sort((left, right) => left - right).map(cstringNullTrapC),
           `  ScrCallbackToken *sc_token = (ScrCallbackToken *)sc_ctx;`,
           `  ${invocation} *sc_invocation = (${invocation} *)scr_callback_invocation_alloc(sc_token, sizeof(${invocation}));`,
           `  if (sc_invocation == NULL) return;`,
@@ -2464,7 +2482,7 @@ export class CEmitter {
               ? []
               : [
                   copiedStrings.has(index)
-                    ? `  sc_invocation->sc_a${index} = scr_str_from_c_data(sc_a${index});`
+                    ? `  sc_invocation->sc_a${index} = ${cstringDecodeC(index)};`
                     : `  sc_invocation->sc_a${index} = sc_a${index};`,
                 ]
           ),
@@ -2480,12 +2498,26 @@ export class CEmitter {
         `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );
+      /* A borrowed payload pointer is only valid for the duration of this
+       * call, so the script string is built here rather than aliased. The
+       * reference produced moves into the call: a script function owns the
+       * arguments it receives. Rejected before any of them is built, so a
+       * trap cannot strand an earlier decode. */
+      for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
+        if (
+          argument.kind === "callback-parameter" &&
+          adapter.source.params[sourceIndex]?.kind === "cstring"
+        ) {
+          out.push(cstringNullTrapC(argument.parameter));
+        }
+      }
       const sourceType = adapter.source;
       const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
         if (argument.kind !== "callback-parameter") {
           throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
         }
         const source = adapter.source.params[sourceIndex];
+        if (source?.kind === "cstring") return cstringDecodeC(argument.parameter);
         /* Same widening as the queued path, without the queue. */
         if (source?.kind === "f64") return `(double)sc_a${argument.parameter}`;
         /* An integer slot read as a boolean: false is exactly the value the
@@ -2497,7 +2529,7 @@ export class CEmitter {
         }
         return `sc_a${argument.parameter}`;
       });
-      const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
+      const call = `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
       if (signature.result.kind === "void") {
         out.push(`  ${call};`, `}`, ``);
       } else {
