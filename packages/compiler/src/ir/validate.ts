@@ -1720,77 +1720,96 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
-    const error = binding.error as unknown;
-    if (typeof error !== "object" || error === null || !("kind" in error)) {
-      errors.push({
-        message: `Native IR binding "${binding.id}" has no valid error contract`,
-        loc: moduleLoc,
-      });
-    } else if (error.kind === "errno") {
-      const failureValue = "failureValue" in error ? error.failureValue : null;
-      const resultType = binding.result.type;
-      const info = resultType.kind === "nativeScalar"
-        ? nativeIntegerInfo(
-            resultType.scalar,
-            validNativeTarget ? nativePointerBits : undefined,
-          )
+    /* Failure is three orthogonal axes, but only the combinations both
+     * backends emit are admissible. Listing them here — rather than encoding
+     * them as union arms — is what makes a new convention a row plus an
+     * emission branch instead of a new case in every switch in the compiler.
+     *
+     * Two combinations the old closed enum could not spell are already
+     * admissible below: a sentinel result with nothing to say, and a NULL
+     * result that sets errno, which is what most of POSIX allocation does.
+     * They are refused only because nothing emits them yet, and that refusal
+     * is one line each to lift. */
+    {
+      const contract = binding.error as unknown;
+      const axis = (value: unknown, keys: string): Record<string, unknown> | null =>
+        typeof value === "object" && value !== null &&
+          Object.keys(value).sort().join(",") === keys
+          ? value as Record<string, unknown>
+          : null;
+      const shape = typeof contract === "object" && contract !== null &&
+          Object.keys(contract).sort().join(",") === "detect,message,release"
+        ? contract as { detect: unknown; message: unknown; release: unknown }
         : null;
-      const value = parseCanonicalNativeInteger(failureValue);
-      if (
-        Object.keys(error).sort().join(",") !== "failureValue,kind" ||
-        info === null || value === null || value < info.min || value > info.max ||
-        binding.result.passMode !== "value" || binding.result.ownership.kind !== "value"
-      ) {
+      const detect = shape === null
+        ? null
+        : axis(shape.detect, "kind") ?? axis(shape.detect, "kind,value");
+      const message = shape === null ? null : axis(shape.message, "kind") ?? axis(shape.message, "kind,symbol");
+      const release = shape === null ? null : axis(shape.release, "kind") ?? axis(shape.release, "kind,symbol");
+      if (detect === null || message === null || release === null) {
         errors.push({
-          message: `Native IR binding "${binding.id}" has an invalid errno failure contract`,
+          message: `Native IR binding "${binding.id}" has no valid error contract`,
           loc: moduleLoc,
         });
+      } else {
+        const detectKind = String(detect["kind"]);
+        const messageKind = String(message["kind"]);
+        const releaseKind = String(release["kind"]);
+        const combination = `${detectKind}/${messageKind}/${releaseKind}`;
+        const symbolValid = (candidate: Record<string, unknown>): boolean =>
+          typeof candidate["symbol"] === "string" && candidate["symbol"] !== "";
+        let invalid: string | null = null;
+        if (combination === "never/none/none") {
+          /* Nothing to check: an operation that cannot fail names no
+           * detection, no message, and nothing to release. */
+        } else if (combination === "resultEquals/errno/none") {
+          const resultType = binding.result.type;
+          const info = resultType.kind === "nativeScalar"
+            ? nativeIntegerInfo(
+                resultType.scalar,
+                validNativeTarget ? nativePointerBits : undefined,
+              )
+            : null;
+          const value = parseCanonicalNativeInteger(detect["value"]);
+          if (
+            info === null || value === null || value < info.min || value > info.max ||
+            binding.result.passMode !== "value" || binding.result.ownership.kind !== "value"
+          ) {
+            invalid = "sentinel";
+          }
+        } else if (combination === "resultIsNull/none/none") {
+          if (
+            binding.result.type.kind !== "nativeHandle" ||
+            binding.result.passMode !== "pointer" ||
+            binding.result.ownership.kind !== "owned"
+          ) {
+            invalid = "null-result";
+          }
+        } else if (combination === "resultIsNotNull/symbol/symbol") {
+          // The two foreign entries are named by the contract so no emitter
+          // derives them from the operation's own symbol. The result pairing
+          // is checked beside the error-channel projection.
+          const projection = binding.result.projection as { kind?: unknown } | undefined;
+          if (
+            !symbolValid(message) || !symbolValid(release) ||
+            message["symbol"] === release["symbol"] ||
+            projection?.kind !== "errorChannel"
+          ) {
+            invalid = "error-object";
+          }
+        } else {
+          errors.push({
+            message: `Native IR binding "${binding.id}" has an error contract with no lowering: ${combination}`,
+            loc: moduleLoc,
+          });
+        }
+        if (invalid !== null) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" has an invalid ${invalid} failure contract`,
+            loc: moduleLoc,
+          });
+        }
       }
-    } else if (error.kind === "no-fail") {
-      if (Object.keys(error).length !== 1) {
-        errors.push({
-          message: `Native IR binding "${binding.id}" has an invalid no-fail error contract`,
-          loc: moduleLoc,
-        });
-      }
-    } else if (error.kind === "nullable") {
-      if (
-        Object.keys(error).length !== 1 ||
-        binding.result.type.kind !== "nativeHandle" ||
-        binding.result.passMode !== "pointer" ||
-        binding.result.ownership.kind !== "owned"
-      ) {
-        errors.push({
-          message: `Native IR binding "${binding.id}" has an invalid nullable failure contract`,
-          loc: moduleLoc,
-        });
-      }
-    } else if (error.kind === "errorHandle") {
-      // The two foreign entries are named here so no emitter derives them from
-      // the operation's own symbol. The result pairing is checked beside the
-      // error-channel projection.
-      const messageSymbol = "messageSymbol" in error ? error.messageSymbol : null;
-      const releaseSymbol = "releaseSymbol" in error ? error.releaseSymbol : null;
-      const projection = binding.result.projection as { kind?: unknown } | undefined;
-      if (
-        Object.keys(error).sort().join(",") !== "kind,messageSymbol,releaseSymbol" ||
-        typeof messageSymbol !== "string" ||
-        messageSymbol.length === 0 ||
-        typeof releaseSymbol !== "string" ||
-        releaseSymbol.length === 0 ||
-        messageSymbol === releaseSymbol ||
-        projection?.kind !== "errorChannel"
-      ) {
-        errors.push({
-          message: `Native IR binding "${binding.id}" has an invalid error-handle failure contract`,
-          loc: moduleLoc,
-        });
-      }
-    } else {
-      errors.push({
-        message: `Native IR binding "${binding.id}" has unsupported error contract "${String(error.kind)}"`,
-        loc: moduleLoc,
-      });
     }
     if (
       binding.sourceAccess !== "call" &&
@@ -2312,7 +2331,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         trueValue > info.max ||
         binding.result.passMode !== "value" ||
         binding.result.ownership.kind !== "value" ||
-        binding.error.kind !== "no-fail"
+        binding.error.detect.kind !== "never"
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid boolean result projection`,
@@ -2331,7 +2350,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         !numberCarryingScalarType(binding.result.type) ||
         binding.result.passMode !== "value" ||
         binding.result.ownership.kind !== "value" ||
-        binding.error.kind !== "no-fail"
+        binding.error.detect.kind !== "never"
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid number result projection`,
@@ -2352,7 +2371,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         ownership.kind !== "borrowed" ||
         ownership.scope !== "receiver" ||
         anchor?.type.kind !== "nativeHandle" ||
-        binding.error.kind !== "no-fail" ||
+        binding.error.detect.kind !== "never" ||
         typeof resultProjection.nullable !== "boolean"
       ) {
         errors.push({
@@ -2364,13 +2383,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       /* An owned handle the callee may report as absent. Absence is a value,
        * so the binding must not also claim NULL is a failure: the two contracts
        * would disagree about the same pointer. */
-      const error = binding.error as { kind: string };
       if (
         binding.result.type.kind !== "nativeHandle" ||
         binding.result.passMode !== "pointer" ||
         binding.result.ownership.kind !== "owned" ||
         binding.result.ownership.transfer !== "to-runtime" ||
-        error.kind !== "no-fail"
+        binding.error.detect.kind !== "never"
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid nullable handle result projection`,
@@ -2382,13 +2400,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       // source, so it must be an unowned pointer paired with the contract that
       // reads and releases it. Any other pairing would either strand the
       // object or let a foreign pointer become a source value.
-      const error = binding.error as { kind: string };
       if (
         binding.result.type.kind !== "nativePointer" ||
         !validNativePointer(binding.result.type) ||
         binding.result.passMode !== "pointer" ||
         binding.result.ownership.kind !== "value" ||
-        error.kind !== "errorHandle"
+        binding.error.detect.kind !== "resultIsNotNull"
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid error-channel result projection`,
@@ -2724,7 +2741,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       if (e.declaration.module === "" || e.declaration.name === "") {
         errors.push({ message: `library native export "${e.id}" has an empty declaration identity`, loc: entryLoc });
       }
-      if (e.error.kind !== "no-fail" || Object.keys(e.error).length !== 1) {
+      if (e.error.detect.kind !== "never") {
         errors.push({ message: `library native export "${e.id}" has an invalid error contract`, loc: entryLoc });
       }
       if (!fn) {

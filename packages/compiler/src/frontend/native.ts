@@ -1,5 +1,6 @@
 import type {
   IrNativeAbiType,
+  IrNativeErrorContract,
   IrNativeArgumentType,
   IrNativeCallbackContract,
   IrNativeHandleDef,
@@ -100,14 +101,7 @@ export interface NativeFrontendBinding {
   readonly callingConvention: "c";
   readonly variadic: false;
   readonly error:
-    | { readonly kind: "no-fail" }
-    | { readonly kind: "errno"; readonly failureValue: string }
-    | { readonly kind: "nullable" }
-    | {
-        readonly kind: "errorHandle";
-        readonly messageSymbol: string;
-        readonly releaseSymbol: string;
-      };
+    Readonly<IrNativeErrorContract>;
   readonly sourceCall:
     | { readonly kind: "function" }
     | { readonly kind: "constructor" }
@@ -172,7 +166,11 @@ export interface NativeFrontendExport {
   };
   readonly callingConvention: "c";
   readonly variadic: false;
-  readonly error: { readonly kind: "no-fail" };
+  readonly error: {
+    readonly detect: { readonly kind: "never" };
+    readonly message: { readonly kind: "none" };
+    readonly release: { readonly kind: "none" };
+  };
   readonly parameters: readonly {
     readonly name: string;
     readonly type: Readonly<IrNativeValueType>;

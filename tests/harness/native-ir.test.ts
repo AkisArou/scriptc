@@ -375,7 +375,24 @@ const SUBSCRIPTION_DEFINITION = {
   upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
 const NATIVE_VOID = { kind: "void" } as const;
-const NO_NATIVE_ERROR = { kind: "no-fail" } as const;
+const NO_NATIVE_ERROR = {
+  detect: { kind: "never" },
+  message: { kind: "none" },
+  release: { kind: "none" },
+} as const;
+/** A NULL result means failure and the detection is the whole message. */
+const NULL_IS_FAILURE = {
+  detect: { kind: "resultIsNull" },
+  message: { kind: "none" },
+  release: { kind: "none" },
+} as const;
+/** A sentinel result means failure and errno says why. */
+const errnoFailure = (value: string) =>
+  ({
+    detect: { kind: "resultEquals", value },
+    message: { kind: "errno" },
+    release: { kind: "none" },
+  }) as const;
 const DIRECT_RESULT = { kind: "direct" } as const;
 
 type DirectNativeParameter = {
@@ -577,7 +594,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "nullable" },
+      error: NULL_IS_FAILURE,
       arguments: [{
         name: "callback",
         type: RETAINED_NUMBER_SOURCE,
@@ -964,9 +981,9 @@ const localNativeInput: NativeFrontendInput = {
       variadic: false,
       sourceCall: { kind: "function" },
       error: {
-        kind: "errorHandle",
-        messageSymbol: "nts_fixture_error_message",
-        releaseSymbol: "nts_fixture_error_free",
+        detect: { kind: "resultIsNotNull" },
+        message: { kind: "symbol", symbol: "nts_fixture_error_message" },
+        release: { kind: "symbol", symbol: "nts_fixture_error_free" },
       },
       ...directSignature([
         { name: "code", type: I32, passMode: "value", ownership: { kind: "value" } },
@@ -985,7 +1002,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "no-fail" },
+      error: NO_NATIVE_ERROR,
       ...directSignature([]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
@@ -996,7 +1013,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "errno", failureValue: "-1" },
+      error: errnoFailure("-1"),
       ...directSignature([
         { name: "error_number", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
@@ -1012,7 +1029,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "nullable" },
+      error: NULL_IS_FAILURE,
       ...directSignature([]),
       result: {
         type: VAULT,
@@ -1095,7 +1112,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "nullable" },
+      error: NULL_IS_FAILURE,
       arguments: [
         { name: "callback", type: ASK_I32_SOURCE, callback: ASK_I32_CONTRACT },
       ],
@@ -1136,7 +1153,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "nullable" },
+      error: NULL_IS_FAILURE,
       arguments: [
         { name: "callback", type: ASK_BOOL_SOURCE, callback: ASK_BOOL_CONTRACT },
       ],
@@ -1237,7 +1254,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c",
       variadic: false,
       sourceCall: { kind: "function" },
-      error: { kind: "nullable" },
+      error: NULL_IS_FAILURE,
       arguments: [
         {
           name: "callback",
@@ -1310,7 +1327,7 @@ const localNativeInput: NativeFrontendInput = {
       callingConvention: "c" as const,
       variadic: false as const,
       sourceCall: { kind: "method" as const, receiverArgument: 0 },
-      error: { kind: "errno" as const, failureValue: "-1" },
+      error: errnoFailure("-1"),
       ...directSignature([
         {
           name: "subscription",
@@ -1664,7 +1681,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        error: { kind: "errno", failureValue: "-1" },
+        error: errnoFailure("-1"),
         arguments: [
           { name: "callback", type: CALL_I32_SOURCE, callback: CALL_I32_CONTRACT },
           { name: "value", type: I32 },
@@ -1701,7 +1718,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        error: { kind: "nullable" },
+        error: NULL_IS_FAILURE,
         ...directSignature([
           { name: "succeed", type: I32, passMode: "value", ownership: { kind: "value" } },
         ]),
@@ -1723,7 +1740,7 @@ function frontendNativeInput(): NativeFrontendInput {
         callingConvention: "c",
         variadic: false,
         sourceCall: { kind: "function" },
-        error: { kind: "nullable" },
+        error: NULL_IS_FAILURE,
         arguments: [
           { name: "callback", type: CALL_I32_SOURCE, callback: CALL_I32_CONTRACT },
           { name: "succeed", type: I32 },
@@ -2477,12 +2494,9 @@ test("Native IR requires explicit, range-checked error contracts", () => {
   );
 
   const outOfRange = exactI32Module();
-  outOfRange.nativeBindings![0]!.error = {
-    kind: "errno",
-    failureValue: "2147483648",
-  };
+  outOfRange.nativeBindings![0]!.error = errnoFailure("2147483648");
   expect(validateModule(outOfRange).map((error) => error.message)).toContain(
-    'Native IR binding "fixture.i32_identity" has an invalid errno failure contract',
+    'Native IR binding "fixture.i32_identity" has an invalid sentinel failure contract',
   );
 });
 
@@ -4320,9 +4334,9 @@ describe.each(["c", "llvm"] as const)(
         expect.objectContaining({
           id: "scriptc.fixture.c-v1@0.0.0#error_handle_fail",
           error: {
-            kind: "errorHandle",
-            messageSymbol: "nts_fixture_error_message",
-            releaseSymbol: "nts_fixture_error_free",
+            detect: { kind: "resultIsNotNull" },
+            message: { kind: "symbol", symbol: "nts_fixture_error_message" },
+            release: { kind: "symbol", symbol: "nts_fixture_error_free" },
           },
         }),
       );
@@ -4397,7 +4411,7 @@ describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (bac
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
         id: "scriptc.fixture.c-v1@0.0.0#fail_errno",
-        error: { kind: "errno", failureValue: "-1" },
+        error: errnoFailure("-1"),
         result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       }),
     );

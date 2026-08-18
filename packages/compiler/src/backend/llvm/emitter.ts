@@ -7965,13 +7965,19 @@ class LlEmitter {
           return { name: "", type: e.type };
         }
         if (binding.result.projection.kind === "errorChannel") {
-          if (binding.error.kind !== "errorHandle") {
+          if (
+            binding.error.detect.kind !== "resultIsNotNull" ||
+            binding.error.message.kind !== "symbol" ||
+            binding.error.release.kind !== "symbol"
+          ) {
             throw new Error(`llvm emitter bug: error channel without an error handle in ${binding.id}`);
           }
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          this.declare(`declare ptr @${binding.error.messageSymbol}(ptr)`);
-          this.declare(`declare void @${binding.error.releaseSymbol}(ptr)`);
+          const messageSymbol = binding.error.message.symbol;
+          const releaseSymbol = binding.error.release.symbol;
+          this.declare(`declare ptr @${messageSymbol}(ptr)`);
+          this.declare(`declare void @${releaseSymbol}(ptr)`);
           this.declare("declare zeroext i1 @scr_exc_pending()");
           this.declare("declare void @scr_native_throw_native_error(ptr, ptr)");
           const failed = B.tmp();
@@ -7984,7 +7990,7 @@ class LlEmitter {
           B.startBlock(failureBlock);
           const message = B.tmp();
           const pending = B.tmp();
-          B.line(`${message} = call ptr @${binding.error.messageSymbol}(ptr ${raw})`);
+          B.line(`${message} = call ptr @${messageSymbol}(ptr ${raw})`);
           B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
           // A callback may already have thrown, and that exception wins. Both
           // paths reach the release, so a pending exception cannot strand the
@@ -7996,7 +8002,7 @@ class LlEmitter {
           );
           B.br(releaseBlock);
           B.startBlock(releaseBlock);
-          B.line(`call void @${binding.error.releaseSymbol}(ptr ${raw})`);
+          B.line(`call void @${releaseSymbol}(ptr ${raw})`);
           B.br(continuation);
           B.startBlock(continuation);
           this.emitPendingCheck();
@@ -8293,7 +8299,7 @@ class LlEmitter {
             B.condBr(isNull, nullBlock, wrapBlock);
             B.startBlock(nullBlock);
             B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
-            if (binding.error.kind === "nullable") {
+            if (binding.error.detect.kind === "resultIsNull") {
               this.declare("declare zeroext i1 @scr_exc_pending()");
               const pending = B.tmp();
               B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
@@ -8320,7 +8326,7 @@ class LlEmitter {
             B.startBlock(continuation);
             result = B.tmp();
             B.line(`${result} = load ptr, ptr ${resultSlot}`);
-          } else if (binding.error.kind === "nullable") {
+          } else if (binding.error.detect.kind === "resultIsNull") {
             const resultSlot = B.slot();
             B.entryAllocas.push(`${resultSlot} = alloca ptr ; nullable native handle result`);
             B.line(`store ptr null, ptr ${resultSlot}`);
@@ -8359,13 +8365,16 @@ class LlEmitter {
         }
         const result = B.tmp();
         B.line(`${result} = ${call}`);
-        if (binding.error.kind === "errno") {
+        if (binding.error.detect.kind === "resultEquals") {
           const resultType = binding.result.type;
           if (resultType.kind !== "nativeScalar" || resultType.scalar === "f64") {
             throw new Error(`llvm emitter bug: errno over non-integer result in ${binding.id}`);
           }
           const failed = B.tmp();
-          const failure = binding.error.failureValue;
+          if (binding.error.message.kind !== "errno") {
+            throw new Error(`emitter bug: unlowered sentinel message in ${binding.id}`);
+          }
+          const failure = binding.error.detect.value;
           const failureBlock = B.newLabel("native.errno");
           const throwBlock = B.newLabel("native.errno.throw");
           const continuation = B.newLabel("native.errno.ok");
@@ -8387,7 +8396,7 @@ class LlEmitter {
           B.br(continuation);
           B.startBlock(continuation);
         }
-        if (callbacksMayThrow || binding.error.kind !== "no-fail") this.emitPendingCheck();
+        if (callbacksMayThrow || binding.error.detect.kind !== "never") this.emitPendingCheck();
         releaseArguments();
         return { name: result, type: e.type };
       }

@@ -862,12 +862,14 @@ export class CEmitter {
         `extern ${nativeAbiType(binding.result.type)} ${binding.entry.symbol}(` +
           `${params.length > 0 ? params.join(", ") : "void"});`,
       );
-      if (binding.error.kind === "errorHandle") {
+      if (binding.error.message.kind === "symbol") {
         // The accessor and release entries the error contract names are
         // foreign symbols too, and their shapes are fixed by the contract.
         out.push(
-          `extern const char *${binding.error.messageSymbol}(void *);`,
-          `extern void ${binding.error.releaseSymbol}(void *);`,
+          `extern const char *${binding.error.message.symbol}(void *);`,
+          ...(binding.error.release.kind === "symbol"
+            ? [`extern void ${binding.error.release.symbol}(void *);`]
+            : []),
         );
       }
     }

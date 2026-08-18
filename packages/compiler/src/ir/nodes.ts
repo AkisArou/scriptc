@@ -1148,7 +1148,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 21 as const;
+export const IR_VERSION = 22 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1236,6 +1236,33 @@ export interface IrModule {
   lib?: IrLibSection;
 }
 
+/** How a failure is recognised in what the call returned. */
+export type IrNativeFailureDetection =
+  | { kind: "never" }
+  | { kind: "resultIsNull" }
+  /** The result IS the error object: non-null means failure, null success. */
+  | { kind: "resultIsNotNull" }
+  | { kind: "resultEquals"; value: string };
+
+/** Where the thrown message comes from. `none` means the detection names the
+ * failure by itself, which is what a bare sentinel contract has to offer. */
+export type IrNativeFailureMessage =
+  | { kind: "none" }
+  | { kind: "errno" }
+  | { kind: "symbol"; symbol: string };
+
+/** What must be released once the message has been read. Named here rather
+ * than derived from the operation's own symbol, so no emitter guesses it. */
+export type IrNativeFailureRelease =
+  | { kind: "none" }
+  | { kind: "symbol"; symbol: string };
+
+export interface IrNativeErrorContract {
+  detect: IrNativeFailureDetection;
+  message: IrNativeFailureMessage;
+  release: IrNativeFailureRelease;
+}
+
 export interface IrNativeBinding {
   /** Stable identity used by `nativeCall`, unique within this module.
    * Embedders may qualify a manifest-local ID with its package instance. */
@@ -1250,21 +1277,20 @@ export interface IrNativeBinding {
   callingConvention: "c";
   variadic: false;
   /** Exact foreign failure convention. This is mandatory so backends never
-   * infer error semantics from a symbol, declaration, or native type. */
-  error:
-    | { kind: "no-fail" }
-    | { kind: "errno"; failureValue: string }
-    | { kind: "nullable" }
-    /** The operation returns an owned error object, or null on success. The
-     * message is read through `messageSymbol` and copied into the thrown
-     * Error, then the object is released through `releaseSymbol` — including
-     * when a callback has already left an exception pending, so the object is
-     * never stranded. */
-    | {
-        kind: "errorHandle";
-        messageSymbol: string;
-        releaseSymbol: string;
-      };
+   * infer error semantics from a symbol, declaration, or native type.
+   *
+   * Failure is three independent questions rather than a list of platform
+   * conventions: how a failure is RECOGNISED, where its message comes from,
+   * and what has to be released afterwards. A compiler has no business
+   * knowing what an HRESULT is; it has every business knowing that some
+   * operations report failure by a sentinel result and some by a non-null
+   * error object.
+   *
+   * The axes are orthogonal but not every combination has a lowering yet.
+   * The validator admits exactly the combinations both backends emit, so
+   * adding one later is a validator row and an emission branch rather than a
+   * new arm through every switch in the compiler. */
+  error: IrNativeErrorContract;
   /** Logical values evaluated by nativeCall, once and in source order. */
   arguments: {
     name: string;
@@ -1520,7 +1546,11 @@ export interface IrNativeExport {
   declaration: { module: string; name: string };
   params: { name: string; type: IrNativeScalarType }[];
   returns: IrNativeScalarType | { kind: "void" };
-  error: { kind: "no-fail" };
+  error: {
+    detect: { kind: "never" };
+    message: { kind: "none" };
+    release: { kind: "none" };
+  };
 }
 
 /** One runtime-trap overlay row: the profile's teaching (replaces the

@@ -929,7 +929,11 @@ function numberBinding(id: string, scalar: "i32" | "u8"): IrNativeBinding {
     entry: { kind: "c-symbol", symbol: `nts_${id}` },
     callingConvention: "c",
     variadic: false,
-    error: { kind: "no-fail" },
+    error: {
+      detect: { kind: "never" },
+      message: { kind: "none" },
+      release: { kind: "none" },
+    },
     arguments: [{ name: "value", type: { kind: "f64" } }],
     parameters: [{
       name: "value",

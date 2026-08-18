@@ -1753,7 +1753,7 @@ function resolveNativeLibraryExports(
     if (
       entry.callingConvention !== "c" ||
       entry.variadic !== false ||
-      entry.error.kind !== "no-fail"
+      entry.error.detect.kind !== "never"
     ) {
       diagnostics.push(nativeSignatureDiag(entry.id, "only non-variadic no-fail C exports are supported", info.loc));
       continue;
@@ -1825,7 +1825,11 @@ function resolveNativeLibraryExports(
       declaration: { ...entry.declaration },
       params,
       returns: result,
-      error: { kind: "no-fail" },
+      error: {
+      detect: { kind: "never" },
+      message: { kind: "none" },
+      release: { kind: "none" },
+    },
     });
   }
   return diagnostics;

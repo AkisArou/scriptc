@@ -47,7 +47,7 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
   const throwingNativeBindings = new Set(
     (mod.nativeBindings ?? [])
       .filter((binding) =>
-        binding.error.kind !== "no-fail" ||
+        binding.error.detect.kind !== "never" ||
         binding.result.projection.kind === "boolean" ||
         (binding.result.projection.kind === "utf8CString" &&
           !binding.result.projection.nullable) ||

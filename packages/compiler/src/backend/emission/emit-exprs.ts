@@ -2653,16 +2653,22 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return { name: "", type: e.type };
         }
         if (binding.result.projection.kind === "errorChannel") {
-          if (binding.error.kind !== "errorHandle") {
-            throw new Error(`emitter bug: error channel without an error handle in ${binding.id}`);
+          if (
+            binding.error.detect.kind !== "resultIsNotNull" ||
+            binding.error.message.kind !== "symbol" ||
+            binding.error.release.kind !== "symbol"
+          ) {
+            throw new Error(`emitter bug: error channel without an error object in ${binding.id}`);
           }
+          const messageSymbol = binding.error.message.symbol;
+          const releaseSymbol = binding.error.release.symbol;
           const raw = `sc_t${E.tempCounter++}`;
           const message = `sc_t${E.tempCounter++}`;
           E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
           E.line(`if (${raw} != NULL) {`);
           E.indent++;
           E.line(
-            `const char *${message} = ${binding.error.messageSymbol}(${raw});`,
+            `const char *${message} = ${messageSymbol}(${raw});`,
           );
           // A callback may already have thrown during the call, and that
           // exception wins. The object is released either way, so a pending
@@ -2670,7 +2676,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.line(
             `if (!scr_exc_pending()) scr_native_throw_native_error(${message}, ${operation});`,
           );
-          E.line(`${binding.error.releaseSymbol}(${raw});`);
+          E.line(`${releaseSymbol}(${raw});`);
           E.indent--;
           E.line("}");
           E.emitPendingCheck();
@@ -2878,13 +2884,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`${result.name} = ${existing};`);
             E.indent--;
             E.line(`} else if (${raw} == NULL) {`);
-          } else if (binding.error.kind === "nullable") {
+          } else if (binding.error.detect.kind === "resultIsNull") {
             E.line(`if (${raw} == NULL) {`);
           }
-          if (interns || binding.error.kind === "nullable") {
+          if (interns || binding.error.detect.kind === "resultIsNull") {
             E.indent++;
             E.line(`scr_native_handle_abandon(${prepared});`);
-            if (binding.error.kind === "nullable") {
+            if (binding.error.detect.kind === "resultIsNull") {
               E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
             } else {
               E.line(
@@ -2907,14 +2913,21 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return result;
         }
         const result = E.newTemp(e.type, call);
-        if (binding.error.kind === "errno") {
+        if (binding.error.detect.kind === "resultEquals") {
           const resultType = binding.result.type;
           if (resultType.kind !== "nativeScalar" || resultType.scalar === "f64") {
-            throw new Error(`emitter bug: errno over non-integer result in ${binding.id}`);
+            throw new Error(`emitter bug: sentinel failure over non-integer result in ${binding.id}`);
+          }
+          /* The only lowered message for a sentinel result is errno. A bare
+           * sentinel — failure with nothing to say — is admissible in the
+           * shape and has no emission yet; the validator refuses it, so
+           * reaching here means the two disagree. */
+          if (binding.error.message.kind !== "errno") {
+            throw new Error(`emitter bug: unlowered sentinel message in ${binding.id}`);
           }
           const failure = cNativeScalarLiteral(
             resultType,
-            binding.error.failureValue,
+            binding.error.detect.value,
             E.mod.nativeTarget?.pointerBits,
           );
           const errorNumber = `sc_t${E.tempCounter++}`;
@@ -2925,7 +2938,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.indent--;
           E.line("}");
         }
-        if (callbacksMayThrow || binding.error.kind !== "no-fail") E.emitPendingCheck();
+        if (callbacksMayThrow || binding.error.detect.kind !== "never") E.emitPendingCheck();
         releaseArguments();
         return result;
       }

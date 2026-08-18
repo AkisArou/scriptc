@@ -455,7 +455,7 @@ function validateDeclaration(
   }
   const sourceResult = L.checker.getReturnTypeOfSignature(signature);
   if (sourceResult.flags & ts.TypeFlags.Never) {
-    if (binding.error.kind === "no-fail") {
+    if (binding.error.detect.kind === "never") {
       failSignature(L, binding, "the return type is 'never', but the native call cannot fail", loc);
     }
     return;
@@ -602,7 +602,7 @@ function lowerNativeInvocation(
       ? { kind: "void" }
       : failBinding(L, binding, "a native setter must have a direct void result", loc)
     : sourceResult.flags & ts.TypeFlags.Never
-    ? binding.error.kind !== "no-fail" &&
+    ? binding.error.detect.kind !== "never" &&
         binding.result.projection.kind === "direct" &&
         binding.result.type.kind !== "nativePointer"
       ? { ...binding.result.type }
@@ -1175,7 +1175,11 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
     entry: { ...binding.entry },
     callingConvention: binding.callingConvention,
     variadic: false,
-    error: { ...binding.error },
+    error: {
+      detect: { ...binding.error.detect },
+      message: { ...binding.error.message },
+      release: { ...binding.error.release },
+    },
     arguments: binding.arguments.map((argument) => ({
       name: argument.name,
       type: { ...argument.type },
