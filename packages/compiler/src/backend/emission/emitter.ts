@@ -46,7 +46,7 @@ import type {
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackPayloads, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -140,7 +140,29 @@ function cstringNullTrapC(index: number): string {
   return `  if (sc_a${index} == NULL) scr_trap("scriptc: native callback passed a NULL cstring\\n");`;
 }
 
-/** A handler's answer, written into the physical result's representation.
+/** One payload, read where the library left it. The DECISION is the shared
+ * plan's; this is only how C spells it. */
+function nativePayloadReadC(payload: NativeCallbackPayload): string {
+  switch (payload.kind) {
+    case "registrationOwner":
+      throw new Error("backend bug: a registration owner has no slot to read");
+    case "span": {
+      const build = payload.text ? "scr_str_from_utf8_lossy" : "scr_bytes_from_data";
+      return `${build}((const uint8_t *)sc_a${payload.data}, sc_a${payload.length})`;
+    }
+    case "cstring":
+      return cstringDecodeC(payload.slot);
+    case "boolean":
+      return `(sc_a${payload.slot} != ${payload.falseValue})`;
+    case "widenedNumber":
+      return `(double)sc_a${payload.slot}`;
+    case "ownedHandle":
+    case "direct":
+      return `sc_a${payload.slot}`;
+  }
+}
+
+/** A handler's answer, written into the physical result's representation./** A handler's answer, written into the physical result's representation.
  * An exact answer is already that representation; a boolean answers with the
  * two values the declaration names; an ordinary number narrows, naming which
  * conversion it performs — the same choice a parameter position makes, for
@@ -1971,6 +1993,14 @@ export class CEmitter {
    * require no TLS and preserve callback identity exactly. */
   emitNativeCallbackDefs(out: string[]): void {
     for (const adapter of this.nativeCallbackAdapters.values()) {
+      /* What every payload becomes, decided once for both backends. */
+      const payloads = nativeCallbackPayloads(adapter, (bindingId) => {
+        const free = this.nativeById.get(bindingId);
+        if (free === undefined) {
+          throw new Error(`emitter bug: unknown payload destructor ${bindingId}`);
+        }
+        return free.entry.symbol;
+      });
       const signature = adapter.callback.signature;
       /* The context slot sits at its declared position rather than being
        * appended: a C API may take userdata first, last, or not at all, and
@@ -1980,36 +2010,21 @@ export class CEmitter {
           ? "void *sc_ctx"
           : `${nativeCallbackParameterTypeC(parameter)} sc_a${index}`
       );
-      /* Physical slots whose source value is a C string. Their pointer must
-       * not be stored: a queued delivery outlives whatever the emitter owned,
-       * so the decode is done when the signal fires. */
+      /* Both are views of the plan. A C-string slot's pointer must not be
+       * stored — a queued delivery outlives whatever the emitter owned, so
+       * the decode happens when the signal fires — and an owned handle
+       * arrives already referenced, so the invocation owns one and the
+       * dropped path has to give it back. */
       const copiedStrings = new Set<number>(
-        adapter.contract.sourceArguments.flatMap((argument, sourceIndex) =>
-          argument.kind === "callback-parameter" &&
-            adapter.source.params[sourceIndex]?.kind === "cstring"
-            ? [argument.parameter]
+        payloads.flatMap((payload) => payload.kind === "cstring" ? [payload.slot] : []),
+      );
+      const ownedHandles = new Map<number, { typeId: string; free: string }>(
+        payloads.flatMap((payload) =>
+          payload.kind === "ownedHandle"
+            ? [[payload.slot, { typeId: payload.typeId, free: payload.free }] as const]
             : []
         ),
       );
-      /* Owned handle payloads, and the binding that gives each reference back.
-       * The pointer arrives already retained by the emitter, so the invocation
-       * owns one and the dropped path has to release it. */
-      const ownedHandles = new Map<number, { typeId: string; free: string }>();
-      for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
-        if (argument.kind !== "callback-parameter") continue;
-        const sourceParam = adapter.source.params[sourceIndex];
-        if (argument.destructor === undefined || sourceParam?.kind !== "nativeHandle") {
-          continue;
-        }
-        const free = this.nativeById.get(argument.destructor);
-        if (free === undefined) {
-          throw new Error(`emitter bug: unknown payload destructor ${argument.destructor}`);
-        }
-        ownedHandles.set(argument.parameter, {
-          typeId: sourceParam.typeId,
-          free: free.entry.symbol,
-        });
-      }
       const ret = cType(signature.result).trim();
       /* A registration a foreign thread may raise cannot be delivered where
        * it is raised: reading a closure is a script-thread operation. The
@@ -2028,16 +2043,7 @@ export class CEmitter {
       ) {
         const signatureId = `${adapter.symbol}_signature`;
         const sourceType = adapter.source;
-        const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
-          if (argument.kind !== "callback-parameter") {
-            throw new Error(
-              "backend bug: a synchronously answered callback cannot inject a registration owner",
-            );
-          }
-          return sourceType.params[sourceIndex]?.kind === "f64"
-            ? `(double)sc_a${argument.parameter}`
-            : `sc_a${argument.parameter}`;
-        });
+        const args = payloads.map((payload) => nativePayloadReadC(payload));
         const call =
           `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         /* A boolean answer is written into the physical result's own
@@ -2256,32 +2262,7 @@ export class CEmitter {
         }
       }
       const sourceType = adapter.source;
-      const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
-        const source = adapter.source.params[sourceIndex];
-        /* A pointer and a count becoming one script value. The reference
-         * produced moves into the call, exactly as a decoded C string's
-         * does. */
-        if (argument.kind === "callback-parameter-span") {
-          const build = source?.kind === "byteSpan"
-            ? "scr_bytes_from_data"
-            : "scr_str_from_utf8_lossy";
-          return `${build}((const uint8_t *)sc_a${argument.data}, sc_a${argument.length})`;
-        }
-        if (argument.kind !== "callback-parameter") {
-          throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
-        }
-        if (source?.kind === "cstring") return cstringDecodeC(argument.parameter);
-        /* Same widening as the queued path, without the queue. */
-        if (source?.kind === "f64") return `(double)sc_a${argument.parameter}`;
-        /* An integer slot read as a boolean: false is exactly the value the
-         * declaration names, and everything else is true. C's own truth test
-         * where that value is zero, which is what a foreign API that returns
-         * "any nonzero" means. */
-        if (source?.kind === "bool") {
-          return `(sc_a${argument.parameter} != ${source.falseValue})`;
-        }
-        return `sc_a${argument.parameter}`;
-      });
+      const args = payloads.map((payload) => nativePayloadReadC(payload));
       const call = `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
       if (signature.result.kind === "void") {
         out.push(`  ${call};`, `}`, ``);

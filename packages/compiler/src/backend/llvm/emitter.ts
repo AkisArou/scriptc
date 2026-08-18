@@ -89,7 +89,7 @@ import type {
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, type NativeCallbackAdapter } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallbackPayloads, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -1658,6 +1658,57 @@ class LlEmitter {
   /** LLVM definitions for exact-scalar Native IR callbacks. The context
    * pointer is the borrowed closure, and callback exceptions remain pending
    * until the outer native call performs its ordinary unwind check. */
+  /** One payload, read where the library left it, with any preparation the
+   * read needs pushed onto `prepare`. The DECISION is the shared plan's; this
+   * is only how LLVM spells it. */
+  private nativePayloadReadLl(
+    payload: NativeCallbackPayload,
+    prepare: string[],
+  ): string {
+    switch (payload.kind) {
+      case "registrationOwner":
+        throw new Error("llvm emitter bug: a registration owner has no slot to read");
+      case "span": {
+        const build = payload.text ? "scr_str_from_utf8_lossy" : "scr_bytes_from_data";
+        this.declare(`declare ptr @${build}(ptr, ${this.sizeType})`);
+        prepare.push(
+          `  %s${payload.data} = call ptr @${build}(` +
+            `ptr %a${payload.data}, ${this.sizeType} %a${payload.length})`,
+        );
+        return `ptr %s${payload.data}`;
+      }
+      case "cstring":
+        this.declare(`declare ${this.sizeType} @strlen(ptr)`);
+        this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
+        prepare.push(
+          `  %len${payload.slot} = call ${this.sizeType} @strlen(ptr %a${payload.slot})`,
+          `  %s${payload.slot} = call ptr @scr_str_from_utf8_lossy(` +
+            `ptr %a${payload.slot}, ${this.sizeType} %len${payload.slot})`,
+        );
+        return `ptr %s${payload.slot}`;
+      case "boolean":
+        prepare.push(
+          `  %a${payload.slot}.bool = icmp ne ${this.llType(payload.physical)} ` +
+            `%a${payload.slot}, ${payload.falseValue}`,
+        );
+        return `i1 %a${payload.slot}.bool`;
+      case "widenedNumber": {
+        const signedScalars = new Set(["i8", "i16", "i32"]);
+        const widen = payload.physical.scalar === "f32"
+          ? "fpext"
+          : signedScalars.has(payload.physical.scalar) ? "sitofp" : "uitofp";
+        prepare.push(
+          `  %a${payload.slot}.wide = ${widen} ` +
+            `${this.llType(payload.physical)} %a${payload.slot} to double`,
+        );
+        return `double %a${payload.slot}.wide`;
+      }
+      case "ownedHandle":
+      case "direct":
+        return `${this.llType(payload.scriptType)} %a${payload.slot}`;
+    }
+  }
+
   private emitNativeCallbackDefs(): string[] {
     const defs: string[] = [];
     if (this.nativeCallbackAdapters.size === 0) return defs;
@@ -1667,6 +1718,14 @@ class LlEmitter {
       "scriptc: native callback invoked outside its call-scoped lifetime\n",
     );
     for (const adapter of this.nativeCallbackAdapters.values()) {
+      /* What every payload becomes, decided once for both backends. */
+      const payloads = nativeCallbackPayloads(adapter, (bindingId) => {
+        const free = this.nativeById.get(bindingId);
+        if (free === undefined) {
+          throw new Error(`llvm emitter bug: unknown payload destructor ${bindingId}`);
+        }
+        return free.entry.symbol;
+      });
       const signature = adapter.callback.signature;
       /* The context slot sits at its declared position rather than being
        * appended: a C API may take userdata first, last, or not at all, and
@@ -1738,30 +1797,7 @@ class LlEmitter {
         const widenLines: string[] = [];
         const callArgs = [
           "ptr %cb",
-          ...adapter.contract.sourceArguments.map((argument, index) => {
-            if (argument.kind !== "callback-parameter") {
-              throw new Error(
-                "backend bug: a synchronously answered callback cannot inject a registration owner",
-              );
-            }
-            const sourceParam = sourceType.params[index]!;
-            const physical = signature.parameters[argument.parameter];
-            if (
-              sourceParam.kind === "f64" && physical?.kind === "nativeScalar" &&
-              physical.scalar !== "f64"
-            ) {
-              const signedScalars = new Set(["i8", "i16", "i32"]);
-              const widen = physical.scalar === "f32"
-                ? "fpext"
-                : signedScalars.has(physical.scalar) ? "sitofp" : "uitofp";
-              widenLines.push(
-                `  %a${argument.parameter}.wide = ${widen} ` +
-                  `${this.llType(physical)} %a${argument.parameter} to double`,
-              );
-              return `double %a${argument.parameter}.wide`;
-            }
-            return `${this.llType(nativeCallbackSourceScriptType(sourceParam))} %a${argument.parameter}`;
-          }),
+          ...payloads.map((payload) => this.nativePayloadReadLl(payload, widenLines)),
         ].join(", ");
         /* A boolean answer is written into the physical result's own
          * representation: the handler says yes or no, and the contract says
@@ -2184,65 +2220,7 @@ class LlEmitter {
       const widenLines: string[] = [];
       const callArgs = [
         `ptr ${closure}`,
-        ...adapter.contract.sourceArguments.map((argument, index) => {
-          const sourceParam = sourceType.params[index]!;
-          /* A pointer and a count becoming one script value, the reference
-           * moving into the call exactly as a decoded C string's does. */
-          if (argument.kind === "callback-parameter-span") {
-            const build = sourceParam.kind === "byteSpan"
-              ? "scr_bytes_from_data"
-              : "scr_str_from_utf8_lossy";
-            this.declare(`declare ptr @${build}(ptr, ${this.sizeType})`);
-            widenLines.push(
-              `  %s${argument.data} = call ptr @${build}(` +
-                `ptr %a${argument.data}, ${this.sizeType} %a${argument.length})`,
-            );
-            return `ptr %s${argument.data}`;
-          }
-          if (argument.kind !== "callback-parameter") {
-            throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
-          }
-          /* A borrowed pointer decoded into a script string the handler may
-           * keep. The reference produced moves into the call. */
-          if (sourceParam.kind === "cstring") {
-            this.declare(`declare ${this.sizeType} @strlen(ptr)`);
-            this.declare(`declare ptr @scr_str_from_utf8_lossy(ptr, ${this.sizeType})`);
-            widenLines.push(
-              `  %len${argument.parameter} = call ${this.sizeType} @strlen(ptr %a${argument.parameter})`,
-              `  %s${argument.parameter} = call ptr @scr_str_from_utf8_lossy(` +
-                `ptr %a${argument.parameter}, ${this.sizeType} %len${argument.parameter})`,
-            );
-            return `ptr %s${argument.parameter}`;
-          }
-          const physical = signature.parameters[argument.parameter];
-          /* Same widening as the queued path, without the queue: %a{n} is
-           * physically typed, so an f64 source widens it before the call. */
-          if (
-            sourceParam.kind === "f64" && physical?.kind === "nativeScalar" &&
-            physical.scalar !== "f64"
-          ) {
-            const signedScalars = new Set(["i8", "i16", "i32"]);
-            const widen = physical.scalar === "f32"
-              ? "fpext"
-              : signedScalars.has(physical.scalar) ? "sitofp" : "uitofp";
-            widenLines.push(
-              `  %a${argument.parameter}.wide = ${widen} ` +
-                `${this.llType(physical)} %a${argument.parameter} to double`,
-            );
-            return `double %a${argument.parameter}.wide`;
-          }
-          /* An integer slot read as a boolean: false is exactly the value
-           * the declaration names, everything else is true. Kept in lockstep
-           * with the C backend. */
-          if (sourceParam.kind === "bool" && physical?.kind === "nativeScalar") {
-            widenLines.push(
-              `  %a${argument.parameter}.bool = icmp ne ${this.llType(physical)} ` +
-                `%a${argument.parameter}, ${sourceParam.falseValue}`,
-            );
-            return `i1 %a${argument.parameter}.bool`;
-          }
-          return `${this.llType(nativeCallbackSourceScriptType(sourceParam))} %a${argument.parameter}`;
-        }),
+        ...payloads.map((payload) => this.nativePayloadReadLl(payload, widenLines)),
       ].join(", ");
       defs.push(...widenLines);
       if (sourceType.ret.kind === "void") {
