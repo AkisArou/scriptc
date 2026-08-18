@@ -45,7 +45,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, moduleHasForeignRegistration, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, hasForeignFfiCallback, hasRetainedFfiCallback } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import {
@@ -539,7 +539,8 @@ export class CEmitter {
     );
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []) ||
       moduleHasProcessScopedRegistration(mod);
-    this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
+    this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []) ||
+      moduleHasForeignRegistration(mod);
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
@@ -2308,6 +2309,75 @@ export class CEmitter {
         });
       }
       const ret = cType(signature.result).trim();
+      /* A registration a foreign thread may raise cannot be delivered where
+       * it is raised: reading a closure is a script-thread operation. The
+       * payload is copied into a transport slot on the producing thread and
+       * the invocation is posted; the dispatch thunk below materializes
+       * script values later, on the loop, where making them is legal. */
+      if (adapter.foreign) {
+        const dispatch = `${adapter.symbol}_dispatch`;
+        const slotOf = (index: number): string => `sc_call, ${index}`;
+        const stage: string[] = [];
+        const read: string[] = [];
+        for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
+          const source = adapter.source.params[sourceIndex]!;
+          if (argument.kind === "callback-parameter-span") {
+            const copy = source.kind === "byteSpan" ? "bytes" : "string";
+            stage.push(
+              `  scr_ffi_call_copy_${copy}(${slotOf(argument.data)}, ` +
+                `(const uint8_t *)sc_a${argument.data}, sc_a${argument.length});`,
+            );
+            read.push(
+              source.kind === "byteSpan"
+                ? `scr_bytes_from_data(scr_ffi_call_get_data(${slotOf(argument.data)}), scr_ffi_call_get_len(${slotOf(argument.data)}))`
+                : `scr_str_from_utf8_lossy(scr_ffi_call_get_data(${slotOf(argument.data)}), scr_ffi_call_get_len(${slotOf(argument.data)}))`,
+            );
+            continue;
+          }
+          if (argument.kind !== "callback-parameter") {
+            throw new Error("backend bug: a foreign registration cannot inject a registration owner");
+          }
+          const slot = argument.parameter;
+          if (source.kind === "cstring") {
+            stage.push(cstringNullTrapC(slot));
+            stage.push(`  scr_ffi_call_copy_cstring(${slotOf(slot)}, sc_a${slot});`);
+            read.push(
+              `scr_str_from_utf8_lossy(scr_ffi_call_get_data(${slotOf(slot)}), scr_ffi_call_get_len(${slotOf(slot)}))`,
+            );
+            continue;
+          }
+          if (source.kind === "bool") {
+            stage.push(
+              `  scr_ffi_call_set_bool(${slotOf(slot)}, (uint8_t)(sc_a${slot} != ${source.falseValue}));`,
+            );
+            read.push(`scr_ffi_call_get_bool(${slotOf(slot)})`);
+            continue;
+          }
+          /* Every remaining payload is a number on the source side. The
+           * transport keeps the widest slot it has and the widening back is
+           * exact, which is why the validator admits only the scalars that
+           * fit one. */
+          stage.push(`  scr_ffi_call_set_f64(${slotOf(slot)}, (double)sc_a${slot});`);
+          read.push(`scr_ffi_call_get_f64(${slotOf(slot)})`);
+        }
+        out.push(
+          ...(adapter.table === null ? [] : [`static ScrFfiTable ${adapter.table};`]),
+          ...(adapter.global === null ? [] : [`static ScrClosure *${adapter.global};`]),
+          `static void ${dispatch}(ScrClosure *sc_cb, ScrFfiCall *sc_call) {`,
+          `  (${cFnPtrCast(nativeCallbackSourceSignature(adapter.source))}sc_cb->fn)(` +
+            `sc_cb${read.length > 0 ? `, ${read.join(", ")}` : ""});`,
+          `}`,
+          `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
+          `  ScrClosure *sc_cb = ${adapter.global ?? "(ScrClosure *)sc_ctx"};`,
+          `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked after its registration was released\\n");`,
+          `  ScrFfiCall *sc_call = scr_ffi_call_new(&${adapter.table}, sc_cb, &${dispatch}, ${signature.parameters.length});`,
+          ...stage,
+          `  scr_ffi_post(sc_call);`,
+          `}`,
+          ``,
+        );
+        continue;
+      }
       /* A retained callback the native side asks for an answer runs now, on
        * the caller's thread, because the answer has to exist before the
        * emitting call returns. Reading the closure is legal for exactly that

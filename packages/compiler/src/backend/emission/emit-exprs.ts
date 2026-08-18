@@ -2448,6 +2448,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return [{
             table: adapter.table,
             global: adapter.global,
+            foreign: adapter.foreign,
             closure: args[argumentIndex]!.name,
           }];
         });
@@ -2460,7 +2461,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           if (adapter.table === null) {
             throw new Error(`emitter bug: released registration without a ledger in ${binding.id}`);
           }
-          return [{ table: adapter.table, closure: args[parameter.projection.argument]!.name }];
+          return [{
+            table: adapter.table,
+            foreign: adapter.foreign,
+            closure: args[parameter.projection.argument]!.name,
+          }];
         });
         for (const registration of processRegistrations) {
           /* A replaceable slot registers in two halves. The first pins the
@@ -2470,13 +2475,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * one last time mid-replace. The second half, after the call,
            * repoints the slot and retires what it superseded. */
           E.line(
-            registration.global === null
-              ? `scr_ffi_retain(&${registration.table}, ${registration.closure});`
-              : `scr_ffi_retain_slot(&${registration.table}, &${registration.global}, ${registration.closure});`,
+            registration.global !== null
+              ? `scr_ffi_retain_slot(&${registration.table}, &${registration.global}, ${registration.closure});`
+              : `scr_ffi_retain${registration.foreign ? "_foreign" : ""}(&${registration.table}, ${registration.closure});`,
           );
         }
         for (const release of processReleases) {
-          E.line(`scr_ffi_require(&${release.table}, ${release.closure});`);
+          E.line(`scr_ffi_require${release.foreign ? "_foreign" : ""}(&${release.table}, ${release.closure});`);
         }
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
@@ -2750,7 +2755,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               : [`scr_ffi_commit_slot(&${registration.table}, ${registration.closure});`]
           ),
           ...processReleases.map(
-            (release) => `scr_ffi_release(&${release.table}, ${release.closure});`,
+            (release) =>
+              `scr_ffi_release${release.foreign ? "_foreign" : ""}(&${release.table}, ${release.closure});`,
           ),
         ];
         if (afterCall.length > 0) {

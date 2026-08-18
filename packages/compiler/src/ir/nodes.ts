@@ -380,6 +380,26 @@ export type IrNativeCallbackContract =
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     }
   /**
+   * The same registration, produced by a thread the script does not own. It
+   * cannot be delivered where it is raised — reading a closure is a
+   * script-thread operation — so the payload is copied on the producing
+   * thread and the invocation is queued for a later turn.
+   *
+   * The two axes move together and neither is free. A foreign producer is
+   * exactly why delivery is queued rather than direct, and a queued delivery
+   * is exactly why there is no answer: the producing thread is gone by the
+   * time the handler runs.
+   */
+  | {
+      owner: { kind: "process" };
+      allowedInvocationExecutors: readonly (
+        | "same-as-caller"
+        | "any-attached-thread"
+      )[];
+      synchronousReturn: false;
+      sourceArguments: readonly IrNativeCallbackSourceArgument[];
+    }
+  /**
    * A retained callback the native side ASKS rather than tells: it is
    * registered once and its answer is the value the emitting call returns.
    * An event handler that reports whether it consumed the event has this
@@ -441,6 +461,21 @@ export function nativeCallbackIsOwnerScoped(
 export function moduleHasProcessScopedRegistration(mod: IrModule): boolean {
   return (mod.nativeBindings ?? []).some((binding) =>
     binding.arguments.some((argument) => argument.callback?.owner.kind === "process")
+  );
+}
+
+/** Whether a thread the script does not own may raise a registration in this
+ * module. Such a delivery needs the transport installed and the process loop
+ * held open, even when the program has no timer or async surface of its own —
+ * the wake can arrive at any time. The profile's own predicate answers the
+ * same question about the descriptors it still serves. */
+export function moduleHasForeignRegistration(mod: IrModule): boolean {
+  return (mod.nativeBindings ?? []).some((binding) =>
+    binding.arguments.some((argument) =>
+      argument.callback?.owner.kind === "process" &&
+      (argument.callback.allowedInvocationExecutors as readonly string[])
+        .includes("any-attached-thread")
+    )
   );
 }
 
@@ -1322,7 +1357,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 30 as const;
+export const IR_VERSION = 31 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

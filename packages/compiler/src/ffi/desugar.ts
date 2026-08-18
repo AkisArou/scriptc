@@ -161,8 +161,6 @@ function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
   const param = entry.params[callbackSlot];
   if (param === undefined || !isFfiCallbackParam(param)) return null;
   const callback = param.callback;
-  /* A foreign producer needs a delivery target this slice does not touch. */
-  if (callback.invoke !== "script-thread") return null;
 
   const payloads = callback.params.filter((slot) => !isFfiContextParam(slot));
   if (!payloads.every((cls) => DESUGARABLE_PAYLOADS.has(String(cls)))) return null;
@@ -185,13 +183,23 @@ function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
    * registration on. It ends when a release names the same function value
    * back, or when the process does. */
   if (callback.lifetime === "retained" && callback.returns !== "void") return null;
+  /* A foreign producer cannot deliver where it raises — reading a closure is
+   * a script-thread operation — so the payload is copied there and the
+   * invocation is queued for a later turn. */
   const contract: IrNativeCallbackContract = callback.lifetime === "retained"
-    ? {
-        owner: { kind: "process" },
-        allowedInvocationExecutors: ["same-as-caller"],
-        synchronousReturn: true,
-        sourceArguments,
-      }
+    ? callback.invoke === "foreign"
+      ? {
+          owner: { kind: "process" },
+          allowedInvocationExecutors: ["same-as-caller", "any-attached-thread"],
+          synchronousReturn: false,
+          sourceArguments,
+        }
+      : {
+          owner: { kind: "process" },
+          allowedInvocationExecutors: ["same-as-caller"],
+          synchronousReturn: true,
+          sourceArguments,
+        }
     : {
         owner: { kind: "call" },
         allowedInvocationExecutors: ["same-as-caller"],

@@ -29,6 +29,12 @@ export interface NativeCallbackAdapter {
    * no call whose extent a thread-local could borrow. Replaceable: setting a
    * second registration supersedes the first. */
   readonly global: string | null;
+  /** Whether this registration posts to the PROCESS transport: raised by a
+   * thread the script does not own, and owned by nothing, so there is no
+   * owner whose loop could carry it. An owner-scoped registration a foreign
+   * thread may raise is queued too, but through the owner's gateway — the
+   * two are different transports, and only one of them is this one. */
+  readonly foreign: boolean;
 }
 
 export function nativeCallbackAdapterKey(bindingId: string, argument: number): string {
@@ -131,6 +137,9 @@ export function allocateNativeCallbackAdapters(
           tls: takesContext || processScoped ? null : `${symbol}_closure`,
           table,
           global,
+          foreign: processScoped &&
+            (contract.allowedInvocationExecutors as readonly string[])
+              .includes("any-attached-thread"),
         },
       );
     }

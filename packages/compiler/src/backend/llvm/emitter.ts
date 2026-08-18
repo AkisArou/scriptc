@@ -86,7 +86,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, moduleHasForeignRegistration, nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, collectFfiRetainedOps, hasForeignFfiCallback, hasRetainedFfiCallback, parseFfiCallbackKey } from "../ffi-callbacks.js";
@@ -1205,7 +1205,8 @@ class LlEmitter {
     );
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []) ||
       moduleHasProcessScopedRegistration(mod);
-    this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
+    this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []) ||
+      moduleHasForeignRegistration(mod);
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
@@ -1996,6 +1997,137 @@ class LlEmitter {
       const externalRet = this.nativeReturnType(signature.result);
       const rawRet = this.llType(signature.result);
       const pendingResult = rawRet === "double" ? f64Lit(0) : "0";
+      /* A registration a foreign thread may raise cannot be delivered where
+       * it is raised: reading a closure is a script-thread operation. The
+       * payload is copied into a transport slot on the producing thread and
+       * the invocation is posted; the dispatch thunk materializes script
+       * values later, on the loop, where making them is legal. Kept in
+       * lockstep with the C backend. */
+      if (adapter.foreign) {
+        const dispatch = `${adapter.symbol}_dispatch`;
+        const scriptArgs: string[] = [];
+        const dispatchBody: string[] = [
+          `define internal void @${dispatch}(ptr %cb, ptr %call) ${FN_ATTRS} {`,
+          `entry:`,
+          `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+          `  %fn = load ptr, ptr %fnp`,
+        ];
+        const stage: string[] = [];
+        for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
+          const source = adapter.source.params[sourceIndex]!;
+          const slot = argument.kind === "callback-parameter-span"
+            ? argument.data
+            : argument.kind === "callback-parameter"
+              ? argument.parameter
+              : -1;
+          if (slot < 0) {
+            throw new Error("llvm emitter bug: a foreign registration cannot inject a registration owner");
+          }
+          if (argument.kind === "callback-parameter-span" || source.kind === "cstring") {
+            if (argument.kind === "callback-parameter-span") {
+              const copy = source.kind === "byteSpan" ? "bytes" : "string";
+              this.declare(`declare void @scr_ffi_call_copy_${copy}(ptr, ${this.sizeType}, ptr, ${this.sizeType})`);
+              stage.push(
+                `  call void @scr_ffi_call_copy_${copy}(ptr %call, ${this.sizeType} ${slot}, ` +
+                  `ptr %a${slot}, ${this.sizeType} %a${argument.length})`,
+              );
+            } else {
+              this.declare(`declare void @scr_ffi_call_copy_cstring(ptr, ${this.sizeType}, ptr)`);
+              stage.push(
+                `  %null${slot} = icmp eq ptr %a${slot}, null`,
+                `  br i1 %null${slot}, label %invalid_param${slot}, label %param_ok${slot}`,
+                `invalid_param${slot}:`,
+                `  call void @scr_trap(ptr ${this.cstr("scriptc: native callback passed a NULL cstring\n")})`,
+                `  unreachable`,
+                `param_ok${slot}:`,
+                `  call void @scr_ffi_call_copy_cstring(ptr %call, ${this.sizeType} ${slot}, ptr %a${slot})`,
+              );
+            }
+            this.declare(`declare ptr @scr_ffi_call_get_data(ptr, ${this.sizeType})`);
+            this.declare(`declare ${this.sizeType} @scr_ffi_call_get_len(ptr, ${this.sizeType})`);
+            dispatchBody.push(
+              `  %data${slot} = call ptr @scr_ffi_call_get_data(ptr %call, ${this.sizeType} ${slot})`,
+              `  %len${slot} = call ${this.sizeType} @scr_ffi_call_get_len(ptr %call, ${this.sizeType} ${slot})`,
+            );
+            const build = source.kind === "byteSpan" ? "scr_bytes_from_data" : "scr_str_from_utf8_lossy";
+            this.declare(`declare ptr @${build}(ptr, ${this.sizeType})`);
+            dispatchBody.push(`  %s${slot} = call ptr @${build}(ptr %data${slot}, ${this.sizeType} %len${slot})`);
+            scriptArgs.push(`ptr %s${slot}`);
+            continue;
+          }
+          if (source.kind === "bool") {
+            const physical = signature.parameters[slot]!;
+            if (physical.kind !== "nativeScalar") {
+              throw new Error("llvm emitter bug: a boolean payload needs a scalar slot");
+            }
+            this.declare(`declare void @scr_ffi_call_set_bool(ptr, ${this.sizeType}, i8)`);
+            stage.push(
+              `  %raw${slot} = icmp ne ${this.llType(physical)} %a${slot}, ${source.falseValue}`,
+              `  %byte${slot} = zext i1 %raw${slot} to i8`,
+              `  call void @scr_ffi_call_set_bool(ptr %call, ${this.sizeType} ${slot}, i8 %byte${slot})`,
+            );
+            this.declare(`declare zeroext i1 @scr_ffi_call_get_bool(ptr, ${this.sizeType})`);
+            dispatchBody.push(
+              `  %s${slot} = call zeroext i1 @scr_ffi_call_get_bool(ptr %call, ${this.sizeType} ${slot})`,
+            );
+            scriptArgs.push(`i1 %s${slot}`);
+            continue;
+          }
+          /* Every remaining payload is a number on the source side. The
+           * transport keeps the widest slot it has and the widening back is
+           * exact, which is why the validator admits only the scalars that
+           * fit one. */
+          const physical = signature.parameters[slot]!;
+          const widened = `%wide${slot}`;
+          if (physical.kind === "nativeScalar" && physical.scalar !== "f64") {
+            const signedScalars = new Set(["i8", "i16", "i32"]);
+            const widen = physical.scalar === "f32"
+              ? "fpext"
+              : signedScalars.has(physical.scalar) ? "sitofp" : "uitofp";
+            stage.push(`  ${widened} = ${widen} ${this.llType(physical)} %a${slot} to double`);
+          } else {
+            stage.push(`  ${widened} = fadd double %a${slot}, ${f64Lit(0)}`);
+          }
+          this.declare(`declare void @scr_ffi_call_set_f64(ptr, ${this.sizeType}, double)`);
+          stage.push(`  call void @scr_ffi_call_set_f64(ptr %call, ${this.sizeType} ${slot}, double ${widened})`);
+          this.declare(`declare double @scr_ffi_call_get_f64(ptr, ${this.sizeType})`);
+          dispatchBody.push(
+            `  %s${slot} = call double @scr_ffi_call_get_f64(ptr %call, ${this.sizeType} ${slot})`,
+          );
+          scriptArgs.push(`double %s${slot}`);
+        }
+        dispatchBody.push(
+          `  call void %fn(${[`ptr %cb`, ...scriptArgs].join(", ")})`,
+          `  ret void`,
+          `}`,
+          ``,
+        );
+        defs.push(...dispatchBody);
+        this.declare(`declare ptr @scr_ffi_call_new(ptr, ptr, ptr, ${this.sizeType})`);
+        this.declare(`declare void @scr_ffi_post(ptr)`);
+        const closure = adapter.global === null ? "%ctx" : "%lent.closure";
+        defs.push(
+          `define internal void @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
+          `entry:`,
+          ...(adapter.global === null
+            ? []
+            : [`  ${closure} = load ptr, ptr @${adapter.global}`]),
+          `  %missing = icmp eq ptr ${closure}, null`,
+          `  br i1 %missing, label %expired, label %ready`,
+          `expired:`,
+          `  call void @scr_trap(ptr ${expiredReleased})`,
+          `  unreachable`,
+          `ready:`,
+          `  %call = call ptr @scr_ffi_call_new(ptr @${adapter.table}, ptr ${closure}, ` +
+            `ptr @${dispatch}, ${this.sizeType} ${signature.parameters.length})`,
+          ...stage,
+          `  call void @scr_ffi_post(ptr %call)`,
+          `  ret void`,
+          `}`,
+          ``,
+        );
+        continue;
+      }
       /* A retained callback the native side asks for an answer: the closure
        * is read and called now, on the caller's thread, because the answer
        * has to exist before the emitting call returns. Kept in lockstep with
@@ -7729,6 +7861,7 @@ class LlEmitter {
           return [{
             table: adapter.table,
             global: adapter.global,
+            foreign: adapter.foreign,
             closure: args[argumentIndex]!.name,
           }];
         });
@@ -7741,7 +7874,11 @@ class LlEmitter {
           if (adapter.table === null) {
             throw new Error(`llvm emitter bug: released registration without a ledger in ${binding.id}`);
           }
-          return [{ table: adapter.table, closure: args[parameter.projection.argument]!.name }];
+          return [{
+            table: adapter.table,
+            foreign: adapter.foreign,
+            closure: args[parameter.projection.argument]!.name,
+          }];
         });
         for (const registration of processRegistrations) {
           /* A replaceable slot registers in two halves. The first pins the
@@ -7751,8 +7888,9 @@ class LlEmitter {
            * one last time mid-replace. The second half, after the call,
            * repoints the slot and retires what it superseded. */
           if (registration.global === null) {
-            this.declare(`declare void @scr_ffi_retain(ptr, ptr)`);
-            B.line(`call void @scr_ffi_retain(ptr @${registration.table}, ptr ${registration.closure})`);
+            const entry = registration.foreign ? "scr_ffi_retain_foreign" : "scr_ffi_retain";
+            this.declare(`declare void @${entry}(ptr, ptr)`);
+            B.line(`call void @${entry}(ptr @${registration.table}, ptr ${registration.closure})`);
           } else {
             this.declare(`declare void @scr_ffi_retain_slot(ptr, ptr, ptr)`);
             B.line(
@@ -7762,8 +7900,9 @@ class LlEmitter {
           }
         }
         for (const release of processReleases) {
-          this.declare(`declare void @scr_ffi_require(ptr, ptr)`);
-          B.line(`call void @scr_ffi_require(ptr @${release.table}, ptr ${release.closure})`);
+          const entry = release.foreign ? "scr_ffi_require_foreign" : "scr_ffi_require";
+          this.declare(`declare void @${entry}(ptr, ptr)`);
+          B.line(`call void @${entry}(ptr @${release.table}, ptr ${release.closure})`);
         }
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
@@ -8235,8 +8374,9 @@ class LlEmitter {
             ];
           }),
           ...processReleases.map((release) => {
-            this.declare(`declare void @scr_ffi_release(ptr, ptr)`);
-            return `call void @scr_ffi_release(ptr @${release.table}, ptr ${release.closure})`;
+            const entry = release.foreign ? "scr_ffi_release_foreign" : "scr_ffi_release";
+            this.declare(`declare void @${entry}(ptr, ptr)`);
+            return `call void @${entry}(ptr @${release.table}, ptr ${release.closure})`;
           }),
         ];
         if (afterCall.length > 0) {

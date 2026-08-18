@@ -1568,6 +1568,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               Object.keys(result).sort().join(",") === "conversion,kind" &&
               (result.conversion === "checked" || result.conversion === "wrap")))));
   };
+  /* Exact scalars the foreign transport's slots can hold. Its union carries a
+   * double, a 32-bit integer, and a byte span, so anything wider — or a
+   * pointer-width count — has nowhere to be copied to on the producing
+   * thread. Deliberately a set rather than a width test: it names what the
+   * runtime has, so growing the runtime is what grows this. */
+  const queueCarriableScalars = new Set(["f64", "f32", "i8", "u8", "i16", "u16", "i32", "u32"]);
   const validNativeCallbackContract = (
     contract: unknown,
     type: IrNativeCallbackArgumentType,
@@ -1630,17 +1636,41 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     if (ownerKind === "process") {
       /* Nothing owns it, so there is no cancellation binding and no owner to
-       * inject. Delivery is direct on the registering thread, which is what
-       * a library that calls a stored callback from inside a later call
-       * does, and it carries no answer: there is nowhere to put one. */
-      return Object.keys(candidate).sort().join(",") ===
+       * inject, and it carries no answer: a library that calls a stored
+       * callback at a moment of its own choosing has nowhere to put one. */
+      const shape = Object.keys(candidate).sort().join(",") ===
           "allowedInvocationExecutors,owner,sourceArguments,synchronousReturn" &&
         Object.keys(owner).length === 1 &&
-        executors.length === 1 && executors[0] === "same-as-caller" &&
-        candidate["synchronousReturn"] === true &&
         type.ret.kind === "void" &&
         sourceArguments.every((argument) =>
           (argument as { kind?: unknown }).kind !== "registration-owner"
+        );
+      if (!shape) return false;
+      /* Direct delivery on the registering thread, which is what a library
+       * that calls a stored callback from inside a later call does. */
+      if (candidate["synchronousReturn"] === true) {
+        return executors.length === 1 && executors[0] === "same-as-caller";
+      }
+      /* Queued delivery, and the reason for it: a foreign producer. Without
+       * one there is nothing a queue buys that direct delivery does not, and
+       * two ways to spell one delivery is worse than either. */
+      const allowed = new Set(["same-as-caller", "any-attached-thread"]);
+      return candidate["synchronousReturn"] === false &&
+        executors.length > 0 &&
+        executors.every((executor) => allowed.has(String(executor))) &&
+        new Set(executors).size === executors.length &&
+        executors.includes("any-attached-thread") &&
+        /* The transport carries the payload across a thread by copying it
+         * into a slot, and its slots hold a double, a 32-bit integer, or a
+         * byte span. An exact scalar wider than that has no slot to be
+         * copied into — the queue would have to grow one, which is a runtime
+         * change with its own test, not something to half-emit here. */
+        type.params.every((parameter) =>
+          parameter.kind === "cstring" || parameter.kind === "utf8Span" ||
+          parameter.kind === "byteSpan" || parameter.kind === "f64" ||
+          parameter.kind === "bool" ||
+          (parameter.kind === "nativeScalar" &&
+            queueCarriableScalars.has(parameter.scalar))
         );
     }
     if (ownerKind === "result" || ownerKind === "argument") {
