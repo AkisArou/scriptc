@@ -1263,7 +1263,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 26 as const;
+export const IR_VERSION = 27 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

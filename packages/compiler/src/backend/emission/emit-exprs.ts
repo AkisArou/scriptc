@@ -2661,7 +2661,44 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           );
           E.emitPendingCheck();
         }
-        const call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
+        let call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
+        /* A callback whose C signature has no userdata slot cannot be handed
+         * its closure, so the call lends one through the adapter's
+         * thread-local for exactly its own duration. Set after every argument
+         * conversion, so a conversion that throws cannot leave a slot armed,
+         * and restored the moment the call returns — which is why the native
+         * result is bound here rather than left as an expression for the
+         * branches below to place. Saving the previous value is what makes a
+         * nested or reentrant call through the same binding stack correctly. */
+        const rawContexts = binding.arguments.flatMap((argument, argumentIndex) => {
+          if (argument.type.kind !== "func") return [];
+          const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
+          if (adapter.tls === null) return [];
+          const previous = `sc_t${E.tempCounter++}`;
+          E.line(`ScrClosure *${previous} = ${adapter.tls};`);
+          E.line(`${adapter.tls} = ${args[argumentIndex]!.name};`);
+          return [{ tls: adapter.tls, previous }];
+        });
+        if (rawContexts.length > 0) {
+          if (binding.result.type.kind === "void") {
+            E.line(`${call};${E.srcComment(e.loc)}`);
+            call = "(void)0";
+          } else {
+            const bound = `sc_t${E.tempCounter++}`;
+            /* A pointer-shaped native result is `void *` here for the same
+             * reason every branch below spells it that way: what it points
+             * at is the projection's business, not the call's. */
+            const decl = binding.result.type.kind === "nativeScalar"
+              ? cDecl(binding.result.type, bound)
+              : `void *${bound}`;
+            E.line(`${decl} = ${call};${E.srcComment(e.loc)}`);
+            call = bound;
+          }
+          for (let i = rawContexts.length - 1; i >= 0; i--) {
+            const saved = rawContexts[i]!;
+            E.line(`${saved.tls} = ${saved.previous};`);
+          }
+        }
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);
           if (cancellationStarted !== undefined) {

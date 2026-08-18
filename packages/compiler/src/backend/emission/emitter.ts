@@ -2493,8 +2493,15 @@ export class CEmitter {
         continue;
       }
       out.push(
+        /* A signature with no userdata slot cannot be handed its closure, so
+         * the call lends one here for its own dynamic extent. The NULL check
+         * below is what makes an invocation outside that extent a precise
+         * trap rather than a jump through a stale pointer. */
+        ...(adapter.tls === null
+          ? []
+          : [`static _Thread_local ScrClosure *${adapter.tls};`]),
         `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-        `  ScrClosure *sc_cb = (ScrClosure *)sc_ctx;`,
+        `  ScrClosure *sc_cb = ${adapter.tls ?? "(ScrClosure *)sc_ctx"};`,
         `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );

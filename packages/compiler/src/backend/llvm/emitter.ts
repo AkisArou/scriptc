@@ -2375,10 +2375,21 @@ class LlEmitter {
         }
         continue;
       }
+      /* A signature with no userdata slot cannot be handed its closure, so
+       * the call lends one through this thread-local for its own dynamic
+       * extent. The NULL check below is what makes an invocation outside that
+       * extent a precise trap rather than a jump through a stale pointer. */
+      const closure = adapter.tls === null ? "%ctx" : "%tls.closure";
       defs.push(
+        ...(adapter.tls === null
+          ? []
+          : [`@${adapter.tls} = internal thread_local global ptr null`]),
         `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
         `entry:`,
-        `  %missing = icmp eq ptr %ctx, null`,
+        ...(adapter.tls === null
+          ? []
+          : [`  ${closure} = load ptr, ptr @${adapter.tls}`]),
+        `  %missing = icmp eq ptr ${closure}, null`,
         `  br i1 %missing, label %expired, label %ready`,
         `expired:`,
         `  call void @scr_trap(ptr ${expired})`,
@@ -2389,7 +2400,7 @@ class LlEmitter {
         `skip:`,
         signature.result.kind === "void" ? `  ret void` : `  ret ${rawRet} ${pendingResult}`,
         `invoke:`,
-        `  %fnp = getelementptr inbounds %ScrClosure, ptr %ctx, i64 0, i32 1`,
+        `  %fnp = getelementptr inbounds %ScrClosure, ptr ${closure}, i64 0, i32 1`,
         `  %fn = load ptr, ptr %fnp`,
       );
       const sourceType = adapter.source;
@@ -2431,7 +2442,7 @@ class LlEmitter {
       }
       const widenLines: string[] = [];
       const callArgs = [
-        "ptr %ctx",
+        `ptr ${closure}`,
         ...adapter.contract.sourceArguments.map((argument, index) => {
           const sourceParam = sourceType.params[index]!;
           /* A pointer and a count becoming one script value, the reference
@@ -8100,9 +8111,45 @@ class LlEmitter {
           );
           this.emitPendingCheck();
         }
-        const call =
+        /* A callback whose C signature has no userdata slot cannot be handed
+         * its closure, so the call lends one through the adapter's
+         * thread-local for exactly its own duration. Set after every argument
+         * conversion, so a conversion that throws cannot leave a slot armed,
+         * and restored the moment the call returns — which is why the result
+         * is bound here rather than left for the branches below to place.
+         * Saving the previous value is what lets a nested or reentrant call
+         * through the same binding stack correctly. */
+        const rawContexts = binding.arguments.flatMap((argument, argumentIndex) => {
+          if (argument.type.kind !== "func") return [];
+          const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
+          if (adapter.tls === null) return [];
+          const previous = B.tmp();
+          B.line(`${previous} = load ptr, ptr @${adapter.tls}`);
+          B.line(`store ptr ${args[argumentIndex]!.name}, ptr @${adapter.tls}`);
+          return [{ tls: adapter.tls, previous }];
+        });
+        let call =
           `call ${returnType} @${binding.entry.symbol}(` +
           `${callArgs.join(", ")})`;
+        if (rawContexts.length > 0) {
+          if (returnType === "void") {
+            B.line(call);
+            /* Emitted above; the branch that would have placed it writes a
+             * comment instead of a second call. */
+            call = "; native call emitted before the callback slot was restored";
+          } else {
+            const bound = B.tmp();
+            B.line(`${bound} = ${call}`);
+            /* Every branch below writes `<tmp> = <call>`, so the already
+             * evaluated result is spelled as a copy of itself rather than
+             * threaded through each branch as a special case. */
+            call = `select i1 true, ${returnType} ${bound}, ${returnType} ${bound}`;
+          }
+          for (let i = rawContexts.length - 1; i >= 0; i--) {
+            const saved = rawContexts[i]!;
+            B.line(`store ptr ${saved.previous}, ptr @${saved.tls}`);
+          }
+        }
         if (aggregateResult !== null && returnStorage !== null) {
           B.line(call);
           const result = B.tmp();

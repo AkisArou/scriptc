@@ -14,6 +14,11 @@ export interface NativeCallbackAdapter {
   readonly callback: IrNativeCallbackType;
   readonly source: IrNativeCallbackArgumentType;
   readonly contract: IrNativeCallbackContract;
+  /** The thread-local the closure is lent through, for a callback whose C
+   * signature has no userdata slot to carry it. Null when the signature has
+   * one, which is the ordinary case and needs no storage at all: the context
+   * slot IS the closure pointer, so nesting and reentrancy cost nothing. */
+  readonly tls: string | null;
 }
 
 export function nativeCallbackAdapterKey(bindingId: string, argument: number): string {
@@ -83,6 +88,14 @@ export function allocateNativeCallbackAdapters(
           `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no logical function type`,
         );
       }
+      /* A signature with no context slot cannot be handed the closure, so
+       * one is lent per adapter for the dynamic extent of the call. Distinct
+       * per adapter rather than shared, so two raw callbacks in one call —
+       * or a nested call reaching the same binding — cannot read each
+       * other's. */
+      const takesContext = parameter.type.signature.parameters.some(
+        (slot) => slot.kind === "nativeContext",
+      );
       adapters.set(
         nativeCallbackAdapterKey(binding.id, parameter.projection.argument),
         {
@@ -92,6 +105,7 @@ export function allocateNativeCallbackAdapters(
           callback: parameter.type,
           source,
           contract,
+          tls: takesContext ? null : `${symbol}_closure`,
         },
       );
     }

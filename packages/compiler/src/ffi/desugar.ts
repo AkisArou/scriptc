@@ -77,7 +77,7 @@ function desugarCallback(entry: IrFfiImport): {
   readonly contract: IrNativeCallbackContract;
   readonly source: IrNativeCallbackArgumentType;
   readonly callbackSlot: number;
-  readonly contextSlot: number;
+  readonly contextSlot: number | null;
 } | null {
   const found = entry.params.flatMap((param, index) =>
     isFfiCallbackParam(param) ? [[index, param as IrFfiCallbackParam] as const] : [],
@@ -91,15 +91,17 @@ function desugarCallback(entry: IrFfiImport): {
 
   const payloads = callback.params.filter((slot) => !isFfiContextParam(slot));
   if (!payloads.every((cls) => DESUGARABLE_PAYLOADS.has(String(cls)))) return null;
-  /* A contextless callback binds its closure through a thread-local slot,
-   * which the native trampoline family does not have. */
-  if (payloads.length === callback.params.length) return null;
   if (callback.returns !== "void" && !DESUGARABLE_ANSWERS.has(callback.returns)) return null;
 
+  /* A callback with no userdata slot of its own takes no context argument
+   * either: there is nothing for one to fill. Its closure is lent through the
+   * adapter's thread-local instead, which is why the two counts have to agree
+   * rather than each being checked on its own. */
+  const takesContext = payloads.length !== callback.params.length;
   const contexts = entry.params.flatMap((candidate, index) =>
     isFfiContextParam(candidate) && candidate.context === callback.id ? [index] : [],
   );
-  if (contexts.length !== 1) return null;
+  if (contexts.length !== (takesContext ? 1 : 0)) return null;
 
   /* Physical slots, source payloads, and the map between them are built in
    * one pass because they are no longer parallel: a span class is one thing
@@ -166,7 +168,7 @@ function desugarCallback(entry: IrFfiImport): {
     synchronousReturn: true,
     sourceArguments,
   };
-  return { signature, contract, source, callbackSlot, contextSlot: contexts[0]! };
+  return { signature, contract, source, callbackSlot, contextSlot: contexts[0] ?? null };
 }
 
 /**

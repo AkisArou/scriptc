@@ -1933,6 +1933,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       bytesByteLength: 0,
       callbackFunction: 0,
       callbackContext: 0,
+      /* Set from the callback's own signature when its function projection is
+       * read: a C API that takes no userdata has no context slot, and then
+       * there is no context parameter to project either. */
+      callbackTakesContext: false,
       total: 0,
     }));
     const parameterNames = new Set<string>();
@@ -2356,11 +2360,24 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             return projectedPhysical.size === payloadSlots.length;
           })();
           if (
+            parameter.type.kind === "nativeCallback" &&
+            Array.isArray(parameter.type.signature?.parameters)
+          ) {
+            projectionCounts.callbackTakesContext = parameter.type.signature
+              .parameters.some((slot) => slot?.kind === "nativeContext");
+          }
+          if (
             !validNativeCallbackArgument(sourceArgument.type) ||
             parameter.type.kind !== "nativeCallback" ||
             !validNativeCallback(parameter.type) ||
             !callbackSourceProjectionValid ||
-            parameter.ownership.kind !== "callback"
+            parameter.ownership.kind !== "callback" ||
+            /* A closure the trampoline cannot reach through a context slot is
+             * lent through a thread-local one for the dynamic extent of the
+             * call, so it is readable for exactly as long as the call lasts.
+             * A registration that outlives the call has nothing to read. */
+            (!projectionCounts.callbackTakesContext &&
+              callbackContract?.owner.kind !== "call")
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-function projection`,
@@ -2401,9 +2418,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 projections.bytesData === 1 &&
                 projections.bytesByteLength === 1
               : argument.type.kind === "func"
-                ? projections.total === 2 &&
-                  projections.callbackFunction === 1 &&
-                  projections.callbackContext === 1
+                ? projections.callbackFunction === 1 &&
+                  projections.callbackContext ===
+                    (projections.callbackTakesContext ? 1 : 0) &&
+                  projections.total ===
+                    (projections.callbackTakesContext ? 2 : 1)
                 : projections.total === 1 && projections.direct === 1;
       if (!valid) {
         errors.push({
