@@ -253,7 +253,10 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           // synchronous native call returns.
           if (
             callbackNativeBindings.has(rec["binding"] as string) ||
-            throwingNativeBindings.has(rec["binding"] as string)
+            throwingNativeBindings.has(rec["binding"] as string) ||
+            /* A retained profile callback defers its throw for a later call
+             * to observe, and that call may be served by either path. */
+            manifestHasRetainedCallback
           ) f.throws = true;
           break;
         case "bytesNew": {

@@ -1193,7 +1193,10 @@ class LlEmitter {
     // i16 gen; size_t buf_index }. The object follows it, so color is 12
     // bytes behind a wasm32 object and 16 bytes behind a 64-bit object.
     this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
-    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
+    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(
+      mod.ffiImports ?? [],
+      (mod.nativeBindings ?? []).map((binding) => binding.entry.symbol),
+    );
     this.nativeCallbackAdapters = allocateNativeCallbackAdapters(
       mod.nativeBindings ?? [],
       mod.ffiImports ?? [],
@@ -7491,7 +7494,11 @@ class LlEmitter {
           (argument) =>
             argument.type.kind === "func" &&
             argument.callback?.owner.kind === "call",
-        );
+        ) ||
+          /* A retained profile callback defers its throw until a later
+           * native call checks; that call is a checkpoint whichever path
+           * serves it. */
+          this.ffiHasRetainedCallback;
         const retainedTokens = new Map<number, string>();
         const retainedOwnerArguments = new Set<number>();
         binding.arguments.forEach((argument, argumentIndex) => {
@@ -7638,11 +7645,24 @@ class LlEmitter {
                 const helper = info.signed ? "scr_bit_or" : "scr_bit_ushr";
                 this.declare(`declare double @${helper}(double, double)`);
                 const wrapped = B.tmp();
-                const narrowed = B.tmp();
                 B.line(
                   `${wrapped} = call double @${helper}(double ${arg.name}, double 0.0)`,
                 );
-                B.line(`${narrowed} = fptosi double ${wrapped} to ${parameterType}`);
+                /* The helpers answer ToInt32/ToUint32, so the value is in a
+                 * 32-bit range and the conversion to i32 is exact — signed
+                 * or unsigned per the class, because fptosi would saturate
+                 * on the unsigned half. A narrower slot then truncates,
+                 * which is the same two-step cast the C backend spells. */
+                const wide = B.tmp();
+                B.line(
+                  `${wide} = ${info.signed ? "fptosi" : "fptoui"} double ${wrapped} to i32`,
+                );
+                const slotType = this.llType(parameter.type);
+                let narrowed = wide;
+                if (slotType !== "i32") {
+                  narrowed = B.tmp();
+                  B.line(`${narrowed} = trunc i32 ${wide} to ${slotType}`);
+                }
                 callArgs.push(`${parameterType} ${narrowed}`);
                 break;
               }
@@ -7690,9 +7710,13 @@ class LlEmitter {
                 throw new Error(`llvm emitter bug: invalid boolean parameter projection in ${binding.id}`);
               }
               const value = B.tmp();
+              /* The select needs the bare slot type: `parameterType` carries
+               * the call-argument attribute (signext/zeroext), which is not
+               * a value type and is rejected here. */
+              const slotType = this.llType(parameter.type);
               B.line(
-                `${value} = select i1 ${arg.name}, ${parameterType} ` +
-                  `${parameter.projection.trueValue}, ${parameterType} ` +
+                `${value} = select i1 ${arg.name}, ${slotType} ` +
+                  `${parameter.projection.trueValue}, ${slotType} ` +
                   `${parameter.projection.falseValue}`,
               );
               callArgs.push(`${parameterType} ${value}`);

@@ -2400,7 +2400,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           (argument) =>
             argument.type.kind === "func" &&
             argument.callback?.owner.kind === "call",
-        );
+        ) ||
+          /* A retained profile callback defers its throw until a later
+           * native call checks; that call is a checkpoint whichever path
+           * serves it. */
+          E.ffiHasRetainedCallback;
         const retainedTokens = new Map<number, string>();
         const retainedOwnerArguments = new Set<number>();
         binding.arguments.forEach((argument, argumentIndex) => {

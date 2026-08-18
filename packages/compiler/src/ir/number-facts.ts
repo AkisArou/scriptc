@@ -1757,6 +1757,11 @@ class FnAnalyzer {
     if (native !== null && native !== undefined && binding !== undefined) {
       binding.parameters.forEach((parameter, index) => {
         if (parameter.projection.kind !== "number") return;
+        /* A wrapping conversion is TOTAL: every double has an answer, so no
+         * value can be proven not to cross and the slot constrains nothing
+         * about what reaches it. Only the checked conversion has a range to
+         * fall outside of. */
+        if (parameter.projection.conversion !== "checked") return;
         const slot = parameter.type.kind === "nativeScalar"
           ? nativeSlot(parameter.type.scalar)
           : null;

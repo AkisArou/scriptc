@@ -475,7 +475,10 @@ export class CEmitter {
       ? new Map()
       : numberBoundaryFacts(mod).certified;
     this.nativeDestructorBindings = nativeDestructorBindingIds(mod);
-    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
+    this.ffiCallbackAdapters = allocateFfiCallbackAdapters(
+      mod.ffiImports ?? [],
+      (mod.nativeBindings ?? []).map((binding) => binding.entry.symbol),
+    );
     this.nativeCallbackAdapters = allocateNativeCallbackAdapters(
       mod.nativeBindings ?? [],
       mod.ffiImports ?? [],

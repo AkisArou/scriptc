@@ -14,6 +14,8 @@
  */
 import { resolve } from "node:path";
 import { isRelativeSpecifier, tsgoPath } from "../shared.js";
+import { desugarFfiValueBinding } from "../../ffi/desugar.js";
+import type { IrNativeBinding } from "../../ir/nodes.js";
 import * as ts from "../ts7/adapter.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import {
@@ -1264,6 +1266,11 @@ export class Lowerer {
   readonly ffiImports: readonly IrFfiImport[];
   readonly libraryCallbacks: boolean;
   readonly ffiImportsByName: ReadonlyMap<string, IrFfiImport>;
+  /** Profile bindings that carry no callback, translated into the one
+   * outbound native-call vocabulary. Calls to these lower as `nativeCall`;
+   * the rest keep the profile's own path until the callback slices land. */
+  readonly desugaredFfiBindings: readonly IrNativeBinding[];
+  readonly desugaredFfiNames: ReadonlySet<string>;
   /** Non-null after whole-program FFI declaration validation. */
   readonly ffiBindingSymbols: ReadonlyMap<string, ReadonlySet<ts.Symbol>> | null;
   /** Manifest-neutral native input resolved exclusively by checker symbol. */
@@ -1340,6 +1347,14 @@ export class Lowerer {
     this.ffiImports = mode.ffiImports ?? [];
     this.libraryCallbacks = mode.libraryCallbacks ?? false;
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
+    {
+      const desugared = this.ffiImports.flatMap((entry) => {
+        const binding = desugarFfiValueBinding(entry);
+        return binding === null ? [] : [[entry.name, binding] as const];
+      });
+      this.desugaredFfiBindings = desugared.map(([, binding]) => binding);
+      this.desugaredFfiNames = new Set(desugared.map(([name]) => name));
+    }
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
     this.nativeInput = mode.native;
     if ((this.nativeInput?.exports.length ?? 0) > 0) this.usesNativeTarget = true;
@@ -2328,7 +2343,20 @@ export class Lowerer {
                     abi: this.nativeInput!.target.abi,
                   },
                 }
-              : {}),
+              /* A desugared FFI binding needs a pointer width — a string or
+               * byte span crosses with a size_t length — and nothing else.
+               * The compiler already knows its own target, so it states the
+               * width rather than asking a profile that has no ABI facts to
+               * invent one. */
+              : this.desugaredFfiBindings.length > 0
+                ? {
+                    nativeTarget: {
+                      pointerBits: this.targetPlatform === "wasi"
+                        ? 32 as const
+                        : 64 as const,
+                    },
+                  }
+                : {}),
             ...(this.usedNativeTypeIds.size > 0
               ? {
                   nativeTypes: (this.nativeInput?.types ?? [])
@@ -2336,14 +2364,26 @@ export class Lowerer {
                     .map(materializeNativeType),
                 }
               : {}),
-            ...(this.usedNativeBindingIds.size > 0
+            ...(this.usedNativeBindingIds.size > 0 || this.desugaredFfiBindings.length > 0
               ? {
-                  nativeBindings: (this.nativeInput?.bindings ?? [])
-                    .filter((binding) => this.usedNativeBindingIds.has(binding.id))
-                    .map(materializeNativeBinding),
+                  nativeBindings: [
+                    ...(this.nativeInput?.bindings ?? [])
+                      .filter((binding) => this.usedNativeBindingIds.has(binding.id))
+                      .map(materializeNativeBinding),
+                    ...this.desugaredFfiBindings,
+                  ],
                 }
               : {}),
-            ...(this.ffiImports.length > 0 ? { ffiImports: [...this.ffiImports] } : {}),
+            ...(() => {
+              /* Only the bindings still served by the profile's own path
+               * stay in this table: a desugared one is a native binding now,
+               * and two tables claiming one C symbol is exactly the
+               * duplication this change removes. */
+              const remaining = this.ffiImports.filter(
+                (entry) => !this.desugaredFfiNames.has(entry.name),
+              );
+              return remaining.length > 0 ? { ffiImports: remaining } : {};
+            })(),
           };
     return {
       module,

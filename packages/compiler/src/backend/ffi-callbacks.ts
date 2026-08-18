@@ -12,13 +12,22 @@ export interface FfiCallbackAdapter {
   callback: IrFfiCallbackParam["callback"];
 }
 
-/** Allocate internal callback symbols outside the manifest's external
- * symbol set. C and LLVM share this table so a valid native symbol can
- * never collide with a generated trampoline or raw-callback TLS slot. */
+/** Allocate internal callback symbols outside EVERY external symbol the
+ * module declares. C and LLVM share this table so a valid native symbol can
+ * never collide with a generated trampoline or raw-callback TLS slot.
+ *
+ * The reserved set spans both outbound tables. It used to be enough to read
+ * the profile's own, because that table held every external symbol; once a
+ * profile binding can be served by the native path instead, a symbol the
+ * generator must avoid can live in either. */
 export function allocateFfiCallbackAdapters(
   imports: readonly IrFfiImport[],
+  externalSymbols: Iterable<string> = [],
 ): Map<string, FfiCallbackAdapter> {
-  const reserved = new Set(imports.map((entry) => entry.symbol));
+  const reserved = new Set([
+    ...imports.map((entry) => entry.symbol),
+    ...externalSymbols,
+  ]);
   const adapters = new Map<string, FfiCallbackAdapter>();
   let suffix = 0;
 

@@ -5,6 +5,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
+import { ffiBindingId } from "../../ffi/desugar.js";
 import { BIGINT, BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals, isFfiReleaseParam } from "../../ir/nodes.js";
 import type { IrFfiCallbackParam, IrFfiCallbackParamClass, IrFfiImport, IrFfiReleaseParam } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
@@ -2961,6 +2962,19 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       }
       return lowered;
     });
+    /* A profile binding with no callback is expressible in the one native
+     * vocabulary, so it lowers as an ordinary native call. The rest keep the
+     * profile's own path until the callback slices land — two paths for one
+     * more change, rather than one change that cannot be verified. */
+    if (L.desugaredFfiNames.has(binding.name)) {
+      return {
+        kind: "nativeCall",
+        binding: ffiBindingId(binding.name),
+        args,
+        type: expectedReturn,
+        loc,
+      };
+    }
     return {
       kind: "ffiCall",
       import: binding.name,

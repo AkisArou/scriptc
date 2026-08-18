@@ -1235,7 +1235,12 @@ export interface IrModule {
    * lowering emits them when it reaches a native call or target-sized value. */
   nativeTarget?: {
     pointerBits: 32 | 64;
-    abi: string;
+    /** The proof key AGGREGATE layout was probed against. Absent when the
+     * module declares no struct or union: field offsets and by-value passing
+     * are the only facts an ABI identity decides, and a module with no
+     * aggregates has nothing to prove. Requiring one anyway would make a
+     * caller invent a string the driver then checks against itself. */
+    abi?: string;
   };
   /** Reached nominal native definitions. Aggregate layout/indirect passing
    * and opaque-handle ownership facts are embedder-provided, not inferred. */

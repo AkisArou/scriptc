@@ -1206,14 +1206,34 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       candidate !== "-0"
       ? BigInt(candidate)
       : null;
-  if (
-    mod.nativeTarget !== undefined &&
-    (!validNativeTarget || typeof mod.nativeTarget.abi !== "string" || mod.nativeTarget.abi.length === 0)
-  ) {
+  if (mod.nativeTarget !== undefined && !validNativeTarget) {
     errors.push({
-      message: `Native IR target has invalid pointer width or ABI identity`,
+      message: `Native IR target has invalid pointer width`,
       loc: moduleLoc,
     });
+  }
+  /* An ABI identity decides aggregate layout and nothing else, so it is
+   * required exactly when the module declares an aggregate. Demanding one of
+   * a module with no struct or union would make a caller invent a string
+   * whose only reader checks it against the selected target. */
+  {
+    const aggregates = (mod.nativeTypes ?? []).some(
+      (definition) => definition.kind === "struct",
+    );
+    const abi = mod.nativeTarget?.abi;
+    if (
+      mod.nativeTarget !== undefined &&
+      (aggregates
+        ? typeof abi !== "string" || abi.length === 0
+        : abi !== undefined && (typeof abi !== "string" || abi.length === 0))
+    ) {
+      errors.push({
+        message: aggregates
+          ? `Native IR aggregates require a target ABI identity`
+          : `Native IR target has an invalid ABI identity`,
+        loc: moduleLoc,
+      });
+    }
   }
   if (
     ((mod.nativeBindings?.length ?? 0) > 0 || (mod.lib?.nativeExports.length ?? 0) > 0) &&
