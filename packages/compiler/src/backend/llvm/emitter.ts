@@ -74,6 +74,8 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeCallbackArgumentType,
+  IrNativeCallbackSignature,
   IrNativePhysicalAbiType,
   IrNativePhysicalAbiValue,
   IrNativeScalarType,
@@ -1399,6 +1401,61 @@ class LlEmitter {
     }
   }
 
+  /** A handler's answer written into the physical result's representation.
+   * Kept in lockstep with the C backend's `nativeCallbackAnswerC`. */
+  private nativeCallbackAnswerLl(
+    answer: IrNativeCallbackArgumentType["ret"],
+    storage: IrNativeCallbackSignature["result"],
+    value: string,
+  ): string[] {
+    const B = this.B;
+    if (storage.kind === "void") return [`  ret void`, `}`, ``];
+    const rawRet = this.llType(storage);
+    if (answer.kind === "bool") {
+      const chosen = B.tmp();
+      return [
+        `  ${chosen} = select i1 ${value}, ${rawRet} ${answer.trueValue}, ${rawRet} ${answer.falseValue}`,
+        `  ret ${rawRet} ${chosen}`,
+        `}`,
+        ``,
+      ];
+    }
+    if (answer.kind !== "f64" || !("conversion" in answer) || storage.scalar === "f64") {
+      return [`  ret ${rawRet} ${value}`, `}`, ``];
+    }
+    if (answer.conversion === "wrap") {
+      const info = nativeIntegerInfo(storage.scalar, this.mod.nativeTarget?.pointerBits);
+      if (info === null) {
+        throw new Error(`llvm emitter bug: wrapping answer over ${storage.scalar}`);
+      }
+      /* The helpers answer ToInt32/ToUint32, so the value is in a 32-bit
+       * range; converting signed-or-unsigned per the class and truncating
+       * after is the same two-step cast the C backend spells. */
+      const helper = info.signed ? "scr_bit_or" : "scr_bit_ushr";
+      this.declare(`declare double @${helper}(double, double)`);
+      const wrapped = B.tmp();
+      const wide = B.tmp();
+      const lines = [
+        `  ${wrapped} = call double @${helper}(double ${value}, double 0.0)`,
+        `  ${wide} = ${info.signed ? "fptosi" : "fptoui"} double ${wrapped} to i32`,
+      ];
+      let narrowed = wide;
+      if (rawRet !== "i32") {
+        narrowed = B.tmp();
+        lines.push(`  ${narrowed} = trunc i32 ${wide} to ${rawRet}`);
+      }
+      return [...lines, `  ret ${rawRet} ${narrowed}`, `}`, ``];
+    }
+    const checked = B.tmp();
+    this.declare(`declare ${rawRet} @scr_native_${storage.scalar}_from_number(double)`);
+    return [
+      `  ${checked} = call ${rawRet} @scr_native_${storage.scalar}_from_number(double ${value})`,
+      `  ret ${rawRet} ${checked}`,
+      `}`,
+      ``,
+    ];
+  }
+
   private nativeParameterType(
     t: IrNativeBinding["parameters"][number]["type"],
   ): string {
@@ -2348,6 +2405,16 @@ class LlEmitter {
             );
             return `double %a${argument.parameter}.wide`;
           }
+          /* An integer slot read as a boolean: false is exactly the value
+           * the declaration names, everything else is true. Kept in lockstep
+           * with the C backend. */
+          if (sourceParam.kind === "bool" && physical?.kind === "nativeScalar") {
+            widenLines.push(
+              `  %a${argument.parameter}.bool = icmp ne ${this.llType(physical)} ` +
+                `%a${argument.parameter}, ${sourceParam.falseValue}`,
+            );
+            return `i1 %a${argument.parameter}.bool`;
+          }
           return `${this.llType(sourceParam)} %a${argument.parameter}`;
         }),
       ].join(", ");
@@ -2355,11 +2422,11 @@ class LlEmitter {
       if (sourceType.ret.kind === "void") {
         defs.push(`  call void %fn(${callArgs})`, `  ret void`, `}`, ``);
       } else {
+        const answer = sourceType.ret;
+        const answerLl = answer.kind === "bool" ? "i1" : this.llType(answer);
         defs.push(
-          `  %result = call ${this.llType(sourceType.ret)} %fn(${callArgs})`,
-          `  ret ${this.llType(sourceType.ret)} %result`,
-          `}`,
-          ``,
+          `  %result = call ${answerLl} %fn(${callArgs})`,
+          ...this.nativeCallbackAnswerLl(answer, signature.result, "%result"),
         );
       }
     }

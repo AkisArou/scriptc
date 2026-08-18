@@ -36,6 +36,7 @@ import type {
   IrModule,
   IrNativeBinding,
   IrNativeScalarType,
+  IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
   IrNativeStructDef,
   IrStmt,
@@ -44,7 +45,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { nativeIntegerInfo, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, hasForeignFfiCallback, hasRetainedFfiCallback } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import {
@@ -174,6 +175,37 @@ function nativeCallbackParameterTypeC(
     return "void *";
   }
   return cType(parameter).trim();
+}
+
+/** A handler's answer, written into the physical result's representation.
+ * An exact answer is already that representation; a boolean answers with the
+ * two values the declaration names; an ordinary number narrows, naming which
+ * conversion it performs — the same choice a parameter position makes, for
+ * the same reason. */
+function nativeCallbackAnswerC(
+  answer: IrNativeCallbackArgumentType["ret"],
+  storage: IrNativeCallbackSignature["result"],
+  call: string,
+): string {
+  if (answer.kind === "bool") {
+    return `((${call}) ? ${answer.trueValue} : ${answer.falseValue})`;
+  }
+  if (answer.kind !== "f64" || !("conversion" in answer)) return call;
+  if (storage.kind !== "nativeScalar") {
+    throw new Error("emitter bug: numeric callback answer over a non-scalar result");
+  }
+  if (storage.scalar === "f64") return call;
+  if (answer.conversion === "wrap") {
+    const info = nativeIntegerInfo(storage.scalar);
+    if (info === null) {
+      throw new Error(`emitter bug: wrapping answer over ${storage.scalar}`);
+    }
+    const via = info.signed
+      ? `scr_bit_or(${call}, 0.0)`
+      : `scr_bit_ushr(${call}, 0.0)`;
+    return `(${cType(storage).trim()})${via}`;
+  }
+  return `scr_native_${storage.scalar}_from_number(${call})`;
 }
 
 function nativeCallbackPointerTypeC(
@@ -2453,16 +2485,23 @@ export class CEmitter {
         if (argument.kind !== "callback-parameter") {
           throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
         }
+        const source = adapter.source.params[sourceIndex];
         /* Same widening as the queued path, without the queue. */
-        return adapter.source.params[sourceIndex]?.kind === "f64"
-          ? `(double)sc_a${argument.parameter}`
-          : `sc_a${argument.parameter}`;
+        if (source?.kind === "f64") return `(double)sc_a${argument.parameter}`;
+        /* An integer slot read as a boolean: false is exactly the value the
+         * declaration names, and everything else is true. C's own truth test
+         * where that value is zero, which is what a foreign API that returns
+         * "any nonzero" means. */
+        if (source?.kind === "bool") {
+          return `(sc_a${argument.parameter} != ${source.falseValue})`;
+        }
+        return `sc_a${argument.parameter}`;
       });
       const call = `(${cFnPtrCast(sourceType)}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
       if (signature.result.kind === "void") {
         out.push(`  ${call};`, `}`, ``);
       } else {
-        out.push(`  return ${call};`, `}`, ``);
+        out.push(`  return ${nativeCallbackAnswerC(adapter.source.ret, signature.result, call)};`, `}`, ``);
       }
     }
   }

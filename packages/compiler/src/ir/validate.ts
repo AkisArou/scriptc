@@ -1541,7 +1541,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ((parameter.kind === "nativeHandle" &&
             nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
             parameter.kind === "string" ||
-            parameter.kind === "f64"))
+            parameter.kind === "f64" ||
+            /* An integer payload read as a boolean, carrying the two
+             * storage values it means — the mirror of the answer below. */
+            (parameter.kind === "bool" &&
+              Object.keys(parameter).sort().join(",") === "falseValue,kind,trueValue" &&
+              typeof parameter.falseValue === "string" &&
+              typeof parameter.trueValue === "string" &&
+              parameter.falseValue !== parameter.trueValue)))
       ) &&
       (validNativeScalar(result) ||
         (typeof result === "object" && result !== null &&
@@ -1552,7 +1559,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               Object.keys(result).sort().join(",") === "falseValue,kind,trueValue" &&
               typeof result.falseValue === "string" &&
               typeof result.trueValue === "string" &&
-              result.falseValue !== result.trueValue))));
+              result.falseValue !== result.trueValue) ||
+            /* An ordinary number answered into the slot, naming which
+             * conversion the narrowing performs. */
+            (result.kind === "f64" &&
+              Object.keys(result).sort().join(",") === "conversion,kind" &&
+              (result.conversion === "checked" || result.conversion === "wrap")))));
   };
   const validNativeCallbackContract = (
     contract: unknown,
@@ -2238,6 +2250,22 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 if (!widenableScalarType(expected)) return false;
                 continue;
               }
+              /* An integer payload slot read as a TypeScript boolean. The
+               * two storage values must be exactly representable there —
+               * the same rule the boolean ANSWER follows on the way out. */
+              if (source.kind === "bool") {
+                if (expected.kind !== "nativeScalar" || expected.scalar === "f64") {
+                  return false;
+                }
+                const info = nativeIntegerInfo(expected.scalar, nativePointerBits);
+                if (info === null) return false;
+                for (const value of [source.falseValue, source.trueValue]) {
+                  if (!/^-?(?:0|[1-9][0-9]*)$/.test(value) || value === "-0") return false;
+                  const exact = BigInt(value);
+                  if (exact < info.min || exact > info.max) return false;
+                }
+                continue;
+              }
               /* An f32 payload has no source form of its own, so an f64
                * source is the only thing that can receive it. */
               if (abiOnlyScalar(expected)) return false;
@@ -2260,6 +2288,21 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 const exact = BigInt(value);
                 if (exact < info.min || exact > info.max) return false;
               }
+            } else if (answer.kind === "f64" && "conversion" in answer) {
+              /* An ordinary number answered into an exact slot. A checked
+               * conversion has a defined answer only where the slot's whole
+               * range is representable in a double; a wrapping one is total
+               * at every integer width, and a double slot converts nothing
+               * either way. */
+              const storage = parameter.type.signature.result;
+              if (storage.kind !== "nativeScalar") return false;
+              if (storage.scalar === "f64") {
+                if (answer.conversion !== "checked") return false;
+              } else if (answer.conversion === "checked") {
+                if (!numberCarryingScalarType(storage)) return false;
+              } else if (
+                nativeIntegerInfo(storage.scalar, nativePointerBits) === null
+              ) return false;
             } else if (!typeEquals(answer, parameter.type.signature.result)) {
               return false;
             }

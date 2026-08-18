@@ -257,6 +257,10 @@ export type IrNativeCallbackArgumentType = {
      * source f64. The queued invocation stores the physical exact value; the
      * widening happens when the delivery reads it back. */
     | { kind: "f64" }
+    /** An integer payload slot read as an ordinary TypeScript boolean,
+     * carrying the two values that storage means — the mirror of the answer
+     * form below, which this list was simply missing. */
+    | { kind: "bool"; falseValue: string; trueValue: string }
   )[];
   /** A handler's answer. An exact scalar answers with its own
    * representation; `bool` answers with an ordinary TypeScript boolean over
@@ -266,7 +270,17 @@ export type IrNativeCallbackArgumentType = {
   ret:
     | IrNativeScalarType
     | { kind: "void" }
-    | { kind: "bool"; falseValue: string; trueValue: string };
+    | { kind: "bool"; falseValue: string; trueValue: string }
+    /** An ordinary number answered into an exact slot — the mirror of the
+     * `f64` payload form above, which this list was missing.
+     *
+     * It names its conversion where the payload form does not, and the
+     * difference is real rather than an inconsistency: a payload WIDENS out
+     * of an at-most-32-bit slot into a double, which is exact and cannot
+     * fail, while an answer NARROWS a double back into the slot and has to
+     * choose. Same reason a parameter position names one and a result
+     * position does not. */
+    | { kind: "f64"; conversion: "checked" | "wrap" };
 };
 
 export type IrNativeCallbackSourceArgument =
@@ -1180,7 +1194,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 22 as const;
+export const IR_VERSION = 23 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

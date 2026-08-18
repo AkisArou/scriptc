@@ -18,9 +18,13 @@
  * became a named projection rather than one side's habit winning.
  */
 import type {
+  IrFfiCallbackParam,
   IrFfiImport,
   IrFfiValueParamClass,
   IrNativeBinding,
+  IrNativeCallbackArgumentType,
+  IrNativeCallbackContract,
+  IrNativeCallbackSignature,
   IrNativeScalarType,
 } from "../ir/nodes.js";
 import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "../ir/nodes.js";
@@ -54,6 +58,87 @@ export function ffiBindingId(name: string): string {
  * declaration in the program's own source, which has no package. */
 const FFI_DECLARATION_MODULE = "\u0000ffi";
 
+/** Payload classes a call-scoped callback can carry today. `cstring` needs a
+ * copy transport the call arm does not admit, and the span classes need a
+ * source argument built from two physical slots; both are measured additions
+ * with named consumers rather than guesses, so a descriptor using them keeps
+ * the profile's own path for now. */
+const DESUGARABLE_PAYLOADS = new Set(["f64", "bool", "u8", "u32", "i32"]);
+
+/** The one callback a binding may carry, with its context slot, or null when
+ * the descriptor needs vocabulary the native path does not have yet. */
+function desugarCallback(entry: IrFfiImport): {
+  readonly signature: IrNativeCallbackSignature;
+  readonly contract: IrNativeCallbackContract;
+  readonly source: IrNativeCallbackArgumentType;
+  readonly callbackSlot: number;
+  readonly contextSlot: number;
+} | null {
+  const found = entry.params.flatMap((param, index) =>
+    isFfiCallbackParam(param) ? [[index, param as IrFfiCallbackParam] as const] : [],
+  );
+  if (found.length !== 1) return null;
+  const [callbackSlot, param] = found[0]!;
+  const callback = param.callback;
+  /* Retained and foreign registrations are their own slice: they need an
+   * owner arm and a delivery target this one does not touch. */
+  if (callback.lifetime !== "call" || callback.invoke !== "script-thread") return null;
+
+  const payloads = callback.params.filter((slot) => !isFfiContextParam(slot));
+  if (!payloads.every((cls) => DESUGARABLE_PAYLOADS.has(String(cls)))) return null;
+  /* A contextless callback binds its closure through a thread-local slot,
+   * which the native trampoline family does not have. */
+  if (payloads.length === callback.params.length) return null;
+  if (callback.returns !== "void" && !DESUGARABLE_PAYLOADS.has(callback.returns)) return null;
+
+  const contexts = entry.params.flatMap((candidate, index) =>
+    isFfiContextParam(candidate) && candidate.context === callback.id ? [index] : [],
+  );
+  if (contexts.length !== 1) return null;
+
+  const signature: IrNativeCallbackSignature = {
+    parameters: callback.params.map((slot) =>
+      isFfiContextParam(slot)
+        ? { kind: "nativeContext", addressSpace: 0 } as const
+        : scalarOf(slot as "f64" | "bool" | "u8" | "u32" | "i32"),
+    ),
+    result: callback.returns === "void"
+      ? { kind: "void" }
+      : scalarOf(callback.returns),
+  };
+  const payloadSlots = signature.parameters.flatMap((slot, index) =>
+    slot.kind === "nativeContext" ? [] : [index],
+  );
+  /* Each payload reaches the handler as the ordinary JavaScript value its
+   * class names: a boolean for `bool`, a number for the rest. Nothing
+   * outlives the call, so nothing is copied. */
+  const source: IrNativeCallbackArgumentType = {
+    kind: "func",
+    params: payloads.map((cls) =>
+      cls === "bool"
+        ? { kind: "bool" as const, falseValue: "0", trueValue: "1" }
+        : { kind: "f64" as const },
+    ),
+    ret: callback.returns === "void"
+      ? { kind: "void" }
+      : callback.returns === "bool"
+        ? { kind: "bool", falseValue: "0", trueValue: "1" }
+        /* The profile's integer answers wrap, exactly as its arguments do. */
+        : { kind: "f64", conversion: callback.returns === "f64" ? "checked" : "wrap" },
+  };
+  const contract: IrNativeCallbackContract = {
+    owner: { kind: "call" },
+    allowedInvocationExecutors: ["same-as-caller"],
+    synchronousReturn: true,
+    transports: payloadSlots.map(() => ({ kind: "borrow" })),
+    sourceArguments: payloadSlots.map((parameter) => ({
+      kind: "callback-parameter",
+      parameter,
+    })),
+  };
+  return { signature, contract, source, callbackSlot, contextSlot: contexts[0]! };
+}
+
 /**
  * The value-call subset: every parameter and the result cross as values,
  * strings and byte spans included. Returns null for anything carrying a
@@ -62,14 +147,13 @@ const FFI_DECLARATION_MODULE = "\u0000ffi";
  * suite that still exercises both.
  */
 export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | null {
-  if (
-    entry.params.some(
-      (param) =>
-        isFfiCallbackParam(param) || isFfiContextParam(param) || isFfiReleaseParam(param),
-    )
-  ) {
-    return null;
-  }
+  /* A release descriptor belongs to the retained slice. */
+  if (entry.params.some(isFfiReleaseParam)) return null;
+  const carriesCallback = entry.params.some(isFfiCallbackParam);
+  const callback = carriesCallback ? desugarCallback(entry) : null;
+  if (carriesCallback && callback === null) return null;
+  /* A context with no callback of ours to belong to is not ours to serve. */
+  if (callback === null && entry.params.some(isFfiContextParam)) return null;
   const classes = entry.params as IrFfiValueParamClass[];
 
   const args: IrNativeBinding["arguments"] = [];
@@ -78,7 +162,39 @@ export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | nu
    * the target's pointer width. */
   const usize: IrNativeScalarType = { kind: "nativeScalar", scalar: "usize" };
 
+  /* TypeScript argument positions skip what the compiler supplies: the
+   * function value is one argument, the context is none at all. */
+  const callbackArgument = callback === null
+    ? -1
+    : entry.params
+        .slice(0, callback.callbackSlot)
+        .filter((slot) => !isFfiContextParam(slot)).length;
   classes.forEach((cls, index) => {
+    if (callback !== null && index === callback.contextSlot) {
+      parameters.push({
+        name: `a${index}`,
+        type: { kind: "nativeContext", addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "callback" },
+        projection: { kind: "callbackContext", argument: callbackArgument },
+      });
+      return;
+    }
+    if (callback !== null && index === callback.callbackSlot) {
+      args.push({
+        name: `a${index}`,
+        type: callback.source,
+        callback: callback.contract,
+      });
+      parameters.push({
+        name: `a${index}`,
+        type: { kind: "nativeCallback", signature: callback.signature },
+        passMode: "pointer",
+        ownership: { kind: "callback" },
+        projection: { kind: "callbackFunction", argument: callbackArgument },
+      });
+      return;
+    }
     const name = `a${index}`;
     switch (cls) {
       case "string":
