@@ -46,7 +46,7 @@ import type {
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackPayloads, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -1993,7 +1993,9 @@ export class CEmitter {
    * require no TLS and preserve callback identity exactly. */
   emitNativeCallbackDefs(out: string[]): void {
     for (const adapter of this.nativeCallbackAdapters.values()) {
-      /* What every payload becomes, decided once for both backends. */
+      /* What shape this trampoline is, where it finds its closure, and what
+       * every payload becomes — decided once for both backends. */
+      const form = nativeTrampolineForm(adapter);
       const payloads = nativeCallbackPayloads(adapter, (bindingId) => {
         const free = this.nativeById.get(bindingId);
         if (free === undefined) {
@@ -2037,10 +2039,7 @@ export class CEmitter {
        * reason: the contract admits no foreign producer, and the owner-side
        * table lookup is the same one a queued delivery performs — just
        * without the queue between the question and the answer. */
-      if (
-        adapter.contract.owner.kind !== "call" &&
-        adapter.contract.synchronousReturn
-      ) {
+      if (form.shape === "direct") {
         const signatureId = `${adapter.symbol}_signature`;
         const sourceType = adapter.source;
         const args = payloads.map((payload) => nativePayloadReadC(payload));
@@ -2063,11 +2062,15 @@ export class CEmitter {
         const bail = voids ? "return;" : "return 0;";
         out.push(
           `static const unsigned char ${signatureId};`,
-          ...(adapter.global === null
-            ? []
-            : [`static ScrCallbackToken *${adapter.global};`]),
+          ...(form.closure.kind === "tokenGlobal"
+            ? [`static ScrCallbackToken *${form.closure.slot};`]
+            : []),
           `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-          `  ScrCallbackToken *sc_token = ${adapter.global ?? "(ScrCallbackToken *)sc_ctx"};`,
+          `  ScrCallbackToken *sc_token = ${
+            form.closure.kind === "tokenGlobal"
+              ? form.closure.slot
+              : "(ScrCallbackToken *)sc_ctx"
+          };`,
           /* A disposed registration answers with the ABI zero rather than
            * reading a closure that is gone; so does an already-unwinding
            * turn, which must not start another handler. */
@@ -2095,7 +2098,7 @@ export class CEmitter {
         );
         continue;
       }
-      if (adapter.contract.owner.kind !== "call") {
+      if (form.shape === "queued") {
         const invocation = `${adapter.symbol}_invocation`;
         const signatureId = `${adapter.symbol}_signature`;
         const invoke = `${adapter.symbol}_invoke`;
@@ -2232,11 +2235,13 @@ export class CEmitter {
          * extent. The NULL check below is what makes an invocation outside
          * that extent a precise trap rather than a jump through a stale
          * pointer. */
-        ...(adapter.tls === null
-          ? []
-          : [`static _Thread_local ScrClosure *${adapter.tls};`]),
+        ...(form.closure.kind === "threadLocal"
+          ? [`static _Thread_local ScrClosure *${form.closure.slot};`]
+          : []),
         `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-        `  ScrClosure *sc_cb = ${adapter.tls ?? "(ScrClosure *)sc_ctx"};`,
+        `  ScrClosure *sc_cb = ${
+          form.closure.kind === "threadLocal" ? form.closure.slot : "(ScrClosure *)sc_ctx"
+        };`,
         `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );

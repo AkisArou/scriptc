@@ -250,3 +250,63 @@ export function nativeCallbackPayloads(
     return { kind: "direct", slot, scriptType: nativeCallbackSourceScriptType(source) };
   });
 }
+
+/** Where a trampoline finds the closure it must invoke.
+ *
+ * There are exactly four answers and they follow from the contract, not from
+ * the backend: what owns the registration decides whether the library hands
+ * back a closure or a token, and whether the signature has a userdata slot
+ * decides whether it hands back anything at all. */
+export type NativeClosureSource =
+  /** The context slot IS the closure. A call-scoped callback, nothing else. */
+  | { readonly kind: "context" }
+  /** No userdata slot, and only this call's extent to survive: the closure is
+   * lent through a thread-local for that extent. */
+  | { readonly kind: "threadLocal"; readonly slot: string }
+  /** The context slot is the registration's token; the closure is read
+   * through the table, which is what keeps it alive between calls. */
+  | { readonly kind: "tokenContext" }
+  /** No userdata slot and a life longer than the call, so the token lives in
+   * a replaceable global instead of being handed over. */
+  | { readonly kind: "tokenGlobal"; readonly slot: string };
+
+/** Which trampoline a contract calls for.
+ *
+ * `call-scoped` invokes the closure directly and dies with the call.
+ * `direct` reads the closure through its token and invokes it now, which is
+ * what a library that calls a stored callback from inside a later call does.
+ * `queued` copies the payload where the event is raised and delivers on a
+ * later turn, because the raising thread may not be the script's. */
+export type NativeTrampolineShape = "call-scoped" | "direct" | "queued";
+
+export interface NativeTrampolineForm {
+  readonly shape: NativeTrampolineShape;
+  readonly closure: NativeClosureSource;
+}
+
+/** The shape and closure source for one adapter.
+ *
+ * Both backends selected their arm from the same two contract fields and read
+ * the closure from the same two adapter fields, in code that had to agree and
+ * twice did not: an arm guard narrowed on one side sent a process-scoped
+ * registration into owner-side token machinery, and a slot emitted by a new
+ * arm was emitted again by an old one. */
+export function nativeTrampolineForm(
+  adapter: NativeCallbackAdapter,
+): NativeTrampolineForm {
+  if (adapter.contract.owner.kind === "call") {
+    return {
+      shape: "call-scoped",
+      closure: adapter.tls === null
+        ? { kind: "context" }
+        : { kind: "threadLocal", slot: adapter.tls },
+    };
+  }
+  const closure: NativeClosureSource = adapter.global === null
+    ? { kind: "tokenContext" }
+    : { kind: "tokenGlobal", slot: adapter.global };
+  return {
+    shape: adapter.contract.synchronousReturn ? "direct" : "queued",
+    closure,
+  };
+}

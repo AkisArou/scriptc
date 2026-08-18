@@ -89,7 +89,7 @@ import type {
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallbackPayloads, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -1718,7 +1718,9 @@ class LlEmitter {
       "scriptc: native callback invoked outside its call-scoped lifetime\n",
     );
     for (const adapter of this.nativeCallbackAdapters.values()) {
-      /* What every payload becomes, decided once for both backends. */
+      /* What shape this trampoline is, where it finds its closure, and what
+       * every payload becomes — decided once for both backends. */
+      const form = nativeTrampolineForm(adapter);
       const payloads = nativeCallbackPayloads(adapter, (bindingId) => {
         const free = this.nativeById.get(bindingId);
         if (free === undefined) {
@@ -1743,10 +1745,7 @@ class LlEmitter {
        * is read and called now, on the caller's thread, because the answer
        * has to exist before the emitting call returns. Kept in lockstep with
        * the C backend's trampoline. */
-      if (
-        adapter.contract.owner.kind !== "call" &&
-        adapter.contract.synchronousReturn
-      ) {
+      if (form.shape === "direct") {
         const signatureId = `@${adapter.symbol}_signature`;
         const sourceType = adapter.source;
         /* A registration nothing owns is told rather than asked, so it may
@@ -1755,7 +1754,7 @@ class LlEmitter {
          * lockstep with the C backend. */
         const voids = signature.result.kind === "void";
         const bail = voids ? "ret void" : `ret ${rawRet} ${pendingResult}`;
-        const tok = adapter.global === null ? "%ctx" : "%tok";
+        const tok = form.closure.kind === "tokenGlobal" ? "%tok" : "%ctx";
         this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
         this.declare(`declare void @scr_closure_release(ptr)`);
         this.declare(`declare i32 @scr_callback_token_state(ptr)`);
@@ -1764,14 +1763,14 @@ class LlEmitter {
         this.declare(`declare i64 @scr_callback_token_generation(ptr)`);
         defs.push(
           `${signatureId} = internal constant i8 0`,
-          ...(adapter.global === null
-            ? []
-            : [`@${adapter.global} = internal global ptr null`]),
+          ...(form.closure.kind === "tokenGlobal"
+            ? [`@${form.closure.slot} = internal global ptr null`]
+            : []),
           `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
           `entry:`,
-          ...(adapter.global === null
-            ? []
-            : [`  ${tok} = load ptr, ptr @${adapter.global}`]),
+          ...(form.closure.kind === "tokenGlobal"
+            ? [`  ${tok} = load ptr, ptr @${form.closure.slot}`]
+            : []),
           `  %absent = icmp eq ptr ${tok}, null`,
           `  br i1 %absent, label %skip, label %present`,
           `present:`,
@@ -1837,7 +1836,7 @@ class LlEmitter {
         );
         continue;
       }
-      if (adapter.contract.owner.kind !== "call") {
+      if (form.shape === "queued") {
         const injectsOwner = adapter.contract.sourceArguments.some(
           (argument) => argument.kind === "registration-owner",
         );
@@ -2157,12 +2156,12 @@ class LlEmitter {
        * What is left is the call-scoped callback, whose context slot IS the
        * closure — or, with no userdata slot, a thread-local lent for the
        * call's own dynamic extent. Kept in lockstep with the C backend. */
-      const lent = adapter.tls;
+      const lent = form.closure.kind === "threadLocal" ? form.closure.slot : null;
       const closure = lent === null ? "%ctx" : "%lent.closure";
       defs.push(
-        ...(adapter.tls === null
+        ...(lent === null
           ? []
-          : [`@${adapter.tls} = internal thread_local global ptr null`]),
+          : [`@${lent} = internal thread_local global ptr null`]),
         `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
         `entry:`,
         ...(lent === null ? [] : [`  ${closure} = load ptr, ptr @${lent}`]),
