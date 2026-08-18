@@ -48,7 +48,9 @@
  *            binding that is not an ambient function declaration
  *            (SC5002), and a TypeScript signature that does not match its
  *            declared native ABI classes (SC5003), and native toolchain
- *            failures while applying a valid profile (SC5004); generic
+ *            failures while applying a valid profile (SC5004), and a called
+ *            descriptor the native binding vocabulary cannot express
+ *            (SC5005); generic
  *            Native IR target mismatch (SC5101), declaration resolution/
  *            signature/exact-conversion failures (SC5102-SC5104),
  *            native link failures (SC5105), and impossible checked-number
@@ -125,6 +127,23 @@ export function ffiSignatureDiag(name: string, detail: string, loc: SrcLoc): Scr
       "format 3 callback parameters additionally accept cstring/string (TypeScript string) and bytes (Uint8Array); " +
       "format 4 adds retained callback descriptors and explicit release references; " +
       "return classes: f64/u8/u32/i32, bool, and void",
+  };
+}
+
+/** SC5005 — a called outbound FFI descriptor names something the one native
+ * vocabulary cannot express. The profile is an input dialect that translates
+ * into Native IR bindings; a descriptor that does not translate has no
+ * lowering, and saying so is better than emitting a partial one. */
+export function ffiUntranslatableDiag(name: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC5005",
+    message:
+      `FFI binding '${name}' declares a descriptor the native binding vocabulary cannot express`,
+    loc,
+    hint:
+      "every parameter, callback payload, and answer must map onto a native binding: " +
+      "value classes f64/bool/u8/u32/i32/cstring/string/bytes, call-scoped or retained " +
+      "callbacks with or without a context slot, and releases naming a retained registration",
   };
 }
 

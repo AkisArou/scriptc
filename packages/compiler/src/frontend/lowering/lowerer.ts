@@ -1348,7 +1348,13 @@ export class Lowerer {
     this.libraryCallbacks = mode.libraryCallbacks ?? false;
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     {
-      const desugared = desugarFfiBindings(this.ffiImports);
+      /* A library-mode host-callback channel rides this table too, and it is
+       * not an outbound descriptor: its name is a registration key rather
+       * than a C symbol, and translating one would mint a native binding for
+       * a symbol that does not exist. */
+      const desugared = this.libraryCallbacks
+        ? new Map<string, IrNativeBinding>()
+        : desugarFfiBindings(this.ffiImports);
       this.desugaredFfiBindings = [...desugared.values()];
       this.desugaredFfiNames = new Set(desugared.keys());
     }
@@ -2371,16 +2377,13 @@ export class Lowerer {
                   ],
                 }
               : {}),
-            ...(() => {
-              /* Only the bindings still served by the profile's own path
-               * stay in this table: a desugared one is a native binding now,
-               * and two tables claiming one C symbol is exactly the
-               * duplication this change removes. */
-              const remaining = this.ffiImports.filter(
-                (entry) => !this.desugaredFfiNames.has(entry.name),
-              );
-              return remaining.length > 0 ? { ffiImports: remaining } : {};
-            })(),
+            /* Outbound descriptors are native bindings now, every one of
+             * them, so none reaches the module's own table. What does is a
+             * library-mode host-callback channel, which is not an outbound
+             * descriptor at all. */
+            ...(this.libraryCallbacks && this.ffiImports.length > 0
+              ? { ffiImports: [...this.ffiImports] }
+              : {}),
           };
     return {
       module,

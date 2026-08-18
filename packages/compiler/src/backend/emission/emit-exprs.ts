@@ -7,7 +7,6 @@ import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cF
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
-import { collectFfiRetainedOps, parseFfiCallbackKey } from "../ffi-callbacks.js";
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallbackIsOwnerScoped } from "../../ir/nodes.js";
@@ -2233,156 +2232,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return E.newTemp(e.type, `(double)${call}`);
           }
         }
-        const entry = E.ffiByName.get(e.import);
-        if (!entry) throw new Error(`emitter bug: unknown FFI import ${e.import}`);
-        const args = e.args.map((arg) => E.emitExpr(arg));
-        const sourceArgs = new Map<number, Temp>();
-        const callbackArgs = new Map<string, Temp>();
-        let sourceIndex = 0;
-        entry.params.forEach((param, abiIndex) => {
-          if (isFfiContextParam(param)) return;
-          const arg = args[sourceIndex++]!;
-          sourceArgs.set(abiIndex, arg);
-          if (isFfiCallbackParam(param)) callbackArgs.set(param.callback.id, arg);
-          if (isFfiReleaseParam(param)) callbackArgs.set(param.callback.release, arg);
-        });
-
-        const { registrations: retainedRegistrations, releases: retainedReleases } =
-          collectFfiRetainedOps<Temp>(entry, callbackArgs, (binding, id) => E.ffiCallbackAdapter(binding, id));
-
-        // Pin before registration. Raw retained descriptors are native
-        // singletons: the incoming closure is pinned (and an EMPTY slot
-        // armed) before the native set call, but a replaced registration
-        // stays live and dispatching until the call returns — a native
-        // setter may flush the outgoing callback one last time mid-replace.
-        // scr_ffi_commit_slot below repoints the slot and retires the
-        // superseded pins after the call.
-        for (const registration of retainedRegistrations) {
-          if (registration.global !== null) {
-            E.line(`scr_ffi_retain_slot(&${registration.table}, &${registration.global}, ${registration.callback.name});`);
-          } else if (registration.foreign) {
-            E.line(`scr_ffi_retain_foreign(&${registration.table}, ${registration.callback.name});`);
-          } else {
-            E.line(`scr_ffi_retain(&${registration.table}, ${registration.callback.name});`);
-          }
-        }
-        // Validate releases BEFORE the native removal call runs: a bogus
-        // release traps without native code observing any side effect. The
-        // registration itself is unpinned only after the call returns.
-        for (const release of retainedReleases) {
-          E.line(`scr_ffi_require${release.foreign ? "_foreign" : ""}(&${release.table}, ${release.callback.name});`);
-        }
-
-        // Raw C callback pointers carry no userdata. For the documented
-        // call-scoped/same-thread policy, lend each one a distinct TLS
-        // slot for the dynamic extent of this native call. Save/restore
-        // makes nested and reentrant calls stack correctly.
-        const rawContexts: { tls: string; previous: Temp }[] = [];
-        for (const param of entry.params) {
-          if (!isFfiCallbackParam(param)) continue;
-          const adapter = E.ffiCallbackAdapter(entry.name, param.callback.id);
-          if (adapter.tls === null) continue;
-          const callback = callbackArgs.get(param.callback.id)!;
-          const previous = E.newBorrowedTemp(callback.type, adapter.tls);
-          E.line(`${adapter.tls} = ${callback.name};`);
-          rawContexts.push({ tls: adapter.tls, previous });
-        }
-        const nativeArgs: string[] = [];
-        entry.params.forEach((param, i) => {
-          if (isFfiCallbackParam(param)) {
-            const adapter = E.ffiCallbackAdapter(entry.name, param.callback.id);
-            nativeArgs.push(`&${adapter.symbol}`);
-            return;
-          }
-          if (isFfiReleaseParam(param)) {
-            const { binding, id } = parseFfiCallbackKey(param.callback.release);
-            const adapter = E.ffiCallbackAdapter(binding, id);
-            nativeArgs.push(`&${adapter.symbol}`);
-            return;
-          }
-          if (isFfiContextParam(param)) {
-            const callback = callbackArgs.get(param.context);
-            if (!callback) throw new Error(`emitter bug: FFI context '${param.context}' has no callback arg`);
-            nativeArgs.push(`(void *)${callback.name}`);
-            return;
-          }
-          const arg = sourceArgs.get(i)!;
-          switch (param) {
-            case "f64":
-              nativeArgs.push(arg.name);
-              break;
-            case "bool":
-              nativeArgs.push(`(uint8_t)(${arg.name} ? 1 : 0)`);
-              break;
-            case "u8":
-              nativeArgs.push(`(uint8_t)(uint32_t)scr_bit_ushr(${arg.name}, 0.0)`);
-              break;
-            case "u32":
-              nativeArgs.push(`(uint32_t)scr_bit_ushr(${arg.name}, 0.0)`);
-              break;
-            case "i32":
-              nativeArgs.push(`(int32_t)scr_bit_or(${arg.name}, 0.0)`);
-              break;
-            case "string":
-              nativeArgs.push(`(const uint8_t *)${arg.name}->data`, `${arg.name}->len`);
-              break;
-            case "bytes":
-              nativeArgs.push(`(const uint8_t *)${arg.name}->data`, `${arg.name}->len`);
-              break;
-          }
-        });
-        const call = `${entry.symbol}(${nativeArgs.join(", ")})`;
-        const restoreRawContexts = (): void => {
-          for (let i = rawContexts.length - 1; i >= 0; i--) {
-            const saved = rawContexts[i]!;
-            E.line(`${saved.tls} = ${saved.previous.name};`);
-          }
-        };
-        const finishRetainedReleases = (): void => {
-          // Commit raw replacements first (repoint the slot, retire the
-          // superseded pins), then unpin explicit releases — the runtime
-          // disarms the slot itself when the released closure holds it.
-          for (const registration of retainedRegistrations) {
-            if (registration.global !== null) {
-              E.line(`scr_ffi_commit_slot(&${registration.table}, ${registration.callback.name});`);
-            }
-          }
-          for (const release of retainedReleases) {
-            E.line(`scr_ffi_release${release.foreign ? "_foreign" : ""}(&${release.table}, ${release.callback.name});`);
-          }
-        };
-        const callbacksMayThrow = callbackArgs.size > 0 || E.ffiHasRetainedCallback;
-        switch (entry.returns) {
-          case "void":
-            E.line(`${call};${E.srcComment(e.loc)}`);
-            restoreRawContexts();
-            finishRetainedReleases();
-            if (callbacksMayThrow) E.emitPendingCheck();
-            return { name: "", type: e.type };
-          case "f64": {
-            const result = E.newTemp(e.type, call);
-            restoreRawContexts();
-            finishRetainedReleases();
-            if (callbacksMayThrow) E.emitPendingCheck();
-            return result;
-          }
-          case "bool": {
-            const result = E.newTemp(e.type, `(${call} != 0)`);
-            restoreRawContexts();
-            finishRetainedReleases();
-            if (callbacksMayThrow) E.emitPendingCheck();
-            return result;
-          }
-          case "u8":
-          case "u32":
-          case "i32": {
-            const result = E.newTemp(e.type, `(double)${call}`);
-            restoreRawContexts();
-            finishRetainedReleases();
-            if (callbacksMayThrow) E.emitPendingCheck();
-            return result;
-          }
-        }
+        /* Every outbound descriptor is a native binding now, so nothing
+         * reaches here but a channel the library profile declares — and a
+         * reference to one the profile does NOT declare, which the
+         * frontend has already refused. */
+        throw new Error(`emitter bug: unknown host-callback channel ${e.import}`);
       }
       case "nativeCall": {
         const binding = E.nativeById.get(e.binding);

@@ -13,7 +13,7 @@ import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
-import { ffiBindingDiag, ffiSignatureDiag, libCallbackDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
+import { ffiBindingDiag, ffiSignatureDiag, ffiUntranslatableDiag, libCallbackDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
@@ -2962,11 +2962,20 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       }
       return lowered;
     });
-    /* A profile binding with no callback is expressible in the one native
-     * vocabulary, so it lowers as an ordinary native call. The rest keep the
-     * profile's own path until the callback slices land — two paths for one
-     * more change, rather than one change that cannot be verified. */
-    if (L.desugaredFfiNames.has(binding.name)) {
+    /* An outbound profile descriptor is expressible in the one native
+     * vocabulary, so it lowers as an ordinary native call. One that is not
+     * has no lowering at all, and a call to it is refused where it is written
+     * rather than emitted through a second path — the profile is an input
+     * dialect, and a dialect with an untranslatable sentence has an error in
+     * it, not an alternative meaning.
+     *
+     * A library-mode host-callback channel is not an outbound descriptor at
+     * all: it dispatches through a registration slot rather than a native
+     * symbol, and it keeps `ffiCall`. */
+    if (!L.libraryCallbacks) {
+      if (!L.desugaredFfiNames.has(binding.name)) {
+        L.diags.push(ffiUntranslatableDiag(binding.name, loc));
+      }
       return {
         kind: "nativeCall",
         binding: ffiBindingId(binding.name),
