@@ -1750,12 +1750,8 @@ function resolveNativeLibraryExports(
       );
       continue;
     }
-    if (
-      entry.callingConvention !== "c" ||
-      entry.variadic !== false ||
-      entry.error.detect.kind !== "never"
-    ) {
-      diagnostics.push(nativeSignatureDiag(entry.id, "only non-variadic no-fail C exports are supported", info.loc));
+    if (entry.error.detect.kind !== "never") {
+      diagnostics.push(nativeSignatureDiag(entry.id, "only no-fail C exports are supported", info.loc));
       continue;
     }
     const fn = fnByName.get(entry.sourceExport);

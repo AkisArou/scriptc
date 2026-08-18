@@ -98,8 +98,6 @@ export interface NativeFrontendBinding {
     readonly kind: "c-symbol";
     readonly symbol: string;
   };
-  readonly callingConvention: "c";
-  readonly variadic: false;
   readonly error:
     Readonly<IrNativeErrorContract>;
   readonly sourceCall:
@@ -164,8 +162,6 @@ export interface NativeFrontendExport {
     readonly kind: "c-symbol";
     readonly symbol: string;
   };
-  readonly callingConvention: "c";
-  readonly variadic: false;
   readonly error: {
     readonly detect: { readonly kind: "never" };
     readonly message: { readonly kind: "none" };

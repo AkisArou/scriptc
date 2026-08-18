@@ -209,8 +209,12 @@ export interface IrNativePointerType {
   addressSpace: 0;
 }
 
+/** The C ABI is the only calling convention with a lowering, so it is not a
+ * field: a field whose only function is to be checked equal to a constant
+ * carries no information and gives a producer somewhere to be wrong. It
+ * returns when a target needs a second convention, with an emission behind
+ * it. */
 export interface IrNativeCallbackSignature {
-  callingConvention: "c";
   /** A pointer appears where the payload is a borrowed string: the physical
    * slot carries the pointer, and the source sees the copy made from it. A
    * handle appears where the payload is an object the emitter referenced; the
@@ -1274,8 +1278,6 @@ export interface IrNativeBinding {
    * declaration identity for a native accessor pair. */
   sourceAccess: "call" | "read" | "write";
   entry: { kind: "c-symbol"; symbol: string };
-  callingConvention: "c";
-  variadic: false;
   /** Exact foreign failure convention. This is mandatory so backends never
    * infer error semantics from a symbol, declaration, or native type.
    *

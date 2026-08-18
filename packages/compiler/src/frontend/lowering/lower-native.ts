@@ -1173,8 +1173,6 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
         ? "write"
         : "call",
     entry: { ...binding.entry },
-    callingConvention: binding.callingConvention,
-    variadic: false,
     error: {
       detect: { ...binding.error.detect },
       message: { ...binding.error.message },

@@ -1656,8 +1656,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const signature = type.signature as Partial<IrNativeCallbackSignature>;
     const result = signature.result;
     const context = signature.context;
-    return signature.callingConvention === "c" &&
-      Array.isArray(signature.parameters) &&
+    return Array.isArray(signature.parameters) &&
       signature.parameters.every((parameter) =>
         validNativeScalar(parameter) ||
         (typeof parameter === "object" && parameter !== null &&
@@ -1826,18 +1825,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (nativeDeclarations.has(declarationKey)) {
       errors.push({
         message: `duplicate Native IR declaration "${binding.declaration.module}"::"${binding.declaration.name}"`,
-        loc: moduleLoc,
-      });
-    }
-    if (binding.callingConvention !== "c") {
-      errors.push({
-        message: `Native IR binding "${binding.id}" has unsupported calling convention "${String(binding.callingConvention)}"`,
-        loc: moduleLoc,
-      });
-    }
-    if (binding.variadic !== false) {
-      errors.push({
-        message: `Native IR binding "${binding.id}" must be non-variadic in the direct-call slice`,
         loc: moduleLoc,
       });
     }
