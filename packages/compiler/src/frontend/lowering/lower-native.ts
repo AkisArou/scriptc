@@ -15,7 +15,7 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nativeArgumentScriptType, nativeCallbackIsRetained, nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
+import { nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -586,7 +586,7 @@ function lowerNativeInvocation(
     L.usedNativeBindingIds.add(binding.result.ownership.destructor);
   }
   for (const argument of binding.arguments) {
-    if (argument.callback && nativeCallbackIsRetained(argument.callback)) {
+    if (argument.callback && nativeCallbackIsOwnerScoped(argument.callback)) {
       L.usedNativeBindingIds.add(argument.callback.cancellationBinding);
     }
   }
@@ -1215,7 +1215,7 @@ function materializeNativeCallbackContract(
       sourceArguments,
     };
   }
-  if (!nativeCallbackIsRetained(contract)) {
+  if (!nativeCallbackIsOwnerScoped(contract)) {
     throw new Error("frontend bug: a non-call callback owner must be retained");
   }
   const owner = { ...contract.owner };

@@ -14,7 +14,7 @@
  */
 import { resolve } from "node:path";
 import { isRelativeSpecifier, tsgoPath } from "../shared.js";
-import { desugarFfiValueBinding } from "../../ffi/desugar.js";
+import { desugarFfiBindings } from "../../ffi/desugar.js";
 import type { IrNativeBinding } from "../../ir/nodes.js";
 import * as ts from "../ts7/adapter.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
@@ -1348,12 +1348,9 @@ export class Lowerer {
     this.libraryCallbacks = mode.libraryCallbacks ?? false;
     this.ffiImportsByName = new Map(this.ffiImports.map((entry) => [entry.name, entry]));
     {
-      const desugared = this.ffiImports.flatMap((entry) => {
-        const binding = desugarFfiValueBinding(entry);
-        return binding === null ? [] : [[entry.name, binding] as const];
-      });
-      this.desugaredFfiBindings = desugared.map(([, binding]) => binding);
-      this.desugaredFfiNames = new Set(desugared.map(([name]) => name));
+      const desugared = desugarFfiBindings(this.ffiImports);
+      this.desugaredFfiBindings = [...desugared.values()];
+      this.desugaredFfiNames = new Set(desugared.keys());
     }
     this.ffiBindingSymbols = mode.ffiBindingSymbols ?? null;
     this.nativeInput = mode.native;

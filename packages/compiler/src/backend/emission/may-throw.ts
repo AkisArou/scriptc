@@ -1,7 +1,7 @@
 /* Cheap whole-module may-throw analysis (see computeMayThrow). Pure function
  * of the IR module; the emitter consults the result to place unwind checks. */
 import type { IrArrIntrinsicMethod, IrBytesIntrinsicMethod, IrLibFn, IrModule } from "../../ir/nodes.js";
-import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber } from "../../ir/nodes.js";
+import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, moduleHasProcessScopedRegistration, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber } from "../../ir/nodes.js";
 import { hasRetainedFfiCallback } from "../ffi-callbacks.js";
 
 /** Cheap may-throw analysis (cost discipline: functions that transitively
@@ -39,7 +39,10 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
     (mod.nativeBindings ?? [])
       .filter((binding) =>
         binding.parameters.some((parameter) =>
-          parameter.projection.kind === "callbackFunction"
+          parameter.projection.kind === "callbackFunction" ||
+          /* A removal call reaches the same trampoline the registration
+           * installed: a library may flush it one last time on the way out. */
+          parameter.projection.kind === "callbackRelease"
         )
       )
       .map((binding) => binding.id),
@@ -77,7 +80,8 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
       )
       .map((binding) => binding.id),
   );
-  const manifestHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
+  const manifestHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []) ||
+    moduleHasProcessScopedRegistration(mod);
   // Method name → every class's implementation of it (virtualCall callees).
   const methodImpls = new Map<string, string[]>();
   for (const cls of mod.classes ?? []) {

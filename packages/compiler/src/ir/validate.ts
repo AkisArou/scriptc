@@ -25,7 +25,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsRetained, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsOwnerScoped, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1628,6 +1628,21 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         executors.length === 1 && executors[0] === "same-as-caller" &&
         candidate["synchronousReturn"] === true;
     }
+    if (ownerKind === "process") {
+      /* Nothing owns it, so there is no cancellation binding and no owner to
+       * inject. Delivery is direct on the registering thread, which is what
+       * a library that calls a stored callback from inside a later call
+       * does, and it carries no answer: there is nowhere to put one. */
+      return Object.keys(candidate).sort().join(",") ===
+          "allowedInvocationExecutors,owner,sourceArguments,synchronousReturn" &&
+        Object.keys(owner).length === 1 &&
+        executors.length === 1 && executors[0] === "same-as-caller" &&
+        candidate["synchronousReturn"] === true &&
+        type.ret.kind === "void" &&
+        sourceArguments.every((argument) =>
+          (argument as { kind?: unknown }).kind !== "registration-owner"
+        );
+    }
     if (ownerKind === "result" || ownerKind === "argument") {
       const allowed = new Set(["same-as-caller", "any-attached-thread"]);
       const ownerCandidate = owner as Record<string, unknown>;
@@ -1741,6 +1756,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   ) {
     errors.push({ message: "Native IR aggregate types require complete module target ABI facts", loc: moduleLoc });
   }
+  /* Indexed before the walk below rather than during it: a release refers to
+   * a registration in a DIFFERENT binding, which may be declared after the
+   * one releasing it. */
+  const bindingById = new Map(
+    (mod.nativeBindings ?? []).map((binding) => [binding.id, binding]),
+  );
   for (const binding of mod.nativeBindings ?? []) {
     if (!nativeId.test(binding.id)) {
       errors.push({ message: `invalid Native IR binding id "${binding.id}"`, loc: moduleLoc });
@@ -1887,8 +1908,19 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
+    /* A function value that UNMAKES a registration carries no contract of its
+     * own: the contract is the registration's, and it was stated where the
+     * registration was made. Read from the physical projections because that
+     * is where the direction is written down. */
+    const releasingArguments = new Set(
+      binding.parameters.flatMap((parameter) =>
+        parameter.projection.kind === "callbackRelease"
+          ? [parameter.projection.argument]
+          : []
+      ),
+    );
     const argumentNames = new Set<string>();
-    for (const argument of binding.arguments) {
+    for (const [argumentIndex, argument] of binding.arguments.entries()) {
       if (argument.name === "" || argumentNames.has(argument.name)) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an empty or duplicate argument name "${argument.name}"`,
@@ -1912,7 +1944,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
       if (
-        argument.type.kind === "func"
+        argument.type.kind === "func" && !releasingArguments.has(argumentIndex)
           ? !validNativeCallbackContract(argument.callback, argument.type)
           : argument.callback !== undefined
       ) {
@@ -1933,6 +1965,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       bytesByteLength: 0,
       callbackFunction: 0,
       callbackContext: 0,
+      callbackRelease: 0,
       /* Set from the callback's own signature when its function projection is
        * read: a C API that takes no userdata has no context slot, and then
        * there is no context parameter to project either. */
@@ -2385,6 +2418,49 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        case "callbackRelease": {
+          projectionCounts.callbackRelease++;
+          if (
+            parameter.type.kind === "nativeCallback" &&
+            Array.isArray(parameter.type.signature?.parameters)
+          ) {
+            projectionCounts.callbackTakesContext = parameter.type.signature
+              .parameters.some((slot) => slot?.kind === "nativeContext");
+          }
+          const reference = parameter.projection.registration;
+          const registering = typeof reference?.binding === "string"
+            ? bindingById.get(reference.binding)
+            : undefined;
+          const registered = registering?.arguments[reference?.argument ?? -1];
+          /* The trampoline this passes back is the registering binding's, so
+           * the reference must name a registration that exists, is
+           * process-scoped — nothing else is released by naming its value —
+           * and takes the very same function type, because the pointer pair
+           * the library matches on is only meaningful for one signature. */
+          if (
+            registering === undefined || registered === undefined ||
+            registered.type.kind !== "func" ||
+            registered.callback?.owner.kind !== "process" ||
+            sourceArgument.type.kind !== "func" ||
+            !typeEquals(
+              nativeArgumentScriptType(sourceArgument.type),
+              nativeArgumentScriptType(registered.type),
+            ) ||
+            parameter.type.kind !== "nativeCallback" ||
+            !validNativeCallback(parameter.type) ||
+            parameter.ownership.kind !== "callback" ||
+            /* A binding that both makes and unmakes the same registration
+             * would have to do them in an order neither the ledger nor the
+             * library defines. */
+            registering === binding
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-release projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        }
         case "callbackContext":
           projectionCounts.callbackContext++;
           if (
@@ -2418,7 +2494,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 projections.bytesData === 1 &&
                 projections.bytesByteLength === 1
               : argument.type.kind === "func"
-                ? projections.callbackFunction === 1 &&
+                /* A function value either MAKES a registration or unmakes
+                 * one, never both and never neither, and each takes the same
+                 * physical shape: the trampoline, plus the context slot when
+                 * the signature has one to fill. */
+                ? projections.callbackFunction + projections.callbackRelease === 1 &&
                   projections.callbackContext ===
                     (projections.callbackTakesContext ? 1 : 0) &&
                   projections.total ===
@@ -2629,7 +2709,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const contract = argument.callback;
       if (
         argument.type.kind !== "func" || contract === undefined ||
-        !nativeCallbackIsRetained(contract)
+        !nativeCallbackIsOwnerScoped(contract)
       ) {
         continue;
       }

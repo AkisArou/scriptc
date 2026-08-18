@@ -19,6 +19,10 @@
  */
 import type {
   IrFfiCallbackParam,
+  IrFfiCallbackParamClass,
+  IrFfiContextParam,
+  IrFfiReturnClass,
+  IrFfiReleaseParam,
   IrFfiImport,
   IrFfiValueParamClass,
   IrNativeBinding,
@@ -26,6 +30,7 @@ import type {
   IrNativeCallbackContract,
   IrNativeCallbackSignature,
   IrNativeCallbackSourceArgument,
+  IrNativeRegistrationRef,
   IrNativeScalarType,
 } from "../ir/nodes.js";
 import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "../ir/nodes.js";
@@ -70,43 +75,25 @@ const DESUGARABLE_PAYLOADS = new Set([
  * ownership and allocator contract the profile deliberately omits. */
 const DESUGARABLE_ANSWERS = new Set(["f64", "bool", "u8", "u32", "i32"]);
 
-/** One of a binding's callbacks, with its context slot, or null when the
- * descriptor needs vocabulary the native path does not have yet. */
-function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
+/** The physical slots, the source payloads, and the map between them for one
+ * callback ABI. Built in one pass because they are not parallel: a span class
+ * is one thing the handler receives and two things the library passes.
+ *
+ * Shared by a registration and by the release that names it back — the same
+ * ABI described twice would be two chances to describe it differently, and
+ * the pointer pair the library matches on is only meaningful for one. */
+function callbackShape(
+  params: readonly (IrFfiCallbackParamClass | IrFfiContextParam)[],
+  returns: IrFfiReturnClass,
+): {
   readonly signature: IrNativeCallbackSignature;
-  readonly contract: IrNativeCallbackContract;
   readonly source: IrNativeCallbackArgumentType;
-  readonly callbackSlot: number;
-  readonly contextSlot: number | null;
-} | null {
-  const param = entry.params[callbackSlot];
-  if (param === undefined || !isFfiCallbackParam(param)) return null;
-  const callback = param.callback;
-  /* Retained and foreign registrations are their own slice: they need an
-   * owner arm and a delivery target this one does not touch. */
-  if (callback.lifetime !== "call" || callback.invoke !== "script-thread") return null;
-
-  const payloads = callback.params.filter((slot) => !isFfiContextParam(slot));
-  if (!payloads.every((cls) => DESUGARABLE_PAYLOADS.has(String(cls)))) return null;
-  if (callback.returns !== "void" && !DESUGARABLE_ANSWERS.has(callback.returns)) return null;
-
-  /* A callback with no userdata slot of its own takes no context argument
-   * either: there is nothing for one to fill. Its closure is lent through the
-   * adapter's thread-local instead, which is why the two counts have to agree
-   * rather than each being checked on its own. */
-  const takesContext = payloads.length !== callback.params.length;
-  const contexts = entry.params.flatMap((candidate, index) =>
-    isFfiContextParam(candidate) && candidate.context === callback.id ? [index] : [],
-  );
-  if (contexts.length !== (takesContext ? 1 : 0)) return null;
-
-  /* Physical slots, source payloads, and the map between them are built in
-   * one pass because they are no longer parallel: a span class is one thing
-   * the handler receives and two things the library passes. */
+  readonly sourceArguments: readonly IrNativeCallbackSourceArgument[];
+} {
   const parameters: IrNativeCallbackSignature["parameters"][number][] = [];
   const sourceParams: IrNativeCallbackArgumentType["params"][number][] = [];
   const sourceArguments: IrNativeCallbackSourceArgument[] = [];
-  for (const slot of callback.params) {
+  for (const slot of params) {
     if (isFfiContextParam(slot)) {
       parameters.push({ kind: "nativeContext", addressSpace: 0 });
       continue;
@@ -143,28 +130,76 @@ function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
           : { kind: "f64" },
     );
   }
-  const signature: IrNativeCallbackSignature = {
-    parameters,
-    result: callback.returns === "void"
-      ? { kind: "void" }
-      : scalarOf(callback.returns),
-  };
-  const source: IrNativeCallbackArgumentType = {
-    kind: "func",
-    params: sourceParams,
-    ret: callback.returns === "void"
-      ? { kind: "void" }
-      : callback.returns === "bool"
-        ? { kind: "bool", falseValue: "0", trueValue: "1" }
-        /* The profile's integer answers wrap, exactly as its arguments do. */
-        : { kind: "f64", conversion: callback.returns === "f64" ? "checked" : "wrap" },
-  };
-  const contract: IrNativeCallbackContract = {
-    owner: { kind: "call" },
-    allowedInvocationExecutors: ["same-as-caller"],
-    synchronousReturn: true,
+  return {
+    signature: {
+      parameters,
+      result: returns === "void" ? { kind: "void" } : scalarOf(returns),
+    },
+    source: {
+      kind: "func",
+      params: sourceParams,
+      ret: returns === "void"
+        ? { kind: "void" }
+        : returns === "bool"
+          ? { kind: "bool", falseValue: "0", trueValue: "1" }
+          /* The profile's integer answers wrap, exactly as its arguments do. */
+          : { kind: "f64", conversion: returns === "f64" ? "checked" : "wrap" },
+    },
     sourceArguments,
   };
+}
+
+/** One of a binding's callbacks, with its context slot, or null when the
+ * descriptor needs vocabulary the native path does not have yet. */
+function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
+  readonly signature: IrNativeCallbackSignature;
+  readonly contract: IrNativeCallbackContract;
+  readonly source: IrNativeCallbackArgumentType;
+  readonly callbackSlot: number;
+  readonly contextSlot: number | null;
+} | null {
+  const param = entry.params[callbackSlot];
+  if (param === undefined || !isFfiCallbackParam(param)) return null;
+  const callback = param.callback;
+  /* A foreign producer needs a delivery target this slice does not touch. */
+  if (callback.invoke !== "script-thread") return null;
+
+  const payloads = callback.params.filter((slot) => !isFfiContextParam(slot));
+  if (!payloads.every((cls) => DESUGARABLE_PAYLOADS.has(String(cls)))) return null;
+  if (callback.returns !== "void" && !DESUGARABLE_ANSWERS.has(callback.returns)) return null;
+
+  /* A callback with no userdata slot of its own takes no context argument
+   * either: there is nothing for one to fill. Its closure is lent through the
+   * adapter's thread-local instead, which is why the two counts have to agree
+   * rather than each being checked on its own. */
+  const takesContext = payloads.length !== callback.params.length;
+  const contexts = entry.params.flatMap((candidate, index) =>
+    isFfiContextParam(candidate) && candidate.context === callback.id ? [index] : [],
+  );
+  if (contexts.length !== (takesContext ? 1 : 0)) return null;
+
+  const { signature, source, sourceArguments } =
+    callbackShape(callback.params, callback.returns);
+  /* A retained descriptor names no owner, because a C API that takes a
+   * callback and hands back nothing has given the program nothing to hang the
+   * registration on. It ends when a release names the same function value
+   * back, or when the process does. */
+  if (callback.lifetime === "retained" && (!takesContext || callback.returns !== "void")) {
+    return null;
+  }
+  const contract: IrNativeCallbackContract = callback.lifetime === "retained"
+    ? {
+        owner: { kind: "process" },
+        allowedInvocationExecutors: ["same-as-caller"],
+        synchronousReturn: true,
+        sourceArguments,
+      }
+    : {
+        owner: { kind: "call" },
+        allowedInvocationExecutors: ["same-as-caller"],
+        synchronousReturn: true,
+        sourceArguments,
+      };
   return { signature, contract, source, callbackSlot, contextSlot: contexts[0] ?? null };
 }
 
@@ -175,9 +210,20 @@ function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
  * until the callback slices land, so this change can be verified against a
  * suite that still exercises both.
  */
-export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | null {
-  /* A release descriptor belongs to the retained slice. */
-  if (entry.params.some(isFfiReleaseParam)) return null;
+export function desugarFfiValueBinding(
+  entry: IrFfiImport,
+  resolveRegistration: (key: string) => IrNativeRegistrationRef | null = () => null,
+): IrNativeBinding | null {
+  /* A release names a registration made elsewhere. It is describable only if
+   * that registration is on this path too — a ledger half here and half in
+   * the profile would pin in one and look in the other. */
+  const releases = new Map<number, IrNativeRegistrationRef>();
+  for (const [index, param] of entry.params.entries()) {
+    if (!isFfiReleaseParam(param)) continue;
+    const reference = resolveRegistration(param.callback.release);
+    if (reference === null) return null;
+    releases.set(index, reference);
+  }
   /* A binding may carry more than one callback — two comparators, a pair of
    * hooks — and each is an independent registration with its own signature,
    * context slot, and trampoline. They are desugared one at a time and any
@@ -194,9 +240,21 @@ export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | nu
   const contextBySlot = new Map(
     callbacks.flatMap((one) => one.contextSlot === null ? [] : [[one.contextSlot, one]]),
   );
+  /* A release passes the same context the registration did, which is the
+   * function value itself, so its context slot belongs to the release
+   * parameter beside it rather than to a callback of ours. */
+  const releaseContextBySlot = new Map<number, number>();
+  for (const [index, param] of entry.params.entries()) {
+    if (!isFfiContextParam(param)) continue;
+    const owner = [...releases.keys()].find((slot) =>
+      (entry.params[slot] as IrFfiReleaseParam).callback.release === param.context
+    );
+    if (owner !== undefined) releaseContextBySlot.set(index, owner);
+  }
   /* A context with no callback of ours to belong to is not ours to serve. */
   if (
-    entry.params.filter(isFfiContextParam).length !== contextBySlot.size
+    entry.params.filter(isFfiContextParam).length !==
+      contextBySlot.size + releaseContextBySlot.size
   ) return null;
   const classes = entry.params as IrFfiValueParamClass[];
 
@@ -211,6 +269,41 @@ export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | nu
   const argumentOf = (slot: number): number =>
     entry.params.slice(0, slot).filter((candidate) => !isFfiContextParam(candidate)).length;
   classes.forEach((cls, index) => {
+    const releaseContextOwner = releaseContextBySlot.get(index);
+    if (releaseContextOwner !== undefined) {
+      parameters.push({
+        name: `a${index}`,
+        type: { kind: "nativeContext", addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "callback" },
+        projection: { kind: "callbackContext", argument: argumentOf(releaseContextOwner) },
+      });
+      return;
+    }
+    const releasedRegistration = releases.get(index);
+    if (releasedRegistration !== undefined) {
+      const released = entry.params[index] as IrFfiReleaseParam;
+      /* The value is the registration's own function type — that is what
+       * makes it findable — but it carries no contract: the contract was
+       * stated where the registration was made. */
+      const shape = callbackShape(released.callback.params, released.callback.returns);
+      args.push({
+        name: `a${index}`,
+        type: shape.source,
+      });
+      parameters.push({
+        name: `a${index}`,
+        type: { kind: "nativeCallback", signature: shape.signature },
+        passMode: "pointer",
+        ownership: { kind: "callback" },
+        projection: {
+          kind: "callbackRelease",
+          argument: argumentOf(index),
+          registration: releasedRegistration,
+        },
+      });
+      return;
+    }
     const contextOwner = contextBySlot.get(index);
     if (contextOwner !== undefined) {
       parameters.push({
@@ -352,4 +445,73 @@ export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | nu
     parameters,
     result,
   };
+}
+
+/**
+ * Every profile entry this path can serve, desugared as a set rather than one
+ * at a time.
+ *
+ * A registration and the releases that name it are one unit: the ledger a
+ * registration pins into is the one a release looks in, and there is exactly
+ * one of those per adapter. If either half stayed on the profile's path the
+ * two halves would be pinning and searching different tables, so an entry is
+ * kept only when everything it is joined to is kept — which is a fixpoint,
+ * because dropping a registration drops its releases, and dropping a release
+ * drops the registration it named along with THAT registration's other
+ * releases.
+ */
+export function desugarFfiBindings(
+  entries: readonly IrFfiImport[],
+): Map<string, IrNativeBinding> {
+  const byName = new Map(entries.map((entry) => [entry.name, entry]));
+  /* `<binding>:<callback-id>`, the profile's own spelling. A binding name may
+   * contain a colon and a callback id may not, so the last one splits it. */
+  const resolve = (key: string): IrNativeRegistrationRef | null => {
+    const split = key.lastIndexOf(":");
+    const registering = byName.get(key.slice(0, split));
+    const id = key.slice(split + 1);
+    if (registering === undefined) return null;
+    const slot = registering.params.findIndex(
+      (param) => isFfiCallbackParam(param) && param.callback.id === id,
+    );
+    if (slot < 0) return null;
+    return {
+      binding: ffiBindingId(registering.name),
+      argument: registering.params
+        .slice(0, slot)
+        .filter((param) => !isFfiContextParam(param)).length,
+    };
+  };
+  const desugared = new Map<string, IrNativeBinding>();
+  /* Which entries each entry is joined to, in both directions. */
+  const joined = new Map<string, Set<string>>();
+  const join = (left: string, right: string): void => {
+    for (const [a, b] of [[left, right], [right, left]] as const) {
+      const set = joined.get(a) ?? new Set<string>();
+      set.add(b);
+      joined.set(a, set);
+    }
+  };
+  for (const entry of entries) {
+    const binding = desugarFfiValueBinding(entry, resolve);
+    if (binding === null) continue;
+    desugared.set(entry.name, binding);
+    for (const param of entry.params) {
+      if (!isFfiReleaseParam(param)) continue;
+      const key = param.callback.release;
+      join(entry.name, key.slice(0, key.lastIndexOf(":")));
+    }
+  }
+  for (let dropped = true; dropped;) {
+    dropped = false;
+    for (const name of [...desugared.keys()]) {
+      for (const partner of joined.get(name) ?? []) {
+        if (desugared.has(partner)) continue;
+        desugared.delete(name);
+        dropped = true;
+        break;
+      }
+    }
+  }
+  return desugared;
 }

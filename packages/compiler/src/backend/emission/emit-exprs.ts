@@ -10,6 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { collectFfiRetainedOps, parseFfiCallbackKey } from "../ffi-callbacks.js";
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
+import { nativeCallbackIsOwnerScoped } from "../../ir/nodes.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2397,9 +2398,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
         };
         const callbacksMayThrow = binding.arguments.some(
-          (argument) =>
-            argument.type.kind === "func" &&
-            argument.callback?.owner.kind === "call",
+          (argument) => argument.type.kind === "func",
         ) ||
           /* A retained profile callback defers its throw until a later
            * native call checks; that call is a checkpoint whichever path
@@ -2410,7 +2409,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         binding.arguments.forEach((argument, argumentIndex) => {
           if (
             argument.type.kind !== "func" ||
-            argument.callback === undefined || argument.callback.owner.kind === "call"
+            argument.callback === undefined ||
+            !nativeCallbackIsOwnerScoped(argument.callback)
           ) {
             return;
           }
@@ -2432,6 +2432,38 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             );
           }
         });
+        /* A registration nothing owns is pinned in its ledger before the
+         * native call, so a library that fires on subscribe already reaches a
+         * rooted closure. A release is VALIDATED before the call and unpinned
+         * after it: releasing a value that was never registered must trap
+         * before native code acts on the bogus pointer pair, and the
+         * registration must stay live for a library that flushes one last
+         * time on the way out. */
+        const processRegistrations = binding.arguments.flatMap((argument, argumentIndex) => {
+          if (argument.callback?.owner.kind !== "process") return [];
+          const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
+          if (adapter.table === null) {
+            throw new Error(`emitter bug: process-scoped registration without a ledger in ${binding.id}`);
+          }
+          return [{ table: adapter.table, closure: args[argumentIndex]!.name }];
+        });
+        const processReleases = binding.parameters.flatMap((parameter) => {
+          if (parameter.projection.kind !== "callbackRelease") return [];
+          const adapter = E.nativeCallbackAdapter(
+            parameter.projection.registration.binding,
+            parameter.projection.registration.argument,
+          );
+          if (adapter.table === null) {
+            throw new Error(`emitter bug: released registration without a ledger in ${binding.id}`);
+          }
+          return [{ table: adapter.table, closure: args[parameter.projection.argument]!.name }];
+        });
+        for (const registration of processRegistrations) {
+          E.line(`scr_ffi_retain(&${registration.table}, ${registration.closure});`);
+        }
+        for (const release of processReleases) {
+          E.line(`scr_ffi_require(&${release.table}, ${release.closure});`);
+        }
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
         );
@@ -2589,6 +2621,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `${arg.name}->len`;
             case "callbackFunction":
               return `&${E.nativeCallbackAdapter(binding.id, parameter.projection.argument).symbol}`;
+            /* The registering binding's trampoline, not one of ours: the
+             * library matches the registration on the pointer pair it was
+             * given, so a second trampoline would identify nothing. */
+            case "callbackRelease":
+              return `&${
+                E.nativeCallbackAdapter(
+                  parameter.projection.registration.binding,
+                  parameter.projection.registration.argument,
+                ).symbol
+              }`;
             case "callbackContext":
               return `(void *)${retainedTokens.get(parameter.projection.argument) ?? arg.name}`;
             case "argument": {
@@ -2671,7 +2713,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
          * branches below to place. Saving the previous value is what makes a
          * nested or reentrant call through the same binding stack correctly. */
         const rawContexts = binding.arguments.flatMap((argument, argumentIndex) => {
-          if (argument.type.kind !== "func") return [];
+          /* A value that UNMAKES a registration has no adapter of its own —
+           * the trampoline it passes back belongs to the binding that made
+           * the registration, and that binding lent whatever it had to. */
+          if (argument.type.kind !== "func" || argument.callback === undefined) return [];
           const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
           if (adapter.tls === null) return [];
           const previous = `sc_t${E.tempCounter++}`;
@@ -2679,7 +2724,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.line(`${adapter.tls} = ${args[argumentIndex]!.name};`);
           return [{ tls: adapter.tls, previous }];
         });
-        if (rawContexts.length > 0) {
+        /* Everything that has to happen the moment the native call returns,
+         * innermost first: the lent closure slots go back, and only then is a
+         * released registration unpinned — the library may flush it one last
+         * time on the way out, and the pin is what keeps that legal. */
+        const afterCall = [
+          ...rawContexts.map((saved) => `${saved.tls} = ${saved.previous};`).reverse(),
+          ...processReleases.map(
+            (release) => `scr_ffi_release(&${release.table}, ${release.closure});`,
+          ),
+        ];
+        if (afterCall.length > 0) {
           if (binding.result.type.kind === "void") {
             E.line(`${call};${E.srcComment(e.loc)}`);
             call = "(void)0";
@@ -2694,10 +2749,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`${decl} = ${call};${E.srcComment(e.loc)}`);
             call = bound;
           }
-          for (let i = rawContexts.length - 1; i >= 0; i--) {
-            const saved = rawContexts[i]!;
-            E.line(`${saved.tls} = ${saved.previous};`);
-          }
+          for (const line of afterCall) E.line(line);
         }
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);

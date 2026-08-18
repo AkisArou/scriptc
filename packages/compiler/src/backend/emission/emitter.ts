@@ -45,7 +45,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { nativeIntegerInfo, nativeCallbackSourceSignature, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, ffiCallbackType, funcOf, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, hasForeignFfiCallback, hasRetainedFfiCallback } from "../ffi-callbacks.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, type NativeCallbackAdapter } from "../native-callbacks.js";
 import {
@@ -347,10 +347,11 @@ export class CEmitter {
   readonly ffiCallbackAdapters: Map<string, FfiCallbackAdapter>;
   /** One context-carrying C trampoline per logical Native IR callback. */
   readonly nativeCallbackAdapters: Map<string, NativeCallbackAdapter>;
-  /** Module-level constant consulted per ffiCall: with a retained
-   * descriptor anywhere in the manifest, every native call is a
-   * pending-exception checkpoint (may-throw derives the same fact from
-   * the same helper). */
+  /** Module-level constant consulted per native call: with a registration
+   * that outlives its call anywhere in the module — the profile's or Native
+   * IR's — every native call is a pending-exception checkpoint, because any
+   * of them may pump a stored callback. May-throw derives the same fact from
+   * the same two helpers. */
   readonly ffiHasRetainedCallback: boolean;
   readonly ffiHasForeignCallback: boolean;
   readonly globalsById = new Map<string, IrGlobal>();
@@ -536,7 +537,8 @@ export class CEmitter {
       mod.nativeBindings ?? [],
       mod.ffiImports ?? [],
     );
-    this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
+    this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []) ||
+      moduleHasProcessScopedRegistration(mod);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
@@ -2313,7 +2315,7 @@ export class CEmitter {
        * table lookup is the same one a queued delivery performs — just
        * without the queue between the question and the answer. */
       if (
-        adapter.contract.owner.kind !== "call" &&
+        nativeCallbackIsOwnerScoped(adapter.contract) &&
         adapter.contract.synchronousReturn
       ) {
         const signatureId = `${adapter.symbol}_signature`;
@@ -2364,7 +2366,7 @@ export class CEmitter {
         );
         continue;
       }
-      if (adapter.contract.owner.kind !== "call") {
+      if (nativeCallbackIsOwnerScoped(adapter.contract)) {
         const invocation = `${adapter.symbol}_invocation`;
         const signatureId = `${adapter.symbol}_signature`;
         const invoke = `${adapter.symbol}_invoke`;
@@ -2492,7 +2494,16 @@ export class CEmitter {
         );
         continue;
       }
+      /* A process-scoped registration and a call-scoped callback reach their
+       * closure the same way — through the context slot the library hands
+       * back — and differ only in how long that is true. The ledger is what
+       * keeps a process-scoped one alive between calls; the trampoline
+       * itself has nothing to do differently. */
+      const expired = adapter.contract.owner.kind === "process"
+        ? "scriptc: native callback invoked after its registration was released"
+        : "scriptc: native callback invoked outside its call-scoped lifetime";
       out.push(
+        ...(adapter.table === null ? [] : [`static ScrFfiTable ${adapter.table};`]),
         /* A signature with no userdata slot cannot be handed its closure, so
          * the call lends one here for its own dynamic extent. The NULL check
          * below is what makes an invocation outside that extent a precise
@@ -2502,7 +2513,7 @@ export class CEmitter {
           : [`static _Thread_local ScrClosure *${adapter.tls};`]),
         `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
         `  ScrClosure *sc_cb = ${adapter.tls ?? "(ScrClosure *)sc_ctx"};`,
-        `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
+        `  if (sc_cb == NULL) scr_trap("${expired}\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );
       /* A borrowed payload pointer is only valid for the duration of this

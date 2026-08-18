@@ -5,7 +5,7 @@ import type {
   IrNativeCallbackContract,
   IrNativeCallbackType,
 } from "../ir/nodes.js";
-import { nativeCallbackIsRetained } from "../ir/nodes.js";
+import { nativeCallbackIsOwnerScoped } from "../ir/nodes.js";
 
 export interface NativeCallbackAdapter {
   readonly symbol: string;
@@ -19,6 +19,11 @@ export interface NativeCallbackAdapter {
    * one, which is the ordinary case and needs no storage at all: the context
    * slot IS the closure pointer, so nesting and reentrancy cost nothing. */
   readonly tls: string | null;
+  /** The counted registration ledger a process-scoped registration lives in,
+   * and which a release names back. Null for every other owner: a call-scoped
+   * callback has nothing to outlive the call, and an owner-scoped one is
+   * pinned by the object that owns it. */
+  readonly table: string | null;
 }
 
 export function nativeCallbackAdapterKey(bindingId: string, argument: number): string {
@@ -36,7 +41,7 @@ export function nativeCallbackCancellationArgument(
     registration.arguments.some((argument) =>
       argument.type.kind === "func" &&
       argument.callback !== undefined &&
-      nativeCallbackIsRetained(argument.callback) &&
+      nativeCallbackIsOwnerScoped(argument.callback) &&
       argument.callback.cancellationBinding === binding.id
     )
   );
@@ -70,11 +75,17 @@ export function allocateNativeCallbackAdapters(
       ) {
         continue;
       }
+      const contractOf = binding.arguments[parameter.projection.argument]?.callback;
+      const processScoped = contractOf?.owner.kind === "process";
       let symbol: string;
+      let table: string | null;
       do {
-        symbol = `sc_native_cb_${suffix++}`;
-      } while (reserved.has(symbol));
+        const index = suffix++;
+        symbol = `sc_native_cb_${index}`;
+        table = processScoped ? `sc_native_cb_table_${index}` : null;
+      } while (reserved.has(symbol) || (table !== null && reserved.has(table)));
       reserved.add(symbol);
+      if (table !== null) reserved.add(table);
       const contract =
         binding.arguments[parameter.projection.argument]?.callback;
       const source = binding.arguments[parameter.projection.argument]?.type;
@@ -106,6 +117,7 @@ export function allocateNativeCallbackAdapters(
           source,
           contract,
           tls: takesContext ? null : `${symbol}_closure`,
+          table,
         },
       );
     }

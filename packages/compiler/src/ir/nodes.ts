@@ -320,7 +320,21 @@ export type IrNativeCallbackSourceArgument =
 export type IrNativeCallbackOwner =
   | { kind: "call" }
   | { kind: "result" }
-  | { kind: "argument"; argument: number };
+  | { kind: "argument"; argument: number }
+  /** Nothing in the program owns it. The registration lives from the call
+   * that makes it until an explicit release names the same function value
+   * back, or until the process exits — which is what a C API offers when it
+   * takes a callback and hands back no object to hang it on. */
+  | { kind: "process" };
+
+/** Which registration a release refers to: the binding that made it and the
+ * argument position of the callback within that binding. A release lives in a
+ * DIFFERENT binding from its registration — `remove` is not `add` — so the
+ * reference has to name both halves rather than an index into the caller. */
+export interface IrNativeRegistrationRef {
+  binding: string;
+  argument: number;
+}
 
 /** Delivery executor, reentrancy, post-disposal behavior, and shutdown
  * behavior are deliberately absent. Each was pinned by the validator to the
@@ -344,6 +358,25 @@ export type IrNativeCallbackContract =
         | "any-attached-thread"
       )[];
       synchronousReturn: false;
+      sourceArguments: readonly IrNativeCallbackSourceArgument[];
+    }
+  /**
+   * A registration nothing in the program owns, invoked on the thread that
+   * registered it whenever the library decides to — inside a later native
+   * call, not on a runtime turn. Delivery is therefore direct, and script
+   * code runs re-entrantly within whatever native frame pumped it.
+   *
+   * There is no cancellation binding, because there is no owner whose
+   * disposal could cancel anything. A release names the function value back
+   * instead, and the ledger matches it by pointer identity.
+   *
+   * It carries no answer: the library that calls a stored callback at a
+   * moment of its own choosing has nowhere to put one.
+   */
+  | {
+      owner: { kind: "process" };
+      allowedInvocationExecutors: readonly ["same-as-caller"];
+      synchronousReturn: true;
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     }
   /**
@@ -384,15 +417,31 @@ export type IrNativeCallbackContract =
  * discriminate a union on a NESTED property, so the narrowing that `owner`
  * implies is spelled once here rather than by giving the contract a second,
  * redundant discriminant to keep in step with the first. */
-export type IrNativeRetainedCallbackContract = Extract<
+export type IrNativeOwnerScopedCallbackContract = Extract<
   IrNativeCallbackContract,
   { cancellationBinding: string }
 >;
 
-export function nativeCallbackIsRetained(
+/** A registration a VALUE in the program owns, and whose life is therefore
+ * that value's. Distinct from "outlives the call": a process-scoped
+ * registration outlives the call too, but nothing owns it and nothing's
+ * disposal can cancel it, so it has no cancellation binding to read. The two
+ * questions were one predicate while there were only two answers. */
+export function nativeCallbackIsOwnerScoped(
   contract: IrNativeCallbackContract,
-): contract is IrNativeRetainedCallbackContract {
-  return contract.owner.kind !== "call";
+): contract is IrNativeOwnerScopedCallbackContract {
+  return contract.owner.kind === "result" || contract.owner.kind === "argument";
+}
+
+/** Whether any registration in this module outlives the call that makes it
+ * without an owner to end it — the throw-checkpoint policy predicate. With one
+ * of these anywhere, ANY native call may pump a stored callback, so any native
+ * call is a checkpoint. The profile's own predicate answers the same question
+ * about the descriptors it still serves. */
+export function moduleHasProcessScopedRegistration(mod: IrModule): boolean {
+  return (mod.nativeBindings ?? []).some((binding) =>
+    binding.arguments.some((argument) => argument.callback?.owner.kind === "process")
+  );
 }
 
 /**
@@ -530,7 +579,17 @@ export type IrNativeParameterProjection =
   | { kind: "bytesData"; argument: number }
   | { kind: "bytesByteLength"; argument: number }
   | { kind: "callbackFunction"; argument: number }
-  | { kind: "callbackContext"; argument: number };
+  | { kind: "callbackContext"; argument: number }
+  /** The trampoline of a registration this call is UNMAKING. It is the same
+   * pointer the registering call passed, because that pair — function and
+   * context — is how the library recognises which registration to drop, so
+   * the projection names the registration rather than allocating a second
+   * trampoline that would identify nothing. */
+  | {
+      kind: "callbackRelease";
+      argument: number;
+      registration: IrNativeRegistrationRef;
+    };
 
 export type IrNativeResultProjection =
   | { kind: "direct" }
@@ -1263,7 +1322,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 28 as const;
+export const IR_VERSION = 29 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

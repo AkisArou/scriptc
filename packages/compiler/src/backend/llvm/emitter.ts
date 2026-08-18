@@ -86,7 +86,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateFfiCallbackAdapters, type FfiCallbackAdapter, collectFfiRetainedOps, hasForeignFfiCallback, hasRetainedFfiCallback, parseFfiCallbackKey } from "../ffi-callbacks.js";
@@ -1203,7 +1203,8 @@ class LlEmitter {
       mod.nativeBindings ?? [],
       mod.ffiImports ?? [],
     );
-    this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
+    this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []) ||
+      moduleHasProcessScopedRegistration(mod);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) {
@@ -1962,8 +1963,23 @@ class LlEmitter {
     if (this.nativeCallbackAdapters.size === 0) return defs;
     this.declare(`declare zeroext i1 @scr_exc_pending()`);
     this.declare(`declare void @scr_trap(ptr)`);
-    const expired = this.cstr("scriptc: native callback invoked outside its call-scoped lifetime\n");
+    const expiredCallScoped = this.cstr(
+      "scriptc: native callback invoked outside its call-scoped lifetime\n",
+    );
+    const expiredReleased = this.cstr(
+      "scriptc: native callback invoked after its registration was released\n",
+    );
     for (const adapter of this.nativeCallbackAdapters.values()) {
+      /* A process-scoped registration and a call-scoped callback reach their
+       * closure the same way — through the context slot — and differ only in
+       * how long that is true. The ledger keeps a process-scoped one alive
+       * between calls; the trampoline does nothing differently. */
+      const expired = adapter.contract.owner.kind === "process"
+        ? expiredReleased
+        : expiredCallScoped;
+      if (adapter.table !== null) {
+        defs.push(`@${adapter.table} = internal global %ScrFfiTable zeroinitializer`);
+      }
       const signature = adapter.callback.signature;
       /* The context slot sits at its declared position rather than being
        * appended: a C API may take userdata first, last, or not at all, and
@@ -1982,7 +1998,7 @@ class LlEmitter {
        * has to exist before the emitting call returns. Kept in lockstep with
        * the C backend's trampoline. */
       if (
-        adapter.contract.owner.kind !== "call" &&
+        nativeCallbackIsOwnerScoped(adapter.contract) &&
         adapter.contract.synchronousReturn
       ) {
         const signatureId = `@${adapter.symbol}_signature`;
@@ -2070,7 +2086,7 @@ class LlEmitter {
         );
         continue;
       }
-      if (adapter.contract.owner.kind !== "call") {
+      if (nativeCallbackIsOwnerScoped(adapter.contract)) {
         const injectsOwner = adapter.contract.sourceArguments.some(
           (argument) => argument.kind === "registration-owner",
         );
@@ -7664,7 +7680,8 @@ class LlEmitter {
         binding.arguments.forEach((argument, argumentIndex) => {
           if (
             argument.type.kind !== "func" ||
-            argument.callback === undefined || argument.callback.owner.kind === "call"
+            argument.callback === undefined ||
+            !nativeCallbackIsOwnerScoped(argument.callback)
           ) {
             return;
           }
@@ -7690,6 +7707,40 @@ class LlEmitter {
             );
           }
         });
+        /* A registration nothing owns is pinned in its ledger before the
+         * native call, so a library that fires on subscribe already reaches a
+         * rooted closure. A release is VALIDATED before the call and unpinned
+         * after it: releasing a value that was never registered must trap
+         * before native code acts on the bogus pointer pair, and the
+         * registration must stay live for a library that flushes one last
+         * time on the way out. Kept in lockstep with the C backend. */
+        const processRegistrations = binding.arguments.flatMap((argument, argumentIndex) => {
+          if (argument.callback?.owner.kind !== "process") return [];
+          const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
+          if (adapter.table === null) {
+            throw new Error(`llvm emitter bug: process-scoped registration without a ledger in ${binding.id}`);
+          }
+          return [{ table: adapter.table, closure: args[argumentIndex]!.name }];
+        });
+        const processReleases = binding.parameters.flatMap((parameter) => {
+          if (parameter.projection.kind !== "callbackRelease") return [];
+          const adapter = this.nativeCallbackAdapter(
+            parameter.projection.registration.binding,
+            parameter.projection.registration.argument,
+          );
+          if (adapter.table === null) {
+            throw new Error(`llvm emitter bug: released registration without a ledger in ${binding.id}`);
+          }
+          return [{ table: adapter.table, closure: args[parameter.projection.argument]!.name }];
+        });
+        for (const registration of processRegistrations) {
+          this.declare(`declare void @scr_ffi_retain(ptr, ptr)`);
+          B.line(`call void @scr_ffi_retain(ptr @${registration.table}, ptr ${registration.closure})`);
+        }
+        for (const release of processReleases) {
+          this.declare(`declare void @scr_ffi_require(ptr, ptr)`);
+          B.line(`call void @scr_ffi_require(ptr @${release.table}, ptr ${release.closure})`);
+        }
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
         );
@@ -7967,6 +8018,17 @@ class LlEmitter {
               callArgs.push(`${parameterType} @${adapter.symbol}`);
               break;
             }
+            /* The registering binding's trampoline, not one of ours: the
+             * library matches the registration on the pointer pair it was
+             * given, so a second trampoline would identify nothing. */
+            case "callbackRelease": {
+              const adapter = this.nativeCallbackAdapter(
+                parameter.projection.registration.binding,
+                parameter.projection.registration.argument,
+              );
+              callArgs.push(`${parameterType} @${adapter.symbol}`);
+              break;
+            }
             case "callbackContext":
               callArgs.push(
                 `${parameterType} ${retainedTokens.get(parameter.projection.argument) ?? arg.name}`,
@@ -8120,7 +8182,10 @@ class LlEmitter {
          * Saving the previous value is what lets a nested or reentrant call
          * through the same binding stack correctly. */
         const rawContexts = binding.arguments.flatMap((argument, argumentIndex) => {
-          if (argument.type.kind !== "func") return [];
+          /* A value that UNMAKES a registration has no adapter of its own —
+           * the trampoline it passes back belongs to the binding that made
+           * the registration, and that binding lent whatever it had to. */
+          if (argument.type.kind !== "func" || argument.callback === undefined) return [];
           const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
           if (adapter.tls === null) return [];
           const previous = B.tmp();
@@ -8131,7 +8196,19 @@ class LlEmitter {
         let call =
           `call ${returnType} @${binding.entry.symbol}(` +
           `${callArgs.join(", ")})`;
-        if (rawContexts.length > 0) {
+        /* Everything that has to happen the moment the native call returns,
+         * innermost first: the lent closure slots go back, and only then is a
+         * released registration unpinned — the library may flush it one last
+         * time on the way out, and the pin is what keeps that legal. */
+        const afterCall = [
+          ...rawContexts.map((saved) =>
+            `store ptr ${saved.previous}, ptr @${saved.tls}`).reverse(),
+          ...processReleases.map((release) => {
+            this.declare(`declare void @scr_ffi_release(ptr, ptr)`);
+            return `call void @scr_ffi_release(ptr @${release.table}, ptr ${release.closure})`;
+          }),
+        ];
+        if (afterCall.length > 0) {
           if (returnType === "void") {
             B.line(call);
             /* Emitted above; the branch that would have placed it writes a
@@ -8145,10 +8222,7 @@ class LlEmitter {
              * threaded through each branch as a special case. */
             call = `select i1 true, ${returnType} ${bound}, ${returnType} ${bound}`;
           }
-          for (let i = rawContexts.length - 1; i >= 0; i--) {
-            const saved = rawContexts[i]!;
-            B.line(`store ptr ${saved.previous}, ptr @${saved.tls}`);
-          }
+          for (const line of afterCall) B.line(line);
         }
         if (aggregateResult !== null && returnStorage !== null) {
           B.line(call);
