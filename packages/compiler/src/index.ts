@@ -32,6 +32,7 @@ import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
+import { hasForeignFfiCallback } from "./backend/ffi-callbacks.js";
 import type { NativeFrontendExport, NativeFrontendInput } from "./frontend/native.js";
 import {
   defineExecutableCompilationPlan,
@@ -1218,6 +1219,9 @@ function executableNativeBuildPlan(
     dgram: moduleUsesDgram(module),
     watch: moduleUsesFsWatch(module),
     nodeTest: moduleUsesNodeTest(module),
+    // The link switch for scr_ffi_queue.c: a foreign-thread FFI callback
+    // descriptor anywhere in the profile.
+    foreignFfi: hasForeignFfiCallback(module.ffiImports ?? []),
     tls: moduleUsesTls(module),
     tlsCa: moduleUsesTlsCa(module),
     ...((ffi?.libraries.length ?? 0) + (opts.nativeLinkInputs?.length ?? 0) > 0

@@ -2228,6 +2228,22 @@ void scr_loop_set_watch(bool (*pending)(void), void (*dispatch)(void), int (*pol
   scr_watch_pollfd_fn = pollfd;
 }
 
+/* The foreign-FFI queue hook (scr_ffi.c when a format-5 descriptor exists).
+ * Its pending count includes live registrations (reffed by default) and
+ * queued deliveries; dispatch runs exactly one callback per loop turn. */
+static bool (*scr_ffi_pending_fn)(void) = NULL;
+static bool (*scr_ffi_dispatch_fn)(void) = NULL;
+static int (*scr_ffi_pollfd_fn)(void) = NULL;
+static void (*scr_ffi_stop_fn)(void) = NULL;
+
+void scr_loop_set_ffi(bool (*pending)(void), bool (*dispatch)(void),
+                      int (*pollfd)(void), void (*stop)(void)) {
+  scr_ffi_pending_fn = pending;
+  scr_ffi_dispatch_fn = dispatch;
+  scr_ffi_pollfd_fn = pollfd;
+  scr_ffi_stop_fn = stop;
+}
+
 /* The stream hook (scr_stream.c, when linked): `pending` keeps the loop
  * alive while deferred stream ticks exist, `dispatch` drains them at the
  * TOP of every turn — before the events/net stations, the closest
@@ -2344,6 +2360,12 @@ bool scr_loop_run(ScrPromise *top_level) {
       if (scr_exc_pending()) return false;
       if (dispatched) continue;
     }
+    /* Foreign native callbacks are macrotasks. Deliver one, then restart at
+     * the microtask checkpoint before considering the next queued post. */
+    if (scr_ffi_dispatch_fn != NULL && scr_ffi_dispatch_fn()) {
+      if (scr_exc_pending()) return false;
+      if (scr_ready_len > 0 || scr_nt_head != NULL || scr_nunhandled > 0) continue;
+    }
     /* Stream tick dispatch (scr_stream.c, when linked): the deferred
      * next-tick emissions ('data' flow kicks, 'readable'/'end'/'finish'/
      * 'drain'/'error'/'close') fire now, FIRST — the nextTick station.
@@ -2414,6 +2436,7 @@ bool scr_loop_run(ScrPromise *top_level) {
           (scr_watch_pending_fn != NULL && scr_watch_pending_fn()) ||
           (scr_attached_pending_fn != NULL &&
            scr_attached_pending_fn(scr_attached_context)) ||
+          (scr_ffi_pending_fn != NULL && scr_ffi_pending_fn()) ||
           scr_fs_renames_pending();
       if (held) {
         scr_children_poll();
@@ -2433,8 +2456,12 @@ bool scr_loop_run(ScrPromise *top_level) {
     bool net = scr_net_pending_fn != NULL && scr_net_pending_fn();
     bool dgram = scr_dgram_pending_fn != NULL && scr_dgram_pending_fn();
     bool watch = scr_watch_pending_fn != NULL && scr_watch_pending_fn();
+    /* Two independent foreign liveness sources: a platform loop this runtime
+     * is attached to, and the FFI queue's own pending posts. Either one
+     * keeps the loop alive. */
     bool attached = scr_attached_pending_fn != NULL &&
                     scr_attached_pending_fn(scr_attached_context);
+    bool ffi = scr_ffi_pending_fn != NULL && scr_ffi_pending_fn();
     bool renames = scr_fs_renames_pending();
     /* Timer liveness counts only REF'd timers: an unref'd timer stays in
      * the heap (and fires if the loop runs on for other reasons) but does
@@ -2442,7 +2469,7 @@ bool scr_loop_run(ScrPromise *top_level) {
      * Children follow the same rule: an unref'd child is still REAPED
      * while the loop runs (kids drives the sweeps and sleeps above) but
      * only reffed ones keep the process alive. */
-    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch && !attached && !renames) break;
+    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch && !attached && !ffi && !renames) break;
     /* Sleep to the earliest deadline, then run every due timer (each may
      * enqueue microtasks, which the next iteration drains first). Who
      * sleeps depends on what is pending:
@@ -2505,11 +2532,11 @@ bool scr_loop_run(ScrPromise *top_level) {
        * on EINTR), so they re-impose a coarser cap — bounded Ctrl-C and
        * socket latency during a fetch, without the reap-granularity
        * cost. */
-      else if ((evw || net || dgram || watch) && due > now + SCR_SIGNAL_POLL_MS) due = now + SCR_SIGNAL_POLL_MS;
+      else if ((evw || net || dgram || watch || ffi) && due > now + SCR_SIGNAL_POLL_MS) due = now + SCR_SIGNAL_POLL_MS;
       scr_io_poll_fn(due > now ? due - now : 0);
       now = scr_now_ms();
       if (scr_ready_len > 0) continue; /* io callbacks woke fibers */
-    } else if (evw || net || dgram || watch) {
+    } else if (evw || net || dgram || watch || ffi) {
 #if defined(_WIN32) || defined(__wasi__)
       /* The win32 arm, and WASI hosts whose poll_oneoff adapters do not
        * reliably wake for a closed inherited stdin pipe: the sleep is a capped nanosleep and
@@ -2524,6 +2551,7 @@ bool scr_loop_run(ScrPromise *top_level) {
        * WaitForMultipleObjects over WSAEVENTs, or IOCP. */
       if (evw && due > now + SCR_SIGNAL_POLL_MS) due = now + SCR_SIGNAL_POLL_MS;
       if ((net || dgram || watch) && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
+      if (ffi && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (kids && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (due > now) {
         double wait = due - now;
@@ -2540,7 +2568,7 @@ bool scr_loop_run(ScrPromise *top_level) {
        * events are pending); unrepresentable children keep the ~1ms reap cap
        * instead. Dispatch happens at the next turn's top — the poll only
        * decides how long to sleep. */
-      struct pollfd fds[6];
+      struct pollfd fds[7];
       int nfds = 0;
       int evfds[2];
       int nev = evw && scr_events_pollfds_fn != NULL ? scr_events_pollfds_fn(evfds) : 0;
@@ -2583,6 +2611,16 @@ bool scr_loop_run(ScrPromise *top_level) {
           fds[nfds++].revents = 0;
         } else if (due > now + SCR_SIGNAL_POLL_MS) {
           due = now + SCR_SIGNAL_POLL_MS;
+        }
+      }
+      if (ffi) {
+        int ffd = scr_ffi_pollfd_fn != NULL ? scr_ffi_pollfd_fn() : -1;
+        if (ffd >= 0) {
+          fds[nfds].fd = ffd;
+          fds[nfds].events = POLLIN;
+          fds[nfds++].revents = 0;
+        } else if (due > now + SCR_CHILD_POLL_MS) {
+          due = now + SCR_CHILD_POLL_MS;
         }
       }
       if (kids) {
@@ -2693,7 +2731,21 @@ bool scr_loop_run(ScrPromise *top_level) {
    * them as leaks. Uncaught callback throws still return above for main
    * to report through the existing exceptional teardown path. */
   scr_timers_teardown();
-  /* Same story for unref'd children the loop never reaped: release the
+  /* No reffed foreign registration or queued invocation remains at ordinary
+   * exhaustion. Disarm posting before exit listeners/global teardown so a
+   * straggling native thread becomes a safe silent drop. */
+  if (scr_ffi_stop_fn != NULL) scr_ffi_stop_fn();
+  /* Retained native FFI registrations are deliberately NOT torn down
+   * here: process 'exit' listeners run after the loop returns (inline in
+   * main, before any atexit handler) and may legitimately release a
+   * registration or pump a native library one last time — exactly like
+   * the process.exit() path, where the ledger is also still intact. On
+   * returns that reach atexit, the sweep scr_ffi_retain registered (LIFO
+   * before the RC audit) then drops the ledger's references. It does NOT
+   * run on process.exit(): scr_process_exit ends in _Exit, skipping every
+   * atexit handler — the sweep and the RC audit alike — and leaves the
+   * ledger to the OS. */
+  /* Unref'd children the loop never reaped: release the
    * registry's references (their listeners never fire — the process is
    * exiting, Node's behavior; the OS reparents the children). */
   scr_children_teardown();

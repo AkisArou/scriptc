@@ -736,6 +736,7 @@ interface LoopFrame {
 const NEGATE: Record<string, string> = { "<": ">=", "<=": ">", ">": "<=", ">=": "<", "===": "!==", "!==": "===" };
 const FLIP: Record<string, string> = { "<": ">", "<=": ">=", ">": "<", ">=": "<=", "===": "===", "!==": "!==" };
 const CMP_OPS = new Set(["<", "<=", ">", ">=", "===", "!=="]);
+const ORDERED_CMP_OPS = new Set(["<", "<=", ">", ">="]);
 
 /** Meet a value with an interval; `clearNaN` when the comparison's truth
  * on this edge excludes NaN operands. */
@@ -754,6 +755,10 @@ function meetInterval(v: AbsVal, lo: number, hi: number, clearNaN: boolean): Abs
  * ordinary counter loop prove a precise bound. */
 function refineLhs(op: string, a: AbsVal, b: AbsVal, clearNaN: boolean): AbsVal {
   if (!hasNumeric(b) || !hasNumeric(a)) return clearNaN ? { ...a, maybeNaN: false } : a;
+  // On a failed ordered comparison, a NaN in `b` satisfies the failed edge
+  // regardless of `a`'s numeric value. Preserve every numeric member of `a`
+  // in that case; the caller applies the same rule in the other direction.
+  if (!clearNaN && b.maybeNaN && ORDERED_CMP_OPS.has(op)) return a;
   switch (op) {
     case "<":
       return meetInterval(a, -Infinity, a.whole ? Math.ceil(b.hi) - 1 : b.hi, clearNaN);
@@ -1233,7 +1238,7 @@ class FnAnalyzer {
         // NaN makes < <= > >= === evaluate false, so the edge where one of
         // those was TRUE proves both operands NaN-free (!== held excludes
         // nothing — NaN !== x is true).
-        const clearNaN = op !== "!==";
+        const clearNaN = branch ? cond.op !== "!==" : cond.op === "!==";
         const a = this.evalPure(cond.left, env);
         const b = this.evalPure(cond.right, env);
         const out = cloneEnv(env);

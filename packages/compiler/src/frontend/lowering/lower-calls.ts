@@ -5,8 +5,8 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
-import { BIGINT, BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
-import type { IrFfiCallbackParam, IrFfiCallbackParamClass, IrFfiImport } from "../../ir/nodes.js";
+import { BIGINT, BOOL, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, ffiClassType, ffiSourceParamTypes, funcOf, isFfiCallbackParam, isFfiContextParam, isUnitType, shapeHasAccessorSlots, typeEquals, isFfiReleaseParam } from "../../ir/nodes.js";
+import type { IrFfiCallbackParam, IrFfiCallbackParamClass, IrFfiImport, IrFfiReleaseParam } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
@@ -2479,7 +2479,11 @@ function ffiSourceParams(binding: IrFfiImport): Exclude<IrFfiImport["params"][nu
 }
 
 function ffiParamDisplay(param: ReturnType<typeof ffiSourceParams>[number]): string {
-  return isFfiCallbackParam(param) ? `callback '${param.callback.id}'` : `class '${param}'`;
+  return isFfiCallbackParam(param)
+    ? `callback '${param.callback.id}'`
+    : isFfiReleaseParam(param)
+      ? `release callback '${param.callback.release}'`
+      : `class '${param}'`;
 }
 
 /** Callback arguments flow from native code into TypeScript. Their source
@@ -2488,7 +2492,7 @@ function ffiParamDisplay(param: ReturnType<typeof ffiSourceParams>[number]): str
  * enum, or `never` from an unrestricted `number`. */
 function ffiCallbackInputDiagnostic(
   L: Lowerer,
-  descriptor: IrFfiCallbackParam,
+  descriptor: IrFfiCallbackParam | IrFfiReleaseParam,
   callbackType: ts.Type,
 ): string | null {
   const signatures = L.checker.getCallSignatures(callbackType);
@@ -2515,13 +2519,23 @@ function ffiCallbackInputDiagnostic(
       continue;
     }
 
-    const domain = nativeClass === "bool" ? "boolean" : "number";
+    if (nativeClass === "bytes") continue;
+    const domain = nativeClass === "bool"
+      ? "boolean"
+      : nativeClass === "cstring" || nativeClass === "string"
+      ? "string"
+      : "number";
     const coversDomain = nativeClass === "bool"
       ? (paramType.flags & ts.TypeFlags.Boolean) !== 0
+      : nativeClass === "cstring" || nativeClass === "string"
+      ? (paramType.flags & ts.TypeFlags.String) !== 0
       : (paramType.flags & ts.TypeFlags.Number) !== 0;
     if (!coversDomain) {
+      const descriptorName = isFfiCallbackParam(descriptor)
+        ? descriptor.callback.id
+        : descriptor.callback.release;
       return (
-        `callback '${descriptor.callback.id}' parameter ${i + 1} is '${L.checker.typeToString(paramType)}', ` +
+        `callback '${descriptorName}' parameter ${i + 1} is '${L.checker.typeToString(paramType)}', ` +
         `but native class '${nativeClass}' may supply any ${domain}; declare it as '${domain}'`
       );
     }
@@ -2631,7 +2645,7 @@ function ffiDeclarationDiagnostic(
         loc,
       );
     }
-    if (isFfiCallbackParam(sourceParam)) {
+    if (isFfiCallbackParam(sourceParam) || isFfiReleaseParam(sourceParam)) {
       const callbackDiagnostic = ffiCallbackInputDiagnostic(L, sourceParam, paramType);
       if (callbackDiagnostic !== null) {
         return signatureDiag(binding.name, callbackDiagnostic, loc);
@@ -2898,9 +2912,55 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
       );
     }
     const expectedReturn = ffiClassType(binding.returns);
-    const args = expr.arguments.map((arg, i) =>
-      L.lowerExprExpecting(arg, expectedParams[i]!)
-    );
+    const sourceParams = ffiSourceParams(binding);
+    const args = expr.arguments.map((arg, i) => {
+      const sourceParam = sourceParams[i]!;
+      const expected = expectedParams[i]!;
+      const lowered = L.lowerExprExpecting(arg, expected);
+      // Retained identity is the runtime closure pointer. A coercion adapter
+      // would be freshly allocated at registration and release sites, so an
+      // assignable-but-different function shape (notably `() => number` into
+      // `() => void`) cannot honestly participate in explicit release. The
+      // adapter set comes from the mint sites themselves (Lowerer's
+      // freshClosureAdapters), not name-prefix matching, so a new coercion
+      // helper cannot silently slip past this guard.
+      if (
+        isFfiReleaseParam(sourceParam) ||
+        (isFfiCallbackParam(sourceParam) && sourceParam.callback.lifetime === "retained")
+      ) {
+        if (
+          lowered.kind === "dynCheck" ||
+          (lowered.kind === "call" && L.freshClosureAdapters.has(lowered.callee))
+        ) {
+          signatureError(
+            `retained callback argument ${i + 1} must have the exact manifest function type; ` +
+              `an implicit function adapter would change its release identity`,
+          );
+        }
+        // An inline function value at a RELEASE site can never match:
+        // lifted lambdas always carry a captures list (even an empty one),
+        // so both backends mint a fresh closure per evaluation of the
+        // expression — the release argument is a pointer no registration
+        // holds, a guaranteed runtime trap. Declared functions stay valid
+        // here — their value is the interned immortal closure (captures
+        // undefined), one pointer for every mention. Registration sites
+        // still accept literals: an unnameable registration is simply
+        // permanent, released by the exit teardown (the live-at-exit
+        // fixture shape), and hides no matching failure.
+        if (
+          isFfiReleaseParam(sourceParam) &&
+          lowered.kind === "closure" &&
+          L.liftedFns.some((f) => f.name === lowered.fnName && f.captures !== undefined)
+        ) {
+          signatureError(
+            `retained callback argument ${i + 1} cannot be an inline function value; ` +
+              `each evaluation creates a fresh closure no registration holds — ` +
+              `pass the same named value used to register`,
+          );
+        }
+      }
+      return lowered;
+    });
     return {
       kind: "ffiCall",
       import: binding.name,
@@ -4613,8 +4673,9 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // take the ordinary typed paths, but there is no static home for an
     // any-elemented array). Typed receivers keep their own lowerings.
     const recvTs = L.typeOf(access.expression);
+    const arrayReceiver = L.checker.isArrayType(recvTs);
     const anyArray =
-      L.checker.isArrayType(recvTs) &&
+      arrayReceiver &&
       ((L.checker.getTypeArguments(recvTs as ts.TypeReference)[0]?.flags ?? 0) &
         (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
     let recv: IrExpr;
@@ -4688,21 +4749,8 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     // unimplemented methods throw a LOUD not-supported Error; names the
     // kind's prototype lacks throw Node's "x.y is not a function"; OBJ
     // receivers call the own member.
-    if (DYN_DISPATCH_METHODS.has(access.name.text) && !call.questionDotToken && !access.questionDotToken) {
-      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        L.unsupported("SC1090", call, "spread arguments in calls through 'unknown' values");
-      }
-      const args = call.arguments.map((a) => L.lowerExprExpecting(a, DYN));
-      return {
-        kind: "dynInvoke",
-        recv,
-        method: access.name.text,
-        calleeName: access.getText(),
-        args,
-        type: DYN,
-        loc: locOf(call),
-      };
-    }
+    const dispatched = lowerDynDispatchMethodCall(L, call, access, recv, arrayReceiver);
+    if (dispatched) return dispatched;
     // Names NO dyn-representable prototype declares: the member can only
     // be an OWN property, so "read the member, call it" IS Node's
     // semantics for every possible dyn value — `handlers.onDone(x)` on a
@@ -4813,6 +4861,42 @@ export const DYN_DISPATCH_METHODS = new Set([
   "request", "sendTrailers", "priority", "settings", "goaway", "ping",
   "additionalHeaders", "altsvc", "origin",
 ]);
+
+export function lowerDynDispatchMethodCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+  recv: IrExpr,
+  arrayReceiver: boolean,
+): IrExpr | null {
+  const method = access.name.text;
+  if (!DYN_DISPATCH_METHODS.has(method) || call.questionDotToken || access.questionDotToken) return null;
+  if (call.arguments.some((arg) => ts.isSpreadElement(arg))) {
+    L.unsupported("SC1090", call, "spread arguments in calls through 'unknown' values");
+  }
+  const predicate = method === "filter" && call.arguments[0]
+    ? L.lowerExpr(call.arguments[0])
+    : null;
+  if (arrayReceiver && predicate?.type.kind === "func" && predicate.type.ret.kind === "void") {
+    L.unsupported(
+      "SC1090",
+      call.arguments[0]!,
+      "'.filter()' with a void-returning predicate (the callback return value is erased before its truthiness can be tested)",
+    );
+  }
+  const args = call.arguments.map((arg, i) =>
+    i === 0 && predicate ? L.coerceInto(arg, predicate, DYN) : L.lowerExprExpecting(arg, DYN),
+  );
+  return {
+    kind: "dynInvoke",
+    recv,
+    method,
+    calleeName: access.getText(),
+    args,
+    type: DYN,
+    loc: locOf(call),
+  };
+}
 
 /** STR_METHODS ∪ the regex-form names, MINUS everything Array (or any
  * other dyn kind's prototype) also declares. */

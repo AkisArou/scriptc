@@ -5569,14 +5569,26 @@
    "diags": []
   },
   "<repo>/tests/corpus/2682-fs-rename.ts": {
+    "order": [
+     "<repo>/tests/corpus/2682-fs-rename.ts"
+    ],
+    "diags": []
+   },
+  "<repo>/tests/corpus/2683-filter-truthy-predicate.ts": {
    "order": [
-    "<repo>/tests/corpus/2682-fs-rename.ts"
+    "<repo>/tests/corpus/2683-filter-truthy-predicate.ts"
    ],
    "diags": []
   },
   "<repo>/tests/corpus/2683-fs-rename-js.cjs": {
    "order": [
     "<repo>/tests/corpus/2683-fs-rename-js.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2684-filter-no-predicate-dyn.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2684-filter-no-predicate-dyn.cjs"
    ],
    "diags": []
   },
@@ -5635,9 +5647,9 @@
    "diags": []
   },
   "<repo>/tests/corpus/2700-wasi-core.ts": {
-   "order": [
-    "<repo>/tests/corpus/2700-wasi-core.ts"
-   ],
+    "order": [
+     "<repo>/tests/corpus/2700-wasi-core.ts"
+    ],
    "diags": []
   },
   "<repo>/tests/corpus/300-if-else.ts": {
@@ -6974,6 +6986,30 @@
   "<repo>/tests/diagnostics/filter-narrow.ts": {
    "order": [
     "<repo>/tests/diagnostics/filter-narrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/filter-void-predicate-dyn.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/filter-void-predicate-dyn.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/filter-void-predicate-dynamic.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/filter-void-predicate-dynamic.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/filter-void-predicate-island.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/filter-void-predicate-island.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/filter-void-predicate.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/filter-void-predicate.ts"
    ],
    "diags": []
   },

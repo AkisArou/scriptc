@@ -56,7 +56,7 @@
  * head buffers in the socket's write buffer until the handshake
  * establishes (the mid-connect buffering path, reused verbatim).
  * rejectUnauthorized:false maps to VERIFY_NONE; `ca` replaces the trust
- * anchors; with neither, /etc/ssl/cert.pem stands in for Node's bundled
+ * anchors; with neither, the host trust store stands in for Node's bundled
  * Mozilla roots (SEMANTICS.md documents the divergence). Verify
  * failures surface as Node-shaped 'error' messages on the request
  * ("self-signed certificate", "self-signed certificate in certificate
@@ -336,15 +336,15 @@ typedef struct ScrTlsCli {
   bool verify_recorded;
 } ScrTlsCli;
 
-/* The default trust anchors when no `ca` option is given: the system
- * bundle, standing in for Node's compiled-in Mozilla roots, plus
- * NODE_EXTRA_CA_CERTS. The system bundle is probed once across the distro
- * spellings — /etc/ssl/cert.pem first (macOS ships it; Alpine links it),
- * then Debian/Ubuntu's ca-certificates.crt, Fedora/RHEL's ca-bundle.crt,
- * and openSUSE's ca-bundle.pem. On macOS only the first path exists, so
- * the probe order changes nothing there. A host with none leaves only the
- * optional extra chain. Windows is that host by construction (no PEM
- * bundle ships; the OS store is cert-database-shaped). */
+/* The default trust anchors when no `ca` option is given: the host trust
+ * store, standing in for Node's compiled-in Mozilla roots, plus
+ * NODE_EXTRA_CA_CERTS. Windows certificates live as DER entries across the
+ * machine, enterprise, current-user, and policy ROOT/CA/TrustedPeople store
+ * locations; mbedTLS copies each successfully parsed entry into its own chain.
+ * POSIX hosts probe the established bundle spellings — /etc/ssl/cert.pem
+ * first (macOS ships it; Alpine links it), then Debian/Ubuntu's
+ * ca-certificates.crt, Fedora/RHEL's ca-bundle.crt, and openSUSE's
+ * ca-bundle.pem. */
 static mbedtls_x509_crt scr_tls_system_roots;
 static bool scr_tls_system_roots_loaded = false;
 
@@ -355,6 +355,12 @@ static bool scr_tls_system_roots_loaded = false;
  * verification fails, Node's own consequence of trusting nothing. */
 static mbedtls_x509_crt scr_tls_override_roots;
 static uint64_t scr_tls_override_parsed_gen = 0;
+
+#ifdef _WIN32
+static void scr_tls_add_windows_ca(void *ctx, const unsigned char *der, size_t len) {
+  (void)mbedtls_x509_crt_parse_der((mbedtls_x509_crt *)ctx, der, len);
+}
+#endif
 
 static mbedtls_x509_crt *scr_tls_system_ca(void) {
   const char *pem = NULL;
@@ -375,6 +381,12 @@ static mbedtls_x509_crt *scr_tls_system_ca(void) {
   if (!scr_tls_system_roots_loaded) {
     scr_tls_system_roots_loaded = true;
     mbedtls_x509_crt_init(&scr_tls_system_roots);
+#ifdef _WIN32
+    /* The shared enumerator applies Windows' effective server-auth EKU
+     * policy before yielding DER. mbedTLS copies every successfully parsed
+     * entry, so the store contexts may die immediately after each callback. */
+    scr_tls_ca_windows_certs(scr_tls_add_windows_ca, &scr_tls_system_roots);
+#else
     static const char *const bundles[] = {
         "/etc/ssl/cert.pem",                  /* macOS, Alpine */
         "/etc/ssl/certs/ca-certificates.crt", /* Debian/Ubuntu */
@@ -384,6 +396,7 @@ static mbedtls_x509_crt *scr_tls_system_ca(void) {
     for (size_t i = 0; i < sizeof bundles / sizeof bundles[0]; i++) {
       if (mbedtls_x509_crt_parse_file(&scr_tls_system_roots, bundles[i]) == 0) break;
     }
+#endif
     const char *extra = NULL;
     size_t extra_len = 0;
     if (scr_tls_ca_extra_pem(&extra, &extra_len) && extra_len > 0) {

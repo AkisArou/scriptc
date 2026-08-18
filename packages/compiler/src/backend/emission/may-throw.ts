@@ -2,6 +2,7 @@
  * of the IR module; the emitter consults the result to place unwind checks. */
 import type { IrArrIntrinsicMethod, IrBytesIntrinsicMethod, IrLibFn, IrModule } from "../../ir/nodes.js";
 import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber } from "../../ir/nodes.js";
+import { hasRetainedFfiCallback } from "../ffi-callbacks.js";
 
 /** Cheap may-throw analysis (cost discipline: functions that transitively
  * CANNOT throw pay for no pending-exception checks). A function may throw
@@ -76,6 +77,7 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
       )
       .map((binding) => binding.id),
   );
+  const manifestHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
   // Method name → every class's implementation of it (virtualCall callees).
   const methodImpls = new Map<string, string[]>();
   for (const cls of mod.classes ?? []) {
@@ -237,10 +239,13 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           if (MAY_THROW_LIB_FNS.has(rec["fn"] as IrLibFn)) f.throws = true;
           break;
         case "ffiCall":
-          // A call-scoped native callback may run arbitrary scriptc code.
-          // Its exception stays pending until the outer native call
-          // returns, where the emitter checks and unwinds normally.
-          if (callbackFfiImports.has(rec["import"] as string)) f.throws = true;
+          // A native callback may run arbitrary scriptc code. With retained
+          // descriptors any manifest binding may pump a previously stored
+          // callback, so every FFI call is conservatively a checkpoint.
+          if (
+            callbackFfiImports.has(rec["import"] as string) ||
+            manifestHasRetainedCallback
+          ) f.throws = true;
           break;
         case "nativeCall":
           // Native IR callback trampolines use the same pending-exception
