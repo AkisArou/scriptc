@@ -259,6 +259,12 @@ export type IrNativeCallbackArgumentType = {
      * is a different physical arrangement of the same script value, and the
      * two cannot share one tag. */
     | { kind: "cstring" }
+    /** The same script string from a pointer and a length instead of a
+     * terminator, so the bytes may contain NUL and are not scanned for one. */
+    | { kind: "utf8Span" }
+    /** A pointer and a length copied into a script byte array. Bytes, not
+     * text: nothing is decoded and nothing is replaced. */
+    | { kind: "byteSpan" }
     /** Exact widening of an at-most-32-bit integer payload slot into the
      * source f64. The queued invocation stores the physical exact value; the
      * widening happens when the delivery reads it back. */
@@ -298,6 +304,12 @@ export type IrNativeCallbackSourceArgument =
        * it back — whether the delivery runs or is dropped at shutdown. */
       destructor?: string;
     }
+  /** One handler parameter fed by two physical slots: a pointer and the
+   * element count beside it. The pairing lives here rather than in the
+   * payload form because which slots feed a parameter is what a source
+   * argument is for — the form says what the handler sees, not where the
+   * pieces came from. */
+  | { kind: "callback-parameter-span"; data: number; length: number }
   | { kind: "registration-owner" };
 
 /** Which thing owns a callback registration, and therefore how long the
@@ -428,11 +440,13 @@ export function nativeArgumentScriptType(
 export function nativeCallbackSourceScriptType(
   parameter: IrNativeCallbackArgumentType["params"][number],
 ): IrType {
-  return parameter.kind === "cstring"
+  return parameter.kind === "cstring" || parameter.kind === "utf8Span"
     ? STRING
-    : parameter.kind === "bool"
-      ? BOOL
-      : parameter;
+    : parameter.kind === "byteSpan"
+      ? BYTES_U8
+      : parameter.kind === "bool"
+        ? BOOL
+        : parameter;
 }
 
 /**
@@ -1249,7 +1263,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 25 as const;
+export const IR_VERSION = 26 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

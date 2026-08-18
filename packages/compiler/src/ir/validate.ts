@@ -1541,6 +1541,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ((parameter.kind === "nativeHandle" &&
             nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
             parameter.kind === "cstring" ||
+            parameter.kind === "utf8Span" ||
+            parameter.kind === "byteSpan" ||
             parameter.kind === "f64" ||
             /* An integer payload read as a boolean, carrying the two
              * storage values it means — the mirror of the answer below. */
@@ -1587,6 +1589,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         return source["kind"] === "registration-owner";
       }
       const keys = Object.keys(source).sort().join(",");
+      if (keys === "data,kind,length") {
+        return source["kind"] === "callback-parameter-span" &&
+          Number.isSafeInteger(source["data"]) && Number(source["data"]) >= 0 &&
+          Number.isSafeInteger(source["length"]) && Number(source["length"]) >= 0 &&
+          (type.params[index]?.kind === "utf8Span" ||
+            type.params[index]?.kind === "byteSpan");
+      }
       if (
         (keys !== "kind,parameter" && keys !== "destructor,kind,parameter") ||
         source["kind"] !== "callback-parameter" ||
@@ -1655,6 +1664,17 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           candidate["cancellationBinding"] !== "" &&
           executors.length === 1 && executors[0] === "same-as-caller" &&
           type.ret.kind !== "void";
+      }
+      /* A queued delivery has no span emission: the length slot is consumed
+       * when the payload is read, and the record that outlives the call has
+       * nowhere to keep it. A `cstring` payload queues fine because its
+       * length is in the bytes. Refused here rather than half-emitted. */
+      if (
+        type.params.some((parameter) =>
+          parameter.kind === "utf8Span" || parameter.kind === "byteSpan"
+        )
+      ) {
+        return false;
       }
       return Object.keys(candidate).sort().join(",") ===
           "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn" &&
@@ -2183,6 +2203,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               callbackContract === undefined ||
               callbackContract.sourceArguments.length !== sourceArgument.type.params.length
             ) return false;
+            /* Narrowed by the refusal above, and no longer optional. */
+            const slots = parameter.type.signature.parameters;
             const projectedPhysical = new Set<number>();
             let projectedOwner = false;
             for (const [sourceIndex, projection] of
@@ -2199,6 +2221,37 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 ) return false;
                 projectedPhysical.add(projection.parameter);
                 expected = parameter.type.signature.parameters[projection.parameter];
+              } else if (projection.kind === "callback-parameter-span") {
+                /* Two slots, one parameter. Both must exist, be distinct, and
+                 * be unclaimed — the same accounting a single slot gets, so
+                 * the "every payload slot projected exactly once" check at the
+                 * end still means what it says. */
+                const spanSlots = [projection.data, projection.length];
+                if (
+                  projection.data === projection.length ||
+                  spanSlots.some((slot) =>
+                    !Number.isSafeInteger(slot) || slot < 0 ||
+                    slot >= slots.length ||
+                    projectedPhysical.has(slot)
+                  )
+                ) return false;
+                for (const slot of spanSlots) projectedPhysical.add(slot);
+                const data = slots[projection.data]!;
+                const length = slots[projection.length]!;
+                const source = sourceArgument.type.params[sourceIndex]!;
+                /* A span reaches the handler as text or as bytes, and the
+                 * physical arrangement is the same either way: a const
+                 * pointer the library still owns, and an unsigned count
+                 * beside it. A signed count has no meaning the copy could
+                 * act on. */
+                if (
+                  (source.kind !== "utf8Span" && source.kind !== "byteSpan") ||
+                  data.kind !== "nativePointer" || !data.const ||
+                  data.addressSpace !== 0 ||
+                  length.kind !== "nativeScalar" ||
+                  nativeIntegerInfo(length.scalar, nativePointerBits)?.min !== 0n
+                ) return false;
+                continue;
               } else {
                 if (
                   projectedOwner ||
@@ -2220,6 +2273,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               /* A C-string source over a const byte pointer is the copy the
                * runtime makes when it decodes the payload. Everything else
                * must be the physical type itself. */
+              if (source.kind === "utf8Span" || source.kind === "byteSpan") {
+                /* A span form is two slots by construction, so a single-slot
+                 * projection can never carry one. */
+                return false;
+              }
               if (expected.kind === "nativePointer" || source.kind === "cstring") {
                 if (
                   source.kind !== "cstring" ||

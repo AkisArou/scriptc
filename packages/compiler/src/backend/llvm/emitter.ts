@@ -2396,6 +2396,25 @@ class LlEmitter {
       /* Every payload pointer is rejected before any script value is built,
        * so a later bad slot cannot strand an earlier decode. */
       for (const [index, argument] of adapter.contract.sourceArguments.entries()) {
+        /* An empty span may arrive as NULL; a NULL pointer with a nonzero
+         * count cannot be read at all. Kept in lockstep with the C backend. */
+        if (argument.kind === "callback-parameter-span") {
+          const data = argument.data;
+          const kind = sourceType.params[index]?.kind === "byteSpan" ? "bytes" : "string";
+          defs.push(
+            `  %null${data} = icmp eq ptr %a${data}, null`,
+            `  %nonempty${data} = icmp ne ${this.sizeType} %a${argument.length}, 0`,
+            `  %invalid${data} = and i1 %null${data}, %nonempty${data}`,
+            `  br i1 %invalid${data}, label %invalid_param${data}, label %param_ok${data}`,
+            `invalid_param${data}:`,
+            `  call void @scr_trap(ptr ${this.cstr(
+              `scriptc: native callback passed a NULL ${kind} span with nonzero length\n`,
+            )})`,
+            `  unreachable`,
+            `param_ok${data}:`,
+          );
+          continue;
+        }
         if (
           argument.kind !== "callback-parameter" ||
           sourceType.params[index]?.kind !== "cstring"
@@ -2414,10 +2433,23 @@ class LlEmitter {
       const callArgs = [
         "ptr %ctx",
         ...adapter.contract.sourceArguments.map((argument, index) => {
+          const sourceParam = sourceType.params[index]!;
+          /* A pointer and a count becoming one script value, the reference
+           * moving into the call exactly as a decoded C string's does. */
+          if (argument.kind === "callback-parameter-span") {
+            const build = sourceParam.kind === "byteSpan"
+              ? "scr_bytes_from_data"
+              : "scr_str_from_utf8_lossy";
+            this.declare(`declare ptr @${build}(ptr, ${this.sizeType})`);
+            widenLines.push(
+              `  %s${argument.data} = call ptr @${build}(` +
+                `ptr %a${argument.data}, ${this.sizeType} %a${argument.length})`,
+            );
+            return `ptr %s${argument.data}`;
+          }
           if (argument.kind !== "callback-parameter") {
             throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
           }
-          const sourceParam = sourceType.params[index]!;
           /* A borrowed pointer decoded into a script string the handler may
            * keep. The reference produced moves into the call. */
           if (sourceParam.kind === "cstring") {

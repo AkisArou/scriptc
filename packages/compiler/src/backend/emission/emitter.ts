@@ -2504,19 +2504,36 @@ export class CEmitter {
        * arguments it receives. Rejected before any of them is built, so a
        * trap cannot strand an earlier decode. */
       for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
-        if (
-          argument.kind === "callback-parameter" &&
-          adapter.source.params[sourceIndex]?.kind === "cstring"
-        ) {
+        const source = adapter.source.params[sourceIndex];
+        if (argument.kind === "callback-parameter" && source?.kind === "cstring") {
           out.push(cstringNullTrapC(argument.parameter));
+        }
+        /* An empty span may legitimately arrive as NULL — there is nothing to
+         * point at. A NULL pointer with a nonzero count cannot be read at
+         * all, and is the library's bug rather than a value. */
+        if (argument.kind === "callback-parameter-span") {
+          const kind = source?.kind === "byteSpan" ? "bytes" : "string";
+          out.push(
+            `  if (sc_a${argument.data} == NULL && sc_a${argument.length} != 0) ` +
+              `scr_trap("scriptc: native callback passed a NULL ${kind} span with nonzero length\\n");`,
+          );
         }
       }
       const sourceType = adapter.source;
       const args = adapter.contract.sourceArguments.map((argument, sourceIndex) => {
+        const source = adapter.source.params[sourceIndex];
+        /* A pointer and a count becoming one script value. The reference
+         * produced moves into the call, exactly as a decoded C string's
+         * does. */
+        if (argument.kind === "callback-parameter-span") {
+          const build = source?.kind === "byteSpan"
+            ? "scr_bytes_from_data"
+            : "scr_str_from_utf8_lossy";
+          return `${build}((const uint8_t *)sc_a${argument.data}, sc_a${argument.length})`;
+        }
         if (argument.kind !== "callback-parameter") {
           throw new Error("backend bug: call-scoped callback cannot inject a registration owner");
         }
-        const source = adapter.source.params[sourceIndex];
         if (source?.kind === "cstring") return cstringDecodeC(argument.parameter);
         /* Same widening as the queued path, without the queue. */
         if (source?.kind === "f64") return `(double)sc_a${argument.parameter}`;

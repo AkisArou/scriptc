@@ -25,6 +25,7 @@ import type {
   IrNativeCallbackArgumentType,
   IrNativeCallbackContract,
   IrNativeCallbackSignature,
+  IrNativeCallbackSourceArgument,
   IrNativeScalarType,
 } from "../ir/nodes.js";
 import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "../ir/nodes.js";
@@ -58,11 +59,12 @@ export function ffiBindingId(name: string): string {
  * declaration in the program's own source, which has no package. */
 const FFI_DECLARATION_MODULE = "\u0000ffi";
 
-/** Payload classes a call-scoped callback can carry today. The span classes
- * (`string`, `bytes`) still need a source argument built from two physical
- * slots, which is a measured addition with a named consumer rather than a
- * guess, so a descriptor using one keeps the profile's own path for now. */
-const DESUGARABLE_PAYLOADS = new Set(["f64", "bool", "u8", "u32", "i32", "cstring"]);
+/** Payload classes a call-scoped callback can carry, which is now every class
+ * the profile has: the value classes, a NUL-terminated string, and the two
+ * spans. */
+const DESUGARABLE_PAYLOADS = new Set([
+  "f64", "bool", "u8", "u32", "i32", "cstring", "string", "bytes",
+]);
 
 /** Answer classes. A C string is a payload only: answering one would need the
  * ownership and allocator contract the profile deliberately omits. */
@@ -99,39 +101,58 @@ function desugarCallback(entry: IrFfiImport): {
   );
   if (contexts.length !== 1) return null;
 
-  const signature: IrNativeCallbackSignature = {
-    parameters: callback.params.map((slot) =>
-      isFfiContextParam(slot)
-        ? { kind: "nativeContext", addressSpace: 0 } as const
-        /* The library hands over a pointer it still owns, which is what
-         * `const` records — the trampoline reads through it and never writes
-         * or frees. The element is `char`, spelled `i8` here because the
-         * profile states no signedness and nothing reads the tag for a
-         * payload pointer: both backends emit `const char *` and let the
-         * platform mean what it means. */
+  /* Physical slots, source payloads, and the map between them are built in
+   * one pass because they are no longer parallel: a span class is one thing
+   * the handler receives and two things the library passes. */
+  const parameters: IrNativeCallbackSignature["parameters"][number][] = [];
+  const sourceParams: IrNativeCallbackArgumentType["params"][number][] = [];
+  const sourceArguments: IrNativeCallbackSourceArgument[] = [];
+  for (const slot of callback.params) {
+    if (isFfiContextParam(slot)) {
+      parameters.push({ kind: "nativeContext", addressSpace: 0 });
+      continue;
+    }
+    if (slot === "string" || slot === "bytes") {
+      const data = parameters.length;
+      parameters.push({ kind: "nativePointer", pointee: "u8", const: true, addressSpace: 0 });
+      const length = parameters.length;
+      parameters.push({ kind: "nativeScalar", scalar: "usize" });
+      sourceArguments.push({ kind: "callback-parameter-span", data, length });
+      sourceParams.push({ kind: slot === "bytes" ? "byteSpan" : "utf8Span" });
+      continue;
+    }
+    const parameter = parameters.length;
+    /* The library hands over a pointer it still owns, which is what `const`
+     * records — the trampoline reads through it and never writes or frees.
+     * A C string's element is `char`, spelled `i8` because the profile states
+     * no signedness and nothing reads the tag for a payload pointer: both
+     * backends emit `const char *` and let the platform mean what it means. */
+    parameters.push(
+      slot === "cstring"
+        ? { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 }
+        : scalarOf(slot as "f64" | "bool" | "u8" | "u32" | "i32"),
+    );
+    sourceArguments.push({ kind: "callback-parameter", parameter });
+    /* Each payload reaches the handler as the ordinary JavaScript value its
+     * class names: a boolean for `bool`, a string for `cstring`, a number for
+     * the rest. */
+    sourceParams.push(
+      slot === "bool"
+        ? { kind: "bool", falseValue: "0", trueValue: "1" }
         : slot === "cstring"
-          ? { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 } as const
-          : scalarOf(slot as "f64" | "bool" | "u8" | "u32" | "i32"),
-    ),
+          ? { kind: "cstring" }
+          : { kind: "f64" },
+    );
+  }
+  const signature: IrNativeCallbackSignature = {
+    parameters,
     result: callback.returns === "void"
       ? { kind: "void" }
       : scalarOf(callback.returns),
   };
-  const payloadSlots = signature.parameters.flatMap((slot, index) =>
-    slot.kind === "nativeContext" ? [] : [index],
-  );
-  /* Each payload reaches the handler as the ordinary JavaScript value its
-   * class names: a boolean for `bool`, a string for `cstring`, a number for
-   * the rest. */
   const source: IrNativeCallbackArgumentType = {
     kind: "func",
-    params: payloads.map((cls) =>
-      cls === "bool"
-        ? { kind: "bool" as const, falseValue: "0", trueValue: "1" }
-        : cls === "cstring"
-          ? { kind: "cstring" as const }
-          : { kind: "f64" as const },
-    ),
+    params: sourceParams,
     ret: callback.returns === "void"
       ? { kind: "void" }
       : callback.returns === "bool"
@@ -143,10 +164,7 @@ function desugarCallback(entry: IrFfiImport): {
     owner: { kind: "call" },
     allowedInvocationExecutors: ["same-as-caller"],
     synchronousReturn: true,
-    sourceArguments: payloadSlots.map((parameter) => ({
-      kind: "callback-parameter",
-      parameter,
-    })),
+    sourceArguments,
   };
   return { signature, contract, source, callbackSlot, contextSlot: contexts[0]! };
 }
