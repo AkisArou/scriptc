@@ -70,20 +70,17 @@ const DESUGARABLE_PAYLOADS = new Set([
  * ownership and allocator contract the profile deliberately omits. */
 const DESUGARABLE_ANSWERS = new Set(["f64", "bool", "u8", "u32", "i32"]);
 
-/** The one callback a binding may carry, with its context slot, or null when
- * the descriptor needs vocabulary the native path does not have yet. */
-function desugarCallback(entry: IrFfiImport): {
+/** One of a binding's callbacks, with its context slot, or null when the
+ * descriptor needs vocabulary the native path does not have yet. */
+function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
   readonly signature: IrNativeCallbackSignature;
   readonly contract: IrNativeCallbackContract;
   readonly source: IrNativeCallbackArgumentType;
   readonly callbackSlot: number;
   readonly contextSlot: number | null;
 } | null {
-  const found = entry.params.flatMap((param, index) =>
-    isFfiCallbackParam(param) ? [[index, param as IrFfiCallbackParam] as const] : [],
-  );
-  if (found.length !== 1) return null;
-  const [callbackSlot, param] = found[0]!;
+  const param = entry.params[callbackSlot];
+  if (param === undefined || !isFfiCallbackParam(param)) return null;
   const callback = param.callback;
   /* Retained and foreign registrations are their own slice: they need an
    * owner arm and a delivery target this one does not touch. */
@@ -181,11 +178,26 @@ function desugarCallback(entry: IrFfiImport): {
 export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | null {
   /* A release descriptor belongs to the retained slice. */
   if (entry.params.some(isFfiReleaseParam)) return null;
-  const carriesCallback = entry.params.some(isFfiCallbackParam);
-  const callback = carriesCallback ? desugarCallback(entry) : null;
-  if (carriesCallback && callback === null) return null;
+  /* A binding may carry more than one callback — two comparators, a pair of
+   * hooks — and each is an independent registration with its own signature,
+   * context slot, and trampoline. They are desugared one at a time and any
+   * failure sinks the whole binding, because a descriptor half on the native
+   * path is not a thing that can be emitted. */
+  const callbacks: NonNullable<ReturnType<typeof desugarCallback>>[] = [];
+  for (const [index, param] of entry.params.entries()) {
+    if (!isFfiCallbackParam(param)) continue;
+    const desugared = desugarCallback(entry, index);
+    if (desugared === null) return null;
+    callbacks.push(desugared);
+  }
+  const callbackBySlot = new Map(callbacks.map((one) => [one.callbackSlot, one]));
+  const contextBySlot = new Map(
+    callbacks.flatMap((one) => one.contextSlot === null ? [] : [[one.contextSlot, one]]),
+  );
   /* A context with no callback of ours to belong to is not ours to serve. */
-  if (callback === null && entry.params.some(isFfiContextParam)) return null;
+  if (
+    entry.params.filter(isFfiContextParam).length !== contextBySlot.size
+  ) return null;
   const classes = entry.params as IrFfiValueParamClass[];
 
   const args: IrNativeBinding["arguments"] = [];
@@ -196,23 +208,25 @@ export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | nu
 
   /* TypeScript argument positions skip what the compiler supplies: the
    * function value is one argument, the context is none at all. */
-  const callbackArgument = callback === null
-    ? -1
-    : entry.params
-        .slice(0, callback.callbackSlot)
-        .filter((slot) => !isFfiContextParam(slot)).length;
+  const argumentOf = (slot: number): number =>
+    entry.params.slice(0, slot).filter((candidate) => !isFfiContextParam(candidate)).length;
   classes.forEach((cls, index) => {
-    if (callback !== null && index === callback.contextSlot) {
+    const contextOwner = contextBySlot.get(index);
+    if (contextOwner !== undefined) {
       parameters.push({
         name: `a${index}`,
         type: { kind: "nativeContext", addressSpace: 0 },
         passMode: "pointer",
         ownership: { kind: "callback" },
-        projection: { kind: "callbackContext", argument: callbackArgument },
+        projection: {
+          kind: "callbackContext",
+          argument: argumentOf(contextOwner.callbackSlot),
+        },
       });
       return;
     }
-    if (callback !== null && index === callback.callbackSlot) {
+    const callback = callbackBySlot.get(index);
+    if (callback !== undefined) {
       args.push({
         name: `a${index}`,
         type: callback.source,
@@ -223,7 +237,10 @@ export function desugarFfiValueBinding(entry: IrFfiImport): IrNativeBinding | nu
         type: { kind: "nativeCallback", signature: callback.signature },
         passMode: "pointer",
         ownership: { kind: "callback" },
-        projection: { kind: "callbackFunction", argument: callbackArgument },
+        projection: {
+          kind: "callbackFunction",
+          argument: argumentOf(callback.callbackSlot),
+        },
       });
       return;
     }
