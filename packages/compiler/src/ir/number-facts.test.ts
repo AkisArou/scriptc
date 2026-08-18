@@ -938,7 +938,7 @@ function numberBinding(id: string, scalar: "i32" | "u8"): IrNativeBinding {
       type,
       passMode: "value",
       ownership: { kind: "value" },
-      projection: { kind: "number", argument: 0 },
+      projection: { kind: "number", argument: 0, conversion: "checked" },
     }],
     result: {
       type,

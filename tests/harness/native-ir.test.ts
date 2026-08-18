@@ -532,7 +532,7 @@ const localNativeInput: NativeFrontendInput = {
         type: nativeScalarType(scalar),
         passMode: "value" as const,
         ownership: { kind: "value" as const },
-        projection: { kind: "number" as const, argument: 0 },
+        projection: { kind: "number" as const, argument: 0, conversion: "checked" as const },
       }],
       result: {
         type: nativeScalarType(scalar),
@@ -648,7 +648,7 @@ const localNativeInput: NativeFrontendInput = {
           type: I32,
           passMode: "value",
           ownership: { kind: "value" },
-          projection: { kind: "number", argument: 1 },
+          projection: { kind: "number", argument: 1, conversion: "checked" },
         },
       ],
       result: {
@@ -690,7 +690,7 @@ const localNativeInput: NativeFrontendInput = {
           type: nativeScalarType("f32"),
           passMode: "value",
           ownership: { kind: "value" },
-          projection: { kind: "number", argument: 1 },
+          projection: { kind: "number", argument: 1, conversion: "checked" },
         },
       ],
       result: {
@@ -740,6 +740,7 @@ const localNativeInput: NativeFrontendInput = {
         ownership: { kind: "value" as const },
         projection: {
           kind: "boolean" as const,
+          conversion: "exact" as const,
           falseValue: "0",
           trueValue: "1",
         },
@@ -768,7 +769,7 @@ const localNativeInput: NativeFrontendInput = {
         type: I32,
         passMode: "value",
         ownership: { kind: "value" },
-        projection: { kind: "boolean", falseValue: "0", trueValue: "1" },
+        projection: { kind: "boolean", conversion: "exact", falseValue: "0", trueValue: "1" },
       },
     },
     {
@@ -2289,6 +2290,7 @@ test("Native IR validates exact integer-backed boolean results", () => {
   const malformed = structuredClone(binding);
   malformed.result.projection = {
     kind: "boolean",
+    conversion: "exact",
     falseValue: "1",
     trueValue: "1",
   };

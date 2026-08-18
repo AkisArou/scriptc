@@ -2017,9 +2017,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
            * must use their exact carriers instead. */
           if (
             Object.keys(parameter.projection).sort().join(",") !==
-              "argument,kind" ||
+              "argument,conversion,kind" ||
             sourceArgument.type.kind !== "f64" ||
-            !numberCarryingScalarType(parameter.type) ||
+            /* A checked crossing has a defined answer only where the slot's
+             * whole range is representable in f64. A wrapping one is defined
+             * at every integer width by construction — the modulo conversion
+             * is total — so it carries no such restriction. */
+            (parameter.projection.conversion === "checked"
+              ? !numberCarryingScalarType(parameter.type)
+              : parameter.projection.conversion !== "wrap" ||
+                parameter.type.kind !== "nativeScalar" ||
+                nativeIntegerInfo(
+                  parameter.type.scalar,
+                  validNativeTarget ? nativePointerBits : undefined,
+                ) === null) ||
             parameter.ownership.kind !== "value"
           ) {
             errors.push({
@@ -2260,7 +2271,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     });
     const resultProjection = binding.result.projection as
       | { kind: "direct" }
-      | { kind: "boolean"; falseValue?: unknown; trueValue?: unknown }
+      | { kind: "boolean"; conversion?: unknown; falseValue?: unknown; trueValue?: unknown }
       | { kind: "number" }
       | { kind: "utf8CString"; nullable?: unknown }
       | { kind: "nullableHandle" }
@@ -2296,6 +2307,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
+    } else if (
+      resultProjection?.kind === "boolean" && resultProjection.conversion === "nonZero"
+    ) {
+      /* C's own truth test over an integer slot. Nothing can fail, so the
+       * binding must not also claim a failure the source would never see. */
+      if (
+        Object.keys(resultProjection).sort().join(",") !== "conversion,kind" ||
+        binding.result.type.kind !== "nativeScalar" ||
+        nativeIntegerInfo(
+          binding.result.type.scalar,
+          validNativeTarget ? nativePointerBits : undefined,
+        ) === null ||
+        binding.result.passMode !== "value" ||
+        binding.result.ownership.kind !== "value" ||
+        binding.error.detect.kind !== "never"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid nonzero boolean result projection`,
+          loc: moduleLoc,
+        });
+      }
     } else if (resultProjection?.kind === "boolean") {
       const resultType = binding.result.type;
       const info = resultType.kind === "nativeScalar"
@@ -2307,7 +2339,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const falseValue = parseCanonicalNativeInteger(resultProjection.falseValue);
       const trueValue = parseCanonicalNativeInteger(resultProjection.trueValue);
       if (
-        Object.keys(resultProjection).sort().join(",") !== "falseValue,kind,trueValue" ||
+        Object.keys(resultProjection).sort().join(",") !== "conversion,falseValue,kind,trueValue" ||
+        resultProjection.conversion !== "exact" ||
         info === null ||
         falseValue === null ||
         trueValue === null ||

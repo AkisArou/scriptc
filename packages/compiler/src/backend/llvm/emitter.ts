@@ -7623,6 +7623,29 @@ class LlEmitter {
                 callArgs.push(`${parameterType} ${rounded}`);
                 break;
               }
+              if (parameter.projection.conversion === "wrap") {
+                /* The ECMAScript modulo conversion, which is total: every
+                 * double has an answer, so nothing is checked and nothing
+                 * throws. The runtime helpers keep both backends on one
+                 * definition of what ToInt32/ToUint32 mean. */
+                const info = nativeIntegerInfo(
+                  parameter.type.scalar,
+                  this.mod.nativeTarget?.pointerBits,
+                );
+                if (info === null) {
+                  throw new Error(`llvm emitter bug: wrapping conversion over ${parameter.type.scalar} in ${binding.id}`);
+                }
+                const helper = info.signed ? "scr_bit_or" : "scr_bit_ushr";
+                this.declare(`declare double @${helper}(double, double)`);
+                const wrapped = B.tmp();
+                const narrowed = B.tmp();
+                B.line(
+                  `${wrapped} = call double @${helper}(double ${arg.name}, double 0.0)`,
+                );
+                B.line(`${narrowed} = fptosi double ${wrapped} to ${parameterType}`);
+                callArgs.push(`${parameterType} ${narrowed}`);
+                break;
+              }
               /* A literal argument the emitter can re-prove in place needs no
                * runtime check: the constant IS the converted value, which is
                * exactly what a branded exact construction would have emitted.
@@ -8108,6 +8131,15 @@ class LlEmitter {
           }
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
+          if (binding.result.projection.conversion === "nonZero") {
+            // C's own truth test: nothing to validate, nothing to throw.
+            const truthy = B.tmp();
+            B.line(
+              `${truthy} = icmp ne ${this.llType(binding.result.type)} ${raw}, 0`,
+            );
+            releaseArguments();
+            return { name: truthy, type: e.type };
+          }
           const value = B.tmp();
           const isFalse = B.tmp();
           const valid = B.tmp();

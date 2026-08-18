@@ -411,14 +411,27 @@ export type IrNativeArgumentType =
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
   | { kind: "boolean"; argument: number; falseValue: string; trueValue: string }
-  /** Checked JavaScript-number ingress into an exact integer slot of at most
+  /** JavaScript-number ingress into an exact integer slot, naming which
+   * conversion it performs. `checked` requires finite, integral, and in the
+   * slot's range, raising a catchable TypeError otherwise; `wrap` is the
+   * ECMAScript modulo conversion, exactly what `| 0` and `>>> 0` spell in
+   * the language.
+   *
+   * Naming it is the point. Both behaviors are defensible and a binding
+   * author may want either, but a boundary that wraps INVISIBLY is a
+   * corruption wearing a conversion's clothes. There is no default: a
+   * position states which one it gets.
+   *
+   * The original text follows, for the checked arm it still describes.
+   *
+   * Checked JavaScript-number ingress into an exact integer slot of at most
    * 32 bits. The source argument is f64; crossing requires finite, integral
    * (trunc(v) == v), and in the slot's range, else a catchable TypeError at
    * the boundary — the native boolean projection's mechanism. -0 crosses as
    * integer zero. 64-bit and pointer-width slots are excluded: their range
    * exceeds what an f64 carries injectively, which is what BigInt carriers
    * are for. */
-  | { kind: "number"; argument: number }
+  | { kind: "number"; argument: number; conversion: "checked" | "wrap" }
   | { kind: "utf8CString"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
@@ -429,7 +442,13 @@ export type IrNativeParameterProjection =
 
 export type IrNativeResultProjection =
   | { kind: "direct" }
-  | { kind: "boolean"; falseValue: string; trueValue: string }
+  /** A native integer becoming a JavaScript boolean, naming which reading it
+   * performs. `exact` admits only the two declared representations and
+   * raises catchably on anything else — the contract a binding states when
+   * the foreign API promises exactly those. `nonZero` is C's own truth test,
+   * where every nonzero value is true and nothing can fail. */
+  | { kind: "boolean"; conversion: "exact"; falseValue: string; trueValue: string }
+  | { kind: "boolean"; conversion: "nonZero" }
   /** Exact widening of an at-most-32-bit integer result into the source f64.
    * Lossless for every representable value, so there is no failure path and
    * validation requires the no-fail error contract. */

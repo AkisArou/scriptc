@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey, isFfiReleaseParam } from "../../ir/nodes.js";
+import { arrayOf, nativeIntegerInfo, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey, isFfiReleaseParam } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -2493,6 +2493,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               if (parameter.type.scalar === "f32") {
                 return `scr_native_f32_from_number(${arg.name})`;
               }
+              if (parameter.projection.conversion === "wrap") {
+                /* The ECMAScript modulo conversion, which is total: every
+                 * double has an answer, so nothing is checked and nothing
+                 * throws. `| 0` and `>>> 0` spell the same thing in source,
+                 * which is why this is a conversion the document names
+                 * rather than a behavior the boundary assumes. */
+                const info = nativeIntegerInfo(
+                  parameter.type.scalar,
+                  E.mod.nativeTarget?.pointerBits,
+                );
+                if (info === null) {
+                  throw new Error(`emitter bug: wrapping conversion over ${parameter.type.scalar} in ${binding.id}`);
+                }
+                const via = info.signed
+                  ? `scr_bit_or(${arg.name}, 0.0)`
+                  : `scr_bit_ushr(${arg.name}, 0.0)`;
+                return `(${cType(parameter.type)})${via}`;
+              }
               /* A literal argument the emitter can re-prove in place needs no
                * runtime check: the constant IS the converted value, which is
                * exactly what a branded exact construction would have emitted. */
@@ -2725,6 +2743,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             throw new Error(`emitter bug: invalid boolean result projection in ${binding.id}`);
           }
           const raw = E.newTemp(binding.result.type, call);
+          if (binding.result.projection.conversion === "nonZero") {
+            // C's own truth test: nothing to validate, nothing to throw.
+            const result = E.newTemp(e.type, `(${raw.name} != 0)`);
+            releaseArguments();
+            return result;
+          }
           const trueValue = cNativeScalarLiteral(
             binding.result.type,
             binding.result.projection.trueValue,
