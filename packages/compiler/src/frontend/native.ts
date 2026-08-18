@@ -131,10 +131,7 @@ export interface NativeFrontendBinding {
       | { readonly kind: "value" }
       | { readonly kind: "borrowed"; readonly scope: "call" }
       | { readonly kind: "owned"; readonly transfer: "to-native" }
-      | {
-          readonly kind: "callback";
-          readonly lifetime: "call" | "until-cancelled";
-        };
+      | { readonly kind: "callback" };
     readonly projection: Readonly<IrNativeParameterProjection>;
   }[];
   readonly result: {

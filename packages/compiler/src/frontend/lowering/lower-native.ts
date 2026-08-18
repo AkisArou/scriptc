@@ -15,7 +15,7 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
+import { nativeCallbackIsRetained, nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -584,7 +584,7 @@ function lowerNativeInvocation(
     L.usedNativeBindingIds.add(binding.result.ownership.destructor);
   }
   for (const argument of binding.arguments) {
-    if (argument.callback?.lifetime === "until-cancelled") {
+    if (argument.callback && nativeCallbackIsRetained(argument.callback)) {
       L.usedNativeBindingIds.add(argument.callback.cancellationBinding);
     }
   }
@@ -1202,33 +1202,41 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
 function materializeNativeCallbackContract(
   contract: Readonly<IrNativeCallbackContract>,
 ): IrNativeCallbackContract {
-  if (contract.lifetime === "call") {
+  const sourceArguments = contract.sourceArguments.map((argument) => ({ ...argument }));
+  if (contract.owner.kind === "call") {
     return {
-      ...contract,
-      registrationOwner: { kind: "native-call" },
+      owner: { kind: "call" },
       allowedInvocationExecutors: ["same-as-caller"],
+      synchronousReturn: true,
       transports: contract.transports.map(() => ({ kind: "borrow" })),
-      sourceArguments: contract.sourceArguments.map((argument) => ({ ...argument })),
+      sourceArguments,
     };
   }
+  if (!nativeCallbackIsRetained(contract)) {
+    throw new Error("frontend bug: a non-call callback owner must be retained");
+  }
+  const owner = { ...contract.owner };
+  const cancellationBinding = contract.cancellationBinding;
   /* A retained callback the native side asks synchronously borrows its
    * payloads for the call, exactly as a call-scoped one does: nothing
    * outlives the answer, so nothing is copied. */
   if (contract.synchronousReturn) {
     return {
-      ...contract,
-      registrationOwner: { ...contract.registrationOwner },
+      owner,
+      cancellationBinding,
       allowedInvocationExecutors: ["same-as-caller"],
+      synchronousReturn: true,
       transports: contract.transports.map(() => ({ kind: "borrow" })),
-      sourceArguments: contract.sourceArguments.map((argument) => ({ ...argument })),
+      sourceArguments,
     };
   }
   return {
-    ...contract,
-    registrationOwner: { ...contract.registrationOwner },
+    owner,
+    cancellationBinding,
     allowedInvocationExecutors: [...contract.allowedInvocationExecutors],
+    synchronousReturn: false,
     transports: contract.transports.map(() => ({ kind: "copy" })),
-    sourceArguments: contract.sourceArguments.map((argument) => ({ ...argument })),
+    sourceArguments,
   };
 }
 

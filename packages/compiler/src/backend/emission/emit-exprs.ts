@@ -2399,14 +2399,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const callbacksMayThrow = binding.arguments.some(
           (argument) =>
             argument.type.kind === "func" &&
-            argument.callback?.lifetime === "call",
+            argument.callback?.owner.kind === "call",
         );
         const retainedTokens = new Map<number, string>();
         const retainedOwnerArguments = new Set<number>();
         binding.arguments.forEach((argument, argumentIndex) => {
           if (
             argument.type.kind !== "func" ||
-            argument.callback?.lifetime !== "until-cancelled"
+            argument.callback === undefined || argument.callback.owner.kind === "call"
           ) {
             return;
           }
@@ -2414,17 +2414,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const token = `sc_t${E.tempCounter++}`;
           const sourceOwner = argument.callback.sourceArguments.some(
               (source) => source.kind === "registration-owner") &&
-              argument.callback.registrationOwner.kind === "argument"
-            ? args[argument.callback.registrationOwner.argument]!.name
+              argument.callback.owner.kind === "argument"
+            ? args[argument.callback.owner.argument]!.name
             : "NULL";
           E.line(
             `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
               `${args[argumentIndex]!.name}, &${adapter.symbol}_signature, ${sourceOwner});`,
           );
           retainedTokens.set(argumentIndex, token);
-          if (argument.callback.registrationOwner.kind === "argument") {
+          if (argument.callback.owner.kind === "argument") {
             retainedOwnerArguments.add(
-              argument.callback.registrationOwner.argument,
+              argument.callback.owner.argument,
             );
           }
         });

@@ -25,7 +25,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsRetained, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1553,7 +1553,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         ? (transport as { kind?: unknown }).kind
         : null
     );
-    const owner = candidate["registrationOwner"];
+    const owner = candidate["owner"];
     const executors = candidate["allowedInvocationExecutors"];
     const validSourceArguments = sourceArguments.every((argument, index) => {
       if (typeof argument !== "object" || argument === null) return false;
@@ -1586,20 +1586,16 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     ) {
       return false;
     }
-    if (candidate["lifetime"] === "call") {
+    const ownerKind = (owner as { kind?: unknown }).kind;
+    if (ownerKind === "call") {
       return Object.keys(candidate).sort().join(",") ===
-          "allowedInvocationExecutors,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
+          "allowedInvocationExecutors,owner,sourceArguments,synchronousReturn,transports" &&
         Object.keys(owner).length === 1 &&
-        (owner as { kind?: unknown }).kind === "native-call" &&
         executors.length === 1 && executors[0] === "same-as-caller" &&
-        candidate["deliveryExecutor"] === "same-as-caller" &&
         candidate["synchronousReturn"] === true &&
-        transportKinds.every((kind) => kind === "borrow") &&
-        candidate["reentrancy"] === "required" &&
-        candidate["postDisposal"] === "not-invoked" &&
-        candidate["shutdown"] === "drain";
+        transportKinds.every((kind) => kind === "borrow");
     }
-    if (candidate["lifetime"] === "until-cancelled") {
+    if (ownerKind === "result" || ownerKind === "argument") {
       const allowed = new Set(["same-as-caller", "any-attached-thread"]);
       const ownerCandidate = owner as Record<string, unknown>;
       const validOwner =
@@ -1629,33 +1625,24 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           return false;
         }
         return Object.keys(candidate).sort().join(",") ===
-            "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
+            "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn,transports" &&
           validOwner &&
           typeof candidate["cancellationBinding"] === "string" &&
           candidate["cancellationBinding"] !== "" &&
           executors.length === 1 && executors[0] === "same-as-caller" &&
-          candidate["deliveryExecutor"] === "same-as-caller" &&
           transportKinds.every((kind) => kind === "borrow") &&
-          candidate["reentrancy"] === "required" &&
-          candidate["postDisposal"] === "not-invoked" &&
-          candidate["shutdown"] === "drain" &&
           type.ret.kind !== "void";
       }
       return Object.keys(candidate).sort().join(",") ===
-          "allowedInvocationExecutors,cancellationBinding,deliveryExecutor,lifetime,postDisposal,reentrancy,registrationOwner,shutdown,sourceArguments,synchronousReturn,transports" &&
+          "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn,transports" &&
         validOwner &&
         typeof candidate["cancellationBinding"] === "string" &&
         candidate["cancellationBinding"] !== "" &&
         executors.length > 0 &&
         executors.every((executor) => allowed.has(String(executor))) &&
         new Set(executors).size === executors.length &&
-        candidate["deliveryExecutor"] === "runtime-owner" &&
         candidate["synchronousReturn"] === false &&
         transportKinds.every((kind) => kind === "copy") &&
-        (candidate["reentrancy"] === "allowed" ||
-          candidate["reentrancy"] === "required") &&
-        candidate["postDisposal"] === "not-invoked" &&
-        candidate["shutdown"] === "drain" &&
         type.ret.kind === "void";
     }
     return false;
@@ -2147,12 +2134,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               } else {
                 if (
                   projectedOwner ||
-                  callbackContract.lifetime !== "until-cancelled" ||
-                  callbackContract.registrationOwner.kind !== "argument"
+                  callbackContract.owner.kind === "call" ||
+                  callbackContract.owner.kind !== "argument"
                 ) return false;
                 projectedOwner = true;
                 const ownerType = binding.arguments[
-                  callbackContract.registrationOwner.argument
+                  callbackContract.owner.argument
                 ]?.type;
                 if (ownerType?.kind !== "nativeHandle") return false;
                 expected = ownerType;
@@ -2213,8 +2200,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             parameter.type.kind !== "nativeCallback" ||
             !validNativeCallback(parameter.type) ||
             !callbackSourceProjectionValid ||
-            parameter.ownership.kind !== "callback" ||
-            parameter.ownership.lifetime !== sourceArgument.callback?.lifetime
+            parameter.ownership.kind !== "callback"
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-function projection`,
@@ -2228,8 +2214,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             sourceArgument.type.kind !== "func" ||
             parameter.type.kind !== "nativeContext" ||
             !validNativeContext(parameter.type) ||
-            parameter.ownership.kind !== "callback" ||
-            parameter.ownership.lifetime !== sourceArgument.callback?.lifetime
+            parameter.ownership.kind !== "callback"
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-context projection`,
@@ -2443,7 +2428,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     let retainedOwnerArgument: number | undefined;
     for (const argument of binding.arguments) {
       const contract = argument.callback;
-      if (argument.type.kind !== "func" || contract?.lifetime !== "until-cancelled") {
+      if (
+        argument.type.kind !== "func" || contract === undefined ||
+        !nativeCallbackIsRetained(contract)
+      ) {
         continue;
       }
       if (
@@ -2455,18 +2443,18 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
-      if (contract.registrationOwner.kind === "argument") {
+      if (contract.owner.kind === "argument") {
         if (
           retainedOwnerArgument !== undefined &&
-          retainedOwnerArgument !== contract.registrationOwner.argument
+          retainedOwnerArgument !== contract.owner.argument
         ) {
           errors.push({
             message: `Native IR binding "${binding.id}" retained callbacks have conflicting receiver owners`,
             loc: moduleLoc,
           });
         }
-        retainedOwnerArgument = contract.registrationOwner.argument;
-        const owner = binding.arguments[contract.registrationOwner.argument];
+        retainedOwnerArgument = contract.owner.argument;
+        const owner = binding.arguments[contract.owner.argument];
         const ownerDefinition = owner?.type.kind === "nativeHandle"
           ? nativeTypesById.get(owner.type.typeId)
           : undefined;

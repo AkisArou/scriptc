@@ -44,16 +44,11 @@ const CALL_I32_CALLBACK = {
 } as const;
 const CALL_I32_SOURCE = nativeCallbackArgumentType(CALL_I32_CALLBACK);
 const CALL_I32_CONTRACT = {
-  lifetime: "call",
-  registrationOwner: { kind: "native-call" },
+  owner: { kind: "call" },
   allowedInvocationExecutors: ["same-as-caller"],
-  deliveryExecutor: "same-as-caller",
   synchronousReturn: true,
   transports: [{ kind: "borrow" }],
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
-  reentrancy: "required",
-  postDisposal: "not-invoked",
-  shutdown: "drain",
 } as const satisfies IrNativeCallbackContract;
 const RETAINED_I32_CALLBACK = {
   callingConvention: "c",
@@ -63,21 +58,16 @@ const RETAINED_I32_CALLBACK = {
 } as const;
 const RETAINED_I32_SOURCE = nativeCallbackArgumentType(RETAINED_I32_CALLBACK);
 const RETAINED_I32_CONTRACT = {
-  lifetime: "until-cancelled",
-  registrationOwner: { kind: "result" },
+  owner: { kind: "result" },
   cancellationBinding:
     "scriptc.fixture.c-v1@0.0.0#subscription_destroy",
   allowedInvocationExecutors: [
     "same-as-caller",
     "any-attached-thread",
   ],
-  deliveryExecutor: "runtime-owner",
   synchronousReturn: false,
   transports: [{ kind: "copy" }],
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
-  reentrancy: "allowed",
-  postDisposal: "not-invoked",
-  shutdown: "drain",
 } as const satisfies IrNativeCallbackContract;
 /* The checked-number surface: source sees plain f64 numbers; the physical
  * slots stay the exact scalars, so every binding below reuses an existing C
@@ -336,17 +326,12 @@ const ASK_I32_CALLBACK = {
 } as const;
 const ASK_I32_SOURCE = nativeCallbackArgumentType(ASK_I32_CALLBACK);
 const ASK_I32_CONTRACT = {
-  lifetime: "until-cancelled",
-  registrationOwner: { kind: "result" },
+  owner: { kind: "result" },
   cancellationBinding: "scriptc.fixture.c-v1@0.0.0#asker_destroy",
   allowedInvocationExecutors: ["same-as-caller"],
-  deliveryExecutor: "same-as-caller",
   synchronousReturn: true,
   transports: [{ kind: "borrow" }],
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
-  reentrancy: "required",
-  postDisposal: "not-invoked",
-  shutdown: "drain",
 } as const satisfies IrNativeCallbackContract;
 /* The same question answered with an ordinary TypeScript boolean over the
  * fixture's exact i32 storage — the shape an event handler takes when its
@@ -603,14 +588,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: RETAINED_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
       ],
@@ -643,14 +628,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "call" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "call" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
         {
@@ -687,14 +672,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: CALL_F32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "call" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "call" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
         {
@@ -951,14 +936,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "call" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "call" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
         {
@@ -1119,14 +1104,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: ASK_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
       ],
@@ -1160,14 +1145,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: ASK_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
       ],
@@ -1265,14 +1250,14 @@ const localNativeInput: NativeFrontendInput = {
           name: "callback",
           type: { kind: "nativeCallback", signature: RETAINED_I32_CALLBACK },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackFunction", argument: 0 },
         },
         {
           name: "context",
           type: { kind: "nativeContext", addressSpace: 0 },
           passMode: "pointer",
-          ownership: { kind: "callback", lifetime: "until-cancelled" },
+          ownership: { kind: "callback" },
           projection: { kind: "callbackContext", argument: 0 },
         },
       ],
@@ -1689,14 +1674,14 @@ function frontendNativeInput(): NativeFrontendInput {
             name: "callback",
             type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
             passMode: "pointer",
-            ownership: { kind: "callback", lifetime: "call" },
+            ownership: { kind: "callback" },
             projection: { kind: "callbackFunction", argument: 0 },
           },
           {
             name: "context",
             type: { kind: "nativeContext", addressSpace: 0 },
             passMode: "pointer",
-            ownership: { kind: "callback", lifetime: "call" },
+            ownership: { kind: "callback" },
             projection: { kind: "callbackContext", argument: 0 },
           },
           {
@@ -1748,14 +1733,14 @@ function frontendNativeInput(): NativeFrontendInput {
             name: "callback",
             type: { kind: "nativeCallback", signature: CALL_I32_CALLBACK },
             passMode: "pointer",
-            ownership: { kind: "callback", lifetime: "call" },
+            ownership: { kind: "callback" },
             projection: { kind: "callbackFunction", argument: 0 },
           },
           {
             name: "context",
             type: { kind: "nativeContext", addressSpace: 0 },
             passMode: "pointer",
-            ownership: { kind: "callback", lifetime: "call" },
+            ownership: { kind: "callback" },
             projection: { kind: "callbackContext", argument: 0 },
           },
           {
@@ -2319,17 +2304,12 @@ test("Native IR rejects a synchronously answered callback with no answer", () =>
     name: "callback",
     type: { kind: "func", params: [], ret: { kind: "void" } },
     callback: {
-      lifetime: "until-cancelled",
-      registrationOwner: { kind: "result" },
+      owner: { kind: "result" },
       cancellationBinding: binding.id,
       allowedInvocationExecutors: ["same-as-caller"],
-      deliveryExecutor: "same-as-caller",
       synchronousReturn: true,
       transports: [],
       sourceArguments: [],
-      reentrancy: "required",
-      postDisposal: "not-invoked",
-      shutdown: "drain",
     },
   }];
   (binding as { parameters: unknown }).parameters = [{
@@ -2344,7 +2324,7 @@ test("Native IR rejects a synchronously answered callback with no answer", () =>
       },
     },
     passMode: "pointer",
-    ownership: { kind: "callback", lifetime: "until-cancelled" },
+    ownership: { kind: "callback" },
     projection: { kind: "callbackFunction", argument: 0 },
   }];
   expect(validateModule(mod).map(({ message }) => message)).toContain(
@@ -2749,7 +2729,7 @@ test("Native IR rejects malformed or ambiguous call-scoped callback projections"
       name: "context",
       type: { kind: "nativeContext", addressSpace: 0 },
       passMode: "pointer",
-      ownership: { kind: "callback", lifetime: "call" },
+      ownership: { kind: "callback" },
       projection: { kind: "callbackContext", argument: 0 },
     },
   ];
@@ -2758,14 +2738,14 @@ test("Native IR rejects malformed or ambiguous call-scoped callback projections"
   );
 
   const missingContext = structuredClone(mod);
-  missingContext.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback", lifetime: "call" };
+  missingContext.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback" };
   missingContext.nativeBindings![0]!.parameters.pop();
   expect(validateModule(missingContext).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" argument "callback" has an incomplete or ambiguous ABI projection',
   );
 
   const wrongSignature = structuredClone(mod);
-  wrongSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback", lifetime: "call" };
+  wrongSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback" };
   const callbackType = wrongSignature.nativeBindings![0]!.parameters[0]!.type;
   if (callbackType.kind !== "nativeCallback") throw new Error("test fixture lost its callback type");
   callbackType.signature.result = U32;
@@ -2774,7 +2754,7 @@ test("Native IR rejects malformed or ambiguous call-scoped callback projections"
   );
 
   const missingSignature = structuredClone(mod);
-  missingSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback", lifetime: "call" };
+  missingSignature.nativeBindings![0]!.parameters[0]!.ownership = { kind: "callback" };
   const malformedCallbackType = missingSignature.nativeBindings![0]!.parameters[0]!.type;
   Reflect.deleteProperty(malformedCallbackType, "signature");
   expect(() => validateModule(missingSignature)).not.toThrow();

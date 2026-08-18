@@ -2253,7 +2253,7 @@ export class CEmitter {
        * table lookup is the same one a queued delivery performs — just
        * without the queue between the question and the answer. */
       if (
-        adapter.contract.lifetime === "until-cancelled" &&
+        adapter.contract.owner.kind !== "call" &&
         adapter.contract.synchronousReturn
       ) {
         const signatureId = `${adapter.symbol}_signature`;
@@ -2304,7 +2304,7 @@ export class CEmitter {
         );
         continue;
       }
-      if (adapter.contract.lifetime === "until-cancelled") {
+      if (adapter.contract.owner.kind !== "call") {
         const invocation = `${adapter.symbol}_invocation`;
         const signatureId = `${adapter.symbol}_signature`;
         const invoke = `${adapter.symbol}_invoke`;

@@ -271,36 +271,41 @@ export type IrNativeCallbackSourceArgument =
     }
   | { kind: "registration-owner" };
 
+/** Which thing owns a callback registration, and therefore how long the
+ * registration lives. This is the whole lifetime story: a call-scoped
+ * callback is one the native call itself owns, and a retained one is owned by
+ * a value that outlives the call. Stating it once removes the possibility of
+ * a `lifetime` and an owner that disagree. */
+export type IrNativeCallbackOwner =
+  | { kind: "call" }
+  | { kind: "result" }
+  | { kind: "argument"; argument: number };
+
+/** Delivery executor, reentrancy, post-disposal behavior, and shutdown
+ * behavior are deliberately absent. Each was pinned by the validator to the
+ * one value its arm implies and then read by nothing: a call-scoped callback
+ * always runs on the caller, an asynchronous retained one always through the
+ * runtime owner, and every implemented contract drains at shutdown and is not
+ * invoked after disposal. A field the emitter derives is not documentation;
+ * it is a second place for the truth to live. */
 export type IrNativeCallbackContract =
   | {
-      lifetime: "call";
-      registrationOwner: { kind: "native-call" };
+      owner: { kind: "call" };
       allowedInvocationExecutors: readonly ["same-as-caller"];
-      deliveryExecutor: "same-as-caller";
       synchronousReturn: true;
       transports: readonly { kind: "borrow" }[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
-      reentrancy: "required";
-      postDisposal: "not-invoked";
-      shutdown: "drain";
     }
   | {
-      lifetime: "until-cancelled";
-      registrationOwner:
-        | { kind: "result" }
-        | { kind: "argument"; argument: number };
+      owner: { kind: "result" } | { kind: "argument"; argument: number };
       cancellationBinding: string;
       allowedInvocationExecutors: readonly (
         | "same-as-caller"
         | "any-attached-thread"
       )[];
-      deliveryExecutor: "runtime-owner";
       synchronousReturn: false;
       transports: readonly { kind: "copy" }[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
-      reentrancy: "allowed" | "required";
-      postDisposal: "not-invoked";
-      shutdown: "drain";
     }
   /**
    * A retained callback the native side ASKS rather than tells: it is
@@ -323,20 +328,34 @@ export type IrNativeCallbackContract =
    * outer native call is what observes it.
    */
   | {
-      lifetime: "until-cancelled";
-      registrationOwner:
-        | { kind: "result" }
-        | { kind: "argument"; argument: number };
+      owner: { kind: "result" } | { kind: "argument"; argument: number };
       cancellationBinding: string;
       allowedInvocationExecutors: readonly ["same-as-caller"];
-      deliveryExecutor: "same-as-caller";
       synchronousReturn: true;
       transports: readonly { kind: "borrow" }[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
-      reentrancy: "required";
-      postDisposal: "not-invoked";
-      shutdown: "drain";
     };
+
+/** A retained contract: one whose registration outlives the call that made
+ * it, and therefore names the binding that cancels it. TypeScript cannot
+ * discriminate a union on a NESTED property, so the narrowing that `owner`
+ * implies is spelled once here rather than by giving the contract a second,
+ * redundant discriminant to keep in step with the first. */
+/** A retained contract: one whose registration outlives the call that made
+ * it, and therefore names the binding that cancels it. TypeScript cannot
+ * discriminate a union on a NESTED property, so the narrowing that `owner`
+ * implies is spelled once here rather than by giving the contract a second,
+ * redundant discriminant to keep in step with the first. */
+export type IrNativeRetainedCallbackContract = Extract<
+  IrNativeCallbackContract,
+  { cancellationBinding: string }
+>;
+
+export function nativeCallbackIsRetained(
+  contract: IrNativeCallbackContract,
+): contract is IrNativeRetainedCallbackContract {
+  return contract.owner.kind !== "call";
+}
 
 /**
  * The default source projection of a physical callback signature: every
@@ -1265,7 +1284,7 @@ export interface IrNativeBinding {
       | { kind: "value" }
       | { kind: "borrowed"; scope: "call" }
       | { kind: "owned"; transfer: "to-native" }
-      | { kind: "callback"; lifetime: "call" | "until-cancelled" };
+      | { kind: "callback" };
     projection: IrNativeParameterProjection;
   }[];
   result: {
@@ -7373,7 +7392,7 @@ export function nativeDestructorBindingIds(mod: IrModule): ReadonlySet<string> {
 export function moduleUsesRetainedCallbacks(mod: IrModule): boolean {
   return (mod.nativeBindings ?? []).some((binding) =>
     binding.arguments.some(
-      (argument) => argument.callback?.lifetime === "until-cancelled",
+      (argument) => argument.callback !== undefined && argument.callback.owner.kind !== "call",
     )
   );
 }

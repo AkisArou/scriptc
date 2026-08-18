@@ -1919,7 +1919,7 @@ class LlEmitter {
        * has to exist before the emitting call returns. Kept in lockstep with
        * the C backend's trampoline. */
       if (
-        adapter.contract.lifetime === "until-cancelled" &&
+        adapter.contract.owner.kind !== "call" &&
         adapter.contract.synchronousReturn
       ) {
         const signatureId = `@${adapter.symbol}_signature`;
@@ -2007,7 +2007,7 @@ class LlEmitter {
         );
         continue;
       }
-      if (adapter.contract.lifetime === "until-cancelled") {
+      if (adapter.contract.owner.kind !== "call") {
         const injectsOwner = adapter.contract.sourceArguments.some(
           (argument) => argument.kind === "registration-owner",
         );
@@ -7490,14 +7490,14 @@ class LlEmitter {
         const callbacksMayThrow = binding.arguments.some(
           (argument) =>
             argument.type.kind === "func" &&
-            argument.callback?.lifetime === "call",
+            argument.callback?.owner.kind === "call",
         );
         const retainedTokens = new Map<number, string>();
         const retainedOwnerArguments = new Set<number>();
         binding.arguments.forEach((argument, argumentIndex) => {
           if (
             argument.type.kind !== "func" ||
-            argument.callback?.lifetime !== "until-cancelled"
+            argument.callback === undefined || argument.callback.owner.kind === "call"
           ) {
             return;
           }
@@ -7507,8 +7507,8 @@ class LlEmitter {
           );
           const sourceOwner = argument.callback.sourceArguments.some(
               (source) => source.kind === "registration-owner") &&
-              argument.callback.registrationOwner.kind === "argument"
-            ? args[argument.callback.registrationOwner.argument]!.name
+              argument.callback.owner.kind === "argument"
+            ? args[argument.callback.owner.argument]!.name
             : "null";
           const token = B.tmp();
           B.line(
@@ -7517,9 +7517,9 @@ class LlEmitter {
               `ptr ${sourceOwner})`,
           );
           retainedTokens.set(argumentIndex, token);
-          if (argument.callback.registrationOwner.kind === "argument") {
+          if (argument.callback.owner.kind === "argument") {
             retainedOwnerArguments.add(
-              argument.callback.registrationOwner.argument,
+              argument.callback.owner.argument,
             );
           }
         });

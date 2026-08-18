@@ -5,6 +5,7 @@ import type {
   IrNativeCallbackContract,
   IrNativeCallbackType,
 } from "../ir/nodes.js";
+import { nativeCallbackIsRetained } from "../ir/nodes.js";
 
 export interface NativeCallbackAdapter {
   readonly symbol: string;
@@ -29,7 +30,8 @@ export function nativeCallbackCancellationArgument(
   const cancellation = bindings.some((registration) =>
     registration.arguments.some((argument) =>
       argument.type.kind === "func" &&
-      argument.callback?.lifetime === "until-cancelled" &&
+      argument.callback !== undefined &&
+      nativeCallbackIsRetained(argument.callback) &&
       argument.callback.cancellationBinding === binding.id
     )
   );
