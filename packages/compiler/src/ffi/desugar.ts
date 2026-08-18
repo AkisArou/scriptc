@@ -184,9 +184,7 @@ function desugarCallback(entry: IrFfiImport, callbackSlot: number): {
    * callback and hands back nothing has given the program nothing to hang the
    * registration on. It ends when a release names the same function value
    * back, or when the process does. */
-  if (callback.lifetime === "retained" && (!takesContext || callback.returns !== "void")) {
-    return null;
-  }
+  if (callback.lifetime === "retained" && callback.returns !== "void") return null;
   const contract: IrNativeCallbackContract = callback.lifetime === "retained"
     ? {
         owner: { kind: "process" },

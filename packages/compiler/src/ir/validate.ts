@@ -2405,12 +2405,16 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             !validNativeCallback(parameter.type) ||
             !callbackSourceProjectionValid ||
             parameter.ownership.kind !== "callback" ||
-            /* A closure the trampoline cannot reach through a context slot is
-             * lent through a thread-local one for the dynamic extent of the
-             * call, so it is readable for exactly as long as the call lasts.
-             * A registration that outlives the call has nothing to read. */
+            /* A closure the trampoline cannot reach through a context slot
+             * needs somewhere else to live, and there are exactly two such
+             * places: a thread-local for the dynamic extent of a call, or a
+             * replaceable process-global for a registration nothing owns. A
+             * registration an OBJECT owns has neither — its closure is found
+             * through the owner, and without a context slot there is nothing
+             * to find the owner by. */
             (!projectionCounts.callbackTakesContext &&
-              callbackContract?.owner.kind !== "call")
+              callbackContract?.owner.kind !== "call" &&
+              callbackContract?.owner.kind !== "process")
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid callback-function projection`,

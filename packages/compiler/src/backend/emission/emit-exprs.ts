@@ -2445,7 +2445,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           if (adapter.table === null) {
             throw new Error(`emitter bug: process-scoped registration without a ledger in ${binding.id}`);
           }
-          return [{ table: adapter.table, closure: args[argumentIndex]!.name }];
+          return [{
+            table: adapter.table,
+            global: adapter.global,
+            closure: args[argumentIndex]!.name,
+          }];
         });
         const processReleases = binding.parameters.flatMap((parameter) => {
           if (parameter.projection.kind !== "callbackRelease") return [];
@@ -2459,7 +2463,17 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return [{ table: adapter.table, closure: args[parameter.projection.argument]!.name }];
         });
         for (const registration of processRegistrations) {
-          E.line(`scr_ffi_retain(&${registration.table}, ${registration.closure});`);
+          /* A replaceable slot registers in two halves. The first pins the
+           * incoming closure and arms an EMPTY slot — so a library that fires
+           * on subscribe reaches the new closure — but leaves a live
+           * registration dispatching, because a setter may flush the outgoing
+           * one last time mid-replace. The second half, after the call,
+           * repoints the slot and retires what it superseded. */
+          E.line(
+            registration.global === null
+              ? `scr_ffi_retain(&${registration.table}, ${registration.closure});`
+              : `scr_ffi_retain_slot(&${registration.table}, &${registration.global}, ${registration.closure});`,
+          );
         }
         for (const release of processReleases) {
           E.line(`scr_ffi_require(&${release.table}, ${release.closure});`);
@@ -2730,6 +2744,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
          * time on the way out, and the pin is what keeps that legal. */
         const afterCall = [
           ...rawContexts.map((saved) => `${saved.tls} = ${saved.previous};`).reverse(),
+          ...processRegistrations.flatMap((registration) =>
+            registration.global === null
+              ? []
+              : [`scr_ffi_commit_slot(&${registration.table}, ${registration.closure});`]
+          ),
           ...processReleases.map(
             (release) => `scr_ffi_release(&${release.table}, ${release.closure});`,
           ),

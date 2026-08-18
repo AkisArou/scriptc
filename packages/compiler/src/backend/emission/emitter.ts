@@ -2504,15 +2504,20 @@ export class CEmitter {
         : "scriptc: native callback invoked outside its call-scoped lifetime";
       out.push(
         ...(adapter.table === null ? [] : [`static ScrFfiTable ${adapter.table};`]),
-        /* A signature with no userdata slot cannot be handed its closure, so
-         * the call lends one here for its own dynamic extent. The NULL check
-         * below is what makes an invocation outside that extent a precise
-         * trap rather than a jump through a stale pointer. */
+        /* A signature with no userdata slot cannot be handed its closure. A
+         * call-scoped one borrows a thread-local for its own dynamic extent;
+         * a process-scoped one has no call to borrow and dispatches through
+         * a replaceable global. Either way the NULL check below is what makes
+         * an invocation outside the registration's life a precise trap rather
+         * than a jump through a stale pointer. */
         ...(adapter.tls === null
           ? []
           : [`static _Thread_local ScrClosure *${adapter.tls};`]),
+        ...(adapter.global === null
+          ? []
+          : [`static ScrClosure *${adapter.global};`]),
         `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-        `  ScrClosure *sc_cb = ${adapter.tls ?? "(ScrClosure *)sc_ctx"};`,
+        `  ScrClosure *sc_cb = ${adapter.tls ?? adapter.global ?? "(ScrClosure *)sc_ctx"};`,
         `  if (sc_cb == NULL) scr_trap("${expired}\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );

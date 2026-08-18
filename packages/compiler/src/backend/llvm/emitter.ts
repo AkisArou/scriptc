@@ -1980,6 +1980,9 @@ class LlEmitter {
       if (adapter.table !== null) {
         defs.push(`@${adapter.table} = internal global %ScrFfiTable zeroinitializer`);
       }
+      if (adapter.global !== null) {
+        defs.push(`@${adapter.global} = internal global ptr null`);
+      }
       const signature = adapter.callback.signature;
       /* The context slot sits at its declared position rather than being
        * appended: a C API may take userdata first, last, or not at all, and
@@ -2395,16 +2398,19 @@ class LlEmitter {
        * the call lends one through this thread-local for its own dynamic
        * extent. The NULL check below is what makes an invocation outside that
        * extent a precise trap rather than a jump through a stale pointer. */
-      const closure = adapter.tls === null ? "%ctx" : "%tls.closure";
+      /* A signature with no userdata slot cannot be handed its closure. A
+       * call-scoped one borrows a thread-local for its own dynamic extent; a
+       * process-scoped one has no call to borrow and dispatches through a
+       * replaceable global. Kept in lockstep with the C backend. */
+      const lent = adapter.tls ?? adapter.global;
+      const closure = lent === null ? "%ctx" : "%lent.closure";
       defs.push(
         ...(adapter.tls === null
           ? []
           : [`@${adapter.tls} = internal thread_local global ptr null`]),
         `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
         `entry:`,
-        ...(adapter.tls === null
-          ? []
-          : [`  ${closure} = load ptr, ptr @${adapter.tls}`]),
+        ...(lent === null ? [] : [`  ${closure} = load ptr, ptr @${lent}`]),
         `  %missing = icmp eq ptr ${closure}, null`,
         `  br i1 %missing, label %expired, label %ready`,
         `expired:`,
@@ -7720,7 +7726,11 @@ class LlEmitter {
           if (adapter.table === null) {
             throw new Error(`llvm emitter bug: process-scoped registration without a ledger in ${binding.id}`);
           }
-          return [{ table: adapter.table, closure: args[argumentIndex]!.name }];
+          return [{
+            table: adapter.table,
+            global: adapter.global,
+            closure: args[argumentIndex]!.name,
+          }];
         });
         const processReleases = binding.parameters.flatMap((parameter) => {
           if (parameter.projection.kind !== "callbackRelease") return [];
@@ -7734,8 +7744,22 @@ class LlEmitter {
           return [{ table: adapter.table, closure: args[parameter.projection.argument]!.name }];
         });
         for (const registration of processRegistrations) {
-          this.declare(`declare void @scr_ffi_retain(ptr, ptr)`);
-          B.line(`call void @scr_ffi_retain(ptr @${registration.table}, ptr ${registration.closure})`);
+          /* A replaceable slot registers in two halves. The first pins the
+           * incoming closure and arms an EMPTY slot — so a library that fires
+           * on subscribe reaches the new closure — but leaves a live
+           * registration dispatching, because a setter may flush the outgoing
+           * one last time mid-replace. The second half, after the call,
+           * repoints the slot and retires what it superseded. */
+          if (registration.global === null) {
+            this.declare(`declare void @scr_ffi_retain(ptr, ptr)`);
+            B.line(`call void @scr_ffi_retain(ptr @${registration.table}, ptr ${registration.closure})`);
+          } else {
+            this.declare(`declare void @scr_ffi_retain_slot(ptr, ptr, ptr)`);
+            B.line(
+              `call void @scr_ffi_retain_slot(ptr @${registration.table}, ` +
+                `ptr @${registration.global}, ptr ${registration.closure})`,
+            );
+          }
         }
         for (const release of processReleases) {
           this.declare(`declare void @scr_ffi_require(ptr, ptr)`);
@@ -8203,6 +8227,13 @@ class LlEmitter {
         const afterCall = [
           ...rawContexts.map((saved) =>
             `store ptr ${saved.previous}, ptr @${saved.tls}`).reverse(),
+          ...processRegistrations.flatMap((registration) => {
+            if (registration.global === null) return [];
+            this.declare(`declare void @scr_ffi_commit_slot(ptr, ptr)`);
+            return [
+              `call void @scr_ffi_commit_slot(ptr @${registration.table}, ptr ${registration.closure})`,
+            ];
+          }),
           ...processReleases.map((release) => {
             this.declare(`declare void @scr_ffi_release(ptr, ptr)`);
             return `call void @scr_ffi_release(ptr @${release.table}, ptr ${release.closure})`;

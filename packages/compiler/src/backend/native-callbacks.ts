@@ -24,6 +24,11 @@ export interface NativeCallbackAdapter {
    * callback has nothing to outlive the call, and an owner-scoped one is
    * pinned by the object that owns it. */
   readonly table: string | null;
+  /** The process-global slot a contextless process-scoped registration is
+   * dispatched through, since there is no userdata to carry the closure and
+   * no call whose extent a thread-local could borrow. Replaceable: setting a
+   * second registration supersedes the first. */
+  readonly global: string | null;
 }
 
 export function nativeCallbackAdapterKey(bindingId: string, argument: number): string {
@@ -77,15 +82,25 @@ export function allocateNativeCallbackAdapters(
       }
       const contractOf = binding.arguments[parameter.projection.argument]?.callback;
       const processScoped = contractOf?.owner.kind === "process";
+      const takesContext = parameter.type.signature.parameters.some(
+        (slot) => slot.kind === "nativeContext",
+      );
       let symbol: string;
       let table: string | null;
+      let global: string | null;
       do {
         const index = suffix++;
         symbol = `sc_native_cb_${index}`;
         table = processScoped ? `sc_native_cb_table_${index}` : null;
-      } while (reserved.has(symbol) || (table !== null && reserved.has(table)));
+        global = processScoped && !takesContext ? `sc_native_cb_slot_${index}` : null;
+      } while (
+        reserved.has(symbol) ||
+        (table !== null && reserved.has(table)) ||
+        (global !== null && reserved.has(global))
+      );
       reserved.add(symbol);
       if (table !== null) reserved.add(table);
+      if (global !== null) reserved.add(global);
       const contract =
         binding.arguments[parameter.projection.argument]?.callback;
       const source = binding.arguments[parameter.projection.argument]?.type;
@@ -99,14 +114,11 @@ export function allocateNativeCallbackAdapters(
           `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no logical function type`,
         );
       }
-      /* A signature with no context slot cannot be handed the closure, so
-       * one is lent per adapter for the dynamic extent of the call. Distinct
-       * per adapter rather than shared, so two raw callbacks in one call —
-       * or a nested call reaching the same binding — cannot read each
-       * other's. */
-      const takesContext = parameter.type.signature.parameters.some(
-        (slot) => slot.kind === "nativeContext",
-      );
+      /* A signature with no context slot cannot be handed the closure. A
+       * call-scoped one borrows a thread-local for the call's dynamic extent
+       * — distinct per adapter, so two raw callbacks in one call cannot read
+       * each other's — and a process-scoped one has no call to borrow, so it
+       * dispatches through the replaceable global above instead. */
       adapters.set(
         nativeCallbackAdapterKey(binding.id, parameter.projection.argument),
         {
@@ -116,8 +128,9 @@ export function allocateNativeCallbackAdapters(
           callback: parameter.type,
           source,
           contract,
-          tls: takesContext ? null : `${symbol}_closure`,
+          tls: takesContext || processScoped ? null : `${symbol}_closure`,
           table,
+          global,
         },
       );
     }
